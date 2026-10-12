@@ -955,8 +955,30 @@ impl SessionClient {
         environment_id: Uuid,
         environment_generation: u64,
     ) -> Result<CredentialBridgeConnection, SessionClientError> {
+        self.open_credential_bridge_with_capabilities(environment_id, environment_generation, &[])
+            .await
+    }
+
+    /// [`Self::open_credential_bridge`], listing the optional operations this
+    /// host serves on the epoch. Only bounded, canonical names this build
+    /// knows are sent; the daemon sends such an operation only when listed.
+    pub async fn open_credential_bridge_with_capabilities(
+        &self,
+        environment_id: Uuid,
+        environment_generation: u64,
+        capabilities: &[&str],
+    ) -> Result<CredentialBridgeConnection, SessionClientError> {
         if environment_id.is_nil() || environment_generation == 0 {
             return Err(SessionClientError::InvalidCredential);
+        }
+        let mut listed = Vec::new();
+        for capability in capabilities {
+            if codewire_daemon_proto::CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES.contains(capability)
+                && !listed.iter().any(|known: &String| known == capability)
+                && listed.len() < codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+            {
+                listed.push((*capability).to_owned());
+            }
         }
         let (input, receiver) = mpsc::channel(32);
         input
@@ -966,8 +988,7 @@ impl SessionClient {
                         protocol_version: codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                         environment_id: environment_id.to_string(),
                         environment_generation,
-                        // Local brokers serve no optional operation.
-                        capabilities: Vec::new(),
+                        capabilities: listed,
                     },
                 )),
             })

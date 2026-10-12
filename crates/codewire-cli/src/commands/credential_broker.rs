@@ -262,8 +262,18 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     .context("broker daemon transport readiness timed out")?
     .context("connect broker to guest daemon")?;
     stage.set("bridge.open");
+    // Both brokers serve the Codex login, the one listed direct delivery
+    // exception (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
+    // exceptions"): the local broker for the owner's own Codex sign-in, and
+    // the platform relay by passing the request to the platform broker, which
+    // decides it for the delegation's creator. Either answers a refusal as
+    // Denied, which never ends the epoch.
     let bridge = daemon
-        .open_credential_bridge(environment_uuid, args.environment_generation)
+        .open_credential_bridge_with_capabilities(
+            environment_uuid,
+            args.environment_generation,
+            &[codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN],
+        )
         .await
         .context("open guest credential bridge")?;
     stage.set("bridge.admit");

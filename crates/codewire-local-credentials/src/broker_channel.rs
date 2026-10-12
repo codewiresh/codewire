@@ -327,14 +327,51 @@ where
             route: route.clone(),
         };
         // The Codex and Claude login permissions name the listed direct
-        // delivery exceptions, which only a hosted platform Sandbox may
-        // receive; a local broker never leases them, whatever the shared
-        // catalog grants.
+        // delivery exceptions: neither is ever leased as an ordinary provider
+        // operation, and the Codex login only through
+        // [`Self::lease_codex_login`].
         if requested_permission == codewire_access::codex_login_permission()
             || requested_permission == codewire_access::claude_login_permission()
         {
             return Err(BrokerLeaseChannelError::Denied);
         }
+        self.lease_admitted(request_id, capability_slot, requested_permission)
+            .await
+    }
+
+    /// Lease the Codex login for the one listed direct delivery exception
+    /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions"):
+    /// the host owner's own Active Codex ChatGPT login in the Codex slot of
+    /// the VM's selected profile. The authority admits it only then
+    /// ([`local_codex_login_admissible`]); this side checks the same again.
+    pub async fn lease_codex_login(
+        &mut self,
+        request_id: Uuid,
+    ) -> Result<CredentialOperationLease, BrokerLeaseChannelError> {
+        if request_id.is_nil() {
+            return Err(BrokerLeaseChannelError::InvalidRequest);
+        }
+        let lease = self
+            .lease_admitted(
+                request_id,
+                CapabilitySlot::codex(),
+                codewire_access::codex_login_permission(),
+            )
+            .await?;
+        if !local_codex_login_admissible(&lease.credential.metadata, &lease.grant) {
+            return Err(BrokerLeaseChannelError::Denied);
+        }
+        Ok(lease)
+    }
+
+    async fn lease_admitted(
+        &mut self,
+        request_id: Uuid,
+        capability_slot: CapabilitySlot,
+        requested_permission: GrantPermission,
+    ) -> Result<CredentialOperationLease, BrokerLeaseChannelError> {
+        let operation = requested_permission.operation.clone();
+        let route = requested_permission.route.clone();
         let response = self
             .inner
             .lease_credential_operation(v1::BrokerLeaseRequest {
@@ -1190,7 +1227,14 @@ where
         };
         let admission = match admission {
             Ok(admission) => {
-                if deny_generic_ssh_lease(&admission.credential.metadata).is_err() {
+                let login_refused = admission.permission
+                    == codewire_access::codex_login_permission()
+                    && !local_codex_login_admissible(
+                        &admission.credential.metadata,
+                        &admission.grant,
+                    );
+                if deny_generic_ssh_lease(&admission.credential.metadata).is_err() || login_refused
+                {
                     self.audit
                         .record(BrokerLeaseAuditEvent {
                             sequence: 0,
@@ -1208,9 +1252,11 @@ where
                             credential_revocation_generation: None,
                         })
                         .await;
-                    return Err(Status::permission_denied(
-                        "SSH credentials require the typed SSH operation",
-                    ));
+                    return Err(Status::permission_denied(if login_refused {
+                        "the Codex login is delivered only for the owner's own active Codex sign-in"
+                    } else {
+                        "SSH credentials require the typed SSH operation"
+                    }));
                 }
                 self.audit
                     .record(BrokerLeaseAuditEvent {
@@ -1537,6 +1583,26 @@ fn map_server_error(error: LocalCredentialError) -> Status {
     }
 }
 
+/// The one listed direct delivery exception on a local VM
+/// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions"): the
+/// host owner's own Active Codex ChatGPT login, an OpenAI OAuth credential in
+/// the Codex slot of the VM's selected local profile. Never an API key; a
+/// local store holds no organization credential, and its one owner is the
+/// VM's creator.
+pub(crate) fn local_codex_login_admissible(
+    credential: &codewire_access::CredentialMetadata,
+    grant: &codewire_access::DerivedGrant,
+) -> bool {
+    grant.capability_slot == CapabilitySlot::codex()
+        && grant.profile.is_some()
+        && grant.credential_id == credential.id
+        && credential.provider.as_str() == "openai"
+        && credential.authentication_kind == codewire_access::CredentialAuthKind::OAuth
+        && credential.status == codewire_access::CredentialStatus::Active
+        && credential.placement == codewire_access::Placement::Local
+        && matches!(credential.owner, codewire_access::Owner::User(_))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -1835,8 +1901,12 @@ mod tests {
         server.abort();
     }
 
+    /// The Codex login is the one listed direct delivery exception. The
+    /// generic operation path never leases it; the dedicated path leases it
+    /// only for the owner's own Active Codex ChatGPT (OAuth) login, and the
+    /// authority refuses it for an API key in the same slot.
     #[tokio::test]
-    async fn local_channel_never_leases_a_login_permission() {
+    async fn local_channel_leases_the_codex_login_only_on_its_own_path_for_an_oauth_login() {
         let temp = tempfile::tempdir().unwrap();
         let store = TestProtectedStore::default();
         // The shared catalog grants every Codex and Anthropic selection its
@@ -1952,6 +2022,14 @@ mod tests {
         }
         // Refused before any request reached the authority.
         assert!(audit.recent(8).await.is_empty());
+        // The dedicated path reaches the authority, which refuses an API key.
+        assert!(matches!(
+            client.lease_codex_login(Uuid::new_v4()).await,
+            Err(BrokerLeaseChannelError::Denied)
+        ));
+        let events = audit.recent(8).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].decision, BrokerLeaseAuditDecision::Denied);
         // The proxied permission on the same selection is unaffected.
         assert!(
             client
@@ -1966,6 +2044,163 @@ mod tests {
         );
         drop(client);
         server.abort();
+
+        // The owner's own Active Codex sign-in is leased on the same path.
+        let temp = tempfile::tempdir().unwrap();
+        let store = TestProtectedStore::default();
+        let authority = Arc::new(
+            LocalCredentialAuthority::open(
+                &temp.path().join("authority"),
+                store.clone(),
+                codewire_access::builtin_provider_catalog(),
+            )
+            .unwrap(),
+        );
+        let credential = authority
+            .add_credential(
+                NewCredential {
+                    provider: ProviderId::parse("openai").unwrap(),
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: "synthetic-sign-in".into(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                ProtectedValue::from_slice(b"synthetic-codex-sign-in-record").unwrap(),
+            )
+            .unwrap();
+        let profile = authority
+            .create_profile(
+                AccessProfileName::parse("synthetic").unwrap(),
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+            )
+            .unwrap();
+        let environment_id = EnvironmentId::parse(uuid::Uuid::new_v4().to_string()).unwrap();
+        authority
+            .create_environment_access_binding(EnvironmentAccessBinding {
+                environment_id: environment_id.clone(),
+                profile_id: profile.profile.id,
+                profile_revision: profile.profile.revision,
+            })
+            .unwrap();
+        let (server_stream, client_stream) = UnixStream::pair().unwrap();
+        let audit = Arc::new(BrokerLeaseAuditLog::default());
+        let server = tokio::spawn(serve_broker_lease_channel_with_ready(
+            BrokerChannelRefreshLifetime::new(Arc::clone(&authority)),
+            server_stream,
+            environment_id.clone(),
+            7,
+            Arc::clone(&audit),
+            None,
+            BrokerLeaseChannelControl {
+                local_profile: Some(
+                    authority
+                        .get_environment_access_binding(&environment_id)
+                        .unwrap()
+                        .binding,
+                ),
+                ..Default::default()
+            },
+        ));
+        let mut client = LocalCredentialBrokerLeaseClient::connect(
+            client_stream,
+            store.clone(),
+            environment_id.clone(),
+            7,
+        )
+        .await
+        .unwrap();
+        let lease = client.lease_codex_login(Uuid::new_v4()).await.unwrap();
+        assert_eq!(lease.permission, codewire_access::codex_login_permission());
+        assert_eq!(lease.credential.metadata.id, credential.metadata.id);
+        assert_eq!(lease.grant.capability_slot, CapabilitySlot::codex());
+        let events = audit.recent(8).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].decision, BrokerLeaseAuditDecision::Admitted);
+        drop(client);
+        server.abort();
+    }
+
+    /// The predicate itself: only the Codex slot's Active OpenAI OAuth login
+    /// of the local owner, from a selected profile.
+    #[test]
+    fn the_local_codex_login_predicate_admits_only_an_active_oauth_sign_in() {
+        use codewire_access::{CredentialMetadata, CredentialStatus};
+        let credential = |kind: CredentialAuthKind, status: CredentialStatus| CredentialMetadata {
+            id: CredentialId::parse("synthetic-credential").unwrap(),
+            placement: codewire_access::Placement::Local,
+            owner: codewire_access::Owner::User(codewire_access::OwnerId::parse("owner").unwrap()),
+            provider: ProviderId::parse("openai").unwrap(),
+            authentication_kind: kind,
+            display_name: "synthetic".into(),
+            account_hint: None,
+            ssh_public_key: None,
+            status,
+            expires_at_unix: None,
+            revocation_generation: 1,
+        };
+        let grant = |slot: CapabilitySlot, profile: bool| DerivedGrant {
+            environment_id: EnvironmentId::parse(uuid::Uuid::new_v4().to_string()).unwrap(),
+            environment_generation: 7,
+            capability_slot: slot,
+            credential_id: CredentialId::parse("synthetic-credential").unwrap(),
+            profile: profile.then(|| codewire_access::GrantProfile {
+                id: codewire_access::AccessProfileId::parse(uuid::Uuid::new_v4().to_string())
+                    .unwrap(),
+                revision: 1,
+            }),
+            credential_revocation_generation: 1,
+            expires_at_unix: None,
+            permissions: BTreeSet::new(),
+        };
+        let active = credential(CredentialAuthKind::OAuth, CredentialStatus::Active);
+        assert!(local_codex_login_admissible(
+            &active,
+            &grant(CapabilitySlot::codex(), true)
+        ));
+        for (credential, grant) in [
+            (
+                credential(CredentialAuthKind::ApiKey, CredentialStatus::Active),
+                grant(CapabilitySlot::codex(), true),
+            ),
+            (
+                credential(CredentialAuthKind::OAuth, CredentialStatus::RefreshFailed),
+                grant(CapabilitySlot::codex(), true),
+            ),
+            (
+                credential(CredentialAuthKind::OAuth, CredentialStatus::Revoked),
+                grant(CapabilitySlot::codex(), true),
+            ),
+            (active.clone(), grant(CapabilitySlot::codex(), false)),
+            (active.clone(), grant(CapabilitySlot::openai(), true)),
+            (
+                CredentialMetadata {
+                    placement: codewire_access::Placement::Platform,
+                    ..active.clone()
+                },
+                grant(CapabilitySlot::codex(), true),
+            ),
+            (
+                CredentialMetadata {
+                    owner: codewire_access::Owner::Organization(
+                        codewire_access::OwnerId::parse("org").unwrap(),
+                    ),
+                    ..active.clone()
+                },
+                grant(CapabilitySlot::codex(), true),
+            ),
+            (
+                CredentialMetadata {
+                    provider: ProviderId::parse("anthropic").unwrap(),
+                    ..active.clone()
+                },
+                grant(CapabilitySlot::codex(), true),
+            ),
+        ] {
+            assert!(
+                !local_codex_login_admissible(&credential, &grant),
+                "{credential:?}"
+            );
+        }
     }
 
     #[tokio::test]

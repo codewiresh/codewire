@@ -394,6 +394,36 @@ where
         })
     }
 
+    /// The one listed direct delivery exception on a local VM: the local
+    /// authority admits only the host owner's own Active Codex ChatGPT login
+    /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions").
+    async fn lease_codex_login(&self, request_id: Uuid) -> Result<Self::Lease, BrokerLeaseError> {
+        let mut client = self.clone();
+        codewire_local_credentials::LocalCredentialBrokerLeaseClient::lease_codex_login(
+            &mut client,
+            request_id,
+        )
+        .await
+        .map_err(|error| match error {
+            codewire_local_credentials::BrokerLeaseChannelError::InvalidRequest => {
+                BrokerLeaseError::InvalidRequest
+            }
+            codewire_local_credentials::BrokerLeaseChannelError::Denied => BrokerLeaseError::Denied,
+            codewire_local_credentials::BrokerLeaseChannelError::RefreshInProgress => {
+                BrokerLeaseError::Denied
+            }
+            codewire_local_credentials::BrokerLeaseChannelError::StaleRefresh => {
+                BrokerLeaseError::Denied
+            }
+            codewire_local_credentials::BrokerLeaseChannelError::Unavailable => {
+                BrokerLeaseError::Unavailable
+            }
+            codewire_local_credentials::BrokerLeaseChannelError::InvalidResponse => {
+                BrokerLeaseError::InvalidResponse
+            }
+        })
+    }
+
     async fn begin_credential_refresh(
         &self,
         request: BrokerCredentialRefreshRequest,
