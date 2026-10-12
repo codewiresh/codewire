@@ -195,6 +195,7 @@ pub async fn terminal_websocket(
         .on_upgrade(move |socket| terminal_session(socket, client, pool, lease.id))
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(crate) async fn authenticate_socket_request(
     state: &ApiState,
     headers: &HeaderMap,

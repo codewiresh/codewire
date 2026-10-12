@@ -258,6 +258,7 @@ fn canonical_request(
     Ok(origin)
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn session(
     state: &PreviewContext<'_>,
     headers: &HeaderMap,
@@ -272,6 +273,7 @@ async fn session(
         .bind(hash_session_token(token)).fetch_optional(state.pool).await.map_err(|_| unavailable())
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn challenge_target(
     state: &PreviewContext<'_>,
     challenge: &Challenge,
@@ -299,6 +301,7 @@ async fn challenge_target(
     Ok((matched, target))
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn check_access(
     state: &PreviewContext<'_>,
     user: &AuthUser,
@@ -331,6 +334,7 @@ pub(super) async fn check_access(
     }
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn start(
     state: &PreviewContext<'_>,
     matched: &PreviewHostMatch,
@@ -397,6 +401,7 @@ pub(crate) async fn authorize_page(
     }
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn authorize_page_inner(
     state: &PreviewContext<'_>,
     headers: &HeaderMap,
@@ -453,6 +458,7 @@ pub(crate) async fn authorize(
     }
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn authorize_inner(
     state: &PreviewContext<'_>,
     headers: &HeaderMap,
@@ -517,6 +523,7 @@ async fn authorize_inner(
     ))
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn cleanup_expired(pool: &sqlx::PgPool) -> Result<(), Response> {
     // Authenticated traffic also retires expired rows belonging to inactive
     // users. Bounded indexed batches never wait on another callback's rows.
@@ -538,6 +545,7 @@ struct Callback {
     code: String,
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn callback(
     state: &PreviewContext<'_>,
     request: Request<Body>,
@@ -684,6 +692,7 @@ pub(super) async fn callback(
     Ok(response)
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn grant_user(
     state: &PreviewContext<'_>,
     headers: &HeaderMap,

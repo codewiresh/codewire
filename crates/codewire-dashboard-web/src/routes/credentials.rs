@@ -1321,6 +1321,7 @@ async fn credential_revision_action(
     }
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn mutation_cookie(
     state: &AppState,
     headers: &HeaderMap,
