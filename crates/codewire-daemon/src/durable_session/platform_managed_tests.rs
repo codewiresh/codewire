@@ -277,11 +277,13 @@ async fn platform_managed_changed_origin_and_legacy_refuse_before_guarded_effect
 /// A managed agent's driver is prepared exactly as an ordinary session is:
 /// the one shared environment, then the launch projection through the same
 /// launcher and rendezvous, so the application-secret environment reaches it
-/// with the same per-launch authority check. Synthetic records and a real
-/// prepared process; nothing is spawned, and no image or broker is proved.
+/// with the same per-launch authority check. Synthetic records, a synthetic
+/// daemon environment and a real prepared process; nothing is spawned, and
+/// no image or broker is proved.
 #[tokio::test]
 async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_any_session() {
     use std::os::unix::fs::{DirBuilderExt as _, FileTypeExt as _};
+    const TOKEN: &str = "synthetic-platform-projection-token";
     let temp = tempfile::tempdir().unwrap();
     let processes = temp.path().join("processes");
     std::fs::DirBuilder::new()
@@ -300,17 +302,17 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
         ingress_uid: unsafe { libc::geteuid() },
         ingress_gid: unsafe { libc::getegid() },
     };
+    let selected =
+        codewire_access::ManagedCredentialClients::from_profile_slots(["codex", "github", "ssh"])
+            .unwrap();
     let mut config = Config {
         listen_addr: "unused:0".into(),
         workspace_root: temp.path().to_owned(),
         home_root: temp.path().to_owned(),
-        auth_token: crate::DaemonAuthToken::new("synthetic-platform-projection").unwrap(),
+        auth_token: crate::DaemonAuthToken::new(TOKEN).unwrap(),
         process_execution: ProcessExecution::Native,
         credential_bridge: Some(bridge.clone()),
-        managed_credential_clients: codewire_access::ManagedCredentialClients::from_profile_slots(
-            ["codex", "github", "ssh"],
-        )
-        .unwrap(),
+        managed_credential_clients: selected,
         host: None,
         launch_projection: Some(crate::LaunchProjectionConfig {
             selection_sha256: [7; 32],
@@ -367,6 +369,23 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
     };
     let ordinary = session(vec!["/bin/sh".into(), "-c".into(), "exit 0".into()], None);
     let managed = session(origin.command(), Some(origin.clone()));
+    // The daemon's own environment as a hosted Pod renders it: its internal
+    // configuration beside what a session may see. Nothing of the environment
+    // this test runs in is read.
+    let daemon_environment = || {
+        [
+            (crate::config::DAEMON_AUTH_TOKEN_ENV, TOKEN),
+            (
+                crate::config::MANAGED_CREDENTIAL_CLIENTS_ENV,
+                selected.encode(),
+            ),
+            ("CODEWIRE_ENVIRONMENT_ID", "synthetic-environment"),
+            ("HOME", "/home/codewire"),
+            ("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            ("IMAGE_VALUE", "visible"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+    };
     // What the daemon would start: the program, its arguments and the
     // environment it supplies before the projection is added.
     let describe = |prepared: &PreparedProcess| {
@@ -384,8 +403,10 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
     };
 
     let credential_bridge = CredentialBridge::new(Some(bridge));
-    let prepared_ordinary = prepare_pipe_process(&config, &credential_bridge, &ordinary).unwrap();
-    let prepared_managed = prepare_pipe_process(&config, &credential_bridge, &managed).unwrap();
+    let prepared_ordinary =
+        prepare_pipe_process(&config, &credential_bridge, &ordinary, daemon_environment()).unwrap();
+    let prepared_managed =
+        prepare_pipe_process(&config, &credential_bridge, &managed, daemon_environment()).unwrap();
     let (ordinary_program, ordinary_arguments, ordinary_environment) = describe(&prepared_ordinary);
     let (managed_program, managed_arguments, managed_environment) = describe(&prepared_managed);
     // Both run the projection launcher, each with its own one-launch
@@ -412,13 +433,41 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
     }
     assert_ne!(ordinary_arguments[2], managed_arguments[2]);
     // The environment the projection is added to is the same shared one,
-    // with the Git route and the signer socket.
-    assert_eq!(managed_environment, ordinary_environment);
-    assert_eq!(managed_environment["GIT_CONFIG_COUNT"], "1");
-    assert_eq!(
-        managed_environment["SSH_AUTH_SOCK"],
-        codewire_access::SSH_PLATFORM_AUTH_SOCK
-    );
+    // with the Git route and the signer socket. Only names are reported.
+    let differing: Vec<&String> = ordinary_environment
+        .keys()
+        .chain(managed_environment.keys())
+        .filter(|name| ordinary_environment.get(*name) != managed_environment.get(*name))
+        .collect();
+    assert!(differing.is_empty(), "{differing:?}");
+    assert!(managed_environment["GIT_CONFIG_COUNT"] == "1");
+    assert!(managed_environment["SSH_AUTH_SOCK"] == codewire_access::SSH_PLATFORM_AUTH_SOCK);
+    assert!(managed_environment["IMAGE_VALUE"] == "visible");
+    // The daemon's internal configuration reaches neither launch: not as a
+    // name, and the daemon token not as any value or argument.
+    for (label, arguments, launch_environment) in [
+        ("ordinary", &ordinary_arguments, &ordinary_environment),
+        ("managed", &managed_arguments, &managed_environment),
+    ] {
+        for name in [
+            crate::config::DAEMON_AUTH_TOKEN_ENV,
+            crate::config::MANAGED_CREDENTIAL_CLIENTS_ENV,
+        ] {
+            assert!(!launch_environment.contains_key(name), "{label} {name}");
+        }
+        assert!(
+            !launch_environment
+                .values()
+                .any(|value| value.contains(TOKEN) || value == selected.encode()),
+            "{label} environment"
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.contains(TOKEN) || argument == selected.encode()),
+            "{label} arguments"
+        );
+    }
     // A session record carries no value and no marker for it.
     assert!(managed.env.is_empty() && !managed.environment_projection_required);
     drop((prepared_ordinary, prepared_managed));
@@ -428,7 +477,9 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
     config.launch_projection = None;
     config.managed_credential_clients = Default::default();
     for snapshot in [&ordinary, &managed] {
-        let prepared = prepare_pipe_process(&config, &credential_bridge, snapshot).unwrap();
+        let prepared =
+            prepare_pipe_process(&config, &credential_bridge, snapshot, daemon_environment())
+                .unwrap();
         let (program, arguments, _) = describe(&prepared);
         assert_eq!(program.to_str(), Some(snapshot.command[0].as_str()));
         assert_eq!(arguments, snapshot.command[1..]);
@@ -438,7 +489,9 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
         selection_sha256: [7; 32],
         native: None,
     });
-    assert!(prepare_pipe_process(&config, &credential_bridge, &managed).is_err());
+    assert!(
+        prepare_pipe_process(&config, &credential_bridge, &managed, daemon_environment()).is_err()
+    );
 }
 
 #[test]

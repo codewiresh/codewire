@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::Config;
 use crate::credential_bridge::CredentialBridge;
-use crate::env::{build_process_env, default_shell_for};
+use crate::env::{build_process_env, build_process_env_in, default_shell_for};
 use crate::execution::{PreparedProcess, ProcessExecution};
 
 const SESSION_DIRECTORY: &str = ".codewire/daemon/sessions";
@@ -1880,6 +1880,7 @@ impl SessionEngine {
             &self.inner.config,
             &self.inner.credential_bridge,
             &snapshot,
+            std::env::vars(),
         ) {
             Ok(prepared) => prepared,
             Err(message) => return self.record_unspawned_failure(handle, message).await,
@@ -2867,13 +2868,17 @@ async fn prune_session_records_preserving(
 /// guardian and the provider inherit the result, and the guardian adds only
 /// the managed login lockdown. Nothing resolved is kept: the values exist in
 /// the launcher and the processes it becomes, never in the session record.
+/// `daemon_environment` is this daemon's own environment, from which the
+/// builder drops the daemon's internal configuration.
 fn prepare_pipe_process(
     config: &Config,
     bridge: &CredentialBridge,
     snapshot: &PersistedSession,
+    daemon_environment: impl IntoIterator<Item = (String, String)>,
 ) -> Result<PreparedProcess, String> {
-    let environment = build_process_env(config, &snapshot.env, &snapshot.term)
-        .map_err(|error| format!("prepare session environment: {error}"))?;
+    let environment =
+        build_process_env_in(config, &snapshot.env, &snapshot.term, daemon_environment)
+            .map_err(|error| format!("prepare session environment: {error}"))?;
     PreparedProcess::prepare_configured(
         (config, bridge),
         &snapshot.command,
