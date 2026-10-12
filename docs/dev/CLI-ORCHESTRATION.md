@@ -147,10 +147,14 @@ notification without replaying a completed or ambiguous provider task.
 | Kimi | ACP adapter planned | Qualification pending | Qualification pending | Qualification pending |
 
 Managed Codex uses `danger-full-access` and `approvalPolicy: never` on the
-explicitly trusted host. Claude retains the installed CLI's settings and
-permission rules. Neither adapter copies login material. Claude supports
-`low`, `medium`, `high`, `xhigh`, and `max`; omitting effort preserves its
-configured default.
+explicitly trusted host. In every placement it starts with its working
+directory trusted as a Codex project: a `-c projects=…` launch override sets
+Codex's `[projects."<dir>"] trust_level = "trusted"` entry, so the project's
+own `.codex` configuration, hooks and exec policies load without a trust
+warning, and no `config.toml` is written. Claude retains the installed CLI's
+settings and permission rules. Neither adapter copies login material. Claude
+supports `low`, `medium`, `high`, `xhigh`, and `max`; omitting effort
+preserves its configured default.
 
 No additional MCP server is needed to receive these messages. A native protocol
 driver owns delivery and completion. A foreground controller can forward

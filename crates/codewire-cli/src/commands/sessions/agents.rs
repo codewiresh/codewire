@@ -2205,6 +2205,46 @@ fn spawn_control_reader() -> tokio::sync::mpsc::Receiver<ControlInput> {
     receiver
 }
 
+/// `codex app-server` with the conversation's working directory trusted as a
+/// Codex project, in every placement. Codex then loads that project's own
+/// `.codex` configuration, hooks and exec policies from the start, as it does
+/// once a user trusts a folder. Without it Codex 0.160.0 starts with a warning
+/// that they are disabled, then appends the trust to its `config.toml` at the
+/// first thread. The override is that same `[projects."<dir>"] trust_level =
+/// "trusted"` entry, for this process only: no `config.toml` is written. Codex
+/// splits a dotted `-c` key at every `.`, including one inside a quoted path,
+/// so the override sets the `projects` table as one value.
+fn codex_app_server_arguments(working_dir: &str) -> [String; 3] {
+    [
+        "-c".to_owned(),
+        format!(
+            "projects={{{}={{trust_level=\"trusted\"}}}}",
+            toml_basic_string(working_dir)
+        ),
+        "app-server".to_owned(),
+    ]
+}
+
+/// `value` as a TOML basic string, which is also a quoted TOML key.
+fn toml_basic_string(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        match character {
+            '"' | '\\' => {
+                quoted.push('\\');
+                quoted.push(character);
+            }
+            control if control.is_control() => {
+                quoted.push_str(&format!("\\u{:04X}", u32::from(control)));
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 struct Peer {
     child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
@@ -2874,7 +2914,9 @@ impl Driver {
         match self.config.agent {
             AgentKind::Codex => Peer::spawn(
                 &self.config.program,
-                &["app-server"],
+                &codex_app_server_arguments(&self.config.working_dir)
+                    .each_ref()
+                    .map(String::as_str),
                 &self.config.working_dir,
                 self,
                 "codex",
@@ -4443,5 +4485,88 @@ mod tests {
         let shown = preview(&long);
         assert!(shown.ends_with('…'));
         assert_eq!(shown.len(), ACTIVITY_PREVIEW_BYTES + '…'.len_utf8());
+    }
+
+    /// The configuration one `-c key=value` override sets, read as Codex
+    /// 0.160.0 reads it: split at the first `=`, the key split at every `.`,
+    /// and the value parsed as a TOML value.
+    fn codex_override(raw: &str) -> toml::Table {
+        let (key, value) = raw.split_once('=').unwrap();
+        let mut value = toml::from_str::<toml::Table>(&format!("_x_ = {}", value.trim()))
+            .unwrap()
+            .remove("_x_")
+            .unwrap();
+        for segment in key.trim().split('.').rev() {
+            value = toml::Value::Table(toml::Table::from_iter([(segment.to_owned(), value)]));
+        }
+        match value {
+            toml::Value::Table(table) => table,
+            other => panic!("override is not a table: {other}"),
+        }
+    }
+
+    #[test]
+    fn codex_launch_trusts_exactly_its_working_directory_as_a_project() {
+        let arguments = codex_app_server_arguments("/workspace/github");
+        assert_eq!(
+            arguments,
+            [
+                "-c",
+                "projects={\"/workspace/github\"={trust_level=\"trusted\"}}",
+                "app-server",
+            ]
+        );
+        // The same settings as Codex's documented `config.toml` entry, for
+        // paths whose dots, quotes, backslashes and spaces a dotted key or an
+        // unescaped key would misread.
+        for (working_dir, config_toml) in [
+            (
+                "/workspace",
+                "[projects.\"/workspace\"]\ntrust_level = \"trusted\"\n",
+            ),
+            (
+                "/workspace/github",
+                "[projects.\"/workspace/github\"]\ntrust_level = \"trusted\"\n",
+            ),
+            (
+                "/workspace/my.repo",
+                "[projects.\"/workspace/my.repo\"]\ntrust_level = \"trusted\"\n",
+            ),
+            (
+                "/workspace/quo\"te\\back slash",
+                "[projects.\"/workspace/quo\\\"te\\\\back slash\"]\ntrust_level = \"trusted\"\n",
+            ),
+        ] {
+            let arguments = codex_app_server_arguments(working_dir);
+            assert_eq!(arguments[0], "-c");
+            assert_eq!(arguments[2], "app-server");
+            let expected: toml::Table = toml::from_str(config_toml).unwrap();
+            assert_eq!(codex_override(&arguments[1]), expected, "{working_dir}");
+        }
+        // Control characters are escaped, so the value stays one TOML value
+        // naming exactly the directory.
+        for working_dir in [
+            "/workspace/new\nline",
+            "/workspace/tab\there",
+            "/workspace/del\u{7f}ete",
+            "/workspace/c1\u{85}next",
+            "/workspace/ünïcode",
+            "/workspace/=equals",
+        ] {
+            let projects = codex_override(&codex_app_server_arguments(working_dir)[1]);
+            assert_eq!(projects.len(), 1);
+            let projects = projects["projects"].as_table().unwrap();
+            assert_eq!(
+                projects.keys().map(String::as_str).collect::<Vec<_>>(),
+                [working_dir]
+            );
+            assert_eq!(
+                projects[working_dir],
+                toml::Value::Table(toml::Table::from_iter([(
+                    "trust_level".to_owned(),
+                    toml::Value::String("trusted".to_owned())
+                )]))
+            );
+        }
     }
 }
