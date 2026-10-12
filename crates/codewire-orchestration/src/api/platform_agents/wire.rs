@@ -64,7 +64,9 @@ pub(super) fn digest(value: &str) -> AppResult<Vec<u8>> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let nibble = |b: u8| {
                 if b.is_ascii_digit() {

@@ -1,6 +1,5 @@
 //! Personal platform credential commands: write-only keys and managed OAuth.
 
-use anyhow::Context as _;
 use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::{

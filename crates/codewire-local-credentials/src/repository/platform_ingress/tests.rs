@@ -1,6 +1,6 @@
 use codewire_credential_bridge::CredentialBridgeOutput;
 use codewire_daemon_proto::codewire::bridge::v1;
-use futures::{FutureExt as _, StreamExt as _};
+use futures::StreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;

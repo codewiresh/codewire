@@ -191,7 +191,7 @@ fn hex32(value: &str) -> Result<[u8; 32]> {
         return Err(invalid());
     }
     let mut bytes = [0; 32];
-    for (index, part) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, part) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let nibble = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
         bytes[index] = nibble(part[0]) * 16 + nibble(part[1]);
     }

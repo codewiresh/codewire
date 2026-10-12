@@ -1,7 +1,6 @@
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder};
-use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;

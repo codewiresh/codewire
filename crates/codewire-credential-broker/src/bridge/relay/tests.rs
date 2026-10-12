@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use futures::{StreamExt as _, stream};
+use futures::stream;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 

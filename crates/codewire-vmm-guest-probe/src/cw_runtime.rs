@@ -281,7 +281,7 @@ pub fn validate_static_cw(bytes: &[u8]) -> Result<(), &'static str> {
                 if !length.is_multiple_of(16) {
                     return Err(invalid);
                 }
-                for entry in dynamic.chunks_exact(16) {
+                for entry in dynamic.as_chunks::<16>().0 {
                     match i64::from_le_bytes(entry[..8].try_into().unwrap()) {
                         0 => break,
                         1 => return Err(invalid),

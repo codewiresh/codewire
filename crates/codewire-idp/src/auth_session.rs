@@ -177,7 +177,7 @@ fn decode_sha256_digest(encoded: &str) -> anyhow::Result<[u8; SHA256_DIGEST_BYTE
     }
 
     let mut digest = [0u8; SHA256_DIGEST_BYTES];
-    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+    for (index, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
         digest[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
     }
     Ok(digest)

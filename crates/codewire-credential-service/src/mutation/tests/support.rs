@@ -57,6 +57,9 @@ impl DeviceProvider {
     }
 
     fn answer(&self, target: &str, body: &[u8]) -> Option<(http::StatusCode, Value)> {
+        if body.len() > 64 * 1024 {
+            return None;
+        }
         let suffix = self.suffix.lock().unwrap().clone();
         let approved = self.approved.load(Ordering::SeqCst);
         Some(match target {
@@ -141,7 +144,6 @@ impl DeviceProvider {
             ),
             _ => return None,
         })
-        .filter(|_| body.len() <= 64 * 1024)
     }
 }
 

@@ -1319,7 +1319,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::io::{Read as _, Write as _};
     use std::net::{Ipv4Addr, TcpListener};
-    use std::os::fd::{AsFd as _, AsRawFd as _};
+    use std::os::fd::AsRawFd as _;
     use std::os::unix::net::UnixStream as StdUnixStream;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

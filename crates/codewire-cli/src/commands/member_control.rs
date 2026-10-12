@@ -153,7 +153,7 @@ fn key(value: &str) -> anyhow::Result<[u8; 32]> {
         "member public key must be 64 lowercase hexadecimal digits"
     );
     let mut result = [0; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let nibble = |b: u8| {
             if b.is_ascii_digit() {
                 b - b'0'

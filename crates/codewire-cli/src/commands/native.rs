@@ -5,7 +5,6 @@ use std::pin::Pin;
 
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 
-use anyhow::Context as _;
 use codewire_access::{AccessProfileReference, EnvironmentId};
 use codewire_client::TokenProvider as _;
 use codewire_local_credentials::LocalCredentialClient;
