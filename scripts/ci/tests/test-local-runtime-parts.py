@@ -121,6 +121,15 @@ class CacheTest(unittest.TestCase):
             parts.fetch(self.origin, "git-macos", self.recipe, self.base / "out")
         self.assertFalse((self.base / "out").exists())
 
+    def test_presence_reads_only_the_record(self):
+        self.assertFalse(parts.present(self.origin, "git-macos", self.recipe))
+        record = self.publish()
+        self.assertTrue(parts.present(self.origin, "git-macos", self.recipe))
+        self.assertEqual([request for request in self.fake.requests if "/blobs/" in request[2]], [])
+        self.fake.store(parts.record_key(self.recipe), record.replace(b"git-macos", b"e2fsprogs-macos"))
+        with self.assertRaises(parts.PartsError):
+            parts.present(self.origin, "git-macos", self.recipe)
+
     def test_a_record_names_one_part_and_recipe(self):
         record = parts.record("git-macos", self.recipe, self.built)
         for name, recipe in (("e2fsprogs-macos", self.recipe), ("git-macos", "b" * 64)):
@@ -198,6 +207,47 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(self.fake.puts(), [])
 
 
+class RuntimeModeTest(unittest.TestCase):
+    """The dry run builds the runtime exactly when one of its inputs changes."""
+
+    def test_a_runtime_input_selects_the_full_build(self):
+        for paths, mode in (
+            ([], "parts"),
+            (["docs/dev/README.md", "crates/codewire-cli/src/main.rs"], "parts"),
+            (["crates/codewire-local-vmm/src/lib.rs"], "parts"),
+            (["crates/codewire-local-vmm/macos-vz-runner/Sources/Runner/main.swift"], "full"),
+            (["crates/codewire-vmm-guest-probe/src/main.rs"], "full"),
+            (["Cargo.lock"], "full"),
+            (["scripts/ci/release/local-runtime-sources.json"], "full"),
+            (["scripts/ci/verify/linux-vmm-kernel/arm64.config"], "full"),
+            (["scripts/ci/select/select-verification.sh"], "full"),
+            (["scripts/ci/release"], "parts"),
+            (["Cargo.lock.orig"], "parts"),
+        ):
+            with self.subTest(paths=paths):
+                self.assertEqual(parts.runtime_mode(paths), mode)
+
+    def test_runtime_inputs_cover_every_part_and_trigger_the_dry_run(self):
+        for name, shape in parts.PARTS.items():
+            for path in shape["files"]:
+                with self.subTest(part=name, path=path):
+                    self.assertEqual(parts.runtime_mode([path]), "full")
+        workflow = (ROOT / ".gitea/workflows/cw-release-dry-run.yaml").read_text()
+        triggers = workflow.split("    paths:\n", 1)[1].split("\n  workflow_dispatch:", 1)[0]
+        patterns = [line.strip()[3:-1] for line in triggers.splitlines()]
+        for entry in parts.RUNTIME_INPUTS:
+            with self.subTest(entry=entry):
+                self.assertTrue((ROOT / entry).exists())
+                self.assertTrue(any(entry == pattern or (pattern.endswith("/**") and entry.startswith(pattern[:-2]))
+                                    for pattern in patterns), f"{entry} does not trigger the dry run")
+
+    def test_the_mode_reads_changed_paths_on_stdin(self):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/ci/release/local_runtime_parts.py"),
+                                 "runtime-mode"], input="README.md\nCargo.lock\n", capture_output=True,
+                                text=True, check=True)
+        self.assertEqual(result.stdout, "full\n")
+
+
 class BuildScriptTest(unittest.TestCase):
     """The orchestrator refuses a bad invocation before it writes anything."""
 
@@ -217,6 +267,7 @@ class BuildScriptTest(unittest.TestCase):
             (("linux", "--output", "relative"), "absolute path"),
             (("linux", "--output", str(base)), "already exists"),
             (("linux", "--bogus"), "unknown argument"),
+            (("linux", "--check", "--output", str(output)), "--check takes no other argument"),
         ):
             result = self.run_script(*args)
             self.assertEqual(result.returncode, 1, args)

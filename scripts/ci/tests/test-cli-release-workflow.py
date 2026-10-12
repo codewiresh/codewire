@@ -76,12 +76,41 @@ def check(text, ci_text):
          "channel promotion does not default to none")
     need("tags:" not in header, "tag-owned workflow code may release")
     blocks = jobs(text)
-    need(list(blocks) == ["release-selection", "build-darwin", "build-release", "package-release"],
-         "unexpected job set")
-    darwin = blocks.get("build-darwin", "")
+    need(list(blocks) == ["release-selection", "build-runtime-linux", "build-darwin", "build-release",
+                          "package-release"], "unexpected job set")
+    runtime, darwin = blocks.get("build-runtime-linux", ""), blocks.get("build-darwin", "")
     build, package = blocks.get("build-release", ""), blocks.get("package-release", "")
 
-    need("    needs: [release-selection]" in darwin, "the macOS build does not depend on release selection")
+    # The local VM runtime the arm64 cw embeds (#2539): built from the release
+    # source's own scripts, slow parts included on a cache miss, by jobs with
+    # no capability; only the publishing job records the parts it built.
+    need("    needs: [release-selection]\n    runs-on: ci-protected\n" in runtime,
+         "the runtime's Linux side does not follow release selection on a protected runner")
+    for capability in CAPABILITIES:
+        need(capability not in runtime, f"runtime build job holds capability {capability}")
+    runtime_build = dict(steps(runtime)).get("Build the Linux side", "")
+    need("        working-directory: .release-source\n" in runtime_build
+         and "scripts/ci/release/build-local-runtime.sh linux --output" in runtime_build
+         and 'LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}"' in runtime_build,
+         "the runtime's Linux side is not built by the release source's own scripts in this job's container")
+    need("LOCAL_RUNTIME_NO_BUILD" not in text, "a release refuses to build an uncached runtime part")
+    for upload, job in (("Hand the Linux side to the macOS build", runtime),
+                        ("Hand the runtime part records to publication", darwin)):
+        need("          include-hidden-files: true\n" in dict(steps(job)).get(upload, ""),
+             f"{upload!r} skips its hidden path")
+    need("    needs: [release-selection, build-runtime-linux]" in darwin,
+         "the macOS build does not depend on release selection and the runtime's Linux side")
+    mac_runtime = dict(steps(darwin)).get("Build the local VM runtime", "")
+    need('[ "$(shasum -a 256 ../.local-runtime-linux/runtime-linux.tar | cut -c1-64)" = "$LINUX_SHA256" ]'
+         in mac_runtime and "scripts/ci/release/build-local-runtime.sh macos" in mac_runtime
+         and 'CW_RELEASE_LOCAL_RUNTIME_DIR=$work/macos/runtime' in mac_runtime,
+         "the macOS build does not bind the received Linux side and embed the runtime it packs")
+    need("records_sha256" in darwin and "name: cw-release-runtime-records-${{ github.run_id }}" in darwin,
+         "the macOS build does not hand over and bind its runtime part records")
+    need([job for job, body in blocks.items() if "local_runtime_parts.py publish" in body] == ["package-release"]
+         and [step for step, body in steps(package) if "local_runtime_parts.py publish" in body]
+         == ["Record the runtime parts this release built"],
+         "runtime part records are written outside the publishing step")
     need("    runs-on: macos-arm64\n" in darwin, "the macOS build does not run on the protected Mac runner")
     for capability in CAPABILITIES:
         need(capability not in darwin, f"macOS build job holds capability {capability}")
@@ -108,7 +137,8 @@ def check(text, ci_text):
          and "          include-hidden-files: true\n" in verifier_upload,
          "the hidden verifier directory is not uploaded (the upload action skips hidden paths)")
 
-    need("    needs: [release-selection, build-release]" in package, "signing does not need a successful build")
+    need("    needs: [release-selection, build-darwin, build-release]" in package,
+         "signing does not need a successful build")
     need("    enable-openid-connect: true" in package, "publication job lacks its OIDC exchange")
     need(not re.search(r"^    if:", package, re.M), "publication job can run without a successful build")
     names = [name for name, _ in steps(package)]
@@ -116,7 +146,8 @@ def check(text, ci_text):
              "Receive cw's release-signature verifier", "Verify the received verifier is the built verifier",
              "Reuse an already-published signed R2 release", "Sign release delivery",
              "Verify the signed delivery with cw's built-in verifier",
-             "Publish immutable R2 release objects", "Remove the R2 publisher credential",
+             "Publish immutable R2 release objects", "Receive the runtime part records",
+             "Record the runtime parts this release built", "Remove the R2 publisher credential",
              "Publish signed release assets"]
     positions = [names.index(name) if name in names else -1 for name in order]
     need(-1 not in positions and positions == sorted(positions), "publication steps are missing or reordered")
@@ -160,6 +191,14 @@ def check(text, ci_text):
     need(0 <= admitted < fetch, "the R2 credential is read before the route admission check")
     need([step for step, body in steps(package) if "fetch-openbao-releases-r2-credentials.sh" in body]
          == ["Reuse an already-published signed R2 release"], "the R2 credential is read in an unexpected step")
+    records = by_name.get("Record the runtime parts this release built", "")
+    need("if: ${{ inputs.r2_publication == 'immutable' && needs.build-darwin.outputs.records_sha256 != '' }}"
+         in records and "always()" not in records, "runtime part records are written without R2 publication")
+    need('[ "$(sha256sum ../.runtime-records/runtime-records.tar | cut -c1-64)" = "$RECORDS_SHA256" ]' in records,
+         "the received runtime part records are not checked against the built records")
+    need('if [ "$CW_RELEASE_R2_STATE" = retained ]; then' in records
+         and "printf 'CW_RELEASE_R2_STATE=%s\\n' \"$state\" >> \"$GITHUB_ENV\"" in probe,
+         "a retained release writes records for blobs it did not publish")
     need("--promote \"$PROMOTE_CHANNEL\"" in publish and "PROMOTE_CHANNEL: ${{ inputs.r2_promote_channel }}"
          in publish, "promotion is not the explicit input")
     need("cw_release.py digest --dist dist/cw-release)\" = \"$DELIVERY_SHA256\" ]"
@@ -206,10 +245,39 @@ MUTATIONS = {
     .replace("          set -euo pipefail\n          [ \"$CW_RELEASE_R2_ROUTE_ADMITTED\" = 'true' ] || {",
              "          set -euo pipefail\n          ../scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh x\n"
              "          [ \"$CW_RELEASE_R2_ROUTE_ADMITTED\" = 'true' ] || {", 1),
-    "publish after failed build": lambda t: t.replace("    needs: [release-selection, build-release]",
-                                                      "    needs: [release-selection, build-release]\n    if: always()", 1),
-    "signing without build": lambda t: t.replace("    needs: [release-selection, build-release]",
-                                                 "    needs: [release-selection]", 1),
+    "publish after failed build": lambda t: t.replace(
+        "    needs: [release-selection, build-darwin, build-release]",
+        "    needs: [release-selection, build-darwin, build-release]\n    if: always()", 1),
+    "signing without build": lambda t: t.replace("    needs: [release-selection, build-darwin, build-release]",
+                                                 "    needs: [release-selection, build-darwin]", 1),
+    "OIDC in runtime build": lambda t: t.replace(
+        "    needs: [release-selection]\n    runs-on: ci-protected\n",
+        "    needs: [release-selection]\n    runs-on: ci-protected\n    enable-openid-connect: true\n", 1),
+    "release skips uncached parts": lambda t: t.replace(
+        'TMPDIR="$work/tmp" LOCAL_RUNTIME_JOB_CONTAINER',
+        'TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 LOCAL_RUNTIME_JOB_CONTAINER', 1),
+    "runtime from the workflow's scripts": lambda t: t.replace(
+        "      - name: Build the Linux side\n        id: build\n        working-directory: .release-source\n",
+        "      - name: Build the Linux side\n        id: build\n", 1),
+    "macOS build without the Linux side": lambda t: t.replace(
+        "    needs: [release-selection, build-runtime-linux]", "    needs: [release-selection]", 1),
+    "unbound Linux side": lambda t: t.replace(
+        '[ "$(shasum -a 256 ../.local-runtime-linux/runtime-linux.tar | cut -c1-64)" = "$LINUX_SHA256" ]',
+        "true", 1),
+    "records written by a build job": lambda t: t.replace(
+        '          tar -C "$work" -cf "$work/runtime-linux.tar" linux\n',
+        '          tar -C "$work" -cf "$work/runtime-linux.tar" linux\n'
+        '          python3 scripts/ci/release/local_runtime_parts.py publish --dist x --records y --credentials z\n', 1),
+    "records before their blobs": lambda t: move_step(
+        t, "Record the runtime parts this release built", "Publish immutable R2 release objects"),
+    "records without R2 publication": lambda t: t.replace(
+        "        if: ${{ inputs.r2_publication == 'immutable' && needs.build-darwin.outputs.records_sha256 != '' }}\n"
+        "        working-directory: .release-source\n",
+        "        if: ${{ needs.build-darwin.outputs.records_sha256 != '' }}\n"
+        "        working-directory: .release-source\n", 1),
+    "unbound records": lambda t: t.replace('= "$RECORDS_SHA256" ]', "] || true", 1),
+    "records on a retained retry": lambda t: t.replace('if [ "$CW_RELEASE_R2_STATE" = retained ]; then',
+                                                       "if false; then", 1),
     "one Mac target": lambda t: t.replace(f"CW_RELEASE_TARGETS='{DARWIN_TARGETS}'",
                                           "CW_RELEASE_TARGETS='aarch64-apple-darwin'", 1),
     "no macOS import": lambda t: t.replace("CW_RELEASE_IMPORT_DIR=dist-darwin", "CW_RELEASE_IMPORT_DIR=", 1),
@@ -222,7 +290,17 @@ MUTATIONS = {
         "          export GH_MIRROR_TOKEN_FILE=\"$github_work/token\"\n"
         "          ../scripts/ci/setup/fetch-openbao-release-signing-key.sh \"$github_work/key\"\n", 1),
     "signing key not shredded": lambda t: t.replace("          trap cleanup_signing EXIT\n", "", 1),
-    "hidden verifier skipped": lambda t: t.replace("          include-hidden-files: true\n", "", 1),
+    "hidden verifier skipped": lambda t: t.replace(
+        "          # included, unless asked; without this the verifier never uploads.\n"
+        "          include-hidden-files: true\n",
+        "          # included, unless asked; without this the verifier never uploads.\n", 1),
+    "hidden Linux side skipped": lambda t: t.replace(
+        "          path: .local-runtime/runtime-linux.tar\n          # The upload action skips hidden paths unless asked.\n"
+        "          include-hidden-files: true\n",
+        "          path: .local-runtime/runtime-linux.tar\n", 1),
+    "hidden records skipped": lambda t: t.replace(
+        "          path: .runtime-records/runtime-records.tar\n          include-hidden-files: true\n",
+        "          path: .runtime-records/runtime-records.tar\n", 1),
     "signing key outlives signing": lambda t: t.replace("          cleanup_signing\n          trap - EXIT\n",
                                                          "          trap - EXIT\n", 1),
     "no built-in verification": lambda t: re.sub(
@@ -310,14 +388,35 @@ def check_dry_run(text):
             errors.append(message)
 
     blocks = jobs(text)
-    need(list(blocks) == ["protected-main", "build-darwin", "assemble"], "unexpected dry-run job set")
-    guard = blocks.get("protected-main", "")
+    need(list(blocks) == ["protected-main", "build-runtime-linux", "build-darwin", "assemble"],
+         "unexpected dry-run job set")
+    guard, runtime = blocks.get("protected-main", ""), blocks.get("build-runtime-linux", "")
     darwin, assemble = blocks.get("build-darwin", ""), blocks.get("assemble", "")
     need("    runs-on: ci-lite\n" in guard and "actions-checkout" not in guard
          and "[ \"$GITHUB_REF\" = 'refs/heads/main' ]" in guard
          and "[ \"$GITHUB_REF_NAME\" = 'main' ]" in guard and not re.search(r"^\s+if:", guard, re.M),
          "the dry run does not refuse every ref but main before the protected builders")
-    need("    needs: [protected-main]\n" in darwin, "the macOS build does not wait for the main-only guard")
+    need("    needs: [protected-main, build-runtime-linux]\n" in darwin,
+         "the macOS build does not wait for the main-only guard and the runtime's Linux side")
+    need("    needs: [protected-main]\n    runs-on: ci-protected\n" in runtime,
+         "the runtime's Linux side does not wait for the main-only guard on a protected runner")
+    # The runtime is built when one of its inputs changed, from cached slow
+    # parts only; otherwise each side checks its slow parts are cached.
+    select = dict(steps(runtime)).get("Select the local runtime check", "")
+    need("          mode=full\n" in select
+         and "python3 scripts/ci/release/local_runtime_parts.py runtime-mode" in select,
+         "the dry run does not select the runtime build from the runtime's inputs")
+    linux_build = dict(steps(runtime)).get("Build the Linux side from cached parts", "")
+    mac_build = dict(steps(darwin)).get("Build the local VM runtime from cached parts", "")
+    need("LOCAL_RUNTIME_NO_BUILD=1" in linux_build and "LOCAL_RUNTIME_NO_BUILD=1" in mac_build,
+         "the dry run builds slow runtime parts")
+    need("build-local-runtime.sh linux --check" in runtime and "build-local-runtime.sh macos --check" in darwin,
+         "the dry run does not check the slow parts are cached")
+    need('[ "$(shasum -a 256 .local-runtime-linux/runtime-linux.tar | cut -c1-64)" = "$LINUX_SHA256" ]' in mac_build,
+         "the dry-run macOS build does not bind the received Linux side")
+    need("grep -q '^cw-release: local runtime document_sha256=' <<<\"$verified\"" in assemble
+         and "[ ! -e dist/cw-release/delivery/local-runtime ]" in assemble,
+         "the dry run does not check the delivery embeds exactly the runtime it built")
     for capability in CAPABILITIES:
         need(capability not in text, f"dry run holds capability {capability}")
     need("    runs-on: macos-arm64\n" in darwin, "the dry-run macOS build is not on the protected Mac runner")
@@ -345,8 +444,23 @@ DRY_RUN_MUTATIONS = {
     "guard skipped": lambda t: t.replace("    name: Refuse anything but protected main\n    runs-on: ci-lite\n",
                                          "    name: Refuse anything but protected main\n    runs-on: ci-lite\n"
                                          "    if: github.event_name == 'push'\n", 1),
-    "Mac build without the guard": lambda t: t.replace("    needs: [protected-main]\n    runs-on: macos-arm64",
-                                                       "    runs-on: macos-arm64", 1),
+    "Mac build without the guard": lambda t: t.replace(
+        "    needs: [protected-main, build-runtime-linux]\n    runs-on: macos-arm64",
+        "    needs: [build-runtime-linux]\n    runs-on: macos-arm64", 1),
+    "runtime build without the guard": lambda t: t.replace(
+        "    needs: [protected-main]\n    runs-on: ci-protected\n    outputs:\n      mode:",
+        "    runs-on: ci-protected\n    outputs:\n      mode:", 1),
+    "Linux dry run builds slow parts": lambda t: t.replace(
+        'TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 ', 'TMPDIR="$work/tmp" ', 1),
+    "Mac dry run builds slow parts": lambda t: t.replace(
+        "          LOCAL_RUNTIME_NO_BUILD=1 scripts/ci/release/build-local-runtime.sh macos",
+        "          scripts/ci/release/build-local-runtime.sh macos", 1),
+    "runtime never selected": lambda t: t.replace("          mode=full\n", "          mode=parts\n", 1),
+    "no parts check": lambda t: t.replace("build-local-runtime.sh macos --check", "true", 1),
+    "unbound dry-run Linux side": lambda t: t.replace('= "$LINUX_SHA256" ]', "] || true", 1),
+    "embedded runtime unchecked": lambda t: t.replace(
+        "            grep -q '^cw-release: local runtime document_sha256=' <<<\"$verified\"\n",
+        "            true\n", 1),
 }
 
 

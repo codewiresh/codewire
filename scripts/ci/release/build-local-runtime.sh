@@ -5,6 +5,7 @@ usage() {
   cat <<'EOF'
 usage: build-local-runtime.sh linux --output DIR
        build-local-runtime.sh macos --linux DIR --source-sha SHA --output DIR
+       build-local-runtime.sh linux|macos --check
 
 Builds the macOS local VM runtime that a release's arm64 cw embeds (#2539),
 from this checkout. Run it from the release source; its scripts are that
@@ -24,6 +25,8 @@ Only a release's publishing job writes cache records; nothing here holds a
 credential. Set LOCAL_RUNTIME_NO_BUILD=1 to refuse a cache miss instead of
 building (the per-push dry run): it then exits 4. LOCAL_RUNTIME_KERNEL_SOURCE
 names an existing Linux clone to build the kernel from instead of cloning.
+--check only reports whether that side's slow parts are cached: it exits 0
+when all are, and 4 when one would be built.
 In a CI job container, LOCAL_RUNTIME_JOB_CONTAINER names that container so the
 kernel build can reach its files (build-runtime-kernel.sh --job-container);
 TMPDIR and DIR must then be on its workspace.
@@ -42,9 +45,10 @@ log() {
 mode="${1:-}"
 [ -n "$mode" ] || { usage >&2; exit 2; }
 shift
-linux_dir="" source_sha="" output=""
+linux_dir="" source_sha="" output="" check=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --check) check=1; shift ;;
     --linux) linux_dir="${2:-}"; shift 2 ;;
     --source-sha) source_sha="${2:-}"; shift 2 ;;
     --output) output="${2:-}"; shift 2 ;;
@@ -55,12 +59,17 @@ done
 case "$mode" in
   linux) [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ] || die "the linux side runs on x86_64 Linux" ;;
   macos) [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] || die "the macos side runs on an Apple silicon Mac"
-         case "$linux_dir" in /*) [ -d "$linux_dir" ] || die "--linux is not a directory" ;; *) die "--linux must be absolute" ;; esac
-         [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || die "--source-sha must be the release commit" ;;
+         [ -n "$check" ] ||
+           case "$linux_dir" in /*) [ -d "$linux_dir" ] || die "--linux is not a directory" ;; *) die "--linux must be absolute" ;; esac
+         [ -n "$check" ] || [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || die "--source-sha must be the release commit" ;;
   *) die "mode must be linux or macos" ;;
 esac
-case "$output" in /*) ;; *) die "--output must be an absolute path" ;; esac
-[ ! -e "$output" ] || die "output already exists"
+if [ -n "$check" ]; then
+  [ -z "$output$linux_dir$source_sha" ] || die "--check takes no other argument"
+else
+  case "$output" in /*) ;; *) die "--output must be an absolute path" ;; esac
+  [ ! -e "$output" ] || die "output already exists"
+fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 release_dir="$root/scripts/ci/release"
@@ -100,10 +109,39 @@ record() {
   python3 "$parts" record --part "$part" --recipe "$recipe" --dir "$dir" > "$output/built/$recipe.json"
 }
 
-mkdir -m 0700 "$output" "$output/built"
+[ -n "$check" ] || mkdir -m 0700 "$output" "$output/built"
 work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-local-runtime.XXXXXX")"
 chmod 0700 "$work"
 trap 'chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work"' EXIT
+
+host_facts() {
+  python3 -c 'import json, platform, subprocess, sys
+json.dump({"macos": platform.mac_ver()[0],
+           "sdk": subprocess.check_output(["xcrun", "--show-sdk-version"], text=True).strip(),
+           "clang": subprocess.check_output(["xcrun", "clang", "--version"], text=True).splitlines()[0]},
+          open(sys.argv[1], "w"))' "$work/host.json"
+}
+
+# Whether each slow part of this side is cached, without reading its blobs.
+check() {
+  local part missing=0 status recipe
+  local -a facts=()
+  if [ "$mode" = macos ]; then
+    host_facts
+    facts=(--host-facts "$work/host.json")
+  fi
+  for part in $( [ "$mode" = linux ] && echo kernel-arm64 || echo e2fsprogs-macos git-macos ); do
+    recipe="$(python3 "$parts" recipe --part "$part" "${facts[@]}")"
+    status=0
+    python3 "$parts" present --part "$part" --recipe "$recipe" || status=$?
+    case "$status" in
+      0) ;;
+      3) missing=1 ;;
+      *) die "the $part cache could not be read" ;;
+    esac
+  done
+  [ "$missing" = 0 ] || exit 4
+}
 
 linux() {
   # The guest root: the sealed probe built twice for arm64, with the pinned
@@ -160,11 +198,7 @@ linux() {
 }
 
 macos() {
-  python3 -c 'import json, platform, subprocess, sys
-json.dump({"macos": platform.mac_ver()[0],
-           "sdk": subprocess.check_output(["xcrun", "--show-sdk-version"], text=True).strip(),
-           "clang": subprocess.check_output(["xcrun", "clang", "--version"], text=True).splitlines()[0]},
-          open(sys.argv[1], "w"))' "$work/host.json"
+  host_facts
   local part tool name recipe archive
   for part in e2fsprogs-macos git-macos; do
     case "$part" in
@@ -200,5 +234,10 @@ for name in parts.PARTS[sys.argv[2]]["outputs"]:
   cp "$linux_dir"/built/*.json "$output/built/" 2>/dev/null || true
 }
 
-"$mode"
-log "$mode side complete: $output"
+if [ -n "$check" ]; then
+  check
+  log "$mode side: every slow part is cached"
+else
+  "$mode"
+  log "$mode side complete: $output"
+fi

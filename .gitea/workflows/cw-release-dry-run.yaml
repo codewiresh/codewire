@@ -6,6 +6,13 @@ name: cw four-target dry run
 # is (cli-release.yaml): the macOS pair natively on the Mac, the Linux pair
 # beside the unsigned four-target delivery, which is verified. Nothing is
 # signed or published, and no job holds a credential.
+#
+# The macOS arm64 cw embeds the local VM runtime (#2539). When one of the
+# runtime's inputs changed (local_runtime_parts.py RUNTIME_INPUTS), or on
+# dispatch, the runtime is built as a release builds it but only from cached
+# slow parts, and the delivery embeds it. Otherwise each side only checks its
+# slow parts are cached. A missing part is a warning: the next release builds
+# it.
 
 on:
   push:
@@ -19,7 +26,16 @@ on:
       - 'proto/**'
       - 'images/cw-runtime/**'
       - 'scripts/ci/release/**'
+      - 'scripts/ci/select/**'
+      - 'scripts/ci/verify/build-local-vmm-initramfs.sh'
+      - 'scripts/ci/verify/build-linux-vmm-kernel.py'
+      - 'scripts/ci/verify/linux-vmm-kernel/**'
       - 'scripts/dev/cw-runtime-image.py'
+      - 'scripts/dev/macos-local-runtime.py'
+      - 'scripts/dev/macos-ext4-tool.py'
+      - 'scripts/dev/macos-git-tool.py'
+      - 'scripts/dev/macos-cli.py'
+      - '.gitea/workflows/cli-release.yaml'
       - '.gitea/workflows/cw-release-dry-run.yaml'
   workflow_dispatch:
 
@@ -46,12 +62,100 @@ jobs:
           [ "$GITHUB_REF" = 'refs/heads/main' ]
           [ "$GITHUB_REF_NAME" = 'main' ]
 
+  build-runtime-linux:
+    name: Build or check the local runtime's Linux side
+    needs: [protected-main]
+    runs-on: ci-protected
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+      present: ${{ steps.build.outputs.present }}
+      linux_sha256: ${{ steps.build.outputs.linux_sha256 }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Select the local runtime check
+        id: select
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          mode=full
+          if [ "$GITHUB_EVENT_NAME" = push ] && [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] &&
+            [[ ! "$BEFORE" =~ ^0+$ ]] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            mode="$(git diff --name-only "$BEFORE" "$GITHUB_SHA" |
+              python3 scripts/ci/release/local_runtime_parts.py runtime-mode)"
+          fi
+          printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Verify sealed Rust toolchain and release targets
+        if: steps.select.outputs.mode == 'full'
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Install protoc (pinned)
+        if: steps.select.outputs.mode == 'full'
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
+          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Build the Linux side from cached parts
+        id: build
+        if: steps.select.outputs.mode == 'full'
+        run: |
+          set -euo pipefail
+          # The kernel build's container reaches only this job's workspace.
+          work="$GITHUB_WORKSPACE/.local-runtime"
+          mkdir -m 0700 "$work" "$work/tmp"
+          status=0
+          TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}" \
+            scripts/ci/release/build-local-runtime.sh linux --output "$work/linux" || status=$?
+          case "$status" in
+            0) ;;
+            4) echo '::warning::A slow runtime part is not cached; the next release builds it. This dry run embeds no runtime.'
+               echo 'present=false' >> "$GITHUB_OUTPUT"
+               exit 0 ;;
+            *) exit "$status" ;;
+          esac
+          tar -C "$work" -cf "$work/runtime-linux.tar" linux
+          printf 'present=true\nlinux_sha256=%s\n' \
+            "$(sha256sum "$work/runtime-linux.tar" | cut -c1-64)" >> "$GITHUB_OUTPUT"
+
+      - name: Check the Linux side's slow parts are cached
+        if: steps.select.outputs.mode == 'parts'
+        run: |
+          set -euo pipefail
+          status=0
+          scripts/ci/release/build-local-runtime.sh linux --check || status=$?
+          case "$status" in
+            0) ;;
+            4) echo '::warning::A slow runtime part is not cached; the next release builds it.' ;;
+            *) exit "$status" ;;
+          esac
+
+      - name: Hand the Linux side to the macOS build
+        if: steps.build.outputs.present == 'true'
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-dry-run-runtime-linux-${{ github.run_id }}
+          path: .local-runtime/runtime-linux.tar
+          # The upload action skips hidden paths unless asked.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
   build-darwin:
     name: Build the macOS cw natively
-    needs: [protected-main]
+    needs: [protected-main, build-runtime-linux]
     runs-on: macos-arm64
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
+      runtime: ${{ steps.runtime.outputs.present }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -66,6 +170,47 @@ jobs:
           unzip -o -q "$HOME/protoc.zip" -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
           "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Receive the local runtime's Linux side
+        if: needs.build-runtime-linux.outputs.present == 'true'
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-dry-run-runtime-linux-${{ github.run_id }}
+          path: .local-runtime-linux
+
+      - name: Build the local VM runtime from cached parts
+        id: runtime
+        if: needs.build-runtime-linux.outputs.present == 'true'
+        env:
+          LINUX_SHA256: ${{ needs.build-runtime-linux.outputs.linux_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$LINUX_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(shasum -a 256 .local-runtime-linux/runtime-linux.tar | cut -c1-64)" = "$LINUX_SHA256" ]
+          work="${RUNNER_TEMP:?}/codewire-local-runtime"
+          mkdir -m 0700 "$work"
+          tar -xf .local-runtime-linux/runtime-linux.tar -C "$work"
+          status=0
+          LOCAL_RUNTIME_NO_BUILD=1 scripts/ci/release/build-local-runtime.sh macos --linux "$work/linux" \
+            --source-sha "$GITHUB_SHA" --output "$work/macos" || status=$?
+          case "$status" in
+            0) echo "CW_RELEASE_LOCAL_RUNTIME_DIR=$work/macos/runtime" >> "$GITHUB_ENV"
+               echo 'present=true' >> "$GITHUB_OUTPUT" ;;
+            4) echo '::warning::A slow runtime part is not cached; the next release builds it. This dry run embeds no runtime.' ;;
+            *) exit "$status" ;;
+          esac
+
+      - name: Check the Mac side's slow parts are cached
+        if: needs.build-runtime-linux.outputs.present != 'true'
+        run: |
+          set -euo pipefail
+          status=0
+          scripts/ci/release/build-local-runtime.sh macos --check || status=$?
+          case "$status" in
+            0) ;;
+            4) echo '::warning::A slow runtime part is not cached; the next release builds it.' ;;
+            *) exit "$status" ;;
+          esac
 
       - name: Build the macOS pair
         id: build
@@ -134,6 +279,8 @@ jobs:
           (cd dist-darwin && sha256sum --check SHA256SUMS)
 
       - name: Package and verify the unsigned delivery
+        env:
+          RUNTIME: ${{ needs.build-darwin.outputs.runtime }}
         run: |
           set -euo pipefail
           CW_RELEASE_BUILD_CMD='cargo zigbuild' \
@@ -143,5 +290,11 @@ jobs:
           [ "$(wc -l < dist/cw-release/SHA256SUMS)" -eq 4 ]
           (cd dist/cw-release && sha256sum --check SHA256SUMS)
           [ "$(find dist/cw-release/delivery/identities -name '*.json' | wc -l)" -eq 4 ]
-          python3 scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned |
-            grep -Fx "cw-release: verified targets=4 version=$DRY_RUN_VERSION runtime_equal=true signed=false"
+          verified="$(python3 scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned)"
+          grep -Fx "cw-release: verified targets=4 version=$DRY_RUN_VERSION runtime_equal=true signed=false" <<<"$verified"
+          # The macOS arm64 cw embeds the runtime exactly when one was built.
+          if [ "$RUNTIME" = true ]; then
+            grep -q '^cw-release: local runtime document_sha256=' <<<"$verified"
+          else
+            [ ! -e dist/cw-release/delivery/local-runtime ]
+          fi
