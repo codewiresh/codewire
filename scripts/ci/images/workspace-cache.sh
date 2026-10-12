@@ -113,7 +113,7 @@ workspace_cache_create_builder() {
 }
 
 workspace_cache_cleanup_builder() {
-  local status=0 phase_status=0 started removal_error
+  local status=0 phase_status=0 started
   if [[ -n "$workspace_command_pid" ]]; then
     kill -TERM "$workspace_command_pid" 2>/dev/null || true
     wait "$workspace_command_pid" 2>/dev/null || true
