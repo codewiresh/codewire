@@ -50,7 +50,7 @@ def require(condition, reason):
 def load_pins(path=PINS):
     pins = json.loads(Path(path).read_bytes())
     require(isinstance(pins, dict) and pins.get("schema") == SCHEMA
-            and set(pins) == {"schema", "kernel_builder", "kernel_bc", "sources"},
+            and set(pins) == {"schema", "kernel_builder", "kernel_bc", "initramfs_inputs", "sources"},
             "local runtime source pins are not the expected shape")
     sources = pins["sources"]
     require(set(sources) == {name for names in SIDES.values() for name in names}, "pinned sources are not the set")

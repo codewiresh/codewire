@@ -1154,7 +1154,8 @@ run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false 
   scripts/ci/tests/test-cw-release-delivery.py scripts/ci/tests/test-cw-release-r2.py \
   scripts/ci/tests/test-package-cw-release.py scripts/ci/release/local_runtime_parts.py \
   scripts/ci/release/local_runtime_sources.py scripts/ci/release/local-runtime-sources.json \
-  scripts/ci/release/build-runtime-kernel.sh scripts/ci/tests/test-local-runtime-parts.py
+  scripts/ci/release/build-runtime-kernel.sh scripts/ci/tests/test-local-runtime-parts.py \
+  scripts/ci/release/build-local-runtime.sh
 # The published workspace pin selects every consumer that compiles it; its
 # tool and post-publish proposal select the release proofs that run them.
 run_paths_case workspace_image_pin pull_request refs/pull/2255/head false \

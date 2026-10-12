@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import shutil
+import subprocess
 import sys
 import tarfile
 import unittest
@@ -131,6 +132,98 @@ class CacheTest(unittest.TestCase):
             parts.parse_record(release.canonical(value), "git-macos", self.recipe)
 
 
+class PublishTest(unittest.TestCase):
+    """Records are written by the publishing job only, after the blobs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = fx.scratch("runtime-records.")
+        cls.signer = fx.Signer(cls.base)
+        (cls.base / "signed").mkdir()
+        cls.dist = fx.signed_delivery(cls.base / "signed", cls.signer, runtime=True)[0]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.signer.close()
+        shutil.rmtree(cls.base)
+
+    def setUp(self):
+        self.fake = fx.FakeR2()
+        self.s3 = r2.S3(self.fake, r2.Credentials(fx.ACCESS_KEY, fx.SECRET_KEY))
+        self.records = fx.scratch("runtime-records-dir.")
+        self.addCleanup(shutil.rmtree, self.records)
+        # The git part's two files, as the runtime document pins them.
+        _, document, blobs = release.local_runtime_paths(self.dist)
+        document = json.loads(document.read_bytes())
+        git = document["targets"]["macos-aarch64"]["lock"]["git"]
+        self.built = fx.scratch("runtime-built.")
+        self.addCleanup(shutil.rmtree, self.built)
+        for key, name in (("git", "git"), ("git_remote_https", "git-remote-https")):
+            shutil.copyfile(blobs / git[key]["sha256"], self.built / name)
+        self.recipe = "c" * 64
+
+    def write(self, recipe=None, directory=None):
+        recipe = recipe or self.recipe
+        data = parts.record("git-macos", recipe, directory or self.built)
+        (self.records / f"{recipe}.json").write_bytes(data)
+        return data
+
+    def test_records_are_written_once_and_read_back(self):
+        data = self.write()
+        self.assertEqual(parts.publish(self.s3, self.dist, self.records), 1)
+        self.assertEqual(self.fake.objects[parts.record_key(self.recipe)][0], data)
+        self.assertTrue(all(request[3].get("if-none-match") == "*" for request in self.fake.puts()))
+        self.assertEqual(parts.publish(self.s3, self.dist, self.records), 1)
+
+    def test_a_record_names_only_published_blobs(self):
+        (self.built / "git").write_bytes(b"not a published blob\n")
+        self.write()
+        with self.assertRaisesRegex(parts.PartsError, "does not publish"):
+            parts.publish(self.s3, self.dist, self.records)
+        self.assertEqual(self.fake.puts(), [])
+
+    def test_an_existing_record_with_other_bytes_is_kept(self):
+        value = json.loads(self.write())
+        value["files"]["git"] = value["files"]["git-remote-https"]
+        existing = release.canonical(value)
+        self.fake.store(parts.record_key(self.recipe), existing)
+        self.assertEqual(parts.publish(self.s3, self.dist, self.records), 0)
+        self.assertEqual(self.fake.objects[parts.record_key(self.recipe)][0], existing)
+
+    def test_a_record_is_named_by_its_recipe(self):
+        self.write()
+        (self.records / f"{self.recipe}.json").rename(self.records / f"{'d' * 64}.json")
+        with self.assertRaisesRegex(parts.PartsError, "named by its recipe"):
+            parts.publish(self.s3, self.dist, self.records)
+        self.assertEqual(self.fake.puts(), [])
+
+
+class BuildScriptTest(unittest.TestCase):
+    """The orchestrator refuses a bad invocation before it writes anything."""
+
+    def run_script(self, *args):
+        return subprocess.run(["bash", str(ROOT / "scripts/ci/release/build-local-runtime.sh"), *args],
+                              capture_output=True, text=True, check=False)
+
+    def test_bad_invocations_write_nothing(self):
+        base = fx.scratch("runtime-build-script.")
+        self.addCleanup(shutil.rmtree, base)
+        output = base / "out"
+        self.assertEqual(self.run_script().returncode, 2)
+        for args, message in (
+            (("windows", "--output", str(output)), "mode must be linux or macos"),
+            (("macos", "--linux", str(base), "--source-sha", "a" * 40, "--output", str(output)),
+             "Apple silicon Mac"),
+            (("linux", "--output", "relative"), "absolute path"),
+            (("linux", "--output", str(base)), "already exists"),
+            (("linux", "--bogus"), "unknown argument"),
+        ):
+            result = self.run_script(*args)
+            self.assertEqual(result.returncode, 1, args)
+            self.assertIn(message, result.stderr)
+        self.assertFalse(output.exists())
+
+
 class SourcesTest(unittest.TestCase):
     def setUp(self):
         self.base = fx.scratch("runtime-sources.")
@@ -147,6 +240,15 @@ class SourcesTest(unittest.TestCase):
         provenance = json.loads((ROOT / "scripts/ci/verify/linux-vmm-kernel/provenance.json").read_bytes())
         self.assertEqual(pins["kernel_bc"]["sha256"], provenance["bc_sha256"])
         self.assertTrue(pins["kernel_builder"]["image"].startswith("docker.io/library/archlinux@sha256:"))
+
+    def test_initramfs_inputs_are_the_guest_root_pins(self):
+        pins = sources.load_pins()["initramfs_inputs"]
+        script = (ROOT / "scripts/ci/verify/build-local-vmm-initramfs.sh").read_text()
+        self.assertIn(f"readonly ARM64_RUNC_SHA256='{pins['runc']['sha256']}'", script)
+        self.assertIn(f"readonly ARM64_BUSYBOX_SHA256='{pins['busybox']['member_sha256']}'", script)
+        self.assertIn(pins["busybox"]["sha256"], script)
+        self.assertIn(pins["busybox"]["url"], script)
+        self.assertIn(pins["runc"]["url"], script)
 
     def synthetic(self):
         """Pins whose sources are served from memory."""

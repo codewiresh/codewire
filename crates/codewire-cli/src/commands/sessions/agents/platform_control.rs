@@ -610,7 +610,10 @@ pub(crate) async fn run_platform_agent_peer(
     );
     let native = &args.arguments[prefix.len()..];
     match config.agent {
-        AgentKind::Codex => ensure!(native == ["app-server"], "platform Codex peer differs"),
+        AgentKind::Codex => ensure!(
+            native == codex_app_server_arguments(&config.working_dir).as_slice(),
+            "platform Codex peer differs"
+        ),
         AgentKind::Claude => {
             let state: DriverState = private_record(&dir.join("state.json"))?;
             let session = state
