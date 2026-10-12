@@ -140,10 +140,12 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::GetHealthRequest>,
     ) -> Result<Response<v1::GetHealthResponse>, Status> {
         self.authorize(&request)?;
+        let mut diagnostics = self.runtime_state.diagnostics.clone();
+        diagnostics.extend(self.session_engine.store_diagnostic());
         Ok(Response::new(v1::GetHealthResponse {
             state: self.runtime_state.state as i32,
             message: self.runtime_state.message.clone(),
-            diagnostics: self.runtime_state.diagnostics.clone(),
+            diagnostics,
         }))
     }
 
@@ -1399,6 +1401,76 @@ mod tests {
                 .insert(DAEMON_AUTH_TOKEN_HEADER, token.parse().unwrap());
         }
         request
+    }
+
+    #[tokio::test]
+    async fn a_refused_session_store_is_a_distinct_status_and_a_health_diagnostic_until_corrected()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: temp.path().to_path_buf(),
+            home_root: temp.path().to_path_buf(),
+            auth_token: DaemonAuthToken::new(TEST_AUTH_TOKEN).unwrap(),
+            process_execution: crate::execution::ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            host: None,
+            launch_projection: None,
+            session_working_dir: None,
+        };
+        let store = temp.path().join(".codewire/daemon/sessions");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(&store, b"not a directory").unwrap();
+        let service = DaemonServiceImpl::new(config);
+        fn request<T>(message: T) -> Request<T> {
+            let mut request = Request::new(message);
+            request
+                .metadata_mut()
+                .insert(DAEMON_AUTH_TOKEN_HEADER, TEST_AUTH_TOKEN.parse().unwrap());
+            request
+        }
+        let health = |service: DaemonServiceImpl| async move {
+            service
+                .get_health(request(v1::GetHealthRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .diagnostics
+        };
+        // Nothing is reported before a request has met the store.
+        assert!(health(service.clone()).await.is_empty());
+        for _ in 0..2 {
+            let refused = service
+                .list_sessions(request(v1::ListSessionsRequest {}))
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code(), tonic::Code::DataLoss);
+            assert!(
+                refused
+                    .message()
+                    .starts_with("session store refused: create session store "),
+                "{refused:?}"
+            );
+            let diagnostics = health(service.clone()).await;
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(diagnostics[0].name, "session-store");
+            assert!(!diagnostics[0].healthy);
+            assert!(
+                diagnostics[0]
+                    .message
+                    .starts_with("refused: create session store "),
+                "{diagnostics:?}"
+            );
+        }
+        std::fs::remove_file(&store).unwrap();
+        let listed = service
+            .list_sessions(request(v1::ListSessionsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(listed.sessions.is_empty());
+        assert!(health(service).await.is_empty());
     }
 
     #[tokio::test]

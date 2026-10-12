@@ -195,7 +195,7 @@ url=new URL(process.env.OPENAI_BASE_URL+'/responses');
 headers={'content-type':'application/json','authorization':'Bearer '+process.env.OPENAI_API_KEY};
 input={model:'codewire-synthetic',input:'Return the synthetic marker.',stream:true};
 }else if(mode==='count-tokens'){
-if(process.env.ANTHROPIC_BASE_URL!=='http://127.0.0.1:38081'||process.env.ANTHROPIC_AUTH_TOKEN!=='codewire-managed'||process.env.ANTHROPIC_API_KEY!==''||process.env.CLAUDE_CODE_OAUTH_TOKEN!=='')process.exit(82);
+if(process.env.ANTHROPIC_BASE_URL!=='http://127.0.0.1:38081/_codewire/anthropic'||process.env.ANTHROPIC_AUTH_TOKEN!=='codewire-managed'||process.env.ANTHROPIC_API_KEY!==''||process.env.CLAUDE_CODE_OAUTH_TOKEN!=='')process.exit(82);
 url=new URL(process.env.ANTHROPIC_BASE_URL+'/v1/messages/count_tokens');
 headers={'content-type':'application/json','anthropic-version':'2023-06-01','authorization':'Bearer '+process.env.ANTHROPIC_AUTH_TOKEN};
 input={model:'claude-sonnet-4-6',messages:[{role:'user',content:'Return the synthetic marker.'}]};
@@ -206,7 +206,7 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
 
     const CLAUDE_RESOLVER_SCRIPT: &str = "PATH=/opt/codewire/agents/npm/bin:/home/codewire/.npm-global/bin:/usr/bin:/bin; export PATH; command -v claude";
     const CLAUDE_ENV_EXEC_SCRIPT: &str = concat!(
-        "test \"${ANTHROPIC_BASE_URL-}\" = 'http://127.0.0.1:38081' && ",
+        "test \"${ANTHROPIC_BASE_URL-}\" = 'http://127.0.0.1:38081/_codewire/anthropic' && ",
         "test \"${ANTHROPIC_AUTH_TOKEN-}\" = codewire-managed && ",
         "test \"${ANTHROPIC_API_KEY+x}\" = x && test -z \"$ANTHROPIC_API_KEY\" && ",
         "test \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" = x && test -z \"$CLAUDE_CODE_OAUTH_TOKEN\" && ",
@@ -1732,17 +1732,54 @@ function generalEgress(){
         excluded_pid: Option<i32>,
     ) -> SmokeResult<i32> {
         let deadline = Instant::now() + EXEC_TIMEOUT;
+        let mut overlap_until = None;
         loop {
             let mut pids = exact_broker_pids(args, environment)?;
             pids.retain(|pid| Some(*pid) != excluded_pid);
-            if pids.len() == 1 {
-                return Ok(pids[0]);
+            match exact_broker_step(&pids, Instant::now(), deadline, &mut overlap_until) {
+                Ok(Some(pid)) => return Ok(pid),
+                Ok(None) => tokio::time::sleep(Duration::from_millis(25)).await,
+                Err(error) => {
+                    // A count only: never a process identity or argv.
+                    eprintln!(
+                        "codewire-local-codex-bridge-smoke: exact broker count={}",
+                        pids.len()
+                    );
+                    return Err(error);
+                }
             }
-            require(pids.is_empty())?;
-            if Instant::now() >= deadline {
-                return Err(failed());
+        }
+    }
+
+    /// A local broker epoch renewal runs the successor beside its predecessor
+    /// from 90 seconds before the predecessor's 600-second lifetime ends until
+    /// that lifetime ends and its drain (at most 10 seconds) finishes. The
+    /// proof never chooses between two exact brokers; it waits such an overlap
+    /// out, within this bound.
+    const BROKER_RENEWAL_OVERLAP: Duration = Duration::from_secs(120);
+
+    /// One look at the exact brokers. Exactly one is the answer. None is
+    /// waited for until `deadline`. Two are a renewal overlap, waited out
+    /// for at most [`BROKER_RENEWAL_OVERLAP`] from the first look that saw
+    /// one. More than two is never a renewal and is refused at once.
+    fn exact_broker_step(
+        pids: &[i32],
+        now: Instant,
+        deadline: Instant,
+        overlap_until: &mut Option<Instant>,
+    ) -> SmokeResult<Option<i32>> {
+        match pids {
+            [pid] => Ok(Some(*pid)),
+            [] => {
+                require(now < deadline)?;
+                Ok(None)
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            [_, _] => {
+                let until = *overlap_until.get_or_insert(now + BROKER_RENEWAL_OVERLAP);
+                require(now < until)?;
+                Ok(None)
+            }
+            _ => Err(failed()),
         }
     }
 
@@ -2683,6 +2720,56 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
         }
 
         #[test]
+        fn the_exact_broker_is_never_chosen_between_two_and_a_renewal_overlap_is_waited_out() {
+            let start = Instant::now();
+            let deadline = start + EXEC_TIMEOUT;
+            let at = |seconds| start + Duration::from_secs(seconds);
+
+            // One exact broker is the answer at once.
+            let mut overlap = None;
+            assert_eq!(
+                exact_broker_step(&[7], start, deadline, &mut overlap).unwrap(),
+                Some(7)
+            );
+
+            // A renewal overlap: two brokers are waited out, then the one
+            // left is the answer, even past the empty-wait deadline.
+            let mut overlap = None;
+            assert_eq!(
+                exact_broker_step(&[7, 9], at(1), deadline, &mut overlap).unwrap(),
+                None
+            );
+            assert_eq!(
+                exact_broker_step(&[7, 9], at(100), deadline, &mut overlap).unwrap(),
+                None
+            );
+            assert_eq!(
+                exact_broker_step(&[9], at(110), deadline, &mut overlap).unwrap(),
+                Some(9)
+            );
+
+            // Two that outlast a renewal's overlap are refused.
+            let mut overlap = None;
+            assert_eq!(
+                exact_broker_step(&[7, 9], at(1), deadline, &mut overlap).unwrap(),
+                None
+            );
+            assert!(exact_broker_step(&[7, 9], at(121), deadline, &mut overlap).is_err());
+
+            // More than two is never a renewal.
+            let mut overlap = None;
+            assert!(exact_broker_step(&[7, 9, 11], start, deadline, &mut overlap).is_err());
+
+            // None is waited for until the deadline only.
+            let mut overlap = None;
+            assert_eq!(
+                exact_broker_step(&[], at(89), deadline, &mut overlap).unwrap(),
+                None
+            );
+            assert!(exact_broker_step(&[], at(90), deadline, &mut overlap).is_err());
+        }
+
+        #[test]
         fn stock_ssh_push_failures_are_named_from_the_workload_s_own_messages() {
             for (message, reason) in STOCK_SSH_PUSH_FAILURES {
                 assert!(
@@ -2957,7 +3044,11 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
             let payload = payload.unwrap_or(Value::Null);
             let messages = payload["messages"].as_array().map(Vec::len);
             let valid = parts.method == http::Method::POST
-                && matches!(path, "/v1/messages" | "/v1/messages?beta=true")
+                && matches!(
+                    path,
+                    "/_codewire/anthropic/v1/messages"
+                        | "/_codewire/anthropic/v1/messages?beta=true"
+                )
                 && headers_valid
                 && payload["model"] == CLAUDE_MODEL
                 && payload["stream"] == true
@@ -3029,7 +3120,10 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                 .env("HOME", home)
                 .env("TMPDIR", home)
                 .env("PATH", "/usr/bin:/bin")
-                .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:38081")
+                .env(
+                    "ANTHROPIC_BASE_URL",
+                    "http://127.0.0.1:38081/_codewire/anthropic",
+                )
                 .env("ANTHROPIC_AUTH_TOKEN", "codewire-managed")
                 .env("ANTHROPIC_API_KEY", "")
                 .env("CLAUDE_CODE_OAUTH_TOKEN", "")
@@ -3461,7 +3555,7 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
         }
 
         const SELECTED_HTTP_FIXTURE: &str = r#"const vm=require('vm');
-const env={OPENAI_BASE_URL:'http://127.0.0.1:38081/_codewire/openai/v1',OPENAI_API_KEY:'codewire-managed',ANTHROPIC_BASE_URL:'http://127.0.0.1:38081',ANTHROPIC_AUTH_TOKEN:'codewire-managed',ANTHROPIC_API_KEY:'',CLAUDE_CODE_OAUTH_TOKEN:''};
+const env={OPENAI_BASE_URL:'http://127.0.0.1:38081/_codewire/openai/v1',OPENAI_API_KEY:'codewire-managed',ANTHROPIC_BASE_URL:'http://127.0.0.1:38081/_codewire/anthropic',ANTHROPIC_AUTH_TOKEN:'codewire-managed',ANTHROPIC_API_KEY:'',CLAUDE_CODE_OAUTH_TOKEN:''};
 const mode=process.argv[2];const change=process.argv[3];if(change==='missing-api')delete env.ANTHROPIC_API_KEY;else if(change==='oauth')env.CLAUDE_CODE_OAUTH_TOKEN='synthetic-competing';else if(change==='base')env.OPENAI_BASE_URL='https://unselected.invalid/v1';else if(change==='key')env.OPENAI_API_KEY='synthetic-competing';
 let calls=0;let exitCode=0;let captured=null;let output='';let timeoutMs=0;const handlers=new Map();
 const response={statusCode:200,headers:{'content-type':mode==='openai'?'text/event-stream':'application/json','x-request-id':'[REDACTED]','request-id':'[REDACTED]'},on:(name,callback)=>{handlers.set(name,callback);return response;}};
@@ -3504,7 +3598,7 @@ process.stdout.write(JSON.stringify({calls,exit_code:exitCode,captured,output,ti
                 ),
                 (
                     "count-tokens",
-                    "http://127.0.0.1:38081/v1/messages/count_tokens",
+                    "http://127.0.0.1:38081/_codewire/anthropic/v1/messages/count_tokens",
                     CLAUDE_MODEL,
                 ),
             ] {
@@ -3537,6 +3631,39 @@ process.stdout.write(JSON.stringify({calls,exit_code:exitCode,captured,output,ti
                     serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
                 assert!(!response.opaque_header_present);
                 assert_eq!(response.request_id.as_deref(), Some("[REDACTED]"));
+            }
+        }
+
+        /// The scripts run in the guest, so they name the generated routing
+        /// values as literals. Those literals are what the shared projection
+        /// generates; a route that moves fails here, not in the VM.
+        #[test]
+        fn selected_scripts_name_exactly_the_generated_provider_values() {
+            let environment = codewire_access::ManagedCredentialClients::from_profile_slots([
+                "openai",
+                "anthropic",
+            ])
+            .unwrap()
+            .for_placement(codewire_access::ManagedCredentialClientPlacement::Native)
+            .environment;
+            for (name, scripts) in [
+                (
+                    "OPENAI_BASE_URL",
+                    &[SELECTED_HTTP_SCRIPT, SELECTED_HTTP_FIXTURE][..],
+                ),
+                (
+                    "ANTHROPIC_BASE_URL",
+                    &[
+                        SELECTED_HTTP_SCRIPT,
+                        CLAUDE_ENV_EXEC_SCRIPT,
+                        SELECTED_HTTP_FIXTURE,
+                    ],
+                ),
+            ] {
+                let generated = format!("'{}'", environment[name]);
+                for script in scripts {
+                    assert!(script.contains(&generated), "{name}");
+                }
             }
         }
 

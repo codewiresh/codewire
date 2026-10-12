@@ -394,6 +394,7 @@ mod tests {
                 CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
             );
             assert_eq!(spec["automountServiceAccountToken"], false);
+            assert_eq!(spec["enableServiceLinks"], false);
             let volume = spec["volumes"]
                 .as_array()
                 .unwrap()
@@ -2556,6 +2557,9 @@ mod tests {
         );
         assert_eq!(volume["projected"]["defaultMode"], 0o440);
         assert_eq!(spec["automountServiceAccountToken"], false);
+        // No other environment's Service reaches workspace processes as
+        // `*_SERVICE_HOST` variables.
+        assert_eq!(spec["enableServiceLinks"], false);
         for container in spec["containers"]
             .as_array()
             .unwrap()

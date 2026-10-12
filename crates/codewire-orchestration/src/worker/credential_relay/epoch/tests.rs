@@ -924,13 +924,14 @@ fn broker_expiry_header_is_parsed_strictly() {
 }
 
 #[test]
-fn a_successor_must_outlive_the_current_epoch_by_a_minute() {
+fn a_successor_must_expire_strictly_later_than_the_current_epoch() {
     let at = Instant::now();
     let expiry = |unix| Some(BrokerExpiry { unix, at });
-    assert!(extends(expiry(1_060), 1_000));
+    assert!(extends(expiry(1_001), 1_000));
+    assert!(extends(expiry(1_040), 1_000));
     assert!(extends(expiry(1_600), 1_000));
-    assert!(!extends(expiry(1_059), 1_000));
     assert!(!extends(expiry(1_000), 1_000));
+    assert!(!extends(expiry(999), 1_000));
     assert!(!extends(None, 1_000));
     assert!(!extends(expiry(u64::MAX), u64::MAX));
 }
@@ -985,8 +986,9 @@ async fn a_successor_that_does_not_extend_the_expiry_never_sends_open() {
         .unwrap();
     assert_eq!(admitted.expiry.map(|expiry| expiry.unix), Some(current));
     for refused in [
-        vec![(current + 59).to_string()],
+        // Neither token rotated yet: it would end with the current epoch.
         vec![current.to_string()],
+        vec![(current - 1).to_string()],
         // An older broker, or a malformed or ambiguous header, cannot prove
         // that kubelet already rotated the successor's tokens.
         vec![],
@@ -1000,17 +1002,21 @@ async fn a_successor_that_does_not_extend_the_expiry_never_sends_open() {
             "{refused:?}"
         );
     }
-    let admitted = admit_successor(
-        &mut fixture,
-        Some(current),
-        vec![(current + 60).to_string()],
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        admitted.expiry.map(|expiry| expiry.unix),
-        Some(current + 60)
-    );
+    // One token rotated and the other expires 40 seconds later: the successor
+    // is admitted with overlap and serves until then (#2641).
+    for later in [40, 1, 500] {
+        let admitted = admit_successor(
+            &mut fixture,
+            Some(current),
+            vec![(current + later).to_string()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            admitted.expiry.map(|expiry| expiry.unix),
+            Some(current + later)
+        );
+    }
     fixture.stop().await;
 }
 

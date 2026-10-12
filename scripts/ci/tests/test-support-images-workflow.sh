@@ -8,6 +8,7 @@ readonly LEGACY_GITHUB_WORKFLOW="$ROOT/.github/workflows/build-workspace-image.y
 readonly WORKSPACE_DOCKERFILE="$ROOT/images/workspace/Dockerfile"
 readonly WORKSPACE_AGENTS="$ROOT/images/workspace/agents"
 readonly CONFIDENTIAL_PROBE_DOCKERFILE="$ROOT/images/confidential-probe/Dockerfile"
+readonly PLATFORM_BUILDER="$ROOT/scripts/ci/images/build-support-platform.sh"
 
 fail() {
   printf '[test-support-images-workflow] ERROR: %s\n' "$*" >&2
@@ -34,7 +35,7 @@ concurrency_block="$(sed -n '/^concurrency:$/,/^$/p' "$WORKFLOW")"
 if grep -Fq 'CODEWIRE_GHCR_PUBLISH_ENABLED' "$WORKFLOW"; then
   fail 'support GHCR publication retains its rollout flag'
 fi
-selection_job="$(sed -n '/^  support-selection:/,/^  publish-support-images:/p' "$WORKFLOW")"
+selection_job="$(sed -n '/^  support-selection:/,/^  build-support-amd64:/p' "$WORKFLOW")"
 grep -Fq '    runs-on: ci-protected' <<<"$selection_job" ||
   fail 'support selection does not receive the pinned Skopeo capability'
 if grep -Fq 'enable-openid-connect: true' <<<"$selection_job"; then
@@ -86,17 +87,17 @@ for output in build_support_images build_confidential_probe_image reason matched
   grep -Fq "      ${output}: \${{ steps.select.outputs.${output} }}" <<<"$selection_job" ||
     fail "support selection omits ${output} planner output"
 done
-grep -Fq "if: \${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}" \
-  "$WORKFLOW" || fail 'support-pair publication is not independently selected'
+[[ "$(grep -Fc "if: \${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}" \
+  "$WORKFLOW")" -eq 2 ]] || fail 'support-pair platform builds are not both independently selected'
 grep -Fq "if: \${{ needs.support-selection.outputs.build_confidential_probe_image == 'true' && needs.support-selection.outputs.superseded == 'false' }}" \
   "$WORKFLOW" || fail 'confidential-probe publication is not independently selected'
-[[ "$(grep -Fc 'needs: [support-selection]' "$WORKFLOW")" -eq 2 ]] ||
-  fail 'independent publisher jobs do not both wait for support selection'
+[[ "$(grep -Fc 'needs: [support-selection]' "$WORKFLOW")" -eq 3 ]] ||
+  fail 'the platform builds and the probe publisher do not all wait for support selection'
 grep -qF 'scripts/ci/images/build-push-image.sh base images/base/Dockerfile images/base' \
   "$WORKFLOW" || fail 'base is not built by the canonical Gitea helper'
 # shellcheck disable=SC2016
-grep -qF 'CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}' \
-  "$WORKFLOW" || fail 'workspace does not consume the same-job exact base candidate'
+grep -qF '"CODEWIRE_BASE_IMAGE_REF=registry.example.invalid/codewire/base@$base_digest"' \
+  "$PLATFORM_BUILDER" || fail 'a platform workspace does not consume that platform'"'"'s exact base'
 grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .' \
   "$WORKFLOW" || fail 'workspace is not built by the canonical Gitea helper'
 grep -qF 'scripts/ci/images/build-push-image.sh confidential-probe images/confidential-probe/Dockerfile images/confidential-probe' \
@@ -112,10 +113,10 @@ grep -Fq '    enable-openid-connect: true' <<<"$publish_job" ||
   fail 'support-pair publisher lacks job-scoped OIDC'
 grep -Fq '    enable-openid-connect: true' <<<"$probe_job" ||
   fail 'confidential-probe publisher lacks job-scoped OIDC'
-[[ "$(grep -Fc 'enable-openid-connect: true' "$WORKFLOW")" -eq 3 ]] ||
-  fail 'support workflow exposes OIDC outside the two publisher jobs and the pin proposal'
-grep -qF 'needs: [support-selection]' <<<"$publish_job" ||
-  fail 'support-pair publisher is not bound to selection'
+[[ "$(grep -Fc 'enable-openid-connect: true' "$WORKFLOW")" -eq 5 ]] ||
+  fail 'support workflow exposes OIDC outside the platform builds, the two publishers and the pin proposal'
+grep -qF '    needs: [build-support-amd64, build-support-arm64]' <<<"$publish_job" ||
+  fail 'support-pair publisher does not join both platform builds'
 grep -qF 'needs: [support-selection]' <<<"$probe_job" ||
   fail 'confidential-probe publisher is not bound to selection'
 [[ "$(grep -Fc 'OPENBAO_GHCR_ROLE: codewire-source-support-publisher' "$WORKFLOW")" -eq 2 ]] ||
@@ -140,8 +141,15 @@ grep -Fq -- '--support-pair' <<<"$publish_job" ||
   fail 'support-pair publisher does not verify both exact build sources'
 [[ "$(grep -Fc 'outputs.source_sha }}" == "$GITHUB_SHA"' <<<"$probe_job")" -eq 1 ]] ||
   fail 'confidential-probe publisher does not verify its exact build source'
-if grep -Fq 'needs.build-' <<<"$publish_job$probe_job"; then
-  fail 'publisher still crosses a runner job-output boundary'
+# Publication consumes only same-job candidates. The platform digests cross
+# the job boundary only into the two joins, which verify the whole index
+# (both platforms, their provenance and SBOMs) before reporting a candidate.
+[[ "$(grep -Fc 'needs.build-' <<<"$publish_job")" -eq 2 \
+  && "$(grep -Fc '          CODEWIRE_IMAGE_JOIN: ${{ needs.build-support-amd64.outputs.base_digest }} ${{ needs.build-support-arm64.outputs.base_digest }}' <<<"$publish_job")" -eq 1 \
+  && "$(grep -Fc '          CODEWIRE_IMAGE_JOIN: ${{ needs.build-support-amd64.outputs.workspace_digest }} ${{ needs.build-support-arm64.outputs.workspace_digest }}' <<<"$publish_job")" -eq 1 ]] ||
+  fail 'publisher consumes another job'"'"'s output outside the verifying joins'
+if grep -Fq 'needs.build-' <<<"$probe_job"; then
+  fail 'probe publisher crosses a runner job-output boundary'
 fi
 # shellcheck disable=SC2016
 grep -Fq '"${{ steps.confidential_probe.outputs.candidate_ref }}"' <<<"$probe_job" ||
@@ -276,9 +284,29 @@ grep -qF 'rm -rf /tmp/cargo-target' <<<"$builder_stage" ||
   fail 'workspace target cleanup must share the compile layer'
 floating_stage="$(sed -n '/^FROM workspace-foundation AS workspace-floating-tools$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
 for tool in 'NPM_CONFIG_PREFIX=/usr/local npm install' 'npm@12.2.0 pnpm@12.9.0 yarn@1.22.22' \
-  'https://bun.sh/install' 'gopls@latest' 'hcloud@latest' 'pipx install poetry' 'pipx install uv' 'pipx install aider-chat'; do
+  'https://bun.sh/install' 'pipx install poetry' 'pipx install uv' 'pipx install aider-chat' \
+  'COPY --from=workspace-floating-go --chown=codewire:codewire /out/ /home/codewire/go/bin/' \
+  'RUN gopls version && hcloud version'; do
   grep -qF "$tool" <<<"$floating_stage" || fail "floating tool omitted from the fresh stage: $tool"
 done
+# The Go tools cross-compile natively on the build platform, never under
+# emulation, still at @latest when the image is built.
+# shellcheck disable=SC2016 # Match the Dockerfile's literal variables.
+go_stage="$(sed -n '/^FROM --platform=$BUILDPLATFORM rust:1.93.0-bookworm@sha256:[0-9a-f]\{64\} AS workspace-floating-go$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
+# shellcheck disable=SC2016
+for go_input in 'GOOS=linux GOARCH="$TARGETARCH" CGO_ENABLED=0' \
+  '/usr/local/go/bin/go install golang.org/x/tools/gopls@latest' \
+  '/usr/local/go/bin/go install github.com/hetznercloud/cli/cmd/hcloud@latest' \
+  '"https://go.dev/dl/go${GO_VERSION}.linux-${BUILDARCH}.tar.gz"' \
+  'echo "${go_sha}  /tmp/go.tgz" | sha256sum -c -' \
+  'install -D -m 0755 "$binaries/gopls" /out/gopls' 'install -D -m 0755 "$binaries/hcloud" /out/hcloud'; do
+  grep -qF -- "$go_input" <<<"$go_stage" || fail "build-platform Go tool stage omits: $go_input"
+done
+if grep -q 'go install' <<<"$floating_stage"; then
+  fail 'the emulated floating stage still compiles Go tools'
+fi
+go_shas="$(sed -n 's/^ *\(amd64\|arm64\)) .*go_sha=\([0-9a-f]\{64\}\).*$/\1 \2/p' "$WORKSPACE_DOCKERFILE" | sort -u)"
+[[ "$(wc -l <<<"$go_shas")" -eq 2 ]] || fail 'the build-platform Go archive differs from the workspace Go archive'
 [[ "$(grep -E '^COPY --from=cw-builder ' "$WORKSPACE_DOCKERFILE")" == \
   'COPY --from=cw-builder --chown=0:0 --chmod=0555 /out/cw /usr/local/bin/cw
 COPY --from=cw-builder --chown=0:0 /out/provenance/ /usr/local/share/codewire/cw-runtime/' ]] ||
@@ -290,7 +318,7 @@ cw_copy_line="$(grep -n -m1 '^COPY --from=cw-builder .* /out/cw /usr/local/bin/c
   "$WORKSPACE_DOCKERFILE" | cut -d: -f1)"
 [[ -n "$cw_copy_line" ]] || fail 'workspace final stage lacks the cw handoff'
 for moving_tool_pattern in \
-  'go install golang.org/x/tools/gopls@latest' \
+  'COPY --from=workspace-floating-go --chown=codewire:codewire' \
   'pipx install aider-chat' \
   'npm install -g --ignore-scripts' \
   'COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/'; do
@@ -356,10 +384,13 @@ for checksum_var in docker_sha buildx_sha compose_sha gh_sha; do
   [[ "$(grep -Ec "${checksum_var}=[0-9a-f]{64}" "$ROOT/images/base/Dockerfile")" -eq 2 ]] ||
     fail "base image does not define $checksum_var exactly once per supported architecture"
 done
-for checksum_var in node_sha go_sha; do
-  [[ "$(grep -Ec "${checksum_var}=[0-9a-f]{64}" "$WORKSPACE_DOCKERFILE")" -eq 2 ]] ||
-    fail "workspace image does not define $checksum_var exactly once per supported architecture"
-done
+[[ "$(grep -Ec "node_sha=[0-9a-f]{64}" "$WORKSPACE_DOCKERFILE")" -eq 2 ]] ||
+  fail "workspace image does not define node_sha exactly once per supported architecture"
+# The installed Go and the build-platform Go that cross-compiles the Go tools
+# are the same archive: two stages, one checksum per architecture.
+[[ "$(grep -Ec "go_sha=[0-9a-f]{64}" "$WORKSPACE_DOCKERFILE")" -eq 4 \
+  && "$(grep -Eo "go_sha=[0-9a-f]{64}" "$WORKSPACE_DOCKERFILE" | sort -u | wc -l)" -eq 2 ]] ||
+  fail "workspace image does not use one Go archive checksum per supported architecture"
 grep -qF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' "$ROOT/images/base/ubuntu.sources" ||
   fail 'base apt inputs are not bound to the reviewed Ubuntu snapshot'
 grep -qF 'snapshot.debian.org/archive/debian/20251208T000000Z/' \
@@ -533,8 +564,8 @@ superseded_line="$(grep -n -m1 'name: Skip a superseded commit' <<<"$selection_j
 resolve_line="$(grep -n -m1 'name: Resolve untrusted published support pair' <<<"$selection_job" | cut -d: -f1)"
 [[ "$superseded_line" -lt "$resolve_line" ]] ||
   fail 'support selection resolves the published pair before it knows whether its commit was superseded'
-[[ "$(grep -Fc "needs.support-selection.outputs.superseded == 'false'" "$WORKFLOW")" -eq 2 ]] ||
-  fail 'a superseded commit still reaches a support publisher'
+[[ "$(grep -Fc "needs.support-selection.outputs.superseded == 'false'" "$WORKFLOW")" -eq 3 ]] ||
+  fail 'a superseded commit still reaches a support platform build or the probe publisher'
 cat >"$superseded_bin/git" <<'GIT'
 #!/usr/bin/env bash
 [[ "$*" == 'ls-remote origin refs/heads/main' ]] || exit 64
@@ -562,5 +593,151 @@ superseded_case() {
   fail 'an unreadable canonical main did not fail closed'
 [[ "$(superseded_case not-a-commit)" == failed ]] ||
   fail 'a malformed canonical main did not fail closed'
+
+# Each platform of the pair builds in its own protected job with its own time
+# budget below the runner's ceiling, pushes only by digest and publishes
+# nothing; the join is the only publisher.
+for platform in amd64 arm64; do
+  case "$platform" in
+    amd64) timeout_minutes=120 budget=110 next_job=build-support-arm64 ;;
+    arm64) timeout_minutes=120 budget=110 next_job=publish-support-images ;;
+  esac
+  platform_job="$(sed -n "/^  build-support-$platform:/,/^  $next_job:/p" "$WORKFLOW")"
+  for expected in '    runs-on: ci-protected' '    enable-openid-connect: true' \
+      "    timeout-minutes: $timeout_minutes" '    needs: [support-selection]' \
+      "          SUPPORT_PLATFORM_BUDGET_MINUTES: '$budget'" \
+      "        run: scripts/ci/images/build-support-platform.sh linux/$platform" \
+      '      base_digest: ${{ steps.build.outputs.base_digest }}' \
+      '      workspace_digest: ${{ steps.build.outputs.workspace_digest }}' \
+      '      OPENBAO_ROLE: codewire-source-support-publisher'; do
+    grep -qxF -- "$expected" <<<"$platform_job" || fail "linux/$platform support build omits: $expected"
+  done
+  [[ "$budget" -lt "$timeout_minutes" && "$timeout_minutes" -lt 180 ]] ||
+    fail "linux/$platform support build budget does not fail before the runner ceiling"
+  if grep -Eq 'publish-image-to-|OPENBAO_GHCR|secrets\.|--support-pair' <<<"$platform_job"; then
+    fail "linux/$platform support build crosses the publication boundary"
+  fi
+done
+grep -qxF '    timeout-minutes: 30' <<<"$publish_job" || fail 'support join has no explicit time budget'
+if grep -qF 'build-support-platform.sh' <<<"$publish_job"; then
+  fail 'support join rebuilds a platform'
+fi
+
+# The platform script, run in a copy of its tree against a recording builder,
+# a recording Docker and a stub for the arm64 node's client certificate.
+platform_tree="$(mktemp -d)"
+trap 'rm -rf -- "$superseded_step" "$superseded_bin" "$platform_tree"' EXIT
+mkdir -p "$platform_tree/scripts/ci/images" "$platform_tree/scripts/ci/setup" "$platform_tree/bin" "$platform_tree/runner"
+cp "$PLATFORM_BUILDER" "$platform_tree/scripts/ci/images/"
+cat >"$platform_tree/scripts/ci/images/build-push-image.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s|%s|%s|%s|%s\n' "$1" "${CODEWIRE_IMAGE_PLATFORM:-}" "${CODEWIRE_BASE_IMAGE_REF:-}" \
+  "${CODEWIRE_EXTERNAL_BUILDX_BUILDER:-}" "$*" >>"$STUB_CALLS"
+[[ -z "${CODEWIRE_EXTERNAL_DOCKER_CONFIG:-}" || -d "$CODEWIRE_EXTERNAL_DOCKER_CONFIG" ]] || exit 7
+case "${STUB_MODE:-ok}:$1" in
+  fail:base) exit 9 ;;
+  nodigest:base) exit 0 ;;
+esac
+case "$1" in
+  base) digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+  workspace) digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
+esac
+printf 'platform_digest=%s\n' "$digest" >>"$GITHUB_OUTPUT"
+STUB
+cat >"$platform_tree/scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "$(stat -c '%a' "$1")" >>"$STUB_FETCHES"
+[[ "${STUB_FETCH:-ok}" == ok ]] || exit 1
+for file in ca.crt client.crt client.key; do printf 'synthetic\n' >"$1/$file"; done
+STUB
+cat >"$platform_tree/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+printf 'DOCKER_CONFIG=%s %s\n' "${DOCKER_CONFIG:-}" "$*" >>"$STUB_DOCKER"
+case "$1 $2" in
+  'buildx inspect')
+    case "${STUB_NODE:-arm64}" in
+      arm64) printf 'Name: x\nDriver: remote\nStatus:             running\nPlatforms:          linux/arm64*, linux/arm64/v8\n' ;;
+      amd64) printf 'Status:             running\nPlatforms:          linux/amd64*\n' ;;
+      stopped) printf 'Status:             stopped\nPlatforms:          linux/arm64*\n' ;;
+      down) echo 'ERROR: connection refused' >&2; exit 1 ;;
+    esac ;;
+esac
+exit 0
+STUB
+chmod +x "$platform_tree/scripts/ci/images/build-push-image.sh" "$platform_tree/scripts/ci/images/build-support-platform.sh" \
+  "$platform_tree/scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh" "$platform_tree/bin/docker"
+platform_case() {
+  local budget="$1" platform="$2"
+  shift 2
+  : >"$platform_tree/calls"; : >"$platform_tree/output"; : >"$platform_tree/fetches"; : >"$platform_tree/docker"
+  if env "$@" PATH="$platform_tree/bin:$PATH" RUNNER_TEMP="$platform_tree/runner" \
+      STUB_CALLS="$platform_tree/calls" STUB_FETCHES="$platform_tree/fetches" STUB_DOCKER="$platform_tree/docker" \
+      GITHUB_OUTPUT="$platform_tree/output" GITHUB_RUN_ID=77 GITHUB_RUN_ATTEMPT=1 \
+      SUPPORT_PLATFORM_BUDGET_MINUTES="$budget" \
+      "$platform_tree/scripts/ci/images/build-support-platform.sh" "$platform" >"$platform_tree/out" 2>&1; then
+    echo ok
+  else
+    echo "failed $?"
+  fi
+}
+base_a=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+# amd64 builds on the job's own builder: no certificate, no remote node.
+[[ "$(platform_case 110 linux/amd64)" == ok ]] || { cat "$platform_tree/out" >&2; fail 'amd64 platform build failed'; }
+[[ "$(cat "$platform_tree/calls")" == "base|linux/amd64|||base images/base/Dockerfile images/base
+workspace|linux/amd64|registry.example.invalid/codewire/base@$base_a||workspace images/workspace/Dockerfile ." ]] ||
+  fail 'amd64 build does not build its base, then its workspace from that exact base, on its own builder'
+[[ ! -s "$platform_tree/fetches" && ! -s "$platform_tree/docker" ]] ||
+  fail 'amd64 build read the arm64 certificate or attached a remote node'
+[[ "$(cat "$platform_tree/output")" == "base_digest=$base_a
+workspace_digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ]] ||
+  fail 'platform build does not report both exact digests'
+grep -Eq '^CODEWIRE_CI_PHASE name=support-amd64-workspace seconds=[0-9]+ status=0$' "$platform_tree/out" ||
+  fail 'platform build does not report each phase'"'"'s time'
+# arm64 builds natively on the protected node, attached with this job's certificate.
+[[ "$(platform_case 110 linux/arm64)" == ok ]] || { cat "$platform_tree/out" >&2; fail 'arm64 platform build failed'; }
+read -r tls_dir tls_mode <"$platform_tree/fetches"
+[[ "$tls_mode" == 700 && "$tls_dir" == "$platform_tree/runner/codewire-support-platform."*/arm64-buildkit-tls ]] ||
+  fail 'the arm64 certificate was not fetched into a private job directory'
+[[ ! -e "$tls_dir" && -z "$(find "$platform_tree/runner" -mindepth 1 -print -quit)" ]] ||
+  fail 'the arm64 certificate or the private Docker configuration survived the build'
+docker_config="${tls_dir%/arm64-buildkit-tls}/docker-config"
+builder=codewire-support-arm64-77-1-
+create_call="$(grep ' buildx create ' "$platform_tree/docker")"
+[[ "$create_call" == "DOCKER_CONFIG=$docker_config buildx create --name $builder"*" --driver remote --platform linux/arm64 --driver-opt cacert=$tls_dir/ca.crt,cert=$tls_dir/client.crt,key=$tls_dir/client.key,servername=arm64-builder.example.invalid tcp://arm64-builder.example.invalid:1234" ]] ||
+  fail "the arm64 node is not attached as the mutual-TLS remote builder: $create_call"
+remote_name="$(sed -n 's/^.* buildx create --name \([^ ]*\) .*$/\1/p' "$platform_tree/docker")"
+grep -qxF "DOCKER_CONFIG=$docker_config buildx inspect $remote_name --bootstrap" "$platform_tree/docker" ||
+  fail 'the arm64 node was not checked before building'
+grep -qxF "DOCKER_CONFIG=$docker_config buildx rm $remote_name" "$platform_tree/docker" ||
+  fail 'the remote builder was not forgotten after the build'
+[[ "$(cat "$platform_tree/calls")" == "base|linux/arm64||$remote_name|base images/base/Dockerfile images/base
+workspace|linux/arm64|registry.example.invalid/codewire/base@$base_a|$remote_name|workspace images/workspace/Dockerfile ." ]] ||
+  fail 'arm64 images were not built on the attached node'
+# The arm64 build fails closed, never falling back to emulation.
+for arm64_failure in 'STUB_FETCH=fail|client certificate could not be read' \
+    'STUB_NODE=down|did not answer as a running linux/arm64 builder' \
+    'STUB_NODE=amd64|did not answer as a running linux/arm64 builder' \
+    'STUB_NODE=stopped|did not answer as a running linux/arm64 builder'; do
+  [[ "$(platform_case 110 linux/arm64 "${arm64_failure%%|*}")" == failed* ]] ||
+    fail "arm64 build did not fail closed: ${arm64_failure%%|*}"
+  grep -qF "${arm64_failure#*|}" "$platform_tree/out" && grep -qF 'does not fall back to emulation' "$platform_tree/out" ||
+    fail "arm64 failure was not attributable: ${arm64_failure%%|*}"
+  [[ ! -s "$platform_tree/calls" ]] || fail "arm64 build ran without the native node: ${arm64_failure%%|*}"
+  [[ -z "$(find "$platform_tree/runner" -mindepth 1 -print -quit)" ]] ||
+    fail "a failed arm64 attach left the certificate behind: ${arm64_failure%%|*}"
+done
+[[ "$(platform_case 110 linux/amd64 STUB_MODE=fail)" == 'failed 9' && ! -s "$platform_tree/output" ]] ||
+  fail 'a failed platform base did not fail the build with its status'
+[[ "$(platform_case 110 linux/amd64 STUB_MODE=nodigest)" == 'failed 1' ]] ||
+  fail 'a platform build that reported no digest was accepted'
+[[ "$(platform_case 0 linux/amd64)" == failed* && "$(platform_case '' linux/amd64)" == failed* ]] ||
+  fail 'a platform build without a valid budget was accepted'
+[[ "$(platform_case 110 linux/riscv64)" == failed* && ! -s "$platform_tree/calls" ]] ||
+  fail 'an unsupported platform was built'
+grep -qF -- '--kill-after=60s "${remaining}s"' "$PLATFORM_BUILDER" ||
+  fail 'platform build does not bound each image by the remaining budget'
+grep -qF "::error::the %s support build exceeded its %s-minute budget in the %s image" "$PLATFORM_BUILDER" ||
+  fail 'platform build does not explain an exhausted budget'
+"$ROOT/scripts/ci/tests/test-fetch-openbao-arm64-buildkit-client.sh" >/dev/null
 
 echo 'support-image workflow contract: OK'

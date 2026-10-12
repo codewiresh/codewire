@@ -419,6 +419,10 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     spec.insert("restartPolicy".into(), "Never".into());
     spec.insert("serviceAccountName".into(), SANDBOX_SERVICE_ACCOUNT.into());
     spec.insert("automountServiceAccountToken".into(), false.into());
+    // Every environment has a Service in this shared namespace. Without this,
+    // Kubernetes injects each one's name and address into every workspace
+    // process as `*_SERVICE_HOST` variables, across owners.
+    spec.insert("enableServiceLinks".into(), false.into());
     spec.insert(
         "securityContext".into(),
         json!({

@@ -33,8 +33,12 @@ pub(crate) struct Owner {
     request: v1::PlatformManagedMutationRequest,
     fingerprint: String,
 }
-fn status(_: Error) -> Status {
-    Status::failed_precondition("platform managed incarnation or outcome refused")
+fn status(error: Error) -> Status {
+    match error {
+        // Material-free and refused before any effect, so it says why.
+        Error::EarlierProvider(_) => Status::failed_precondition(error.to_string()),
+        _ => Status::failed_precondition("platform managed incarnation or outcome refused"),
+    }
 }
 fn invalid(_: &'static str) -> Status {
     Status::invalid_argument("invalid closed platform operation")
@@ -292,6 +296,12 @@ impl Service {
                 ProviderPin::admit(agent, &provider)?;
             }
             v1::platform_managed_mutation_request::Operation::Control(c) => {
+                if c.action == v1::PlatformManagedAction::Restart as i32 {
+                    self.inner
+                        .engine
+                        .platform_restartable(&c.session_id)
+                        .await?;
+                }
                 let origin = self
                     .inner
                     .engine
@@ -732,6 +742,32 @@ impl PlatformManagedService for Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn platform_service_names_only_an_earlier_provider_and_keeps_other_refusals_opaque() {
+        for (agent, message) in [
+            (
+                Agent::Claude,
+                "this managed agent was started with an earlier Claude Code; start a new conversation",
+            ),
+            (
+                Agent::Codex,
+                "this managed agent was started with an earlier Codex; start a new conversation",
+            ),
+        ] {
+            let refused = status(Error::EarlierProvider(agent));
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(refused.message(), message);
+        }
+        for error in [Error::Refused, Error::Unknown] {
+            let refused = status(error);
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(
+                refused.message(),
+                "platform managed incarnation or outcome refused"
+            );
+        }
+    }
+
     #[test]
     fn platform_service_settlement_keeps_pipe_native_and_exact_clean_generation_distinct() {
         let driver = uuid::Uuid::new_v4().to_string();

@@ -19,7 +19,9 @@ command -v jq >/dev/null 2>&1 || die 'missing jq'
 [[ -n "${INFRA_KUBECONFIG_DIR:-}" ]] ||
   die 'invoke beneath Infra scripts/kube-access'
 
-install -d -m 0700 "$ROOT/.tmp"
+# Create the shared scratch directory private if it is absent; never reset an
+# existing one's mode. The receipt's own work directory below is 0700.
+(umask 077; mkdir -p "$ROOT/.tmp")
 work="$(mktemp -d "$ROOT/.tmp/openbao-native-secret-preflight.XXXXXX")"
 readonly work
 receipt="$work/counts.json"

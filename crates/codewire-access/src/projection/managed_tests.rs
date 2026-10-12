@@ -296,7 +296,10 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
         assert_eq!(
             anthropic.environment,
             BTreeMap::from([
-                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:38081".into()),
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    "http://127.0.0.1:38081/_codewire/anthropic".into()
+                ),
                 ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
                 ("ANTHROPIC_API_KEY".into(), String::new()),
                 ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
@@ -315,6 +318,7 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
     }
     assert_eq!(MANAGED_HTTP_PORT, 38_081);
     assert_eq!(MANAGED_OPENAI_API_PREFIX, "/_codewire/openai/v1");
+    assert_eq!(MANAGED_ANTHROPIC_API_PREFIX, "/_codewire/anthropic");
     assert_eq!(MANAGED_GITHUB_GIT_PREFIX, "/_codewire/github/");
     assert_eq!(CODEX_NATIVE_HOME, "/run/codewire-agent/codex");
     assert_eq!(SSH_NATIVE_AUTH_SOCK, "/run/codewire-host/ssh-agent.sock");
@@ -496,7 +500,10 @@ fn anthropic_subscription_projection_is_the_exact_claude_code_oauth_placeholder(
         assert_eq!(
             projection.environment,
             BTreeMap::from([
-                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:38081".into()),
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    "http://127.0.0.1:38081/_codewire/anthropic".into()
+                ),
                 ("CLAUDE_CODE_OAUTH_TOKEN".into(), "codewire-managed".into()),
                 ("ANTHROPIC_AUTH_TOKEN".into(), String::new()),
                 ("ANTHROPIC_API_KEY".into(), String::new()),
@@ -506,7 +513,10 @@ fn anthropic_subscription_projection_is_the_exact_claude_code_oauth_placeholder(
         assert_eq!(
             clients(&["anthropic"]).for_placement(placement).environment,
             BTreeMap::from([
-                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:38081".into()),
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    "http://127.0.0.1:38081/_codewire/anthropic".into()
+                ),
                 ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
                 ("ANTHROPIC_API_KEY".into(), String::new()),
                 ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),

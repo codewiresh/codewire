@@ -492,6 +492,13 @@ class DiagnosticCleanupTests(unittest.TestCase):
 
 
 class ParentHarnessTests(unittest.TestCase):
+    # A run ends as soon as its children finish, so the whole-run deadline only
+    # has to outlast a slow host: a 3 s deadline failed a passing run whose
+    # verifier had not been reaped yet. Only the unreaped cases wait for it,
+    # and they set a short one.
+    DEADLINE_SECONDS = 60
+    PROCESS_TIMEOUT = DEADLINE_SECONDS + 30
+
     def setUp(self):
         # Reuse synthetic private image/signing construction, not the old
         # nine-FD protocol, killed-helper success condition or deletion claim.
@@ -510,7 +517,7 @@ class ParentHarnessTests(unittest.TestCase):
             "m.production.require_host = lambda: None\n"
             f"m.production.CODESIGN = {str(self.support.codesign)!r}\n"
             "m.production.MIN_DISK_BYTES = 4096; m.production.DISK_ALIGNMENT = 4096\n"
-            "m.production.DEADLINE_SECONDS = 3; m.production.STOP_SECONDS = 0.1\n"
+            f"m.production.DEADLINE_SECONDS = {self.DEADLINE_SECONDS}; m.production.STOP_SECONDS = 0.1\n"
             "sys.exit(m.main())\n"
         )
         self.mode("success")
@@ -531,7 +538,7 @@ class ParentHarnessTests(unittest.TestCase):
 
     def finish(self, expected=0, *, args=None):
         process = self.support.start(self.arguments() if args is None else args)
-        output, errors = process.communicate(timeout=10)
+        output, errors = process.communicate(timeout=self.PROCESS_TIMEOUT)
         self.assertEqual(process.returncode, expected, (output, errors))
         self.assertEqual(errors, b"")
         self.assertNotIn(old.CANARY.encode(), output)
@@ -589,7 +596,7 @@ class ParentHarnessTests(unittest.TestCase):
     def test_broken_stdout_after_commit_preserves_authoritative_pass_and_zero_exit(self):
         process = self.support.start(self.arguments())
         process.stdout.close()
-        self.assertEqual(process.wait(timeout=10), 0)
+        self.assertEqual(process.wait(timeout=self.PROCESS_TIMEOUT), 0)
         errors = process.stderr.read()
         process.stderr.close()
         self.assertEqual(errors, b"")
@@ -612,7 +619,7 @@ class ParentHarnessTests(unittest.TestCase):
             env={**os.environ, "CODEWIRE_TEST_SECRET_CANARY": old.CANARY},
         )
         try:
-            self.assertEqual(process.wait(timeout=10), 0)
+            self.assertEqual(process.wait(timeout=self.PROCESS_TIMEOUT), 0)
             self.assertEqual(m.fcntl.fcntl(writer, m.fcntl.F_GETFL), original_flags)
             self.assertEqual(process.stderr.read(), b"")
             self.assertEqual(json.loads((self.root / "result.json").read_bytes())["outcome"], "pass")
@@ -635,6 +642,12 @@ class ParentHarnessTests(unittest.TestCase):
                 self.finish(1)
 
     def test_eof_without_exact_child_reap_cannot_pass(self):
+        # An unreaped child is only refused at the deadline; keep it short here.
+        wrapper = self.support.wrapper.read_text()
+        short = wrapper.replace(f"m.production.DEADLINE_SECONDS = {self.DEADLINE_SECONDS};",
+                                "m.production.DEADLINE_SECONDS = 3;")
+        self.assertNotEqual(short, wrapper)
+        self.support.wrapper.write_text(short)
         for mode in ("helper-unreaped", "verifier-unreaped"):
             with self.subTest(mode=mode):
                 self.root = self.base / mode
