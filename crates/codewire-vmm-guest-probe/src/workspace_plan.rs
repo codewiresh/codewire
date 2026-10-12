@@ -1133,6 +1133,71 @@ mod tests {
         }
     }
 
+    /// The `gh` names are projected without being reserved, so a declared
+    /// value is not refused. The managed value wins over it while GitHub is
+    /// selected, as it does in a hosted Sandbox, and the declared value is
+    /// the workload's own otherwise.
+    #[test]
+    fn a_declared_gh_configuration_loses_to_the_managed_one_while_github_is_selected() {
+        use codewire_access::ManagedCredentialClients;
+        let root = root();
+        let config = config(json!({}));
+        let header = setup(&config);
+        let mut declared =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        for (name, value) in [
+            ("GH_CONFIG_DIR", "/home/codewire/.config/gh"),
+            ("GH_TOKEN", "declared"),
+        ] {
+            declared.environment.push(format!("{name}={value}"));
+            declared.explicit_environment_keys.push(name.into());
+        }
+        declared.environment.sort();
+        declared.explicit_environment_keys.sort();
+        let values = |plan: &WorkspacePlan| -> BTreeMap<String, String> {
+            plan.environment
+                .iter()
+                .map(|entry| {
+                    let (name, value) = entry.split_once('=').unwrap();
+                    (name.to_owned(), value.to_owned())
+                })
+                .collect()
+        };
+
+        let selected = declared
+            .clone()
+            .with_managed_credential_clients(
+                ManagedCredentialClients::from_profile_slots(["github"]).unwrap(),
+            )
+            .unwrap();
+        let environment = values(&selected);
+        assert_eq!(
+            environment["GH_CONFIG_DIR"],
+            codewire_access::GH_NATIVE_CONFIG_DIR
+        );
+        assert_eq!(
+            environment["GH_TOKEN"],
+            codewire_access::GH_TOKEN_PLACEHOLDER
+        );
+        assert_eq!(
+            selected
+                .environment
+                .iter()
+                .filter(|entry| entry.starts_with("GH_"))
+                .count(),
+            2
+        );
+
+        let unselected = declared
+            .with_managed_credential_clients(
+                ManagedCredentialClients::from_profile_slots(["codex"]).unwrap(),
+            )
+            .unwrap();
+        let environment = values(&unselected);
+        assert_eq!(environment["GH_CONFIG_DIR"], "/home/codewire/.config/gh");
+        assert_eq!(environment["GH_TOKEN"], "declared");
+    }
+
     #[test]
     fn installation_binding_requires_current_canonical_nonzero_digest_and_active_admission() {
         let root = root();
