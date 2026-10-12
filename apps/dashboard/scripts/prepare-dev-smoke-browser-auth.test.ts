@@ -191,7 +191,13 @@ let root = "";
 let binRoot = "";
 
 beforeAll(async () => { root = await mkdtemp("/dev/shm/cw-browser-auth-test."); });
-beforeAll(async () => { binRoot = await mkdtemp(join(process.cwd(), ".cw-browser-auth-bin-test.")); });
+// The fake cw must be executable, and /dev/shm is not; keep it in the
+// checkout's ignored scratch directory, never as a new entry in the source tree.
+beforeAll(async () => {
+  const scratch = join(process.cwd(), ".tmp");
+  await mkdir(scratch, { recursive: true });
+  binRoot = await mkdtemp(join(scratch, "cw-browser-auth-bin-test."));
+});
 afterAll(async () => {
   await rm(root, { recursive: true, force: true });
   await rm(binRoot, { recursive: true, force: true });
