@@ -630,6 +630,7 @@ docker() {{ echo {"4" * 64}; }}
 kubectl() {{
   case "$*" in
     *'exec deploy/postgres -- psql '*UPDATE*at_kind_connect_oidc_codewire_api*) echo 1 ;;
+    *'exec deploy/postgres -- psql '*'UPDATE sessions'*ses_contract_user*) printf '1\\n1\\n' ;;
     *'jsonpath='*compatibility_version*) echo 1 ;;
     *'jsonpath='*cluster-name*) echo synthetic-profile ;;
     *'jsonpath='*workspace-image*) echo workspace:source ;;

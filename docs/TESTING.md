@@ -52,13 +52,13 @@ scripts/dev/kind/test-dashboard-kind.sh \
 ```
 
 The gate requires the repository-pinned Chromium version that matches
-Playwright. CI provisions it before the test. For a local run, provision it
-once through the checksum-verifying setup helper, then pass the returned path:
-
-```bash
-pinned_chromium="$(scripts/ci/install-pinned-playwright-chromium.sh)"
-PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$pinned_chromium" make e2e-kind
-```
+Playwright. CI provisions it before the test and passes it in
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`. Without that variable, the Kind browser
+suite and the design-fixture runner use the pinned build already unpacked in
+this checkout's `.tmp/`, or install it there with the checksum-verifying
+`scripts/ci/install-pinned-playwright-chromium.sh`. The verified archive is
+cached in `~/.cache/codewire/chrome-for-testing/`, so a new worktree unpacks it
+without downloading again.
 
 Visual baselines are renderer-specific. An ordinary local run uses the
 automatic `linux` snapshot suffix. The `ubuntu24-cft145` suffix is reserved for
@@ -213,9 +213,8 @@ collide with `make design-system` on 4174 or with checks in other worktrees. The
 a test fails or is skipped, or when either viewport runs nothing.
 
 Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to a pinned Chromium to reuse it.
-Otherwise the runner reuses a pinned-version download already in this checkout's
-`.tmp/`, or downloads and verifies one with
-`scripts/ci/install-pinned-playwright-chromium.sh`.
+Otherwise the runner resolves the pinned Chromium as the Kind browser suite
+does (above).
 A new spec that reads `CODEWIRE_DESIGN_ORIGIN` must be added to that list; the
 `test:fixtures` unit test enforces this.
 
