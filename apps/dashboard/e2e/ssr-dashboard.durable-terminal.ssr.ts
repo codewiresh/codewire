@@ -16,7 +16,7 @@ type Detail = { state: string; desiredState: string; tone: string; lastEvent: st
 
 async function transport(page: Page) {
   const state = { accountId: "account-a", sessions: [] as Session[], connections: [] as Connection[],
-    launches: 0, stops: 0, lists: 0, launchFailure: "", stopFailure: "", listStatus: 200, listGate: Promise.resolve(), launchGate: Promise.resolve(),
+    launches: 0, stops: 0, lists: 0, launchFailure: "", stopFailure: "", listStatus: 200, listError: "sign-in-required", listGate: Promise.resolve(), launchGate: Promise.resolve(),
     statusGate: Promise.resolve(), statusAvailable: true, running: true, setupComplete: true, detail: null as Detail | null };
   // Only the opted-in readiness request is answered with setupRunning.
   await page.route("**/_fragments/terminal-readiness?fields=setup", async (route) => {
@@ -34,7 +34,7 @@ async function transport(page: Page) {
     state.lists += 1;
     await state.listGate;
     await route.fulfill({ status: state.listStatus, json: state.listStatus === 200
-      ? { accountId: state.accountId, sessions: state.sessions } : { error: "sign-in-required" } });
+      ? { accountId: state.accountId, sessions: state.sessions } : { error: state.listError } });
   });
   await page.route("**/_actions/terminal-sessions/launch", async (route) => {
     state.launches += 1;
@@ -74,11 +74,23 @@ async function transport(page: Page) {
   return state;
 }
 
-async function openFixture(page: Page) {
+async function gotoFixture(page: Page) {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
   await page.goto(`${origin}/reference/fixtures/terminal-tabs.html`);
+}
+
+async function openFixture(page: Page) {
+  await gotoFixture(page);
   await expect(page.locator("[data-terminal-refresh]")).toBeEnabled();
+}
+
+// With no live session to re-attach, opening the page opens one terminal by
+// itself: session 1, launched once. Wait for it as a person waits for a shell.
+async function automaticTerminal(page: Page, state: { launches: number; connections: Connection[] }) {
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  await expect.poll(() => state.connections.length).toBe(1);
+  expect(state.launches).toBe(1);
 }
 
 // The terminal menu (Terminal actions) holds Rename, the selected tab's Copy
@@ -152,16 +164,19 @@ async function advance(page: Page, ms: number) {
 
 test("the workspace keeps the terminal between its tab bar and status bar, with alerts and short viewports", async ({ page }) => {
   const state = await transport(page);
-  await openFixture(page);
-  // With no tab open, the message fills the one column the bars span.
+  let release!: () => void;
+  state.launchGate = new Promise<void>((resolve) => { release = resolve; });
+  // The held launch keeps the session controls busy, so wait for its text instead.
+  await gotoFixture(page);
+  // While the page's terminal opens, the message fills the one column the bars span.
   await page.setViewportSize({ width: 1440, height: 900 });
-  await expect(page.locator("[data-terminal-empty]")).toBeVisible();
-  const empty = await page.evaluate(() => [".cw-durable-terminal", ".cw-terminal-tabs-bar", "[data-terminal-empty]",
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("Opening a terminal…");
+  await expect(page.locator("[data-terminal-message]")).toHaveText("Starting a terminal…");
+  const empty = await page.evaluate(() => [".cw-durable-terminal", ".cw-terminal-tabs-bar", ".cw-terminal-empty",
     ".cw-workspace-statusbar"].map((selector) => document.querySelector(selector)!.getBoundingClientRect().width));
   for (const width of empty.slice(1)) expect(Math.abs(width - empty[0]), `${empty}`).toBeLessThanOrEqual(1);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
-  await expect(page.getByRole("tab")).toHaveCount(1);
-  await expect.poll(() => state.connections.length).toBe(1);
+  release();
+  await automaticTerminal(page, state);
   output(state.connections[0], "usable-terminal-output\r\n");
   const terminal = page.locator("[data-terminal-root]");
   await expect(terminal.locator(".xterm-rows")).toContainText("usable-terminal-output");
@@ -396,10 +411,11 @@ test("tabs answer the keyboard and a double-click like a desktop terminal", asyn
 });
 
 test("the selected tab stays in view when the window narrows", async ({ page }) => {
-  await transport(page);
+  const state = await transport(page);
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFixture(page);
-  for (let count = 1; count <= 3; count += 1) {
+  await automaticTerminal(page, state);
+  for (let count = 2; count <= 3; count += 1) {
     await page.getByRole("button", { name: "New terminal", exact: true }).click();
     await expect(page.getByRole("tab")).toHaveCount(count);
   }
@@ -709,8 +725,9 @@ test("a synchronous renderer failure resolves the old queue and permits explicit
   expect(state.stops).toBe(0);
 });
 
+// Installed before the page loads, so it also controls the automatic terminal's socket.
 async function controlledSendBuffer(page: Page, tail: number | null = null) {
-  await page.evaluate((tail) => {
+  await page.addInitScript((tail) => {
     const Native = WebSocket;
     const state = { buffered: 0, tail, sizes: [] as number[] };
     (window as unknown as { terminalTestBuffer: typeof state }).terminalTestBuffer = state;
@@ -734,9 +751,9 @@ async function controlledSendBuffer(page: Page, tail: number | null = null) {
 test("continuous partial drainage does not count already transmitted frames toward the limit", async ({ page }) => {
   await page.clock.install();
   const state = await transport(page);
-  await openFixture(page);
   await controlledSendBuffer(page, 8);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await openFixture(page);
+  await automaticTerminal(page, state);
   await expect.poll(() => state.connections[0]?.frames.some((frame) => frame.type === "resize")).toBe(true);
   await page.clock.pauseAt(new Date(Date.now() + 1000));
   const input = page.getByRole("textbox", { name: "Terminal input" });
@@ -753,9 +770,9 @@ test("continuous partial drainage does not count already transmitted frames towa
 test("a genuinely full frame queue pauses and reconnects automatically without replaying input", async ({ page }) => {
   await page.clock.install();
   const state = await transport(page);
-  await openFixture(page);
   await controlledSendBuffer(page);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await openFixture(page);
+  await automaticTerminal(page, state);
   await expect.poll(() => state.connections[0]?.frames.length || 0).toBeGreaterThan(0);
   await page.clock.pauseAt(new Date(Date.now() + 1000));
   await page.getByRole("textbox", { name: "Terminal input" }).focus();
@@ -785,9 +802,9 @@ test("a genuinely full frame queue pauses and reconnects automatically without r
 test("fast multibyte keystrokes batch once in order and continuous typing cannot delay the flush", async ({ page }) => {
   await page.clock.install();
   const state = await transport(page);
-  await openFixture(page);
   await controlledSendBuffer(page);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await openFixture(page);
+  await automaticTerminal(page, state);
   await expect.poll(() => state.connections[0]?.frames.length || 0).toBeGreaterThan(0);
   await page.clock.pauseAt(new Date(Date.now() + 1000));
   await page.getByRole("textbox", { name: "Terminal input" }).focus();
@@ -812,7 +829,7 @@ for (const transition of ["disconnect", "stopping", "exited"] as const) {
     await page.clock.install();
     const state = await transport(page);
     await openFixture(page);
-    await page.getByRole("button", { name: "New terminal", exact: true }).click();
+    await automaticTerminal(page, state);
     await expect.poll(() => state.connections[0]?.frames.length || 0).toBeGreaterThan(0);
     await page.clock.pauseAt(new Date(Date.now() + 1000));
     await page.getByRole("textbox", { name: "Terminal input" }).focus();
@@ -842,9 +859,9 @@ for (const transition of ["disconnect", "stopping", "exited"] as const) {
 test("a staged frame reserves capacity against newer output acknowledgements", async ({ page }) => {
   await page.clock.install();
   const state = await transport(page);
-  await openFixture(page);
   await controlledSendBuffer(page);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await openFixture(page);
+  await automaticTerminal(page, state);
   await expect.poll(() => state.connections[0]?.frames.length || 0).toBeGreaterThan(0);
   await page.clock.pauseAt(new Date(Date.now() + 1000));
   await page.getByRole("textbox", { name: "Terminal input" }).focus();
@@ -866,9 +883,9 @@ test("a staged frame reserves capacity against newer output acknowledgements", a
 test("staged encoded bytes reserve capacity against newer output acknowledgements", async ({ page }) => {
   await page.clock.install();
   const state = await transport(page);
-  await openFixture(page);
   await controlledSendBuffer(page);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await openFixture(page);
+  await automaticTerminal(page, state);
   await expect.poll(() => state.connections[0]?.frames.length || 0).toBeGreaterThan(0);
   await page.clock.pauseAt(new Date(Date.now() + 1000));
   await page.getByRole("textbox", { name: "Terminal input" }).focus();
@@ -894,9 +911,9 @@ test("staged encoded bytes reserve capacity against newer output acknowledgement
 test("staged input retains its older deadline when an ACK overtakes it on the wire", async ({ page }) => {
   await page.clock.install();
   const state = await transport(page);
-  await openFixture(page);
   await controlledSendBuffer(page);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await openFixture(page);
+  await automaticTerminal(page, state);
   await expect.poll(() => state.connections[0]?.frames.length || 0).toBeGreaterThan(0);
   await page.clock.pauseAt(new Date(Date.now() + 1000));
   await page.evaluate(() => { (window as unknown as { terminalTestBuffer: { buffered: number } }).terminalTestBuffer.buffered = 0; });
@@ -918,9 +935,9 @@ test("staged input retains its older deadline when an ACK overtakes it on the wi
 test("send deadlines follow the oldest outstanding frame and partial progress cannot renew them", async ({ page }) => {
   await page.clock.install();
   const state = await transport(page);
-  await openFixture(page);
   await controlledSendBuffer(page);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await openFixture(page);
+  await automaticTerminal(page, state);
   await expect.poll(() => state.connections[0]?.frames.length || 0).toBeGreaterThan(0);
   await page.clock.fastForward(2000);
   await page.getByRole("textbox", { name: "Terminal input" }).focus();
@@ -956,9 +973,9 @@ test("send deadlines follow the oldest outstanding frame and partial progress ca
 
 test("genuine encoded bytes are bounded before the frame cap is reached", async ({ page }) => {
   const state = await transport(page);
-  await openFixture(page);
   await controlledSendBuffer(page);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await openFixture(page);
+  await automaticTerminal(page, state);
   await expect.poll(() => state.connections[0]?.frames.length || 0).toBeGreaterThan(0);
   await page.getByRole("textbox", { name: "Terminal input" }).focus();
   for (let index = 0; index < 16; index += 1) await page.keyboard.insertText("é".repeat(8192));
@@ -971,16 +988,12 @@ test("genuine encoded bytes are bounded before the frame cap is reached", async 
   expect(state.stops).toBe(0);
 });
 
-test("terminal tabs launch explicitly, retain separate displays and bound the visible tab set", async ({ page }, testInfo) => {
+test("terminal tabs after the first launch explicitly, retain separate displays and bound the visible tab set", async ({ page }, testInfo) => {
   const state = await transport(page);
   await openFixture(page);
-  expect(state.launches).toBe(0);
-  await expect(page.getByRole("tab")).toHaveCount(0);
+  await automaticTerminal(page, state);
   const rename = await terminalAction(page, "Rename terminal");
-  await expect(rename).toBeDisabled();
   await expect(page.locator(".cw-terminal-tabs-bar").getByRole("button", { name: "Rename terminal", exact: true })).toHaveCount(1);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
-  await expect.poll(() => state.connections.length).toBe(1);
   output(state.connections[0], "first-terminal-output\r\n");
   await expect(page.getByRole("tabpanel")).toContainText("first-terminal-output");
   await renameTerminal(page, "Build");
@@ -1055,9 +1068,10 @@ test("terminal tabs launch explicitly, retain separate displays and bound the vi
 test("the tab limit note appears only at the limit", async ({ page }) => {
   const state = await transport(page);
   await openFixture(page);
+  await automaticTerminal(page, state);
   const limit = page.locator("[data-terminal-limit]");
   const create = page.getByRole("button", { name: "New terminal", exact: true });
-  for (let count = 1; count <= 8; count += 1) {
+  for (let count = 2; count <= 8; count += 1) {
     await expect(limit).toBeHidden();
     await expect(create).not.toHaveAttribute("aria-describedby");
     await create.click();
@@ -1071,16 +1085,26 @@ test("the tab limit note appears only at the limit", async ({ page }) => {
   expect(state.stops).toBe(1);
 });
 
-test("a launch refused at the session limit says so and leaves New terminal usable", async ({ page }) => {
+test("an automatic terminal refused at the session limit says so beside Retry and leaves New terminal usable", async ({ page }) => {
   const state = await transport(page);
-  await openFixture(page);
-  const create = page.getByRole("button", { name: "New terminal", exact: true });
-  await expect(create).toBeEnabled();
   state.launchFailure = "limit";
-  await create.click();
-  await expect(page.locator("[data-terminal-message]")).toHaveText("This Sandbox has reached its terminal session limit. Close a terminal you no longer need, then try again.");
+  await openFixture(page);
+  const retry = page.getByRole("button", { name: "Retry", exact: true });
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("This Sandbox has reached its session limit. Stop a session you no longer need, then retry.");
+  // The failure replaces the invitation once; the status line does not repeat it.
+  await expect(page.locator("[data-terminal-message]")).toBeHidden();
+  await expect(retry).toBeVisible();
   await expect(page.getByRole("tab")).toHaveCount(0);
-  await expect(create).toBeEnabled();
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  expect(state.launches).toBe(1);
+  // Retry re-lists, then opens the terminal: one launch per click.
+  state.launchFailure = "";
+  await retry.click();
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  await expect.poll(() => state.connections.length).toBe(1);
+  expect(state.launches).toBe(2);
+  expect(state.lists).toBe(2);
+  await expect(page.locator(".cw-terminal-empty")).toBeHidden();
 });
 
 test("the Close terminal dialog dismisses from its backdrop and Escape without stopping the shell", async ({ page }) => {
@@ -1199,7 +1223,7 @@ test("a failed deletion restores the actions that recover the Sandbox", async ({
 test("a terminal refit after copying keeps the copy announcement", async ({ page }) => {
   const state = await transport(page);
   await openFixture(page);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await automaticTerminal(page, state);
   await expect.poll(() => state.connections.length).toBe(1);
   output(state.connections[0], "refit-output\r\n");
   const panel = page.getByRole("tabpanel");
@@ -1230,7 +1254,7 @@ test("a terminal refit after copying keeps the copy announcement", async ({ page
 test("terminal names survive reload and reconnect, render literally, and clear only the closed tab", async ({ page }) => {
   const state = await transport(page);
   await openFixture(page);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await automaticTerminal(page, state);
   await expect.poll(() => state.connections.length).toBe(1);
   output(state.connections[0], "private-transcript-not-a-name\r\n");
   await renameTerminal(page, "<b>Build</b>");
@@ -1266,10 +1290,9 @@ test("terminal names survive reload and reconnect, render literally, and clear o
 test("new terminal names do not collide with restored numeric labels", async ({ page }) => {
   const state = await transport(page);
   await openFixture(page);
-  for (let index = 0; index < 2; index += 1) {
-    await page.getByRole("button", { name: "New terminal", exact: true }).click();
-    await expect(page.getByRole("tab")).toHaveCount(index + 1);
-  }
+  await automaticTerminal(page, state);
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect(page.getByRole("tab")).toHaveCount(2);
   await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
   await closeSelected(page);
   await expect(page.getByRole("tab")).toHaveCount(1);
@@ -1404,7 +1427,7 @@ test("an account change found on return clears terminal labels and a stale renam
 test("disconnect retains output, reload replays from zero, and Close requires confirmation", async ({ page }) => {
   const state = await transport(page);
   await openFixture(page);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await automaticTerminal(page, state);
   await expect.poll(() => state.connections.length).toBe(1);
   const cursor = output(state.connections[0], "retained-output\r\n");
   await expect.poll(() => state.connections[0].frames.some((frame) => frame.type === "ack" && frame.offset === String(cursor))).toBe(true);
@@ -1431,6 +1454,10 @@ test("disconnect retains output, reload replays from zero, and Close requires co
   await dialog.getByRole("button", { name: "Close terminal", exact: true }).click();
   await expect(page.getByRole("tab")).toHaveCount(0);
   expect(state.stops).toBe(1);
+  // Closing the last terminal on purpose does not open another in this page.
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("No terminal is open. Choose New terminal to start one; it keeps running until you close it or stop the Sandbox.");
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  expect(state.launches).toBe(1);
 });
 
 test("reconnect drains old render callbacks and never ACKs them on the replacement socket", async ({ page }) => {
@@ -1462,17 +1489,17 @@ test("unknown launch outcomes require inspection and stale CSRF requires reload 
   const state = await transport(page);
   state.launchFailure = "lost";
   await openFixture(page);
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
-  await expect(page.locator("[data-terminal-message]")).toContainText("could not be confirmed");
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("The terminal could not be confirmed as started. Retry looks for it before starting another.");
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
   expect(state.launches).toBe(1);
-  await (await terminalAction(page, "Refresh sessions")).click();
+  expect(state.connections.length).toBe(0);
+  // Retry re-lists first: the terminal that did start is re-attached, not doubled.
+  state.launchFailure = "";
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect.poll(() => state.connections.length).toBe(1);
+  expect(state.connections[0].url.searchParams.get("session_id")).toBe(sessionId(1));
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
   expect(state.launches).toBe(1);
-  expect(state.connections.length).toBe(0);
-  await (await openMenu(page, "Terminal actions")).getByLabel("Existing terminal", { exact: true }).selectOption(sessionId(1));
-  await (await terminalAction(page, "Open terminal")).click();
-  await expect.poll(() => state.connections.length).toBe(1);
   output(state.connections[0], "keep-on-stale-csrf\r\n");
   await expect(page.getByRole("tabpanel")).toContainText("keep-on-stale-csrf");
   state.launchFailure = "csrf";
@@ -1540,9 +1567,13 @@ test("missing stored sessions do not launch replacements", async ({ page }) => {
 test("ended terminals replay without resize and can be removed locally", async ({ page }) => {
   const state = await transport(page);
   state.sessions = ["exited", "failed", "interrupted"].map((status, index) => ({ sessionId: sessionId(index + 1), state: status }));
+  // No session is live, so the page tries its one automatic terminal; refuse
+  // it so only the ended terminals open here.
+  state.launchFailure = "limit";
   await openFixture(page);
+  await expect(page.locator("[data-terminal-empty]")).toContainText("session limit");
   await expect(page.getByRole("tab")).toHaveCount(0);
-  for (let index = 0; index < state.sessions.length; index += 1) {
+  for (let index = 0; index < 3; index += 1) {
     await (await openMenu(page, "Terminal actions")).getByLabel("Existing terminal", { exact: true }).selectOption(sessionId(index + 1));
     await (await terminalAction(page, "Open terminal")).click();
     await expect.poll(() => state.connections.length).toBe(index + 1);
@@ -1557,7 +1588,7 @@ test("ended terminals replay without resize and can be removed locally", async (
     await expect(page.getByRole("tab")).toHaveCount(0);
   }
   expect(state.stops).toBe(0);
-  expect(state.launches).toBe(0);
+  expect(state.launches).toBe(1);
 });
 
 test("unknown Stop is not repeated and a missing tab can be removed without another Stop", async ({ page }) => {
@@ -1666,10 +1697,9 @@ test("initial terminal inventory waits until workspace setup finishes", async ({
   state.setupComplete = true;
   state.listStatus = 200;
   await (await sandboxAction(page, "Refresh sandbox status")).click();
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  // The first list after setup finishes opens the page's terminal, once.
+  await automaticTerminal(page, state);
   expect(state.lists).toBe(1);
-  expect(state.connections).toHaveLength(0);
-  expect(state.launches).toBe(0);
   expect(state.stops).toBe(0);
 });
 
@@ -1694,10 +1724,14 @@ test("a Sandbox still being created says its terminals open when ready, then wit
   await expect(page.locator("[data-terminal-empty]")).toHaveText("This Sandbox is starting. Terminals open when it is ready.");
   await expect(page.locator("[data-sandbox-creation-notice]")).toBeVisible();
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  // A starting Sandbox gets no list and no launch until it is ready.
+  expect(state.lists).toBe(0);
+  expect(state.launches).toBe(0);
   state.running = true;
   state.setupComplete = true;
   state.detail = null;
   await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await automaticTerminal(page, state);
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
   await expect(page.locator("[data-sandbox-creation-notice]")).toBeHidden();
 });
@@ -1715,10 +1749,8 @@ test("starting a stopped Sandbox enables terminals after its first ready status 
   state.setupComplete = true;
   state.listStatus = 200;
   await (await sandboxAction(page, "Refresh sandbox status")).click();
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await automaticTerminal(page, state);
   expect(state.lists).toBe(1);
-  expect(state.launches).toBe(0);
-  expect(state.connections).toHaveLength(0);
 });
 
 test("setup loss pauses input and attachment but still permits explicit Stop", async ({ page }) => {
@@ -1749,15 +1781,39 @@ test("a pending stopped-state list cannot consume initial restoration when setup
   state.running = true;
   state.setupComplete = true;
   await (await sandboxAction(page, "Refresh sandbox status")).click();
-  await expect(page.locator("[data-terminal-empty]")).toContainText("Choose New terminal");
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("Opening a terminal…");
   release();
-  await expect(page.locator("[data-terminal-message]")).toContainText("Terminal sessions are unavailable");
+  // The failed list replaces the empty state's text, beside Retry.
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("Terminal sessions are unavailable right now.");
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+  expect(state.launches).toBe(0);
   state.listStatus = 200;
   await (await sandboxAction(page, "Refresh sandbox status")).click();
-  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await automaticTerminal(page, state);
   expect(state.lists).toBe(2);
+});
+
+test("a session list the Sandbox refuses says so in place of the invitation, and Retry recovers without reload", async ({ page }) => {
+  const state = await transport(page);
+  state.listStatus = 409;
+  state.listError = "sessions-refused";
+  await openFixture(page);
+  const retry = page.getByRole("button", { name: "Retry", exact: true });
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("This Sandbox can't list its terminals right now. Retry, or restart the Sandbox.");
+  await expect(retry).toBeVisible();
+  // It names no disabled action as the way in, and the status line is not a second copy.
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.locator("[data-terminal-message]")).toBeHidden();
   expect(state.launches).toBe(0);
-  expect(state.connections).toHaveLength(0);
+  // A Retry that fails again keeps focus on Retry.
+  await retry.click();
+  await expect.poll(() => state.lists).toBe(2);
+  await expect(retry).toBeFocused();
+  state.listStatus = 200;
+  await retry.click();
+  await automaticTerminal(page, state);
+  expect(state.lists).toBe(3);
+  await expect(retry).toBeHidden();
 });
 
 test("Sandbox lifecycle changes pause terminal controls without automatic launch, and re-attaches existing sessions automatically when ready again", async ({ page }) => {
@@ -2382,6 +2438,8 @@ test("live deletion metadata preserves nanoseconds, terminal and open confirmati
 
 test("malformed or contradictory deletion metadata fails closed and retains last known deadline", async ({ page }) => {
   const state = await transport(page);
+  // An attached terminal, so any launch below would come from the metadata.
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
   state.detail = { state: "running", desiredState: "started", tone: "success", lastEvent: "just now",
     resources: "1 vCPU · 2 GiB · 10 GiB", cpuMillicores: 1000, memoryMib: 2048, diskGib: 10,
     startEligible: false, stopEligible: true, deleteEligible: true, actionsAllowed: true, pending: false,
@@ -2450,6 +2508,8 @@ test("live detail distinguishes pending desired state and preserves terminal and
 
 test("live detail pauses stale actions and leaves open Resize drafts unchanged", async ({ page }) => {
   const state = await transport(page);
+  // An attached terminal, so any launch below would come from the status.
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
   await openFixture(page);
   await openMenu(page, "More actions");
   const resize = page.locator("[data-sandbox-resize]");
@@ -2593,8 +2653,8 @@ test("an account change found on return clears the old account's output", async 
 
 test("oversized input and a full browser send buffer are never queued for replay", async ({ page }) => {
   const state = await transport(page);
-  await openFixture(page);
-  await page.evaluate(() => {
+  // Before the page loads, so it also records the automatic terminal's socket.
+  await page.addInitScript(() => {
     const Native = WebSocket;
     const sockets: WebSocket[] = [];
     (window as unknown as { terminalTestSockets: WebSocket[] }).terminalTestSockets = sockets;
@@ -2602,8 +2662,8 @@ test("oversized input and a full browser send buffer are never queued for replay
       constructor(url: string | URL, protocols?: string | string[]) { super(url, protocols); sockets.push(this); }
     };
   });
-  await page.getByRole("button", { name: "New terminal", exact: true }).click();
-  await expect.poll(() => state.connections.length).toBe(1);
+  await openFixture(page);
+  await automaticTerminal(page, state);
   const input = page.getByRole("tabpanel").getByRole("textbox", { name: "Terminal input" });
   await input.focus();
   await page.keyboard.insertText("x".repeat(16385));
