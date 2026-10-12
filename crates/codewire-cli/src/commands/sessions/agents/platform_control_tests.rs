@@ -614,6 +614,65 @@ fn codex_settings(dir: &Path, route: Route) -> (toml::Table, toml::Table) {
     (file, overrides)
 }
 
+/// The private Codex configuration is the login lockdown followed by the
+/// provider configuration every placement generates in `codewire-access`,
+/// byte for byte: no hosted-only Codex builder exists.
+#[test]
+fn platform_control_codex_private_config_is_the_lockdown_then_the_shared_provider_config() {
+    use codewire_access::{
+        CODEX_MANAGED_CONFIG_HEADER, CodexProviderProjection, MANAGED_HTTP_PORT,
+        ManagedCredentialClientPlacement, ManagedCredentialClients,
+    };
+    const LOCKDOWN: &str = "forced_login_method = \"api\"\ncli_auth_credentials_store = \"file\"\n";
+    let private = |route| {
+        let f = Fixture::new();
+        let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+        lockdown::prepare(&f.dir, &config, route).unwrap();
+        fs::read_to_string(f.dir.join("codex/config.toml")).unwrap()
+    };
+
+    let codex = private(Route::Codex);
+    let provider = codex.strip_prefix(LOCKDOWN).unwrap();
+    let selected = ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
+    // A local VM's Codex home holds exactly the provider configuration.
+    let native = selected
+        .for_placement(ManagedCredentialClientPlacement::Native)
+        .codex
+        .unwrap();
+    assert_eq!(provider, native.config_toml());
+    // The hosted user's `~/.codex/config.toml` adds only its ownership header.
+    let hosted = selected
+        .for_placement(ManagedCredentialClientPlacement::Platform)
+        .codex
+        .unwrap();
+    assert_eq!(
+        hosted.config_toml(),
+        format!("{CODEX_MANAGED_CONFIG_HEADER}\n{provider}")
+    );
+
+    let openai = private(Route::OpenAi);
+    assert_eq!(
+        openai.strip_prefix(LOCKDOWN).unwrap(),
+        CodexProviderProjection::for_openai_api_loopback_port(MANAGED_HTTP_PORT)
+            .unwrap()
+            .config_toml()
+    );
+    // The lockdown lines are the only ones this path writes itself.
+    for (route, config) in [(Route::Codex, &codex), (Route::OpenAi, &openai)] {
+        let overrides = lockdown::arguments(route);
+        assert_eq!(
+            &overrides[..4],
+            [
+                "-c",
+                "forced_login_method=\"api\"",
+                "-c",
+                "cli_auth_credentials_store=\"file\""
+            ]
+        );
+        assert_eq!(config.matches(LOCKDOWN).count(), 1);
+    }
+}
+
 #[test]
 fn platform_control_codex_slot_route_is_credential_free_through_the_codex_route() {
     let f = Fixture::new();
@@ -643,10 +702,7 @@ fn platform_control_codex_slot_route_is_credential_free_through_the_codex_route(
     let (file, overrides) = codex_settings(&f.dir, Route::Codex);
     // The file and the overrides configure the same provider.
     for settings in [&file, &overrides] {
-        assert_eq!(
-            settings["model_provider"].as_str(),
-            Some("codewire_platform_codex")
-        );
+        assert_eq!(settings["model_provider"].as_str(), Some("codewire_openai"));
         assert_eq!(settings["forced_login_method"].as_str(), Some("api"));
         assert_eq!(
             settings["cli_auth_credentials_store"].as_str(),
@@ -656,7 +712,7 @@ fn platform_control_codex_slot_route_is_credential_free_through_the_codex_route(
             settings["features"]["enable_request_compression"].as_bool(),
             Some(false)
         );
-        let provider = settings["model_providers"]["codewire_platform_codex"]
+        let provider = settings["model_providers"]["codewire_openai"]
             .as_table()
             .unwrap();
         // The Codex slot's own route on the managed ingress; no key name.
@@ -687,9 +743,9 @@ fn platform_control_openai_route_keeps_its_key_slot_configuration() {
     for settings in [&file, &overrides] {
         assert_eq!(
             settings["model_provider"].as_str(),
-            Some("codewire_platform_api")
+            Some("codewire_openai_api")
         );
-        let provider = settings["model_providers"]["codewire_platform_api"]
+        let provider = settings["model_providers"]["codewire_openai_api"]
             .as_table()
             .unwrap();
         assert_eq!(

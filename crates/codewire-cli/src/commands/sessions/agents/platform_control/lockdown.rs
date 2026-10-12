@@ -3,41 +3,42 @@
 //! The agent runs in the Sandbox session environment its driver was started
 //! with. The shared `codewire-access` projection gives it the Git route, the
 //! SSH signer socket and the provider variables exactly as an interactive
-//! session has them, so this module sets none of them. It holds only what
-//! keeps the agent on the selected broker route instead of a login saved in
-//! the Sandbox: its own private Codex or Claude home with exact configuration,
-//! and fixed arguments. It never opens `~/.codex`, `~/.claude`, `auth.json` or
-//! the user's agent settings.
+//! session has them, and Codex's provider configuration is that crate's too,
+//! so this module names no route, URL or credential variable. It holds only
+//! what keeps the agent on the selected broker route instead of a login saved
+//! in the Sandbox: its own private Codex or Claude home with exact
+//! configuration, and fixed arguments. It never opens `~/.codex`, `~/.claude`,
+//! `auth.json` or the user's agent settings.
 use super::*;
-const CODEX_CONFIG: &str = concat!(
-    "model_provider = \"codewire_platform_api\"\n",
-    "forced_login_method = \"api\"\n",
-    "cli_auth_credentials_store = \"file\"\n",
-    "[model_providers.codewire_platform_api]\n",
-    "name = \"Codewire Platform API\"\n",
-    "base_url = \"http://127.0.0.1:38081/_codewire/openai/v1\"\n",
-    "env_key = \"OPENAI_API_KEY\"\n",
-    "wire_api = \"responses\"\n",
-    "requires_openai_auth = false\n",
-    "supports_websockets = false\n",
-    "[features]\n",
-    "enable_request_compression = false\n"
-);
-/// The Codex slot's route. It names no key, so Codex sends no credential; the
-/// broker adds the owner's ChatGPT sign-in, or the API key held in that slot.
-const CODEX_SLOT_CONFIG: &str = concat!(
-    "model_provider = \"codewire_platform_codex\"\n",
-    "forced_login_method = \"api\"\n",
-    "cli_auth_credentials_store = \"file\"\n",
-    "[model_providers.codewire_platform_codex]\n",
-    "name = \"Codewire Platform Codex\"\n",
-    "base_url = \"http://127.0.0.1:38081/v1\"\n",
-    "wire_api = \"responses\"\n",
-    "requires_openai_auth = false\n",
-    "supports_websockets = false\n",
-    "[features]\n",
-    "enable_request_compression = false\n"
-);
+use codewire_access::{CodexProviderProjection, MANAGED_HTTP_PORT};
+
+/// Codex's sign-in lockdown, as `(key, TOML value)`: only the configured
+/// provider, never a ChatGPT login, and no operating-system credential store.
+const CODEX_LOGIN_LOCKDOWN: [(&str, &str); 2] = [
+    ("forced_login_method", "\"api\""),
+    ("cli_auth_credentials_store", "\"file\""),
+];
+/// The shared provider configuration a Codex `route` names. The Codex slot's
+/// names no key, so Codex sends no credential and the broker adds the owner's
+/// ChatGPT sign-in, or the API key held in that slot.
+fn codex_provider(route: Route) -> Option<CodexProviderProjection> {
+    let provider = match route {
+        Route::Codex => CodexProviderProjection::for_loopback_port(MANAGED_HTTP_PORT),
+        Route::OpenAi => CodexProviderProjection::for_openai_api_loopback_port(MANAGED_HTTP_PORT),
+        Route::Anthropic => return None,
+    };
+    Some(provider.expect("fixed managed HTTP port is unprivileged"))
+}
+/// The private Codex configuration: the login lockdown, then the shared
+/// provider configuration byte for byte.
+fn codex_config(provider: &CodexProviderProjection) -> String {
+    let mut config: String = CODEX_LOGIN_LOCKDOWN
+        .iter()
+        .map(|(key, value)| format!("{key} = {value}\n"))
+        .collect();
+    config.push_str(provider.config_toml());
+    config
+}
 fn write_config(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let mut f = fs::OpenOptions::new()
         .write(true)
@@ -61,15 +62,14 @@ fn private_home(agent: AgentKind) -> (&'static str, &'static str) {
 /// Write the private home for `route`, which the home then records: its exact
 /// configuration names the route for the driver's lifetime.
 pub(super) fn prepare(stage: &Path, config: &AgentConfig, route: Route) -> anyhow::Result<()> {
-    let bytes = match (config.agent, route) {
-        (AgentKind::Codex, Route::OpenAi) => CODEX_CONFIG.as_bytes(),
-        (AgentKind::Codex, Route::Codex) => CODEX_SLOT_CONFIG.as_bytes(),
-        (AgentKind::Claude, Route::Anthropic) => b"{}\n".as_slice(),
+    let bytes = match (config.agent, codex_provider(route)) {
+        (AgentKind::Codex, Some(provider)) => codex_config(&provider).into_bytes(),
+        (AgentKind::Claude, None) => b"{}\n".to_vec(),
         _ => anyhow::bail!("platform route serves another agent"),
     };
     let (home, file) = private_home(config.agent);
     make_directory(&stage.join(home))?;
-    write_config(&stage.join(home).join(file), bytes)
+    write_config(&stage.join(home).join(file), &bytes)
 }
 /// The route an exact private Codex configuration names, if any.
 fn codex_route(bytes: &[u8], working_dir: &str) -> anyhow::Result<Option<Route>> {
@@ -83,10 +83,8 @@ fn codex_route(bytes: &[u8], working_dir: &str) -> anyhow::Result<Option<Route>>
     // Codex adds this one project-trust entry to its own private home. Admit
     // only the authenticated launch directory; provider/features stay exact.
     let quoted = serde_json::to_string(working_dir)?;
-    for (route, exact) in [
-        (Route::OpenAi, CODEX_CONFIG),
-        (Route::Codex, CODEX_SLOT_CONFIG),
-    ] {
+    for route in [Route::OpenAi, Route::Codex] {
+        let exact = codex_config(&codex_provider(route).context("Codex route")?);
         let trusted = format!("{exact}\n[projects.{quoted}]\ntrust_level = \"trusted\"\n");
         if bytes == exact.as_bytes() || bytes == trusted.as_bytes() {
             return Ok(Some(route));
@@ -193,14 +191,26 @@ pub(super) fn environment(
         ],
     })
 }
+/// The fixed arguments before the driver's own. Codex gets its login lockdown
+/// and the shared provider configuration again as overrides, so the provider
+/// holds whatever its configuration file later contains.
 pub(super) fn arguments(route: Route) -> Vec<String> {
-    match route {
-        Route::Codex=>["-c","model_provider=\"codewire_platform_codex\"","-c","forced_login_method=\"api\"","-c","cli_auth_credentials_store=\"file\"","-c",
-            "model_providers.codewire_platform_codex={name=\"Codewire Platform Codex\",base_url=\"http://127.0.0.1:38081/v1\",wire_api=\"responses\",requires_openai_auth=false,supports_websockets=false}",
-            "-c","features.enable_request_compression=false"].into_iter().map(str::to_owned).collect(),
-        Route::OpenAi=>["-c","model_provider=\"codewire_platform_api\"","-c","forced_login_method=\"api\"","-c","cli_auth_credentials_store=\"file\"","-c",
-            "model_providers.codewire_platform_api={name=\"Codewire Platform API\",base_url=\"http://127.0.0.1:38081/_codewire/openai/v1\",env_key=\"OPENAI_API_KEY\",wire_api=\"responses\",requires_openai_auth=false,supports_websockets=false}",
-            "-c","features.enable_request_compression=false"].into_iter().map(str::to_owned).collect(),
-        Route::Anthropic=>["--setting-sources","","--strict-mcp-config","--mcp-config","{\"mcpServers\":{}}","--disable-slash-commands"].into_iter().map(str::to_owned).collect(),
+    match codex_provider(route) {
+        Some(provider) => CODEX_LOGIN_LOCKDOWN
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .chain(provider.overrides().iter().cloned())
+            .flat_map(|setting| ["-c".to_owned(), setting])
+            .collect(),
+        None => [
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{\"mcpServers\":{}}",
+            "--disable-slash-commands",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
     }
 }

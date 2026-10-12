@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 const CODEX_PROVIDER_ID: &str = "codewire_openai";
+const CODEX_OPENAI_API_PROVIDER_ID: &str = "codewire_openai_api";
 const MIN_UNPRIVILEGED_PORT: u16 = 1024;
 
 /// Relative path for the generated credential-free Codex provider config.
@@ -363,39 +364,95 @@ pub struct ManagedCredentialClientProjection {
 /// Deterministic machine-owned Codex configuration for a protected provider
 /// route.
 ///
-/// The projection contains no provider credential or environment-key lookup.
-/// Both placements use the guest loopback listener and keep material in their
-/// broker boundary.
+/// The projection contains no provider credential. Every placement uses the
+/// guest loopback listener and keeps material in its broker boundary. The
+/// Codex slot's provider names no environment key; the OpenAI API-key slot's
+/// names only the session's public `OPENAI_API_KEY` placeholder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexProviderProjection {
     config_toml: String,
+    overrides: [String; 3],
 }
 
 impl CodexProviderProjection {
     /// Create a Responses-only provider projection for one unprivileged IPv4
-    /// loopback port owned by the guest-side Codewire listener.
+    /// loopback port owned by the guest-side Codewire listener. This is the
+    /// Codex slot's route: the broker adds the ChatGPT sign-in, or the API key
+    /// held in that slot.
     pub fn for_loopback_port(port: u16) -> Result<Self, ProjectionError> {
+        Self::provider(port, CODEX_PROVIDER_ID, "Codewire OpenAI", "/v1", None)
+    }
+
+    /// The same for Codex through the distinct OpenAI API-key slot: that
+    /// slot's managed base path, with Codex sending the session's
+    /// `OPENAI_API_KEY` placeholder, which the broker replaces. A managed
+    /// agent uses it when its profile has no Codex slot.
+    pub fn for_openai_api_loopback_port(port: u16) -> Result<Self, ProjectionError> {
+        Self::provider(
+            port,
+            CODEX_OPENAI_API_PROVIDER_ID,
+            "Codewire OpenAI API",
+            MANAGED_OPENAI_API_PREFIX,
+            Some("OPENAI_API_KEY"),
+        )
+    }
+
+    /// One provider as a configuration file and as the equivalent overrides,
+    /// rendered from the same settings. Every value is a fixed ASCII token
+    /// that needs no TOML escaping.
+    fn provider(
+        port: u16,
+        id: &str,
+        name: &str,
+        base_path: &str,
+        env_key: Option<&str>,
+    ) -> Result<Self, ProjectionError> {
         if port < MIN_UNPRIVILEGED_PORT {
             return Err(ProjectionError::InvalidGuestEndpoint);
         }
+        let mut settings = vec![
+            ("name", format!("\"{name}\"")),
+            (
+                "base_url",
+                format!("\"http://127.0.0.1:{port}{base_path}\""),
+            ),
+        ];
+        if let Some(env_key) = env_key {
+            settings.push(("env_key", format!("\"{env_key}\"")));
+        }
+        settings.extend([
+            ("wire_api", "\"responses\"".to_owned()),
+            ("requires_openai_auth", "false".to_owned()),
+            ("supports_websockets", "false".to_owned()),
+        ]);
+        let lines: String = settings
+            .iter()
+            .map(|(key, value)| format!("{key} = {value}\n"))
+            .collect();
+        let inline = settings
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
         Ok(Self {
             config_toml: format!(
                 concat!(
-                    "model_provider = \"{provider}\"\n",
+                    "model_provider = \"{id}\"\n",
                     "\n",
-                    "[model_providers.{provider}]\n",
-                    "name = \"Codewire OpenAI\"\n",
-                    "base_url = \"http://127.0.0.1:{port}/v1\"\n",
-                    "wire_api = \"responses\"\n",
-                    "requires_openai_auth = false\n",
-                    "supports_websockets = false\n",
+                    "[model_providers.{id}]\n",
+                    "{lines}",
                     "\n",
                     "[features]\n",
                     "enable_request_compression = false\n",
                 ),
-                provider = CODEX_PROVIDER_ID,
-                port = port,
+                id = id,
+                lines = lines,
             ),
+            overrides: [
+                format!("model_provider=\"{id}\""),
+                format!("model_providers.{id}={{{inline}}}"),
+                "features.enable_request_compression=false".to_owned(),
+            ],
         })
     }
 
@@ -404,6 +461,7 @@ impl CodexProviderProjection {
     fn with_managed_header(self) -> Self {
         Self {
             config_toml: format!("{CODEX_MANAGED_CONFIG_HEADER}\n{}", self.config_toml),
+            ..self
         }
     }
 
@@ -416,6 +474,13 @@ impl CodexProviderProjection {
     /// Consume the projection and return its complete UTF-8 contents.
     pub fn into_config_toml(self) -> String {
         self.config_toml
+    }
+
+    /// The same settings as Codex `-c` override values, each one `key=value`
+    /// whose value is TOML. A launch that must keep this provider whatever
+    /// its configuration file later holds passes every one after `-c`.
+    pub fn overrides(&self) -> &[String] {
+        &self.overrides
     }
 }
 
@@ -515,6 +580,99 @@ mod tests {
         }
         assert_eq!(CODEX_CONFIG_FILE_NAME, "config.toml");
         assert_eq!(projection.clone().into_config_toml(), config);
+    }
+
+    /// The `-c` override values merged into one table, as Codex applies them.
+    fn overrides_table(projection: &CodexProviderProjection) -> toml::Table {
+        fn merge(into: &mut toml::Table, from: toml::Table) {
+            for (key, value) in from {
+                match (into.get_mut(&key), value) {
+                    (Some(Value::Table(existing)), Value::Table(table)) => merge(existing, table),
+                    (_, value) => {
+                        into.insert(key, value);
+                    }
+                }
+            }
+        }
+        let mut table = toml::Table::new();
+        for value in projection.overrides() {
+            merge(
+                &mut table,
+                toml::from_str(value).expect("valid TOML override"),
+            );
+        }
+        table
+    }
+
+    #[test]
+    fn overrides_are_the_configuration_file_as_codex_command_line_values() {
+        let codex = CodexProviderProjection::for_loopback_port(38_081).unwrap();
+        assert_eq!(
+            codex.overrides(),
+            [
+                "model_provider=\"codewire_openai\"",
+                concat!(
+                    "model_providers.codewire_openai={name=\"Codewire OpenAI\",",
+                    "base_url=\"http://127.0.0.1:38081/v1\",wire_api=\"responses\",",
+                    "requires_openai_auth=false,supports_websockets=false}"
+                ),
+                "features.enable_request_compression=false",
+            ]
+        );
+        for projection in [
+            codex,
+            CodexProviderProjection::for_openai_api_loopback_port(38_081).unwrap(),
+        ] {
+            assert_eq!(
+                overrides_table(&projection),
+                toml::from_str::<toml::Table>(projection.config_toml()).unwrap()
+            );
+            // The ownership header changes the file only.
+            assert_eq!(
+                projection.clone().with_managed_header().overrides(),
+                projection.overrides()
+            );
+        }
+    }
+
+    #[test]
+    fn openai_api_slot_provider_names_its_managed_base_and_the_public_placeholder() {
+        let projection = CodexProviderProjection::for_openai_api_loopback_port(38_081).unwrap();
+        assert_eq!(
+            projection.config_toml(),
+            concat!(
+                "model_provider = \"codewire_openai_api\"\n",
+                "\n",
+                "[model_providers.codewire_openai_api]\n",
+                "name = \"Codewire OpenAI API\"\n",
+                "base_url = \"http://127.0.0.1:38081/_codewire/openai/v1\"\n",
+                "env_key = \"OPENAI_API_KEY\"\n",
+                "wire_api = \"responses\"\n",
+                "requires_openai_auth = false\n",
+                "supports_websockets = false\n",
+                "\n",
+                "[features]\n",
+                "enable_request_compression = false\n",
+            )
+        );
+        // The base and the key name are the OpenAI client's own projection:
+        // Codex reads the placeholder the session already has.
+        let environment = ManagedCredentialClients::from_profile_slots(["openai"])
+            .unwrap()
+            .for_placement(ManagedCredentialClientPlacement::Platform)
+            .environment;
+        assert!(projection.config_toml().contains(&format!(
+            "base_url = \"{}\"\n",
+            environment["OPENAI_BASE_URL"]
+        )));
+        assert!(environment.contains_key("OPENAI_API_KEY"));
+        for forbidden in ["experimental_bearer_token", "auth.command", "Bearer "] {
+            assert!(!projection.config_toml().contains(forbidden));
+        }
+        assert_eq!(
+            CodexProviderProjection::for_openai_api_loopback_port(MIN_UNPRIVILEGED_PORT - 1),
+            Err(ProjectionError::InvalidGuestEndpoint)
+        );
     }
 
     #[test]
