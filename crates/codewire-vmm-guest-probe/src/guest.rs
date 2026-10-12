@@ -750,8 +750,20 @@ pub async fn run_daemon() -> Result<()> {
         session_working_dir: None,
     };
 
-    let daemon = codewire_daemon::serve_grpc_with_incoming(
+    // While Codex is selected the guest daemon also keeps Codex's own ChatGPT
+    // login in the native Codex home, on the workload user's behalf: the one
+    // listed direct delivery exception (docs/dev/SECRETS-AND-CREDENTIALS.md,
+    // "Direct delivery exceptions").
+    let codex_home = codewire_daemon::codex_home::CodexHome::native(
+        PERSISTENT_CODEX_HOME_PATH,
+        codewire_daemon::codex_home::FileOwner {
+            uid: plan.identity.uid,
+            gid: plan.identity.gid,
+        },
+    );
+    let daemon = codewire_daemon::serve_native_grpc_with_incoming(
         config,
+        codex_home,
         HostOnlyIncoming::new(listener.incoming()),
         shutdown_signal(),
     );
