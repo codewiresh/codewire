@@ -24,7 +24,8 @@ pub use platform_projection::{
     platform_projection_reserved_keys,
 };
 pub use repository::{
-    RepositorySshHost, canonical_repository_known_hosts, parse_repository_ssh_host,
+    GITHUB_SSH_KNOWN_HOSTS, GitHubSshSource, RepositorySshHost, canonical_repository_known_hosts,
+    github_ssh_source, parse_repository_ssh_host,
 };
 pub use selection::{StoragePlacement, StorageReference};
 

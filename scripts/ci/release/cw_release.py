@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shutil
 import stat
@@ -643,6 +644,70 @@ def _runtime_lock_files(platform, lock):
     return [(value["sha256"], value["size"]) for value in specs]
 
 
+# The macOS VZ helper a runtime pins is re-checked on Linux before release:
+# a thin arm64 executable, signed with the hardened runtime and exactly the
+# virtualization entitlement, linking only the operating system's libraries.
+HELPER_ENTITLEMENTS = ROOT / "crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist"
+HELPER_LIBRARY_PREFIXES = ("/System/Library/Frameworks/", "/usr/lib/")
+# Search paths the Swift toolchain records. No load uses @rpath, so they find
+# nothing; any other search path is refused.
+HELPER_RPATHS = ("@loader_path", "/usr/lib/swift")
+DYLIB_COMMANDS = {0xC, 0x20, 0x80000018, 0x8000001F, 0x80000023}  # load, lazy, weak, reexport, upward
+LC_RPATH, LC_CODE_SIGNATURE = 0x8000001C, 0x1D
+CS_RUNTIME = 0x10000
+
+
+def check_macos_helper(data, entitlements=None):
+    """Refuse a VZ helper that is not exactly what the runtime may run."""
+    require(len(data) >= 32, "helper is not a Mach-O executable")
+    magic, cputype, _subtype, filetype, ncmds, sizeofcmds = struct.unpack_from("<IiiIII", data, 0)
+    require(magic == 0xFEEDFACF and cputype == 0x0100000C and filetype == 2,
+            "helper is not a thin arm64 Mach-O executable")
+    require(32 + sizeofcmds <= len(data) and 0 < ncmds <= 512, "helper load commands are out of bounds")
+    offset, libraries, rpaths, signature = 32, [], [], None
+    for _ in range(ncmds):
+        require(offset + 8 <= 32 + sizeofcmds, "helper load commands are truncated")
+        command, size = struct.unpack_from("<II", data, offset)
+        require(size >= 8 and offset + size <= 32 + sizeofcmds, "helper load command is out of bounds")
+        if command in DYLIB_COMMANDS or command == LC_RPATH:
+            name_offset, = struct.unpack_from("<I", data, offset + 8)
+            require(name_offset < size, "helper library name is out of bounds")
+            name = data[offset + name_offset:offset + size].split(b"\0", 1)[0].decode("ascii", "replace")
+            (rpaths if command == LC_RPATH else libraries).append(name)
+        elif command == LC_CODE_SIGNATURE:
+            signature = struct.unpack_from("<II", data, offset + 8)
+        offset += size
+    foreign = [name for name in libraries if not name.startswith(HELPER_LIBRARY_PREFIXES) or ".." in name]
+    require(libraries and not foreign, f"helper links outside the operating system: {foreign[:3]}")
+    require(all(path in HELPER_RPATHS for path in rpaths), f"helper searches outside the operating system: {rpaths[:3]}")
+    require(signature is not None, "helper is not code-signed")
+    start, length = signature
+    require(start + length <= len(data) and length >= 12, "helper code signature is out of bounds")
+    blob = data[start:start + length]
+    magic, total, count = struct.unpack_from(">III", blob, 0)
+    require(magic == 0xFADE0CC0 and total <= length and 12 + 8 * count <= total, "helper signature is malformed")
+    slots = {}
+    for index in range(count):
+        kind, at = struct.unpack_from(">II", blob, 12 + 8 * index)
+        require(at + 8 <= total, "helper signature slot is out of bounds")
+        slot_magic, slot_length = struct.unpack_from(">II", blob, at)
+        require(at + slot_length <= total, "helper signature slot is truncated")
+        slots[kind] = (slot_magic, blob[at:at + slot_length])
+    directory = slots.get(0)
+    require(directory is not None and directory[0] == 0xFADE0C02 and len(directory[1]) >= 16,
+            "helper has no code directory")
+    flags, = struct.unpack_from(">I", directory[1], 12)
+    require(flags & CS_RUNTIME, "helper is not signed with the hardened runtime")
+    granted = slots.get(5)
+    require(granted is not None and granted[0] == 0xFADE7171, "helper carries no entitlements")
+    try:
+        actual = plistlib.loads(granted[1][8:])
+    except Exception:
+        raise ReleaseError("helper entitlements are malformed") from None
+    expected = plistlib.loads(entitlements if entitlements is not None else HELPER_ENTITLEMENTS.read_bytes())
+    require(actual == expected, "helper entitlements are not exactly the virtualization entitlement")
+
+
 def local_runtime_blobs(document):
     """Validate a canonical local runtime document; return every blob it pins.
 
@@ -771,6 +836,11 @@ def check_local_runtime(dist, executables, identities):
             "a cw embeds a different local runtime")
     require(json.loads(document)["source_revision"] == identities[LOCAL_RUNTIME_TARGET]["source_revision"],
             "local runtime source revision differs from the cw that embeds it")
+    blobs = local_runtime_paths(dist)[2]
+    for platform, target in json.loads(document)["targets"].items():
+        if platform.startswith("macos-"):
+            helper = target["lock"]["vz_runner"]["sha256"]
+            check_macos_helper(read_regular(blobs / helper, MAX_OBJECT))
     return document, pinned
 
 

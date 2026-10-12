@@ -314,6 +314,61 @@ class PackTests(unittest.TestCase):
         self.assertEqual(status, 0, stderr)
         self.assert_release(self.snapshot(), cw_runtime=source)
 
+    def components(self, name="sources", entries=None):
+        directory = self.inputs / name
+        directory.mkdir()
+        entries = entries if entries is not None else [
+            {"name": "busybox", "version": "1.37.0", "license": "GPL-2.0-only", "file": "busybox-1.37.0.tar.bz2"},
+            {"name": "libpathrs", "version": "0.2.5", "license": "MPL-2.0 OR LGPL-3.0-or-later",
+             "file": "libpathrs-0.2.5.tar.xz"}]
+        for entry in entries:
+            (directory / entry["file"]).write_bytes(("source of %s\n" % entry["name"]).encode())
+        (directory / "components.json").write_text(json.dumps(entries))
+        return directory
+
+    def test_packs_third_party_sources_as_components(self):
+        linux, mac = self.components(), self.components("mac", [
+            {"name": "git", "version": "2.56.0", "license": "GPL-2.0-only", "file": "git-2.56.0.tar.xz"}])
+        status, _stdout, stderr = self.pack("--components", str(linux), "--components", str(mac))
+        self.assertEqual(status, 0, stderr)
+        snapshot = self.snapshot()
+        document = json.loads(snapshot[runtime.LOCAL_RUNTIME_DOCUMENT])
+        components = document["targets"][runtime.TARGET]["components"]
+        self.assertEqual([component["name"] for component in components], ["busybox", "git", "libpathrs"])
+        for component in components:
+            data = ("source of %s\n" % component["name"]).encode()
+            self.assertEqual(component["source"], {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
+            self.assertEqual(snapshot["blobs/sha256/" + component["source"]["sha256"]], data)
+        self.assertEqual(components[2]["license"], "MPL-2.0 OR LGPL-3.0-or-later")
+
+    def test_malformed_components_fail_before_effects(self):
+        cases = {
+            "unlisted": (lambda d: (d / "components.json").unlink(), "no readable components.json"),
+            "twice": (lambda d: (d / "components.json").write_text(json.dumps([
+                {"name": "a", "version": "1", "license": "MIT", "file": "x"},
+                {"name": "a", "version": "1", "license": "MIT", "file": "x"}])), "listed twice"),
+            "outside": (lambda d: (d / "components.json").write_text(json.dumps([
+                {"name": "a", "version": "1", "license": "MIT", "file": "../Image"}])), "not a file beside"),
+            "extra field": (lambda d: (d / "components.json").write_text(json.dumps([
+                {"name": "a", "version": "1", "license": "MIT", "file": "x", "url": "u"}])), "malformed entry"),
+        }
+        for label, (mutate, message) in cases.items():
+            with self.subTest(case=label):
+                directory = self.components("case-" + label.replace(" ", "-"))
+                (directory / "x").write_bytes(b"x")
+                mutate(directory)
+                status, _stdout, stderr = self.pack("--components", str(directory))
+                self.assertEqual(status, 1)
+                self.assertIn(message, stderr)
+                self.assertFalse(self.release.exists())
+
+    def test_a_component_the_release_rules_refuse_is_never_packed(self):
+        directory = self.components("bad-license", [
+            {"name": "busybox", "version": "1.37.0", "license": "GPL;rm", "file": "busybox.tar"}])
+        status, _stdout, stderr = self.pack("--components", str(directory))
+        self.assertEqual(status, 1)
+        self.assertIn("the packed runtime does not verify", stderr)
+
     def test_invalid_cw_runtime_or_guest_root_fails_before_effects(self):
         self.live_guest_root()
         cases = {

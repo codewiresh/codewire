@@ -58,4 +58,43 @@ if env PATH="$work/bin:$PATH" \
 fi
 
 CODEWIRE_SCCACHE_MODE=disabled "$RUNNER" true >/dev/null
-printf '[test-run-host-rust-build] host adapter preserves disabled fallback and scopes R2 writes\n'
+
+# A workstation build with no job selection uses the shared local cache. Its
+# server outlives the build: the image runner must not zero or stop it.
+mkdir -p "$work/local-bin"
+printf '%s\n' "$work/local-calls" >"$work/local-bin/calls-path"
+cat >"$work/local-bin/sccache" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$(cat "$(dirname "$0")/calls-path")"
+case "${1:-}" in
+  --version) printf 'sccache 0.17.0\n' ;;
+  --dist-status) [[ ! -e "$(dirname "$0")/start-fails" ]] ;;
+  *) exit 64 ;;
+esac
+EOF
+chmod +x "$work/local-bin/sccache"
+cat >"$work/assert-local" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "\$RUSTC_WRAPPER" == "$ROOT/scripts/ci/verify/local-rust-cache-rustc.sh" ]]
+[[ -z "\${CARGO_INCREMENTAL+x}" ]]
+[[ "\$SCCACHE_DIR" == "$work/local-cache/cache" ]]
+[[ "\$CODEWIRE_RUST_PROFILE" == ci ]]
+EOF
+chmod +x "$work/assert-local"
+run_local() {
+  env -u GITHUB_ACTIONS -u CI -u CODEWIRE_SCCACHE_MODE -u RUSTC_WRAPPER \
+    -u CARGO_INCREMENTAL -u CODEWIRE_LOCAL_RUST_CACHE \
+    PATH="$work/local-bin:$PATH" CODEWIRE_LOCAL_SCCACHE_BASE="$work/local-cache" \
+    "$RUNNER" "$@"
+}
+run_local "$work/assert-local" >/dev/null 2>&1
+if grep -Eq -- '--zero-stats|--stop-server|--show-stats' "$work/local-calls"; then
+  printf 'host Rust build managed the shared local cache server\n' >&2
+  exit 1
+fi
+# The cache is best effort: a server that does not start compiles uncached.
+touch "$work/local-bin/start-fails"
+run_local bash -c '[[ -z "${RUSTC_WRAPPER:-}" ]]' >/dev/null 2>&1
+printf '[test-run-host-rust-build] host adapter preserves disabled fallback, scopes R2 writes and shares the local cache\n'

@@ -333,6 +333,10 @@ run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
 run_paths_case service_ssh_image_verifier pull_request refs/pull/1922/head false \
   'policy security security_js' scripts/ci/tests/test-service-ssh-image-verifier.sh \
   scripts/ci/verify/service-ssh-image-contract.sh scripts/ci/verify/verify-service-ssh-image.sh
+# The public install/update/rollback acceptance journey is release tooling.
+run_paths_case release_update_journey pull_request refs/pull/3/head false \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
+  scripts/dev/test-cw-release-update.py
 run_paths_case apt_transactions pull_request refs/pull/3/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/test-apt-get-with-retry.sh
@@ -1152,7 +1156,11 @@ run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false 
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \
   scripts/ci/tests/test-cw-release-delivery.py scripts/ci/tests/test-cw-release-r2.py \
-  scripts/ci/tests/test-package-cw-release.py
+  scripts/ci/tests/test-package-cw-release.py scripts/ci/release/local_runtime_parts.py \
+  scripts/ci/release/local_runtime_sources.py scripts/ci/release/local-runtime-sources.json \
+  scripts/ci/release/build-runtime-kernel.sh scripts/ci/tests/test-local-runtime-parts.py \
+  scripts/ci/release/build-local-runtime.sh scripts/ci/release/build-runtime-guest-root.sh \
+  scripts/ci/release/runtime-container.sh
 # The published workspace pin selects every consumer that compiles it; its
 # tool and post-publish proposal select the release proofs that run them.
 run_paths_case workspace_image_pin pull_request refs/pull/2255/head false \

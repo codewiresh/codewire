@@ -164,7 +164,10 @@ RUN set -euo pipefail; \
 ENV PATH="/usr/local/go/bin:/home/codewire/go/bin:${PATH}"
 ENV GOPATH="/home/codewire/go"
 
+# Codex's Linux sandbox runs commands through the system bubblewrap on PATH;
+# without it Codex warns at startup and falls back to its bundled copy.
 RUN apt-get-with-retry update && apt-get-with-retry install -y --no-install-recommends \
+      bubblewrap=0.9.0-1ubuntu0.1 \
       file gdb pipx pkg-config protobuf-compiler python3-full python3-venv strace && \
     rm -rf /var/lib/apt/lists/*
 

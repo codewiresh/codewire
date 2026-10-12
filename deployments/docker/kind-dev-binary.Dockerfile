@@ -32,9 +32,15 @@ ARG KIND_DEV_TREE
 # makes Cargo rebuild exactly the crates they belong to. Without a record every
 # file counts as changed. The record is written only after a successful build,
 # so it always describes the artifacts beside it.
+#
+# Every compile goes through the repository's disk-only sccache
+# (codewire-rust-build local mode), whose content-addressed cache all
+# worktrees share: a crate any worktree already compiled from identical inputs
+# is a cache hit, so a new worktree's first deploy is no longer a cold build.
 RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=codewire-services-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=codewire-kind-dev-target,target=/src/target,sharing=locked \
+    --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \
     test -n "$KIND_DEV_CRATE" && \
     test -n "$KIND_DEV_TREE" && \
     export CARGO_TARGET_DIR="/src/target/trees/$KIND_DEV_TREE" && \
@@ -47,10 +53,11 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     grep -vxFf "$built" /tmp/kind-dev-sources.sha256 | cut -c67- | tr '\n' '\0' | xargs -0r touch -c && \
     set -- && \
     if [ -n "$KIND_DEV_FEATURES" ]; then set -- --features "$KIND_DEV_FEATURES"; fi && \
-    cargo build --locked --profile ci -p "$KIND_DEV_CRATE" --bin "$bin" "$@" && \
+    export CODEWIRE_SCCACHE_MODE=local CODEWIRE_RUST_PROFILE=ci && \
+    codewire-rust-build cargo build --locked --profile ci -p "$KIND_DEV_CRATE" --bin "$bin" "$@" && \
     install -D "$CARGO_TARGET_DIR/ci/$bin" "/out/$bin" && \
     if [ -n "$KIND_DEV_FIXTURE_FEATURES" ]; then \
-      cargo test --locked --profile ci -p "$KIND_DEV_CRATE" \
+      codewire-rust-build cargo test --locked --profile ci -p "$KIND_DEV_CRATE" \
         --features "$KIND_DEV_FIXTURE_FEATURES" --lib --no-run \
         --message-format=json >/tmp/kind-dev-fixture.jsonl && \
       fixture="$(sed -n '/"reason":"compiler-artifact"/{/"test":true/{s@.*"executable":"\([^"]*\)".*@\1@p;}}' /tmp/kind-dev-fixture.jsonl)" && \

@@ -7,6 +7,49 @@ use crate::{
 
 const DEFAULT_SSH_PORT: u16 = 22;
 const MAX_SSH_HOST_BYTES: usize = 253;
+const GITHUB_HTTPS_PREFIX: &str = "https://github.com/";
+const MAX_GITHUB_PATH_SEGMENT_BYTES: usize = 128;
+
+/// GitHub's published SSH host keys (`ssh_keys` at
+/// <https://api.github.com/meta>), as canonical `known_hosts` lines in the
+/// order [`canonical_repository_known_hosts`] returns them. A test binds each
+/// key to the SHA256 fingerprint GitHub documents, so this is trust from a
+/// published channel, never from a first connection.
+pub const GITHUB_SSH_KNOWN_HOSTS: [&str; 3] = [
+    "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
+    "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+    "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=",
+];
+
+/// The SSH form of a GitHub HTTPS repository source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitHubSshSource {
+    /// `git@github.com:<owner>/<repository>`, with the HTTPS path verbatim.
+    pub source: String,
+    /// [`GITHUB_SSH_KNOWN_HOSTS`], already canonical for `source`.
+    pub known_hosts: Vec<String>,
+}
+
+/// Map a canonical `https://github.com/<owner>/<repository>` source to its SSH
+/// form, so a checkout can use a selected SSH key instead of a GitHub
+/// connection. Anything else, including other hosts, extra path segments,
+/// userinfo, queries and fragments, returns `None`.
+pub fn github_ssh_source(source: &str) -> Option<GitHubSshSource> {
+    let path = source.strip_prefix(GITHUB_HTTPS_PREFIX)?;
+    let (owner, repository) = path.split_once('/')?;
+    let canonical = [owner, repository].iter().all(|part| {
+        !part.is_empty()
+            && part.len() <= MAX_GITHUB_PATH_SEGMENT_BYTES
+            && !matches!(*part, "." | ".." | ".git")
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    });
+    canonical.then(|| GitHubSshSource {
+        source: format!("git@github.com:{owner}/{repository}"),
+        known_hosts: GITHUB_SSH_KNOWN_HOSTS.map(str::to_owned).to_vec(),
+    })
+}
 
 /// Canonical host identity selected by an SSH repository source.
 ///
@@ -398,6 +441,101 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    fn base64_decode(text: &str) -> Vec<u8> {
+        let mut bits = 0_u32;
+        let mut count = 0;
+        let mut bytes = Vec::new();
+        for byte in text.trim_end_matches('=').bytes() {
+            let value = BASE64.iter().position(|digit| *digit == byte).unwrap();
+            bits = (bits << 6) | value as u32;
+            count += 6;
+            if count >= 8 {
+                count -= 8;
+                bytes.push((bits >> count) as u8);
+                bits &= (1 << count) - 1;
+            }
+        }
+        bytes
+    }
+
+    fn base64_encode_unpadded(bytes: &[u8]) -> String {
+        let mut text = String::new();
+        for chunk in bytes.chunks(3) {
+            let mut block = [0_u8; 3];
+            block[..chunk.len()].copy_from_slice(chunk);
+            let bits = u32::from_be_bytes([0, block[0], block[1], block[2]]);
+            for index in 0..=chunk.len() {
+                text.push(BASE64[((bits >> (18 - 6 * index)) & 63) as usize] as char);
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn github_pins_match_the_fingerprints_github_publishes() {
+        use sha2::{Digest as _, Sha256};
+        // "GitHub's SSH key fingerprints" (docs.github.com) and
+        // `ssh_key_fingerprints` at https://api.github.com/meta.
+        let published = [
+            "p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM",
+            "+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU",
+            "uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
+        ];
+        for (line, fingerprint) in GITHUB_SSH_KNOWN_HOSTS.iter().zip(published) {
+            let key = line.split(' ').nth(2).unwrap();
+            let digest = Sha256::digest(base64_decode(key));
+            assert_eq!(base64_encode_unpadded(&digest), fingerprint, "{line}");
+        }
+    }
+
+    #[test]
+    fn github_https_sources_map_to_ssh_with_canonical_pins() {
+        for (source, expected) in [
+            ("https://github.com/org/app", "git@github.com:org/app"),
+            (
+                "https://github.com/org/app.git",
+                "git@github.com:org/app.git",
+            ),
+            (
+                "https://github.com/My-Org/my_app.v2",
+                "git@github.com:My-Org/my_app.v2",
+            ),
+        ] {
+            let mapped = github_ssh_source(source).unwrap();
+            assert_eq!(mapped.source, expected);
+            let host = parse_repository_ssh_host(&mapped.source).unwrap().unwrap();
+            assert_eq!((host.host(), host.port()), ("github.com", 22));
+            assert_eq!(
+                canonical_repository_known_hosts(&mapped.source, mapped.known_hosts.clone())
+                    .unwrap(),
+                mapped.known_hosts
+            );
+        }
+        for source in [
+            "http://github.com/org/app",
+            "https://GitHub.com/org/app",
+            "https://github.com./org/app",
+            "https://github.com:443/org/app",
+            "https://user@github.com/org/app",
+            "https://gitlab.com/org/app",
+            "https://github.com/org",
+            "https://github.com/org/",
+            "https://github.com//app",
+            "https://github.com/org/app/",
+            "https://github.com/org/app/tree/main",
+            "https://github.com/org/app?x=1",
+            "https://github.com/org/app#main",
+            "https://github.com/org/.git",
+            "https://github.com/../app",
+            "https://github.com/org/a%20pp",
+            "git@github.com:org/app.git",
+        ] {
+            assert!(github_ssh_source(source).is_none(), "mapped {source:?}");
+        }
     }
 
     #[test]

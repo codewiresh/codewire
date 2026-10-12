@@ -13,6 +13,9 @@ MANIFEST_DIR="${CURATED_RUST_MANIFEST_DIR:-$ROOT/deployments/docker}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 STAGING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/codewire-compile-all-targets.XXXXXX")"
 trap 'rm -rf -- "$STAGING_ROOT"' EXIT
+# shellcheck source=scripts/ci/verify/local-rust-cache.sh
+source "$ROOT/scripts/ci/verify/local-rust-cache.sh"
+select_local_rust_cache "$ROOT" || true
 
 phase() {
   local name="$1"

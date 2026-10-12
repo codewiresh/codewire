@@ -419,8 +419,9 @@ class PublisherTest(unittest.TestCase):
                 self.fake.dump(state)
                 runner = sandbox / "runner"
                 runner.mkdir()
+                github_env = sandbox / "github-env"
                 env = {"PATH": os.environ["PATH"], "HOME": str(sandbox), "LC_ALL": "C",
-                       "RUNNER_TEMP": str(runner), "RELEASE_TAG": fx.VERSION,
+                       "RUNNER_TEMP": str(runner), "RELEASE_TAG": fx.VERSION, "GITHUB_ENV": str(github_env),
                        "CW_RELEASE_R2_ROUTE_ADMITTED": "true",
                        "SYNTHETIC_ACCESS": ACCESS_KEY, "SYNTHETIC_SECRET": SECRET_KEY,
                        "CW_TEST_TESTS": str(fx.ROOT / "scripts/ci/tests"),
@@ -432,6 +433,9 @@ class PublisherTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("cw-release-r2: probe", result.stderr)
                 self.assertNotIn(SECRET_KEY, result.stdout + result.stderr)
+                # Later steps (runtime part records) learn only the state.
+                self.assertEqual(github_env.read_text(),
+                                 f"CW_RELEASE_R2_STATE={'retained' if published else 'fresh'}\n")
                 dist = source / "dist/cw-release"
                 manifest = release.delivery_paths(dist)["manifest"]
                 if published:

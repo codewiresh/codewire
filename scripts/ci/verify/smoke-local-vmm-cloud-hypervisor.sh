@@ -374,6 +374,9 @@ validate_artifact_lock
 
 TARGET_DIR="$(scripts/ci/verify/resolve-cargo-target-dir.sh "$ROOT")"
 readonly TARGET_DIR
+# shellcheck source=scripts/ci/verify/local-rust-cache.sh
+source "$ROOT/scripts/ci/verify/local-rust-cache.sh"
+select_local_rust_cache "$ROOT" || true
 log 'building exact-tree smoke driver offline (no artifact acquisition)'
 (
   cd "$ROOT"

@@ -950,3 +950,131 @@ async fn source_worker_preserves_pending_intent_when_authority_is_unavailable() 
         );
     }
 }
+
+#[tokio::test]
+async fn failed_source_effect_records_and_logs_its_own_cause_without_secret_values() {
+    // Application secret values never reach the supervisor; the values it
+    // does hold for an environment, such as project environment values, and
+    // any error text must not reach the recorded cause or the log either.
+    const CANARY: &str = "synthetic-application-secret-value-must-not-escape";
+    for (checkpoint, state, effect, expected) in [
+        (
+            6,
+            StoredEnvironmentState::Stopped,
+            "ensure_runner",
+            "environment_sources_artifact_store",
+        ),
+        (
+            8,
+            StoredEnvironmentState::Starting,
+            "record_source_outcome",
+            "environment_sources_not_running",
+        ),
+    ] {
+        let mut environment = project_environment();
+        let mut project: ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        project
+            .environment
+            .insert("APP_SETTING".into(), CANARY.into());
+        let json = project.canonical_json().unwrap();
+        let sha256 = format!("{:x}", Sha256::digest(&json));
+        environment.active_workspace_generation =
+            Some(test_workspace_generation(&json, &sha256, b"source-failure"));
+        environment.project_spec_sha256 = Some(sha256);
+        environment.project_spec_json = Some(json);
+        environment.state = StoredEnvironmentState::Running;
+        let mut request = target_request(&environment);
+        request.allow_restart = true;
+        // Keep the local credential authority out of this synthetic restart:
+        // with it unavailable the journal stays pending, by design.
+        edit_target(&mut request, |project| project.secrets = Default::default());
+        let transition = SourceTransition::new(&request, &environment).unwrap();
+        environment.state = state;
+        let (_parent, mut core) = test_supervisor_core(environment);
+        core.log = Some(
+            DiagnosticLog::adopt(
+                diagnostic_log::open_child_log(&core.root, diagnostic_log::SUPERVISOR_LOG).unwrap(),
+            )
+            .unwrap(),
+        );
+        let operation = begin_at(&core, &transition, checkpoint);
+        transition
+            .target
+            .write_to(core.environment_mut("dev").unwrap())
+            .unwrap();
+        core.environment_mut("dev").unwrap().generation = 2;
+        core.save().unwrap();
+
+        // No runtime is provisioned, so the target start fails at `effect`.
+        core.run_pending_operations(false).await.unwrap();
+
+        // The journal row records the failing checkpoint and its cause.
+        let failed = core
+            .store
+            .operation_by_request(operation.request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.phase, OperationPhase::Failed, "{effect}");
+        assert_eq!(failed.checkpoint, checkpoint + 1);
+        assert_eq!(
+            supervisor_effect(failed.kind, checkpoint)
+                .unwrap()
+                .map(LifecycleEffect::name),
+            Some(effect)
+        );
+        assert_eq!(failed.error_code.as_deref(), Some(expected));
+        // `cw env info` shows it, and so does the failed `cw env update`.
+        let shown = core.environment_proto("dev").unwrap();
+        assert_eq!(shown.state, v1::EnvironmentState::Error as i32);
+        assert_eq!(shown.error_code, expected);
+        let failure = operation_outcome(operation_proto(&failed).unwrap()).unwrap_err();
+        assert!(
+            failure.message().contains(&format!("failed: {expected}")),
+            "{}",
+            failure.message()
+        );
+        // The supervisor log names the effect and the closed cause.
+        let log = fs::read_to_string(
+            core.root
+                .path()
+                .join(diagnostic_log::LOG_DIRECTORY)
+                .join(diagnostic_log::SUPERVISOR_LOG),
+        )
+        .unwrap();
+        let line = log
+            .lines()
+            .find(|line| line.contains(&operation.operation_id.to_string()))
+            .unwrap_or_else(|| panic!("no failure line in {log:?}"));
+        assert!(line.contains(" event=operation_failed "), "{line}");
+        assert!(line.contains(" kind=update_environment_sources "), "{line}");
+        assert!(line.contains(&format!(" effect={effect} ")), "{line}");
+        assert!(
+            line.contains(&format!(
+                " cause={} ",
+                expected.trim_start_matches("environment_sources_")
+            )),
+            "{line}"
+        );
+        assert!(line.ends_with(&format!(" error_code={expected}")), "{line}");
+
+        let journal = core
+            .store
+            .recent_environment_operations(failed.environment_id.unwrap())
+            .unwrap()
+            .iter()
+            .filter(|operation| operation.operation_id != failed.operation_id)
+            .map(|operation| format!("{:?} {:?}", operation.error_code, operation.payload))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for text in [
+            log.as_str(),
+            expected,
+            shown.error_code.as_str(),
+            failure.message(),
+            journal.as_str(),
+        ] {
+            assert!(!text.contains(CANARY), "{text}");
+        }
+    }
+}

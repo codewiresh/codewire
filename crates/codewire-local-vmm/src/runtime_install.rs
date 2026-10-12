@@ -106,6 +106,12 @@ pub trait BlobSource {
     fn open(&self, sha256: &str) -> Result<Box<dyn Read + '_>, InstallError>;
 }
 
+/// The generation of the runtime `document` pins for this host: the name it
+/// is installed and reported under.
+pub fn pinned_generation(document: &LocalRuntimeDocument) -> Result<String, InstallError> {
+    Ok(host_lock(document)?.generation()?)
+}
+
 /// A directory holding `blobs/sha256/<hex>`, as a release publishes them.
 pub struct DirectoryBlobSource {
     root: PathBuf,

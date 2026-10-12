@@ -415,7 +415,7 @@ grep -Fq '  release-selection:' "$cli_workflow"
 grep -Fq '  build-release:' "$cli_workflow"
 grep -Fq '  package-release:' "$cli_workflow"
 grep -Fq '    needs: [release-selection]' "$cli_workflow"
-grep -Fq '    needs: [release-selection, build-release]' "$cli_workflow"
+grep -Fq '    needs: [release-selection, build-darwin, build-release]' "$cli_workflow"
 grep -Fq "[ \"\$GITHUB_REF\" = 'refs/heads/main' ]" "$cli_workflow"
 grep -Fq '          path: .release-source' "$cli_workflow"
 grep -Fq '+refs/heads/main:refs/remotes/origin/main' "$cli_workflow"
@@ -538,6 +538,10 @@ python3 -B "$ROOT/scripts/ci/tests/test-cw-release-r2.py" >/dev/null 2>&1 || {
 }
 python3 -B "$ROOT/scripts/ci/tests/test-package-cw-release.py" >/dev/null 2>&1 || {
   echo 'cw release packaging tests failed' >&2
+  exit 1
+}
+python3 -B "$ROOT/scripts/ci/tests/test-local-runtime-parts.py" >/dev/null 2>&1 || {
+  echo 'local runtime parts and source pin tests failed' >&2
   exit 1
 }
 "$ROOT/scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh"

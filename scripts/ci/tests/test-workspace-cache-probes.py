@@ -494,7 +494,9 @@ class ProbeFixture(unittest.TestCase):
             [str(self.root / "scripts/ci/tests/probe-workspace-r2-cache.sh"), str(self.credential), str(self.report)],
             env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
-            output, _ = process.communicate(timeout=35)
+            # A hang guard only: the probe's own deadlines are asserted by the
+            # native-timeout cases. A loaded shared runner needs more than 35 s.
+            output, _ = process.communicate(timeout=120)
         except subprocess.TimeoutExpired:
             # TERM the actual GNU timeout owner so it forwards cancellation and
             # lets the harness reap children; subprocess.run would KILL it first.

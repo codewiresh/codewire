@@ -578,6 +578,41 @@ class SourceDigestTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, f"needs {gcc}, or cargo-zigbuild and zig"):
                         native.compiler_route(target, path, home)
 
+    def test_native_managed_build_reuses_one_public_cargo_home_per_target(self):
+        spec = importlib.util.spec_from_file_location(
+            "build_native_managed_agent", ROOT / "scripts/dev/build-native-managed-agent.py")
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        cache = self.base / "public-cargo-cache"
+        (cache / "registry").mkdir(parents=True)
+        (cache / "git").mkdir()
+        target = self.base / "public-cargo-target"
+        home = native.public_cargo_home(target, cache)
+        self.assertEqual(home, target / "native-managed-agent-cargo-home")
+        self.assertEqual({entry.name: os.readlink(entry) for entry in home.iterdir()},
+                         {"registry": str(cache / "registry"), "git": str(cache / "git")})
+        # Cargo's own lock and cache-tracking files are kept; the path is reused.
+        for name in native.CARGO_BOOKKEEPING:
+            (home / name).write_bytes(b"")
+        self.assertEqual(native.public_cargo_home(target, cache), home)
+        for name, make in (("config.toml", lambda path: path.write_text("[build]\n")),
+                           ("credentials.toml", lambda path: path.write_text("")),
+                           ("bin", lambda path: path.mkdir())):
+            with self.subTest(name):
+                make(home / name)
+                with self.assertRaisesRegex(RuntimeError, "not this build's public Cargo home"):
+                    native.public_cargo_home(target, cache)
+                (shutil.rmtree if (home / name).is_dir() else os.unlink)(home / name)
+        other = self.base / "other-cargo-cache"
+        (other / "registry").mkdir(parents=True)
+        (other / "git").mkdir()
+        with self.assertRaisesRegex(RuntimeError, "not this build's public Cargo home"):
+            native.public_cargo_home(target, other)
+        os.unlink(home / ".global-cache")
+        os.symlink(cache, home / ".global-cache")
+        with self.assertRaisesRegex(RuntimeError, "not this build's public Cargo home"):
+            native.public_cargo_home(target, cache)
+
     def test_compiled_inputs_must_all_be_in_the_source_digest(self):
         base = self.base / "depinfo"
         base.mkdir()
@@ -705,7 +740,7 @@ class LocalRuntimeTest(unittest.TestCase):
 
         def changed(blobs):
             path = next(blobs.iterdir())
-            path.write_bytes(path.read_bytes().replace(b"synthetic", b"Synthetic"))
+            path.write_bytes(path.read_bytes() + b"\n")
 
         def linked(blobs):
             path = next(blobs.iterdir())
@@ -732,6 +767,41 @@ class LocalRuntimeTest(unittest.TestCase):
                            ("invalid", document.replace(b'"schema_version":1', b'"schema_version":2'))):
             with self.subTest(case=name), self.assertRaises(release.ReleaseError):
                 release.embedded_local_runtime(data)
+
+    def test_the_helper_is_rechecked_without_macos(self):
+        release.check_macos_helper(fx.macos_helper())
+        networking = release.HELPER_ENTITLEMENTS.read_bytes().replace(
+            b"</dict>", b"<key>com.apple.vm.networking</key><true/></dict>")
+        cases = {
+            "x86_64": fx.macos_helper(cpu=0x01000007),
+            "no hardened runtime": fx.macos_helper(runtime=False),
+            "another entitlement": fx.macos_helper(entitlements=networking),
+            "homebrew library": fx.macos_helper(libraries=fx.HELPER_LIBRARIES + ("/opt/homebrew/lib/libz.dylib",)),
+            "rpath library": fx.macos_helper(libraries=("@rpath/libswiftCore.dylib",)),
+            "homebrew search path": fx.macos_helper(rpaths=("@loader_path", "/opt/homebrew/lib")),
+            "escaping path": fx.macos_helper(libraries=("/usr/lib/../../tmp/x.dylib",)),
+            "unsigned": fx.macos_helper(signed=False),
+            "fat": b"\xca\xfe\xba\xbe" + fx.macos_helper()[4:],
+        }
+        for label, data in cases.items():
+            with self.subTest(case=label), self.assertRaises(release.ReleaseError):
+                release.check_macos_helper(data)
+
+    def test_a_delivery_whose_helper_fails_its_recheck_is_refused(self):
+        dist = self.copy(self.dist)
+        document_path, blobs = release.local_runtime_paths(dist)[1:]
+        document = json.loads(document_path.read_bytes())
+        lock = document["targets"]["macos-aarch64"]["lock"]
+        bad = fx.macos_helper(runtime=False)
+        (blobs / lock["vz_runner"]["sha256"]).unlink()
+        (blobs / fx.digest(bad)).write_bytes(bad)
+        lock["vz_runner"].update(sha256=fx.digest(bad), size=len(bad))
+        document_path.write_bytes(release.canonical(document))
+        with self.assertRaisesRegex(release.ReleaseError, "hardened runtime"):
+            release.load_local_runtime(dist)
+            release.check_macos_helper(bad)
+        with self.assertRaises(release.ReleaseError):
+            release.verify_delivery(dist)
 
     def test_the_runtime_comes_from_the_cw_source_revision(self):
         original = fx.local_runtime

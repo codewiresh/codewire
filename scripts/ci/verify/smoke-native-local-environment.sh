@@ -128,6 +128,8 @@ CREATE_DOCKER_ARGS=()
 DIRECT_SHARE_PIDS=()
 NETWORK_QUALIFICATION=0
 NETWORK_PROBE_PID=''
+BROKER_RENEWAL_OBSERVATION=0
+BROKER_RENEWAL_PROBE_PID=''
 # Public HTTPS targets for the opt-in network qualification. The guest reaches
 # them only through the packet worker and the developer-policy egress broker;
 # the host measures the same URLs for its baseline.
@@ -157,6 +159,7 @@ usage: smoke-native-local-environment.sh \
    --managed-agent-update-cw-sha256 B_CW_SHA256] \
   [--workspace-image-import-bin ABSOLUTE_PATH] \
   [--network-qualification] \
+  [--broker-renewal-observation] \
   [--scratch-parent ABSOLUTE_DIRECTORY]
 
 Runs the built cw Linux/KVM native-environment product smoke with 2 vCPUs and
@@ -218,6 +221,15 @@ runs. Each kill must give a typed environment error, fail every probe from the
 kill second, leave no internet socket on the egress path, and stop/start must
 restore egress. It needs public HTTPS to releases.codewire.sh and
 speed.cloudflare.com from the host and the broker.
+
+--broker-renewal-observation requires --managed-credential-broker and replaces
+its application-secret, managed-agent and credential-broker scenarios. The VM
+stays up until the local credential authority has replaced its first broker
+child (about ten minutes after start) while a guest loop keeps managed OpenAI
+requests in flight through the credential bridge. Every request must succeed,
+the successor must start about 90 seconds before the predecessor's 600-second
+lifetime ends, the predecessor must exit only after that, and the successor
+must keep serving.
 USAGE
 }
 
@@ -321,6 +333,11 @@ while [[ $# -gt 0 ]]; do
       NETWORK_QUALIFICATION=1
       shift
       ;;
+    --broker-renewal-observation)
+      [[ "$BROKER_RENEWAL_OBSERVATION" -eq 0 ]] || { usage; exit 2; }
+      BROKER_RENEWAL_OBSERVATION=1
+      shift
+      ;;
     --managed-agent-cw-image-receipt)
       [[ $# -ge 2 && -n "$2" && "$MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN" -eq 0 ]] || { usage; exit 2; }
       MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN=1
@@ -360,6 +377,13 @@ done
   usage
   exit 2
 }
+
+if [[ "$BROKER_RENEWAL_OBSERVATION" -eq 1 ]]; then
+  [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 && "$MANAGED_AGENT_SESSIONS" -eq 0 &&
+     "$MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN" -eq 0 &&
+     $(( MANAGED_AGENT_UPDATE_RUNTIME_SEEN + MANAGED_AGENT_UPDATE_IMAGE_SEEN + MANAGED_AGENT_UPDATE_SHA_SEEN )) -eq 0 ]] ||
+    { usage; exit 2; }
+fi
 
 if (( MANAGED_AGENT_UPDATE_RUNTIME_SEEN + MANAGED_AGENT_UPDATE_IMAGE_SEEN + MANAGED_AGENT_UPDATE_SHA_SEEN > 0 )); then
   [[ "$MANAGED_AGENT_UPDATE_RUNTIME_SEEN" -eq 1 && "$MANAGED_AGENT_UPDATE_IMAGE_SEEN" -eq 1 &&
@@ -977,6 +1001,191 @@ stop_smoke_mesh() {
   jq -e '.stopped == true and .state == "stopped"' "$LAST_STDOUT" >/dev/null ||
     die 'standalone Mesh shutdown metadata drifted'
   MESH_STARTED=0
+}
+
+# Local broker epoch renewal (--broker-renewal-observation). The local
+# credential authority replaces each broker child with an overlapping successor
+# before the child's 600 s lifetime ends. A guest request loop keeps managed
+# OpenAI requests in flight through the credential bridge across that
+# handover; every one must succeed, the predecessor must exit only after the
+# successor runs, and the successor must keep serving.
+readonly BROKER_LIFETIME_SECONDS=600
+readonly BROKER_SUCCESSOR_LEAD_SECONDS=90
+
+environment_broker_children() {
+  # One "PID START_EPOCH_SECONDS" line per live broker child of this exact
+  # environment, identified by its spawner's argv.
+  /usr/bin/env python3 - "$CW_BIN" "$ENVIRONMENT_ID" <<'PY'
+import os
+import sys
+
+cw, environment = os.fsencode(os.path.realpath(sys.argv[1])), os.fsencode(sys.argv[2])
+with open("/proc/stat", "r", encoding="ascii") as source:
+    boot = next(int(line.split()[1]) for line in source if line.startswith("btime "))
+ticks = os.sysconf("SC_CLK_TCK")
+for entry in os.listdir("/proc"):
+    if not entry.isdigit():
+        continue
+    try:
+        with open(f"/proc/{entry}/cmdline", "rb") as source:
+            argv = source.read().split(b"\0")
+        with open(f"/proc/{entry}/stat", "r", encoding="ascii") as source:
+            fields = source.read().rsplit(") ", 1)[1].split()
+    except OSError:
+        continue
+    if fields[0] in ("Z", "X") or len(argv) < 6 or argv[0] != cw:
+        continue
+    if argv[1] == b"__local-credential-broker" and argv[4:6] == [b"--environment-id", environment]:
+        print(entry, f"{boot + int(fields[19]) / ticks:.2f}")
+PY
+}
+
+start_broker_renewal_requests() {
+  rm -f -- "$DIRECT_RW_SOURCE/broker-renewal.log" "$DIRECT_RW_SOURCE/broker-renewal.stop"
+  # Three workers each send one streamed synthetic OpenAI request through the
+  # selected credential route, record "START_MS END_MS STATUS BYTES" and send
+  # the next 50 ms later, until the stop file appears.
+  # shellcheck disable=SC2016 # JavaScript template literals, evaluated in the guest.
+  cw_isolated run --no-tty -- node -e '
+    const http = require("http"), fs = require("fs");
+    const [log, stop] = process.argv.slice(1);
+    if (process.env.OPENAI_BASE_URL !== "http://127.0.0.1:38081/_codewire/openai/v1" ||
+        process.env.OPENAI_API_KEY !== "codewire-managed") process.exit(81);
+    const url = new URL(process.env.OPENAI_BASE_URL + "/responses");
+    const body = JSON.stringify({model: "codewire-synthetic", input: "Return the synthetic marker.", stream: true});
+    const out = fs.openSync(log, "a");
+    let active = 3;
+    const record = (start, status, bytes) => fs.writeSync(out, `${start} ${Date.now()} ${status} ${bytes}\n`);
+    function next() {
+      if (fs.existsSync(stop)) {
+        if (--active === 0) { fs.closeSync(out); process.stdout.write("broker-renewal-requests-done\n"); }
+        return;
+      }
+      const start = Date.now();
+      let settled = false;
+      const settle = (status, bytes) => { if (!settled) { settled = true; record(start, status, bytes); setTimeout(next, 50); } };
+      const request = http.request(url, {method: "POST", headers: {"content-type": "application/json",
+        "authorization": "Bearer " + process.env.OPENAI_API_KEY, "content-length": Buffer.byteLength(body)}},
+        (response) => {
+          let bytes = 0;
+          response.on("data", (chunk) => { bytes += chunk.length; });
+          response.on("end", () => settle(response.statusCode, bytes));
+          response.on("error", () => settle("error", bytes));
+        });
+      request.setTimeout(30000, () => request.destroy(new Error("timeout")));
+      request.on("error", () => settle("error", 0));
+      request.end(body);
+    }
+    for (let worker = 0; worker < 3; worker++) next();
+  ' /workspace/direct-rw/broker-renewal.log /workspace/direct-rw/broker-renewal.stop \
+    >"$SMOKE_ROOT/broker-renewal.stdout" 2>"$SMOKE_ROOT/broker-renewal.stderr" &
+  BROKER_RENEWAL_PROBE_PID=$!
+  for _attempt in {1..240}; do
+    if [[ -f "$DIRECT_RW_SOURCE/broker-renewal.log" ]] &&
+       (( $(awk '$3 == "200"' "$DIRECT_RW_SOURCE/broker-renewal.log" | wc -l) >= 3 )); then
+      return 0
+    fi
+    sleep 0.25
+  done
+  cat "$SMOKE_ROOT/broker-renewal.stdout" "$SMOKE_ROOT/broker-renewal.stderr" >>"$TRANSCRIPT" 2>/dev/null || true
+  die 'managed requests through the local broker did not start succeeding'
+}
+
+broker_renewal_requests_live() {
+  # The guest loop outlives the `cw run` client, which can return as soon as
+  # the session starts. Its log is the evidence: a request finished within
+  # the last 15 seconds.
+  local last
+  last="$(tail -n 1 "$DIRECT_RW_SOURCE/broker-renewal.log" 2>/dev/null | awk '{ print $2 }')"
+  [[ "$last" =~ ^[0-9]+$ ]] && (( $(date +%s%3N) - last < 15000 ))
+}
+
+stop_broker_renewal_requests() {
+  local before after
+  touch "$DIRECT_RW_SOURCE/broker-renewal.stop"
+  # Every worker sees the stop file within one request; the log then stops
+  # growing.
+  before=-1
+  for _attempt in {1..60}; do
+    sleep 1
+    after="$(stat -c '%s' "$DIRECT_RW_SOURCE/broker-renewal.log")"
+    [[ "$after" == "$before" ]] && break
+    before="$after"
+  done
+  if kill -0 "$BROKER_RENEWAL_PROBE_PID" 2>/dev/null; then
+    pkill -TERM -P "$BROKER_RENEWAL_PROBE_PID" 2>/dev/null || true
+    kill -TERM "$BROKER_RENEWAL_PROBE_PID" 2>/dev/null || true
+  fi
+  wait "$BROKER_RENEWAL_PROBE_PID" 2>/dev/null || true
+  BROKER_RENEWAL_PROBE_PID=''
+  cat "$SMOKE_ROOT/broker-renewal.stdout" "$SMOKE_ROOT/broker-renewal.stderr" >>"$TRANSCRIPT" 2>/dev/null || true
+}
+
+run_broker_renewal_observation() {
+  local predecessor predecessor_start successor successor_start children deadline now predecessor_exit
+  log 'broker renewal: keeping managed requests in flight across a local broker epoch handover'
+  mapfile -t children < <(environment_broker_children)
+  [[ ${#children[@]} -eq 1 ]] || die "expected exactly one local broker child, found ${#children[@]}"
+  read -r predecessor predecessor_start <<<"${children[0]}"
+  start_broker_renewal_requests
+  deadline="$(awk -v at="$predecessor_start" -v life="$BROKER_LIFETIME_SECONDS" 'BEGIN { printf "%d", at + life + 60 }')"
+  successor=''
+  while [[ -z "$successor" ]]; do
+    now="$(date +%s)"
+    (( now <= deadline )) || die 'no successor local broker started before its predecessor lifetime ended'
+    broker_renewal_requests_live || die 'the managed request loop ended before the broker handover'
+    while read -r pid start; do
+      [[ -n "$pid" && "$pid" != "$predecessor" ]] && { successor="$pid"; successor_start="$start"; }
+    done < <(environment_broker_children)
+    [[ -n "$successor" ]] || sleep 1
+  done
+  log "broker renewal: successor $successor started $(awk -v a="$successor_start" -v b="$predecessor_start" 'BEGIN { printf "%.1f", a - b }') s after predecessor $predecessor"
+  while [[ -r "/proc/$predecessor/stat" && "$(awk '{ print $3 }' "/proc/$predecessor/stat" 2>/dev/null)" != Z ]]; do
+    (( $(date +%s) <= deadline )) || die 'the predecessor local broker outlived its lifetime'
+    broker_renewal_requests_live || die 'the managed request loop ended during the broker handover'
+    sleep 0.5
+  done
+  predecessor_exit="$(date +%s.%N)"
+  sleep 15
+  [[ -d "/proc/$successor" ]] || die 'the successor local broker exited after the handover'
+  stop_broker_renewal_requests
+  cp -- "$DIRECT_RW_SOURCE/broker-renewal.log" "$SMOKE_ROOT/broker-renewal.log"
+  /usr/bin/env python3 - "$SMOKE_ROOT/broker-renewal.log" "$predecessor_start" "$successor_start" \
+    "$predecessor_exit" "$BROKER_LIFETIME_SECONDS" "$BROKER_SUCCESSOR_LEAD_SECONDS" <<'PY' >&2 || die 'managed requests did not cross the local broker handover cleanly'
+import sys
+
+path = sys.argv[1]
+predecessor_start, successor_start, predecessor_exit = (float(value) for value in sys.argv[2:5])
+lifetime, lead = int(sys.argv[5]), int(sys.argv[6])
+requests = []
+with open(path, "r", encoding="ascii") as source:
+    for line in source:
+        start, end, status, size = line.split()
+        requests.append((int(start) / 1000, int(end) / 1000, status, int(size)))
+failed = [request for request in requests if request[2] != "200" or request[3] == 0]
+across = [request for request in requests if request[0] <= predecessor_exit and request[1] >= successor_start]
+spanning = [request for request in across if request[0] < successor_start < request[1] or
+            request[0] < predecessor_exit < request[1]]
+after = [request for request in requests if request[0] > predecessor_exit]
+served = predecessor_exit - predecessor_start
+spawned = successor_start - predecessor_start
+print(f"[native-local-environment-smoke] broker renewal: {len(requests)} managed requests, "
+      f"{len(failed)} failed; {len(across)} between the successor start and the predecessor exit, "
+      f"{len(spanning)} in flight at either edge, max latency there "
+      f"{max((end - start for start, end, _, _ in across), default=0):.3f} s; {len(after)} after the predecessor exit; "
+      f"successor started {spawned:.1f} s and predecessor exited {served:.1f} s after the predecessor started")
+if failed:
+    print("[native-local-environment-smoke] broker renewal failures: " +
+          ", ".join(f"{start:.3f}:{status}" for start, _, status, _ in failed[:20]))
+if failed or len(across) < 10 or len(after) < 3:
+    raise SystemExit(1)
+if not lifetime - lead - 20 <= spawned <= lifetime - lead + 20:
+    raise SystemExit(1)
+if not lifetime - 5 <= served <= lifetime + 20:
+    raise SystemExit(1)
+PY
+  cat "$SMOKE_ROOT/broker-renewal.log" >>"$TRANSCRIPT"
+  log 'broker renewal: passed'
 }
 
 # Linux network qualification (--network-qualification). The packet worker,
@@ -2548,11 +2757,13 @@ cleanup() {
   trap - EXIT HUP INT TERM
   ALLOW_REGISTRY_EGRESS=0
   CW_COMMAND_TIMEOUT_SECONDS=180
-  if [[ -n "$NETWORK_PROBE_PID" ]]; then
-    pkill -TERM -P "$NETWORK_PROBE_PID" 2>/dev/null || true
-    kill -TERM "$NETWORK_PROBE_PID" 2>/dev/null || true
-    wait "$NETWORK_PROBE_PID" 2>/dev/null || true
-  fi
+  local probe_pid
+  for probe_pid in "$NETWORK_PROBE_PID" "$BROKER_RENEWAL_PROBE_PID"; do
+    [[ -n "$probe_pid" ]] || continue
+    pkill -TERM -P "$probe_pid" 2>/dev/null || true
+    kill -TERM "$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+  done
   if [[ "$ENV_CREATED" -eq 1 && -f "$STATE_ROOT/supervisor.db" ]]; then
     if [[ "$status" -eq 0 ]]; then
       log 'cleaning native environment after incomplete smoke'
@@ -2990,33 +3201,37 @@ run_cw run --no-tty -- /bin/sh -lc \
   die 'direct-share symlink access mutated unselected host content'
 
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
-  run_application_secret_smoke
-  if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
-    log 'checking actual pinned guest managed sessions and parent continuation'
-    run_native_managed_agent_smoke
+  if [[ "$BROKER_RENEWAL_OBSERVATION" -eq 1 ]]; then
+    run_broker_renewal_observation
+  else
+    run_application_secret_smoke
+    if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
+      log 'checking actual pinned guest managed sessions and parent continuation'
+      run_native_managed_agent_smoke
+    fi
+    log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
+    run_managed_credential_broker_smoke
+    run_cw credentials --local get "id:$CREDENTIAL_ID" --output json
+    jq -e '
+      length == 1 and
+      .[0].status == "revoked" and
+      .[0].revocation_generation == 2 and
+      .[0].protected_store_persistence == "operating_system" and
+      .[0].cleanup_pending == false
+    ' "$LAST_STDOUT" >/dev/null || die 'synthetic credential revocation metadata drifted'
+    run_cw credentials --local get "id:$SSH_CREDENTIAL_ID" --output json
+    jq -e --arg key "$SSH_PUBLIC_KEY" --arg fingerprint "$SSH_PUBLIC_KEY_FINGERPRINT" '
+      length == 1 and
+      .[0].provider == "ssh" and
+      .[0].authentication_kind == "ssh_key" and
+      .[0].status == "revoked" and
+      .[0].revocation_generation == 2 and
+      .[0].ssh_public_key.openssh == $key and
+      .[0].ssh_public_key.fingerprint == $fingerprint and
+      .[0].protected_store_persistence == "operating_system" and
+      .[0].cleanup_pending == false
+    ' "$LAST_STDOUT" >/dev/null || die 'synthetic SSH revocation metadata drifted'
   fi
-  log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
-  run_managed_credential_broker_smoke
-  run_cw credentials --local get "id:$CREDENTIAL_ID" --output json
-  jq -e '
-    length == 1 and
-    .[0].status == "revoked" and
-    .[0].revocation_generation == 2 and
-    .[0].protected_store_persistence == "operating_system" and
-    .[0].cleanup_pending == false
-  ' "$LAST_STDOUT" >/dev/null || die 'synthetic credential revocation metadata drifted'
-  run_cw credentials --local get "id:$SSH_CREDENTIAL_ID" --output json
-  jq -e --arg key "$SSH_PUBLIC_KEY" --arg fingerprint "$SSH_PUBLIC_KEY_FINGERPRINT" '
-    length == 1 and
-    .[0].provider == "ssh" and
-    .[0].authentication_kind == "ssh_key" and
-    .[0].status == "revoked" and
-    .[0].revocation_generation == 2 and
-    .[0].ssh_public_key.openssh == $key and
-    .[0].ssh_public_key.fingerprint == $fingerprint and
-    .[0].protected_store_persistence == "operating_system" and
-    .[0].cleanup_pending == false
-  ' "$LAST_STDOUT" >/dev/null || die 'synthetic SSH revocation metadata drifted'
 
   if [[ "$NETWORK_QUALIFICATION" -eq 1 ]]; then
     run_network_qualification

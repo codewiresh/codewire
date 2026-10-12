@@ -199,6 +199,7 @@ pub async fn admit_create_sources_in(
     };
     let (selection, profile) =
         resolve_selection_in(tx, profiles, user, organization, &selection, None).await?;
+    require_ssh_key_for_ssh_repositories(&body.project_spec, profile.as_ref())?;
     confirm_sources(
         user,
         &selection,
@@ -523,6 +524,38 @@ fn confirm_sources(
     Ok(())
 }
 
+/// An SSH repository source can only be checked out with the profile's SSH key.
+/// Refusing it here, inside the create transaction, records nothing. The
+/// detail never echoes repository data.
+fn require_ssh_key_for_ssh_repositories(
+    spec: &ProjectSpec,
+    profile: Option<&AccessProfile>,
+) -> AppResult<()> {
+    let ssh_key = profile.is_some_and(|profile| {
+        profile
+            .entries
+            .keys()
+            .any(|slot| slot.as_str() == SSH_CAPABILITY_SLOT)
+    });
+    let ssh_source = spec.repositories.iter().any(|repository| {
+        codewire_project::parse_repository_ssh_host(&repository.source)
+            .is_ok_and(|host| host.is_some())
+    });
+    if ssh_source && !ssh_key {
+        return Err(super::environments::coded(
+            axum::http::StatusCode::BAD_REQUEST,
+            "repository_credentials_required",
+            "SSH repository checkout needs an SSH key in the selected credential profile; \
+             add one, or use an https://github.com URL with a GitHub connection",
+        ));
+    }
+    Ok(())
+}
+
+/// The profile slot that selects the Sandbox's SSH signer, as the worker's
+/// [`codewire_access::ManagedCredentialClients::from_profile_slots`] reads it.
+const SSH_CAPABILITY_SLOT: &str = "ssh";
+
 /// Every personal profile includes the account's current GitHub connection,
 /// resolved at binding time. A missing one is omitted instead of fabricated.
 async fn github_connection_in(
@@ -719,6 +752,56 @@ mod tests {
         let mut bad = selected;
         bad.secrets.user = Some(StoragePlacement::Local);
         assert!(require_canonical(&bad).is_err());
+    }
+
+    fn profile_with(slots: &[&str]) -> AccessProfile {
+        AccessProfile {
+            id: AccessProfileId::parse("profile").unwrap(),
+            placement: codewire_access::Placement::Platform,
+            owner: Owner::User(OwnerId::parse("creator").unwrap()),
+            name: AccessProfileName::parse("work").unwrap(),
+            revision: 1,
+            entries: slots
+                .iter()
+                .map(|slot| {
+                    (
+                        codewire_access::CapabilitySlot::parse(*slot).unwrap(),
+                        CredentialId::parse(format!("credential-{slot}")).unwrap(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_ssh_repository_needs_the_profile_ssh_key_before_anything_is_recorded() {
+        let private = "git@github.com:private-canary/app.git";
+        let spec = codewire_project::parse_project_yaml(&format!(
+            "repositories:\n  - source: {private}\n    known_hosts: ['{}']\n",
+            codewire_project::GITHUB_SSH_KNOWN_HOSTS[1]
+        ))
+        .unwrap()
+        .spec;
+        let without_ssh = profile_with(&["anthropic"]);
+        for profile in [None, Some(&without_ssh)] {
+            let error = require_ssh_key_for_ssh_repositories(&spec, profile).unwrap_err();
+            let detail = format!("{error:?}");
+            assert!(
+                detail.contains("repository_credentials_required"),
+                "{detail}"
+            );
+            assert!(detail.contains("needs an SSH key"), "{detail}");
+            assert!(!detail.contains("private-canary"), "{detail}");
+        }
+        require_ssh_key_for_ssh_repositories(&spec, Some(&profile_with(&["ssh"]))).unwrap();
+        // HTTPS sources need no key: SSH is preferred, never required.
+        let https = codewire_project::parse_project_yaml(
+            "repositories: [{source: https://github.com/org/app.git}]\n",
+        )
+        .unwrap()
+        .spec;
+        require_ssh_key_for_ssh_repositories(&https, None).unwrap();
+        require_ssh_key_for_ssh_repositories(&https, Some(&without_ssh)).unwrap();
     }
 
     #[test]
