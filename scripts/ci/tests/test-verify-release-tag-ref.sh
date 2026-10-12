@@ -544,6 +544,7 @@ python3 -B "$ROOT/scripts/ci/tests/test-local-runtime-parts.py" >/dev/null 2>&1 
   echo 'local runtime parts and source pin tests failed' >&2
   exit 1
 }
+"$ROOT/scripts/ci/tests/test-dry-run-superseded.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh"
 "$ROOT/scripts/ci/tests/test-fetch-openbao-release-signing-key.sh"
 

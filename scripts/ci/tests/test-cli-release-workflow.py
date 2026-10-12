@@ -419,7 +419,7 @@ def check_dry_run(text):
             errors.append(message)
 
     blocks = jobs(text)
-    need(list(blocks) == ["protected-main", "build-runtime-linux", "build-darwin", "assemble"],
+    need(list(blocks) == ["protected-main", "superseded", "build-runtime-linux", "build-darwin", "assemble"],
          "unexpected dry-run job set")
     # Forgejo cancels the older push run of a workflow with no `concurrency`
     # block. With a group and `cancel-in-progress: false`, runs queue in push
@@ -427,15 +427,28 @@ def check_dry_run(text):
     need("\nconcurrency:\n  group: cw-release-dry-run-${{ github.ref }}\n  cancel-in-progress: false\n\n" in text,
          "a newer main push can cancel a running dry run")
     guard, runtime = blocks.get("protected-main", ""), blocks.get("build-runtime-linux", "")
+    superseded = blocks.get("superseded", "")
     darwin, assemble = blocks.get("build-darwin", ""), blocks.get("assemble", "")
     need("    runs-on: ci-lite\n" in guard and "actions-checkout" not in guard
          and "[ \"$GITHUB_REF\" = 'refs/heads/main' ]" in guard
          and "[ \"$GITHUB_REF_NAME\" = 'main' ]" in guard and not re.search(r"^\s+if:", guard, re.M),
          "the dry run does not refuse every ref but main before the protected builders")
-    need("    needs: [protected-main, build-runtime-linux]\n" in darwin,
+    need("    needs: [protected-main, superseded, build-runtime-linux]\n" in darwin,
          "the macOS build does not wait for the main-only guard and the runtime's Linux side")
-    need("    needs: [protected-main]\n    runs-on: ci-protected\n" in runtime,
+    need("    needs: [protected-main, superseded]\n" in runtime and "    runs-on: ci-protected\n" in runtime,
          "the runtime's Linux side does not wait for the main-only guard on a protected runner")
+    # Forgejo keeps every queued run. Only the newest queued commit needs the
+    # protected builders and the Mac; the checked-in rule says when an older
+    # one may skip without losing a check (test-dry-run-superseded.sh).
+    skip_unless_newest = "    if: needs.superseded.outputs.superseded == 'false'\n"
+    need(skip_unless_newest in runtime and skip_unless_newest in darwin,
+         "a superseded dry run still reaches the protected builders or the Mac")
+    need("    needs: [protected-main]\n    runs-on: ci-lite\n" in superseded
+         and not re.search(r"^\s+if:", superseded, re.M)
+         and "      superseded: ${{ steps.canonical.outputs.superseded }}\n" in superseded
+         and "          BEFORE: ${{ github.event.before }}\n" in superseded
+         and 'run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"' in superseded,
+         "the dry run does not decide supersession with the checked-in rule after the main-only guard")
     # The runtime is built when one of its inputs changed, from cached slow
     # parts only; otherwise each side checks its slow parts are cached.
     select = dict(steps(runtime)).get("Select the local runtime check", "")
@@ -486,11 +499,25 @@ DRY_RUN_MUTATIONS = {
                                          "    name: Refuse anything but protected main\n    runs-on: ci-lite\n"
                                          "    if: github.event_name == 'push'\n", 1),
     "Mac build without the guard": lambda t: t.replace(
-        "    needs: [protected-main, build-runtime-linux]\n    runs-on: macos-arm64",
-        "    needs: [build-runtime-linux]\n    runs-on: macos-arm64", 1),
+        "    needs: [protected-main, superseded, build-runtime-linux]\n",
+        "    needs: [superseded, build-runtime-linux]\n", 1),
     "runtime build without the guard": lambda t: t.replace(
-        "    needs: [protected-main]\n    runs-on: ci-protected\n    outputs:\n      mode:",
-        "    runs-on: ci-protected\n    outputs:\n      mode:", 1),
+        "    needs: [protected-main, superseded]\n", "    needs: [superseded]\n", 1),
+    "Mac builds a superseded commit": lambda t: t.replace(
+        "    if: needs.superseded.outputs.superseded == 'false'\n    runs-on: macos-arm64\n",
+        "    runs-on: macos-arm64\n", 1),
+    "runtime builds a superseded commit": lambda t: t.replace(
+        "    if: needs.superseded.outputs.superseded == 'false'\n    runs-on: ci-protected\n",
+        "    runs-on: ci-protected\n", 1),
+    "supersession before the guard": lambda t: t.replace(
+        "    name: Skip a superseded commit\n    needs: [protected-main]\n",
+        "    name: Skip a superseded commit\n", 1),
+    "supersession without the checked-in rule": lambda t: t.replace(
+        'run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"',
+        "run: echo superseded=true >> \"$GITHUB_OUTPUT\"", 1),
+    "supersession without the push's own changes": lambda t: t.replace(
+        "          BEFORE: ${{ github.event.before }}\n        run: scripts/ci/release/dry-run-superseded.sh",
+        "          BEFORE: ''\n        run: scripts/ci/release/dry-run-superseded.sh", 1),
     "Linux dry run builds slow parts": lambda t: t.replace(
         'TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 ', 'TMPDIR="$work/tmp" ', 1),
     "Mac dry run builds slow parts": lambda t: t.replace(
