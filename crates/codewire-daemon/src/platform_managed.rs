@@ -298,6 +298,13 @@ pub(crate) fn validate_selection(config: &Config, origin: &Origin) -> Result<(),
         || bridge.environment_generation != origin.binding_generation
         || bridge.ingress_uid != 1000 || bridge.ingress_gid != 1000
         || projection.selection_sha256 != origin.projection_selection_sha256
+        // The driver is started through the launch projection's launcher, so
+        // that launcher must be the very image this origin pins and hashes,
+        // never merely a configured path that happens to equal it today.
+        || projection
+            .native
+            .as_ref()
+            .is_none_or(|native| native.helper_path != Path::new(IMAGE))
         || origin
             .agent
             .route(config.managed_credential_clients)
@@ -489,7 +496,10 @@ mod tests {
             host: None,
             launch_projection: Some(crate::LaunchProjectionConfig {
                 selection_sha256: [7; 32],
-                native: None,
+                native: Some(crate::NativeLaunchProjectionConfig {
+                    helper_path: IMAGE.into(),
+                    process_directory: crate::config::HOSTED_PROCESS_DIRECTORY.into(),
+                }),
             }),
             credential_bridge: Some(crate::CredentialBridgeConfig {
                 transport: CredentialBridgeTransport::Hosted,
@@ -556,6 +566,90 @@ mod tests {
             .unwrap()
             .environment_generation -= 1;
         assert!(validate_selection(&config, &origin).is_err());
+    }
+
+    /// The managed driver is started through the launch projection's
+    /// launcher. Only the pinned, hashed image may be that launcher: a
+    /// different path, or no launcher at all, refuses the selection before
+    /// any image I/O.
+    #[test]
+    fn platform_managed_selection_requires_the_pinned_image_as_the_projection_launcher() {
+        let environment = uuid::Uuid::new_v4();
+        let native = |helper: &str| {
+            Some(crate::NativeLaunchProjectionConfig {
+                helper_path: helper.into(),
+                process_directory: crate::config::HOSTED_PROCESS_DIRECTORY.into(),
+            })
+        };
+        let mut config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: "/workspace".into(),
+            home_root: HOME.into(),
+            auth_token: crate::DaemonAuthToken::new("synthetic-platform-launcher").unwrap(),
+            process_execution: ProcessExecution::Native,
+            host: None,
+            launch_projection: Some(crate::LaunchProjectionConfig {
+                selection_sha256: [7; 32],
+                native: native(IMAGE),
+            }),
+            credential_bridge: Some(crate::CredentialBridgeConfig {
+                transport: CredentialBridgeTransport::Hosted,
+                environment_id: environment,
+                environment_generation: 3,
+                ingress_socket: "/run/codewire/fixture-only.sock".into(),
+                ingress_uid: 1000,
+                ingress_gid: 1000,
+            }),
+            managed_credential_clients:
+                codewire_access::ManagedCredentialClients::from_profile_slots(["anthropic"])
+                    .unwrap(),
+            session_working_dir: None,
+        };
+        let origin = Origin {
+            version: 1,
+            environment_id: environment.to_string(),
+            org_id: "fixture".into(),
+            pod_uid: uuid::Uuid::new_v4().to_string(),
+            binding_generation: 3,
+            projection_selection_sha256: [7; 32],
+            driver_id: uuid::Uuid::new_v4().to_string(),
+            agent: Agent::Claude,
+            support_image_sha256: [8; 32],
+            support_image_size: 1024,
+            provider: ProviderIdentity {
+                sha256: [9; 32],
+                size: 1024,
+                version: "2.1.288".into(),
+            },
+            parent_generation: None,
+        };
+        assert!(validate_selection(&config, &origin).is_ok());
+        // The hosted daemon's own configuration names exactly the pinned
+        // image, so a real managed selection passes.
+        let mut hosted = config.clone();
+        hosted.apply_hosted_projection(environment, 3, [7; 32], config.managed_credential_clients);
+        assert!(validate_selection(&hosted, &origin).is_ok());
+        assert_eq!(
+            hosted
+                .launch_projection
+                .as_ref()
+                .and_then(|projection| projection.native.as_ref())
+                .map(|native| native.helper_path.as_path()),
+            Some(Path::new(IMAGE))
+        );
+        for refused in [
+            native("/codewire/bin/cw2"),
+            native("/usr/local/bin/cw"),
+            native("/codewire/bin/../bin/cw"),
+            native("codewire/bin/cw"),
+            None,
+        ] {
+            config.launch_projection.as_mut().unwrap().native = refused.clone();
+            assert!(
+                matches!(validate_selection(&config, &origin), Err(Error::Refused)),
+                "{refused:?}"
+            );
+        }
     }
 
     #[test]
