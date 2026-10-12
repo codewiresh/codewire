@@ -133,7 +133,7 @@ const CLAUDE_DEFAULT_MODEL: &str = "claude-opus-5-5";
 const CODEX_POLICY: &str = "trusted host execution: Codex app-server danger-full-access and approvalPolicy never; native approval requests are declined";
 const CLAUDE_POLICY: &str = "trusted host execution: installed Claude CLI with the user's ordinary settings, MCP configuration and permission rules; no permission mode is passed, so the user's own default mode decides which tools run";
 const CODEX_SANDBOX_POLICY: &str = "Sandbox execution: Codex app-server danger-full-access and approvalPolicy never, through the environment's selected typed provider projection; provider material remains outside the Sandbox";
-const CLAUDE_SANDBOX_POLICY: &str = "Sandbox execution: installed Claude CLI in auto mode (--permission-mode auto) with the Sandbox user's settings, MCP configuration and permission rules, through the environment's selected typed provider projection; provider material remains outside the Sandbox";
+const CLAUDE_SANDBOX_POLICY: &str = "Sandbox execution: installed Claude CLI in auto mode (--permission-mode auto), as `claude` runs for the user in this Sandbox, with the user's and the repository's Claude settings, MCP configuration and permission rules; by default it uses the selected credential through the broker, and those settings or the declared environment can choose another provider or credential; no Codewire-held credential material enters the Sandbox either way";
 /// Managed Claude's permission mode on a Sandbox placement, a local VM or a
 /// hosted Sandbox: auto mode, so that a headless turn can use tools with no
 /// person to answer a prompt. The pinned Claude Code 2.1.288 lists `auto`
@@ -4652,12 +4652,20 @@ mod tests {
         assert!(sandbox.starts_with("Sandbox execution"));
         assert!(sandbox.contains(&CLAUDE_SANDBOX_PERMISSION_MODE.join(" ")));
         assert!(agent_policy(true, AgentKind::Codex).contains("danger-full-access"));
-        for agent in [AgentKind::Codex, AgentKind::Claude] {
-            assert!(
-                agent_policy(true, agent)
-                    .ends_with("provider material remains outside the Sandbox")
-            );
-        }
+        assert!(
+            agent_policy(true, AgentKind::Codex)
+                .ends_with("provider material remains outside the Sandbox")
+        );
+        // With no lockdown, the broker route is Claude's default and not a
+        // guarantee: the policy says who can change it, and that no
+        // Codewire-held material is in the Sandbox whichever is used.
+        assert!(sandbox.contains("by default it uses the selected credential through the broker"));
+        assert!(sandbox.contains("the user's and the repository's Claude settings"));
+        assert!(sandbox.contains("can choose another provider or credential"));
+        assert!(
+            sandbox.ends_with("no Codewire-held credential material enters the Sandbox either way")
+        );
+        assert!(!sandbox.contains("remains outside"));
         let guest = DriverEnvironment::Guest {
             id: uuid::Uuid::new_v4().to_string(),
             root: PathBuf::from("/synthetic"),
