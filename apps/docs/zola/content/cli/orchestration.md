@@ -86,7 +86,11 @@ Sign in and select your organization, then use your repository URL and an
 existing platform credential profile with a credential for each agent. Codex
 uses the profile's Codex credential (your ChatGPT sign-in or an API key), or
 its OpenAI API key when it has no Codex credential. Claude uses its Anthropic
-credential. Codewire adds the credential outside the Sandbox. A managed Codex
+credential: an API key or a Claude subscription token. A subscription token
+from `claude setup-token` supports managed and interactive turns but not the
+plan label or `/usage`, which come with the Claude sign-in; until then Claude
+Code shows "Claude API" in place of your plan. Codewire adds the credential
+outside the Sandbox. A managed Codex
 agent's own Codex home holds only the local route; a managed Claude agent uses
 the Sandbox's own Claude settings and the same local route as your terminal:
 
