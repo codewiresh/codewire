@@ -260,6 +260,15 @@ if [ -n "$leftovers" ]; then
   exit 1
 fi
 
+# The browser suite drives the dashboard's frozen Playwright install (its
+# pinned Chromium it installs itself); provide it as CI does, once per checkout.
+if [[ " ${selected[*]} " == *" dashboard-browser "* ]] \
+    && [ ! -x "$ROOT/apps/dashboard/node_modules/.bin/playwright" ]; then
+  log 'installing the frozen dashboard dependencies for the browser suite'
+  (cd "$ROOT" && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts) \
+    || die 'the frozen dashboard dependency install failed'
+fi
+
 started=$SECONDS
 for service in "${SERVICES[@]}"; do
   KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" KIND_DEPLOY_SKIP_CURRENT=1 \
