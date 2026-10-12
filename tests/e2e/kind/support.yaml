@@ -44,6 +44,11 @@ data:
   # Production set none of these: their coordinator edge has a WebPKI leaf.
   CODEWIRE_SANDBOX_PUBLIC_COORDINATOR_URL: "https://ingress-nginx-controller.ingress-nginx.svc.cluster.local"
   SANDBOX_COORDINATOR_EXTRA_ROOTS: "true"
+  # Test deployment only: each workspace daemon checks its delivered Codex
+  # login every 30 seconds instead of 120, so the credentials suite's login
+  # windows are a quarter as long. Only orchestration built with kind-e2e reads
+  # it; the daemon accepts 10-120 seconds.
+  SANDBOX_CODEX_LOGIN_CHECK_PERIOD_SECONDS: "30"
   SANDBOX_INGRESS_NAMESPACE: ingress-nginx
   SANDBOX_INGRESS_POD_NAME: ingress-nginx
 ---

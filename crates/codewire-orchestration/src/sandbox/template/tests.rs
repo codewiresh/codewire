@@ -2581,6 +2581,42 @@ mod tests {
         );
     }
 
+    /// Only Kind's test deployment selects a Codex login check period; the
+    /// workspace daemon gets it in either identity mode, and nothing else
+    /// renders the variable.
+    #[test]
+    fn kind_codex_login_check_period_renders_only_when_selected() {
+        let period = |opts: &TemplateOpts| {
+            let template = render_sandbox_template("dev-sandboxes", opts);
+            let containers = template["spec"]["podTemplate"]["spec"]["containers"]
+                .as_array()
+                .unwrap()
+                .clone();
+            let mut found = Vec::new();
+            for container in &containers {
+                for entry in container["env"].as_array().into_iter().flatten() {
+                    if entry["name"] == codewire_daemon::CODEX_LOGIN_CHECK_PERIOD_ENV {
+                        found.push((container["name"].clone(), entry["value"].clone()));
+                    }
+                }
+            }
+            found
+        };
+        let token = TemplateOpts {
+            workspace_identity: WorkspaceIdentity::EnvironmentToken,
+            daemon_auth_token: "synthetic-daemon-token".into(),
+            ..credential_opts()
+        };
+        for opts in [identity_free_opts(), token] {
+            assert!(period(&opts).is_empty());
+            let selected = TemplateOpts {
+                codex_login_check_period_seconds: Some(30),
+                ..opts
+            };
+            assert_eq!(period(&selected), vec![(json!("workspace"), json!("30"))]);
+        }
+    }
+
     #[test]
     fn identity_free_templates_carry_no_environment_state() {
         let mut variants = vec![identity_free_opts()];

@@ -852,7 +852,7 @@ fn only_a_hosted_daemon_with_codex_selected_runs_the_writer() {
 
 #[test]
 fn checks_back_off_with_jitter_while_nothing_is_delivered() {
-    let mut retry = Retry::default();
+    let mut retry = Retry::new(CODEX_LOGIN_CHECK_PERIOD);
     let mut ceiling = CODEX_LOGIN_RETRY_MIN;
     for _ in 0..12 {
         let delay = retry.after(CodexLoginSync::Unavailable);
@@ -875,6 +875,17 @@ fn checks_back_off_with_jitter_while_nothing_is_delivered() {
     }
     // A decision resets the backoff.
     assert!(retry.after(CodexLoginSync::Unavailable) <= CODEX_LOGIN_RETRY_MIN);
+}
+
+#[test]
+fn a_shorter_kind_period_bounds_checks_and_backoff() {
+    let period = std::time::Duration::from_secs(30);
+    let mut retry = Retry::new(period);
+    for _ in 0..12 {
+        assert!(retry.after(CodexLoginSync::Unavailable) <= period);
+    }
+    let delay = retry.after(CodexLoginSync::Current);
+    assert!(delay >= period * 9 / 10 && delay <= period, "{delay:?}");
 }
 
 #[test]
@@ -950,6 +961,7 @@ async fn the_task_checks_at_start_changes_nothing_without_the_capability_and_sto
     let task = tokio::spawn(run_codex_login_writer(
         fixture.writer(),
         script.clone(),
+        CODEX_LOGIN_CHECK_PERIOD,
         stopped,
     ));
     eventually(|| script.calls.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
@@ -974,6 +986,7 @@ async fn the_task_checks_at_start_changes_nothing_without_the_capability_and_sto
     let task = tokio::spawn(run_codex_login_writer(
         fixture.writer(),
         script.clone(),
+        CODEX_LOGIN_CHECK_PERIOD,
         stopped,
     ));
     eventually(|| fixture.auth().exists()).await;
