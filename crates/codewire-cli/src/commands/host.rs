@@ -13,6 +13,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// A session stop or restart may first spend up to 10 s interrupting an
 /// agent's active run; its request deadline covers that and the stop.
 const SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(20);
+/// The environment's takedown marker, in its runtime root. `cw env stop`,
+/// `restart` and `rm` write it before the host daemon is asked to stop, and
+/// the daemon writes it first when a signal stops it. The daemon removes it
+/// when it starts, so a marker always means a takedown that is under way or
+/// done. A managed noel driver reads it as evidence that its stop signal is
+/// the whole environment's.
+pub(crate) const SHUTDOWN_MARKER: &str = "shutdown.json";
 
 fn ensure_host_supported() -> anyhow::Result<()> {
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
@@ -653,7 +660,7 @@ pub(crate) async fn host_lifecycle(
         environment = current;
         environment.state = "stopped".into();
         write_private_json(&root.join("host.json"), &environment)?;
-        write_private_json(&root.join("shutdown.json"), &true)?;
+        write_private_json(&root.join(SHUTDOWN_MARKER), &true)?;
         let deadline = Instant::now() + STOP_TIMEOUT;
         loop {
             if let Some(available) = HostLock::acquire(&root.join("daemon.lock"))? {
@@ -715,8 +722,8 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
         }
         fs::remove_file(&socket)?;
     }
-    if root.join("shutdown.json").exists() {
-        fs::remove_file(root.join("shutdown.json"))?;
+    if root.join(SHUTDOWN_MARKER).exists() {
+        fs::remove_file(root.join(SHUTDOWN_MARKER))?;
     }
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
@@ -744,17 +751,28 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
     let shutdown = async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("install host daemon SIGTERM observer");
-        tokio::select! {
-            _=term.recv()=>{},
-            _=tokio::signal::ctrl_c()=>{},
+        let signalled = tokio::select! {
+            _=term.recv()=>true,
+            _=tokio::signal::ctrl_c()=>true,
             _=async {
                 loop {
-                    if shutdown_root.join("shutdown.json").is_file(){break;}
+                    if shutdown_root.join(SHUTDOWN_MARKER).is_file(){break;}
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-            }=>{},
+            }=>false,
+        };
+        if signalled {
+            // A signal takes the environment down as `cw env stop` does, and
+            // a rebooting host signals every process at once. The marker is
+            // written before anything is stopped, so a conversation's driver
+            // that is signalled too finds the takedown's evidence.
+            let _ = write_private_json(&shutdown_root.join(SHUTDOWN_MARKER), &true);
         }
     };
+    // The environment is its conversations' executor: each noel conversation
+    // its takedown paused starts again with it, and no other.
+    #[cfg(target_os = "linux")]
+    let resume = tokio::spawn(resume_paused_conversations(environment.clone()));
     #[cfg(target_os = "linux")]
     let result = codewire_daemon::serve_host_control_grpc_with_incoming(
         config,
@@ -764,6 +782,8 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
         shutdown,
     )
     .await;
+    #[cfg(target_os = "linux")]
+    resume.abort();
     #[cfg(not(target_os = "linux"))]
     let result = codewire_daemon::serve_grpc_with_incoming(config, incoming, shutdown).await;
     if let Ok(after) = fs::symlink_metadata(&socket)
@@ -772,6 +792,27 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
         fs::remove_file(&socket)?;
     }
     result
+}
+
+/// Once this daemon answers its own socket, restarts the noel conversations
+/// its environment's takedown paused. It never starts or repairs a daemon:
+/// it is the daemon, and connects only to itself.
+#[cfg(target_os = "linux")]
+async fn resume_paused_conversations(environment: HostEnvironment) {
+    let deadline = Instant::now() + START_TIMEOUT;
+    let client = loop {
+        match connect_host(&environment, SESSION_STOP_TIMEOUT).await {
+            Ok(client) => break client,
+            Err(error) if Instant::now() >= deadline => {
+                eprintln!("cw host daemon: paused noel conversations were not resumed: {error:#}");
+                return;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    };
+    if let Err(error) = resume_paused(&environment, &client).await {
+        eprintln!("cw host daemon: paused noel conversations were not all resumed: {error:#}");
+    }
 }
 
 fn host_daemon_config(

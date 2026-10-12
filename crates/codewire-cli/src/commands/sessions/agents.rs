@@ -26,6 +26,7 @@ pub(super) mod host_control;
 mod native;
 mod native_host;
 mod noel;
+mod pause;
 #[cfg(target_os = "linux")]
 mod platform_control;
 pub(crate) mod platform_host;
@@ -33,6 +34,8 @@ pub(crate) mod platform_host;
 pub(crate) use guest_peer::{AgentPeerArgs, run_agent_peer};
 #[cfg(target_os = "linux")]
 pub(crate) use native::{AgentControlArgs, run_agent_control};
+#[cfg(target_os = "linux")]
+pub(crate) use pause::resume_paused;
 #[cfg(target_os = "linux")]
 pub(crate) use platform_control::run_platform_agent_control;
 #[cfg(target_os = "linux")]
@@ -333,6 +336,8 @@ impl MessageAction {
 
 /// `accepted` is persisted by the driver before queueing and `running` before
 /// any provider write, so `accepted` proves the message was never issued.
+/// `paused` (noel only) is a running message whose environment was taken
+/// down: it is not terminal, and the conversation's next start resumes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MessageState {
@@ -341,6 +346,7 @@ enum MessageState {
     Undelivered,
     Accepted,
     Running,
+    Paused,
     Completed,
     Error,
     Interrupted,
@@ -355,6 +361,7 @@ impl MessageState {
             Self::Undelivered => "undelivered",
             Self::Accepted => "accepted",
             Self::Running => "running",
+            Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Error => "error",
             Self::Interrupted => "interrupted",
@@ -362,12 +369,14 @@ impl MessageState {
         }
     }
 
+    /// `paused` ranks with `running`: only [`MessageRecord::pause`] and
+    /// [`MessageRecord::resume`] move between the two.
     fn rank(self) -> u8 {
         match self {
             Self::Requested => 0,
             Self::PipeWritten | Self::Undelivered => 1,
             Self::Accepted => 2,
-            Self::Running => 3,
+            Self::Running | Self::Paused => 3,
             Self::Completed | Self::Error | Self::Interrupted | Self::Unknown => 4,
         }
     }
@@ -407,6 +416,31 @@ struct ParentNotification {
     updated_at: String,
 }
 
+/// Why a message is paused. Closed: only a takedown of the conversation's
+/// whole environment pauses one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PauseReason {
+    EnvironmentStopped,
+}
+
+impl PauseReason {
+    fn text(self) -> &'static str {
+        match self {
+            Self::EnvironmentStopped => "environment stopped",
+        }
+    }
+}
+
+/// A message's latest pause. It stays on the record after the message
+/// resumes.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessagePause {
+    reason: PauseReason,
+    paused_at: String,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MessageRecord {
@@ -429,9 +463,16 @@ struct MessageRecord {
     native_acknowledged: bool,
     /// noel only: how often its run was resumed after a crash, counted
     /// before each resume is sent. Absent while zero, so other records keep
-    /// their bytes.
+    /// their bytes. A resume after a pause is not a crash and is not counted.
     #[serde(default, skip_serializing_if = "is_zero")]
     native_resumed: u32,
+    /// noel only: its latest pause, while paused and after. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pause: Option<MessagePause>,
+    /// noel only: how the one pause notice reached the parent's inbox.
+    /// `notification` stays the final notice's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pause_notification: Option<ParentNotification>,
     /// Target-owned birth proof for member messages; ordinary records keep
     /// their established wire bytes and do not acquire a guessed generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -492,6 +533,8 @@ impl MessageRecord {
             finished_at: None,
             native_acknowledged: false,
             native_resumed: 0,
+            pause: None,
+            pause_notification: None,
             member_launch_generation: None,
             platform_launch_generation: None,
             result: None,
@@ -503,9 +546,13 @@ impl MessageRecord {
         }
     }
 
-    /// Monotonic transition; terminal states never change.
+    /// Monotonic transition; terminal states never change. It never pauses:
+    /// see [`Self::pause`].
     fn transition(&mut self, next: MessageState) -> bool {
-        if self.state.is_terminal() || next.rank() <= self.state.rank() {
+        if self.state.is_terminal()
+            || next == MessageState::Paused
+            || next.rank() <= self.state.rank()
+        {
             return false;
         }
         let at = now();
@@ -526,6 +573,32 @@ impl MessageRecord {
         }
         self.error = Some(error.into());
         self.transition(state)
+    }
+
+    /// A running turn whose environment is taken down: held, not ended, for
+    /// the conversation's next start. Only a running turn pauses.
+    fn pause(&mut self, reason: PauseReason) -> bool {
+        if self.state != MessageState::Running || !self.action.starts_turn() {
+            return false;
+        }
+        let at = now();
+        self.state = MessageState::Paused;
+        self.pause = Some(MessagePause {
+            reason,
+            paused_at: at.clone(),
+        });
+        self.updated_at = at;
+        true
+    }
+
+    /// The conversation started again and noel continues the paused run.
+    fn resume(&mut self) -> bool {
+        if self.state != MessageState::Paused {
+            return false;
+        }
+        self.state = MessageState::Running;
+        self.updated_at = now();
+        true
     }
 
     /// The driver decides a queued message when it admits it. Only the
@@ -1005,6 +1078,21 @@ fn notification_id(source_message_id: &str) -> String {
     ))
 }
 
+/// The one notice that a worker message paused, however often it pauses.
+fn pause_notification_id(source_message_id: &str) -> String {
+    derived_id(&format!(
+        "codewire-agent-pause-notification:v1:{source_message_id}"
+    ))
+}
+
+/// The state people read: a paused message says why.
+fn state_label(record: &MessageRecord) -> String {
+    match (record.state, &record.pause) {
+        (MessageState::Paused, Some(pause)) => format!("paused: {}", pause.reason.text()),
+        (state, _) => state.name().to_owned(),
+    }
+}
+
 /// The interrupt an explicit stop or restart sends before the host daemon
 /// signals the conversation: one per active message, so a repeated stop
 /// reuses it, and the driver can tell that the stop follows it.
@@ -1477,7 +1565,7 @@ pub(super) async fn handle_agent_run_command(
         ),
         OutputFormat::Text => match &message {
             Some(record) if args.detach || !record.state.is_terminal() => {
-                println!("{}\t{}", record.id, record.state.name());
+                println!("{}\t{}", record.id, state_label(record));
             }
             Some(record) => print_message_result(record, OutputFormat::Text)?,
             None => println!("{}", session.session_id),
@@ -1738,7 +1826,7 @@ pub(crate) async fn handle_agent_inbox_command(
                     "{}\t{}\t{}\t{}\t{}{}{}",
                     record.id,
                     record.action.name(),
-                    record.state.name(),
+                    state_label(record),
                     record.created_at,
                     summary,
                     if truncated { "…" } else { "" },
@@ -1822,7 +1910,7 @@ async fn await_acceptance(dir: &Path, id: &str) -> anyhow::Result<MessageRecord>
         if Instant::now() >= deadline {
             anyhow::bail!(
                 "message {id} is {} and was not decided within {}s; it is not replayed automatically. Inspect it with `cw inbox` or `cw wait --message {id}`",
-                record.state.name(),
+                state_label(&record),
                 ACCEPT_TIMEOUT.as_secs()
             );
         }
@@ -1834,8 +1922,21 @@ enum WaitEnd {
     Terminal,
     TimedOut,
     SessionEnded(String),
+    /// The message can never end: its records or its conversation's
+    /// session are gone.
+    Gone(&'static str),
 }
 
+/// Whether the host daemon has no such session.
+fn session_missing(error: &anyhow::Error) -> bool {
+    use codewire_daemon::client::SessionClientError as E;
+    error.downcast_ref::<E>().is_some_and(
+        |error| matches!(error, E::Status(status) if status.code() == tonic::Code::NotFound),
+    )
+}
+
+/// Waits until the message ends. A paused message has not ended: the wait
+/// goes on through the pause and says so once per pause.
 async fn wait_for_message(
     environment: &HostEnvironment,
     dir: &Path,
@@ -1844,32 +1945,70 @@ async fn wait_for_message(
 ) -> anyhow::Result<(MessageRecord, WaitEnd)> {
     let deadline = Instant::now() + timeout;
     let mut next_session_check = Instant::now();
+    let mut announced = None;
+    let mut last = None;
     loop {
-        let record = load_message(dir, id)?;
+        let record = match (load_message(dir, id), last.take()) {
+            (Ok(record), _) => record,
+            // Removing the environment removes its records.
+            (Err(_), Some(record))
+                if fs::symlink_metadata(message_path(dir, id))
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok((record, WaitEnd::Gone("its environment was removed")));
+            }
+            (Err(error), _) => return Err(error),
+        };
         if record.state.is_terminal() {
             return Ok((record, WaitEnd::Terminal));
+        }
+        if record.state == MessageState::Paused {
+            let pause = record.pause.as_ref().map(|pause| pause.paused_at.clone());
+            if pause != announced {
+                eprintln!(
+                    "message {id} {}; waiting for its conversation to start again",
+                    state_label(&record)
+                );
+                announced = pause;
+            }
         }
         let current = Instant::now();
         if current >= deadline {
             return Ok((record, WaitEnd::TimedOut));
         }
-        if current >= next_session_check {
+        // A stopped environment has no daemon to ask, and asking one that is
+        // being stopped or removed would wait on its lifecycle lock.
+        if current >= next_session_check
+            && host_environment_at(&environment.root())
+                .is_ok_and(|current| current.state == "running")
+        {
             next_session_check = current + SESSION_CHECK_INTERVAL;
-            if let Ok(session) = host_target(environment)
+            match host_target(environment)
                 .get(&record.target_session_id)
                 .await
-                && session_finished(&session)
             {
-                // Reread so a final driver write is not misreported.
-                let record = load_message(dir, id)?;
-                let end = if record.state.is_terminal() {
-                    WaitEnd::Terminal
-                } else {
-                    WaitEnd::SessionEnded(session.state)
-                };
-                return Ok((record, end));
+                Ok(session) if session_finished(&session) => {
+                    // Reread so a final driver write is not misreported. A
+                    // paused message's session stays stopped until the
+                    // conversation starts again.
+                    let record = load_message(dir, id)?;
+                    if record.state.is_terminal() {
+                        return Ok((record, WaitEnd::Terminal));
+                    }
+                    if record.state != MessageState::Paused {
+                        return Ok((record, WaitEnd::SessionEnded(session.state)));
+                    }
+                }
+                Err(error) if record.state == MessageState::Paused && session_missing(&error) => {
+                    return Ok((
+                        record,
+                        WaitEnd::Gone("its conversation's session no longer exists"),
+                    ));
+                }
+                _ => {}
             }
         }
+        last = Some(record);
         tokio::time::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(current))).await;
     }
 }
@@ -1880,12 +2019,17 @@ fn wait_failure(record: &MessageRecord, end: &WaitEnd) -> Option<anyhow::Error> 
         WaitEnd::TimedOut => Some(anyhow::anyhow!(
             "timed out waiting for message {}; it is still {} and its outcome is unknown, not success",
             record.id,
-            record.state.name()
+            state_label(record)
         )),
         WaitEnd::SessionEnded(state) => Some(anyhow::anyhow!(
             "the managed conversation session is {state}; message {} remains {} and its outcome is unknown until the conversation restarts",
             record.id,
-            record.state.name()
+            state_label(record)
+        )),
+        WaitEnd::Gone(why) => Some(anyhow::anyhow!(
+            "message {} is {}, but {why}; its outcome is unknown",
+            record.id,
+            state_label(record)
         )),
     }
 }
@@ -1964,7 +2108,7 @@ fn print_message_summary(record: &MessageRecord, output: OutputFormat) -> anyhow
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(record)?),
         OutputFormat::Text => {
-            println!("{}\t{}", record.id, record.state.name());
+            println!("{}\t{}", record.id, state_label(record));
             if let Some(error) = &record.error {
                 eprintln!("{error}");
             }
@@ -1979,7 +2123,7 @@ fn print_message_result(record: &MessageRecord, output: OutputFormat) -> anyhow:
         OutputFormat::Text => {
             match (&record.state, &record.result) {
                 (MessageState::Completed, Some(result)) => println!("{result}"),
-                _ => println!("{}\t{}", record.id, record.state.name()),
+                _ => println!("{}\t{}", record.id, state_label(record)),
             }
             if record.result_truncated {
                 eprintln!("(result truncated to {MAX_RESULT_BYTES} bytes)");
@@ -2898,6 +3042,11 @@ impl Driver {
         let mut terminate = signal(SignalKind::terminate())?;
         let mut interrupt = signal(SignalKind::interrupt())?;
         let mut hangup = signal(SignalKind::hangup())?;
+        // Only a noel run pauses, by who stops it and why.
+        #[cfg(target_os = "linux")]
+        if self.config.agent == AgentKind::Noel {
+            pause::sender::watch().context("watch who stops the conversation")?;
+        }
         // Keep the spawned peer outside the initialization future. Cancelling
         // a stalled protocol handshake must retain the guardian and its family
         // until cleanup is proved, just like shutdown during a running turn.
@@ -2946,7 +3095,7 @@ impl Driver {
             }
             StartupEvent::Stop(signal) => {
                 return self
-                    .lose_peer(&mut peer, format!("startup stopped by {signal}"), true)
+                    .stopped(&mut peer, format!("startup stopped by {signal}"), true)
                     .await;
             }
             #[cfg(target_os = "linux")]
@@ -3051,30 +3200,30 @@ impl Driver {
                     log(reason);
                     Ok(())
                 }
-                DriverEvent::Native(Some(NativeLine::Closed(reason))) => {
-                    let reason = reason
-                        .map(|reason| format!(": {reason}"))
-                        .unwrap_or_default();
-                    let reason = format!("the native agent closed its output{reason}");
-                    if self.config.agent == AgentKind::Noel
-                        && self.respawn_noel(&mut peer, &reason).await
-                    {
-                        continue;
-                    }
-                    return self.lose_peer(&mut peer, reason, false).await;
-                }
-                DriverEvent::Native(None) => {
-                    let reason = "the native agent output ended".to_owned();
-                    if self.config.agent == AgentKind::Noel
-                        && self.respawn_noel(&mut peer, &reason).await
-                    {
-                        continue;
+                DriverEvent::Native(line @ (Some(NativeLine::Closed(_)) | None)) => {
+                    let reason = match line {
+                        Some(NativeLine::Closed(Some(reason))) => {
+                            format!("the native agent closed its output: {reason}")
+                        }
+                        Some(NativeLine::Closed(None)) => {
+                            "the native agent closed its output".to_owned()
+                        }
+                        _ => "the native agent output ended".to_owned(),
+                    };
+                    if self.config.agent == AgentKind::Noel {
+                        match self.respawn_noel(&mut peer, &reason).await {
+                            noel::Respawn::Started => continue,
+                            noel::Respawn::Signalled => {
+                                return self.stopped(&mut peer, reason, false).await;
+                            }
+                            noel::Respawn::No => {}
+                        }
                     }
                     return self.lose_peer(&mut peer, reason, false).await;
                 }
                 DriverEvent::Stop(signal) => {
                     return self
-                        .lose_peer(
+                        .stopped(
                             &mut peer,
                             format!("the driver was stopped by {signal}"),
                             true,
@@ -3181,7 +3330,9 @@ impl Driver {
             }
             let previous = record.state;
             let updated = update_message(&self.dir, &record.id, |r| match r.state {
-                MessageState::Running => {
+                // Only noel pauses; any other agent's paused record could
+                // never resume and ends as a running one does.
+                MessageState::Running | MessageState::Paused => {
                     r.fail(
                         MessageState::Unknown,
                         "the driver restarted while this was in flight; outcome unknown; not replayed",
@@ -3209,7 +3360,9 @@ impl Driver {
                     self.settled.insert(updated.id.clone());
                     self.queue.push_back(updated.id);
                 }
-                MessageState::Unknown if previous == MessageState::Running => {
+                MessageState::Unknown
+                    if matches!(previous, MessageState::Running | MessageState::Paused) =>
+                {
                     self.settled.insert(updated.id.clone());
                     unknown.push(updated.id);
                 }
@@ -3220,6 +3373,22 @@ impl Driver {
             }
         }
         self.persist_state()?;
+        // A pause whose writer stopped between its two writes still owes
+        // the parent its notice.
+        if let Some(id) = self.noel.set_aside_message().map(str::to_owned) {
+            let record = load_message(&self.dir, &id)?;
+            if let Err(error) = pause::ensure_pause_notice(
+                &self.environment,
+                &self.dir,
+                &self.config,
+                &self.binding,
+                &record,
+            ) {
+                log(format!(
+                    "the pause notice for message {id} was not queued: {error:#}"
+                ));
+            }
+        }
         for id in unknown {
             let record = load_message(&self.dir, &id)?;
             self.notify_parent(&record).await;
@@ -3228,10 +3397,13 @@ impl Driver {
     }
 
     /// Worker notifications are adopted from the inbox as well as the pipe; the
-    /// single accepted transition keeps delivery at most once.
+    /// single accepted transition keeps delivery at most once. They are
+    /// adopted in the order they were made, so a worker message's pause
+    /// notice comes before its final one.
     async fn adopt_notifications(&mut self) -> anyhow::Result<()> {
         let mut adopted = false;
         let generation = self.message_generations()?;
+        let mut candidates = Vec::new();
         for id in message_ids(&self.dir)? {
             if self.settled.contains(&id) {
                 continue;
@@ -3246,6 +3418,11 @@ impl Driver {
             {
                 continue;
             }
+            candidates.push((record.created_at, id));
+        }
+        candidates.sort();
+        for (_, id) in candidates {
+            let record = load_message(&self.dir, &id)?;
             if !managed_message_generation_matches(generation, &record) {
                 update_message(&self.dir, &id, |r| {
                     r.fail(
@@ -4202,13 +4379,22 @@ impl Driver {
             }
         }
         if let Some(active) = active {
+            // A message the environment's takedown paused stays paused for
+            // the next start.
             match update_message(&self.dir, &active.message_id, |r| {
-                r.fail(
-                    MessageState::Unknown,
-                    format!("{reason}; the turn outcome is unknown and is not replayed"),
-                );
+                if r.state != MessageState::Paused {
+                    r.fail(
+                        MessageState::Unknown,
+                        format!("{reason}; the turn outcome is unknown and is not replayed"),
+                    );
+                }
             }) {
-                Ok(record) => self.notify_parent(&record).await,
+                Ok(record) if record.state.is_terminal() => self.notify_parent(&record).await,
+                Ok(record) => log(format!(
+                    "message {} stays {}",
+                    record.id,
+                    state_label(&record)
+                )),
                 Err(error) => log(format!(
                     "could not record message {} as unknown: {error:#}",
                     active.message_id
@@ -4236,39 +4422,7 @@ impl Driver {
     }
 
     fn notification_text(&self, source: &MessageRecord) -> String {
-        let who = if self.config.name.is_empty() {
-            format!("session {}", self.binding.session_id)
-        } else {
-            format!("{} (session {})", self.config.name, self.binding.session_id)
-        };
-        let header = format!(
-            "[Codewire] Managed worker {who} finished message {} as {}.",
-            source.id,
-            source.state.name()
-        );
-        let footer = format!(
-            "Follow up with: cw msg {} {} \"...\" --reply-to {}",
-            self.environment.id(),
-            self.binding.session_id,
-            source.id
-        );
-        let body = match source.state {
-            MessageState::Completed => source
-                .result
-                .clone()
-                .unwrap_or_else(|| "(the worker produced no reply text)".into()),
-            _ => source
-                .error
-                .clone()
-                .or_else(|| source.result.clone())
-                .unwrap_or_default(),
-        };
-        let budget = MAX_TEXT_BYTES.saturating_sub(header.len() + footer.len() + 32);
-        let (body, truncated) = truncate_utf8(&body, budget);
-        format!(
-            "{header}\n\n{body}{}\n\n{footer}",
-            if truncated { "\n[truncated]" } else { "" }
-        )
+        pause::final_notice_text(self.environment.id(), &self.config, &self.binding, source)
     }
 
     fn set_notification(
@@ -4447,14 +4601,28 @@ impl Driver {
             return Ok(());
         }
         let line = control_line(&parent.driver_id, &record.id)?;
+        // The parent hears of a pause before the final state: a pause notice
+        // it has not adopted yet is written to its pipe first.
+        let pause_line = source
+            .pause_notification
+            .as_ref()
+            .and_then(|notice| load_message(&parent_dir, &notice.message_id).ok())
+            .filter(|notice| notice.state.rank() < MessageState::Accepted.rank())
+            .map(|notice| control_line(&parent.driver_id, &notice.id))
+            .transpose()?;
         let sent = match host_session_client(environment).await {
-            Ok(client) => client
-                .send_input(&parent.session_id, line)
-                .await
-                .map_err(|error| {
-                    let definitive = send_error_is_definitive(&error);
-                    (definitive, error.to_string())
-                }),
+            Ok(client) => {
+                if let Some(pause_line) = pause_line {
+                    let _ = client.send_input(&parent.session_id, pause_line).await;
+                }
+                client
+                    .send_input(&parent.session_id, line)
+                    .await
+                    .map_err(|error| {
+                        let definitive = send_error_is_definitive(&error);
+                        (definitive, error.to_string())
+                    })
+            }
             Err(error) => Err((true, format!("{error:#}"))),
         };
         match sent {
@@ -4546,6 +4714,234 @@ mod tests {
             notification_id("00000000-0000-4000-8000-000000000001"),
             derived_id("codewire-agent-notification:v1:00000000-0000-4000-8000-000000000001")
         );
+        // A message's pause notice is one more record of its own.
+        let pause = pause_notification_id(&active);
+        assert_eq!(pause, pause_notification_id(&active));
+        assert_eq!(canonical_uuid(&pause).unwrap(), pause);
+        assert_ne!(pause, notification_id(&active));
+        assert_ne!(pause, id);
+        assert_ne!(
+            pause,
+            pause_notification_id(&uuid::Uuid::new_v4().to_string())
+        );
+    }
+
+    fn running(action: MessageAction) -> MessageRecord {
+        let mut record = MessageRecord::new("driver", "session", action, "task".into());
+        assert!(record.transition(MessageState::Accepted));
+        assert!(record.transition(MessageState::Running));
+        record
+    }
+
+    #[test]
+    fn only_a_running_turn_pauses_and_only_resume_takes_it_back() {
+        let reason = PauseReason::EnvironmentStopped;
+        // Not before it runs, and never by an ordinary transition.
+        let mut record =
+            MessageRecord::new("driver", "session", MessageAction::Message, "task".into());
+        assert!(!record.pause(reason) && !record.transition(MessageState::Paused));
+        assert!(record.transition(MessageState::Accepted));
+        assert!(!record.pause(reason) && !record.transition(MessageState::Paused));
+        assert_eq!(record.state, MessageState::Accepted);
+        // A steer or an interrupt is no turn of its own.
+        for action in [MessageAction::Steer, MessageAction::Interrupt] {
+            let mut control = running(action);
+            assert!(!control.pause(reason));
+            assert_eq!(control.state, MessageState::Running);
+        }
+        for action in [
+            MessageAction::Prompt,
+            MessageAction::Message,
+            MessageAction::Notification,
+        ] {
+            let mut record = running(action);
+            assert!(!record.transition(MessageState::Paused));
+            assert!(record.pause(reason));
+            assert_eq!(record.state, MessageState::Paused);
+            assert_eq!(record.state.name(), "paused");
+            // Paused is decided and not an end.
+            assert!(!record.state.is_terminal() && record.decided());
+            assert!(record.finished_at.is_none() && record.error.is_none());
+            assert!(!record.pause(reason));
+            // Nothing but resume takes it back, and nothing moves it back.
+            assert!(!record.transition(MessageState::Running));
+            assert!(!record.transition(MessageState::Accepted));
+            // It ends as a running message does.
+            for end in [
+                MessageState::Completed,
+                MessageState::Error,
+                MessageState::Interrupted,
+                MessageState::Unknown,
+            ] {
+                let mut ended = record.clone();
+                assert!(ended.transition(end));
+                assert!(ended.finished_at.is_some());
+                assert!(!ended.resume() && !ended.pause(reason));
+            }
+            assert!(record.clone().fail(MessageState::Unknown, "gone"));
+            assert!(record.resume());
+            assert_eq!(record.state, MessageState::Running);
+            assert!(!record.resume());
+            // Its pause stays on the record.
+            assert_eq!(record.pause.as_ref().unwrap().reason, reason);
+        }
+    }
+
+    #[test]
+    fn records_that_never_paused_keep_their_bytes_and_a_pause_reads_back() {
+        let mut record = running(MessageAction::Message);
+        let never = serde_json::to_value(&record).unwrap();
+        assert!(never.get("pause").is_none() && never.get("pause_notification").is_none());
+        // Records written before these fields read as before.
+        let old: MessageRecord = serde_json::from_value(never).unwrap();
+        assert!(old.pause.is_none() && old.pause_notification.is_none());
+
+        assert!(record.pause(PauseReason::EnvironmentStopped));
+        let saved = serde_json::to_value(&record).unwrap();
+        assert_eq!(saved["state"], "paused");
+        assert_eq!(
+            saved["pause"],
+            json!({"reason": "environment_stopped", "paused_at": record.updated_at})
+        );
+        let read: MessageRecord = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(
+            (read.state, &read.pause),
+            (MessageState::Paused, &record.pause)
+        );
+        // The reason is closed, and so is the pause.
+        let mut other = saved.clone();
+        other["pause"]["reason"] = json!("driver_stopped");
+        assert!(serde_json::from_value::<MessageRecord>(other).is_err());
+        let mut extra = saved;
+        extra["pause"]["until"] = json!("later");
+        assert!(serde_json::from_value::<MessageRecord>(extra).is_err());
+    }
+
+    /// A conversation's records in a host environment that is stopped, with
+    /// one running message.
+    fn waited() -> (tempfile::TempDir, HostEnvironment, PathBuf, MessageRecord) {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("environment");
+        let driver = uuid::Uuid::new_v4().to_string();
+        let dir = root.join("agents").join(&driver);
+        for path in [&root, &root.join("agents"), &dir, &dir.join("messages")] {
+            private_directory(path).unwrap();
+        }
+        let environment = HostEnvironment {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "host".into(),
+            path: root.clone(),
+            created_at: now(),
+            state: "stopped".into(),
+            runtime_root: Some(root),
+        };
+        let mut record =
+            MessageRecord::new(&driver, "session", MessageAction::Message, "task".into());
+        record.transition(MessageState::Accepted);
+        record.transition(MessageState::Running);
+        assert!(create_message(&dir, &record).unwrap());
+        (temporary, environment, dir, record)
+    }
+
+    #[tokio::test]
+    async fn wait_goes_on_through_a_pause_and_returns_only_a_final_state() {
+        let (_temporary, environment, dir, record) = waited();
+        update_message(&dir, &record.id, |r| {
+            assert!(r.pause(PauseReason::EnvironmentStopped));
+        })
+        .unwrap();
+        // A pause is no outcome: the wait does not return on it. Its timeout
+        // is still a failure, and says the message is paused.
+        let (paused, end) =
+            wait_for_message(&environment, &dir, &record.id, Duration::from_millis(400))
+                .await
+                .unwrap();
+        assert!(matches!(end, WaitEnd::TimedOut));
+        assert_eq!(paused.state, MessageState::Paused);
+        assert_eq!(
+            wait_failure(&paused, &end).unwrap().to_string(),
+            format!(
+                "timed out waiting for message {}; it is still paused: environment stopped and its outcome is unknown, not success",
+                record.id
+            )
+        );
+        assert!(message_failure(&paused).is_none());
+
+        // The conversation starts again and the run ends while it waits.
+        let resumed = {
+            let (dir, id) = (dir.clone(), record.id.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(400));
+                update_message(&dir, &id, |r| assert!(r.resume())).unwrap();
+                std::thread::sleep(Duration::from_millis(400));
+                update_message(&dir, &id, |r| {
+                    r.result = Some("done".into());
+                    r.transition(MessageState::Completed);
+                })
+                .unwrap();
+            })
+        };
+        let started = Instant::now();
+        let (done, end) = wait_for_message(&environment, &dir, &record.id, Duration::from_secs(60))
+            .await
+            .unwrap();
+        resumed.join().unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(800));
+        assert!(matches!(end, WaitEnd::Terminal));
+        assert!(wait_failure(&done, &end).is_none() && message_failure(&done).is_none());
+        // What `cw wait -o json` prints: a consumer that knows only the
+        // final states reads one of them, as before.
+        let printed = serde_json::to_value(&done).unwrap();
+        assert!(
+            ["completed", "error", "interrupted", "unknown"]
+                .contains(&printed["state"].as_str().unwrap())
+        );
+        assert_eq!(printed["result"], "done");
+    }
+
+    #[tokio::test]
+    async fn wait_ends_at_once_when_a_waiting_messages_environment_is_removed() {
+        let (_temporary, environment, dir, record) = waited();
+        update_message(&dir, &record.id, |r| {
+            assert!(r.pause(PauseReason::EnvironmentStopped));
+        })
+        .unwrap();
+        let removed = {
+            let root = environment.root();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(400));
+                fs::remove_dir_all(root).unwrap();
+            })
+        };
+        let started = Instant::now();
+        let (last, end) = wait_for_message(&environment, &dir, &record.id, Duration::from_secs(60))
+            .await
+            .unwrap();
+        removed.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert!(matches!(end, WaitEnd::Gone("its environment was removed")));
+        assert_eq!(
+            wait_failure(&last, &end).unwrap().to_string(),
+            format!(
+                "message {} is paused: environment stopped, but its environment was removed; its outcome is unknown",
+                record.id
+            )
+        );
+    }
+
+    #[test]
+    fn only_a_missing_session_ends_the_wait_for_a_paused_message() {
+        use codewire_daemon::client::SessionClientError as E;
+        assert!(session_missing(&anyhow::Error::from(E::Status(
+            tonic::Status::not_found("session not found")
+        ))));
+        for other in [
+            anyhow::Error::from(E::Status(tonic::Status::unavailable("stopping"))),
+            anyhow::Error::from(E::Connect),
+            anyhow::anyhow!("host environment is stopped"),
+        ] {
+            assert!(!session_missing(&other), "{other:#}");
+        }
     }
 
     #[test]

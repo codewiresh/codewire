@@ -179,6 +179,22 @@ enum Request {
         session_id: String,
         message_id: String,
     },
+    /// The host daemon is stopping a running conversation because its whole
+    /// environment is being taken down.
+    PauseBeforeShutdown {
+        driver_id: String,
+        session_id: String,
+    },
+    /// Retention is about to remove a stopped conversation's session record.
+    RetireBeforePrune {
+        driver_id: String,
+        session_id: String,
+    },
+    /// The host owner's explicit stop of a conversation that is not running.
+    StopPaused {
+        driver_id: String,
+        session_id: String,
+    },
 }
 
 /// How long the stop interrupt waits for an active run to report its ID,
@@ -865,6 +881,18 @@ fn handle(
             session_id,
             message_id,
         } => await_interrupt_before_stop(environment, &driver_id, &session_id, &message_id),
+        Request::PauseBeforeShutdown {
+            driver_id,
+            session_id,
+        } => pause_before_shutdown(environment, &driver_id, &session_id),
+        Request::RetireBeforePrune {
+            driver_id,
+            session_id,
+        } => resolve_paused(environment, &driver_id, &session_id, pause::RETIRED),
+        Request::StopPaused {
+            driver_id,
+            session_id,
+        } => resolve_paused(environment, &driver_id, &session_id, pause::STOPPED),
     }
 }
 
@@ -910,6 +938,11 @@ fn current_state(
 /// record `cw interrupt` makes, for the active message and its run. Only an
 /// agent that takes one gets one; for any other this answers at once and
 /// records nothing. The host daemon delivers it to the driver's input.
+///
+/// A run that has not reported its ID within the wait still gets the
+/// record, without a run: the driver refuses it, but it shows the stop was
+/// explicit, so the message is never paused and never resumed later. So does
+/// a run whose noel is starting again after a crash.
 fn interrupt_before_stop(
     environment: &DriverEnvironment,
     driver: &str,
@@ -926,22 +959,22 @@ fn interrupt_before_stop(
         let Some(state) = current_state(&dir, driver, agent)? else {
             return Ok(nothing());
         };
-        let Some(active) = state
-            .active_message_id
-            .filter(|_| state.phase == DriverPhase::Busy && state.capabilities.interrupt)
-        else {
+        let Some(active) = state.active_message_id.filter(|_| {
+            matches!(state.phase, DriverPhase::Busy | DriverPhase::Starting)
+                && state.capabilities.interrupt
+        }) else {
             return Ok(nothing());
         };
         match state.current_turn_id {
-            Some(run) => break (active, run),
+            Some(run) => break (active, Some(run)),
             None if Instant::now() < deadline => std::thread::sleep(STOP_INTERRUPT_POLL),
-            None => return Ok(nothing()),
+            None => break (active, None),
         }
     };
     let mut record = MessageRecord::new(driver, session, MessageAction::Interrupt, String::new());
     record.id = stop_interrupt_id(&active);
     record.expected_active_message_id = Some(active.clone());
-    record.expected_turn_id = Some(run.clone());
+    record.expected_turn_id = run.clone();
     let deliver = if create_message(&dir, &record)? {
         true
     } else {
@@ -960,6 +993,57 @@ fn interrupt_before_stop(
         json!({"agent": agent, "interrupt": {"message_id": record.id,
         "active_message_id": active, "run_id": run, "deliver": deliver}}),
     )
+}
+
+/// Pauses the active run of a conversation whose whole environment the host
+/// daemon is taking down, before the daemon signals it: the message is
+/// paused and its parent's one notice queued. Only a run noel can resume is
+/// paused, and never one an explicit stop recorded its interrupt for; any
+/// other conversation answers at once and nothing is recorded.
+fn pause_before_shutdown(
+    environment: &DriverEnvironment,
+    driver: &str,
+    session: &str,
+) -> anyhow::Result<Value> {
+    let (dir, config) = bound_conversation(environment, driver, session)?;
+    let agent = config.agent;
+    let nothing = || json!({"agent": agent, "paused": null});
+    let Some(state) = current_state(&dir, driver, agent)? else {
+        return Ok(nothing());
+    };
+    let Some(active) = state
+        .active_message_id
+        .filter(|_| state.capabilities.resume)
+    else {
+        return Ok(nothing());
+    };
+    let binding: AgentBinding = private_record(&dir.join("binding.json"))?;
+    let record = pause::pause_message(environment, &dir, &config, &binding, &active)?;
+    if record.state != MessageState::Paused {
+        return Ok(nothing());
+    }
+    Ok(json!({"agent": agent, "paused": active}))
+}
+
+/// A stopped conversation's paused messages will not resume: retention is
+/// about to remove its session record, so it can never start again, or its
+/// owner explicitly stopped it, so its next start must not continue the
+/// run. Each paused message ends unknown, once, with `why`, and its parent
+/// hears of it once. Other messages, and conversations with none paused,
+/// are left as they are.
+fn resolve_paused(
+    environment: &DriverEnvironment,
+    driver: &str,
+    session: &str,
+    why: &str,
+) -> anyhow::Result<Value> {
+    let (dir, config) = bound_conversation(environment, driver, session)?;
+    if !pause::has_paused(&dir)? {
+        return Ok(json!({"agent": config.agent, "resolved": []}));
+    }
+    let binding: AgentBinding = private_record(&dir.join("binding.json"))?;
+    let resolved = pause::resolve_paused(environment, &dir, &config, &binding, why)?;
+    Ok(json!({"agent": config.agent, "resolved": resolved}))
 }
 
 /// Waits at most 10 s for a stop interrupt's message to end and, for a

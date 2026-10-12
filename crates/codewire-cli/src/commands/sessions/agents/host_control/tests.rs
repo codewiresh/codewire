@@ -994,14 +994,39 @@ fn stop_interrupt_waits_briefly_for_a_starting_run_to_report_its_id() {
     let (driver, session) = f.local(AgentKind::Noel, None);
     let task = f.busy(&driver, &session, None);
     let started = Instant::now();
+    // A run that reports no ID within the wait still gets the record,
+    // without a run: it shows the stop was explicit.
+    let id = stop_interrupt_id(&task.id);
     assert_eq!(
-        f.interrupt_before_stop(&driver, &session).unwrap()["interrupt"],
-        Value::Null
+        f.interrupt_before_stop(&driver, &session).unwrap(),
+        json!({"agent": "noel", "interrupt": {"message_id": id, "active_message_id": task.id,
+            "run_id": null, "deliver": true}})
     );
     let waited = started.elapsed();
     assert!(waited >= STOP_INTERRUPT_RUN_WAIT && waited < Duration::from_secs(5));
-    assert_eq!(message_ids(&f.dir(&driver)).unwrap(), vec![task.id.clone()]);
+    let recorded = load_message(&f.dir(&driver), &id).unwrap();
+    assert_eq!(recorded.state, MessageState::Requested);
+    assert_eq!(recorded.expected_turn_id, None);
+    assert_eq!(
+        recorded.expected_active_message_id.as_deref(),
+        Some(task.id.as_str())
+    );
 
+    // So does a run whose noel is starting again after a crash.
+    let (restarting, restarting_session) = f.local(AgentKind::Noel, None);
+    let cut = f.busy(&restarting, &restarting_session, None);
+    let path = f.dir(&restarting).join("state.json");
+    let mut state: DriverState = private_record(&path).unwrap();
+    state.phase = DriverPhase::Starting;
+    write_private_json(&path, &state).unwrap();
+    assert_eq!(
+        f.interrupt_before_stop(&restarting, &restarting_session)
+            .unwrap()["interrupt"]["message_id"],
+        stop_interrupt_id(&cut.id)
+    );
+
+    let (driver, session) = f.local(AgentKind::Noel, None);
+    let task = f.busy(&driver, &session, None);
     let reporting = {
         let (dir, task) = (f.dir(&driver), task.id.clone());
         std::thread::spawn(move || {
@@ -1109,4 +1134,309 @@ fn stop_interrupt_wait_ends_when_the_message_ends_and_its_parent_notification_is
     other.expected_active_message_id = Some(next.id.clone());
     assert!(create_message(&dir, &other).unwrap());
     assert!(f.await_interrupt(&driver, &session, &other.id).is_err());
+}
+
+impl Fixture {
+    /// A trusted host's own records, as the host daemon's helper reads them.
+    fn host() -> Self {
+        let mut fixture = Self::new();
+        let root = fixture.environment.root();
+        fixture.environment = DriverEnvironment::Host(HostEnvironment {
+            id: fixture.environment.id().to_owned(),
+            name: "host".into(),
+            path: root.clone(),
+            created_at: now(),
+            state: "running".into(),
+            runtime_root: Some(root),
+        });
+        fixture
+    }
+
+    /// The conversation's noel reported that it can resume a run.
+    fn resumable(&self, driver: &str) {
+        let path = self.dir(driver).join("state.json");
+        let mut state: DriverState = private_record(&path).unwrap();
+        state.capabilities.resume = true;
+        write_private_json(&path, &state).unwrap();
+    }
+
+    /// A noel lead and a noel worker of it.
+    fn lead_and_worker(&self) -> (String, String, String) {
+        let (lead, lead_session) = self.local(AgentKind::Noel, None);
+        let (driver, session) = self.local(
+            AgentKind::Noel,
+            Some(ParentLink {
+                session_id: lead_session,
+                driver_id: lead.clone(),
+            }),
+        );
+        (lead, driver, session)
+    }
+
+    fn pause_before_shutdown(&self, driver: &str, session: &str) -> anyhow::Result<Value> {
+        // The exact request the host daemon writes.
+        let request = json!({"op": "pause_before_shutdown", "driver_id": driver,
+            "session_id": session});
+        self.run(read_request(
+            serde_json::to_vec(&request).unwrap().as_slice(),
+        )?)
+    }
+
+    fn retire_before_prune(&self, driver: &str, session: &str) -> anyhow::Result<Value> {
+        let request = json!({"op": "retire_before_prune", "driver_id": driver,
+            "session_id": session});
+        self.run(read_request(
+            serde_json::to_vec(&request).unwrap().as_slice(),
+        )?)
+    }
+
+    fn stop_paused(&self, driver: &str, session: &str) -> anyhow::Result<Value> {
+        let request = json!({"op": "stop_paused", "driver_id": driver,
+            "session_id": session});
+        self.run(read_request(
+            serde_json::to_vec(&request).unwrap().as_slice(),
+        )?)
+    }
+
+    /// The notices a lead's inbox holds for a worker message, oldest first.
+    fn notices(&self, lead: &str, source: &str) -> Vec<MessageRecord> {
+        list_messages(&self.dir(lead))
+            .unwrap()
+            .into_iter()
+            .filter(|record| {
+                record.action == MessageAction::Notification
+                    && record
+                        .source
+                        .as_ref()
+                        .is_some_and(|from| from.message_id == source)
+            })
+            .collect()
+    }
+
+    fn bytes(&self, driver: &str, message: &str) -> Vec<u8> {
+        fs::read(message_path(&self.dir(driver), message)).unwrap()
+    }
+}
+
+#[test]
+fn shutdown_pauses_only_a_run_noel_can_resume_and_queues_its_parents_notice_once() {
+    let f = Fixture::host();
+    // Codex and Claude cannot resume a run: nothing is recorded for them,
+    // and their records keep their bytes.
+    for agent in [AgentKind::Codex, AgentKind::Claude] {
+        let (driver, session) = f.local(agent, None);
+        let task = f.busy(&driver, &session, Some("turn-A"));
+        let before = f.bytes(&driver, &task.id);
+        assert_eq!(
+            f.pause_before_shutdown(&driver, &session).unwrap(),
+            json!({"agent": agent.name(), "paused": null})
+        );
+        assert_eq!(f.bytes(&driver, &task.id), before);
+        assert!(!String::from_utf8(before).unwrap().contains("pause"));
+        assert_eq!(message_ids(&f.dir(&driver)).unwrap(), vec![task.id]);
+    }
+
+    let (lead, driver, session) = f.lead_and_worker();
+    let nothing = json!({"agent": "noel", "paused": null});
+    // Before its driver reports, and while idle, there is no run to pause.
+    assert_eq!(f.pause_before_shutdown(&driver, &session).unwrap(), nothing);
+    f.set_state(&driver, AgentKind::Noel, None, None);
+    f.resumable(&driver);
+    assert_eq!(f.pause_before_shutdown(&driver, &session).unwrap(), nothing);
+    // A noel that cannot resume a run keeps its stop, as Codex and Claude do.
+    let task = f.busy(&driver, &session, Some(RUN));
+    assert_eq!(f.pause_before_shutdown(&driver, &session).unwrap(), nothing);
+    assert_eq!(
+        load_message(&f.dir(&driver), &task.id).unwrap().state,
+        MessageState::Running
+    );
+    assert!(f.notices(&lead, &task.id).is_empty());
+
+    f.resumable(&driver);
+    let reply = f.pause_before_shutdown(&driver, &session).unwrap();
+    assert_eq!(reply, json!({"agent": "noel", "paused": task.id}));
+    let paused = load_message(&f.dir(&driver), &task.id).unwrap();
+    assert_eq!(paused.state, MessageState::Paused);
+    assert_eq!(
+        paused.pause.as_ref().unwrap().reason,
+        PauseReason::EnvironmentStopped
+    );
+    assert_eq!(paused.turn_id.as_deref(), Some(RUN));
+    assert!(paused.finished_at.is_none() && paused.error.is_none());
+    // Its parent's one notice waits in the parent's inbox, an ordinary
+    // notification with fields every driver reads.
+    let id = pause_notification_id(&task.id);
+    let notices = f.notices(&lead, &task.id);
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        (notices[0].id.as_str(), notices[0].state),
+        (id.as_str(), MessageState::Requested)
+    );
+    assert_eq!(
+        notices[0].text,
+        format!(
+            "[Codewire] Managed worker session {session} paused message {}: its environment stopped. Its run continues when the environment starts again, and you will hear its final state then. Do not send it again.",
+            task.id
+        )
+    );
+    assert!(notices[0].pause.is_none() && notices[0].pause_notification.is_none());
+    let sent = paused.pause_notification.as_ref().unwrap();
+    assert_eq!(
+        (sent.message_id.as_str(), sent.state),
+        (id.as_str(), NotificationState::Pending)
+    );
+    assert!(paused.notification.is_none());
+
+    // A repeated shutdown pauses nothing again and queues no second notice.
+    let before = f.bytes(&driver, &task.id);
+    assert_eq!(f.pause_before_shutdown(&driver, &session).unwrap(), reply);
+    assert_eq!(f.bytes(&driver, &task.id), before);
+    assert_eq!(f.notices(&lead, &task.id).len(), 1);
+
+    // The conversation must be bound to the session being stopped.
+    let other = format!("session-{}", uuid::Uuid::new_v4());
+    assert!(f.pause_before_shutdown(&driver, &other).is_err());
+}
+
+#[test]
+fn shutdown_never_pauses_a_run_an_explicit_stop_recorded_its_interrupt_for() {
+    let f = Fixture::host();
+    let (lead, driver, session) = f.lead_and_worker();
+    let task = f.busy(&driver, &session, Some(RUN));
+    f.resumable(&driver);
+    f.interrupt_before_stop(&driver, &session).unwrap();
+    assert_eq!(
+        f.pause_before_shutdown(&driver, &session).unwrap(),
+        json!({"agent": "noel", "paused": null})
+    );
+    assert_eq!(
+        load_message(&f.dir(&driver), &task.id).unwrap().state,
+        MessageState::Running
+    );
+    assert!(f.notices(&lead, &task.id).is_empty());
+}
+
+#[test]
+fn a_conversation_whose_session_record_is_removed_resolves_its_paused_message_once() {
+    let f = Fixture::host();
+    let (lead, driver, session) = f.lead_and_worker();
+    let task = f.busy(&driver, &session, Some(RUN));
+    f.resumable(&driver);
+    // A message that is not paused is left as it is.
+    assert_eq!(
+        f.retire_before_prune(&driver, &session).unwrap(),
+        json!({"agent": "noel", "resolved": []})
+    );
+    assert_eq!(
+        load_message(&f.dir(&driver), &task.id).unwrap().state,
+        MessageState::Running
+    );
+    f.pause_before_shutdown(&driver, &session).unwrap();
+
+    assert_eq!(
+        f.retire_before_prune(&driver, &session).unwrap(),
+        json!({"agent": "noel", "resolved": [task.id]})
+    );
+    let ended = load_message(&f.dir(&driver), &task.id).unwrap();
+    assert_eq!(ended.state, MessageState::Unknown);
+    assert_eq!(
+        ended.error.as_deref(),
+        Some(
+            "paused when its environment stopped; its conversation's session record was removed, so it can never resume; outcome unknown; not replayed"
+        )
+    );
+    // The parent heard of the pause once and now hears of the end once.
+    let notices = f.notices(&lead, &task.id);
+    assert_eq!(
+        notices
+            .iter()
+            .map(|notice| notice.id.clone())
+            .collect::<Vec<_>>(),
+        vec![pause_notification_id(&task.id), notification_id(&task.id)]
+    );
+    assert!(notices[1].text.starts_with(&format!(
+        "[Codewire] Managed worker session {session} finished message {} as unknown.",
+        task.id
+    )));
+    assert_eq!(
+        ended.notification.as_ref().unwrap().message_id,
+        notification_id(&task.id)
+    );
+    // Nothing is resolved or said twice.
+    assert_eq!(
+        f.retire_before_prune(&driver, &session).unwrap(),
+        json!({"agent": "noel", "resolved": []})
+    );
+    assert_eq!(f.notices(&lead, &task.id).len(), 2);
+
+    // Codex and Claude records are never touched.
+    for agent in [AgentKind::Codex, AgentKind::Claude] {
+        let (driver, session) = f.local(agent, None);
+        let task = f.busy(&driver, &session, Some("turn-A"));
+        let before = f.bytes(&driver, &task.id);
+        assert_eq!(
+            f.retire_before_prune(&driver, &session).unwrap(),
+            json!({"agent": agent.name(), "resolved": []})
+        );
+        assert_eq!(f.bytes(&driver, &task.id), before);
+    }
+    let other = format!("session-{}", uuid::Uuid::new_v4());
+    assert!(f.retire_before_prune(&driver, &other).is_err());
+}
+
+#[test]
+fn an_explicit_stop_of_a_stopped_conversation_ends_its_paused_message_once() {
+    let f = Fixture::host();
+    let (lead, driver, session) = f.lead_and_worker();
+    let task = f.busy(&driver, &session, Some(RUN));
+    f.resumable(&driver);
+    // Nothing is paused yet: the stop ends nothing.
+    assert_eq!(
+        f.stop_paused(&driver, &session).unwrap(),
+        json!({"agent": "noel", "resolved": []})
+    );
+    f.pause_before_shutdown(&driver, &session).unwrap();
+    // A `cw interrupt` its driver had accepted for the run waits with it.
+    let mut interrupt =
+        MessageRecord::new(&driver, &session, MessageAction::Interrupt, String::new());
+    interrupt.expected_active_message_id = Some(task.id.clone());
+    interrupt.transition(MessageState::Accepted);
+    interrupt.transition(MessageState::Running);
+    assert!(create_message(&f.dir(&driver), &interrupt).unwrap());
+
+    assert_eq!(
+        f.stop_paused(&driver, &session).unwrap(),
+        json!({"agent": "noel", "resolved": [task.id]})
+    );
+    assert_eq!(
+        load_message(&f.dir(&driver), &interrupt.id).unwrap().state,
+        MessageState::Unknown
+    );
+    let ended = load_message(&f.dir(&driver), &task.id).unwrap();
+    assert_eq!(
+        (ended.state, ended.error.as_deref()),
+        (
+            MessageState::Unknown,
+            Some(
+                "paused when its environment stopped; its conversation was stopped before it resumed; outcome unknown; not replayed"
+            )
+        )
+    );
+    // Its next start has nothing to resume, and its parent heard of the
+    // pause once and of the end once.
+    assert!(!pause::has_paused(&f.dir(&driver)).unwrap());
+    assert_eq!(
+        f.notices(&lead, &task.id)
+            .iter()
+            .map(|notice| notice.id.clone())
+            .collect::<Vec<_>>(),
+        vec![pause_notification_id(&task.id), notification_id(&task.id)]
+    );
+    assert_eq!(
+        f.stop_paused(&driver, &session).unwrap(),
+        json!({"agent": "noel", "resolved": []})
+    );
+    assert_eq!(f.notices(&lead, &task.id).len(), 2);
+    let other = format!("session-{}", uuid::Uuid::new_v4());
+    assert!(f.stop_paused(&driver, &other).is_err());
 }
