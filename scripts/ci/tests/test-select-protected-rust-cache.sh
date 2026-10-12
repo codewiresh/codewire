@@ -187,9 +187,15 @@ grep -Fxq '    runs-on: ci-protected' <<<"$build_job" ||
   fail 'protected compiler cache is reachable outside the protected runner tier'
 grep -Fxq '      OPENBAO_ROLE: codewire-source-dev-publisher' <<<"$build_job" ||
   fail 'protected compiler cache job is not the Dev publisher identity'
-[[ "$(sed -n '/^on:$/,/^jobs:$/p' "$DEPLOY_WORKFLOW")" == "$(printf '%s\n' \
-    'on:' '  push:' '    branches: [main]' '' 'jobs:')" ]] ||
+# The trigger block ends at its first blank line; the workflow's `concurrency`
+# block follows it. No other `on:` key may exist anywhere in the file.
+[[ "$(sed -n '/^on:$/,/^$/p' "$DEPLOY_WORKFLOW")" == "$(printf '%s\n' \
+    'on:' '  push:' '    branches: [main]' '')" ]] ||
   fail 'Deploy Dev is reachable from an event other than a canonical-main push'
+[[ "$(grep -c '^on:$' "$DEPLOY_WORKFLOW")" -eq 1 ]] ||
+  fail 'Deploy Dev declares more than one trigger block'
+[[ "$(sed -n '/^on:$/,/^jobs:$/p' "$DEPLOY_WORKFLOW" | grep -Ec '^[a-z-]+:')" -eq 3 ]] ||
+  fail 'Deploy Dev declares an unexpected key between its trigger and its jobs'
 
 # Untrusted cache selection never names a protected bucket, prefix, or document,
 # and the protected selector never names the untrusted ones.
