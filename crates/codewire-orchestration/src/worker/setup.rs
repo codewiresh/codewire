@@ -621,11 +621,118 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
     input
 }
 
+/// A workspace command that ran and exited non-zero. Only its status is kept:
+/// child output never enters an error that may be logged or persisted.
+#[derive(Debug)]
+struct WorkspaceExecExited(i32);
+
+impl std::fmt::Display for WorkspaceExecExited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "workspace exec exited {}", self.0)
+    }
+}
+
+impl std::error::Error for WorkspaceExecExited {}
+
 fn require_workspace_exec_success(result: &WorkspaceExecResult) -> anyhow::Result<()> {
     if result.exit_code != 0 {
-        anyhow::bail!("workspace exec exited {}", result.exit_code);
+        return Err(WorkspaceExecExited(result.exit_code).into());
     }
     Ok(())
+}
+
+/// Whether `error` is a workspace command that ran to completion and exited
+/// with exactly `code`.
+fn exited_with(error: &anyhow::Error, code: i32) -> bool {
+    error
+        .downcast_ref::<WorkspaceExecExited>()
+        .is_some_and(|exited| exited.0 == code)
+}
+
+/// The visible note when a GitHub repository was cloned over HTTPS because
+/// GitHub refused the selected SSH key or the repository over SSH.
+const SSH_FALLBACK_WARNING: &str = "SSH key not accepted by GitHub; cloned over HTTPS";
+
+/// How one repository was cloned, for a failure that names the credential.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloneTransport {
+    /// The selected SSH key. `refused`: the server did not accept it.
+    Ssh { refused: bool },
+    /// The selected GitHub connection, through the managed bridge.
+    GitHub,
+    /// The user's HTTPS URL after GitHub refused the SSH key.
+    HttpsAfterSshRefused { github: bool },
+    /// No credential. `github`: a canonical GitHub source.
+    Anonymous { github: bool },
+}
+
+fn clone_failure_context(url: &str, transport: CloneTransport) -> String {
+    let detail = match transport {
+        CloneTransport::Ssh { refused: false } => " over SSH",
+        CloneTransport::Ssh { refused: true } => {
+            " over SSH: the server did not accept the SSH key in the Sandbox's credential profile"
+        }
+        CloneTransport::GitHub => " through the GitHub connection",
+        CloneTransport::HttpsAfterSshRefused { github: true } => {
+            " through the GitHub connection after GitHub did not accept the SSH key"
+        }
+        CloneTransport::HttpsAfterSshRefused { github: false } => {
+            " over HTTPS after GitHub did not accept the SSH key; no GitHub connection is selected"
+        }
+        CloneTransport::Anonymous { github: true } => {
+            " (no SSH key or GitHub connection is selected; a private repository needs one)"
+        }
+        CloneTransport::Anonymous { github: false } => "",
+    };
+    format!("git clone {url}{detail}")
+}
+
+/// One repository's first clone and, for a GitHub HTTPS source cloned with the
+/// selected SSH key, the HTTPS clone to run if GitHub refuses that key.
+#[derive(Debug, PartialEq, Eq)]
+struct ClonePlan {
+    clone: Vec<String>,
+    transport: CloneTransport,
+    https_fallback: Option<(Vec<String>, CloneTransport)>,
+}
+
+/// SSH first when its command exists, then the GitHub connection, then an
+/// anonymous clone. Only a GitHub HTTPS source cloned over SSH has a fallback:
+/// the user's own HTTPS URL, through the bridge when GitHub is selected.
+fn clone_plan(
+    ssh: Option<&ssh_checkout::Command>,
+    github: Option<&github_checkout::Commands>,
+    plain: Vec<String>,
+    github_source: bool,
+) -> ClonePlan {
+    let (https, https_transport) = match github {
+        Some(commands) => (commands.clone.clone(), CloneTransport::GitHub),
+        None => (
+            plain,
+            CloneTransport::Anonymous {
+                github: github_source,
+            },
+        ),
+    };
+    match ssh {
+        Some(ssh) => ClonePlan {
+            clone: ssh.argv.clone(),
+            transport: CloneTransport::Ssh { refused: false },
+            https_fallback: ssh.https_fallback.then(|| {
+                (
+                    https,
+                    CloneTransport::HttpsAfterSshRefused {
+                        github: github.is_some(),
+                    },
+                )
+            }),
+        },
+        None => ClonePlan {
+            clone: https,
+            transport: https_transport,
+            https_fallback: None,
+        },
+    }
 }
 
 fn replacement_runtime_is_current(
@@ -1624,30 +1731,71 @@ impl SetupOps for WorkerSetupOps<'_> {
                         .ensure_active(this.active_phase)
                         .await?;
                     #[cfg(feature = "kind-e2e")]
-                    let clone = super::fencing_evidence::clone_fixture_command(&repo.url)
+                    let plain = super::fencing_evidence::clone_fixture_command(&repo.url)
                         .unwrap_or_else(|| plain_clone_command(&repo.url, &dir));
                     #[cfg(not(feature = "kind-e2e"))]
-                    let clone = plain_clone_command(&repo.url, &dir);
-                    let clone = ssh_command
-                        .or_else(|| {
-                            github_command
-                                .as_ref()
-                                .map(|commands| commands.clone.clone())
-                        })
-                        .unwrap_or(clone);
+                    let plain = plain_clone_command(&repo.url, &dir);
+                    let plan = clone_plan(
+                        ssh_command.as_ref(),
+                        github_command.as_ref(),
+                        plain,
+                        codewire_project::github_ssh_source(&repo.url).is_some(),
+                    );
                     // Git's meters are English only under the C locale, which
                     // the managed SSH and GitHub commands already select.
                     let clone_env = BTreeMap::from([("LC_ALL".to_string(), "C".to_string())]);
-                    if let Err(e) = this
+                    let mut transport = plan.transport;
+                    let mut cloned = this
                         .clone_with_progress(
-                            &namespace, &env_id, &clone, &clone_env, repo_index, repo_count,
+                            &namespace,
+                            &env_id,
+                            &plan.clone,
+                            &clone_env,
+                            repo_index,
+                            repo_count,
                         )
-                        .await
+                        .await;
+                    let refused = matches!(transport, CloneTransport::Ssh { .. })
+                        && cloned.as_ref().err().is_some_and(|error| {
+                            exited_with(error, ssh_checkout::SSH_REFUSED_EXIT)
+                        });
+                    if refused {
+                        transport = CloneTransport::Ssh { refused: true };
+                    }
+                    if let Some((https, https_transport)) = plan.https_fallback.filter(|_| refused)
                     {
+                        // Git removed its partial checkout; make the empty
+                        // destination exact before the HTTPS attempt.
+                        if let Err(error) = this
+                            .workspace_exec(&namespace, &env_id, &rm, "", &BTreeMap::new())
+                            .await
+                            && is_setup_control_flow(&error)
+                        {
+                            return Err(error);
+                        }
+                        this.phase_authority
+                            .ensure_active(this.active_phase)
+                            .await?;
+                        transport = https_transport;
+                        cloned = this
+                            .clone_with_progress(
+                                &namespace, &env_id, &https, &clone_env, repo_index, repo_count,
+                            )
+                            .await;
+                        if cloned.is_ok() {
+                            this.emit_clone_row(
+                                "warning",
+                                SSH_FALLBACK_WARNING,
+                                clone_progress::repository_metadata(repo_index, repo_count),
+                            )
+                            .await;
+                        }
+                    }
+                    if let Err(e) = cloned {
                         if is_setup_control_flow(&e) {
                             return Err(e);
                         }
-                        let error = e.context(format!("git clone {}", repo.url));
+                        let error = e.context(clone_failure_context(&repo.url, transport));
                         return Err(this.fence_failed_launch_group(input, error).await);
                     }
                     let selector = if repo.revision.is_empty() {
@@ -2805,6 +2953,143 @@ mod tests {
         let error = require_workspace_exec_success(&result).unwrap_err();
         assert_eq!(error.to_string(), "workspace exec exited 23");
         assert!(!format!("{error:?}").contains(marker));
+    }
+
+    #[test]
+    fn only_a_typed_exit_status_matches_exactly() {
+        let refused = WorkspaceExecResult {
+            exit_code: ssh_checkout::SSH_REFUSED_EXIT,
+            ..Default::default()
+        };
+        let error = require_workspace_exec_success(&refused)
+            .unwrap_err()
+            .context("git clone https://github.com/org/app.git over SSH");
+        assert!(exited_with(&error, ssh_checkout::SSH_REFUSED_EXIT));
+        assert!(!exited_with(&error, 128));
+        // Text alone, such as a transport error, is never an exit status.
+        assert!(!exited_with(
+            &anyhow::anyhow!("workspace exec exited 77"),
+            ssh_checkout::SSH_REFUSED_EXIT
+        ));
+    }
+
+    const GITHUB_HTTPS: &str = "https://github.com/org/app.git";
+
+    fn plan_for(repo: Repo, slots: &[&str]) -> ClonePlan {
+        let clients = Some(
+            codewire_access::ManagedCredentialClients::from_profile_slots(slots.iter().copied())
+                .unwrap(),
+        );
+        let repos = std::slice::from_ref(&repo);
+        let ssh = ssh_checkout::commands(repos, clients).unwrap().remove(0);
+        let github = github_checkout::commands(repos, clients).unwrap().remove(0);
+        clone_plan(
+            ssh.as_ref(),
+            github.as_ref(),
+            plain_clone_command(&repo.url, &repo.mount_path),
+            codewire_project::github_ssh_source(&repo.url).is_some(),
+        )
+    }
+
+    fn https_repo(url: &str) -> Repo {
+        Repo {
+            url: url.into(),
+            mount_path: "/workspace/app".into(),
+            ..Default::default()
+        }
+    }
+
+    fn bridge(plan: &[String]) -> bool {
+        plan.iter()
+            .any(|argument| argument.contains("/_codewire/github/"))
+    }
+
+    #[test]
+    fn a_selected_ssh_key_is_preferred_and_https_is_its_fallback() {
+        let plain = plain_clone_command(GITHUB_HTTPS, "/workspace/app");
+        // SSH only: SSH first, then the anonymous HTTPS URL.
+        let plan = plan_for(https_repo(GITHUB_HTTPS), &["ssh"]);
+        assert_eq!(plan.transport, CloneTransport::Ssh { refused: false });
+        assert_eq!(plan.clone[4], "git@github.com:org/app.git");
+        assert_eq!(
+            plan.https_fallback,
+            Some((
+                plain.clone(),
+                CloneTransport::HttpsAfterSshRefused { github: false }
+            ))
+        );
+        // Both: SSH first, then the GitHub connection.
+        let plan = plan_for(https_repo(GITHUB_HTTPS), &["github", "ssh"]);
+        assert_eq!(plan.transport, CloneTransport::Ssh { refused: false });
+        assert_eq!(plan.clone[4], "git@github.com:org/app.git");
+        let (fallback, transport) = plan.https_fallback.unwrap();
+        assert!(bridge(&fallback));
+        assert_eq!(fallback.last().unwrap(), "/workspace/app");
+        assert_eq!(
+            transport,
+            CloneTransport::HttpsAfterSshRefused { github: true }
+        );
+        // GitHub only: the bridge, with nothing to fall back to.
+        let plan = plan_for(https_repo(GITHUB_HTTPS), &["github"]);
+        assert_eq!(plan.transport, CloneTransport::GitHub);
+        assert!(bridge(&plan.clone));
+        assert_eq!(plan.https_fallback, None);
+        // Neither: anonymous, which still clones a public repository.
+        let plan = plan_for(https_repo(GITHUB_HTTPS), &[]);
+        assert_eq!(plan.transport, CloneTransport::Anonymous { github: true });
+        assert_eq!(plan.clone, plain);
+        assert_eq!(plan.https_fallback, None);
+    }
+
+    #[test]
+    fn ssh_and_other_https_sources_never_fall_back() {
+        let source = "git@example.com:org/app.git";
+        let repo = Repo {
+            url: source.into(),
+            mount_path: "/workspace/app".into(),
+            known_hosts: vec![
+                "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAx"
+                    .into(),
+            ],
+            ..Default::default()
+        };
+        let plan = plan_for(repo, &["github", "ssh"]);
+        assert_eq!(plan.transport, CloneTransport::Ssh { refused: false });
+        assert_eq!(plan.clone[4], source);
+        assert_eq!(plan.https_fallback, None);
+        let plan = plan_for(https_repo("https://gitlab.com/org/app.git"), &["ssh"]);
+        assert_eq!(plan.transport, CloneTransport::Anonymous { github: false });
+        assert_eq!(plan.https_fallback, None);
+    }
+
+    #[test]
+    fn clone_failures_name_the_credential_that_was_used_or_missing() {
+        for (transport, expected) in [
+            (CloneTransport::Ssh { refused: false }, " over SSH"),
+            (
+                CloneTransport::Ssh { refused: true },
+                " over SSH: the server did not accept the SSH key in the Sandbox's credential profile",
+            ),
+            (CloneTransport::GitHub, " through the GitHub connection"),
+            (
+                CloneTransport::HttpsAfterSshRefused { github: true },
+                " through the GitHub connection after GitHub did not accept the SSH key",
+            ),
+            (
+                CloneTransport::HttpsAfterSshRefused { github: false },
+                " over HTTPS after GitHub did not accept the SSH key; no GitHub connection is selected",
+            ),
+            (
+                CloneTransport::Anonymous { github: true },
+                " (no SSH key or GitHub connection is selected; a private repository needs one)",
+            ),
+            (CloneTransport::Anonymous { github: false }, ""),
+        ] {
+            assert_eq!(
+                clone_failure_context(GITHUB_HTTPS, transport),
+                format!("git clone {GITHUB_HTTPS}{expected}")
+            );
+        }
     }
 
     fn current_replacement_probe() -> ProbeResult {
