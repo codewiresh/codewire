@@ -1726,6 +1726,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/build-local-runtime.sh|\
       scripts/ci/release/build-runtime-guest-root.sh|scripts/ci/release/runtime-container.sh|\
       scripts/ci/tests/test-local-runtime-parts.py|\
+      scripts/ci/release/dry-run-superseded.sh|scripts/ci/tests/test-dry-run-superseded.sh|\
       scripts/ci/tests/test-cw-install.py|\
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-release-signing-key.sh|\
