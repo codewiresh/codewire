@@ -78,9 +78,11 @@ be a running managed session in this same VM.
 ### Platform sandbox
 
 Sign in and select your organization, then use your repository URL and an
-existing platform credential profile with an OpenAI proxy for Codex and an
-Anthropic proxy for Claude. A personal Codex login alone does not supply the
-proxy types required by this managed platform journey:
+existing platform credential profile with a credential for each agent. Codex
+uses the profile's Codex credential (your ChatGPT sign-in or an API key), or
+its OpenAI API key when it has no Codex credential. Claude uses its Anthropic
+credential. Codewire adds the credential outside the Sandbox; a managed
+agent's own Codex or Claude home holds only the local route:
 
 ```bash
 cw setup

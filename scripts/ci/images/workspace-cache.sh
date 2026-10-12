@@ -174,7 +174,7 @@ workspace_cache_builder_container_absent() {
 workspace_cache_layer_args() {
   local target="$1" source_tree="$2" architecture="$3" name common alias
   layer_args=()
-  [[ "$target" =~ ^(base|workspace|cw-runtime|canary-[a-z0-9-]+)$ ]] || return 2
+  [[ "$target" =~ ^(base|workspace|cw-runtime|cw-arm64|canary-[a-z0-9-]+)$ ]] || return 2
   [[ "$source_tree" =~ ^[0-9a-f]{40}$ && "$architecture" =~ ^(amd64|arm64)$ ]] || return 2
   if [[ "$layer_cache_mode" == disabled ]]; then
     layer_args+=(--no-cache)

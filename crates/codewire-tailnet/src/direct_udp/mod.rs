@@ -21,12 +21,20 @@ mod peer_relay;
 mod runtime;
 mod state;
 
-use state::{path_for_peer, peer_relay_endpoint_state, PeerRelayRequest, PeerState, Shared};
+use state::{path_for_peer, peer_relay_endpoint_state, PeerRelayRequest, Shared};
 
 pub use runtime::wrap_transport;
 
 const UDP_PACKET_LIMIT: usize = 64 << 10;
 const VERIFIED_ENDPOINT_TTL: Duration = Duration::from_secs(30);
+/// While WireGuard flows to a peer, ping its verified endpoint once it is
+/// this old, so the pong renews it well inside [`VERIFIED_ENDPOINT_TTL`].
+/// magicsock heartbeats its best address for the same reason.
+const DIRECT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+/// A peer is in use while this side sent it WireGuard this recently. Only
+/// peers in use get heartbeats or a new probe when their direct endpoint
+/// lapses, as with magicsock's `sessionActiveTimeout`.
+const DIRECT_SESSION_ACTIVE_TIMEOUT: Duration = Duration::from_secs(45);
 const PEER_RELAY_BIND_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DIRECT_PROBE_RETRY_WINDOW: Duration = Duration::from_secs(5);
 const STUN_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(750);
@@ -195,7 +203,7 @@ impl Handle {
             .unwrap()
             .peers_by_node
             .get(peer.as_bytes())
-            .and_then(PeerState::active_verified_endpoint)
+            .and_then(|peer| peer.active_verified_endpoint(Instant::now()))
             .is_some()
     }
 
@@ -283,14 +291,28 @@ impl Handle {
 
     #[cfg(test)]
     fn expire_verified_endpoint_for_test(&self, peer: &NodePublic) {
+        self.age_verified_endpoint_for_test(peer, VERIFIED_ENDPOINT_TTL + Duration::from_secs(1));
+    }
+
+    #[cfg(test)]
+    fn age_verified_endpoint_for_test(&self, peer: &NodePublic, age: Duration) {
         let mut state = self.shared.state.lock().unwrap();
         if let Some(peer) = state.peers_by_node.get_mut(peer.as_bytes()) {
             if let Some(mut verified) = peer.verified_endpoint {
-                verified.verified_at =
-                    Instant::now() - VERIFIED_ENDPOINT_TTL - Duration::from_secs(1);
+                verified.verified_at = Instant::now() - age;
                 peer.verified_endpoint = Some(verified);
             }
         }
+    }
+
+    #[cfg(test)]
+    fn verified_endpoint_age_for_test(&self, peer: &NodePublic) -> Option<Duration> {
+        let state = self.shared.state.lock().unwrap();
+        state
+            .peers_by_node
+            .get(peer.as_bytes())?
+            .verified_endpoint
+            .map(|verified| verified.verified_at.elapsed())
     }
 }
 

@@ -50,8 +50,10 @@ unclassified even when a runtime image also owns `crates/**`.
 
 This split does not change capability selection or exact-source publication.
 Selected Kind still builds and verifies its workspace image, then consumes the
-exact local image receipt. The receipt retains its complete committed-tree,
-contract, architecture and immutable image bindings. Only standalone workspace
+exact local image receipt. The receipt retains its contract, architecture and
+immutable image bindings. A local receipt also covers a later tree when this
+planner shows `workspace_image_verification` unchanged from the receipt's
+commit (see `docs/dev/WORKSPACE-CACHE.md`). Only standalone workspace
 verification can be omitted by the narrower artifact fact. An unaffected fact
 means the checked-in build and contract inputs are unchanged; floating tool
 channels can still resolve differently on the next actual image build.

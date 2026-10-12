@@ -241,3 +241,5 @@ check_version cargo cargo --version
 check_version rustc rustc --version
 check_version psql psql --version
 check_version protoc protoc --version
+# Codex's Linux sandbox runs commands through the system bubblewrap on PATH.
+check_version bwrap bwrap --version

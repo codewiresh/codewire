@@ -578,6 +578,41 @@ class SourceDigestTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, f"needs {gcc}, or cargo-zigbuild and zig"):
                         native.compiler_route(target, path, home)
 
+    def test_native_managed_build_reuses_one_public_cargo_home_per_target(self):
+        spec = importlib.util.spec_from_file_location(
+            "build_native_managed_agent", ROOT / "scripts/dev/build-native-managed-agent.py")
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        cache = self.base / "public-cargo-cache"
+        (cache / "registry").mkdir(parents=True)
+        (cache / "git").mkdir()
+        target = self.base / "public-cargo-target"
+        home = native.public_cargo_home(target, cache)
+        self.assertEqual(home, target / "native-managed-agent-cargo-home")
+        self.assertEqual({entry.name: os.readlink(entry) for entry in home.iterdir()},
+                         {"registry": str(cache / "registry"), "git": str(cache / "git")})
+        # Cargo's own lock and cache-tracking files are kept; the path is reused.
+        for name in native.CARGO_BOOKKEEPING:
+            (home / name).write_bytes(b"")
+        self.assertEqual(native.public_cargo_home(target, cache), home)
+        for name, make in (("config.toml", lambda path: path.write_text("[build]\n")),
+                           ("credentials.toml", lambda path: path.write_text("")),
+                           ("bin", lambda path: path.mkdir())):
+            with self.subTest(name):
+                make(home / name)
+                with self.assertRaisesRegex(RuntimeError, "not this build's public Cargo home"):
+                    native.public_cargo_home(target, cache)
+                (shutil.rmtree if (home / name).is_dir() else os.unlink)(home / name)
+        other = self.base / "other-cargo-cache"
+        (other / "registry").mkdir(parents=True)
+        (other / "git").mkdir()
+        with self.assertRaisesRegex(RuntimeError, "not this build's public Cargo home"):
+            native.public_cargo_home(target, other)
+        os.unlink(home / ".global-cache")
+        os.symlink(cache, home / ".global-cache")
+        with self.assertRaisesRegex(RuntimeError, "not this build's public Cargo home"):
+            native.public_cargo_home(target, cache)
+
     def test_compiled_inputs_must_all_be_in_the_source_digest(self):
         base = self.base / "depinfo"
         base.mkdir()
@@ -638,6 +673,143 @@ class SourceDigestTest(unittest.TestCase):
             release.check_build_inputs(source, self.depinfo(base, [probe, other]), (base / "target",))
 
 
+
+
+class LocalRuntimeTest(unittest.TestCase):
+    """The local VM runtime a release's macOS cw embeds (#2539)."""
+
+    FIXTURES = ROOT / "crates/codewire-cw-release/src/local_runtime/fixtures"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = fx.scratch("cw-release-runtime.")
+        cls.signer = fx.Signer(cls.base)
+        (cls.base / "signed").mkdir()
+        cls.dist = fx.signed_delivery(cls.base / "signed", cls.signer, runtime=True)[0]
+        (cls.base / "plain").mkdir()
+        cls.plain = fx.unsigned_delivery(cls.base / "plain")[0]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.signer.close()
+        shutil.rmtree(cls.base)
+
+    def copy(self, dist, label=""):
+        target = self.base / f"{self.id().rsplit('.', 1)[-1]}{label}"
+        shutil.copytree(dist, target, symlinks=True)
+        return target
+
+    def test_shared_fixtures_agree_with_the_rust_decoder(self):
+        # crates/codewire-cw-release/src/local_runtime/tests.rs decodes the same files.
+        valid = (self.FIXTURES / "valid-macos-aarch64.json").read_bytes()
+        self.assertEqual(len(release.local_runtime_blobs(valid)), 14)
+        invalid = sorted(self.FIXTURES.glob("invalid-*.json"))
+        self.assertEqual(len(invalid), 21)
+        for path in invalid:
+            with self.subTest(fixture=path.name), self.assertRaises(release.ReleaseError):
+                release.local_runtime_blobs(path.read_bytes())
+
+    def test_a_delivery_carries_exactly_the_runtime_its_macos_cw_embeds(self):
+        result = release.verify_delivery(self.dist, self.signer.trust)
+        document = release.local_runtime_paths(self.dist)[1].read_bytes()
+        self.assertTrue(result["signed"])
+        self.assertEqual(result["local_runtime"], {"document_sha256": fx.digest(document), "blobs": 12})
+        darwin = (self.dist / release.asset_name(fx.VERSION, release.LOCAL_RUNTIME_TARGET)).read_bytes()
+        self.assertEqual(release.embedded_local_runtime(darwin), document)
+        self.assertNotIn("local_runtime", release.verify_delivery(self.plain))
+
+    def test_a_cw_that_embeds_a_runtime_is_never_released_without_it(self):
+        dist = self.copy(self.dist)
+        shutil.rmtree(release.local_runtime_paths(dist)[0])
+        with self.assertRaisesRegex(release.ReleaseError, "does not carry"):
+            release.verify_delivery(dist)
+
+    def test_a_runtime_no_cw_embeds_is_refused(self):
+        dist = self.copy(self.plain)
+        identity = json.loads((release.delivery_paths(dist)["identities"] / "aarch64-apple-darwin.json").read_bytes())
+        fx.write_local_runtime(dist, *fx.local_runtime(identity["source_revision"]))
+        with self.assertRaisesRegex(release.ReleaseError, "does not embed"):
+            release.verify_delivery(dist)
+
+    def test_runtime_files_are_exactly_the_pinned_blobs(self):
+        def extra(blobs):
+            (blobs / ("f" * 64)).write_bytes(b"unpinned\n")
+
+        def missing(blobs):
+            next(blobs.iterdir()).unlink()
+
+        def changed(blobs):
+            path = next(blobs.iterdir())
+            path.write_bytes(path.read_bytes() + b"\n")
+
+        def linked(blobs):
+            path = next(blobs.iterdir())
+            data = path.read_bytes()
+            path.unlink()
+            (blobs.parent / "held").write_bytes(data)
+            path.symlink_to(blobs.parent / "held")
+
+        def stray(blobs):
+            (blobs.parents[1] / "notes.txt").write_bytes(b"stray\n")
+
+        for mutate in (extra, missing, changed, linked, stray):
+            with self.subTest(case=mutate.__name__):
+                dist = self.copy(self.dist, f"-{mutate.__name__}")
+                mutate(release.local_runtime_paths(dist)[2])
+                with self.assertRaises(release.ReleaseError):
+                    release.verify_delivery(dist)
+
+    def test_the_embedded_document_occurs_once_and_whole(self):
+        document = release.local_runtime_paths(self.dist)[1].read_bytes()
+        self.assertIsNone(release.embedded_local_runtime(b"\0" * 64))
+        self.assertEqual(release.embedded_local_runtime(b"head" + document + b"tail"), document)
+        for name, data in (("twice", document + document), ("truncated", document[:-1]),
+                           ("invalid", document.replace(b'"schema_version":1', b'"schema_version":2'))):
+            with self.subTest(case=name), self.assertRaises(release.ReleaseError):
+                release.embedded_local_runtime(data)
+
+    def test_the_helper_is_rechecked_without_macos(self):
+        release.check_macos_helper(fx.macos_helper())
+        networking = release.HELPER_ENTITLEMENTS.read_bytes().replace(
+            b"</dict>", b"<key>com.apple.vm.networking</key><true/></dict>")
+        cases = {
+            "x86_64": fx.macos_helper(cpu=0x01000007),
+            "no hardened runtime": fx.macos_helper(runtime=False),
+            "another entitlement": fx.macos_helper(entitlements=networking),
+            "homebrew library": fx.macos_helper(libraries=fx.HELPER_LIBRARIES + ("/opt/homebrew/lib/libz.dylib",)),
+            "rpath library": fx.macos_helper(libraries=("@rpath/libswiftCore.dylib",)),
+            "homebrew search path": fx.macos_helper(rpaths=("@loader_path", "/opt/homebrew/lib")),
+            "escaping path": fx.macos_helper(libraries=("/usr/lib/../../tmp/x.dylib",)),
+            "unsigned": fx.macos_helper(signed=False),
+            "fat": b"\xca\xfe\xba\xbe" + fx.macos_helper()[4:],
+        }
+        for label, data in cases.items():
+            with self.subTest(case=label), self.assertRaises(release.ReleaseError):
+                release.check_macos_helper(data)
+
+    def test_a_delivery_whose_helper_fails_its_recheck_is_refused(self):
+        dist = self.copy(self.dist)
+        document_path, blobs = release.local_runtime_paths(dist)[1:]
+        document = json.loads(document_path.read_bytes())
+        lock = document["targets"]["macos-aarch64"]["lock"]
+        bad = fx.macos_helper(runtime=False)
+        (blobs / lock["vz_runner"]["sha256"]).unlink()
+        (blobs / fx.digest(bad)).write_bytes(bad)
+        lock["vz_runner"].update(sha256=fx.digest(bad), size=len(bad))
+        document_path.write_bytes(release.canonical(document))
+        with self.assertRaisesRegex(release.ReleaseError, "hardened runtime"):
+            release.load_local_runtime(dist)
+            release.check_macos_helper(bad)
+        with self.assertRaises(release.ReleaseError):
+            release.verify_delivery(dist)
+
+    def test_the_runtime_comes_from_the_cw_source_revision(self):
+        original = fx.local_runtime
+        with mock.patch.object(fx, "local_runtime", lambda revision: original("d" * 40)):
+            (self.base / "other-revision").mkdir()
+            dist = fx.unsigned_delivery(self.base / "other-revision", runtime=True)[0]
+        with self.assertRaisesRegex(release.ReleaseError, "source revision"):
+            release.verify_delivery(dist)
 
 if __name__ == "__main__":
     if sys.platform != "linux":

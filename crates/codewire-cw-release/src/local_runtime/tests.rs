@@ -216,3 +216,106 @@ fn blobs_list_every_lock_file_cw_runtime_and_source_once() {
     assert_eq!(install.len(), 10 + 2);
     assert!(install.iter().all(|blob| blob.sha256 != digest(20)));
 }
+
+/// The release scripts' Python validator (scripts/ci/release/cw_release.py)
+/// must agree with this decoder: both decode these shared fixtures, and
+/// scripts/ci/tests/test-cw-release-delivery.py checks the same files.
+#[test]
+fn shared_fixtures_agree_with_the_release_scripts() {
+    let valid =
+        LocalRuntimeDocument::decode(include_bytes!("fixtures/valid-macos-aarch64.json")).unwrap();
+    assert_eq!(valid.blobs().len(), 14);
+    let invalid: &[(&str, &[u8])] = &[
+        (
+            "invalid-blob-sizes-disagree.json",
+            include_bytes!("fixtures/invalid-blob-sizes-disagree.json").as_slice(),
+        ),
+        (
+            "invalid-component-license.json",
+            include_bytes!("fixtures/invalid-component-license.json").as_slice(),
+        ),
+        (
+            "invalid-component-unknown-field.json",
+            include_bytes!("fixtures/invalid-component-unknown-field.json").as_slice(),
+        ),
+        (
+            "invalid-empty-components.json",
+            include_bytes!("fixtures/invalid-empty-components.json").as_slice(),
+        ),
+        (
+            "invalid-lock-architecture.json",
+            include_bytes!("fixtures/invalid-lock-architecture.json").as_slice(),
+        ),
+        (
+            "invalid-lock-boolean-schema-version.json",
+            include_bytes!("fixtures/invalid-lock-boolean-schema-version.json").as_slice(),
+        ),
+        (
+            "invalid-lock-duplicate-path.json",
+            include_bytes!("fixtures/invalid-lock-duplicate-path.json").as_slice(),
+        ),
+        (
+            "invalid-lock-missing-git.json",
+            include_bytes!("fixtures/invalid-lock-missing-git.json").as_slice(),
+        ),
+        (
+            "invalid-lock-oversized.json",
+            include_bytes!("fixtures/invalid-lock-oversized.json").as_slice(),
+        ),
+        (
+            "invalid-lock-path-separator.json",
+            include_bytes!("fixtures/invalid-lock-path-separator.json").as_slice(),
+        ),
+        (
+            "invalid-lock-schema-version.json",
+            include_bytes!("fixtures/invalid-lock-schema-version.json").as_slice(),
+        ),
+        (
+            "invalid-lock-uppercase-digest.json",
+            include_bytes!("fixtures/invalid-lock-uppercase-digest.json").as_slice(),
+        ),
+        (
+            "invalid-lock-zero-size.json",
+            include_bytes!("fixtures/invalid-lock-zero-size.json").as_slice(),
+        ),
+        (
+            "invalid-macos-lock-on-linux.json",
+            include_bytes!("fixtures/invalid-macos-lock-on-linux.json").as_slice(),
+        ),
+        (
+            "invalid-no-targets.json",
+            include_bytes!("fixtures/invalid-no-targets.json").as_slice(),
+        ),
+        (
+            "invalid-not-canonical.json",
+            include_bytes!("fixtures/invalid-not-canonical.json").as_slice(),
+        ),
+        (
+            "invalid-null-cw-runtime.json",
+            include_bytes!("fixtures/invalid-null-cw-runtime.json").as_slice(),
+        ),
+        (
+            "invalid-schema.json",
+            include_bytes!("fixtures/invalid-schema.json").as_slice(),
+        ),
+        (
+            "invalid-short-revision.json",
+            include_bytes!("fixtures/invalid-short-revision.json").as_slice(),
+        ),
+        (
+            "invalid-unknown-field.json",
+            include_bytes!("fixtures/invalid-unknown-field.json").as_slice(),
+        ),
+        (
+            "invalid-unknown-platform.json",
+            include_bytes!("fixtures/invalid-unknown-platform.json").as_slice(),
+        ),
+    ];
+    assert_eq!(invalid.len(), 21);
+    for (name, bytes) in invalid {
+        assert!(
+            LocalRuntimeDocument::decode(bytes).is_err(),
+            "{name} decoded"
+        );
+    }
+}

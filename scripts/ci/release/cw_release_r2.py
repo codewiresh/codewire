@@ -274,6 +274,14 @@ def immutable_objects(dist):
             add(entry["oci"]["archive"], release.read_regular(paths["oci"], MAX_OBJECT), "application/x-tar")
             add(entry["runtime_pack"], release.read_regular(paths["pack"], MAX_OBJECT), "application/octet-stream")
             add(entry["runtime_lock"], release.read_regular(paths["lock"], release.MAX_JSON), "application/json")
+    # The local VM runtime and its component sources: content-addressed blobs
+    # that the macOS cw pins. release.json never lists them (#2539).
+    local_runtime = release.load_local_runtime(dist)
+    if local_runtime is not None:
+        _, _, runtime_blobs = release.local_runtime_paths(dist)
+        for digest, size in local_runtime[1]:
+            add({"key": release.blob_key(digest), "sha256": digest, "size": size},
+                release.read_regular(runtime_blobs / digest, MAX_OBJECT), "application/octet-stream")
     blobs = len(objects)
     sums = release.read_regular(paths["sums"], release.MAX_JSON)
     sums_sig = release.read_regular(paths["sums_sig"], release.MAX_SIGNATURE)
@@ -371,8 +379,10 @@ def materialize(s3, root, manifest, manifest_bytes, signature, sums, sums_sig):
                 Conflict)
         return response.body
 
+    executables = {}
     for entry in manifest["targets"]:
-        release.write_new(root / entry["asset_name"], fetch(entry["executable"]), 0o755)
+        executables[entry["target"]] = fetch(entry["executable"])
+        release.write_new(root / entry["asset_name"], executables[entry["target"]], 0o755)
         release.write_new(paths["identities"] / f"{entry['target']}.json", release.canonical(entry["identity"]))
         if entry["target"] == release.RUNTIME_TARGET:
             oci = entry["oci"]
@@ -383,6 +393,18 @@ def materialize(s3, root, manifest, manifest_bytes, signature, sums, sums_sig):
                 "schema_version": 1, "index_sha256": oci["index_sha256"],
                 "manifest_sha256": oci["manifest_sha256"], "archive_sha256": oci["archive"]["sha256"],
                 "cw_sha256": entry["identity"]["sha256"], "source_revision": manifest["source_revision"]}))
+    # The runtime the published macOS cw embeds, fetched by its pinned digests.
+    try:
+        document = release.embedded_local_runtime(executables[release.LOCAL_RUNTIME_TARGET])
+    except release.ReleaseError as error:
+        raise Conflict(f"retained release does not verify: {error}") from None
+    if document is not None:
+        runtime, runtime_document, runtime_blobs = release.local_runtime_paths(root)
+        runtime_blobs.mkdir(mode=0o755, parents=True)
+        release.write_new(runtime_document, document)
+        for digest, size in release.local_runtime_blobs(document):
+            release.write_new(runtime_blobs / digest,
+                              fetch({"key": release.blob_key(digest), "sha256": digest, "size": size}))
     release.write_new(paths["sums"], sums)
     release.write_new(paths["sums_sig"], sums_sig)
     release.write_new(paths["manifest"], manifest_bytes)

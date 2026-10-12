@@ -13,7 +13,7 @@ build:
 	cd "$(REPO_ROOT)" && CARGO_TARGET_DIR="$(RESOLVED_CARGO_TARGET_DIR)" python3 scripts/dev/build-cw.py --output "$(CURDIR)/$(BINARY)"
 
 test:
-	cd $(REPO_ROOT) && cargo test -p codewire-cli
+	cd $(REPO_ROOT) && scripts/ci/verify/local-rust-cache.sh cargo test -p codewire-cli
 
 test-cli: test
 
@@ -30,7 +30,7 @@ smoke: build
 test-manual: smoke
 
 lint:
-	cd $(REPO_ROOT) && cargo clippy -p codewire-cli --all-targets -- -D warnings
+	cd $(REPO_ROOT) && scripts/ci/verify/local-rust-cache.sh cargo clippy -p codewire-cli --all-targets -- -D warnings
 
 install: install-user
 

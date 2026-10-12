@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,9 @@ sys.path.insert(0, str(ROOT / "scripts/ci/release"))
 import cw_release as release  # noqa: E402
 
 TARGETS = (release.RUNTIME_TARGET, "aarch64-unknown-linux-musl")
+# Files Cargo itself keeps in its home: package-cache locks and the cache
+# tracker used for automatic cleanup.
+CARGO_BOOKKEEPING = (".global-cache", ".package-cache", ".package-cache-mutate")
 
 
 def bounded_build(command, environment, output, timeout):
@@ -56,6 +60,34 @@ def bounded_build(command, environment, output, timeout):
             pass
         process.wait()
         raise
+
+
+def public_cargo_home(target_dir, cargo_cache):
+    """One public Cargo home per target directory, holding only source caches.
+
+    rustc sees dependency sources through this home, so keeping its path
+    fixed for a target directory keeps Cargo's fingerprints valid from one
+    build to the next instead of recompiling every dependency. It holds only
+    links to the public registry/ and git/ caches plus Cargo's own lock and
+    cache-tracking files: no Cargo config, login or other file ever enters it,
+    and anything else there is refused.
+    """
+    home = target_dir / "native-managed-agent-cargo-home"
+    links = {name: cargo_cache / name for name in ("registry", "git") if (cargo_cache / name).is_dir()}
+    if not os.path.lexists(home):
+        home.mkdir(mode=0o700, parents=True)
+        for name, source in links.items():
+            (home / name).symlink_to(source, target_is_directory=True)
+    info = home.lstat()
+    entries = {entry.name: entry for entry in home.iterdir()}
+    bookkeeping = {name: entries.pop(name) for name in CARGO_BOOKKEEPING if name in entries}
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700
+            or set(entries) != set(links)
+            or any(not entries[name].is_symlink() or Path(os.readlink(entries[name])) != source
+                   for name, source in links.items())
+            or any(not stat.S_ISREG(entry.lstat().st_mode) for entry in bookkeeping.values())):
+        raise RuntimeError(f"{home} is not this build's public Cargo home")
+    return home
 
 
 def compiler_route(target, path, private_home):
@@ -102,12 +134,7 @@ def main():
         raise RuntimeError("--target-dir must be absolute")
     # Only public source caches are reused. No ordinary Cargo config or login
     # files enter this task's compiler environment.
-    public_cargo = args.output / "cargo-home"
-    public_cargo.mkdir(mode=0o700)
-    for name in ("registry", "git"):
-        source = args.cargo_cache / name
-        if source.is_dir():
-            (public_cargo / name).symlink_to(source, target_is_directory=True)
+    public_cargo = public_cargo_home(target_dir, args.cargo_cache)
     path = str(tools) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
     private_home = args.output / "home"
     subcommand, route = compiler_route(args.target, path, private_home)

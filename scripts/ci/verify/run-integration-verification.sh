@@ -10,6 +10,9 @@ CARGO_TARGET_DIR="$(
   "$ROOT/scripts/ci/verify/resolve-cargo-target-dir.sh" "$ROOT"
 )"
 export CARGO_TARGET_DIR
+# shellcheck source=scripts/ci/verify/local-rust-cache.sh
+source "$ROOT/scripts/ci/verify/local-rust-cache.sh"
+select_local_rust_cache "$ROOT" || true
 CARGO_CI_TARGET_DIR="${CODEWIRE_CARGO_CI_TARGET_DIR:-$CARGO_TARGET_DIR}"
 CARGO_CI_DIR="$CARGO_CI_TARGET_DIR/ci"
 RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-product-integration-${GITHUB_RUN_ID:-local-$$}}"

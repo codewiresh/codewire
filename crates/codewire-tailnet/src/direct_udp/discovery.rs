@@ -12,11 +12,11 @@ use crate::stun;
 use super::peer_relay::apply_known_peer_relay_request;
 use super::state::{
     derp_public_from_node, is_acceptable_peer_endpoint, is_usable_direct_endpoint,
-    ping_action_with_transaction, register_pending_transaction, DirectProbe, DirectProbeCandidate,
-    DirectProbeState, DiscoAction, DiscoPeerIndex, DiscoTarget, EndpointRefresh, PeerState,
-    PendingStun, Shared, State, VerifiedEndpoint,
+    ping_action_with_transaction, register_pending_transaction, DirectHeartbeat, DirectProbe,
+    DirectProbeCandidate, DirectProbeState, DiscoAction, DiscoPeerIndex, DiscoTarget,
+    EndpointRefresh, PeerState, PendingStun, Shared, State, VerifiedEndpoint,
 };
-use super::DIRECT_PROBE_RETRY_WINDOW;
+use super::{DIRECT_HEARTBEAT_INTERVAL, DIRECT_PROBE_RETRY_WINDOW};
 
 pub(super) async fn send_stun_refresh(
     socket: &UdpSocket,
@@ -120,6 +120,7 @@ pub(super) fn apply_peer_update(shared: &Shared, nodes: Vec<Node>) -> Vec<DiscoA
     let previous_pending_tx = std::mem::take(&mut state.pending_tx);
     let now = Instant::now();
     let mut start_direct_probes = Vec::new();
+    let mut retired_heartbeats = Vec::new();
 
     for node in nodes {
         if node.key.is_zero() || node.disco_key.is_zero() {
@@ -141,12 +142,19 @@ pub(super) fn apply_peer_update(shared: &Shared, nodes: Vec<Node>) -> Vec<DiscoA
             .unwrap_or(false);
         let verified_endpoint = if shared.peer_direct_udp_enabled && candidates_unchanged {
             previous_peer
-                .and_then(PeerState::active_verified_endpoint)
+                .and_then(|peer| peer.active_verified_endpoint(now))
                 .map(|addr| VerifiedEndpoint {
                     addr,
                     verified_at: now,
                 })
         } else {
+            None
+        };
+        let previous_heartbeat = previous_peer.and_then(|peer| peer.direct_heartbeat);
+        let direct_heartbeat = if verified_endpoint.is_some() {
+            previous_heartbeat
+        } else {
+            retired_heartbeats.extend(previous_heartbeat.map(|heartbeat| heartbeat.tx_id));
             None
         };
         let relay_endpoint = previous_peer
@@ -179,6 +187,8 @@ pub(super) fn apply_peer_update(shared: &Shared, nodes: Vec<Node>) -> Vec<DiscoA
             endpoints,
             verified_endpoint,
             direct_probe,
+            direct_heartbeat,
+            last_wg_send: previous_peer.and_then(|peer| peer.last_wg_send),
             relay_endpoint,
             preferred_derp: node.preferred_derp,
         };
@@ -204,6 +214,9 @@ pub(super) fn apply_peer_update(shared: &Shared, nodes: Vec<Node>) -> Vec<DiscoA
         .into_iter()
         .filter(|(_, peer_key)| state.peers_by_node.contains_key(peer_key))
         .collect();
+    for tx_id in retired_heartbeats {
+        state.pending_tx.remove(&tx_id);
+    }
 
     let current_direct_transactions = state
         .peers_by_node
@@ -248,6 +261,7 @@ pub(super) fn apply_peer_update(shared: &Shared, nodes: Vec<Node>) -> Vec<DiscoA
             &mut state,
             &shared.local_node_key,
             peer_key,
+            None,
             now,
         ));
     }
@@ -295,18 +309,26 @@ pub(super) fn apply_peer_update(shared: &Shared, nodes: Vec<Node>) -> Vec<DiscoA
     actions
 }
 
+/// Ping the peer's advertised endpoints, plus `lapsed`: a direct endpoint
+/// that was verified before, which may be a NAT mapping the peer never
+/// advertised.
 pub(super) fn start_direct_probe(
     state: &mut State,
     local_node_key: &NodePublic,
     peer_key: [u8; 32],
+    lapsed: Option<SocketAddr>,
     now: Instant,
 ) -> Vec<DiscoAction> {
     let Some(peer) = state.peers_by_node.get(&peer_key).cloned() else {
         return Vec::new();
     };
-    let mut candidates = Vec::with_capacity(peer.endpoints.len());
-    let mut actions = Vec::with_capacity(peer.endpoints.len());
-    for endpoint in &peer.endpoints {
+    let mut endpoints = peer.endpoints;
+    if let Some(lapsed) = lapsed.filter(|lapsed| !endpoints.contains(lapsed)) {
+        endpoints.push(lapsed);
+    }
+    let mut candidates = Vec::with_capacity(endpoints.len());
+    let mut actions = Vec::with_capacity(endpoints.len());
+    for endpoint in &endpoints {
         let tx_id = register_pending_transaction(state, peer_key);
         candidates.push(DirectProbeCandidate {
             endpoint: *endpoint,
@@ -347,7 +369,7 @@ pub(super) fn retry_unverified_direct_candidates(
         };
         let probe_state = std::mem::replace(&mut peer.direct_probe, DirectProbeState::Inactive);
         match probe_state {
-            DirectProbeState::Active(probe) if peer.active_verified_endpoint().is_some() => {
+            DirectProbeState::Active(probe) if peer.active_verified_endpoint(now).is_some() => {
                 retired_transactions.extend(
                     probe
                         .candidates
@@ -384,6 +406,80 @@ pub(super) fn retry_unverified_direct_candidates(
 
     for tx_id in retired_transactions {
         state.pending_tx.remove(&tx_id);
+    }
+    actions
+}
+
+/// Keep the direct path of each peer in use alive, and probe again when it
+/// lapses anyway.
+///
+/// A verified endpoint at least [`DIRECT_HEARTBEAT_INTERVAL`] old gets one
+/// disco ping per interval; its pong renews the endpoint. A lapsed endpoint
+/// starts a new probe of the peer's candidates and the lapsed address, while
+/// WireGuard rides the peer relay or DERP. A peer that is not in use gets
+/// neither: its lapsed endpoint waits until WireGuard flows to it again.
+pub(super) fn maintain_direct_paths(shared: &Shared, now: Instant) -> Vec<DiscoAction> {
+    let mut state = shared.state.lock().unwrap();
+    let peer_keys = state.peers_by_node.keys().copied().collect::<Vec<_>>();
+    let mut actions = Vec::new();
+
+    for peer_key in peer_keys {
+        let Some(peer) = state.peers_by_node.get_mut(&peer_key) else {
+            continue;
+        };
+        let Some(verified) = peer.verified_endpoint else {
+            continue;
+        };
+        if !peer.in_use(now) {
+            continue;
+        }
+        if verified.is_fresh(now) {
+            let since = |at: Instant| now.saturating_duration_since(at);
+            let heartbeat_due = since(verified.verified_at) >= DIRECT_HEARTBEAT_INTERVAL
+                && peer
+                    .direct_heartbeat
+                    .is_none_or(|last| since(last.sent_at) >= DIRECT_HEARTBEAT_INTERVAL);
+            if !heartbeat_due {
+                continue;
+            }
+            let peer_disco = peer.disco_key;
+            if let Some(last) = peer.direct_heartbeat.take() {
+                state.pending_tx.remove(&last.tx_id);
+            }
+            let tx_id = register_pending_transaction(&mut state, peer_key);
+            if let Some(peer) = state.peers_by_node.get_mut(&peer_key) {
+                peer.direct_heartbeat = Some(DirectHeartbeat {
+                    sent_at: now,
+                    tx_id,
+                });
+            }
+            actions.push(ping_action_with_transaction(
+                &shared.local_node_key,
+                peer_disco,
+                verified.addr,
+                tx_id,
+            ));
+        } else {
+            peer.verified_endpoint = None;
+            if let Some(last) = peer.direct_heartbeat.take() {
+                state.pending_tx.remove(&last.tx_id);
+            }
+            if state.peers_by_endpoint.get(&verified.addr) == Some(&peer_key) {
+                state.peers_by_endpoint.remove(&verified.addr);
+            }
+            // A peer's endpoint is a person's address: debug only.
+            tracing::debug!(
+                endpoint = %verified.addr,
+                "rust tailnet direct UDP endpoint lapsed; probing again"
+            );
+            actions.extend(start_direct_probe(
+                &mut state,
+                &shared.local_node_key,
+                peer_key,
+                Some(verified.addr),
+                now,
+            ));
+        }
     }
     actions
 }

@@ -27,6 +27,9 @@ EOF
 chmod +x "$TMP/psql"
 export PATH="$TMP:$PATH"
 hash -r
+# Fixtures trace the runner with fake tools; never start the workstation's
+# real compiler-cache server from one.
+export CODEWIRE_LOCAL_RUST_CACHE=off
 
 # shellcheck source=scripts/ci/verify/integration-postgres.sh
 source "$ROOT/scripts/ci/verify/integration-postgres.sh"
@@ -291,6 +294,7 @@ def run_case(failure=''):
     trace.unlink(missing_ok=True)
     environment = {
         'PATH': str(trace_root) + os.pathsep + os.environ['PATH'],
+        'CODEWIRE_LOCAL_RUST_CACHE': 'off',
         'CARGO_TARGET_DIR': str(trace_root / 'debug-target'),
         'CODEWIRE_CARGO_CI_TARGET_DIR': str(trace_root / 'ci-target'),
         'RUN_DIR': str(trace_root / 'run'),

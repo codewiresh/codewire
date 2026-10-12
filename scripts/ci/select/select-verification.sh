@@ -434,6 +434,8 @@ if [ "$event_selected" = false ]; then
       scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
       scripts/dev/macos-app-sandbox-canary.py|scripts/dev/test-macos-app-sandbox-canary.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
+      scripts/dev/pre-push.sh|scripts/dev/preflight-push.sh|\
+      scripts/dev/preflight-environment.sh|\
       scripts/ci/select/emit-verification-matrices.sh|\
       scripts/ci/select/require-verification-results.sh|\
       scripts/ci/receipts/local-prepush-receipt.py|\
@@ -1718,6 +1720,12 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/fetch-openbao-release-signing-key.sh|\
       scripts/ci/tests/cw_release_fixtures.py|scripts/ci/tests/test-cli-release-workflow.py|\
       scripts/ci/tests/test-cw-release-delivery.py|scripts/ci/tests/test-cw-release-r2.py|\
+      scripts/ci/tests/test-package-cw-release.py|\
+      scripts/ci/release/local_runtime_parts.py|scripts/ci/release/local_runtime_sources.py|\
+      scripts/ci/release/local-runtime-sources.json|scripts/ci/release/build-runtime-kernel.sh|\
+      scripts/ci/release/build-local-runtime.sh|\
+      scripts/ci/release/build-runtime-guest-root.sh|scripts/ci/release/runtime-container.sh|\
+      scripts/ci/tests/test-local-runtime-parts.py|\
       scripts/ci/tests/test-cw-install.py|\
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-release-signing-key.sh|\
@@ -1757,7 +1765,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/*observer*.tsv|\
       scripts/ci/release/verify-cw-release-signing-key.sh|scripts/ci/release/verify-release-tag-ref.sh|\
       apps/cli/GPG_PUBLIC_KEY.asc|\
-      apps/cli/README.md|apps/cli/install.sh|\
+      apps/cli/README.md|apps/cli/install.sh|scripts/dev/test-cw-release-update.py|\
       apps/cli/aur/PKGBUILD|apps/cli/nfpm.yaml|\
       apps/cli/scripts/update-homebrew-formula.sh|install.sh)
         select_token release

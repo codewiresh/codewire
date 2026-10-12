@@ -919,6 +919,42 @@ assert_kind_credential_rotation() {
   }
 }
 
+# A failed stage must not leave what it created live: a leftover Sandbox keeps
+# authenticating to the bridge, and the synthetic fixture compares every bridge
+# authentication with the previous one, so the next run fails its
+# same-identity evidence. Remove, best-effort and logged, in dependency order:
+# the environment, its profiles, then each credential, revoked before it is
+# deleted (the CLI refuses to delete an active one). A stage forgets each name
+# once its own steps removed it, so a passing stage removes nothing here.
+cleanup_kind_credential_stage() {
+  local environment="$1" profiles="$2" credentials="$3" item
+  [ -n "${environment}${profiles}${credentials}" ] || return 0
+  log "removing what the stage left: environment ${environment:-none}; profiles ${profiles:-none}; credentials ${credentials:-none}"
+  if [ -n "$environment" ]; then
+    if kind_credential_cli env --platform rm "$environment" --yes --output json >/dev/null 2>&1 \
+        && wait_kind_credential_environment "$environment" destroyed >/dev/null 2>&1; then
+      log "removed environment ${environment}"
+    else
+      log "could not remove environment ${environment}; remove it before the next run"
+    fi
+  fi
+  for item in $profiles; do
+    if kind_credential_cli credentials --platform --profile "$item" delete --yes >/dev/null 2>&1; then
+      log "deleted profile ${item}"
+    else
+      log "could not delete profile ${item}"
+    fi
+  done
+  for item in $credentials; do
+    kind_credential_cli credentials --platform revoke "$item" --output json >/dev/null 2>&1 || true
+    if kind_credential_cli credentials --platform delete "$item" --yes >/dev/null 2>&1; then
+      log "deleted credential ${item}"
+    else
+      log "could not delete credential ${item}"
+    fi
+  done
+}
+
 kind_credential_native_smoke() (
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
     log "release-image gate: synthetic native credential composition is not selected"
@@ -929,6 +965,7 @@ kind_credential_native_smoke() (
   local workspace_image marker
   local login_events login_generation update restart_generation renewal_stop renewal_pid=""
   local member_role_changed="" bound_revision journey_from served
+  local stage_environment="" stage_profiles="" stage_credentials=""
   # The acceptance must never die with a bare exit status again (runs 10381,
   # 10459, 10465 all lost the failing command to a silent jq exit 4). Report
   # the exact failing command before errexit unwinds the suite.
@@ -939,7 +976,7 @@ kind_credential_native_smoke() (
   # A failed step must not leave the renewal probe running, here or in the
   # Pod, and a failure while the creator is an admin restores the seeded
   # member role, so a retained cluster can run this suite again.
-  trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"; [ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"; [ -z "$member_role_changed" ] || set_kind_credential_member_role "$environment" member >/dev/null 2>&1 || true' EXIT
+  trap '[ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"; [ -z "$member_role_changed" ] || set_kind_credential_member_role "$environment" member >/dev/null 2>&1 || true; cleanup_kind_credential_stage "$stage_environment" "$stage_profiles" "$stage_credentials"; rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
   [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
   credential_name="kind-codex-${RANDOM}-${RANDOM}"
   profile_name="kind-profile-${RANDOM}-${RANDOM}"
@@ -954,11 +991,13 @@ kind_credential_native_smoke() (
   kind_credential_cli org current | awk '
     $1 == "ID:" { id = $2; count++ }
     END { exit !(count == 1 && id == "org_contract_1") }'
+  stage_credentials="$credential_name"
   kind_credential_cli credentials --platform connect codex --name "$credential_name"
   kind_credential_cli credentials --platform get "$credential_name" --output json | jq -e \
     --arg name "$credential_name" 'length == 1 and .[0].name == $name
       and .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"' >/dev/null
   # The first explicit identity selection creates the named profile atomically.
+  stage_profiles="$profile_name"
   kind_credential_cli credentials --platform --profile "$profile_name" set codex "$credential_name"
   # Let the public create path resolve a runnable preset for the exact runtime
   # image. preset_contract_1 is an API contract fixture with no template config.
@@ -966,6 +1005,7 @@ kind_credential_native_smoke() (
     --image "$workspace_image" \
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+  stage_environment="$environment"
   wait_kind_credential_environment "$environment" running
   kind_credential_probe "$environment" unselected
   update="$(kind_credential_cli env --platform update "$environment" \
@@ -1099,8 +1139,11 @@ kind_credential_native_smoke() (
   # binding, so a tombstone cannot permanently pin the profile and credential.
   kind_credential_cli env --platform rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
+  stage_environment=""
   kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
+  stage_profiles=""
   kind_credential_cli credentials --platform delete "$credential_name" --yes
+  stage_credentials=""
   log "public synthetic Codex flow, ChatGPT login delivery, native rotation/retry, revocation and terminal cleanup passed"
 )
 
@@ -1297,12 +1340,12 @@ kind_credential_claude_session() (
   log "running public Anthropic API key and Claude subscription token acceptance with stock Claude Code"
   local KIND_CREDENTIAL_CLI_HOME suffix key_name token_name key_profile token_profile environment
   local workspace_image form profile credential update generation pod pod_uid clients baseline
-  local driver
+  local driver stage_environment="" stage_profiles="" stage_credentials=""
   set -E
   trap 'echo "::error::Claude Code credential acceptance failed: command=${BASH_COMMAND} status=$?" >&2' ERR
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-claude.XXXXXX)"
-  trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
+  trap 'cleanup_kind_credential_stage "$stage_environment" "$stage_profiles" "$stage_credentials"; rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
   [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
   suffix="${RANDOM}-${RANDOM}"
   key_name="kind-anthropic-key-$suffix"
@@ -1315,6 +1358,7 @@ kind_credential_claude_session() (
     $1 == "ID:" { id = $2; count++ }
     END { exit !(count == 1 && id == "org_contract_1") }'
   # Material only through stdin, as a user pastes it; never an argument.
+  stage_credentials="$key_name $token_name"
   printf '%s' "$KIND_ANTHROPIC_API_KEY" |
     kind_credential_cli credentials --platform add anthropic --name "$key_name"
   printf '%s' "$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |
@@ -1327,12 +1371,14 @@ kind_credential_claude_session() (
   # The subscription token is the provider's OAuth kind with a hard expiry one
   # year after it was added.
   assert_kind_credential_claude_token "$token_name" 1
+  stage_profiles="$key_profile $token_profile"
   kind_credential_cli credentials --platform --profile "$key_profile" set anthropic "$key_name"
   kind_credential_cli credentials --platform --profile "$token_profile" set anthropic "$token_name"
   environment="$(kind_credential_cli env --platform create --name "$key_profile" \
     --image "$workspace_image" \
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+  stage_environment="$environment"
   wait_kind_credential_environment "$environment" running
   wait_kind_credential_setup_complete "$environment"
   baseline="$(kind_credential_fixture_events | jq -er \
@@ -1373,12 +1419,15 @@ kind_credential_claude_session() (
 
   kind_credential_cli env --platform rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
+  stage_environment=""
   for profile in "$key_profile" "$token_profile"; do
     kind_credential_cli credentials --platform --profile "$profile" delete --yes
   done
+  stage_profiles=""
   for credential in "$key_name" "$token_name"; do
     kind_credential_cli credentials --platform revoke "$credential" --output json
     kind_credential_cli credentials --platform delete "$credential" --yes
   done
+  stage_credentials=""
   log "stock Claude Code in daemon sessions passed with an Anthropic API key and a Claude subscription token, through a provider refusal and its replacement; none reached the Sandbox"
 )

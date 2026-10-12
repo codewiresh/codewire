@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Fetch the exact third-party sources the local VM runtime ships (#2539).
+
+A release publishes, beside the runtime it pins, the source of every
+third-party component in it: the license obligation for the GPL and LGPL
+parts, and a record for the rest. local-runtime-sources.json pins each source
+by URL and SHA-256; Alpine's BusyBox build files are pinned one by one and
+assembled into a deterministic tar. The kernel's source is the exact archive
+its build made (build-runtime-kernel.sh), not a download.
+
+`fetch --side linux` writes the sources of the parts the Linux build job
+makes (BusyBox, its Alpine build files, runc and what it links, and the
+kernel's archive); `--side macos` writes those of the Mac-native parts
+(e2fsprogs, git). Each writes components.json, which the runtime packer turns
+into the document's components.
+"""
+
+import argparse
+import hashlib
+import io
+import json
+import sys
+import tarfile
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cw_release as release  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[3]
+PINS = ROOT / "scripts/ci/release/local-runtime-sources.json"
+SCHEMA = "codewire.local-runtime-sources/v1"
+SIDES = {
+    "linux": ("busybox", "busybox-alpine-build", "runc", "libseccomp", "libpathrs", "linux"),
+    "macos": ("e2fsprogs", "git"),
+}
+TIMEOUT = 120
+
+
+class SourcesError(Exception):
+    pass
+
+
+def require(condition, reason):
+    if not condition:
+        raise SourcesError(reason)
+
+
+def load_pins(path=PINS):
+    pins = json.loads(Path(path).read_bytes())
+    require(isinstance(pins, dict) and pins.get("schema") == SCHEMA
+            and set(pins) == {"schema", "kernel_builder", "kernel_bc", "guest_root_builder", "initramfs_inputs",
+                          "sources"},
+            "local runtime source pins are not the expected shape")
+    sources = pins["sources"]
+    require(set(sources) == {name for names in SIDES.values() for name in names}, "pinned sources are not the set")
+    for name, source in sources.items():
+        require(release._runtime_text(name, "-_.") and release._runtime_text(source.get("version"), "-_.+")
+                and release._runtime_text(source.get("license"), "-_.+ ()"), f"source {name} identity is invalid")
+        if "url" in source:
+            require(source["url"].startswith("https://") and release.is_hex(source.get("sha256"), 64),
+                    f"source {name} must pin an HTTPS URL and its SHA-256")
+        elif "aports" in source:
+            aports = source["aports"]
+            require(release.is_hex(aports.get("commit"), 40) and aports.get("files")
+                    and all(release._runtime_text(file, "-_.") and release.is_hex(digest, 64)
+                            for file, digest in aports["files"].items()), f"source {name} aports pins are invalid")
+        else:
+            require(source.get("from") == "kernel-build", f"source {name} has no origin")
+    return pins
+
+
+def file_name(name, source):
+    if "url" in source:
+        return urllib.parse.urlparse(source["url"]).path.rsplit("/", 1)[-1]
+    if "aports" in source:
+        return f"{name}-{source['version']}.tar"
+    return "linux-source.tar.xz"
+
+
+def download(url, digest, limit=release.MAX_OBJECT):
+    """HTTPS bytes that must hash to `digest`; redirects are followed.
+
+    The request carries urllib's own user agent: Alpine's GitLab serves a bot
+    challenge to agents it does not recognize, a custom one included, and
+    answers 418 when the challenge is not passed.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
+            require(response.geturl().startswith("https://"), f"{url} redirected off HTTPS")
+            data = response.read(limit + 1)
+    except OSError as error:
+        raise SourcesError(f"{url}: {error}") from None
+    require(len(data) <= limit, f"{url} exceeds its bound")
+    require(hashlib.sha256(data).hexdigest() == digest, f"{url} differs from its pinned SHA-256")
+    return data
+
+
+def aports_tar(name, source, fetch=download):
+    """Alpine's pinned build files for a package as one deterministic tar."""
+    aports = source["aports"]
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        for file in sorted(aports["files"]):
+            url = f"{aports['base']}/{aports['commit']}/{aports['path']}/{urllib.parse.quote(file)}"
+            data = fetch(url, aports["files"][file])
+            info = tarfile.TarInfo(f"{name}-{source['version']}/{file}")
+            info.size, info.mode, info.mtime = len(data), 0o644, 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def fetch_side(side, output, kernel=None, pins=None, fetch=download):
+    """Write one side's sources and components.json into a fresh `output`."""
+    pins = pins or load_pins()
+    require(side in SIDES, "unknown side")
+    output = Path(output)
+    output.mkdir(mode=0o700)
+    components = []
+    for name in SIDES[side]:
+        source = pins["sources"][name]
+        target = file_name(name, source)
+        if "url" in source:
+            data = fetch(source["url"], source["sha256"])
+        elif "aports" in source:
+            data = aports_tar(name, source, fetch)
+        else:
+            require(kernel is not None, "the linux side needs --kernel, the kernel build's output")
+            data = release.read_regular(Path(kernel) / target, release.MAX_OBJECT)
+        require(0 < len(data) <= release.MAX_OBJECT, f"{name} source is out of bounds")
+        release.write_new(output / target, data)
+        components.append({"name": name, "version": source["version"], "license": source["license"],
+                           "file": target})
+    release.write_new(output / "components.json", release.canonical(components))
+    return components
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    fetch = sub.add_parser("fetch")
+    fetch.add_argument("--side", required=True, choices=sorted(SIDES))
+    fetch.add_argument("--output", type=Path, required=True)
+    fetch.add_argument("--kernel", type=Path, help="build-runtime-kernel.sh output (linux side)")
+    sub.add_parser("check")
+    args = parser.parse_args(argv)
+    try:
+        pins = load_pins()
+        if args.command == "fetch":
+            components = fetch_side(args.side, args.output, args.kernel, pins)
+            for component in components:
+                print(f"local-runtime-source: {component['name']} {component['version']} {component['file']}")
+        else:
+            print(f"local-runtime-sources: {len(pins['sources'])} sources pinned")
+    except (SourcesError, release.ReleaseError, OSError, ValueError) as error:
+        print(f"local-runtime-sources: REJECT {type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

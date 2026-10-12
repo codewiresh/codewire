@@ -238,6 +238,37 @@ async fn assert_ssh_profile_admission_precedes_writes(harness: &Harness) {
             "rejected direct SSH wrote a preset/environment/preset image configuration"
         );
     }
+    // A selected profile without an SSH key is refused inside the create
+    // transaction, so the environment row it inserted is rolled back.
+    let response = harness
+        .connect_json(
+            ENVIRONMENT_SERVICE,
+            "CreateEnvironment",
+            json!({
+                "orgId": PRIMARY_ORG, "presetId": "preset_contract_in_use",
+                "projectSpec": {"schemaVersion": 1, "workingDirectory": "/workspace/app",
+                    "repositories": [{"source": "git@example.test:private-admission/app.git",
+                        "destination": "/workspace/app", "knownHosts": [pin]}],
+                    "credentials": {"profile": "platform:user/wire-contract-empty"}},
+                "expectedProfileRevision": PROFILE_REVISION,
+                "confirmPersonalCredentials": true,
+            }),
+            Auth::Admin,
+        )
+        .await;
+    let error = assert_connect_error(
+        &response,
+        StatusCode::BAD_REQUEST,
+        "invalid_argument",
+        "SSH repository checkout needs an SSH key in the selected credential profile; \
+         add one, or use an https://github.com URL with a GitHub connection",
+    );
+    assert!(!error.to_string().contains("private-admission"));
+    assert_eq!(
+        counts(&pool).await,
+        before,
+        "a profile without an SSH key left a preset/environment/preset image configuration"
+    );
     let response = harness
         .connect_json(
             ENVIRONMENT_SERVICE,

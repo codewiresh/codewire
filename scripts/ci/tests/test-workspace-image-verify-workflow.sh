@@ -97,6 +97,25 @@ if grep -Eq 'docker (buildx )?build.*--push|docker push' "$VERIFY"; then
 fi
 [[ "$(grep -Ec '^workspace_cache_build (base|workspace) ' "$VERIFY")" -eq 2 ]] ||
   fail 'verification does not build the exact local base/workspace pair'
+# The published arm64 leg cross-compiles cw. Verification builds exactly that
+# stage on amd64 hosts, without publication, emulation or a measured case.
+# shellcheck disable=SC2016 # Match the verifier's literal shell condition.
+arm64_cw_block="$(sed -n '/^if \[\[ "$architecture" == amd64 && -z "$workspace_measurement_case" \]\]; then$/,/^fi$/p' "$VERIFY")"
+[[ "$(grep -c '^ *workspace_cache_build ' <<<"$arm64_cw_block")" -eq 1 \
+    && "$(grep -c '^  workspace_cache_build cw-arm64 ' "$VERIFY")" -eq 1 ]] ||
+  fail 'verification does not gate exactly one arm64 cw cross-compile build'
+# shellcheck disable=SC2016 # Match the verifier's literal shell variables.
+for arm64_cw_input in \
+    'workspace_cache_build cw-arm64 "$source_tree" arm64 ' '--target cw-builder-arm64' \
+    '--output type=cacheonly' '--provenance=false --sbom=false' '"${compiler_args[@]}"' \
+    '--build-arg CODEWIRE_RUST_PROFILE=ci' '--build-arg "BASE_IMAGE_REF=$base_foundation"' \
+    '--file "$ROOT/images/workspace/Dockerfile"'; do
+  grep -qF -- "$arm64_cw_input" <<<"$arm64_cw_block" ||
+    fail "arm64 cw cross-compile check omits: $arm64_cw_input"
+done
+if grep -Eq -- '--push|--load|type=(oci|docker|image|registry)' <<<"$arm64_cw_block"; then
+  fail 'arm64 cw cross-compile check exports an image'
+fi
 # shellcheck disable=SC2016 # Match the verifier's literal shell variables.
 grep -qF -- '--output "type=oci,dest=$base_layout,tar=false"' "$VERIFY" ||
   fail 'base verification does not export a local OCI layout'
@@ -137,7 +156,7 @@ for agent in codex claude gemini kimi pi aider; do
   grep -qF "$agent" "$AGENT_CONTRACT" || fail "verification omits $agent"
 done
 for tool in cw docker dockerd docker-compose gh git go gopls hcloud node npm bun pnpm yarn \
-  python3 pipx poetry uv cargo rustc psql protoc; do
+  python3 pipx poetry uv cargo rustc psql protoc bwrap; do
   grep -qF "$tool" "$AGENT_CONTRACT" || fail "verification omits $tool"
 done
 grep -qF 'dynamic_bun_runner="bun""x"' "$AGENT_CONTRACT" ||
@@ -340,7 +359,9 @@ case "${1:-} ${2:-}" in
         *) exit 98 ;;
       esac
     fi
-    if [[ -z "$archive_file" && -s "$FAKE_REUSE_RESULT_FILE" ]]; then
+    # Only the base build hands the producer pointer to its metadata directory;
+    # the cache-only arm64 cw check has no metadata and no pointer.
+    if [[ -z "$archive_file" && -n "$metadata_file" && -s "$FAKE_REUSE_RESULT_FILE" ]]; then
       reused_result="$(<"$FAKE_REUSE_RESULT_FILE")"
       if [[ -n "$reused_result" ]]; then
         result_path="$(dirname "$metadata_file")/cw-image-work/cw-producer-result.json"
@@ -558,13 +579,35 @@ run_mock_verifier() {
   "${invocation[@]}"
 }
 
+# Base/workspace builds exclude the original CW producer and the arm64 cw check.
+pair_build_count() {
+  grep '^buildx build ' "$work/docker.log" | grep -v -- '--target cw-runtime-export' |
+    { grep -vc -- '--target cw-builder-arm64' || true; }
+}
+arm64_cw_build_count() {
+  grep '^buildx build ' "$work/docker.log" | { grep -c -- '--target cw-builder-arm64' || true; }
+}
+
 # Assert behavior and ordering rather than incidental inspection call counts.
 : >"$work/docker.log"
 run_mock_verifier success >/dev/null
 grep -q '^buildx create --name codewire-workspace-' "$work/docker.log" || fail 'owned builder was not created'
 grep -q -- '--driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:' "$work/docker.log" || fail 'daemon is not pinned'
-[[ "$(grep '^buildx build ' "$work/docker.log" | grep -vc -- '--target cw-runtime-export')" == 2 ]] || fail 'base/workspace pair was not built once'
+[[ "$(pair_build_count)" == 2 ]] || fail 'base/workspace pair was not built once'
 [[ "$(grep -c -- '--target cw-runtime-export' "$work/docker.log" || true)" == "$standalone_producers" ]] || fail 'CW producer count differs from the selected architecture'
+# Only an amd64 host cross-checks the arm64 cw; an arm64 host builds it natively.
+[[ "$(arm64_cw_build_count)" == "$standalone_producers" ]] || fail 'arm64 cw cross-compile count differs from the selected architecture'
+if [[ "$standalone_producers" == 1 ]]; then
+  arm64_cw_call="$(grep '^buildx build ' "$work/docker.log" | grep -- '--target cw-builder-arm64')"
+  for arm64_cw_input in '--platform linux/arm64' '--output type=cacheonly' \
+      '--build-arg CODEWIRE_RUST_PROFILE=ci' '--build-arg CODEWIRE_SCCACHE_MODE=local' \
+      "--build-arg BASE_IMAGE_REF=$(sed -n 's/^FROM \(ubuntu:noble@sha256:[0-9a-f]\{64\}\)$/\1/p' "$ROOT/images/base/Dockerfile")"; do
+    grep -qF -- "$arm64_cw_input" <<<"$arm64_cw_call" || fail "arm64 cw cross-compile call omits $arm64_cw_input"
+  done
+  arm64_cw_line="$(grep -n -- '--target cw-builder-arm64' "$work/docker.log" | cut -d: -f1)"
+  [[ "$arm64_cw_line" -lt "$(grep -n '^buildx rm ' "$work/docker.log" | cut -d: -f1)" ]] ||
+    fail 'arm64 cw cross-compile ran outside the owned builder lifetime'
+fi
 grep -q -- '--output type=oci\\,dest=.*base.oci\\,tar=false' "$work/docker.log" || fail 'exact base OCI export missing'
 grep -q -- '--build-context codewire-verified-base=oci-layout://.*base.oci@sha256:' "$work/docker.log" || fail 'exact base handoff missing'
 grep -q -- '--no-cache-filter workspace-floating-tools' "$work/docker.log" || fail 'floating tools could be reused'
@@ -603,7 +646,7 @@ if [[ "$standalone_producers" == 1 ]]; then
   MOCK_RETAIN=1 run_mock_verifier retained >"$work/retained.out" 2>&1 || {
     cat "$work/retained.out" >&2; fail 'opt-in producer retention failed';
   }
-  [[ "$(grep '^buildx build ' "$work/docker.log" | grep -vc -- '--target cw-runtime-export')" == 2 \
+  [[ "$(pair_build_count)" == 2 \
     && "$(grep -c -- '--target cw-runtime-export' "$work/docker.log")" == 1 ]] ||
     fail 'image-only reuse bypassed retained producer qualification'
   retained_pointer="$(<"$work/selected-producer-result")"
@@ -752,7 +795,8 @@ if run_mock_verifier dirty valid docker-container '' true >/dev/null 2>&1; then 
 
 : >"$work/docker.log"
 MOCK_COMPILER=disabled MOCK_LAYERS=disabled run_mock_verifier cold >/dev/null
-[[ "$(grep '^buildx build ' "$work/docker.log" | grep -v -- '--target cw-runtime-export' | grep -c -- '--no-cache ')" == 2 ]] || fail 'disabled layer cache did not bypass both builds'
+[[ "$(grep '^buildx build ' "$work/docker.log" | grep -v -- '--target cw-runtime-export' | grep -v -- '--target cw-builder-arm64' | grep -c -- '--no-cache ')" == 2 ]] || fail 'disabled layer cache did not bypass both builds'
+[[ "$(grep -- '--target cw-builder-arm64' "$work/docker.log" | grep -c -- '--no-cache ' || true)" == "$standalone_producers" ]] || fail 'disabled layer cache reused the arm64 cw cross-compile'
 if [[ "$standalone_producers" == 1 ]]; then
   grep -- '--target cw-runtime-export' "$work/docker.log" | grep -q -- '--no-cache ' || fail 'disabled producer cache was reused'
 else
@@ -762,7 +806,7 @@ fi
 [[ "$(jq -r '.cache_modes.compiler + "/" + .cache_modes.layers' "$fixture_receipt")" == disabled/disabled ]] || fail 'receipt omitted cache modes'
 : >"$work/docker.log"
 run_mock_verifier changed-mode >/dev/null
-[[ "$(grep '^buildx build ' "$work/docker.log" | grep -vc -- '--target cw-runtime-export')" == 2 ]] || fail 'mode change reused incompatible evidence'
+[[ "$(pair_build_count)" == 2 ]] || fail 'mode change reused incompatible evidence'
 [[ "$(grep -c -- '--target cw-runtime-export' "$work/docker.log" || true)" == "$standalone_producers" ]] || fail 'mode change producer count differs from its architecture'
 : >"$work/docker.log"
 if MOCK_LAYERS=invalid run_mock_verifier invalid-mode >/dev/null 2>&1; then fail 'invalid mode accepted'; fi
@@ -1037,6 +1081,9 @@ replace_once('''  if [[ "$retain_cw_producer" == 1 && "$cw_copy_started" == fals
     fi
   fi
 ''', '')
+# The later arm64 cw cross-compile check is also outside the prior witness.
+remove_between('# The published arm64 leg cross-compiles cw on the build platform. Build only\n',
+               '# Loaded runtime bytes do not depend on BuildKit.')
 assert hashlib.sha256(current.encode()).hexdigest() == '4a9556428364ce20fc450cb245f00774a6ffa2ea0b1c0bdb8046653814716d19'
 copy = '''if [[ "$architecture" == amd64 ]]; then
   # Keep original source provenance and prove the installed bytes after the

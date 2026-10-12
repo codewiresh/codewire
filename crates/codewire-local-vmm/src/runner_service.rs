@@ -31,6 +31,7 @@ use crate::control::v1::environment_runner_service_client::EnvironmentRunnerServ
 use crate::control::v1::environment_runner_service_server::{
     EnvironmentRunnerService, EnvironmentRunnerServiceServer,
 };
+use crate::diagnostic_log::{self, DiagnosticLog, LogField};
 use crate::direct_share::{DirectShareIdentity, DirectShareRequest};
 use crate::host::path::PrivateRoot;
 use crate::host_port::{HostPortBinding, canonical_host_port_bindings};
@@ -610,10 +611,20 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
             platform_config_dir: config.platform_config_dir,
         })),
         adoption: adoption_tx,
+        log: DiagnosticLog::inherited().map(Arc::new),
         events,
         generation_access,
         shutdown: watch::channel(None).0,
     };
+    diagnostic_log::record(
+        service.log.as_deref(),
+        "runner_started",
+        &[
+            ("environment", LogField::Id(config.environment_id)),
+            ("pid", LogField::Count(u64::from(std::process::id()))),
+            ("generation", LogField::Count(generation)),
+        ],
+    );
     let server = tokio::spawn(serve_runner_rpc(config.socket, service));
     let adoption = adoption_rx.recv().await.ok_or(RunnerServiceError::Serve)?;
     #[cfg(target_os = "linux")]
@@ -818,6 +829,8 @@ fn runner_exit_error_code(exit: ExitClass) -> Option<&'static str> {
 struct RunnerRpc {
     state: Arc<Mutex<RunnerState>>,
     adoption: mpsc::Sender<AdoptionRequest>,
+    // The bounded owner-only log the supervisor gave this runner, if any.
+    log: Option<Arc<DiagnosticLog>>,
     events: Arc<RunnerEvents>,
     generation_access: Arc<GenerationAccessCell>,
     // Carries the final prepared event as well as the shutdown signal, so
@@ -827,6 +840,42 @@ struct RunnerRpc {
 
 struct AdoptionRequest {
     acknowledged: oneshot::Sender<()>,
+}
+
+impl RunnerRpc {
+    /// Logs a failed VM start: the runner's closed error code and, for a
+    /// guest that never became ready, the closed reason and last guest stage.
+    fn log_start_failure(
+        &self,
+        environment_id: Uuid,
+        generation: u64,
+        error_code: &str,
+        guest: Option<&GuestStartFailure>,
+        started: std::time::Instant,
+    ) {
+        let mut fields = vec![
+            ("environment", LogField::Id(environment_id)),
+            ("generation", LogField::Count(generation)),
+            ("error_code", LogField::Code(error_code)),
+        ];
+        if let Some(guest) = guest {
+            fields.push(("detail", LogField::Name(guest.detail)));
+            fields.push((
+                "guest_stage",
+                LogField::Name(guest.guest_stage.map_or("none", guest_stage_name)),
+            ));
+            fields.push((
+                "daemon_ready",
+                LogField::Count(u64::from(guest.daemon_ready)),
+            ));
+        }
+        fields.push(("elapsed_ms", LogField::Count(elapsed_ms(started))));
+        diagnostic_log::record(self.log.as_deref(), "vm_start_failed", &fields);
+    }
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[tonic::async_trait]
@@ -965,6 +1014,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                     Status::invalid_argument("invalid managed credential client selection")
                 })?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
+        let started = std::time::Instant::now();
         let mut state = self.state.lock().await;
         state.retirement.require_active()?;
         if !state.adopted {
@@ -1018,6 +1068,17 @@ impl EnvironmentRunnerService for RunnerRpc {
             Ok(prepared) => prepared,
             Err(error) => {
                 let error_code = prepare_error_code(&error);
+                self.log_start_failure(
+                    environment_id,
+                    request.generation,
+                    error_code,
+                    None,
+                    started,
+                );
+                // A failed attempt consumes its generation as a prepared one
+                // does (below), so the generation this runner reports matches
+                // its last event, which a retry compares it with (#2579).
+                state.generation = state.generation.max(request.generation);
                 state.state = v1::EnvironmentState::Error;
                 state.error_code = Some(error_code);
                 self.events.publish(
@@ -1047,6 +1108,13 @@ impl EnvironmentRunnerService for RunnerRpc {
         let mut running = match state.runner.start(prepared).await {
             Ok(running) => running,
             Err(error) => {
+                self.log_start_failure(
+                    environment_id,
+                    request.generation,
+                    "vmm_start_failed",
+                    None,
+                    started,
+                );
                 state.state = v1::EnvironmentState::Error;
                 state.error_code = Some("vmm_start_failed");
                 self.events.publish(
@@ -1065,6 +1133,13 @@ impl EnvironmentRunnerService for RunnerRpc {
         let generation_access = match self.generation_access.publish(&running) {
             Ok(guard) => guard,
             Err(error) => {
+                self.log_start_failure(
+                    environment_id,
+                    request.generation,
+                    "daemon_access_failed",
+                    None,
+                    started,
+                );
                 let _ = running.stop().await;
                 state.state = v1::EnvironmentState::Error;
                 state.error_code = Some("daemon_access_failed");
@@ -1086,6 +1161,13 @@ impl EnvironmentRunnerService for RunnerRpc {
         let worker_executable = match worker_executable {
             Ok(executable) => executable,
             Err(()) => {
+                self.log_start_failure(
+                    environment_id,
+                    request.generation,
+                    "network_worker_failed",
+                    None,
+                    started,
+                );
                 generation_access.revoke();
                 let _ = running.stop().await;
                 state.state = v1::EnvironmentState::Error;
@@ -1113,6 +1195,13 @@ impl EnvironmentRunnerService for RunnerRpc {
             generation_access.revoke();
             let _ = running.stop().await;
             let error_code = network_start_error_code(&error);
+            self.log_start_failure(
+                environment_id,
+                request.generation,
+                error_code,
+                None,
+                started,
+            );
             state.state = v1::EnvironmentState::Error;
             state.error_code = Some(error_code);
             self.events.publish(
@@ -1133,9 +1222,16 @@ impl EnvironmentRunnerService for RunnerRpc {
             None,
             running.cw_runtime_catalog_generation(),
         )?;
-        if let Err(error) =
+        if let Err(failure) =
             wait_for_guest_daemon(&mut running, daemon_ready_timeout, &self.events).await
         {
+            self.log_start_failure(
+                environment_id,
+                request.generation,
+                "guest_start_failed",
+                Some(&failure),
+                started,
+            );
             generation_access.revoke();
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
@@ -1148,9 +1244,16 @@ impl EnvironmentRunnerService for RunnerRpc {
                 Some("guest_start_failed"),
                 state.cw_runtime_catalog_generation(),
             )?;
-            return Err(error);
+            return Err(failure.status);
         }
         if running.discard_one_boot_inputs().is_err() {
+            self.log_start_failure(
+                environment_id,
+                request.generation,
+                "input_cleanup_failed",
+                None,
+                started,
+            );
             generation_access.revoke();
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
@@ -1178,11 +1281,27 @@ impl EnvironmentRunnerService for RunnerRpc {
             None,
             state.cw_runtime_catalog_generation(),
         ) {
+            self.log_start_failure(
+                environment_id,
+                request.generation,
+                "daemon_access_failed",
+                None,
+                started,
+            );
             state.generation_access = None;
             state.state = v1::EnvironmentState::Error;
             state.error_code = Some("daemon_access_failed");
             return Err(error);
         }
+        diagnostic_log::record(
+            self.log.as_deref(),
+            "vm_started",
+            &[
+                ("environment", LogField::Id(environment_id)),
+                ("generation", LogField::Count(request.generation)),
+                ("elapsed_ms", LogField::Count(elapsed_ms(started))),
+            ],
+        );
         Ok(Response::new(state.info()))
     }
 
@@ -1833,20 +1952,30 @@ enum GuestProgressStreamError {
     Flood,
 }
 
+/// Why a started guest never became ready. `detail` and `guest_stage` are
+/// closed names for the runner log (#2595); the status keeps its existing text.
+struct GuestStartFailure {
+    status: Status,
+    detail: &'static str,
+    guest_stage: Option<GuestBootStage>,
+    daemon_ready: bool,
+}
+
 async fn wait_for_guest_daemon(
     running: &mut RunningVm,
     timeout: std::time::Duration,
     events: &RunnerEvents,
-) -> Result<(), Status> {
+) -> Result<(), GuestStartFailure> {
     let target = GuestProgressTarget::from_running(running);
     let generation = running.generation();
     let (progress_tx, mut progress_rx) = mpsc::channel(RUNNER_WATCH_BUFFER);
     let mut progress_task = tokio::spawn(stream_guest_progress(target, progress_tx));
     let mut progress_joined = false;
+    let mut guest_stage = None;
+    let mut daemon_ready = false;
     let result = tokio::time::timeout(timeout, async {
         let mut progress_open = true;
         let mut progress_ready = false;
-        let mut daemon_ready = false;
         loop {
             tokio::select! {
                 progress = progress_rx.recv(), if progress_open => match progress {
@@ -1858,10 +1987,14 @@ async fn wait_for_guest_daemon(
                             Some(progress),
                             None,
                         running.cw_runtime_catalog_generation(),
-                        )?;
+                        ).map_err(|status| ("event_publish", status))?;
+                        guest_stage = Some(progress.stage);
                         if progress.stage.is_failure() {
-                            return Err(Status::failed_precondition(
-                                "authenticated guest initialization failed",
+                            return Err((
+                                guest_failure_detail(progress.stage),
+                                Status::failed_precondition(
+                                    "authenticated guest initialization failed",
+                                ),
                             ));
                         }
                         progress_ready |= progress.stage == GuestBootStage::DaemonStarted;
@@ -1872,13 +2005,17 @@ async fn wait_for_guest_daemon(
                         match (&mut progress_task).await {
                             Ok(Ok(())) if progress_ready => {}
                             Ok(Ok(())) => {
-                                return Err(Status::unavailable(
-                                    "guest progress ended before daemon startup",
+                                return Err((
+                                    "guest_progress_ended",
+                                    Status::unavailable(
+                                        "guest progress ended before daemon startup",
+                                    ),
                                 ));
                             }
                             Ok(Err(_)) | Err(_) => {
-                                return Err(Status::failed_precondition(
-                                    "guest progress validation failed",
+                                return Err((
+                                    "guest_progress_invalid",
+                                    Status::failed_precondition("guest progress validation failed"),
                                 ));
                             }
                         }
@@ -1888,47 +2025,54 @@ async fn wait_for_guest_daemon(
                     match running
                         .observe_exit()
                         .await
-                        .map_err(|error| Status::internal(error.to_string()))?
+                        .map_err(|error| ("vm_observe_failed", Status::internal(error.to_string())))?
                     {
                         ExitClass::StillRunning => {}
                         ExitClass::GuestShutdown => {
-                            return Err(Status::unavailable(
-                                "guest shut down before daemon readiness",
+                            return Err((
+                                "guest_shutdown",
+                                Status::unavailable("guest shut down before daemon readiness"),
                             ));
                         }
                         ExitClass::VmmFailure(code) => {
-                            return Err(Status::unavailable(format!(
+                            return Err(("vmm_exited", Status::unavailable(format!(
                                 "Cloud Hypervisor exited before guest daemon readiness with status {code:?}"
-                            )));
+                            ))));
                         }
                         ExitClass::DirectShareFailure(code) => {
-                            return Err(Status::unavailable(format!(
+                            return Err(("direct_share_exited", Status::unavailable(format!(
                                 "isolated direct-share server exited before guest daemon readiness with status {code:?}"
-                            )));
+                            ))));
                         }
                         ExitClass::NetworkWorkerFailure(code) => {
-                            return Err(Status::unavailable(format!(
+                            return Err(("network_worker_exited", Status::unavailable(format!(
                                 "isolated network worker exited before guest daemon readiness with status {code:?}"
-                            )));
+                            ))));
                         }
                         ExitClass::EgressBrokerFailure(code) => {
-                            return Err(Status::unavailable(format!(
+                            return Err(("egress_broker_exited", Status::unavailable(format!(
                                 "isolated egress broker exited before guest daemon readiness with status {code:?}"
-                            )));
+                            ))));
                         }
                         ExitClass::IngressForwarderFailure => {
-                            return Err(Status::unavailable(
-                                "ingress forwarder exited before guest daemon readiness",
+                            return Err((
+                                "ingress_forwarder_exited",
+                                Status::unavailable(
+                                    "ingress forwarder exited before guest daemon readiness",
+                                ),
                             ));
                         }
                         ExitClass::MeshTransportFailure(code) => {
-                            return Err(Status::unavailable(format!(
+                            return Err(("mesh_transport_exited", Status::unavailable(format!(
                                 "isolated Mesh transport exited before guest daemon readiness with status {code:?}"
-                            )));
+                            ))));
                         }
                         ExitClass::MeshIngressReceiverFailure => {
-                            return Err(Status::unavailable(
-                                "Mesh ingress receiver exited before guest daemon readiness",
+                            return Err((
+                                "mesh_ingress_receiver_exited",
+                                Status::unavailable(
+                                    "Mesh ingress receiver exited before guest daemon readiness",
+                                ),
                             ));
                         }
                     }
@@ -1946,12 +2090,55 @@ async fn wait_for_guest_daemon(
         }
     })
     .await
-    .map_err(|_| Status::unavailable("guest daemon readiness timed out"));
+    .unwrap_or_else(|_| {
+        Err((
+            "readiness_timeout",
+            Status::unavailable("guest daemon readiness timed out"),
+        ))
+    });
     if !progress_joined {
         progress_task.abort();
         let _ = progress_task.await;
     }
-    result?
+    result.map_err(|(detail, status)| GuestStartFailure {
+        status,
+        detail,
+        guest_stage,
+        daemon_ready,
+    })
+}
+
+fn guest_failure_detail(stage: GuestBootStage) -> &'static str {
+    match stage {
+        GuestBootStage::SetupFailed => "guest_setup_failed",
+        GuestBootStage::DockerToolingMissing => "guest_docker_tooling_missing",
+        _ => "guest_workspace_failed",
+    }
+}
+
+/// The closed log name of a guest boot stage.
+fn guest_stage_name(stage: GuestBootStage) -> &'static str {
+    match stage {
+        GuestBootStage::StateMounted => "state_mounted",
+        GuestBootStage::CgroupsReady => "cgroups_ready",
+        GuestBootStage::DisksAdmitted => "disks_admitted",
+        GuestBootStage::RootMounted => "root_mounted",
+        GuestBootStage::SetupHeaderReady => "setup_header_ready",
+        GuestBootStage::SetupContentReady => "setup_content_ready",
+        GuestBootStage::RootLayersReady => "root_layers_ready",
+        GuestBootStage::WorkspacePlanReady => "workspace_plan_ready",
+        GuestBootStage::OwnershipReady => "ownership_ready",
+        GuestBootStage::ContainerControlReady => "container_control_ready",
+        GuestBootStage::RootGenerationReady => "root_generation_ready",
+        GuestBootStage::PersistentLayoutReady => "persistent_layout_ready",
+        GuestBootStage::RuncLaunching => "runc_launching",
+        GuestBootStage::RuncRunning => "runc_running",
+        GuestBootStage::WorkspaceRunning => "workspace_running",
+        GuestBootStage::DaemonStarted => "daemon_started",
+        GuestBootStage::SetupFailed => "setup_failed",
+        GuestBootStage::WorkspaceFailed => "workspace_failed",
+        GuestBootStage::DockerToolingMissing => "docker_tooling_missing",
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2072,11 +2259,92 @@ mod tests {
                 platform_config_dir: parent.path().join("platform"),
             })),
             adoption: mpsc::channel(1).0,
+            log: None,
             events: Arc::new(RunnerEvents::new(environment_id, "synthetic".into(), 1)),
             generation_access: GenerationAccessCell::new(environment_id),
             shutdown: watch::channel(None).0,
         };
         (parent, rpc)
+    }
+
+    #[test]
+    fn guest_start_failures_log_distinct_closed_causes_without_their_status_text() {
+        const CANARY: &str = "synthetic-application-secret-value-must-not-be-logged";
+        let (parent, mut rpc) = bootstrap_rpc();
+        let root_path = parent.path().join("runtime");
+        std::fs::create_dir(&root_path).unwrap();
+        std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = PrivateRoot::open(&std::fs::canonicalize(&root_path).unwrap()).unwrap();
+        let environment_id = Uuid::new_v4();
+        let name = diagnostic_log::runner_log_name(environment_id);
+        rpc.log = Some(Arc::new(
+            DiagnosticLog::adopt(diagnostic_log::open_child_log(&root, &name).unwrap()).unwrap(),
+        ));
+
+        // Install (setup) and startup (workspace) failures are guest stages;
+        // readiness is the bounded wait. Each is its own closed cause.
+        let failures = [
+            (
+                guest_failure_detail(GuestBootStage::SetupFailed),
+                Some(GuestBootStage::SetupFailed),
+            ),
+            (
+                guest_failure_detail(GuestBootStage::WorkspaceFailed),
+                Some(GuestBootStage::WorkspaceFailed),
+            ),
+            ("readiness_timeout", Some(GuestBootStage::RuncRunning)),
+            ("vmm_exited", None),
+        ];
+        for (detail, guest_stage) in failures {
+            let failure = GuestStartFailure {
+                status: Status::unavailable(CANARY),
+                detail,
+                guest_stage,
+                daemon_ready: false,
+            };
+            rpc.log_start_failure(
+                environment_id,
+                3,
+                "guest_start_failed",
+                Some(&failure),
+                std::time::Instant::now(),
+            );
+        }
+        rpc.log_start_failure(
+            environment_id,
+            4,
+            "vmm_start_failed",
+            None,
+            std::time::Instant::now(),
+        );
+
+        let log = std::fs::read_to_string(root.path().join("logs").join(&name)).unwrap();
+        let lines = log.lines().collect::<Vec<_>>();
+        let expected = [
+            "detail=guest_setup_failed guest_stage=setup_failed daemon_ready=0",
+            "detail=guest_workspace_failed guest_stage=workspace_failed daemon_ready=0",
+            "detail=readiness_timeout guest_stage=runc_running daemon_ready=0",
+            "detail=vmm_exited guest_stage=none daemon_ready=0",
+        ];
+        assert_eq!(lines.len(), expected.len() + 1, "{log}");
+        for (line, detail) in lines.iter().zip(expected) {
+            assert!(
+                line.contains(&format!(
+                    " event=vm_start_failed environment={environment_id} generation=3 \
+                     error_code=guest_start_failed {detail} elapsed_ms="
+                )),
+                "{line}"
+            );
+        }
+        assert!(
+            lines[4].contains(&format!(
+                " event=vm_start_failed environment={environment_id} generation=4 \
+                 error_code=vmm_start_failed elapsed_ms="
+            )),
+            "{}",
+            lines[4]
+        );
+        assert!(!log.contains(CANARY));
     }
 
     #[test]
@@ -2314,6 +2582,29 @@ mod tests {
             RetirementState::ShutdownRequested
         );
         assert_retired_capabilities_denied(&rpc).await;
+    }
+
+    /// A start that fails before its VM is prepared still consumes its
+    /// generation, so the generation the runner reports and the one on its
+    /// last event agree. A supervisor's retry compares the two; when they
+    /// disagreed, the first retry after a failed start (such as a taken host
+    /// port) was refused as an invalid runner response (#2579).
+    #[tokio::test]
+    async fn a_start_that_fails_to_prepare_reports_its_generation_consistently() {
+        let (_parent, rpc) = bootstrap_rpc();
+        let id = rpc.events.environment_id;
+        let request = stopped_start_request(id);
+        rpc.start_vm(Request::new(request.clone()))
+            .await
+            .unwrap_err();
+        let info = rpc.state.lock().await.info();
+        let last = rpc.events.subscribe().borrow().clone();
+        let event = last.runner.as_ref().unwrap();
+        assert_eq!(last.stage, v1::RunnerStage::Error as i32, "{last:?}");
+        assert_eq!(info.state, v1::EnvironmentState::Error as i32);
+        assert_eq!(event.generation, request.generation);
+        assert_eq!(info.generation, event.generation);
+        assert_eq!(info.error_code, event.error_code);
     }
 
     #[tokio::test]

@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+if [[ "${PYTHONDONTWRITEBYTECODE:-}" != 1 ]]; then
+  # CI's release step sets this. Without it, a local Python can write
+  # __pycache__ into the CW source capsule, which the producer then refuses.
+  echo '[test-build-push-image] note: run with PYTHONDONTWRITEBYTECODE=1, as CI does' >&2
+fi
 readonly BUILDER="$ROOT/scripts/ci/images/build-push-image.sh"
 readonly KIND_BUILDER="$ROOT/scripts/ci/images/build-kind-images.sh"
 readonly RUST_BUILD_WRAPPER="$ROOT/scripts/ci/images/run-rust-build.sh"
@@ -470,10 +475,11 @@ done
 set_manifest() {
   local reference="$1"
   local digest="$2"
+  local platforms="${3:-}"
   local temporary="${FAKE_MANIFESTS:?}.tmp"
   awk -F '\t' -v reference="$reference" '$1 != reference' \
     "$FAKE_MANIFESTS" >"$temporary"
-  printf '%s\t%s\n' "$reference" "$digest" >>"$temporary"
+  printf '%s\t%s\t%s\n' "$reference" "$digest" "$platforms" >>"$temporary"
   mv "$temporary" "$FAKE_MANIFESTS"
 }
 
@@ -528,8 +534,21 @@ case "${1:-} ${2:-} ${3:-}" in
       echo 'ERROR: registry authorization failed' >&2
       exit 1
     fi
-    if [ "$format" = '{{json .Provenance.SLSA}}' ]; then
-      jq -n \
+    # Like Buildx, a multi-platform index exposes one attestation per
+    # platform as a map keyed by platform, and its single-attestation view is
+    # null. A single-platform image exposes one attestation stub instead.
+    index_platforms=''
+    if [[ "$reference" == *@sha256:* ]]; then
+      index_platforms="$(awk -F '\t' -v repository="${reference%@*}:" -v digest="${reference##*@}" \
+        'index($1, repository) == 1 && $2 == digest && $3 != "" { print $3; exit }' "$FAKE_MANIFESTS")"
+    fi
+    attested_platforms="${FAKE_ATTESTED_PLATFORMS:-$index_platforms}"
+    if [[ -n "$index_platforms" && ( "$format" == '{{json .Provenance.SLSA}}' || "$format" == '{{json .SBOM.SPDX}}' ) ]]; then
+      printf 'null\n'
+      exit 0
+    fi
+    if [ "$format" = '{{json .Provenance.SLSA}}' ] || [ "$format" = '{{json .Provenance}}' ]; then
+      predicate="$(jq -cn \
         --arg builder "${FAKE_PROVENANCE_BUILDER_ID:?}" \
         --arg revision "${FAKE_SOURCE_SHA:?}" \
         --arg source 'https://git.example.invalid/codewire/codewire.git' \
@@ -551,18 +570,37 @@ case "${1:-} ${2:-} ${3:-}" in
             }
             else .
             end
-        '
+        ')"
+      if [[ "$format" == '{{json .Provenance}}' && -z "$index_platforms" ]]; then
+        jq -n --argjson predicate "$predicate" '{SLSA: $predicate}'
+      elif [ "$format" = '{{json .Provenance}}' ]; then
+        jq -n --arg platforms "$attested_platforms" --argjson predicate "$predicate" \
+          '$platforms | split(",") | map({key: ., value: {SLSA: $predicate}}) | from_entries'
+      else
+        printf '%s\n' "$predicate"
+      fi
       exit 0
     fi
-    if [ "$format" = '{{json .SBOM.SPDX}}' ]; then
-      if [ "${FAKE_SBOM_INVALID:-0}" = 1 ]; then
-        jq -n '{spdxVersion: "SPDX-2.3", packages: []}'
+    if [ "$format" = '{{json .SBOM.SPDX}}' ] || [ "$format" = '{{json .SBOM}}' ]; then
+      valid_sbom='{"spdxVersion":"SPDX-2.3","documentNamespace":"https://codewire.example/sbom/test","packages":[{"name":"codewire-test"}]}'
+      invalid_sbom='{"spdxVersion":"SPDX-2.3","packages":[]}'
+      if [[ "$format" == '{{json .SBOM}}' && -z "$index_platforms" ]]; then
+        jq -n --argjson valid "$valid_sbom" '{SPDX: $valid, AdditionalSPDXs: []}'
+      elif [ "$format" = '{{json .SBOM}}' ]; then
+        jq -n --arg platforms "$attested_platforms" \
+          --arg invalid_platform "${FAKE_SBOM_INVALID_PLATFORM:-}" \
+          --argjson all_invalid "$([ "${FAKE_SBOM_INVALID:-0}" = 1 ] && echo true || echo false)" \
+          --argjson valid "$valid_sbom" --argjson invalid "$invalid_sbom" '
+            $platforms | split(",")
+            | map({key: ., value: {
+                SPDX: (if $all_invalid or . == $invalid_platform then $invalid else $valid end),
+                AdditionalSPDXs: []
+              }})
+            | from_entries'
+      elif [ "${FAKE_SBOM_INVALID:-0}" = 1 ]; then
+        printf '%s\n' "$invalid_sbom"
       else
-        jq -n '{
-          spdxVersion: "SPDX-2.3",
-          documentNamespace: "https://codewire.example/sbom/test",
-          packages: [{name: "codewire-test"}]
-        }'
+        printf '%s\n' "$valid_sbom"
       fi
       exit 0
     fi
@@ -711,6 +749,7 @@ case "${1:-} ${2:-} ${3:-}" in
     printf '#1 synthetic image build solve; no Docker/CW execution\n'
     metadata=''
     tags=()
+    build_platforms=''
     shift 2
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -725,7 +764,12 @@ case "${1:-} ${2:-} ${3:-}" in
           tags+=("$2")
           shift 2
           ;;
-        --build-arg|--label|-f|--file|--platform|--build-context|--no-cache-filter|--provenance|--sbom)
+        --platform)
+          # A single explicit platform still yields a single-platform image.
+          if [[ "$2" == *,* ]]; then build_platforms="$2"; fi
+          shift 2
+          ;;
+        --build-arg|--label|-f|--file|--build-context|--no-cache-filter|--provenance|--sbom)
           shift 2
           ;;
         --push|--pull|--load|--no-cache|--provenance=*|--sbom=generator=*)
@@ -740,7 +784,7 @@ case "${1:-} ${2:-} ${3:-}" in
     jq -n --arg digest "${FAKE_DIGEST:?}" \
       '{"containerimage.digest": $digest}' >"$metadata"
     for tag in "${tags[@]}"; do
-      set_manifest "$tag" "$FAKE_DIGEST"
+      set_manifest "$tag" "$FAKE_DIGEST" "$build_platforms"
     done
     ;;
   *)
@@ -1491,6 +1535,115 @@ for variant in legacy disabled protected; do
   if grep -qE -- '--cache-(from|to)|untrusted-(access-key|secret-key)' "$FAKE_DOCKER_CALLS"; then fail 'publisher exported candidate cache or credential material'; fi
 done
 
+# The support pair publishes one index for amd64 and arm64. Every platform in
+# that index, and no other, must carry its own valid provenance and SBOM.
+remove_source_manifest() {
+  awk -F '\t' -v reference="$1" '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
+  mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
+}
+readonly support_platforms_call='--platform linux/amd64\,linux/arm64 '
+# shellcheck disable=SC2016 # Match the escaped literal template in the call log.
+readonly multi_provenance_call='\{\{json\ .Provenance\}\}'
+# shellcheck disable=SC2016
+readonly multi_sbom_call='\{\{json\ .SBOM\}\}'
+for family in base workspace; do
+  case "$family" in
+    base) family_args=(images/base/Dockerfile images/base) ;;
+    workspace) family_args=(images/workspace/Dockerfile .) ;;
+  esac
+  family_env=()
+  [[ "$family" != workspace ]] || family_env=("CODEWIRE_BASE_IMAGE_REF=$base_ref")
+  remove_source_manifest "registry.example.invalid/codewire/$family:$source_sha"
+  : >"$FAKE_DOCKER_CALLS"
+  (
+    cd "$source_fixture"
+    env "${family_env[@]}" "$BUILDER" "$family" "${family_args[@]}"
+  ) >"$work/support-$family.out" 2>&1 || fail "$family support image did not publish both architectures"
+  [[ "$(build_invocation_count)" -eq 1 ]] || fail "$family support image was not built exactly once"
+  grep -qF -- "$support_platforms_call" "$FAKE_DOCKER_CALLS" ||
+    fail "$family support image was not built for amd64 and arm64"
+  grep -qF -- "$multi_provenance_call" "$FAKE_DOCKER_CALLS" ||
+    fail "$family support index did not verify per-platform provenance"
+  grep -qF -- "$multi_sbom_call" "$FAKE_DOCKER_CALLS" ||
+    fail "$family support index did not verify per-platform SBOMs"
+  if grep -qF -- 'Provenance.SLSA' "$FAKE_DOCKER_CALLS" || grep -qF -- 'SBOM.SPDX' "$FAKE_DOCKER_CALLS"; then
+    fail "$family support index accepted a single-platform attestation view"
+  fi
+done
+# The amd64 leg still consumes the verified static CW; arm64 compiles natively.
+[[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
+  fail 'multi-platform workspace did not bind the one original amd64 CW producer'
+assert_cw_context release
+
+base_source_tag="registry.example.invalid/codewire/base:$source_sha"
+for attestation_case in missing-arm64 extra-platform invalid-arm64-sbom; do
+  remove_source_manifest "$base_source_tag"
+  case "$attestation_case" in
+    missing-arm64) case_env=('FAKE_ATTESTED_PLATFORMS=linux/amd64') expected='Protected image provenance is invalid' ;;
+    extra-platform) case_env=('FAKE_ATTESTED_PLATFORMS=linux/amd64,linux/arm64,linux/riscv64') expected='Protected image provenance is invalid' ;;
+    invalid-arm64-sbom) case_env=('FAKE_SBOM_INVALID_PLATFORM=linux/arm64') expected='Protected image SBOM is invalid' ;;
+  esac
+  if (
+    cd "$source_fixture"
+    env "${case_env[@]}" "$BUILDER" base images/base/Dockerfile images/base
+  ) >"$work/support-$attestation_case.out" 2>&1; then
+    fail "support index accepted $attestation_case attestations"
+  fi
+  grep -qF "$expected" "$work/support-$attestation_case.out" ||
+    fail "support index $attestation_case rejection was not attributable"
+done
+
+# A historical release recipe compiled its arm64 cw under emulation and cannot
+# build arm64. Its recovered pair keeps the single native platform it shipped with.
+historical_source="$work/historical-source"
+git clone -q "$source_fixture" "$historical_source"
+sed -i 's/^FROM cw-cross-compiler AS cw-builder-arm64$/FROM cw-toolchain AS cw-builder-arm64/' \
+  "$historical_source/images/workspace/Dockerfile"
+grep -qxF 'FROM cw-toolchain AS cw-builder-arm64' "$historical_source/images/workspace/Dockerfile" ||
+  fail 'historical recipe fixture still cross-compiles its arm64 cw'
+if grep -qF 'cw-cross-compiler AS cw-builder-arm64' "$historical_source/images/workspace/Dockerfile"; then
+  fail 'historical recipe fixture still cross-compiles its arm64 cw'
+fi
+git -C "$historical_source" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+  -c user.name=Synthetic -c user.email=synthetic@example.invalid \
+  commit -q -am 'synthetic historical workspace recipe'
+historical_sha="$(git -C "$historical_source" rev-parse HEAD)"
+for family in base workspace; do
+  case "$family" in
+    base) family_args=(images/base/Dockerfile images/base) ;;
+    workspace) family_args=(images/workspace/Dockerfile .) ;;
+  esac
+  family_env=()
+  [[ "$family" != workspace ]] || family_env=("CODEWIRE_BASE_IMAGE_REF=$base_ref")
+  : >"$FAKE_DOCKER_CALLS"
+  (
+    cd "$historical_source"
+    # A distinct digest keeps this image apart from the multi-platform index.
+    env "${family_env[@]}" CODEWIRE_SOURCE_DIR="$historical_source" GITHUB_SHA="$historical_sha" \
+      FAKE_SOURCE_SHA="$historical_sha" FAKE_DIGEST="$mismatch_digest" \
+      "$BUILDER" "$family" "${family_args[@]}"
+  ) >"$work/historical-$family.out" 2>&1 || fail "historical $family recipe could not be recovered"
+  [[ "$(build_invocation_count)" -eq 1 ]] || fail "historical $family recipe was not built exactly once"
+  if grep -qF -- 'linux/arm64' "$FAKE_DOCKER_CALLS"; then
+    fail "historical $family recipe was built for arm64"
+  fi
+  grep -qF -- 'Provenance.SLSA' "$FAKE_DOCKER_CALLS" ||
+    fail "historical $family image did not verify its single-platform provenance"
+done
+
+# Runtime images are unchanged: one native platform, one attestation view.
+: >"$FAKE_DOCKER_CALLS"
+remove_source_manifest "registry.example.invalid/codewire/daemon:$source_sha"
+(
+  cd "$source_fixture"
+  "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
+) >"$work/runtime-platform.out" 2>&1 || fail 'runtime image did not publish'
+if grep -qF -- 'linux/arm64' "$FAKE_DOCKER_CALLS"; then
+  fail 'runtime image joined the multi-platform support contract'
+fi
+grep -qF -- 'Provenance.SLSA' "$FAKE_DOCKER_CALLS" ||
+  fail 'runtime image changed its single-platform provenance verification'
+
 printf 'untrusted build input\n' >"$source_fixture/forbidden-untracked-input"
 fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
 if (
@@ -1504,16 +1657,16 @@ grep -qF 'Protected image build requires no untracked source files' \
 [[ "$(wc -l <"$FAKE_FETCH_CALLS")" -eq "$fetch_calls_before" ]] ||
   fail 'dirty source rejection reached credential retrieval'
 
-python3 -B - "$FAKE_CW_CONTEXTS" "$source_sha" <<'PY'
+python3 -B - "$FAKE_CW_CONTEXTS" "$source_sha" "$historical_sha" <<'PY'
 from collections import Counter
 import json
 from pathlib import Path
 import sys
 records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
-assert len(records) == 7 and Counter(record['profile'] for record in records) == {'release': 5, 'ci': 2}
-assert all(record['source_revision'] == sys.argv[2] for record in records)
-assert len({record['producer_receipt_sha256'] for record in records}) == 7
-print('protected/runtime/Kind CW original-producer contexts: 7 verified')
+assert len(records) == 10 and Counter(record['profile'] for record in records) == {'release': 8, 'ci': 2}
+assert Counter(record['source_revision'] for record in records) == {sys.argv[2]: 9, sys.argv[3]: 1}
+assert len({record['producer_receipt_sha256'] for record in records}) == 10
+print('protected/runtime/Kind CW original-producer contexts: 10 verified')
 PY
 
 echo 'build-push immutable source image tests passed'

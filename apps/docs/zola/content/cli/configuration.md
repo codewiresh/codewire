@@ -21,6 +21,17 @@ Local environment and Mesh client state live under `~/.codewire/`:
 runtime state. Managed daemon and credential-broker capabilities are not stored
 in that database or printed by normal CLI output.
 
+`native-v1/logs/` holds owner-only diagnostic logs: `supervisor.log` and one
+`runner-<environment id>.log` per environment. Each stops growing at 1 MiB, and
+the previous run's log is kept as `<name>.1`. A line names the operation, the
+lifecycle step and the cause of a failure as fixed codes, identifiers and
+numbers. It never contains secret values, launch values or guest output. The
+files also keep a process's exit error or crash message.
+
+When a local lifecycle command such as `cw env update` fails, its error code
+names the cause, for example `environment_sources_guest_start_failed`.
+`cw env info` shows the same code as the environment's error.
+
 Session records and output live inside the selected environment. There is no
 host-owned session database.
 

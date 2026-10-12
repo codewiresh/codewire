@@ -11,12 +11,22 @@ of `git ls-tree -r <commit> -- images/base images/workspace` (mode, type,
 object ID, a tab and the path, one entry per line, in Git's order). The cw the
 image carries is refreshed through its own runtime asset and is not part of it.
 
+`platforms` records which platforms the published image index serves; the
+proposal reads them from the index itself (`index-platforms`). Every pin serves
+linux/amd64 (Dev and Production Sandboxes). A pin without linux/arm64 cannot
+serve an Apple silicon Mac's local VMs: `check` and the policy core warn, and
+`check --release` refuses it. The checks trust the pin's own `platforms`: only
+the proposal, which read them from the published index, or `render` writes
+the pin, and policy refuses any other edit.
+
 Commands:
   show [--commit REV] [FIELD]      print the pin as JSON, or one field
   inputs-sha256 [--commit REV]     the image-definition identity at REV
   agents [--commit REV]            agent CLI versions the definition pins at REV
-  render --digest D --source-sha S rewrite the pin for a published image
-  check [--commit REV] [--release] canonical form and freshness at REV
+  index-platforms                  image platforms of the OCI index on stdin
+  render --digest D --source-sha S --platforms P,...
+                                   rewrite the pin for a published image
+  check [--commit REV] [--release] canonical form, platforms and freshness
 """
 
 from __future__ import annotations
@@ -45,8 +55,14 @@ AGENT_PACKAGES = {
 }
 # Older cw releases send earlier canonical digests; keep this many.
 MAX_PREVIOUS = 32
-FIELDS = ("digest", "harbor-image", "public-image", "source-sha", "inputs-sha256",
-          "agents", "previous-digests")
+FIELDS = ("digest", "harbor-image", "public-image", "platforms", "source-sha",
+          "inputs-sha256", "agents", "previous-digests")
+# Platforms a workspace image may serve, in the pin's order.
+PLATFORMS = ("linux/amd64", "linux/arm64")
+REQUIRED_PLATFORM = "linux/amd64"
+RELEASE_PLATFORMS = PLATFORMS
+INDEX_MEDIA_TYPES = ("application/vnd.oci.image.index.v1+json",
+                     "application/vnd.docker.distribution.manifest.list.v2+json")
 
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -103,8 +119,53 @@ def agent_versions(root: Path, commit: str) -> dict[str, str]:
     return versions
 
 
+def index_platforms(index) -> list[str]:
+    """The image platforms of an OCI image index, in the pin's order.
+
+    BuildKit's attestation manifests (provenance and SBOM) are not images:
+    each must say unknown/unknown and reference an image entry of the same
+    index, and is skipped. Anything else malformed is refused.
+    """
+    require(isinstance(index, dict) and index.get("mediaType") in INDEX_MEDIA_TYPES,
+            "the published image is not an image index")
+    manifests = index.get("manifests")
+    require(isinstance(manifests, list) and manifests, "the image index lists no manifests")
+    require(all(isinstance(manifest, dict) for manifest in manifests),
+            "the image index has a malformed entry")
+    images: dict[str, str] = {}
+    attestations: list[str] = []
+    for manifest in manifests:
+        digest = manifest.get("digest")
+        platform = manifest.get("platform")
+        annotations = manifest.get("annotations") or {}
+        require(isinstance(digest, str) and DIGEST_RE.match(digest) is not None
+                and isinstance(platform, dict) and isinstance(annotations, dict),
+                "the image index has a malformed entry")
+        os_name, architecture = platform.get("os"), platform.get("architecture")
+        variant = platform.get("variant")
+        require(all(isinstance(value, str) for value in (os_name, architecture))
+                and variant in (None, *(("v8",) if architecture == "arm64" else ())),
+                f"the image index has a malformed platform {platform!r}")
+        if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
+            require((os_name, architecture) == ("unknown", "unknown"),
+                    "an attestation manifest names a real platform")
+            reference = annotations.get("vnd.docker.reference.digest")
+            require(isinstance(reference, str), "an attestation manifest references no image")
+            attestations.append(reference)
+            continue
+        name = f"{os_name}/{architecture}"
+        require(name in PLATFORMS, f"the image index serves an unexpected platform {name}")
+        require(name not in images.values(), f"the image index serves {name} twice")
+        images[digest] = name
+    for reference in attestations:
+        require(reference in images, "an attestation manifest references no image of this index")
+    return [name for name in PLATFORMS if name in images.values()]
+
+
 def render(pin: dict) -> str:
     digest = pin["digest"]
+    # One line, as rustfmt writes a short array.
+    platforms = ", ".join(f'"{item}"' for item in pin["platforms"])
     agents = "".join(f'    ("{name}", "{version}"),\n' for name, version in pin["agents"].items())
     previous = "".join(f'    "{item}",\n' for item in pin["previous_digests"])
     return (
@@ -118,6 +179,8 @@ def render(pin: dict) -> str:
         "/// The same digest at the public GHCR mirror, pulled anonymously by local\n"
         "/// environments.\n"
         f'pub const PUBLIC_IMAGE: &str = "{PUBLIC_REPOSITORY}@{digest}";\n'
+        "/// Platforms the published image index serves.\n"
+        f"pub const PLATFORMS: &[&str] = &[{platforms}];\n"
         "/// Commit the image was built from.\n"
         f'pub const SOURCE_SHA: &str = "{pin["source_sha"]}";\n'
         "/// Identity of the image definition at `SOURCE_SHA`; see the generator.\n"
@@ -135,6 +198,11 @@ def render(pin: dict) -> str:
 def validate(pin: dict) -> dict:
     require(bool(DIGEST_RE.match(pin["digest"])), "pin digest is not an exact sha256 digest")
     require(bool(SHA_RE.match(pin["source_sha"])), "pin source commit is not a full object ID")
+    platforms = pin["platforms"]
+    require(platforms == [name for name in PLATFORMS if name in platforms]
+            and len(set(platforms)) == len(platforms) and set(platforms) <= set(PLATFORMS),
+            "pin platforms are not a known, ordered set")
+    require(REQUIRED_PLATFORM in platforms, f"pin does not serve {REQUIRED_PLATFORM}")
     require(bool(HEX64_RE.match(pin["inputs_sha256"])), "pin inputs_sha256 is not 64 hex")
     require(list(pin["agents"]) == sorted(AGENT_PACKAGES), "pin agents are not exactly the shipped agents")
     for agent, version in pin["agents"].items():
@@ -165,8 +233,12 @@ def parse(text: str) -> dict:
     agents = dict(re.findall(r'^    \("([a-z]+)", "([^"]*)"\),$', block("AGENT_VERSIONS", r"\(&str, &str\)"),
                              re.MULTILINE))
     previous = re.findall(r'^    "([^"]*)",$', block("PREVIOUS_DIGESTS", "&str"), re.MULTILINE)
+    found = re.findall(r'^pub const PLATFORMS: &\[&str\] = &\[(.*)\];$', text, re.MULTILINE)
+    require(len(found) == 1, "pin does not define PLATFORMS exactly once")
+    platforms = re.findall(r'"([^"]*)"', found[0])
     pin = validate({
         "digest": one("DIGEST"),
+        "platforms": platforms,
         "source_sha": one("SOURCE_SHA"),
         "inputs_sha256": one("INPUTS_SHA256"),
         "agents": agents,
@@ -194,6 +266,7 @@ def field(pin: dict, name: str):
         "digest": pin["digest"],
         "harbor-image": f"{HARBOR_REPOSITORY}@{pin['digest']}",
         "public-image": f"{PUBLIC_REPOSITORY}@{pin['digest']}",
+        "platforms": pin["platforms"],
         "source-sha": pin["source_sha"],
         "inputs-sha256": pin["inputs_sha256"],
         "agents": pin["agents"],
@@ -220,9 +293,12 @@ def main(argv: list[str] | None = None) -> int:
     show_parser.add_argument("field", nargs="?", choices=FIELDS)
     for name in ("inputs-sha256", "agents"):
         commands.add_parser(name).add_argument("--commit", default="HEAD")
+    commands.add_parser("index-platforms")
     render_parser = commands.add_parser("render")
     render_parser.add_argument("--digest", required=True)
     render_parser.add_argument("--source-sha", required=True)
+    render_parser.add_argument("--platforms", required=True,
+                               help="comma-separated platforms the published index serves")
     check_parser = commands.add_parser("check")
     check_parser.add_argument("--commit")
     check_parser.add_argument("--release", action="store_true")
@@ -237,6 +313,12 @@ def main(argv: list[str] | None = None) -> int:
             print(inputs_sha256(root, args.commit))
         elif args.command == "agents":
             print(json.dumps(agent_versions(root, args.commit), sort_keys=True))
+        elif args.command == "index-platforms":
+            try:
+                index = json.load(sys.stdin)
+            except json.JSONDecodeError as error:
+                raise PinError(f"the image index is not JSON: {error}") from None
+            print(",".join(index_platforms(index)))
         elif args.command == "render":
             require(bool(DIGEST_RE.match(args.digest)), "--digest must be an exact sha256 digest")
             require(bool(SHA_RE.match(args.source_sha)), "--source-sha must be a full object ID")
@@ -246,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
             previous = [item for item in dict.fromkeys(previous) if item != args.digest][:MAX_PREVIOUS]
             pin = validate({
                 "digest": args.digest,
+                "platforms": args.platforms.split(","),
                 "source_sha": args.source_sha,
                 "inputs_sha256": inputs_sha256(root, args.source_sha),
                 "agents": dict(sorted(agent_versions(root, args.source_sha).items())),
@@ -258,6 +341,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "check":
             commit = args.commit or "HEAD"
             pin = read_pin(root, args.commit)
+            missing = [name for name in RELEASE_PLATFORMS if name not in pin["platforms"]]
+            if missing:
+                message = (f"the pinned image does not serve {', '.join(missing)}; local VMs on "
+                           "Apple silicon need a multi-platform workspace image")
+                if args.release:
+                    print(f"workspace image pin: {message}", file=sys.stderr)
+                    return 1
+                print(f"::warning::workspace image pin: {message}")
             stale = freshness(root, pin, commit)
             if stale is None:
                 print(f"workspace image pin: fresh ({pin['digest']} from {pin['source_sha'][:12]})")

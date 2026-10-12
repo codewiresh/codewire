@@ -4,6 +4,7 @@
 //! its network/grant/book authority or member-origin marker.
 use super::*;
 use anyhow::ensure;
+use codewire_daemon::platform_managed::Route;
 use host_control::{DirectoryPin, private_record};
 use std::os::unix::fs::DirBuilderExt;
 
@@ -61,6 +62,7 @@ enum Request {
         prompt: Option<String>,
         parent_session_id: String,
         initial_message_id: Option<String>,
+        route: Route,
     },
     Queue {
         driver_id: String,
@@ -357,6 +359,7 @@ fn prepare(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result
         prompt,
         parent_session_id,
         initial_message_id,
+        route,
     } = request.request
     else {
         unreachable!()
@@ -364,6 +367,10 @@ fn prepare(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result
     ensure!(
         request.launch_generation == 1,
         "platform preparation requires first generation"
+    );
+    ensure!(
+        route.agent() == agent(request.origin.agent),
+        "platform route serves another agent"
     );
     let provider = codewire_daemon::platform_managed::ProviderPin::admit(
         agent(request.origin.agent),
@@ -438,7 +445,7 @@ fn prepare(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result
             generation: 1,
         },
     )?;
-    proxy::prepare(&stage, &config)?;
+    proxy::prepare(&stage, &config, route)?;
     if let (Some(message), Some(text)) = (&config.initial_message_id, prompt) {
         let mut record = MessageRecord::new(
             &config.driver_id,
@@ -477,6 +484,8 @@ pub(super) struct DriverContext {
     origin: Origin,
     pub(super) generation: u64,
     provider: codewire_daemon::platform_managed::ProviderPin,
+    /// Recorded by the private home when it was prepared; fixed for the driver.
+    route: Route,
 }
 impl DriverContext {
     pub(super) fn admit(environment: &DriverEnvironment, driver: &str) -> anyhow::Result<Self> {
@@ -494,10 +503,12 @@ impl DriverContext {
             agent(origin.agent),
             &origin.provider,
         )?;
+        let route = proxy::check(&dir, &config)?;
         let context = Self {
             origin,
             generation,
             provider,
+            route,
         };
         context.check(environment, &config)?;
         pin.check()?;
@@ -516,7 +527,11 @@ impl DriverContext {
             "platform original driver changed"
         );
         self.provider.check()?;
-        proxy::check(&driver_dir(environment, &config.driver_id)?, config)
+        ensure!(
+            proxy::check(&driver_dir(environment, &config.driver_id)?, config)? == self.route,
+            "platform proxy route changed"
+        );
+        Ok(())
     }
     pub(super) fn environment(&self, dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
         let config: AgentConfig = private_record(&dir.join("config.json"))?;
@@ -525,10 +540,10 @@ impl DriverContext {
             "platform provider changed"
         );
         self.provider.check()?;
-        proxy::environment(dir, &config)
+        proxy::environment(dir, &config, self.route)
     }
     pub(super) fn arguments(&self, args: &[&str]) -> Vec<String> {
-        let mut fixed = proxy::arguments(self.origin.agent);
+        let mut fixed = proxy::arguments(self.route);
         fixed.extend(args.iter().map(|s| (*s).to_owned()));
         fixed
     }
@@ -588,14 +603,17 @@ pub(crate) async fn run_platform_agent_peer(
         binding.session_id == args.session_id && args.program == context.provider.path(),
         "platform peer binding differs"
     );
-    let prefix = proxy::arguments(config.agent);
+    let prefix = proxy::arguments(context.route);
     ensure!(
         args.arguments.starts_with(&prefix),
         "platform API-only peer arguments differ"
     );
     let native = &args.arguments[prefix.len()..];
     match config.agent {
-        AgentKind::Codex => ensure!(native == ["app-server"], "platform Codex peer differs"),
+        AgentKind::Codex => ensure!(
+            native == codex_app_server_arguments(&config.working_dir).as_slice(),
+            "platform Codex peer differs"
+        ),
         AgentKind::Claude => {
             let state: DriverState = private_record(&dir.join("state.json"))?;
             let session = state

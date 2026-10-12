@@ -142,7 +142,7 @@ def self_test(tool) -> list[str]:
             "commit", "-q", "-m", "definition")
         source = git("rev-parse", "HEAD")
         pin_text = tool.render(tool.validate({
-            "digest": digest, "source_sha": source,
+            "digest": digest, "platforms": list(tool.PLATFORMS), "source_sha": source,
             "inputs_sha256": tool.inputs_sha256(repo, source),
             "agents": dict(sorted(tool.agent_versions(repo, source).items())),
             "previous_digests": [previous],
@@ -157,6 +157,18 @@ def self_test(tool) -> list[str]:
                 return tool.main([*root, "check", *args])
         if check("--release") != 0:
             failures.append("workspace image pin self-test: a fresh pin was refused for release")
+        # Platforms: every pin serves linux/amd64; one without linux/arm64
+        # warns on a branch and refuses a release.
+        amd64_only = pin_text.replace('"linux/amd64", "linux/arm64"', '"linux/amd64"')
+        target.write_text(amd64_only)
+        if check() != 0:
+            failures.append("workspace image pin self-test: an amd64-only pin failed a branch check")
+        if check("--release") == 0:
+            failures.append("workspace image pin self-test: an amd64-only pin was accepted for release")
+        target.write_text(pin_text.replace('"linux/amd64", "linux/arm64"', '"linux/arm64"'))
+        if check() == 0:
+            failures.append("workspace image pin self-test: a pin without linux/amd64 was accepted")
+        target.write_text(pin_text)
         (repo / "images/workspace/Dockerfile").write_text("RUN npm install -g @openai/codex@2.0.0\n")
         git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
             "commit", "-qam", "change the definition")
@@ -167,6 +179,41 @@ def self_test(tool) -> list[str]:
         target.write_text(pin_text.replace("pub const DIGEST", "pub const  DIGEST"))
         if check() == 0:
             failures.append("workspace image pin self-test: a hand-edited pin was accepted")
+
+    # The proposal reads platforms from the published index; attestation
+    # manifests are not images, and anything but an index is refused.
+    def entry(seed: str, os_name: str, architecture: str, references: str | None = None,
+              variant: str | None = None) -> dict:
+        platform = {"os": os_name, "architecture": architecture}
+        if variant:
+            platform["variant"] = variant
+        item = {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": f"sha256:{seed * 64}",
+                "size": 1, "platform": platform}
+        if references:
+            item["annotations"] = {"vnd.docker.reference.type": "attestation-manifest",
+                                   "vnd.docker.reference.digest": f"sha256:{references * 64}"}
+        return item
+    index = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
+             "manifests": [entry("b", "linux", "arm64", variant="v8"), entry("a", "linux", "amd64"),
+                           entry("c", "unknown", "unknown", references="a")]}
+    if tool.index_platforms(index) != ["linux/amd64", "linux/arm64"]:
+        failures.append("workspace image pin self-test: index platforms were not read in pin order")
+    for name, bad in {
+        "a plain manifest": {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json"},
+        "an unexpected platform": {**index, "manifests": [*index["manifests"], entry("d", "linux", "s390x")]},
+        "a repeated platform": {**index, "manifests": [*index["manifests"], entry("d", "linux", "amd64")]},
+        "a v8 variant on amd64": {**index, "manifests": [entry("d", "linux", "amd64", variant="v8")]},
+        "an attestation with a real platform": {
+            **index, "manifests": [*index["manifests"], entry("d", "linux", "arm64", references="a")]},
+        "an attestation of another index's image": {
+            **index, "manifests": [*index["manifests"], entry("d", "unknown", "unknown", references="e")]},
+        "a malformed entry": {**index, "manifests": [*index["manifests"], "linux/amd64"]},
+    }.items():
+        try:
+            tool.index_platforms(bad)
+        except tool.PinError:
+            continue
+        failures.append(f"workspace image pin self-test: {name} was read as an image index")
     return failures
 
 
@@ -190,6 +237,10 @@ def check_workspace_image_pin(args: argparse.Namespace) -> int:
         for failure in failures:
             print(failure, file=sys.stderr)
         return 1
+    missing = [name for name in tool.RELEASE_PLATFORMS if name not in pin["platforms"]]
+    if missing:
+        print(f"::warning::workspace image pin: the pinned image does not serve {', '.join(missing)}; "
+              "a release refuses it until support-images publishes a multi-platform index")
     stale = tool.freshness(ROOT, pin, "HEAD")
     if stale:
         print(f"::warning::workspace image pin: {stale}")

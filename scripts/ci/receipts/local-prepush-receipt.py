@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Emit and verify short-lived, exact-tree local pre-push receipts."""
+"""Emit and verify short-lived, exact-tree local verification receipts.
+
+A receipt has a scope. ``push`` records the fast pre-push check; ``merge``
+records merge qualification. Each receipt lists exactly the checks that ran,
+the checks reused from an exact-tree pass, and the selected checks that did
+not run locally (for example Kind, which post-merge CI owns).
+"""
 
 from __future__ import annotations
 
@@ -8,6 +14,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import stat
 import subprocess
 import sys
@@ -17,10 +24,13 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
-SCHEMA = "codewire.local-verification-receipt/v1"
+SCHEMA = "codewire.local-verification-receipt/v2"
+SCOPES = ("push", "merge")
 EXPIRY_SECONDS = 8 * 60 * 60
 MAX_RECEIPT_BYTES = 64 * 1024
 HEX40 = set("0123456789abcdef")
+CHECK_NAME = re.compile(r"^[a-z0-9][a-z0-9:._-]{0,95}$")
+MAX_CHECKS = 256
 
 POLICY_PATHS = (
     "scripts/ci/select/select-verification.sh",
@@ -30,7 +40,10 @@ PLANNER_PATHS = (
 )
 ENTRYPOINT_PATHS = (
     ".githooks/pre-push",
+    "scripts/dev/pre-push.sh",
     "scripts/dev/preflight.sh",
+    "scripts/dev/preflight-push.sh",
+    "scripts/dev/preflight-environment.sh",
     "scripts/ci/receipts/local-prepush-receipt.py",
     "scripts/ci/verify/run-product-verification.sh",
     "scripts/ci/verify/run-integration-verification.sh",
@@ -245,7 +258,9 @@ def invoke_selector(root: Path, paths: Sequence[str], full: bool = False) -> dic
         command = [os.fspath(selector)]
         path_file: Path | None = None
     else:
-        environment.update(GITHUB_EVENT_NAME="pull_request", KIND_E2E_OPT_IN="true")
+        # Local qualification mirrors pull-request CI without the Kind opt-in:
+        # Kind is a dev-loop tool here and a post-merge CI gate.
+        environment.update(GITHUB_EVENT_NAME="pull_request", KIND_E2E_OPT_IN="false")
         fd, path_name = tempfile.mkstemp(prefix="codewire-prepush-paths.")
         path_file = Path(path_name)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -344,7 +359,7 @@ def current_context(
         },
         "verification": {
             "entrypoint_id": "scripts/dev/preflight.sh",
-            "entrypoint_version": 1,
+            "entrypoint_version": 2,
             "digest": entrypoint_digest,
         },
         "toolchain": {"digest": toolchain_digest},
@@ -357,15 +372,67 @@ def current_context(
     }
 
 
-def receipt_path(context: dict[str, Any]) -> Path:
+def check_list(value: str | Sequence[str]) -> list[str]:
+    if isinstance(value, str):
+        names = [item for item in value.split(",") if item]
+    else:
+        names = list(value)
+    if len(names) > MAX_CHECKS:
+        raise fail("execution-invalid")
+    for name in names:
+        if not isinstance(name, str) or not CHECK_NAME.match(name):
+            raise fail("execution-invalid")
+    if len(set(names)) != len(names):
+        raise fail("execution-invalid")
+    return names
+
+
+def execution_record(scope: str, ran: Sequence[str], reused: Sequence[str],
+                     not_run: Sequence[str]) -> dict[str, Any]:
+    """Validate the honest record of what this qualification executed."""
+    if scope not in SCOPES:
+        raise fail("execution-invalid")
+    ran_names = check_list(ran)
+    reused_names = check_list(reused)
+    not_run_names = check_list(not_run)
+    every = [*ran_names, *reused_names, *not_run_names]
+    if len(set(every)) != len(every) or not (ran_names or reused_names):
+        raise fail("execution-invalid")
+    return {
+        "scope": scope,
+        "ran": ran_names,
+        "reused": reused_names,
+        "not_run": not_run_names,
+    }
+
+
+def validated_execution(document: dict[str, Any]) -> dict[str, Any]:
+    execution = document.get("execution")
+    if not isinstance(execution, dict) or set(execution) != {"scope", "ran", "reused", "not_run"}:
+        raise fail("execution-invalid")
+    for key in ("ran", "reused", "not_run"):
+        if not isinstance(execution[key], list):
+            raise fail("execution-invalid")
+    record = execution_record(
+        execution["scope"], execution["ran"], execution["reused"], execution["not_run"]
+    )
+    if record != execution:
+        raise fail("execution-invalid")
+    return record
+
+
+def receipt_path(context: dict[str, Any], scope: str) -> Path:
+    if scope not in SCOPES:
+        raise fail("execution-invalid")
     common = Path(context["repository"]["git_common_dir"])
+    # One file per scope: a later push check never replaces merge evidence.
     return (
         common
         / "codewire-receipts"
-        / "prepush-v1"
+        / "prepush-v2"
         / context["repository"]["id"]
         / context["worktree"]["id"]
-        / f"{context['source']['commit']}.json"
+        / f"{context['source']['commit']}.{scope}.json"
     )
 
 
@@ -384,16 +451,17 @@ def ensure_private_directories(common: Path, leaf: Path) -> None:
         os.chmod(current, 0o700)
 
 
-def emit_receipt(context: dict[str, Any]) -> Path:
+def emit_receipt(context: dict[str, Any], execution: dict[str, Any]) -> Path:
     now = int(time.time())
     document = {
         "schema": SCHEMA,
         **context,
+        "execution": execution,
         "created_at": now,
         "expires_at": now + EXPIRY_SECONDS,
         "result": "success",
     }
-    path = receipt_path(context)
+    path = receipt_path(context, execution["scope"])
     common = Path(context["repository"]["git_common_dir"])
     ensure_private_directories(common, path.parent)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.stem}.", dir=path.parent)
@@ -458,8 +526,20 @@ def load_receipt(path: Path, common: Path) -> dict[str, Any]:
     return document
 
 
-def verify_receipt(context: dict[str, Any]) -> Path:
-    path = receipt_path(context)
+def verify_receipt(context: dict[str, Any], accepted_scopes: Sequence[str]) -> tuple[Path, dict[str, Any]]:
+    """Accept the strongest valid scope; report the strongest present failure."""
+    failure: ReceiptError | None = None
+    for scope in sorted(accepted_scopes, key=lambda name: SCOPES.index(name), reverse=True):
+        try:
+            return verify_scope_receipt(context, scope)
+        except ReceiptError as exc:
+            if failure is None or str(failure) == "missing":
+                failure = exc
+    raise failure if failure is not None else fail("missing")
+
+
+def verify_scope_receipt(context: dict[str, Any], scope: str) -> tuple[Path, dict[str, Any]]:
+    path = receipt_path(context, scope)
     document = load_receipt(path, Path(context["repository"]["git_common_dir"]))
     expected_keys = {
         "schema",
@@ -472,6 +552,7 @@ def verify_receipt(context: dict[str, Any]) -> Path:
         "verification",
         "toolchain",
         "runner",
+        "execution",
         "created_at",
         "expires_at",
         "result",
@@ -491,7 +572,10 @@ def verify_receipt(context: dict[str, Any]) -> Path:
         raise fail("expired")
     if document.get("result") != "success":
         raise fail("result-not-success")
-    return path
+    execution = validated_execution(document)
+    if execution["scope"] != scope:
+        raise fail("scope-mismatch")
+    return path, execution
 
 
 def parser() -> argparse.ArgumentParser:
@@ -502,11 +586,19 @@ def parser() -> argparse.ArgumentParser:
     emit.add_argument("--verified-base", required=True)
     emit.add_argument("--verified-mode", required=True)
     emit.add_argument("--verified-selection", required=True)
+    emit.add_argument("--scope", required=True, choices=SCOPES)
+    emit.add_argument("--ran", required=True)
+    emit.add_argument("--reused", default="")
+    emit.add_argument("--not-run", default="")
     verify = subparsers.add_parser("verify")
     verify.add_argument("--head", default="HEAD")
     verify.add_argument("--base")
     verify.add_argument("--remote-name")
+    # A feature-branch push accepts either scope. A direct canonical-main
+    # update (the only case that passes --base) requires merge qualification.
+    verify.add_argument("--accept-scope", choices=("any", "merge"))
     path = subparsers.add_parser("path")
+    path.add_argument("--scope", default="merge", choices=SCOPES)
     path.add_argument("--head", default="HEAD")
     path.add_argument("--base")
     path.add_argument("--remote-name")
@@ -532,23 +624,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             remote_name=arguments.remote_name if arguments.command != "emit" else None,
         )
         if arguments.command == "emit":
+            execution = execution_record(
+                arguments.scope, arguments.ran, arguments.reused, arguments.not_run
+            )
             if context["source"]["base_commit"] != arguments.verified_base:
                 raise fail("verified-base-mismatch")
             if context["plan"]["required_local_mode"] != arguments.verified_mode:
                 raise fail("verified-mode-mismatch")
             if context["plan"]["selection"] != arguments.verified_selection:
                 raise fail("verified-selection-mismatch")
-            path = emit_receipt(context)
+            path = emit_receipt(context, execution)
             print("receipt=emitted")
             print("reason=exact-tree")
+            print(f"scope={execution['scope']}")
             print(f"receipt_path={path}")
             return 0
         if arguments.command == "path":
-            print(receipt_path(context))
+            print(receipt_path(context, arguments.scope))
             return 0
-        path = verify_receipt(context)
+        accept_scope = arguments.accept_scope or ("merge" if arguments.base else "any")
+        accepted_scopes = SCOPES if accept_scope == "any" else ("merge",)
+        path, execution = verify_receipt(context, accepted_scopes)
         print("receipt=accepted")
         print("reason=exact-tree")
+        print(f"scope={execution['scope']}")
+        print(f"ran={','.join(execution['ran'])}")
+        print(f"reused={','.join(execution['reused'])}")
+        print(f"not_run={','.join(execution['not_run'])}")
         print(f"receipt_path={path}")
         return 0
     except ReceiptError as exc:

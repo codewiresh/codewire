@@ -84,6 +84,44 @@ pub(crate) async fn run_local_credential_broker(
         .context("prepare broker authority channel")?;
     let authority_stream = tokio::net::UnixStream::from_std(authority_stream)
         .context("admit broker authority channel")?;
+    // Provider addresses are resolved once, here, before confinement and
+    // before the guest bridge opens: a successor that cannot resolve them
+    // never takes new work from the epoch it would replace. The authority
+    // replaces this child with an overlapping successor before it has run
+    // 600 seconds, and that successor resolves them again. A platform relay
+    // selects no provider and resolves nothing.
+    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
+    let upstream = if http_providers.is_empty() {
+        None
+    } else {
+        Some(
+            ProviderHttpsTransport::resolve(&http_providers)
+                .await
+                .context("resolve credential broker provider endpoint")?,
+        )
+    };
+    #[cfg(feature = "local-broker-synthetic-smoke")]
+    let upstream = (!http_providers.is_empty()).then_some(SyntheticOpenAiSmokeTransport);
+    // A selected GitHub connection may be an expiring App login. Its refresh
+    // uses the App's own family with the public client ID only; resolve it
+    // with the other provider addresses, before confinement.
+    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
+    let github_app = if http_providers.contains(&HttpProvider::GitHubOAuth) {
+        Some(std::sync::Arc::new(
+            codewire_credential_broker::GitHubAppAuthorizationOwner::public_client(
+                codewire_credential_broker::provider_oauth::github::codewire_github_app(),
+                std::sync::Arc::new(
+                    ProviderHttpsTransport::resolve(&BTreeSet::from([
+                        HttpProvider::GitHubAppAuthorization,
+                    ]))
+                    .await
+                    .context("resolve the GitHub App refresh endpoint")?,
+                ),
+            ),
+        ))
+    } else {
+        None
+    };
     let mut runner = RunnerClient::connect(&args.runner_socket)
         .await
         .context("connect broker to private runner")?;
@@ -165,38 +203,6 @@ pub(crate) async fn run_local_credential_broker(
         .await
         .context("run platform credential relay");
     }
-    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
-    let upstream = if http_providers.is_empty() {
-        None
-    } else {
-        Some(
-            ProviderHttpsTransport::resolve(&http_providers)
-                .await
-                .context("resolve credential broker provider endpoint")?,
-        )
-    };
-    #[cfg(feature = "local-broker-synthetic-smoke")]
-    let upstream = (!http_providers.is_empty()).then_some(SyntheticOpenAiSmokeTransport);
-    // A selected GitHub connection may be an expiring App login. Its refresh
-    // uses the App's own family with the public client ID only; resolve it
-    // with the other provider addresses, before confinement.
-    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
-    let github_app = if http_providers.contains(&HttpProvider::GitHubOAuth) {
-        Some(std::sync::Arc::new(
-            codewire_credential_broker::GitHubAppAuthorizationOwner::public_client(
-                codewire_credential_broker::provider_oauth::github::codewire_github_app(),
-                std::sync::Arc::new(
-                    ProviderHttpsTransport::resolve(&BTreeSet::from([
-                        HttpProvider::GitHubAppAuthorization,
-                    ]))
-                    .await
-                    .context("resolve the GitHub App refresh endpoint")?,
-                ),
-            ),
-        ))
-    } else {
-        None
-    };
     #[cfg(target_os = "linux")]
     let protected_store = {
         apply_broker_landlock_confinement().context("confine credential broker filesystem")?;

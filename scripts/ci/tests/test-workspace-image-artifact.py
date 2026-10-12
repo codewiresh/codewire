@@ -273,13 +273,136 @@ class ReceiptTests(SyntheticSource):
         self.assertEqual(artifact.reuse(self.root, self.receipt), alias)
         self.assertEqual(self.read_receipt()["source_sha"], SOURCE)
 
-    def test_head_tree_change_never_reuses_old_receipt(self):
-        self.seal()
+    def write_planner(self, document=None, *, error=False, changed=("scripts/ci/verify/smoke.sh",)):
+        """A synthetic canonical planner in the private source root."""
+        planner = self.root / artifact.PLANNER
+        planner.parent.mkdir(parents=True, exist_ok=True)
+        planner.write_text(
+            "import json\n"
+            "class PlannerError(RuntimeError):\n    pass\n"
+            f"DOCUMENT = json.loads({json.dumps(json.dumps(document))})\n"
+            f"ERROR = {error!r}\n"
+            f"CHANGED = {list(changed)!r}\n"
+            "def plan(repository, target_base, head):\n"
+            "    (repository / 'planner-calls').open('a').write(f'{target_base} {head}\\n')\n"
+            "    if ERROR:\n        raise PlannerError('synthetic planner failure')\n"
+            "    return DOCUMENT\n"
+            "def changed_paths(repository, baseline, head):\n"
+            "    return CHANGED\n",
+            encoding="utf-8",
+        )
+
+    def planned(self, state, *, baseline=SOURCE, head=OTHER_SOURCE, before=None, after=None):
+        result = {"state": state}
+        if before is not None:
+            result.update(baseline_fingerprint=before, head_fingerprint=after)
+        return {"baseline": {"baseline_commit": baseline, "head_commit": head},
+                "artifacts": {artifact.PLANNED_ARTIFACT: result}}
+
+    def move_head(self):
         self.source = OTHER_SOURCE
         self.tree = OTHER_TREE
         self.commits[OTHER_SOURCE] = OTHER_TREE
+
+    def planner_calls(self):
+        path = self.root / "planner-calls"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def test_head_tree_change_never_reuses_old_receipt_without_planner_proof(self):
+        self.seal()
+        self.move_head()
+        for name, document, error in (
+            ("affected", self.planned("affected"), False),
+            ("unclassified", self.planned("unclassified"), False),
+            ("missing artifact", {"baseline": self.planned("unaffected")["baseline"], "artifacts": {}}, False),
+            ("other baseline", self.planned("unaffected", baseline="5" * 40), False),
+            ("other head", self.planned("unaffected", head="5" * 40), False),
+            ("planner error", None, True),
+            ("unclassified changed fingerprint", self.planned("unclassified", before="a" * 64, after="b" * 64), False),
+            ("unclassified without fingerprint", self.planned("unclassified", before="", after=""), False),
+        ):
+            with self.subTest(case=name):
+                self.write_planner(document, error=error)
+                with self.assertRaisesRegex(ValueError, "source/input mismatch"):
+                    artifact.reuse(self.root, self.receipt)
+                self.assertFalse(artifact.unaffected_record_path(self.receipt).exists())
+
+    def test_planner_proven_unaffected_tree_reuses_the_verified_image_once_planned(self):
+        alias = self.seal()
+        oci = self.read_receipt()["workspace_oci"]
+        self.move_head()
+        self.write_planner(self.planned("unaffected"))
+        self.assertEqual(artifact.reuse(self.root, self.receipt), alias)
+        self.assertEqual(artifact.reuse(self.root, self.receipt, native=True),
+                         {**oci, "path": str(self.root / oci["file"])})
+        self.assertEqual(artifact.reuse(self.root, self.receipt, for_build=True), alias)
+        # The decision is recorded for this exact receipt and tree.
+        self.assertEqual(self.planner_calls(), [f"{SOURCE} {OTHER_SOURCE}"])
+        record = json.loads(artifact.unaffected_record_path(self.receipt).read_text())
+        self.assertEqual(record, {
+            "schema": artifact.UNAFFECTED_SCHEMA,
+            "receipt_sha256": hashlib.sha256(self.receipt.read_bytes()).hexdigest(),
+            "receipt_source_sha": SOURCE, "source_tree": OTHER_TREE,
+            "artifact": artifact.PLANNED_ARTIFACT,
+        })
+        self.assertEqual(self.read_receipt()["source_sha"], SOURCE)
+        # Another tree is planned again, and an affected answer is not recorded.
+        self.tree = "5" * 40
+        self.write_planner(self.planned("affected"))
         with self.assertRaisesRegex(ValueError, "source/input mismatch"):
             artifact.reuse(self.root, self.receipt)
+        self.assertEqual(len(self.planner_calls()), 2)
+
+    def test_unowned_change_outside_build_inputs_keeps_an_unchanged_fingerprint(self):
+        alias = self.seal()
+        self.move_head()
+        unchanged = self.planned("unclassified", before="c" * 64, after="c" * 64)
+        self.write_planner(unchanged, changed=("scripts/ci/verify/smoke-native-local-environment.sh",
+                                              "scripts/ci/tests/test-native-managed-update-entrypoint.py"))
+        self.assertEqual(artifact.reuse(self.root, self.receipt), alias)
+        for path in ("crates/codewire-cli/src/main.rs", "apps/cli/install.sh", "images/workspace/Dockerfile",
+                     "packages/codewire-design/styles.css", "proto/codewire/v1/a.proto", "Cargo.lock",
+                     "rust-toolchain.toml", ".cargo/config.toml", "build.rs"):
+            with self.subTest(path=path):
+                artifact.unaffected_record_path(self.receipt).unlink(missing_ok=True)
+                self.write_planner(unchanged, changed=("scripts/ci/verify/smoke.sh", path))
+                with self.assertRaisesRegex(ValueError, "source/input mismatch"):
+                    artifact.reuse(self.root, self.receipt)
+
+    def test_the_repository_planner_loads_with_the_interface_reuse_needs(self):
+        planner = artifact.load_planner(HELPER.parents[3])
+        for name in ("plan", "changed_paths", "PlannerError"):
+            self.assertTrue(hasattr(planner, name), name)
+
+    def test_recorded_decision_binds_the_exact_receipt(self):
+        self.seal()
+        self.move_head()
+        self.write_planner(self.planned("unaffected"))
+        artifact.reuse(self.root, self.receipt)
+        # A receipt rewritten in any byte is planned again.
+        value = self.read_receipt()
+        self.receipt.write_text(json.dumps(value, indent=1), encoding="utf-8")
+        self.write_planner(self.planned("affected"))
+        with self.assertRaisesRegex(ValueError, "source/input mismatch"):
+            artifact.reuse(self.root, self.receipt)
+        # A forged or foreign-owned record is ignored, never trusted.
+        self.write_planner(self.planned("affected"))
+        artifact.unaffected_record_path(self.receipt).write_text(json.dumps({
+            "schema": artifact.UNAFFECTED_SCHEMA, "receipt_sha256": "0" * 64,
+            "receipt_source_sha": SOURCE, "source_tree": OTHER_TREE,
+            "artifact": artifact.PLANNED_ARTIFACT}), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "source/input mismatch"):
+            artifact.reuse(self.root, self.receipt)
+
+    def test_verifier_input_change_is_never_planned_away(self):
+        self.seal()
+        self.move_head()
+        self.write_planner(self.planned("unaffected"))
+        path = self.root / artifact.INPUTS[0]
+        path.write_text("changed verifier input\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "source/input mismatch"):
+            artifact.reuse(self.root, self.receipt)
+        self.assertEqual(self.planner_calls(), [])
 
     def test_original_commit_must_still_resolve_to_exact_current_tree(self):
         self.seal()

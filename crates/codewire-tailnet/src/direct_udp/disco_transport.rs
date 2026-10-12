@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use rand::rngs::OsRng;
 use tokio::net::UdpSocket;
@@ -89,7 +90,7 @@ pub(super) async fn handle_disco_packet(
                     if !shared.peer_direct_udp_enabled {
                         return;
                     }
-                    state.verify_endpoint(peer_key, addr);
+                    state.verify_endpoint(peer_key, addr, Instant::now());
                     let Some(peer) = state.peers_by_node.get(&peer_key).cloned() else {
                         return;
                     };
@@ -122,12 +123,8 @@ pub(super) async fn handle_disco_packet(
                 }
             }
             Message::Pong(pong) => {
-                if shared.peer_direct_udp_enabled
-                    && state.pending_tx.remove(&pong.tx_id) == Some(peer_key)
-                {
-                    if let Some(addr) = source_addr {
-                        state.verify_endpoint(peer_key, addr);
-                    }
+                if shared.peer_direct_udp_enabled {
+                    state.accept_pong(peer_key, &pong.tx_id, source_addr, Instant::now());
                 }
                 Vec::new()
             }

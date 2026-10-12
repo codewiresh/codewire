@@ -155,33 +155,110 @@ if grep -Fq 'secrets.' <<<"$publish_job$probe_job"; then
 fi
 grep -qF -- '-p codewire-cli-bin --bin cw' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace builds cw from the wrong Rust package'
-# amd64 consumes the verified static cw; only the arm64 stage compiles source.
-builder_stage="$(sed -n '/^FROM cw-toolchain AS cw-builder-arm64$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
-[[ -n "$builder_stage" ]] || fail 'workspace source builder stage is missing'
+# amd64 consumes the verified static cw. arm64 cross-compiles the same static
+# musl target on the build platform: no Rust compiler runs under emulation.
+builder_stage="$(sed -n '/^FROM cw-cross-compiler AS cw-builder-arm64$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
+[[ -n "$builder_stage" ]] || fail 'workspace arm64 cross-compiling builder stage is missing'
 toolchain_stage="$(sed -n '/^FROM rust:.* AS cw-toolchain$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
-# The pinned upstream archive supplies both protoc and its well-known includes.
-# Distribution protobuf packages are too old for the canonical descriptors.
-protoc_inputs=(
+tool_stages="$(sed -n '/^FROM scratch AS sccache-amd64$/,/^FROM --platform=/p' "$WORKSPACE_DOCKERFILE")"
+compiler_stage="$(sed -n '/^FROM --platform=.* AS cw-cross-compiler$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
+# Each compiler tool is checksum-pinned for both build architectures and
+# selected by the build platform. The pinned protoc archive also supplies the
+# well-known includes; distribution packages are too old for the descriptors.
+# shellcheck disable=SC2016 # Match literal Dockerfile platform selectors.
+tool_stage_inputs=(
+  'FROM scratch AS sccache-amd64'
+  'ADD --checksum=sha256:67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006'
+  'sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz /sccache.tar.gz'
+  'FROM scratch AS sccache-arm64'
+  'ADD --checksum=sha256:821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77'
+  'sccache-v0.17.0-aarch64-unknown-linux-musl.tar.gz /sccache.tar.gz'
+  'FROM scratch AS protoc-amd64'
   'ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7'
-  'https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip'
-  'unzip -q /tmp/protoc.zip -d /opt/protoc'
-  'ENV PROTOC=/opt/protoc/bin/protoc'
-  'test "$(/opt/protoc/bin/protoc --version)" = '\''libprotoc 35.1'\'''
+  'https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip /protoc.zip'
+  'FROM scratch AS protoc-arm64'
+  'ADD --checksum=sha256:01bf9d08808c7f96678b63f4bd8efa559bb4f83d5a7a270d5edaf507f9d5d9cf'
+  'https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-aarch_64.zip /protoc.zip'
+  'FROM scratch AS zig-amd64'
+  'ADD --checksum=sha256:02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239'
+  'https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz /zig.tar.xz'
+  'FROM scratch AS zig-arm64'
+  'ADD --checksum=sha256:958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f'
+  'https://ziglang.org/download/0.15.2/zig-aarch64-linux-0.15.2.tar.xz /zig.tar.xz'
+  'FROM sccache-${BUILDARCH} AS build-sccache'
+  'FROM protoc-${BUILDARCH} AS build-protoc'
+  'FROM zig-${BUILDARCH} AS build-zig'
 )
-workspace_protoc_contract() {
-  local stage="$1" input
-  for input in "${protoc_inputs[@]}"; do
-    grep -qF -- "$input" <<<"$stage" || return 1
-  done
+# shellcheck disable=SC2016 # Match literal Dockerfile commands.
+compiler_inputs=(
+  'FROM --platform=$BUILDPLATFORM rust:1.93.0-bookworm@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382 AS cw-cross-compiler'
+  'COPY --from=build-protoc /protoc.zip /tmp/protoc.zip'
+  'COPY --from=build-sccache /sccache.tar.gz /tmp/sccache.tar.gz'
+  'COPY --from=build-zig /zig.tar.xz /tmp/zig.tar.xz'
+  'unzip -q /tmp/protoc.zip -d /opt/protoc'
+  'test "$(/opt/protoc/bin/protoc --version)" = '\''libprotoc 35.1'\'''
+  'test "$(sccache --version)" = '\''sccache 0.17.0'\'''
+  'test "$(/opt/zig/zig version)" = '\''0.15.2'\'''
+  'ENV PROTOC=/opt/protoc/bin/protoc'
+  'rustup target add --toolchain 1.93.0 aarch64-unknown-linux-musl'
+  'cargo install --locked cargo-zigbuild --version 0.23.0'
+  'test "$(cargo-zigbuild --version)" = '\''cargo-zigbuild 0.23.0'\'''
+  'COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build'
+)
+# shellcheck disable=SC2016 # Match literal Dockerfile commands.
+builder_inputs=(
+  'codewire-rust-build cargo zigbuild --manifest-path /src/Cargo.toml --locked --profile "$CODEWIRE_RUST_PROFILE"'
+  '--target aarch64-unknown-linux-musl -p codewire-cli-bin --bin cw'
+  'install -D -m 0755 "/tmp/cargo-target/aarch64-unknown-linux-musl/$CODEWIRE_RUST_PROFILE/cw" /out/cw'
+)
+workspace_cross_contract() {
+  local tools="$1" compiler="$2" builder="$3" toolchain="$4" recipe="$5" input
+  for input in "${tool_stage_inputs[@]}"; do grep -qF -- "$input" <<<"$tools" || return 1; done
+  for input in "${compiler_inputs[@]}"; do grep -qF -- "$input" <<<"$compiler" || return 1; done
+  for input in "${builder_inputs[@]}"; do grep -qF -- "$input" <<<"$builder" || return 1; done
+  # The image-platform toolchain only adds the shipped developer components.
+  [[ "$(grep -c '^RUN ' <<<"$toolchain")" == 1 ]] || return 1
+  grep -qxF 'RUN rustup component add --toolchain 1.93.0 rustfmt clippy' <<<"$toolchain" || return 1
+  ! grep -Eq '^(ADD|COPY) ' <<<"$toolchain" || return 1
+  # Compiler tools follow the build platform, and only cross builds run Cargo.
+  ! grep -Eq '^FROM (sccache|protoc|zig)-\$\{TARGETARCH\}' <<<"$recipe" || return 1
+  ! grep -Eq 'cargo build' <<<"$recipe" || return 1
+  [[ "$(grep -c 'cargo zigbuild' <<<"$recipe")" == 1 && "$(grep -c 'cargo install' <<<"$recipe")" == 1 ]]
 }
-workspace_protoc_contract "$toolchain_stage" ||
-  fail 'workspace Rust builder lacks the exact checked protoc archive and includes'
-for protoc_input in "${protoc_inputs[@]}"; do
-  incomplete_stage="$(grep -vF -- "$protoc_input" <<<"$toolchain_stage")"
-  if workspace_protoc_contract "$incomplete_stage"; then
-    fail 'workspace protoc guard accepted a missing pinned input'
+workspace_recipe="$(<"$WORKSPACE_DOCKERFILE")"
+workspace_cross_contract "$tool_stages" "$compiler_stage" "$builder_stage" "$toolchain_stage" "$workspace_recipe" ||
+  fail 'workspace arm64 cw is not cross-compiled with the exact pinned build-platform tools'
+for input in "${tool_stage_inputs[@]}"; do
+  if workspace_cross_contract "$(grep -vF -- "$input" <<<"$tool_stages")" \
+      "$compiler_stage" "$builder_stage" "$toolchain_stage" "$workspace_recipe"; then
+    fail 'workspace cross-compile guard accepted a missing pinned tool input'
   fi
 done
+for input in "${compiler_inputs[@]}"; do
+  if workspace_cross_contract "$tool_stages" "$(grep -vF -- "$input" <<<"$compiler_stage")" \
+      "$builder_stage" "$toolchain_stage" "$workspace_recipe"; then
+    fail 'workspace cross-compile guard accepted a missing compiler input'
+  fi
+done
+for input in "${builder_inputs[@]}"; do
+  if workspace_cross_contract "$tool_stages" "$compiler_stage" \
+      "$(grep -vF -- "$input" <<<"$builder_stage")" "$toolchain_stage" "$workspace_recipe"; then
+    fail 'workspace cross-compile guard accepted a missing builder input'
+  fi
+done
+# The historical recipe compiled cw in the image-platform toolchain, with an
+# x86-64 protoc, under emulation for arm64.
+historical_toolchain="$(printf '%s\n%s\n' "$toolchain_stage" \
+  'COPY --from=protoc-archive /protoc.zip /tmp/protoc.zip')"
+historical_recipe="$(printf '%s\n%s\n' "$workspace_recipe" \
+  'RUN codewire-rust-build cargo build --manifest-path /src/Cargo.toml -p codewire-cli-bin --bin cw')"
+# shellcheck disable=SC2016 # Match literal Dockerfile platform selectors.
+target_selected_recipe="${workspace_recipe//FROM protoc-\$\{BUILDARCH\}/FROM protoc-\$\{TARGETARCH\}}"
+if workspace_cross_contract "$tool_stages" "$compiler_stage" "$builder_stage" "$historical_toolchain" "$workspace_recipe" \
+    || workspace_cross_contract "$tool_stages" "$compiler_stage" "$builder_stage" "$toolchain_stage" "$historical_recipe" \
+    || workspace_cross_contract "$tool_stages" "$compiler_stage" "$builder_stage" "$toolchain_stage" "$target_selected_recipe"; then
+  fail 'workspace cross-compile guard accepted an emulated or image-platform compiler'
+fi
 grep -qF -- '--mount=type=bind,target=/src,readonly' <<<"$builder_stage" ||
   fail 'workspace Rust builder does not consume the source tree read-only'
 grep -qF -- '--manifest-path /src/Cargo.toml' <<<"$builder_stage" ||
@@ -251,6 +328,14 @@ first_from_line="$(grep -n '^FROM ' "$WORKSPACE_DOCKERFILE" | head -1 | cut -d: 
 # shellcheck disable=SC2016
 grep -qF 'FROM ${BASE_IMAGE_REF}' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace Dockerfile does not consume its exact base argument'
+# An OCI image config carries no SHELL, so a base imported through an OCI
+# store would hand its stages /bin/sh. Each base stage selects bash itself.
+# shellcheck disable=SC2016 # Match the literal Dockerfile base argument.
+base_stage_shells="$(grep -A2 -F 'FROM ${BASE_IMAGE_REF} AS ' "$WORKSPACE_DOCKERFILE" |
+  grep -cxF 'SHELL ["/bin/bash", "-c"]' || true)"
+# shellcheck disable=SC2016
+[[ "$(grep -cF 'FROM ${BASE_IMAGE_REF} AS ' "$WORKSPACE_DOCKERFILE")" -eq 2 && "$base_stage_shells" -eq 2 ]] ||
+  fail 'a workspace stage built from the base image inherits its shell'
 if grep -qF 'ghcr.io/codewiresh/base:latest' "$WORKSPACE_DOCKERFILE"; then
   fail 'workspace Dockerfile still consumes the moving base tag'
 fi
