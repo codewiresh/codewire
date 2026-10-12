@@ -56,13 +56,36 @@ assert_lacks_line() {
   fi
 }
 
+# A Kind run shows in the tool log as a token: the `kind` tool, a `kind-*`
+# command, `--kind-browser`, or `kind` inside a `|...|` selection. A path that
+# merely contains the word, such as a worktree named ci-kind-images, is not one.
+assert_no_kind() {
+  local name="$1" output="$2"
+  if grep -Eq -- '(^|[ |])(--)?kind([ |-]|$)' <<<"$output"; then
+    printf '[test-pre-push-worktree] %s unexpectedly ran Kind\n' "$name" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+}
+for kind_line in 'kind' 'kind-test environment' 'integration database --kind-browser' \
+    'product policy |valid:v3|kind|complete|'; do
+  if (assert_no_kind self-test "$kind_line") >/dev/null 2>&1; then
+    fail "assert_no_kind missed a Kind run: $kind_line"
+  fi
+done
+for path_line in 'local-rust-cache /w/ci-kind-images/.tmp/linked-source' \
+    'environment --rust /home/kind/src' 'product policy |valid:v3|policy|kindred|complete|'; do
+  (assert_no_kind self-test "$path_line") >/dev/null 2>&1 ||
+    fail "assert_no_kind matched a line that runs no Kind: $path_line"
+done
+
 assert_policy_only() {
   local name="$1" output="$2"
   assert_contains "$name" "$output" 'product policy '
   [ "$(grep -c '^product ' <<<"$output")" -eq 1 ] || \
     fail "$name did not execute exactly one product policy family"
   assert_not_contains "$name" "$output" 'integration '
-  assert_not_contains "$name" "$output" 'kind'
+  assert_no_kind "$name" "$output"
   assert_not_contains "$name" "$output" 'bun '
   assert_not_contains "$name" "$output" 'repo_checks '
   assert_not_contains "$name" "$output" 'native_desktop_ui'
@@ -74,7 +97,7 @@ assert_push_check_only() {
   assert_contains "$name" "$output" 'environment'
   assert_not_contains "$name" "$output" 'product '
   assert_not_contains "$name" "$output" 'integration '
-  assert_not_contains "$name" "$output" 'kind'
+  assert_no_kind "$name" "$output"
 }
 
 commit_all() {
@@ -703,7 +726,7 @@ assert_contains stale_pin "$stale_pin_output" \
   'release commit pins a stale workspace image; land the proposed pin before tagging'
 assert_not_contains stale_pin_tools "$(cat "$stale_pin_log")" 'receipt-ref='
 assert_not_contains release_tag_tools "$(cat "$tag_log")" 'integration '
-assert_not_contains release_tag_tools "$(cat "$tag_log")" 'kind'
+assert_no_kind release_tag_tools "$(cat "$tag_log")"
 
 # A release without the CI receipt keeps the complete fail-closed gate,
 # including Kind, run in place.
@@ -926,7 +949,7 @@ assert_contains linked_database_retry "$database_output" \
 # Integration lanes run beside the others on their own port range.
 assert_contains database_tools "$(cat "$database_log")" 'integration database '
 assert_contains database_tools "$(cat "$database_log")" 'port=62000'
-assert_not_contains database_tools "$(cat "$database_log")" 'kind'
+assert_no_kind database_tools "$(cat "$database_log")"
 
 # Contracts compare protos with the canonical base, so a moved base reruns
 # contracts while the families that never read it are reused.
@@ -1086,7 +1109,7 @@ assert_contains sdk_runner "$sdk_runner_output" \
   'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|sdk_python|security|security_js|complete|'
 assert_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'product sdk-python '
 assert_not_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'integration '
-assert_not_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'kind'
+assert_no_kind sdk_runner_tools "$(cat "$sdk_runner_log")"
 
 apikey_tooling_paths="$TMP/apikey-tooling.paths"
 printf '%s\n' scripts/runtime/tests/test-apikey-smoke.sh > "$apikey_tooling_paths"
@@ -1167,7 +1190,7 @@ assert_contains sdk_tooling "$sdk_tooling_output" \
   'preflight selection: |valid:v3|go_consumer_interop|go_support|policy|policy_shell_omittable|sdk_go|security|security_js|complete|'
 assert_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'product sdk-go '
 assert_not_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'integration '
-assert_not_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'kind'
+assert_no_kind sdk_tooling_tools "$(cat "$sdk_tooling_log")"
 
 printf '[test-pre-push-worktree] hook, push check, merge lanes and fail-closed cases passed\n'
 
