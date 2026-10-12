@@ -1845,7 +1845,6 @@ impl SessionEngine {
         snapshot: PersistedSession,
         cancel: &CancellationToken,
     ) -> Result<v1::SessionRecord, SessionError> {
-        let command = &snapshot.command;
         #[cfg(target_os = "linux")]
         let platform_image = match snapshot.platform_managed_origin.as_ref() {
             Some(origin) => {
@@ -1877,53 +1876,13 @@ impl SessionEngine {
         };
         #[cfg(not(target_os = "linux"))]
         let platform_image: Option<()> = None;
-        // One builder for every session. A managed agent works in the user's
-        // environment: its driver, guardian and provider inherit exactly what
-        // an interactive session gets here (the Git route, the SSH signer
-        // socket, the provider routes), and the guardian adds only the
-        // managed login lockdown. A managed session carries no input of its
-        // own, as checked above.
-        let environment = match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term)
-        {
-            Ok(environment) => environment,
-            Err(error) => {
-                return self
-                    .record_unspawned_failure(
-                        handle,
-                        format!("prepare session environment: {error}"),
-                    )
-                    .await;
-            }
-        };
-        let prepare = if platform_image.is_some() {
-            // The driver is this fixed image and requests no launch projection.
-            PreparedProcess::prepare(
-                &ProcessExecution::Native,
-                command,
-                &snapshot.working_dir,
-                &environment.entries,
-                false,
-                0,
-                0,
-            )
-        } else {
-            PreparedProcess::prepare_configured(
-                (&self.inner.config, &self.inner.credential_bridge),
-                command,
-                &snapshot.working_dir,
-                &environment,
-                false,
-                0,
-                0,
-            )
-        };
-        let mut prepared = match prepare {
+        let mut prepared = match prepare_pipe_process(
+            &self.inner.config,
+            &self.inner.credential_bridge,
+            &snapshot,
+        ) {
             Ok(prepared) => prepared,
-            Err(error) => {
-                return self
-                    .record_unspawned_failure(handle, format!("prepare session process: {error}"))
-                    .await;
-            }
+            Err(message) => return self.record_unspawned_failure(handle, message).await,
         };
         let mut process = prepared.tokio_command();
         #[cfg(target_os = "linux")]
@@ -2898,6 +2857,33 @@ async fn prune_session_records_preserving(
         })?;
     }
     Ok(())
+}
+
+/// One pipe session's process. Every session is prepared the same way, a
+/// managed agent's driver included, because a managed agent works in the
+/// user's environment: the one shared builder (the Git route, the SSH signer
+/// socket, the provider routes), then the launch projection when this daemon
+/// has one, with its own authority check for this launch. The driver, its
+/// guardian and the provider inherit the result, and the guardian adds only
+/// the managed login lockdown. Nothing resolved is kept: the values exist in
+/// the launcher and the processes it becomes, never in the session record.
+fn prepare_pipe_process(
+    config: &Config,
+    bridge: &CredentialBridge,
+    snapshot: &PersistedSession,
+) -> Result<PreparedProcess, String> {
+    let environment = build_process_env(config, &snapshot.env, &snapshot.term)
+        .map_err(|error| format!("prepare session environment: {error}"))?;
+    PreparedProcess::prepare_configured(
+        (config, bridge),
+        &snapshot.command,
+        &snapshot.working_dir,
+        &environment,
+        false,
+        0,
+        0,
+    )
+    .map_err(|error| format!("prepare session process: {error}"))
 }
 
 async fn wait_for_launch_cancellation(handle: &SessionHandle) {

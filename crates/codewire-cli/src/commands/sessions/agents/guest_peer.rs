@@ -2590,9 +2590,11 @@ esac
     }
 
     /// A provider's environment is its guardian's, which is the session
-    /// environment the daemon built: nothing is cleared, so the Git route,
-    /// the SSH signer socket and declared values reach it. A platform
-    /// provider gets only its lockdown set over that.
+    /// environment the daemon built and projected: nothing is cleared, so the
+    /// Git route, the SSH signer socket, declared values and a projected
+    /// application secret reach it exactly as they reach a session the user
+    /// starts. A platform provider gets only its lockdown set over that, and
+    /// when the session has no application secret the provider has none.
     #[test]
     fn provider_inherits_the_guardian_environment_with_only_the_lockdown_set_over_it() {
         let work = tempfile::tempdir().unwrap();
@@ -2609,16 +2611,20 @@ esac
             ("CODEX_HOME", "/home/codewire/.codex"),
             ("DECLARED", "by the project"),
         ];
-        for lockdown in [
-            None,
-            Some(vec![(
-                "CODEX_HOME".to_owned(),
-                "/synthetic/private/codex".to_owned(),
-            )]),
-        ] {
-            let output = work
-                .path()
-                .join(format!("environment-{}", lockdown.is_some()));
+        // What the launch projection adds when a secret source is selected.
+        let secret = ("DATABASE_URL", "synthetic-application-value");
+        let lockdown = vec![(
+            "CODEX_HOME".to_owned(),
+            "/synthetic/private/codex".to_owned(),
+        )];
+        let cases = [
+            (false, None),
+            (false, Some(lockdown.clone())),
+            (true, None),
+            (true, Some(lockdown)),
+        ];
+        for (index, (selected, lockdown)) in cases.into_iter().enumerate() {
+            let output = work.path().join(format!("environment-{index}"));
             let mut command = role(
                 "provider-environment",
                 &ProviderEnvironmentSpec {
@@ -2637,10 +2643,14 @@ esac
                     )
                 })
                 .collect();
+            let session: Vec<(&str, &str)> = session
+                .into_iter()
+                .chain(selected.then_some(secret))
+                .collect();
             command
                 .env_clear()
                 .envs(selector.iter().map(|(name, value)| (name, value)))
-                .envs(session);
+                .envs(session.iter().copied());
             assert!(command.status().unwrap().success());
             let seen: BTreeMap<String, String> = fs::read_to_string(&output)
                 .unwrap()
@@ -2657,6 +2667,10 @@ esac
                 .chain(lockdown.unwrap_or_default())
                 .collect();
             assert_eq!(seen, expected);
+            assert_eq!(
+                seen.get(secret.0).map(String::as_str),
+                selected.then_some(secret.1)
+            );
         }
     }
 

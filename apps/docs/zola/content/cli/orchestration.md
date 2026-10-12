@@ -104,7 +104,9 @@ repository boundary.
 
 Credential profiles and application-secret sources are separate selections.
 A profile authorizes provider-specific execution or proxying; application
-secrets supply ordinary workload environment values. Keep provider credentials
+secrets supply ordinary workload environment values. In a VM or a platform
+sandbox a managed agent starts with the selected application secrets in its
+environment, as a terminal session does. Keep provider credentials
 out of task prompts and inline `--env` arguments. See
 [Secrets](@/organizations/secrets.md) for the storage and delivery distinction.
 
