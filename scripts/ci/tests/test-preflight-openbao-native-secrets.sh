@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly PREFLIGHT="$ROOT/scripts/runtime/dev/preflight-openbao-native-secrets.sh"
-install -d -m 0700 "$ROOT/.tmp"
+# mkdir, not install -d: install would reset the mode of an existing shared
+# directory that checks running beside this one hold open.
+(umask 077; mkdir -p "$ROOT/.tmp")
 work="$(mktemp -d "$ROOT/.tmp/test-openbao-native-secret-preflight.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 

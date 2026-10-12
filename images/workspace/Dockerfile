@@ -67,6 +67,42 @@ RUN test "$(rustc --version)" = 'rustc 1.93.0 (254b59607 2026-01-19)' && \
     test "$(cargo-zigbuild --version)" = 'cargo-zigbuild 0.23.0'
 COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build
 
+# The moving Go developer tools build on the build platform: Go cross-compiles
+# for the image's architecture natively, so the arm64 image never compiles
+# them under emulation. They still resolve @latest at image-build time (every
+# builder bypasses this stage's cache, like workspace-floating-tools), and the
+# build information Go embeds in each binary keeps them visible to the SBOM.
+FROM --platform=$BUILDPLATFORM rust:1.93.0-bookworm@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382 AS workspace-floating-go
+SHELL ["/bin/bash", "-c"]
+ARG BUILDARCH
+ARG TARGETARCH
+# The same checksum-verified Go archive workspace-foundation installs. Go
+# installs a cross-compiled binary below bin/<goos>_<goarch>.
+ARG GO_VERSION=1.26.9
+RUN set -euo pipefail; \
+    case "$BUILDARCH" in \
+      amd64) go_sha=42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d ;; \
+      arm64) go_sha=4a97373d49fcacdcf3694fea368a500b00ee3e963974f3e7514132717632f052 ;; \
+      *) echo "unsupported build architecture: $BUILDARCH" >&2; exit 1 ;; \
+    esac; \
+    case "$TARGETARCH" in \
+      amd64|arm64) ;; \
+      *) echo "unsupported workspace image architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://go.dev/dl/go${GO_VERSION}.linux-${BUILDARCH}.tar.gz" -o /tmp/go.tgz; \
+    echo "${go_sha}  /tmp/go.tgz" | sha256sum -c -; \
+    tar --no-same-owner -xzf /tmp/go.tgz -C /usr/local; \
+    rm -f /tmp/go.tgz; \
+    export GOPATH=/tmp/gopath GOCACHE=/tmp/gocache GOOS=linux GOARCH="$TARGETARCH" CGO_ENABLED=0; \
+    /usr/local/go/bin/go install golang.org/x/tools/gopls@latest; \
+    /usr/local/go/bin/go install github.com/hetznercloud/cli/cmd/hcloud@latest; \
+    binaries=/tmp/gopath/bin; \
+    [ "$TARGETARCH" = "$BUILDARCH" ] || binaries="$binaries/linux_$TARGETARCH"; \
+    install -D -m 0755 "$binaries/gopls" /out/gopls; \
+    install -D -m 0755 "$binaries/hcloud" /out/hcloud; \
+    rm -rf /tmp/gopath /tmp/gocache
+
 FROM scratch AS codewire-verified-cw
 
 FROM scratch AS cw-builder-amd64
@@ -210,8 +246,8 @@ RUN NPM_CONFIG_PREFIX=/usr/local npm install -g --ignore-scripts npm@12.2.0 pnpm
     rm -rf /root/.bun
 
 USER codewire
-RUN go install golang.org/x/tools/gopls@latest && \
-    go install github.com/hetznercloud/cli/cmd/hcloud@latest && \
+COPY --from=workspace-floating-go --chown=codewire:codewire /out/ /home/codewire/go/bin/
+RUN gopls version && hcloud version && \
     pipx install poetry && \
     pipx install uv && \
     PIPX_HOME=/opt/codewire/agents/pipx PIPX_BIN_DIR=/opt/codewire/agents/bin pipx install aider-chat

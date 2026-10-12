@@ -394,6 +394,7 @@ mod tests {
                 CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
             );
             assert_eq!(spec["automountServiceAccountToken"], false);
+            assert_eq!(spec["enableServiceLinks"], false);
             let volume = spec["volumes"]
                 .as_array()
                 .unwrap()
@@ -975,6 +976,17 @@ mod tests {
         assert!(bootstrap.contains("chown 1000:1000 \"$codewire_dir\""));
         assert!(bootstrap.contains("chmod 0755 \"$codewire_dir\""));
         assert!(!bootstrap.contains("0775"));
+        // The bootstrap stored Sandboxes carry from before 531fc0f7e differs
+        // only in that mode; Start and Pod replacement re-render it (#2639).
+        assert_eq!(
+            LEGACY_DIND_BOOTSTRAP_SCRIPT.replace(
+                "chmod 0775 \"$codewire_dir\"",
+                "# Owner-writable only: the workspace daemon refuses a group- or\n\
+                 # world-writable ancestor of its platform session store.\n\
+                 chmod 0755 \"$codewire_dir\""
+            ),
+            bootstrap
+        );
         assert!(bootstrap.contains("--data-root \"$data_root\""));
         assert!(bootstrap.contains("--storage-driver vfs"));
         assert!(dind["env"].as_array().unwrap().iter().any(|env| {
@@ -2545,6 +2557,9 @@ mod tests {
         );
         assert_eq!(volume["projected"]["defaultMode"], 0o440);
         assert_eq!(spec["automountServiceAccountToken"], false);
+        // No other environment's Service reaches workspace processes as
+        // `*_SERVICE_HOST` variables.
+        assert_eq!(spec["enableServiceLinks"], false);
         for container in spec["containers"]
             .as_array()
             .unwrap()

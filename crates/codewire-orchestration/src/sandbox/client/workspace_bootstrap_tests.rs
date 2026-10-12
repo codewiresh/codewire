@@ -152,9 +152,11 @@ fn apply_patch_fixture(object: &mut Value, patch: &Value) -> bool {
                 .unwrap()
                 .remove(key.parse::<usize>().unwrap());
         } else if operation["op"] == "replace" {
-            let member = parent
-                .get_mut(&key)
-                .expect("a replaced member must already exist");
+            let member = match parent {
+                Value::Array(values) => values.get_mut(key.parse::<usize>().unwrap()),
+                _ => parent.get_mut(&key),
+            }
+            .expect("a replaced member must already exist");
             *member = operation["value"].clone();
         } else {
             assert_eq!(operation["op"], "add");
@@ -2827,4 +2829,179 @@ async fn a_pod_replaced_before_the_re_pin_is_neither_re_pinned_nor_deleted() {
             assert_eq!(reads, ["pods", "sandboxclaims", "sandboxes", "pods"]);
         }
     }
+}
+
+/// `before` with a DinD bootstrap of `command` in its template, Sandbox and
+/// Pod, and the Sandbox on `runtime_class`.
+fn with_dind(mut before: Fixture, command: Value, runtime_class: Option<&str>) -> Fixture {
+    for spec in [
+        &mut before.template["spec"]["podTemplate"]["spec"],
+        &mut before.sandbox["spec"]["podTemplate"]["spec"],
+        &mut before.pod["spec"],
+    ] {
+        assert_eq!(spec["containers"][0]["name"], "dind");
+        spec["containers"][0]["command"] = command.clone();
+        if let Some(class) = runtime_class {
+            spec["runtimeClassName"] = json!(class);
+        }
+    }
+    before
+}
+
+/// #2639: a Sandbox rendered before 531fc0f7e, whose DinD made the workspace
+/// home's `.codewire` 0775 at every Pod start.
+fn legacy_dind(before: Fixture) -> Fixture {
+    with_dind(
+        before,
+        json!(["sh", "-ec", LEGACY_DIND_BOOTSTRAP_SCRIPT]),
+        None,
+    )
+}
+
+/// The exact operations that re-render the fixture's DinD bootstrap.
+fn dind_operations() -> [Value; 3] {
+    [
+        json!({"op":"test","path":"/spec/podTemplate/spec/containers/0/name","value":"dind"}),
+        json!({"op":"test","path":"/spec/podTemplate/spec/containers/0/command/2","value":LEGACY_DIND_BOOTSTRAP_SCRIPT}),
+        json!({"op":"replace","path":"/spec/podTemplate/spec/containers/0/command/2","value":dind_bootstrap_script()}),
+    ]
+}
+
+/// `sandbox` with the current DinD bootstrap and `mode`.
+fn re_rendered(mut sandbox: Value, mode: &str) -> Value {
+    sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["command"][2] =
+        json!(dind_bootstrap_script());
+    sandbox["spec"]["operatingMode"] = json!(mode);
+    sandbox
+}
+
+/// Start, through either writer, re-renders exactly the legacy DinD script in
+/// the same patch as the mode (and any daemon re-pin). The DinD image and
+/// environment, the workspace container and image, the volumes, the
+/// per-environment template and the Pod are untouched; no workspace image is
+/// re-pinned.
+#[tokio::test]
+async fn start_re_renders_a_legacy_dind_bootstrap_and_nothing_else() {
+    for generic in [false, true] {
+        let before = legacy_dind(fixture());
+        let (template, sandbox, pod) = (
+            before.template.clone(),
+            before.sandbox.clone(),
+            before.pod.clone(),
+        );
+        let (result, state) = resume_through(before, generic, DAEMON_IMAGE).await;
+        result.unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(
+            patches(&state),
+            [&resume_patch(generic, &dind_operations())],
+            "generic={generic}"
+        );
+        assert_eq!(state.sandbox, re_rendered(sandbox, "Running"));
+        assert_eq!(state.template, template);
+        assert_eq!(state.pod, pod);
+        let script = state.sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["command"][2]
+            .as_str()
+            .unwrap();
+        assert!(script.contains("chmod 0755 \"$codewire_dir\"") && !script.contains("0775"));
+    }
+    // With a stale daemon the one patch carries both, the daemon first.
+    let before = legacy_dind(stale_daemon_fixture());
+    let sandbox = before.sandbox.clone();
+    let (result, state) = resume_through(before, false, DAEMON_IMAGE).await;
+    result.unwrap();
+    let state = state.lock().unwrap();
+    let mut between = repin_operations(OLD_DAEMON_IMAGE, DAEMON_IMAGE).to_vec();
+    between.extend(dind_operations());
+    assert_eq!(patches(&state), [&resume_patch(false, &between)]);
+    let mut expected = re_rendered(sandbox, "Running");
+    *daemon_reference_mut(&mut expected) = json!(DAEMON_IMAGE);
+    assert_eq!(state.sandbox, expected);
+}
+
+/// Only the exact legacy script is re-rendered: a current, unknown or direct
+/// dockerd command, and a confidential runtime, are left as they are.
+#[tokio::test]
+async fn start_keeps_any_other_dind_bootstrap() {
+    let cases = [
+        (
+            "current",
+            json!(["sh", "-ec", dind_bootstrap_script()]),
+            None,
+        ),
+        ("unknown", json!(["sh", "-ec", "exec dockerd"]), None),
+        (
+            "direct",
+            json!(["dockerd", "--host", "unix:///var/run/docker/docker.sock"]),
+            None,
+        ),
+        (
+            "legacy as an argument",
+            json!(["sh", "-ec", LEGACY_DIND_BOOTSTRAP_SCRIPT, "extra"]),
+            None,
+        ),
+        (
+            "confidential",
+            json!(["sh", "-ec", LEGACY_DIND_BOOTSTRAP_SCRIPT]),
+            Some("confidential"),
+        ),
+    ];
+    for (label, command, runtime_class) in cases {
+        let before = with_dind(fixture(), command, runtime_class);
+        let sandbox = before.sandbox.clone();
+        let (result, state) = resume_through(before, false, DAEMON_IMAGE).await;
+        result.unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(patches(&state), [&resume_patch(false, &[])], "{label}");
+        let mut expected = sandbox;
+        expected["spec"]["operatingMode"] = json!("Running");
+        assert_eq!(state.sandbox, expected, "{label}");
+    }
+}
+
+/// Daemon repair, restart-mode resize and terminal-Pod replacement rebuild
+/// the Pod from the Sandbox's spec, so they re-render the legacy bootstrap
+/// before deleting the Pod, with no operating mode.
+#[tokio::test]
+async fn a_pod_replacement_re_renders_a_legacy_dind_bootstrap_first() {
+    let before = running(legacy_dind(fixture()));
+    let sandbox = before.sandbox.clone();
+    let (result, state) = replace_pod(before, DAEMON_IMAGE).await;
+    assert_eq!(result.unwrap(), WorkspacePodReplacement::Replaced);
+    let state = state.lock().unwrap();
+    assert_eq!(
+        patches(&state),
+        [&replacement_patch("30", dind_operations())]
+    );
+    assert_eq!(
+        writes(&state),
+        [
+            (Method::PATCH, SANDBOX.to_owned()),
+            (Method::DELETE, POD.to_owned())
+        ]
+    );
+    assert_eq!(state.sandbox, re_rendered(sandbox, "Running"));
+}
+
+/// Two DinD containers leave no single script to re-render: nothing is
+/// written.
+#[tokio::test]
+async fn a_duplicated_dind_container_fails_the_start_without_writes() {
+    let mut before = legacy_dind(fixture());
+    let dind = before.sandbox["spec"]["podTemplate"]["spec"]["containers"][0].clone();
+    before.sandbox["spec"]["podTemplate"]["spec"]["containers"]
+        .as_array_mut()
+        .unwrap()
+        .push(dind);
+    let sandbox = before.sandbox.clone();
+    let (result, state) = resume_through(before, false, DAEMON_IMAGE).await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("workspace DinD container is duplicated")
+    );
+    let state = state.lock().unwrap();
+    assert!(patches(&state).is_empty());
+    assert_eq!(state.sandbox, sandbox);
 }

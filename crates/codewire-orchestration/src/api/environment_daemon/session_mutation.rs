@@ -145,11 +145,13 @@ fn uncertain_outcome() -> AppError {
 }
 
 fn classify_dispatch_error(error: tonic::Status) -> OrganizationRuntimeMutationError {
-    // These codes originate only in daemon authorization, argument validation
-    // or missing-handle lookup, before any session mutation. FailedPrecondition
-    // is deliberately NOT here: Restart can already have stopped its old shell.
+    // These codes originate only in daemon authorization, argument validation,
+    // missing-handle lookup or session store admission, before any session
+    // mutation. FailedPrecondition is deliberately NOT here: Restart can
+    // already have stopped its old shell.
     // Do not log or persist raw status text (commands/paths/provider data).
     let known = match error.code() {
+        tonic::Code::DataLoss => AppError::Precondition(super::SESSION_STORE_REFUSED.into()),
         tonic::Code::Unauthenticated => AppError::Unauthorized,
         tonic::Code::PermissionDenied => AppError::Forbidden,
         tonic::Code::InvalidArgument => {

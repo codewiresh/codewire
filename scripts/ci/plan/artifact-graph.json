@@ -364,7 +364,8 @@
         "scripts/ci/images/build-product-images.sh",
         "scripts/ci/images/build-local-image.sh",
         "scripts/ci/images/build-push-image.sh",
-        "scripts/ci/images/build-push-runtime-images.sh"
+        "scripts/ci/images/build-push-runtime-images.sh",
+        "scripts/ci/images/build-support-platform.sh"
       ]
     }
   }
