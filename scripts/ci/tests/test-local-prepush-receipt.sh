@@ -25,6 +25,28 @@ assert_reason() {
   }
 }
 
+rewrite_receipt() {
+  # Rewrite one receipt field with a Python expression over `document`.
+  python3 - "$receipt" "$1" <<'PY'
+import json
+import sys
+
+path, statement = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+exec(statement)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
+  chmod 0600 "$receipt"
+}
+
+restore_receipt() {
+  cp "$backup" "$receipt"
+  chmod 0600 "$receipt"
+}
+
 repo="$TMP/repo"
 remote="$TMP/remote.git"
 git init -q -b main "$repo"
@@ -56,16 +78,33 @@ base="$(git -C "$repo" rev-parse origin/main)"
 head="$(git -C "$repo" rev-parse HEAD)"
 paths="$TMP/paths"
 printf 'docs/feature.md\n' > "$paths"
+# Local qualification mirrors pull-request CI without the Kind opt-in.
 selector_output="$(
   cd "$repo"
-  GITHUB_EVENT_NAME=pull_request KIND_E2E_OPT_IN=true \
+  GITHUB_EVENT_NAME=pull_request KIND_E2E_OPT_IN=false \
     scripts/ci/select/select-verification.sh "$paths"
 )"
 selection="$(sed -n 's/^selection=//p' <<<"$selector_output")"
 mode="$(sed -n 's/^required_local_mode=//p' <<<"$selector_output")"
 
 verify_receipt() {
-  (cd "$repo" && "$helper" verify --head "$head" --remote-name origin)
+  (cd "$repo" && "$helper" verify --head "$head" --remote-name origin "$@")
+}
+
+verify_merge_receipt() {
+  verify_receipt --accept-scope merge
+}
+
+emit_receipt() {
+  local scope="$1" ran="$2" reused="${3:-}" not_run="${4:-}"
+  (
+    cd "$repo"
+    "$helper" emit \
+      --verified-base "$base" \
+      --verified-mode "$mode" \
+      --verified-selection "$selection" \
+      --scope "$scope" --ran "$ran" --reused "$reused" --not-run "$not_run"
+  )
 }
 
 emit_wrong_mode() {
@@ -74,7 +113,8 @@ emit_wrong_mode() {
     "$helper" emit \
       --verified-base "$base" \
       --verified-mode full \
-      --verified-selection "$selection"
+      --verified-selection "$selection" \
+      --scope merge --ran policy
   )
 }
 
@@ -84,143 +124,139 @@ emit_wrong_selection() {
     "$helper" emit \
       --verified-base "$base" \
       --verified-mode "$mode" \
-      --verified-selection '|valid:v3|complete|'
+      --verified-selection '|valid:v3|complete|' \
+      --scope merge --ran policy
   )
 }
 
 assert_reason missing verify_receipt
 assert_reason verified-mode-mismatch emit_wrong_mode
 assert_reason verified-selection-mismatch emit_wrong_selection
+# The record of what ran is explicit and consistent: a receipt cannot claim
+# that nothing ran, list a check twice, or carry a malformed name.
+assert_reason execution-invalid emit_receipt merge ''
+assert_reason execution-invalid emit_receipt merge policy policy
+assert_reason execution-invalid emit_receipt merge policy '' policy
+assert_reason execution-invalid emit_receipt merge 'Policy Verification'
 
-emit_output="$(
-  cd "$repo"
-  "$helper" emit \
-    --verified-base "$base" \
-    --verified-mode "$mode" \
-    --verified-selection "$selection"
-)"
+# A push-scope receipt satisfies a feature-branch push, never a direct
+# canonical-main update, which needs merge qualification.
+push_output="$(emit_receipt push environment,rust-fmt '' merge-qualification)"
+grep -Fxq 'scope=push' <<<"$push_output" || fail 'push receipt was not emitted'
+push_receipt="$(sed -n 's/^receipt_path=//p' <<<"$push_output")"
+push_verify="$(verify_receipt)"
+grep -Fxq 'scope=push' <<<"$push_verify" || fail 'feature push rejected a push receipt'
+grep -Fxq 'ran=environment,rust-fmt' <<<"$push_verify" || fail 'push receipt lost what ran'
+grep -Fxq 'not_run=merge-qualification' <<<"$push_verify" ||
+  fail 'push receipt hid that merge qualification did not run'
+assert_reason missing verify_merge_receipt
+# The legacy shared dispatcher passes --base only for a direct main update.
+legacy_main_verify() {
+  (cd "$repo" && "$helper" verify --head "$head" --base "$base" --remote-name origin)
+}
+assert_reason missing legacy_main_verify
+
+emit_output="$(emit_receipt merge policy rust kind)"
 grep -Fxq 'receipt=emitted' <<<"$emit_output" || fail 'emit did not succeed'
+grep -Fxq 'scope=merge' <<<"$emit_output" || fail 'merge receipt was not emitted'
 receipt="$(sed -n 's/^receipt_path=//p' <<<"$emit_output")"
 [ -f "$receipt" ] || fail 'receipt file is missing'
+[ -f "$push_receipt" ] || fail 'merge receipt replaced the push evidence'
 [ "$(stat -c '%a' "$receipt")" = 600 ] || fail 'receipt mode is not 0600'
 [ "$(stat -c '%a' "$(dirname "$receipt")")" = 700 ] || \
   fail 'receipt directory mode is not 0700'
 if find "$(dirname "$receipt")" -maxdepth 1 -name ".${head}.*" -print -quit | grep -q .; then
   fail 'atomic emit left a temporary file'
 fi
+grep -Fq '"schema":"codewire.local-verification-receipt/v2"' "$receipt" ||
+  fail 'receipt does not declare the v2 schema'
+grep -Fq '"execution":{"not_run":["kind"],"ran":["policy"],"reused":["rust"],"scope":"merge"}' \
+  "$receipt" || fail 'receipt does not record its execution'
 
-verify_output="$(verify_receipt)"
+verify_output="$(verify_merge_receipt)"
 grep -Fxq 'receipt=accepted' <<<"$verify_output" || fail 'exact receipt was rejected'
+grep -Fxq 'ran=policy' <<<"$verify_output" || fail 'merge receipt lost what ran'
+grep -Fxq 'reused=rust' <<<"$verify_output" || fail 'merge receipt lost what it reused'
+grep -Fxq 'not_run=kind' <<<"$verify_output" || fail 'merge receipt hid that Kind did not run'
+grep -Fxq 'scope=merge' <<<"$(legacy_main_verify)" ||
+  fail 'a direct main update rejected merge qualification'
+# A feature push prefers the merge evidence, and a later push check never
+# replaces it.
+emit_receipt push environment >/dev/null
+grep -Fxq 'scope=merge' <<<"$(verify_receipt)" ||
+  fail 'feature push preferred push evidence over merge evidence'
 # Re-verification models an interrupted or rejected transport retry. Validation
 # must not consume or delete an otherwise valid receipt.
-cd "$repo"
-"$helper" verify --head "$head" --remote-name origin >/dev/null
+verify_merge_receipt >/dev/null
 [ -f "$receipt" ] || fail 'verification consumed the receipt'
-cd - >/dev/null
 
 backup="$TMP/receipt.json"
 cp "$receipt" "$backup"
 
 chmod 0644 "$receipt"
-assert_reason receipt-permissions-unsafe \
-  verify_receipt
-cp "$backup" "$receipt"
-chmod 0600 "$receipt"
+assert_reason receipt-permissions-unsafe verify_merge_receipt
+restore_receipt
 
 chmod 0755 "$(dirname "$receipt")"
-assert_reason receipt-directory-unsafe \
-  verify_receipt
+assert_reason receipt-directory-unsafe verify_merge_receipt
 chmod 0700 "$(dirname "$receipt")"
 
 printf '{"schema":' > "$receipt"
 chmod 0600 "$receipt"
-assert_reason malformed verify_receipt
-cp "$backup" "$receipt"
-chmod 0600 "$receipt"
+assert_reason malformed verify_merge_receipt
+restore_receipt
 
-python3 - "$receipt" <<'PY'
-import json
-import sys
+rewrite_receipt 'document["expires_at"] = document["created_at"] - 1'
+assert_reason expiry-invalid verify_merge_receipt
+restore_receipt
 
-path = sys.argv[1]
-with open(path, encoding="utf-8") as handle:
-    document = json.load(handle)
-document["expires_at"] = document["created_at"] - 1
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(document, handle, sort_keys=True, separators=(",", ":"))
-    handle.write("\n")
-PY
-chmod 0600 "$receipt"
-assert_reason expiry-invalid verify_receipt
-cp "$backup" "$receipt"
-chmod 0600 "$receipt"
+rewrite_receipt 'document["created_at"] -= 9 * 60 * 60; document["expires_at"] -= 9 * 60 * 60'
+assert_reason expired verify_merge_receipt
+restore_receipt
 
-python3 - "$receipt" <<'PY'
-import json
-import sys
+rewrite_receipt 'document["result"] = "failure"'
+assert_reason result-not-success verify_merge_receipt
+restore_receipt
 
-path = sys.argv[1]
-with open(path, encoding="utf-8") as handle:
-    document = json.load(handle)
-document["created_at"] -= 9 * 60 * 60
-document["expires_at"] -= 9 * 60 * 60
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(document, handle, sort_keys=True, separators=(",", ":"))
-    handle.write("\n")
-PY
-chmod 0600 "$receipt"
-assert_reason expired verify_receipt
-cp "$backup" "$receipt"
-chmod 0600 "$receipt"
+rewrite_receipt 'document["plan"]["selection"] = "|valid:v3|complete|"'
+assert_reason plan-mismatch verify_merge_receipt
+restore_receipt
 
-python3 - "$receipt" <<'PY'
-import json
-import sys
+# The execution record cannot be rewritten into stronger or inconsistent
+# evidence: another scope, nothing executed, unknown keys or a check that is
+# both executed and not run.
+rewrite_receipt 'document["execution"]["scope"] = "push"'
+assert_reason scope-mismatch verify_merge_receipt
+restore_receipt
+for execution in \
+    '{"scope":"merge","ran":[],"reused":[],"not_run":["kind"]}' \
+    '{"scope":"merge","ran":["policy"],"reused":[],"not_run":[],"extra":1}' \
+    '{"scope":"merge","ran":["policy"],"reused":[],"not_run":["policy"]}' \
+    '{"scope":"merge","ran":"policy","reused":[],"not_run":[]}'; do
+  rewrite_receipt "document['execution'] = __import__('json').loads('$execution')"
+  assert_reason execution-invalid verify_merge_receipt
+  restore_receipt
+done
 
-path = sys.argv[1]
-with open(path, encoding="utf-8") as handle:
-    document = json.load(handle)
-document["result"] = "failure"
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(document, handle, sort_keys=True, separators=(",", ":"))
-    handle.write("\n")
-PY
-chmod 0600 "$receipt"
-assert_reason result-not-success verify_receipt
-cp "$backup" "$receipt"
-chmod 0600 "$receipt"
-
-python3 - "$receipt" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-with open(path, encoding="utf-8") as handle:
-    document = json.load(handle)
-document["plan"]["selection"] = "|valid:v3|complete|"
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(document, handle, sort_keys=True, separators=(",", ":"))
-    handle.write("\n")
-PY
-chmod 0600 "$receipt"
-assert_reason plan-mismatch verify_receipt
-cp "$backup" "$receipt"
-chmod 0600 "$receipt"
+# A v1 receipt carries no execution record and is not evidence here.
+rewrite_receipt 'document["schema"] = "codewire.local-verification-receipt/v1"; del document["execution"]'
+assert_reason schema-mismatch verify_merge_receipt
+restore_receipt
 
 printf 'dirty\n' > "$repo/untracked.txt"
-assert_reason dirty-worktree verify_receipt
+assert_reason dirty-worktree verify_merge_receipt
 rm "$repo/untracked.txt"
 
 other="$TMP/other-worktree"
 git -C "$repo" worktree add -q -b other-worktree "$other" "$head"
 other_helper="$other/scripts/ci/receipts/local-prepush-receipt.py"
-other_path="$(cd "$other" && "$other_helper" path --head "$head" --remote-name origin)"
+other_path="$(cd "$other" && "$other_helper" path --scope merge --head "$head" --remote-name origin)"
 mkdir -p "$(dirname "$other_path")"
 chmod 0700 "$(dirname "$other_path")"
 cp "$backup" "$other_path"
 chmod 0600 "$other_path"
 verify_other_receipt() {
-  (cd "$other" && "$other_helper" verify --head "$head" --remote-name origin)
+  (cd "$other" && "$other_helper" verify --head "$head" --remote-name origin --accept-scope merge)
 }
 assert_reason worktree-mismatch \
   verify_other_receipt
@@ -230,11 +266,10 @@ new_base="$(
     git -C "$repo" commit-tree "${base}^{tree}" -p "$base"
 )"
 git -C "$repo" update-ref refs/remotes/origin/main "$new_base"
-assert_reason source-mismatch verify_receipt
+assert_reason source-mismatch verify_merge_receipt
 git -C "$repo" update-ref refs/remotes/origin/main "$base"
 
-cp "$backup" "$receipt"
-chmod 0600 "$receipt"
-verify_receipt >/dev/null
+restore_receipt
+verify_merge_receipt >/dev/null
 
-printf '[test-local-prepush-receipt] atomicity and invalidation cases passed\n'
+printf '[test-local-prepush-receipt] scope, execution, atomicity and invalidation cases passed\n'

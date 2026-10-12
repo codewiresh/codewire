@@ -50,7 +50,7 @@ paths. Run the same selector locally before pushing:
 bun run preflight
 ```
 
-Install the `pre-push` hook so pushes require an exact-tree local receipt:
+Install the `pre-push` hook so pushes are checked for their exact tree:
 
 ```bash
 bun run hooks:install
@@ -59,21 +59,30 @@ bun run hooks:install
 The installer copies the tracked `.githooks/pre-push` dispatcher into the
 repository's common Git directory and sets that stable directory as
 `core.hooksPath`. The dispatcher survives deletion of the worktree that ran
-the installer and resolves `scripts/dev/preflight.sh` from the worktree that
-invoked `git push`. Re-run `bun run hooks:install` after pulling a dispatcher
-change. Before pushing, run the complete selected gate outside Git transport:
+the installer and runs `scripts/dev/pre-push.sh` from the worktree that
+invoked `git push` (older worktrees without it keep their receipt check).
+Re-run `bun run hooks:install` after pulling a dispatcher change.
+
+A feature-branch push runs the fast push check when no receipt for the pushed
+tree exists: the environment precheck, formatting, clippy and unit tests for
+the changed crates, and quick checks for changed file types. Run it yourself
+with `scripts/dev/preflight.sh --for-push --emit-receipt`.
+
+Before merging, run merge qualification once:
 
 ```bash
-scripts/dev/preflight.sh --for-push --emit-receipt
+scripts/dev/preflight.sh --for-merge --emit-receipt
 ```
 
-That command derives the required default, integration, Kind, or full mode and
-stores an eight-hour receipt outside the worktree under the common Git
-directory. The hook validates the exact commit, tree, canonical base, selected
-checks, verification controls, toolchain, worktree, expiry, and clean state; it
-does not rerun the long gate while Forgejo is waiting for a push. An interrupted
-or rejected transport keeps a still-valid receipt for the unchanged retry.
-Push one ref at a time.
+It runs the selected families (compile first, then parallel lanes, reusing
+families that already passed for the exact tree) and never Kind; post-merge
+CI owns Kind and everything else. Both commands store an eight-hour receipt
+outside the worktree under the common Git directory that binds the exact
+commit, tree, canonical base, selected checks, verification controls,
+toolchain, worktree, expiry and clean state, and records exactly which checks
+ran. An interrupted or rejected transport keeps a still-valid receipt for the
+unchanged retry. A direct update of `main` needs a merge receipt. Push one ref
+at a time.
 
 `PREFLIGHT_CHANGED_FILES` is an explicit diagnostic/CI interface for
 reproducing path selection. Set it to a file containing one repository-relative
