@@ -1777,7 +1777,23 @@ for label, name, edns, ident in (
   log "network: $(rg '^guest-(go|gh) ' "$LAST_STDOUT" | tr '\n' ';')"
 }
 
+# The managed profile's credential-broker proof ends by killing the credential
+# authority, after which the guest refuses a fresh launch until its broker is
+# back. The qualification's own guest commands start only once one is admitted.
+wait_for_guest_launch() {
+  local attempt
+  for attempt in {1..30}; do
+    if cw_isolated run --no-tty -- /bin/true >/dev/null 2>&1; then
+      log "network: the guest admits launches (attempt $attempt)"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 run_network_qualification() {
+  wait_for_guest_launch || die 'the guest admitted no launch before the network qualification'
   log 'network: reading the serving packet worker descriptor table under the running VM'
   require_serving_worker_boundary serving
   log 'network: measuring guest and host single-stream HTTPS throughput'
