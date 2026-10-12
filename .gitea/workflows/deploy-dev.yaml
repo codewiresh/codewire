@@ -5,6 +5,16 @@ on:
   push:
     branches: [main]
 
+# A newer main push must never cancel a running delivery. Without this block
+# Forgejo cancels the older push run of the same workflow and ref. With a group
+# and `cancel-in-progress: false` it queues: one run at a time, in push order,
+# and each one finishes. Forgejo keeps every queued run (it has no "newest
+# pending only" mode), so a queued run that starts after main moved on builds
+# nothing; see "Skip a superseded commit" below.
+concurrency:
+  group: deploy-dev-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   deploy-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this trusted planner receives only the read-only Deploy baseline integration.
@@ -14,6 +24,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       deploy_dev: ${{ steps.select.outputs.deploy_dev }}
+      superseded: ${{ steps.canonical.outputs.superseded }}
       reason: ${{ steps.select.outputs.reason }}
       matched_categories: ${{ steps.select.outputs.matched_categories }}
       dashboard_image_state: ${{ steps.select.outputs.dashboard_image_state }}
@@ -35,6 +46,26 @@ jobs:
 
       - name: Verify sealed Rust toolchain
         run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      # Delivery dispatches only the canonical main commit, so a queued run
+      # for an older commit would build an image set it must then refuse to
+      # dispatch. The newer commit's run is queued behind this one and plans
+      # against the deployed source, so it delivers the cumulative change.
+      - name: Skip a superseded commit
+        id: canonical
+        run: |
+          set -euo pipefail
+          canonical_main_sha="$(
+            git ls-remote origin refs/heads/main |
+              awk '$2 == "refs/heads/main" { print $1 }'
+          )"
+          [[ "$canonical_main_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$canonical_main_sha" == "$GITHUB_SHA" ]]; then
+            echo 'superseded=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'superseded=true' >> "$GITHUB_OUTPUT"
+            echo "main is now ${canonical_main_sha}; its queued run delivers this commit's changes"
+          fi
 
       - name: Resolve untrusted deployed Dev source
         run: |
@@ -75,7 +106,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 110
     needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}
     env:
       OPENBAO_ROLE: codewire-source-dev-publisher
       OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher

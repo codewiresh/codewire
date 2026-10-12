@@ -4,6 +4,16 @@ name: Build support images
 on:
   push:
     branches: [main]
+
+# A newer main push must never cancel a running publication, or the workspace
+# pin is never proposed while main keeps moving. Without this block Forgejo
+# cancels the older push run of the same workflow and ref. With a group and
+# `cancel-in-progress: false` it queues: one run at a time, in push order, and
+# each one finishes, so the last proposal is the newest publication's.
+concurrency:
+  group: support-images-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   support-selection:
     # zizmor: ignore[excessive-permissions] This credential-free selection uses protected Docker only for the preloaded, pinned Skopeo runtime.
