@@ -11,6 +11,25 @@ use super::*;
 // Production uses one fixed port per Pod. Serialize these real-socket fixtures
 // within this process; an unrelated occupant is a test failure, never evicted.
 pub(super) static LOOPBACK_TEST: Mutex<()> = Mutex::const_new(());
+
+/// This test process's stand-in for the product's fixed loopback port.
+/// Concurrent test runs on one host each take a different free port. It lies
+/// below the kernel's ephemeral range, so no other socket in this process is
+/// ever handed it by a port-0 bind or as a connection's source port, and the
+/// fixtures' exclusivity and release checks stay exact.
+pub(super) fn process_loopback_address() -> std::net::SocketAddr {
+    static ADDRESS: std::sync::OnceLock<std::net::SocketAddr> = std::sync::OnceLock::new();
+    *ADDRESS.get_or_init(|| {
+        const FIRST: u16 = 20_000;
+        const COUNT: u16 = 12_000;
+        let start = (std::process::id() % u32::from(COUNT)) as u16;
+        (0..COUNT)
+            .map(|offset| FIRST + (start + offset) % COUNT)
+            .map(|port| std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+            .find(|address| std::net::TcpListener::bind(address).is_ok())
+            .expect("no free loopback port below the ephemeral range")
+    })
+}
 const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 trait HttpIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -18,7 +37,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> HttpIo for T {}
 type HttpStream = Box<dyn HttpIo>;
 
 fn loopback_address() -> std::net::SocketAddr {
-    (Ipv4Addr::LOCALHOST, CREDENTIAL_BRIDGE_LOOPBACK_PORT).into()
+    process_loopback_address()
 }
 
 fn config(path: PathBuf, transport: CredentialBridgeTransport) -> CredentialBridgeConfig {
@@ -35,6 +54,7 @@ fn config(path: PathBuf, transport: CredentialBridgeTransport) -> CredentialBrid
 struct Harness {
     _temp: tempfile::TempDir,
     bridge: CredentialBridge,
+    address: std::net::SocketAddr,
     token: PathBuf,
     stop: CancellationToken,
     server: Option<tokio::task::JoinHandle<io::Result<()>>>,
@@ -51,15 +71,14 @@ impl Harness {
         );
         let bridge = CredentialBridge::new(Some(config));
         let ingress = bridge.prepare_ingress(false).unwrap().unwrap();
-        assert_eq!(
-            ingress.loopback.as_ref().unwrap().local_addr().unwrap(),
-            loopback_address()
-        );
+        let address = ingress.loopback.as_ref().unwrap().local_addr().unwrap();
+        assert_eq!(address, loopback_address());
         let stop = CancellationToken::new();
         let server = tokio::spawn(ingress.serve(stop.clone().cancelled_owned()));
         Self {
             _temp: temp,
             bridge,
+            address,
             token,
             stop,
             server: Some(server),
@@ -72,7 +91,7 @@ impl Harness {
 
     async fn connect(&self, tcp: bool) -> HttpStream {
         if tcp {
-            Box::new(TcpStream::connect(loopback_address()).await.unwrap())
+            Box::new(TcpStream::connect(self.address).await.unwrap())
         } else {
             Box::new(UnixStream::connect(self.socket()).await.unwrap())
         }
@@ -148,7 +167,7 @@ impl Harness {
             .unwrap();
         assert!(self.bridge.owner.tasks.is_empty());
         assert!(!self.socket().exists());
-        assert!(TcpStream::connect(loopback_address()).await.is_err());
+        assert!(TcpStream::connect(self.address).await.is_err());
         assert!(
             self.bridge
                 .connect_with_token_file(tokio_stream::pending(), &self.token)
@@ -156,7 +175,7 @@ impl Harness {
                 .is_err()
         );
         // The owner released the real socket, not merely its pathname.
-        drop(bind_hosted_loopback().unwrap());
+        drop(bind_hosted_loopback(self.address).unwrap());
     }
 }
 
@@ -244,13 +263,12 @@ async fn hosted_prebind_is_exact_exclusive_and_does_not_unlink_previous_unix_own
     let config = config(path.clone(), CredentialBridgeTransport::Hosted);
     let bridge = CredentialBridge::new(Some(config.clone()));
     let ingress = bridge.prepare_ingress(false).unwrap().unwrap();
-    assert_eq!(
-        ingress.loopback.as_ref().unwrap().local_addr().unwrap(),
-        loopback_address()
-    );
+    let address = ingress.loopback.as_ref().unwrap().local_addr().unwrap();
+    assert_eq!(address, loopback_address());
     let before = std::fs::symlink_metadata(&path).unwrap();
     assert_eq!(before.mode() & 0o777, 0o600);
     assert_eq!(before.uid(), config.ingress_uid);
+    // A second Hosted owner of the same address is refused.
     let second = CredentialBridge::new(Some(config));
     assert!(
         matches!(second.prepare_ingress(false), Err(error) if error.kind() == io::ErrorKind::AddrInUse)
@@ -273,13 +291,14 @@ async fn hosted_prebind_is_exact_exclusive_and_does_not_unlink_previous_unix_own
         std::fs::read(&path).unwrap(),
         b"synthetic existing non-socket"
     );
-    drop(bind_hosted_loopback().unwrap());
+    drop(bind_hosted_loopback(address).unwrap());
 }
 
 #[tokio::test]
 async fn local_ingress_does_not_claim_the_guest_forwarders_loopback_socket() {
     let _lock = LOOPBACK_TEST.lock().await;
-    let existing_forwarder = bind_hosted_loopback().unwrap();
+    let existing_forwarder = bind_hosted_loopback(loopback_address()).unwrap();
+    let address = existing_forwarder.local_addr().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("local.sock");
     let bridge =
@@ -288,7 +307,7 @@ async fn local_ingress_does_not_claim_the_guest_forwarders_loopback_socket() {
     assert!(ingress.loopback.is_none());
     drop(ingress);
     assert!(!path.exists());
-    assert_eq!(existing_forwarder.local_addr().unwrap(), loopback_address());
+    assert_eq!(existing_forwarder.local_addr().unwrap(), address);
 }
 
 #[tokio::test]
@@ -783,4 +802,20 @@ async fn hosted_accept_errors_are_terminal_but_transient_connection_errors_are_n
         () = failed.cancelled() => {},
     }
     assert!(failed.is_cancelled());
+}
+
+#[test]
+fn hosted_ingress_listens_on_the_fixed_guest_port_in_the_product() {
+    // The product's default, asserted without binding it: guests reach the
+    // provider routes at 127.0.0.1:38081 (see env.rs base URLs).
+    assert_eq!(
+        hosted_loopback_address(),
+        "127.0.0.1:38081".parse::<std::net::SocketAddr>().unwrap()
+    );
+    assert_eq!(CREDENTIAL_BRIDGE_LOOPBACK_PORT, 38081);
+    // Unit tests never take it: each test process uses its own port below the
+    // ephemeral range instead.
+    let address = CredentialBridge::new(None).loopback;
+    assert_eq!(address, process_loopback_address());
+    assert!(address.ip().is_loopback() && (20_000..32_000).contains(&address.port()));
 }

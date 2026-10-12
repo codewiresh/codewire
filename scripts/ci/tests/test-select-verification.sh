@@ -3614,6 +3614,84 @@ bash -n \
 "$ROOT/scripts/ci/tests/test-pre-push-worktree.sh"
 "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"
 
+# Main CI runs queue one at a time and Forgejo keeps every queued run. A main
+# push that starts after main moved on runs selection, says which commit
+# superseded it, and dispatches nothing; main's tip runs everything selected.
+# Execute the checked-in step against a stub remote.
+selection_block="$(awk '
+  $0 == "  verification-selection:" { capture = 1 }
+  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
+  capture { print }
+' "$WORKFLOW")"
+for expected in \
+    '      superseded: ${{ steps.superseded.outputs.superseded }}' \
+    '      superseded_by: ${{ steps.superseded.outputs.superseded_by }}' \
+    '          VERIFICATION_SUPERSEDED: ${{ steps.superseded.outputs.superseded }}'; do
+  grep -qxF -- "$expected" <<<"$selection_block" || {
+    echo "verification selection omits: $expected" >&2
+    exit 1
+  }
+done
+superseded_line="$(grep -n -m1 'name: Skip a superseded main commit' <<<"$selection_block" | cut -d: -f1)"
+dispatch_line="$(grep -n -m1 'name: Emit trusted capability dispatch decisions' <<<"$selection_block" | cut -d: -f1)"
+[[ -n "$superseded_line" && "$superseded_line" -lt "$dispatch_line" ]] || {
+  echo 'CI dispatches before it knows whether its main commit was superseded' >&2
+  exit 1
+}
+producer_gate="    if: \${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}"
+[[ "$(grep -cxF -- "$producer_gate" "$WORKFLOW")" -eq 3 ]] || {
+  echo 'a superseded main run still builds a Kind producer' >&2
+  exit 1
+}
+superseded_step="$TMP/ci-superseded-step.sh"
+awk '
+  /- name: Skip a superseded main commit/ { scope = 1 }
+  scope && /^        run: \|$/ { run = 1; next }
+  run && /^          / { print substr($0, 11); next }
+  run { exit }
+' "$WORKFLOW" >"$superseded_step"
+[[ -s "$superseded_step" ]] || { echo 'superseded main step was not extracted' >&2; exit 1; }
+mkdir -p "$TMP/superseded-bin"
+cat >"$TMP/superseded-bin/git" <<'GIT'
+#!/usr/bin/env bash
+printf 'git %s\n' "$*" >>"$FAKE_GIT_CALLS"
+[[ "$*" == 'ls-remote origin refs/heads/main' ]] || exit 64
+[[ -n "${FAKE_MAIN_SHA:-}" ]] || exit 1
+printf '%s\trefs/heads/main\n' "$FAKE_MAIN_SHA"
+GIT
+chmod +x "$TMP/superseded-bin/git"
+# superseded_case EVENT REF MAIN -> outputs, then "summary:" lines, or "failed"
+superseded_case() {
+  local event="$1" ref="$2" main="$3"
+  : >"$TMP/superseded-output"; : >"$TMP/superseded-summary"; : >"$TMP/git-calls"
+  if env PATH="$TMP/superseded-bin:$PATH" FAKE_MAIN_SHA="$main" FAKE_GIT_CALLS="$TMP/git-calls" \
+      EVENT_NAME="$event" EVENT_REF="$ref" GITHUB_SHA=1111111111111111111111111111111111111111 \
+      GITHUB_OUTPUT="$TMP/superseded-output" GITHUB_STEP_SUMMARY="$TMP/superseded-summary" \
+      bash "$superseded_step" >/dev/null 2>&1; then
+    cat "$TMP/superseded-output"
+    sed 's/^/summary: /' "$TMP/superseded-summary"
+  else
+    echo failed
+  fi
+}
+tip=1111111111111111111111111111111111111111
+newer=2222222222222222222222222222222222222222
+[[ "$(superseded_case push refs/heads/main "$tip")" == superseded=false ]] || {
+  echo "main's tip run was treated as superseded" >&2; exit 1; }
+[[ "$(superseded_case push refs/heads/main "$newer")" == "superseded=true
+superseded_by=$newer
+summary: superseded by $newer: main's queued run verifies this commit's changes" ]] || {
+  echo 'a main run behind main'"'"'s tip did not record its supersession' >&2; exit 1; }
+for not_main in 'pull_request refs/pull/7/head' 'workflow_dispatch refs/heads/main' 'push refs/heads/feature'; do
+  read -r event ref <<<"$not_main"
+  [[ "$(superseded_case "$event" "$ref" "$newer")" == superseded=false && ! -s "$TMP/git-calls" ]] || {
+    echo "a $event run on $ref was judged against main" >&2; exit 1; }
+done
+[[ "$(superseded_case push refs/heads/main '')" == failed ]] || {
+  echo 'an unreadable canonical main did not fail closed' >&2; exit 1; }
+[[ "$(superseded_case push refs/heads/main not-a-commit)" == failed ]] || {
+  echo 'a malformed canonical main did not fail closed' >&2; exit 1; }
+
 echo 'select-verification fixtures: OK'
 
 # Preflight runs the fast compile for exactly the selections that make CI run
