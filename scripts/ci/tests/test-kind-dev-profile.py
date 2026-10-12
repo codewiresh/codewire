@@ -148,7 +148,12 @@ elif tool == "docker":
         (state / "last-image").write_text(tag)
         aliases[tag] = "sha256:" + hashlib.sha256(entry["dockerfile"].encode()).hexdigest()
         aliases_path.write_text(json.dumps(aliases))
-    elif args[:2] not in (["buildx", "inspect"], ["buildx", "create"]): sys.exit(64)
+    elif args[:2] == ["buildx", "inspect"]:
+        builders = state / "builders"
+        if not builders.exists() or args[2] not in builders.read_text().split(): sys.exit(1)
+    elif args[:2] == ["buildx", "create"]:
+        with (state / "builders").open("a") as builders: builders.write(args[args.index("--name") + 1] + "\n")
+    else: sys.exit(64)
 elif tool == "ss":
     if os.environ.get("FAKE_LISTENER") == "1":
         port = args[-1].rsplit(":", 1)[-1]
@@ -740,6 +745,18 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         annotate, = [call["args"] for call in self.calls("kubectl") if "annotate" in call["args"]]
         expected = record_digest("5" * 64, "codewire-orchestration", "kind-e2e")
         self.assertEqual(annotate[-1], f"dev.codewire.kind-dev/source-orchestration={expected} sha256:{'6' * 64}")
+
+    def test_builder_keeps_its_build_caches(self) -> None:
+        result = self.run_script("deploy-service.sh", "idp")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create, = [call["args"] for call in self.calls("docker") if call["args"][:2] == ["buildx", "create"]]
+        builder = create[create.index("--name") + 1]
+        self.assertRegex(builder, "^" + re.escape(self.values["KIND_PROFILE_IMAGE_PREFIX"]) + r"-dev-[0-9a-f]{8}$")
+        config = Path(create[create.index("--buildkitd-config") + 1]).read_text()
+        self.assertIn("reservedSpace = \"40GB\"", config)
+        self.assertNotIn("488", config)
+        bake, = [call["args"] for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
+        self.assertEqual(bake[bake.index("--builder") + 1], builder)
 
     def test_mesh_deploys_into_its_own_image(self) -> None:
         result = self.run_script("deploy-service.sh", "mesh")

@@ -215,8 +215,35 @@ if [ "$(cat "$STATE/base" 2>/dev/null || true)" != "$base" ]; then
   printf '%s\n' "$base" >"$STATE/base"
 fi
 
-docker buildx inspect "$BUILDER" >/dev/null 2>&1 \
-  || docker buildx create --name "$BUILDER" --driver docker-container >/dev/null
+# BuildKit's default GC policy prunes cache mounts past 488 MiB and empties the
+# store to 9 GiB whenever the disk has under 20 percent free, which evicted every
+# worktree's target, the compiler cache and the registry between deploys: each
+# deploy was cold. Keep up to 80 GB of them instead, at least 40 GB unless the
+# disk falls under 40 GB free, and anything unused for two weeks goes. The
+# builder name carries the policy's digest, so a changed policy gets a builder
+# that runs it rather than reusing one created with another.
+buildkit_config='[worker.oci]
+  gc = true
+  [[worker.oci.gcpolicy]]
+    filters = ["type==source.local", "type==source.git.checkout"]
+    keepDuration = "48h"
+    maxUsedSpace = "512MB"
+  [[worker.oci.gcpolicy]]
+    keepDuration = "336h"
+    reservedSpace = "40GB"
+    maxUsedSpace = "80GB"
+    minFreeSpace = "40GB"
+  [[worker.oci.gcpolicy]]
+    all = true
+    reservedSpace = "40GB"
+    maxUsedSpace = "80GB"
+    minFreeSpace = "40GB"'
+BUILDER="${BUILDER}-$(printf '%s\n' "$buildkit_config" | sha256sum | cut -c1-8)"
+if ! docker buildx inspect "$BUILDER" >/dev/null 2>&1; then
+  printf '%s\n' "$buildkit_config" >"$STATE/buildkitd.toml"
+  docker buildx create --name "$BUILDER" --driver docker-container \
+    --buildkitd-config "$STATE/buildkitd.toml" >/dev/null
+fi
 log "compiling ${crate} ${bin}${features:+ (features ${features})}${fixture:+ and the ${fixture} fixture}"
 out="$(mktemp -d "$STATE/out.XXXXXX")"
 trap 'rm -rf "$out"' EXIT
