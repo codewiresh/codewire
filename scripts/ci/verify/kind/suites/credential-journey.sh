@@ -11,6 +11,39 @@ if [ "${KIND_E2E_COMMON_LOADED:-0}" != "1" ]; then
   source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/common.sh"
 fi
 
+# `rollout status` returns once the new Pod is available, while the replaced
+# one is still terminating and can still be chosen for the Service, so the
+# first enrollment could reach a closed listener. Wait until the Service's
+# endpoints are exactly the new ready Pods.
+restart_credential_service() {
+  local selector previous endpoints deadline
+  # shellcheck disable=SC2016 # a Go template, expanded by kubectl
+  selector="$(kubectl -n "$NS" get service/codewire-credential-service \
+    -o 'go-template={{range $k, $v := .spec.selector}}{{$k}}={{$v}},{{end}}')"
+  selector="${selector%,}"
+  [ -n "$selector" ]
+  previous="$(kubectl -n "$NS" get pods -l "$selector" -o name | sort)"
+  kubectl -n "$NS" rollout restart deployment/codewire-credential-service
+  kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
+  deadline=$((SECONDS + 360))
+  while :; do
+    # One line per endpoint: its Pod, then whether it is ready.
+    endpoints="$(kubectl -n "$NS" get endpointslices \
+      -l kubernetes.io/service-name=codewire-credential-service \
+      -o go-template='{{range .items}}{{range .endpoints}}pod/{{.targetRef.name}} {{.conditions.ready}}{{"\n"}}{{end}}{{end}}')"
+    if [ -n "$endpoints" ] && ! grep -qv ' true$' <<<"$endpoints" \
+        && ! comm -12 <(cut -d' ' -f1 <<<"$endpoints" | sort) <(printf '%s\n' "$previous") | grep -q .; then
+      log "credential-service endpoints are the new ready Pods: $(cut -d' ' -f1 <<<"$endpoints" | tr '\n' ' ')"
+      return 0
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "::error::credential-service endpoints never became only the new ready Pods: ${endpoints:-none}" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
 run_retained_credentials_suite() {
   local command
   require_kind_errexit
@@ -30,8 +63,7 @@ run_retained_credentials_suite() {
   fi
   build_retained_kind_smokes
   log "restarting the synthetic credential-service for a fresh provider event log"
-  kubectl -n "$NS" rollout restart deployment/codewire-credential-service
-  kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
+  restart_credential_service
   kind_credential_native_smoke
   kind_credential_claude_session
   log "retained credentials suite green"

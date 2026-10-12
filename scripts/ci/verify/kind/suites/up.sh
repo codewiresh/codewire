@@ -49,4 +49,8 @@ run_kind_up() {
   deploy_overlay
   deploy_agent_sandbox
   mark_retained_cluster_prepared
+  # A shard's cluster is disposable; a developer's is kept for kind-test.
+  if [ "$KIND_SHARD_TRANSACTION" != 1 ]; then
+    record_retained_cluster_sources
+  fi
 }

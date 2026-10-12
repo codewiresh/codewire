@@ -745,9 +745,10 @@ validate_retained_cluster() {
   renew_retained_synthetic_bearer
 }
 
-# A retained cluster outlives the four-hour synthetic product bearer that the
-# contract seed issues (tests/fixtures/billing/seed.sql). Renew only that seeded
-# token's lifetime, so a retained suite authenticates as on a fresh cluster.
+# A retained cluster outlives the four-hour synthetic product bearer and user
+# sessions that the contract seed issues (tests/fixtures/billing/seed.sql).
+# Renew only those seeded lifetimes, never the deliberately expired session, so
+# a retained suite authenticates as on a fresh cluster.
 renew_retained_synthetic_bearer() {
   local renewed
   renewed="$(kubectl -n "$NS" exec deploy/postgres -- \
@@ -759,7 +760,18 @@ renew_retained_synthetic_bearer() {
     echo '::error::retained Kind cluster lacks the seeded synthetic product bearer' >&2
     return 1
   fi
-  log "renewed the seeded synthetic product bearer"
+  renewed="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 -qtAc \
+      "UPDATE sessions SET expires_at = NOW() + INTERVAL '4 hours'
+         WHERE (id, token_hash) IN (
+           ('ses_contract_admin', encode(digest('contract-admin-session-token', 'sha256'), 'hex')),
+           ('ses_contract_user', encode(digest('contract-user-session-token', 'sha256'), 'hex')))
+         RETURNING 1")" || return $?
+  if [ "$(printf '%s' "$renewed" | tr -d '[:space:]')" != 11 ]; then
+    echo '::error::retained Kind cluster lacks the seeded contract sessions' >&2
+    return 1
+  fi
+  log "renewed the seeded synthetic product bearer and contract sessions"
 }
 
 # The prepared marker is scoped to its own cluster: parallel CI shard clusters
@@ -792,6 +804,19 @@ mark_retained_cluster_prepared() {
     --from-literal="workspace-image=$workspace_image" \
     "${profile_binding[@]}" \
     --dry-run=client -o yaml | kubectl_apply -f -
+}
+
+# A retained development cluster records, on each Deployment, the source its
+# images were just built from (scripts/dev/kind/deploy-service.sh), so
+# `make kind-test` deploys only what later differs. Best-effort: a service it
+# cannot record is rebuilt on the first `make kind-test`.
+record_retained_cluster_sources() {
+  local service
+  [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = build-ci ] || return 0
+  for service in idp orchestration credential-service billing coordinator mesh dashboard daemon; do
+    KIND_DEPLOY_RECORD_ONLY=1 "$ROOT/scripts/dev/kind/deploy-service.sh" "$service" \
+      || log "could not record the source of ${service}; make kind-test will rebuild it"
+  done
 }
 
 reclaim_cancelled_ci_clusters() {
@@ -1812,12 +1837,11 @@ require_dashboard_browser_host_dependencies() {
     return 1
   fi
 
-  chromium="${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}"
-  if [ -z "$chromium" ]; then
-    chromium="$(command -v chromium || command -v google-chrome || command -v google-chrome-stable || true)"
-  fi
+  # An explicit browser, else the pinned one, installed into this checkout on
+  # first use. A system Chromium is another version and would fail below.
+  chromium="$(resolve_pinned_playwright_chromium "$ROOT")" || chromium=""
   if [ -z "$chromium" ] || [ ! -x "$chromium" ]; then
-    echo "::error::the Kind browser gate requires a pre-provisioned Chromium executable; set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+    echo "::error::the Kind browser gate requires the pinned Chromium; scripts/ci/install-pinned-playwright-chromium.sh could not provide it"
     return 1
   fi
 
@@ -1870,10 +1894,7 @@ dashboard_browser_e2e() (
       ;;
   esac
   playwright="$ROOT/apps/dashboard/node_modules/.bin/playwright"
-  chromium="${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}"
-  if [ -z "$chromium" ]; then
-    chromium="$(command -v chromium || command -v google-chrome || command -v google-chrome-stable || true)"
-  fi
+  chromium="$(resolve_pinned_playwright_chromium "$ROOT")" || return $?
 
   prepare_playwright_browser_runtime "$chromium" "$ROOT" || return $?
 
