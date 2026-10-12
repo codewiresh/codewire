@@ -1085,18 +1085,32 @@ start_broker_renewal_requests() {
        (( $(awk '$3 == "200"' "$DIRECT_RW_SOURCE/broker-renewal.log" | wc -l) >= 3 )); then
       return 0
     fi
-    kill -0 "$BROKER_RENEWAL_PROBE_PID" 2>/dev/null || break
     sleep 0.25
   done
   cat "$SMOKE_ROOT/broker-renewal.stdout" "$SMOKE_ROOT/broker-renewal.stderr" >>"$TRANSCRIPT" 2>/dev/null || true
   die 'managed requests through the local broker did not start succeeding'
 }
 
+broker_renewal_requests_live() {
+  # The guest loop outlives the `cw run` client, which can return as soon as
+  # the session starts. Its log is the evidence: a request finished within
+  # the last 15 seconds.
+  local last
+  last="$(tail -n 1 "$DIRECT_RW_SOURCE/broker-renewal.log" 2>/dev/null | awk '{ print $2 }')"
+  [[ "$last" =~ ^[0-9]+$ ]] && (( $(date +%s%3N) - last < 15000 ))
+}
+
 stop_broker_renewal_requests() {
+  local before after
   touch "$DIRECT_RW_SOURCE/broker-renewal.stop"
-  for _attempt in {1..240}; do
-    kill -0 "$BROKER_RENEWAL_PROBE_PID" 2>/dev/null || break
-    sleep 0.25
+  # Every worker sees the stop file within one request; the log then stops
+  # growing.
+  before=-1
+  for _attempt in {1..60}; do
+    sleep 1
+    after="$(stat -c '%s' "$DIRECT_RW_SOURCE/broker-renewal.log")"
+    [[ "$after" == "$before" ]] && break
+    before="$after"
   done
   if kill -0 "$BROKER_RENEWAL_PROBE_PID" 2>/dev/null; then
     pkill -TERM -P "$BROKER_RENEWAL_PROBE_PID" 2>/dev/null || true
@@ -1119,7 +1133,7 @@ run_broker_renewal_observation() {
   while [[ -z "$successor" ]]; do
     now="$(date +%s)"
     (( now <= deadline )) || die 'no successor local broker started before its predecessor lifetime ended'
-    kill -0 "$BROKER_RENEWAL_PROBE_PID" 2>/dev/null || die 'the managed request loop ended before the broker handover'
+    broker_renewal_requests_live || die 'the managed request loop ended before the broker handover'
     while read -r pid start; do
       [[ -n "$pid" && "$pid" != "$predecessor" ]] && { successor="$pid"; successor_start="$start"; }
     done < <(environment_broker_children)
@@ -1128,7 +1142,7 @@ run_broker_renewal_observation() {
   log "broker renewal: successor $successor started $(awk -v a="$successor_start" -v b="$predecessor_start" 'BEGIN { printf "%.1f", a - b }') s after predecessor $predecessor"
   while [[ -r "/proc/$predecessor/stat" && "$(awk '{ print $3 }' "/proc/$predecessor/stat" 2>/dev/null)" != Z ]]; do
     (( $(date +%s) <= deadline )) || die 'the predecessor local broker outlived its lifetime'
-    kill -0 "$BROKER_RENEWAL_PROBE_PID" 2>/dev/null || die 'the managed request loop ended during the broker handover'
+    broker_renewal_requests_live || die 'the managed request loop ended during the broker handover'
     sleep 0.5
   done
   predecessor_exit="$(date +%s.%N)"
