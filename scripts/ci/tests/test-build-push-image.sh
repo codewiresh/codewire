@@ -619,6 +619,7 @@ case "${1:-} ${2:-} ${3:-}" in
     shift 3
     destination=''
     source=''
+    sources=()
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --tag)
@@ -627,11 +628,23 @@ case "${1:-} ${2:-} ${3:-}" in
           ;;
         *)
           source="$1"
+          sources+=("$1")
           shift
           ;;
       esac
     done
     [[ -n "$destination" && "$source" =~ @sha256:[0-9a-f]{64}$ ]]
+    if [ "${#sources[@]}" -gt 1 ]; then
+      # A join: one index over every source image's platform.
+      for joined in "${sources[@]}"; do
+        grep -qF "$(printf '%s\t' "$joined")" "$FAKE_MANIFESTS" || {
+          printf 'ERROR: %s: manifest unknown\n' "$joined" >&2
+          exit 1
+        }
+      done
+      set_manifest "$destination" "${FAKE_JOIN_DIGEST:?}" "${FAKE_JOIN_PLATFORMS:-linux/amd64,linux/arm64}"
+      exit 0
+    fi
     if [ "$destination" = "${FAKE_CREATE_AUTH_ONCE_REF:-}" ]; then
       auth_state="${FAKE_CREATE_AUTH_STATE:?}"
       auth_count="$(cat "$auth_state")"
@@ -749,6 +762,7 @@ case "${1:-} ${2:-} ${3:-}" in
     printf '#1 synthetic image build solve; no Docker/CW execution\n'
     metadata=''
     tags=()
+    by_digest=''
     build_platforms=''
     shift 2
     while [ "$#" -gt 0 ]; do
@@ -769,7 +783,15 @@ case "${1:-} ${2:-} ${3:-}" in
           if [[ "$2" == *,* ]]; then build_platforms="$2"; fi
           shift 2
           ;;
-        --build-arg|--label|-f|--file|--build-context|--no-cache-filter|--provenance|--sbom)
+        --output)
+          # A per-platform build pushes by digest under its repository only.
+          if [[ "$2" == type=image,name=*,push-by-digest=true,name-canonical=true,push=true ]]; then
+            by_digest="${2#type=image,name=}"
+            by_digest="${by_digest%%,*}"
+          fi
+          shift 2
+          ;;
+        --build-arg|--label|-f|--file|--build-context|--no-cache-filter|--provenance|--sbom|--progress)
           shift 2
           ;;
         --push|--pull|--load|--no-cache|--provenance=*|--sbom=generator=*)
@@ -780,12 +802,14 @@ case "${1:-} ${2:-} ${3:-}" in
           ;;
       esac
     done
-    [[ -n "$metadata" && "${#tags[@]}" -eq 1 ]]
+    [[ -n "$metadata" ]]
+    [[ ( "${#tags[@]}" -eq 1 && -z "$by_digest" ) || ( "${#tags[@]}" -eq 0 && -n "$by_digest" ) ]]
     jq -n --arg digest "${FAKE_DIGEST:?}" \
       '{"containerimage.digest": $digest}' >"$metadata"
     for tag in "${tags[@]}"; do
       set_manifest "$tag" "$FAKE_DIGEST" "$build_platforms"
     done
+    [ -z "$by_digest" ] || set_manifest "$by_digest@$FAKE_DIGEST" "$FAKE_DIGEST"
     ;;
   *)
     echo "unexpected fake docker command: $*" >&2
@@ -1668,5 +1692,127 @@ assert Counter(record['source_revision'] for record in records) == {sys.argv[2]:
 assert len({record['producer_receipt_sha256'] for record in records}) == 10
 print('protected/runtime/Kind CW original-producer contexts: 10 verified')
 PY
+
+# support-images.yaml builds each platform of the pair in its own job and
+# joins them. A per-platform build pushes one platform by digest, untagged,
+# and verifies it as the single-platform image it is; only the amd64
+# workspace binds the admitted CW producer.
+platform_digest_for() {
+  case "$1:$2" in
+    base:linux/amd64) printf 'sha256:%s\n' "$(printf '1%.0s' {1..64})" ;;
+    base:linux/arm64) printf 'sha256:%s\n' "$(printf '2%.0s' {1..64})" ;;
+    workspace:linux/amd64) printf 'sha256:%s\n' "$(printf '3%.0s' {1..64})" ;;
+    workspace:linux/arm64) printf 'sha256:%s\n' "$(printf '4%.0s' {1..64})" ;;
+  esac
+}
+rm -f -- "$source_fixture/forbidden-untracked-input"
+contexts_before="$(wc -l <"$FAKE_CW_CONTEXTS")"
+for family in base workspace; do
+  case "$family" in
+    base) family_args=(images/base/Dockerfile images/base) ;;
+    workspace) family_args=(images/workspace/Dockerfile .) ;;
+  esac
+  for platform in linux/amd64 linux/arm64; do
+    family_env=()
+    [[ "$family" != workspace ]] ||
+      family_env=("CODEWIRE_BASE_IMAGE_REF=registry.example.invalid/codewire/base@$(platform_digest_for base "$platform")")
+    platform_digest="$(platform_digest_for "$family" "$platform")"
+    : >"$FAKE_DOCKER_CALLS"
+    : >"$work/platform-output"
+    (
+      cd "$source_fixture"
+      env "${family_env[@]}" CODEWIRE_IMAGE_PLATFORM="$platform" FAKE_DIGEST="$platform_digest" \
+        GITHUB_OUTPUT="$work/platform-output" "$BUILDER" "$family" "${family_args[@]}"
+    ) >"$work/platform-$family.out" 2>&1 || { cat "$work/platform-$family.out" >&2; fail "$platform $family image did not build"; }
+    [[ "$(build_invocation_count)" -eq 1 ]] || fail "$platform $family image was not built exactly once"
+    build_call="$(grep -E ' buildx build ' "$FAKE_DOCKER_CALLS" | grep -v ' CW_PRODUCER=true ')"
+    [[ "$build_call" == *"--platform ${platform//\//\\/} "* || "$build_call" == *"--platform $platform "* ]] ||
+      fail "$platform $family image was not built for exactly its platform"
+    [[ "$build_call" == *"type=image\\,name=registry.example.invalid/codewire/$family\\,push-by-digest=true\\,name-canonical=true\\,push=true"* ]] ||
+      fail "$platform $family image was not pushed by digest"
+    if [[ "$build_call" == *' --tag '* || "$build_call" == *' --push '* ]]; then
+      fail "$platform $family image was tagged"
+    fi
+    if grep -qF 'buildx imagetools create' "$FAKE_DOCKER_CALLS"; then
+      fail "$platform $family image created a tag"
+    fi
+    grep -qF -- 'Provenance.SLSA' "$FAKE_DOCKER_CALLS" && grep -qF -- 'SBOM.SPDX' "$FAKE_DOCKER_CALLS" ||
+      fail "$platform $family image was not verified as a single-platform image"
+    [[ "$(cat "$work/platform-output")" == "platform_digest=$platform_digest" ]] ||
+      fail "$platform $family image did not report exactly its digest"
+    case "$family:$platform" in
+      workspace:linux/amd64) expected_producers=1 ;;
+      *) expected_producers=0 ;;
+    esac
+    [[ "$(cw_producer_invocation_count)" -eq "$expected_producers" ]] ||
+      fail "$platform $family image bound the CW producer $(cw_producer_invocation_count) times"
+  done
+done
+[[ "$(wc -l <"$FAKE_CW_CONTEXTS")" -eq $((contexts_before + 1)) ]] ||
+  fail 'per-platform builds did not bind exactly one CW producer context'
+
+# The join creates the source-SHA index from the two platform images, then
+# verifies, tags and reports it exactly as one multi-platform build.
+join_digest="sha256:$(printf '5%.0s' {1..64})"
+for family in base workspace; do
+  case "$family" in
+    base) family_args=(images/base/Dockerfile images/base) ;;
+    workspace) family_args=(images/workspace/Dockerfile .) ;;
+  esac
+  remove_source_manifest "registry.example.invalid/codewire/$family:$source_sha"
+  : >"$FAKE_DOCKER_CALLS"
+  : >"$work/join-output"
+  (
+    cd "$source_fixture"
+    env CODEWIRE_IMAGE_JOIN="$(platform_digest_for "$family" linux/amd64) $(platform_digest_for "$family" linux/arm64)" \
+      FAKE_JOIN_DIGEST="$join_digest" GITHUB_OUTPUT="$work/join-output" "$BUILDER" "$family" "${family_args[@]}"
+  ) >"$work/join-$family.out" 2>&1 || { cat "$work/join-$family.out" >&2; fail "$family support index was not joined"; }
+  [[ "$(build_invocation_count)" -eq 0 && "$(cw_producer_invocation_count)" -eq 0 ]] ||
+    fail "$family join rebuilt an image"
+  grep -qF "buildx imagetools create --tag registry.example.invalid/codewire/$family:$source_sha registry.example.invalid/codewire/$family@$(platform_digest_for "$family" linux/amd64) registry.example.invalid/codewire/$family@$(platform_digest_for "$family" linux/arm64)" \
+    "$FAKE_DOCKER_CALLS" || fail "$family join did not create the source-SHA index from both platform images"
+  grep -qF -- "$multi_provenance_call" "$FAKE_DOCKER_CALLS" && grep -qF -- "$multi_sbom_call" "$FAKE_DOCKER_CALLS" ||
+    fail "$family join did not verify per-platform provenance and SBOMs"
+  grep -qxF "candidate_ref=registry.example.invalid/codewire/$family@$join_digest" "$work/join-output" ||
+    fail "$family join did not report the joined index as its candidate"
+done
+for join_case in missing-arm64 invalid-arm64-sbom; do
+  remove_source_manifest "registry.example.invalid/codewire/base:$source_sha"
+  case "$join_case" in
+    missing-arm64) case_env=('FAKE_JOIN_PLATFORMS=linux/amd64') expected='Protected image provenance is invalid' ;;
+    invalid-arm64-sbom) case_env=('FAKE_SBOM_INVALID_PLATFORM=linux/arm64') expected='Protected image SBOM is invalid' ;;
+  esac
+  if (
+    cd "$source_fixture"
+    env "${case_env[@]}" CODEWIRE_IMAGE_JOIN="$(platform_digest_for base linux/amd64) $(platform_digest_for base linux/arm64)" \
+      FAKE_JOIN_DIGEST="$join_digest" GITHUB_OUTPUT="$work/join-output" "$BUILDER" base images/base/Dockerfile images/base
+  ) >"$work/join-$join_case.out" 2>&1; then
+    fail "support join accepted $join_case"
+  fi
+  grep -qF "$expected" "$work/join-$join_case.out" || fail "support join $join_case rejection was not attributable"
+done
+# refuse MESSAGE ENV... -- ARGS...: the helper refuses before any credential read.
+refuse() {
+  local message="$1" fetches_before
+  shift
+  local -a refusal_env=()
+  while [ "$1" != -- ]; do refusal_env+=("$1"); shift; done
+  shift
+  fetches_before="$(wc -l <"$FAKE_FETCH_CALLS")"
+  if (cd "$source_fixture" && env "${refusal_env[@]}" "$BUILDER" "$@") >"$work/refusal.out" 2>&1; then
+    fail "build helper accepted: ${refusal_env[*]}"
+  fi
+  grep -qF "$message" "$work/refusal.out" || { cat "$work/refusal.out" >&2; fail "refusal was not attributable: ${refusal_env[*]}"; }
+  [[ "$(wc -l <"$FAKE_FETCH_CALLS")" -eq "$fetches_before" ]] || fail "refusal reached credential retrieval: ${refusal_env[*]}"
+}
+amd64_base="$(platform_digest_for base linux/amd64)"
+refuse 'apply only to a multi-platform support image' CODEWIRE_IMAGE_PLATFORM=linux/amd64 -- \
+  daemon deployments/docker/daemon.Dockerfile .
+refuse 'unsupported platform' CODEWIRE_IMAGE_PLATFORM=linux/riscv64 -- base images/base/Dockerfile images/base
+refuse 'two distinct exact platform digests' "CODEWIRE_IMAGE_JOIN=$amd64_base" -- base images/base/Dockerfile images/base
+refuse 'two distinct exact platform digests' "CODEWIRE_IMAGE_JOIN=$amd64_base $amd64_base" -- \
+  base images/base/Dockerfile images/base
+refuse 'either built for one platform or joined' CODEWIRE_IMAGE_PLATFORM=linux/amd64 \
+  "CODEWIRE_IMAGE_JOIN=$amd64_base $join_digest" -- base images/base/Dockerfile images/base
 
 echo 'build-push immutable source image tests passed'
