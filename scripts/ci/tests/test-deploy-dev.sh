@@ -24,9 +24,13 @@ bash -n "$0"
 if grep -q '^  workflow_dispatch:' "$WORKFLOW"; then
   fail "dev image publication must be canonical-main push-only"
 fi
-if grep -q '^concurrency:$' "$WORKFLOW"; then
-  fail "dev image publication must not rely on unsupported Gitea concurrency"
-fi
+# A newer main push must never cancel a running delivery. Forgejo cancels the
+# older push run of a workflow with no `concurrency` block; with a group and
+# `cancel-in-progress: false` runs queue in push order and each one finishes.
+concurrency_block="$(sed -n '/^concurrency:$/,/^$/p' "$WORKFLOW")"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+[[ "$concurrency_block" == $'concurrency:\n  group: deploy-dev-${{ github.ref }}\n  cancel-in-progress: false' ]] ||
+  fail "a newer main push can cancel a running Dev delivery"
 if grep -qE '^permissions:|^enable-openid-connect:' "$WORKFLOW"; then
   fail "Dev delivery retains ignored permissions or workflow-wide OIDC"
 fi
@@ -100,9 +104,58 @@ for output in deploy_dev reason matched_categories \
     fail "deploy selection does not expose $output"
 done
 
-[[ "$(grep -Fc "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}" \
+[[ "$(grep -Fc "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}" \
   "$WORKFLOW")" -eq 1 ]] ||
-  fail "all-unaffected selection does not skip the combined runtime build/publication"
+  fail "all-unaffected or superseded selection does not skip the combined runtime build/publication"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -Fq '      superseded: ${{ steps.canonical.outputs.superseded }}' <<<"$selection_job" ||
+  fail "deploy selection does not expose whether its commit was superseded"
+
+# Queued runs are all kept, so one that starts after main moved on must build
+# nothing: delivery dispatches only the canonical main commit. Execute the
+# checked-in step against a stub remote for the current, superseded and
+# unreadable cases; the last must fail closed.
+superseded_step="$(mktemp)"
+superseded_bin="$(mktemp -d)"
+trap 'rm -rf -- "$superseded_step" "$superseded_bin"' EXIT
+awk '
+  /- name: Skip a superseded commit/ { scope = 1 }
+  scope && /^        run: \|$/ { run = 1; next }
+  run && /^          / { print substr($0, 11); next }
+  run { exit }
+' "$WORKFLOW" >"$superseded_step"
+[[ -s "$superseded_step" ]] || fail "superseded-commit step was not extracted"
+superseded_step_line="$(grep -n -m1 'name: Skip a superseded commit' <<<"$selection_job" | cut -d: -f1)"
+resolve_step_line="$(grep -n -m1 'name: Resolve untrusted deployed Dev source' <<<"$selection_job" | cut -d: -f1)"
+[[ "$superseded_step_line" -lt "$resolve_step_line" ]] ||
+  fail "deploy selection plans before it knows whether its commit was superseded"
+cat >"$superseded_bin/git" <<'GIT'
+#!/usr/bin/env bash
+[[ "$*" == 'ls-remote origin refs/heads/main' ]] || exit 64
+[[ -n "${FAKE_MAIN_SHA:-}" ]] || exit 1
+printf '%s\trefs/heads/main\n' "$FAKE_MAIN_SHA"
+GIT
+chmod +x "$superseded_bin/git"
+superseded_case() {
+  local main="$1" output
+  output="$(mktemp)"
+  if env PATH="$superseded_bin:$PATH" FAKE_MAIN_SHA="$main" \
+      GITHUB_SHA=1111111111111111111111111111111111111111 GITHUB_OUTPUT="$output" \
+      bash "$superseded_step" >/dev/null 2>&1; then
+    cat "$output"
+  else
+    printf 'failed\n'
+  fi
+  rm -f -- "$output"
+}
+[[ "$(superseded_case 1111111111111111111111111111111111111111)" == superseded=false ]] ||
+  fail "the canonical main commit was treated as superseded"
+[[ "$(superseded_case 2222222222222222222222222222222222222222)" == superseded=true ]] ||
+  fail "a commit behind canonical main was not skipped"
+[[ "$(superseded_case '')" == failed ]] ||
+  fail "an unreadable canonical main did not fail closed"
+[[ "$(superseded_case not-a-commit)" == failed ]] ||
+  fail "a malformed canonical main did not fail closed"
 
 build_job="$(sed -n '/^  build-publish-runtime-images:/,$p' "$WORKFLOW")"
 grep -Fq '    runs-on: ci-protected' <<<"$build_job" ||

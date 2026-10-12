@@ -39,6 +39,14 @@ on:
       - '.gitea/workflows/cw-release-dry-run.yaml'
   workflow_dispatch:
 
+# A newer main push must never cancel a running dry run. Without this block
+# Forgejo cancels the older push run of the same workflow and ref. With a group
+# and `cancel-in-progress: false` it queues: one run at a time, in push order,
+# and each one finishes.
+concurrency:
+  group: cw-release-dry-run-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 

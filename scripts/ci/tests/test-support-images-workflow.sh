@@ -24,9 +24,13 @@ fi
 if grep -q '^  workflow_dispatch:' "$WORKFLOW"; then
   fail 'support-image publication must be canonical-main push-only'
 fi
-if grep -q '^concurrency:$' "$WORKFLOW"; then
-  fail 'support-image publication must not rely on unsupported Gitea concurrency'
-fi
+# A newer main push must never cancel a running publication. Forgejo cancels the
+# older push run of a workflow with no `concurrency` block; with a group and
+# `cancel-in-progress: false` runs queue in push order and each one finishes.
+concurrency_block="$(sed -n '/^concurrency:$/,/^$/p' "$WORKFLOW")"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+[[ "$concurrency_block" == $'concurrency:\n  group: support-images-${{ github.ref }}\n  cancel-in-progress: false' ]] ||
+  fail 'a newer main push can cancel a running support-image publication'
 if grep -Fq 'CODEWIRE_GHCR_PUBLISH_ENABLED' "$WORKFLOW"; then
   fail 'support GHCR publication retains its rollout flag'
 fi
