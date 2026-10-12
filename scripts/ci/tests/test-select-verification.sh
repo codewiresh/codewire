@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SELECTOR="$ROOT/scripts/ci/select/select-verification.sh"
 WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
+# A main push's Heavy jobs take the runners reserved for main; every other run
+# uses the shared Heavy pool (infra forgejo-runners dispatcher).
+# shellcheck disable=SC2016 # The workflow expression is literal text.
+HEAVY_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-heavy-main'"'"' || '"'"'ci-heavy'"'"' }}'
 DIAGNOSTICS_WORKFLOW="$ROOT/.gitea/workflows/manual-diagnostics.yaml"
 CLI_RELEASE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
 TMP_ROOT="$ROOT/.tmp"
@@ -1345,6 +1349,14 @@ run_present_paths_case mesh_ingress_protocol_guard pull_request refs/pull/1902/h
   'deploy policy policy_shell security security_js' scripts/ci/tests/test-deploy-mesh-ingress-protocol.sh
 run_present_paths_case mesh_ingress_protocol_unknown pull_request refs/pull/1902/head false \
   "$all_product_pr" scripts/ci/tests/test-mesh-ingress-protocol-future.sh
+# Developer-only Apple silicon journeys start real VMs on a Mac and never run
+# in CI; their source selects only policy, and an unknown sibling stays full.
+run_present_paths_case macos_local_vm_journeys pull_request refs/pull/20660/head false \
+  'policy security security_js' \
+  scripts/dev/test-cli-local-vm-macos.py scripts/dev/test-cli-local-vm-docker-macos.py \
+  scripts/dev/test-local-vm-hostile-guest-macos.py scripts/dev/hostile-guest-probe.py
+run_present_paths_case macos_local_vm_journey_unknown pull_request refs/pull/20661/head false \
+  "$all_product_pr" scripts/dev/test-local-vm-future-macos.py
 run_present_paths_case macos_console_pair pull_request refs/pull/20641/head false \
   'policy security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-vz-console-pair.py scripts/dev/test-macos-vz-console-pair.py
@@ -1966,7 +1978,8 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
   ' "$WORKFLOW" > "$block"
   grep -qF "  ${job_id}:" "$block"
   grep -qF "    name: ${job_name}" "$block"
-  grep -qF "    runs-on: ${runner}" "$block"
+  if [ "$runner" = heavy ]; then runner="$HEAVY_RUNS_ON"; fi
+  grep -qxF "    runs-on: ${runner}" "$block"
   if [ "$job_id" = edge-kind ]; then
     # Its optional producer dependencies need an always() condition so edge-
     # only selection still runs. The executable workflow fixture also proves
@@ -1991,19 +2004,19 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     exit 1
   fi
 done <<'EOF'
-cw-release-assets|CW release-assets verification|ci-heavy|cw_release_assets
-workspace-image|Container contract verification|ci-heavy|workspace_image
-policy|Policy verification|ci-heavy|policy
-standard|Standard verification|ci-heavy|standard
-tooling|Tooling / delivery contract verification|ci-heavy|tooling
-rust-compile|Compile every Rust target|ci-heavy|rust_transport
-rust-packages|Rust / transport packages|ci-heavy|rust_transport
-rust-features|Rust / transport feature graphs|ci-heavy|rust_transport
-rust-transport|Rust / transport verification|ci-heavy|rust_transport
-database|Database verification|ci-heavy|database
-services-control|Service control-plane verification|ci-heavy|services_control
-services-runtime|Service runtime-plane verification|ci-heavy|services_runtime
-edge-kind|Edge / Kind verification|ci-heavy|edge_kind
+cw-release-assets|CW release-assets verification|heavy|cw_release_assets
+workspace-image|Container contract verification|heavy|workspace_image
+policy|Policy verification|heavy|policy
+standard|Standard verification|heavy|standard
+tooling|Tooling / delivery contract verification|heavy|tooling
+rust-compile|Compile every Rust target|heavy|rust_transport
+rust-packages|Rust / transport packages|heavy|rust_transport
+rust-features|Rust / transport feature graphs|heavy|rust_transport
+rust-transport|Rust / transport verification|heavy|rust_transport
+database|Database verification|heavy|database
+services-control|Service control-plane verification|heavy|services_control
+services-runtime|Service runtime-plane verification|heavy|services_runtime
+edge-kind|Edge / Kind verification|heavy|edge_kind
 EOF
 
 policy_block="$TMP/policy.yaml"
@@ -2383,10 +2396,14 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 18 ]] || {
-  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
+[[ "$(grep -Fxc "    runs-on: ${HEAVY_RUNS_ON}" "$WORKFLOW")" -eq 18 ]] || {
+  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe, each selecting the main-first Heavy label' >&2
   exit 1
 }
+if grep -Eq '^ *runs-on: ci-heavy(-main)?$' "$WORKFLOW"; then
+  echo 'a Codewire CI Heavy job fixes one label: main would wait behind pull requests, or pull requests would take main-only runners' >&2
+  exit 1
+fi
 [[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 2 ]] || {
   echo 'Codewire CI has not assigned selection and aggregation to ci-lite' >&2
   exit 1
@@ -2490,7 +2507,7 @@ awk '
 ' "$WORKFLOW" > "$cw_block"
 grep -qF '  cw-release-assets:' "$cw_block"
 grep -qF '    name: CW release-assets verification' "$cw_block"
-grep -qF '    runs-on: ci-heavy' "$cw_block"
+grep -qxF "    runs-on: ${HEAVY_RUNS_ON}" "$cw_block"
 grep -qF 'name: CW release assets not selected' "$cw_block"
 grep -qF "needs.verification-selection.outputs.cw_package_selected != 'true'" \
   "$cw_block"
@@ -2533,7 +2550,7 @@ awk '
 ' "$WORKFLOW" > "$workspace_block"
 grep -qF '  workspace-image:' "$workspace_block"
 grep -qF '    name: Container contract verification' "$workspace_block"
-grep -qF '    runs-on: ci-heavy' "$workspace_block"
+grep -qxF "    runs-on: ${HEAVY_RUNS_ON}" "$workspace_block"
 grep -qF '    needs: [verification-selection]' "$workspace_block"
 grep -qF 'name: Container contracts not selected' "$workspace_block"
 grep -qF 'no checkout, download, installation, or build required' "$workspace_block"
