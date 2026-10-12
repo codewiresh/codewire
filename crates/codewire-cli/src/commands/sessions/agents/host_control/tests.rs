@@ -141,6 +141,7 @@ impl Fixture {
             pending: HashMap::new(),
             control_pending: HashMap::new(),
             settled: HashSet::new(),
+            stopping: false,
         }
     }
 }
@@ -810,4 +811,299 @@ fn platform_home_alone_admits_a_shared_volume_root() {
     ));
     fs::set_permissions(&below, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+const RUN: &str = "6c1a4f0e-3b2d-4e5f-8a9b-0c1d2e3f4a5b";
+
+impl Fixture {
+    /// A conversation the host user launched: no member marker.
+    fn local(&self, agent: AgentKind, parent: Option<ParentLink>) -> (String, String) {
+        let driver = uuid::Uuid::new_v4().to_string();
+        let session = format!("session-{}", uuid::Uuid::new_v4());
+        let dir = agents_root(&self.environment).join(&driver);
+        for path in [&agents_root(&self.environment), &dir, &dir.join("messages")] {
+            private_directory(path).unwrap();
+        }
+        write_private_json(
+            &dir.join("config.json"),
+            &AgentConfig {
+                version: 1,
+                driver_id: driver.clone(),
+                environment_id: self.environment.id().into(),
+                agent,
+                program: PathBuf::from(format!("/synthetic/bin/{}", agent.name())),
+                program_fallback: None,
+                model: "synthetic/model".into(),
+                effort: None,
+                working_dir: "/workspace".into(),
+                name: String::new(),
+                parent,
+                initial_message_id: None,
+                created_at: now(),
+            },
+        )
+        .unwrap();
+        write_private_json(
+            &dir.join("binding.json"),
+            &AgentBinding {
+                driver_id: driver.clone(),
+                session_id: session.clone(),
+                bound_at: now(),
+            },
+        )
+        .unwrap();
+        (driver, session)
+    }
+
+    /// The conversation's driver is running `task` as `run`, if it has one.
+    fn busy(&self, driver: &str, session: &str, run: Option<&str>) -> MessageRecord {
+        let dir = self.dir(driver);
+        let config: AgentConfig = private_record(&dir.join("config.json")).unwrap();
+        let mut task = MessageRecord::new(driver, session, MessageAction::Message, "task".into());
+        task.transition(MessageState::Accepted);
+        task.transition(MessageState::Running);
+        task.turn_id = run.map(str::to_owned);
+        assert!(create_message(&dir, &task).unwrap());
+        self.set_state(driver, config.agent, Some(&task.id), run);
+        task
+    }
+
+    fn set_state(&self, driver: &str, agent: AgentKind, active: Option<&str>, run: Option<&str>) {
+        let at = now();
+        write_private_json(
+            &self.dir(driver).join("state.json"),
+            &DriverState {
+                version: 1,
+                driver_id: driver.into(),
+                agent,
+                phase: if active.is_some() {
+                    DriverPhase::Busy
+                } else {
+                    DriverPhase::Idle
+                },
+                native_thread_id: Some("native-thread".into()),
+                native_thread_established: true,
+                current_turn_id: run.map(str::to_owned),
+                active_message_id: active.map(str::to_owned),
+                queued: 0,
+                capabilities: AgentCapabilities {
+                    steer: true,
+                    interrupt: true,
+                    note: "synthetic".into(),
+                },
+                policy: NOEL_POLICY.into(),
+                last_error: None,
+                started_at: at.clone(),
+                updated_at: at,
+            },
+        )
+        .unwrap();
+    }
+
+    fn interrupt_before_stop(&self, driver: &str, session: &str) -> anyhow::Result<Value> {
+        // The exact request the host daemon writes.
+        let request = json!({"op": "interrupt_before_stop", "driver_id": driver,
+            "session_id": session});
+        self.run(read_request(
+            serde_json::to_vec(&request).unwrap().as_slice(),
+        )?)
+    }
+
+    fn await_interrupt(&self, driver: &str, session: &str, message: &str) -> anyhow::Result<Value> {
+        let request = json!({"op": "await_interrupt_before_stop", "driver_id": driver,
+            "session_id": session, "message_id": message});
+        self.run(read_request(
+            serde_json::to_vec(&request).unwrap().as_slice(),
+        )?)
+    }
+}
+
+#[test]
+fn stop_interrupt_is_recorded_only_for_a_noel_run_and_codex_and_claude_get_nothing() {
+    let f = Fixture::new();
+    for agent in [AgentKind::Codex, AgentKind::Claude] {
+        let (driver, session) = f.local(agent, None);
+        f.busy(&driver, &session, Some("turn-A"));
+        let before = message_ids(&f.dir(&driver)).unwrap();
+        let started = Instant::now();
+        assert_eq!(
+            f.interrupt_before_stop(&driver, &session).unwrap(),
+            json!({"agent": agent.name(), "interrupt": null})
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(message_ids(&f.dir(&driver)).unwrap(), before);
+    }
+
+    let (driver, session) = f.local(AgentKind::Noel, None);
+    // Before its driver reports, and while idle, there is no run to interrupt.
+    assert_eq!(
+        f.interrupt_before_stop(&driver, &session).unwrap()["interrupt"],
+        Value::Null
+    );
+    f.set_state(&driver, AgentKind::Noel, None, None);
+    assert_eq!(
+        f.interrupt_before_stop(&driver, &session).unwrap()["interrupt"],
+        Value::Null
+    );
+    assert!(message_ids(&f.dir(&driver)).unwrap().is_empty());
+
+    let task = f.busy(&driver, &session, Some(RUN));
+    let reply = f.interrupt_before_stop(&driver, &session).unwrap();
+    let id = stop_interrupt_id(&task.id);
+    assert_eq!(
+        reply,
+        json!({"agent": "noel", "interrupt": {"message_id": id, "active_message_id": task.id,
+            "run_id": RUN, "deliver": true}})
+    );
+    let interrupt = load_message(&f.dir(&driver), &id).unwrap();
+    assert_eq!(interrupt.action, MessageAction::Interrupt);
+    assert_eq!(interrupt.state, MessageState::Requested);
+    assert_eq!(interrupt.target_session_id, session);
+    assert_eq!(interrupt.text, "");
+    assert_eq!(
+        interrupt.expected_active_message_id.as_deref(),
+        Some(task.id.as_str())
+    );
+    assert_eq!(interrupt.expected_turn_id.as_deref(), Some(RUN));
+
+    // A repeated stop reuses the record; it is delivered again only while no
+    // driver has seen it.
+    assert_eq!(f.interrupt_before_stop(&driver, &session).unwrap(), reply);
+    update_message(&f.dir(&driver), &id, |r| {
+        r.transition(MessageState::Accepted);
+    })
+    .unwrap();
+    assert_eq!(
+        f.interrupt_before_stop(&driver, &session).unwrap()["interrupt"]["deliver"],
+        false
+    );
+    assert_eq!(message_ids(&f.dir(&driver)).unwrap().len(), 2);
+
+    // The conversation must be bound to the session being stopped.
+    let other = format!("session-{}", uuid::Uuid::new_v4());
+    assert!(f.interrupt_before_stop(&driver, &other).is_err());
+    assert!(f.await_interrupt(&driver, &other, &id).is_err());
+}
+
+#[test]
+fn stop_interrupt_waits_briefly_for_a_starting_run_to_report_its_id() {
+    let f = Fixture::new();
+    let (driver, session) = f.local(AgentKind::Noel, None);
+    let task = f.busy(&driver, &session, None);
+    let started = Instant::now();
+    assert_eq!(
+        f.interrupt_before_stop(&driver, &session).unwrap()["interrupt"],
+        Value::Null
+    );
+    let waited = started.elapsed();
+    assert!(waited >= STOP_INTERRUPT_RUN_WAIT && waited < Duration::from_secs(5));
+    assert_eq!(message_ids(&f.dir(&driver)).unwrap(), vec![task.id.clone()]);
+
+    let reporting = {
+        let (dir, task) = (f.dir(&driver), task.id.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let mut state: DriverState = private_record(&dir.join("state.json")).unwrap();
+            assert_eq!(state.active_message_id.as_deref(), Some(task.as_str()));
+            state.current_turn_id = Some(RUN.into());
+            write_private_json(&dir.join("state.json"), &state).unwrap();
+        })
+    };
+    let reply = f.interrupt_before_stop(&driver, &session).unwrap();
+    reporting.join().unwrap();
+    assert_eq!(reply["interrupt"]["run_id"], RUN);
+    assert_eq!(
+        reply["interrupt"]["message_id"],
+        stop_interrupt_id(&task.id)
+    );
+}
+
+#[test]
+fn stop_interrupt_wait_ends_when_the_message_ends_and_its_parent_notification_is_written() {
+    let f = Fixture::new();
+    let (lead, lead_session) = f.local(AgentKind::Noel, None);
+    let (driver, session) = f.local(
+        AgentKind::Noel,
+        Some(ParentLink {
+            session_id: lead_session.clone(),
+            driver_id: lead.clone(),
+        }),
+    );
+    let task = f.busy(&driver, &session, Some(RUN));
+    let reply = f.interrupt_before_stop(&driver, &session).unwrap();
+    let id = reply["interrupt"]["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let dir = f.dir(&driver);
+    // The driver ends the run, then sets the parent notification pending and
+    // records how its delivery went.
+    let driver_thread = {
+        let (dir, task, id) = (dir.clone(), task.id.clone(), id.clone());
+        std::thread::spawn(move || {
+            let pause = || std::thread::sleep(Duration::from_millis(150));
+            pause();
+            update_message(&dir, &task, |r| {
+                r.transition(MessageState::Interrupted);
+            })
+            .unwrap();
+            update_message(&dir, &id, |r| {
+                r.transition(MessageState::Accepted);
+                r.transition(MessageState::Running);
+                r.transition(MessageState::Completed);
+            })
+            .unwrap();
+            pause();
+            let mut notification = ParentNotification {
+                message_id: notification_id(&task),
+                parent_session_id: lead_session,
+                parent_driver_id: lead,
+                state: NotificationState::Pending,
+                detail: None,
+                updated_at: now(),
+            };
+            let pending = notification.clone();
+            update_message(&dir, &task, |r| r.notification = Some(pending)).unwrap();
+            pause();
+            notification.state = NotificationState::PipeWritten;
+            update_message(&dir, &task, |r| r.notification = Some(notification)).unwrap();
+        })
+    };
+    let started = Instant::now();
+    let settled = f.await_interrupt(&driver, &session, &id).unwrap();
+    driver_thread.join().unwrap();
+    assert_eq!(
+        settled,
+        json!({"settled": true, "message_state": "interrupted", "interrupt_state": "completed",
+            "notification_state": "pipe_written"})
+    );
+    let waited = started.elapsed();
+    assert!(waited >= Duration::from_millis(450) && waited < Duration::from_secs(5));
+
+    // An interrupt the driver or noel refused leaves the run going, so the
+    // wait ends at once rather than at its bound.
+    let next = f.busy(&driver, &session, Some("another-run"));
+    let reply = f.interrupt_before_stop(&driver, &session).unwrap();
+    let refused = reply["interrupt"]["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(refused, stop_interrupt_id(&next.id));
+    update_message(&dir, &refused, |r| {
+        r.fail(MessageState::Error, "noel refused the interrupt");
+    })
+    .unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        f.await_interrupt(&driver, &session, &refused).unwrap(),
+        json!({"settled": false, "message_state": "running", "interrupt_state": "error",
+            "notification_state": null})
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    // Only a stop interrupt is awaited.
+    let mut other = MessageRecord::new(&driver, &session, MessageAction::Interrupt, String::new());
+    other.expected_active_message_id = Some(next.id.clone());
+    assert!(create_message(&dir, &other).unwrap());
+    assert!(f.await_interrupt(&driver, &session, &other.id).is_err());
 }

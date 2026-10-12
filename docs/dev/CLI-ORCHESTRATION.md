@@ -188,12 +188,34 @@ the saved session, the requested model and level, and its `run-id` and
 `expected-run-id` RPC extensions; a pi build that answers JSON-RPC fails at
 once. Each prompt starts one run, whose `agent_settled` ends the message; the
 driver clears noel's queue first, so a steer an interrupt left there never
-joins the next message. An explicit `cw stop` or `cw restart` during a run
-currently ends it as it ends Codex and Claude: the host stop signals the
-driver and noel together, the message's outcome is unknown, and noel's run
-stays interrupted; the next message after a restart answers normally and
-never resumes it. Interrupting the run before the stop will come from the
-host daemon's stop path in a later change.
+joins the next message.
+
+**Stopping or restarting a conversation cancels its active noel run.** This
+covers `cw stop`, `cw stop --all`, the confirmed parent cascade, `cw restart`,
+and StopSession or RestartSession from any client. The run is interrupted
+first, bounded at 10 s, and the message ends interrupted.
+
+**Taking the whole environment down pauses it.** This covers `cw env stop`,
+`restart` and `rm`, daemon shutdown and host reboot. The run stays interrupted
+in noel's journal and resumable (resume lands in PR 3), and the message
+outcome stays unknown, as today.
+
+**Why:** an environment-level takedown is indistinguishable from a reboot in
+the daemon, and the owner-approved plan makes host shutdown resumable.
+`env restart` exists to come back. For `rm` the point is moot. So the semantic
+depends on the scope of the stop, not on the client or route, which keeps
+everything consistent.
+
+Before signalling a running managed conversation for a stop or restart, the
+host daemon asks the conversation's record helper whether its agent takes an
+interrupt first. For noel with an active run, the helper records the fenced
+interrupt `cw interrupt` sends, the daemon delivers it, and the helper waits
+for the message to end and the parent's notification to be written. noel
+aborts the run and records it aborted, and the driver starts nothing queued
+before the signal; queued messages stay accepted for the next start. A
+refusal or timeout is logged in the daemon log and the stop goes on, leaving
+the outcome unknown. Codex and Claude stops are unchanged: each costs one
+helper run, which answers at once. The host CLI allows a stop or restart 20 s.
 
 No additional MCP server is needed to receive these messages. A native protocol
 driver owns delivery and completion. A foreground controller can forward
@@ -397,10 +419,16 @@ JSON-RPC mode for an older pi build. The real-noel journey runs a built noel
 with `faux/echo`, offline, with a private HOME and pi agent directory. It
 observes the first answer in `cw inbox`, a second turn in the same session,
 a worker waking its lead once per finished message, a slow turn's refused
-and acknowledged steers and interrupt, a mid-turn stop that leaves the
-outcome unknown, and a restart whose next message answers normally in the
-same session. Both passed on 2026-10-12 with noel built from pi commit
-`ba6fba82`.
+and acknowledged steers and interrupt, and a restart whose next message
+answers normally in the same session. Both prove the stop rules above: a
+direct stop, a restart, `stop --all` and the confirmed cascade interrupt every
+noel run first (the synthetic noel receives `abort {expectedRunId}` before its
+signal; the real noel's journal records the run aborted), while `cw env stop`
+leaves it interrupted in noel's journal, as `get_state.lastRun` reports, and
+its message unknown.
+The synthetic journey also proves Codex and Claude keep their unknown outcome
+on each of those routes. The real-noel journey needs noel built from pi
+commit `ef09c03f` or later.
 None replaces the matching native Linux hardware or retained Kind sandbox
 journey. Program #2255 holds current commands, outcomes and landing evidence.
 

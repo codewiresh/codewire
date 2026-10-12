@@ -16,9 +16,9 @@ def emit(value):
 
 
 def noel():
-    """`noel --mode rpc`: upstream pi's RPC protocol with the run-id and
-    expected-run-id extensions, record for record as the noel binary sends them
-    for faux/echo. noel opens no dialogs; DIALOG stands in for an upstream
+    """`noel --mode rpc`: upstream pi's RPC protocol with the run-id,
+    expected-run-id, request-id and resume-run extensions, record for record as
+    the noel binary sends them for faux/echo. noel opens no dialogs; DIALOG stands in for an upstream
     extension's, and the reply to its answer is the one noel gives that line.
 
     Prompts: HOLD streams until a steer or abort ends it (a steer saying WAIT
@@ -29,6 +29,12 @@ def noel():
     keeps the run's prompt without a reply, and after a restart the next
     prompt answers normally. Every command received, EOF and SIGTERM are
     traced to peer-noel-SESSION.jsonl.
+
+    Runs are durable as in noel's journal: each is saved with its requestId
+    when it starts and with its end (completed or aborted) before
+    agent_settled. A run saved without an end loads as interrupted;
+    `get_state.lastRun` reports it, the next prompt first records it as
+    aborted, and so does an abort while idle.
     """
     import signal
     import time
@@ -57,7 +63,10 @@ def noel():
 
     run = None
     steering, follow_up = [], []
-    messages = json.loads(saved.read_text())["messageCount"] if saved.exists() else 0
+    journal = json.loads(saved.read_text()) if saved.exists() else {}
+    messages = journal.get("messageCount", 0)
+    runs = [dict(r, status="interrupted" if r["status"] == "running" else r["status"])
+            for r in journal.get("runs", [])]
 
     def on_term(*_):
         trace({"event": "sigterm", "active": run is not None})
@@ -83,10 +92,15 @@ def noel():
             reply["data"] = data
         emit(reply)
 
-    def save(count):
+    def save(count=0):
         nonlocal messages
         messages += count
-        saved.write_text(json.dumps({"messageCount": messages}))
+        saved.write_text(json.dumps({"messageCount": messages, "runs": runs}))
+
+    def end_interrupted():
+        if runs and runs[-1]["status"] == "interrupted":
+            runs[-1]["status"] = "aborted"
+            save()
 
     def user(text):
         message = {"role": "user", "content": [{"type": "text", "text": text}], "timestamp": now()}
@@ -128,6 +142,8 @@ def noel():
 
     def settle(aborted=False):
         nonlocal run
+        runs[-1]["status"] = "aborted" if aborted else "completed"
+        save()
         emit({"type": "agent_end", "messages": run["messages"], "willRetry": False})
         emit({"type": "agent_settled", "aborted": aborted, "runId": run["id"]})
         aborts, run = run["aborts"], None
@@ -169,9 +185,16 @@ def noel():
                     sessionFile=str(Path.cwd() / f"{session}.jsonl"), sessionId=session,
                     autoCompactionEnabled=True, messageCount=messages,
                     pendingMessageCount=len(steering) + len(follow_up),
-                    rpcExtensions=["run-id", "expected-run-id"])
+                    rpcExtensions=["run-id", "expected-run-id", "request-id", "resume-run"])
         if run:
             data["runId"] = run["id"]
+        if runs:
+            last = runs[-1]
+            data["lastRun"] = {"runId": last["runId"], "status": last["status"]}
+            if last["requestId"] is not None:
+                data["lastRun"]["requestId"] = last["requestId"]
+            if last["status"] == "interrupted":
+                data["lastRun"]["phase"] = "model"
         return data
 
     while True:
@@ -212,7 +235,10 @@ def noel():
                 respond(request, error=f"active model is not in models config: {model}")
                 continue
             text = request["message"]
+            end_interrupted()
             run = {"id": str(uuid.uuid4()), "messages": [], "aborts": [], "late": text == "LATE"}
+            runs.append({"runId": run["id"], "requestId": request.get("requestId"), "status": "running"})
+            save()
             respond(request, {"disposition": "started", "runId": run["id"]})
             emit({"type": "agent_start", "runId": run["id"]})
             emit({"type": "turn_start"})
@@ -239,6 +265,14 @@ def noel():
             # streaming, so an abort that follows leaves the steer queued.
             if run and kind == "steer" and request["message"] != "WAIT":
                 finish()
+        elif kind == "abort" and not run and runs and runs[-1]["status"] == "interrupted":
+            expected = request.get("expectedRunId")
+            if expected not in (None, runs[-1]["runId"]):
+                respond(request, error=f"expectedRunId {expected} does not match the "
+                        f"interrupted run {runs[-1]['runId']}")
+            else:
+                end_interrupted()
+                respond(request)
         elif kind == "abort":
             refused = fence(request.get("expectedRunId"))
             if refused:

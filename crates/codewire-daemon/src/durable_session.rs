@@ -73,6 +73,23 @@ struct SessionEngineInner {
     /// The reason the store last refused to open, logged once and reported
     /// in health diagnostics until the store opens.
     store_refusal: Mutex<Option<String>>,
+    /// How many stops and restarts asked the record helper about an active
+    /// run to interrupt first.
+    #[cfg(all(test, target_os = "linux"))]
+    stop_interrupt_checks: std::sync::atomic::AtomicUsize,
+}
+
+/// The fenced interrupt recorded for an explicit stop or restart, before it
+/// is delivered to the incarnation that was inspected.
+#[cfg(target_os = "linux")]
+struct StopInterrupt {
+    environment: String,
+    driver_id: String,
+    message_id: String,
+    deliver: bool,
+    token: Uuid,
+    control: mpsc::Sender<SessionControl>,
+    deadline: tokio::time::Instant,
 }
 
 struct SessionHandle {
@@ -364,6 +381,8 @@ impl SessionEngine {
                 launches: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
                 store_refusal: Mutex::new(None),
+                #[cfg(all(test, target_os = "linux"))]
+                stop_interrupt_checks: std::sync::atomic::AtomicUsize::new(0),
             }),
         }
     }
@@ -398,7 +417,7 @@ impl SessionEngine {
             let mut stops = tokio::task::JoinSet::new();
             for id in ids {
                 let engine = self.clone();
-                stops.spawn(async move { engine.stop(&id).await });
+                stops.spawn(async move { engine.stop_for_shutdown(&id).await });
             }
             while let Some(result) = tokio::time::timeout_at(deadline, stops.join_next())
                 .await
@@ -611,7 +630,46 @@ impl SessionEngine {
         Ok(self.handle(session_id)?.metadata.lock().await.to_record())
     }
 
+    /// An explicit stop: a client asked for it. A managed conversation whose
+    /// agent takes it has its active run interrupted first; see
+    /// [`Self::interrupt_active_run_before_stop`].
     pub async fn stop(&self, session_id: &str) -> Result<v1::SessionRecord, SessionError> {
+        let handle = self.admit_stop(session_id).await?;
+        #[cfg(target_os = "linux")]
+        if let Some(interrupt) = self
+            .interrupt_active_run_before_stop(session_id, &handle)
+            .await
+        {
+            // Once its interrupt is recorded, the stop finishes even if this
+            // caller goes away, so a conversation is never left interrupted
+            // but running.
+            let engine = self.clone();
+            let session_id = session_id.to_owned();
+            return tokio::spawn(async move {
+                let _operation = handle.operation.lock().await;
+                engine
+                    .finish_interrupt_before_stop(&session_id, interrupt)
+                    .await;
+                engine.stop_active(&session_id, &handle).await
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Internal("session stop outcome could not be confirmed".into())
+            })?;
+        }
+        let _operation = handle.operation.lock().await;
+        self.stop_active(session_id, &handle).await
+    }
+
+    /// Daemon shutdown stops each session without interrupting an agent's
+    /// run: like a crash, kill or host reboot, it leaves the run resumable.
+    async fn stop_for_shutdown(&self, session_id: &str) -> Result<v1::SessionRecord, SessionError> {
+        let handle = self.admit_stop(session_id).await?;
+        let _operation = handle.operation.lock().await;
+        self.stop_active(session_id, &handle).await
+    }
+
+    async fn admit_stop(&self, session_id: &str) -> Result<Arc<SessionHandle>, SessionError> {
         self.ensure_initialized().await?;
         validate_session_id(session_id)?;
         let handle = self.handle(session_id)?;
@@ -620,8 +678,177 @@ impl SessionEngine {
         // Interrupt a pending projection before waiting for the serial session
         // operation lock. A queued Stop must not wait for secret delivery.
         handle.launch_cancellation.send_replace(true);
-        let _operation = handle.operation.lock().await;
-        self.stop_active(session_id, &handle).await
+        Ok(handle)
+    }
+
+    /// Before an explicit stop or restart signals a running managed
+    /// conversation on a trusted host, asks its record helper to interrupt
+    /// the active run, so the message ends interrupted and its parent is
+    /// notified first. The helper decides from the conversation's own
+    /// config: it records the fenced interrupt only for an agent that takes
+    /// one (noel) and answers at once for any other. The interrupt is then
+    /// delivered and awaited by [`Self::finish_interrupt_before_stop`].
+    ///
+    /// The daemon cannot tell an agent's kind from a session, so every stop
+    /// of a running managed driver costs one helper run. Daemon shutdown
+    /// never comes here. A refusal or timeout is logged and the stop goes on,
+    /// leaving the message's outcome unknown as before.
+    #[cfg(target_os = "linux")]
+    async fn interrupt_active_run_before_stop(
+        &self,
+        session_id: &str,
+        handle: &SessionHandle,
+    ) -> Option<StopInterrupt> {
+        use crate::host_control::managed;
+        let environment = self
+            .inner
+            .config
+            .host
+            .as_ref()?
+            .state_root
+            .file_name()?
+            .to_str()?
+            .to_owned();
+        let (driver_id, token, control) = {
+            let metadata = handle.metadata.lock().await;
+            let driver_id = metadata.command.get(5)?.clone();
+            if metadata.state != v1::SessionLifecycleState::Running as i32
+                || metadata.pty
+                || metadata.platform_managed_origin.is_some()
+                || crate::host_control::canonical_uuid(&environment).is_err()
+                || crate::host_control::canonical_uuid(&driver_id).is_err()
+                || !managed::driver_command_shape(&metadata.command, &environment, &driver_id)
+            {
+                return None;
+            }
+            let (token, control) = lock(&self.inner.active)
+                .get(session_id)
+                .map(|active| (active.token, active.control.clone()))?;
+            (driver_id, token, control)
+        };
+        #[cfg(test)]
+        self.inner
+            .stop_interrupt_checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let deadline = tokio::time::Instant::now() + managed::STOP_INTERRUPT_BOUND;
+        let reply = tokio::select! {
+            biased;
+            _ = self.inner.shutdown.cancelled() => return None,
+            reply = tokio::time::timeout_at(
+                deadline,
+                managed::helper(
+                    &self.inner.config,
+                    &environment,
+                    managed::interrupt_before_stop(&driver_id, session_id),
+                ),
+            ) => reply,
+        };
+        let reply = match reply {
+            Ok(Ok(reply)) => reply,
+            outcome => {
+                tracing::warn!(
+                    session_id,
+                    driver_id = driver_id.as_str(),
+                    timed_out = outcome.is_err(),
+                    "could not check for an active run to interrupt before stopping; stopping without it"
+                );
+                return None;
+            }
+        };
+        let interrupt = &reply["interrupt"];
+        if interrupt.is_null() {
+            return None;
+        }
+        let message_id = interrupt["message_id"]
+            .as_str()
+            .filter(|id| crate::host_control::canonical_uuid(id).is_ok());
+        let (Some(message_id), Some(deliver)) = (message_id, interrupt["deliver"].as_bool()) else {
+            tracing::warn!(
+                session_id,
+                driver_id = driver_id.as_str(),
+                "the record helper answered an unusable interrupt; stopping without it"
+            );
+            return None;
+        };
+        Some(StopInterrupt {
+            environment,
+            driver_id,
+            message_id: message_id.to_owned(),
+            deliver,
+            token,
+            control,
+            deadline,
+        })
+    }
+
+    /// Delivers a recorded interrupt to the incarnation it was recorded for,
+    /// then lets the helper wait, at most 10 s, for the interrupted message to
+    /// end and its parent notification to be written. Bounded as a whole by
+    /// the recording's deadline; daemon shutdown ends the wait at once.
+    #[cfg(target_os = "linux")]
+    async fn finish_interrupt_before_stop(&self, session_id: &str, interrupt: StopInterrupt) {
+        use crate::host_control::managed;
+        let settle = async {
+            if interrupt.deliver {
+                let current = lock(&self.inner.active)
+                    .get(session_id)
+                    .is_some_and(|active| active.token == interrupt.token);
+                if !current {
+                    // Another stop or restart already ended this incarnation.
+                    return Ok(serde_json::Value::Null);
+                }
+                let line = managed::line(&interrupt.driver_id, &interrupt.message_id, false)
+                    .map_err(|_| "the control line could not be encoded")?;
+                self.host_managed_input(interrupt.control.clone(), line)
+                    .await
+                    .map_err(|_| "the driver did not acknowledge the control line")?;
+            }
+            managed::helper_within(
+                &self.inner.config,
+                &interrupt.environment,
+                managed::await_interrupt_before_stop(
+                    &interrupt.driver_id,
+                    session_id,
+                    &interrupt.message_id,
+                ),
+                managed::STOP_INTERRUPT_BOUND,
+            )
+            .await
+            .map_err(|_| "the record helper refused or timed out")
+        };
+        let outcome = tokio::select! {
+            biased;
+            _ = self.inner.shutdown.cancelled() => Err("the daemon is shutting down"),
+            outcome = tokio::time::timeout_at(interrupt.deadline, settle) => {
+                outcome.unwrap_or(Err("the bound expired"))
+            }
+        };
+        match outcome {
+            Ok(serde_json::Value::Null) => {}
+            Ok(settled) if settled["settled"].as_bool() == Some(true) => tracing::info!(
+                session_id,
+                driver_id = interrupt.driver_id.as_str(),
+                message_id = interrupt.message_id.as_str(),
+                message_state = settled["message_state"].as_str().unwrap_or("-"),
+                notification_state = settled["notification_state"].as_str().unwrap_or("-"),
+                "interrupted the active run before stopping"
+            ),
+            Ok(settled) => tracing::warn!(
+                session_id,
+                driver_id = interrupt.driver_id.as_str(),
+                message_id = interrupt.message_id.as_str(),
+                message_state = settled["message_state"].as_str().unwrap_or("-"),
+                interrupt_state = settled["interrupt_state"].as_str().unwrap_or("-"),
+                "the active run did not end before stopping; its outcome stays unknown"
+            ),
+            Err(reason) => tracing::warn!(
+                session_id,
+                driver_id = interrupt.driver_id.as_str(),
+                message_id = interrupt.message_id.as_str(),
+                reason,
+                "the interrupt before stopping did not settle; the run's outcome stays unknown"
+            ),
+        }
     }
 
     async fn stop_active(
@@ -768,6 +995,16 @@ impl SessionEngine {
             })?
         };
         if lock(&self.inner.active).contains_key(session_id) {
+            // An explicit restart interrupts an agent's active run first, as
+            // an explicit stop does.
+            #[cfg(target_os = "linux")]
+            if let Some(interrupt) = self
+                .interrupt_active_run_before_stop(session_id, &handle)
+                .await
+            {
+                self.finish_interrupt_before_stop(session_id, interrupt)
+                    .await;
+            }
             // Once Stop is dispatched, retain the operation lock until the
             // previous monitor settles. Caller loss cannot cancel its cleanup.
             self.stop_active(session_id, &handle).await?;

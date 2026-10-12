@@ -15,6 +15,10 @@ pub(crate) const MAX_CHUNK: usize = 256 * 1024;
 // including a 4 KiB working directory, fits in the remaining 128 KiB.
 const MAX_REQUEST: usize = 512 * 1024;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
+/// The whole interrupt before an explicit stop or restart: recording it,
+/// writing its control line, and the helper's wait of at most 10 s for the
+/// interrupted message to end and its parent notification to be written.
+pub(crate) const STOP_INTERRUPT_BOUND: Duration = Duration::from_secs(12);
 
 pub(crate) fn is_managed(value: i32) -> bool {
     matches!(
@@ -262,6 +266,17 @@ pub(crate) async fn helper(
     environment: &str,
     request: Value,
 ) -> Result<Value, Error> {
+    helper_within(config, environment, request, HELPER_TIMEOUT).await
+}
+
+/// [`helper`] for an operation that itself waits, such as the bounded wait
+/// for an interrupted run; `timeout` covers that wait and the exchange.
+pub(crate) async fn helper_within(
+    config: &crate::Config,
+    environment: &str,
+    request: Value,
+    timeout: Duration,
+) -> Result<Value, Error> {
     let host = config.host.as_ref().ok_or(Error::Denied)?;
     if host.state_root.file_name().and_then(|p| p.to_str()) != Some(environment) {
         return Err(Error::Denied);
@@ -280,7 +295,7 @@ pub(crate) async fn helper(
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| Error::Unavailable)?;
-    exchange_record_pipe(&mut child, &request).await
+    exchange_record_pipe_within(&mut child, &request, timeout).await
 }
 
 // The production caller supplies only its admitted retained-image child. Keep
@@ -290,9 +305,17 @@ pub(crate) async fn exchange_record_pipe(
     child: &mut tokio::process::Child,
     request: &[u8],
 ) -> Result<Value, Error> {
+    exchange_record_pipe_within(child, request, HELPER_TIMEOUT).await
+}
+
+async fn exchange_record_pipe_within(
+    child: &mut tokio::process::Child,
+    request: &[u8],
+    timeout: Duration,
+) -> Result<Value, Error> {
     let mut input = child.stdin.take().ok_or(Error::Unavailable)?;
     let output = child.stdout.take().ok_or(Error::Unavailable)?;
-    let result = tokio::time::timeout(HELPER_TIMEOUT, async {
+    let result = tokio::time::timeout(timeout, async {
         let write = async {
             input.write_all(request).await?;
             input.shutdown().await?;
@@ -372,6 +395,19 @@ pub(crate) fn queue(
         "expected_active_message_id":control.expected_active_message_id,
         "launch_generation":control.expected_launch_generation}),
     )
+}
+/// Records the fenced interrupt an explicit stop or restart sends first, when
+/// the conversation's agent takes one and has an active run. The helper
+/// decides from the conversation's own config; for other agents it records
+/// nothing and answers at once.
+pub(crate) fn interrupt_before_stop(driver: &str, session: &str) -> Value {
+    json!({"op":"interrupt_before_stop","driver_id":driver,"session_id":session})
+}
+/// Waits, in the helper, at most 10 s for that interrupt's message to end and
+/// for its parent notification to be written.
+pub(crate) fn await_interrupt_before_stop(driver: &str, session: &str, message: &str) -> Value {
+    json!({"op":"await_interrupt_before_stop","driver_id":driver,"session_id":session,
+        "message_id":message})
 }
 pub(crate) fn line(driver: &str, message: &str, shutdown: bool) -> Result<Vec<u8>, Error> {
     let mut bytes = serde_json::to_vec(&json!({"v":1,"op":if shutdown{"shutdown"}else{"deliver"},
@@ -709,5 +745,21 @@ mod tests {
             value.action = action;
             assert!(matches!(queue(&origin, &value), Err(Error::Invalid)));
         }
+    }
+
+    #[test]
+    fn stop_interrupt_requests_carry_only_the_conversation_identity() {
+        let driver = uuid::Uuid::new_v4().to_string();
+        let session = format!("session-{}", uuid::Uuid::new_v4());
+        let message = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            interrupt_before_stop(&driver, &session),
+            json!({"op": "interrupt_before_stop", "driver_id": driver, "session_id": session})
+        );
+        assert_eq!(
+            await_interrupt_before_stop(&driver, &session, &message),
+            json!({"op": "await_interrupt_before_stop", "driver_id": driver,
+                   "session_id": session, "message_id": message})
+        );
     }
 }

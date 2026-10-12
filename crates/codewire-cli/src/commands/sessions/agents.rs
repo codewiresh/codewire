@@ -181,6 +181,14 @@ impl AgentKind {
             Self::Noel => None,
         }
     }
+
+    /// Whether an explicit stop or restart interrupts this agent's active run
+    /// before the host daemon signals the conversation. Codex and Claude
+    /// keep their stop: the signal ends the run and its outcome is unknown.
+    #[cfg(target_os = "linux")]
+    fn interrupts_before_stop(self) -> bool {
+        matches!(self, Self::Noel)
+    }
 }
 
 fn agent_effort(agent: AgentKind, requested: Option<&str>) -> anyhow::Result<Option<String>> {
@@ -965,17 +973,31 @@ fn ordered_message_ids(dir: &Path) -> anyhow::Result<Vec<String>> {
     Ok(order.into_iter().map(|(_, id)| id).collect())
 }
 
-/// One deterministic ID per worker message, so a parent is notified once.
-fn notification_id(source_message_id: &str) -> String {
+/// A record ID derived from what the record is for, so it is made once.
+fn derived_id(purpose: &str) -> String {
     use sha2::Digest as _;
-    let digest = sha2::Sha256::digest(
-        format!("codewire-agent-notification:v1:{source_message_id}").as_bytes(),
-    );
+    let digest = sha2::Sha256::digest(purpose.as_bytes());
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     uuid::Builder::from_random_bytes(bytes)
         .into_uuid()
         .to_string()
+}
+
+/// One deterministic ID per worker message, so a parent is notified once.
+fn notification_id(source_message_id: &str) -> String {
+    derived_id(&format!(
+        "codewire-agent-notification:v1:{source_message_id}"
+    ))
+}
+
+/// The interrupt an explicit stop or restart sends before the host daemon
+/// signals the conversation: one per active message, so a repeated stop
+/// reuses it, and the driver can tell that the stop follows it.
+fn stop_interrupt_id(active_message_id: &str) -> String {
+    derived_id(&format!(
+        "codewire-agent-stop-interrupt:v1:{active_message_id}"
+    ))
 }
 
 /// Errors raised before any byte could reach the receiver's pipe.
@@ -2044,6 +2066,7 @@ async fn run_agent_driver_inner(args: AgentDriverArgs, platform: bool) -> anyhow
         pending: HashMap::new(),
         control_pending: HashMap::new(),
         settled: HashSet::new(),
+        stopping: false,
     };
     driver.run().await
 }
@@ -2751,6 +2774,10 @@ struct Driver {
     pending: HashMap<u64, Pending>,
     control_pending: HashMap<String, String>,
     settled: HashSet<String>,
+    /// Set by the interrupt an explicit stop or restart sends first: the host
+    /// daemon signals this session right after it, so no queued message
+    /// starts; each stays accepted for the next start.
+    stopping: bool,
 }
 
 impl Driver {
@@ -3271,6 +3298,9 @@ impl Driver {
     }
 
     async fn start_next(&mut self, peer: &mut Peer) -> anyhow::Result<()> {
+        if self.stopping {
+            return Ok(());
+        }
         while self.active.is_none() {
             let Some(id) = self.queue.pop_front() else {
                 break;
@@ -3483,6 +3513,14 @@ impl Driver {
                 return Ok(());
             }
         };
+        if record.action == MessageAction::Interrupt
+            && record
+                .expected_active_message_id
+                .as_deref()
+                .is_some_and(|active| record.id == stop_interrupt_id(active))
+        {
+            self.stopping = true;
+        }
         match decision {
             Decision::Ignore => log(format!(
                 "rejected message {id}: {}",
@@ -4395,6 +4433,29 @@ async fn claude_control_probe(peer: &mut Peer, request_id: &str) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_noel_interrupts_its_run_before_a_stop() {
+        assert!(AgentKind::Noel.interrupts_before_stop());
+        assert!(!AgentKind::Codex.interrupts_before_stop());
+        assert!(!AgentKind::Claude.interrupts_before_stop());
+    }
+
+    #[test]
+    fn a_stop_interrupt_has_one_id_per_active_message() {
+        let active = uuid::Uuid::new_v4().to_string();
+        let id = stop_interrupt_id(&active);
+        assert_eq!(id, stop_interrupt_id(&active));
+        assert_eq!(canonical_uuid(&id).unwrap(), id);
+        assert_ne!(id, stop_interrupt_id(&uuid::Uuid::new_v4().to_string()));
+        assert_ne!(id, notification_id(&active));
+        // Notification IDs keep their established derivation.
+        assert_eq!(
+            notification_id("00000000-0000-4000-8000-000000000001"),
+            derived_id("codewire-agent-notification:v1:00000000-0000-4000-8000-000000000001")
+        );
+    }
 
     #[test]
     fn a_claude_api_error_reads_as_a_failure() {
