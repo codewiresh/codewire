@@ -151,10 +151,30 @@ explicitly trusted host. In every placement it starts with its working
 directory trusted as a Codex project: a `-c projects=…` launch override sets
 Codex's `[projects."<dir>"] trust_level = "trusted"` entry, so the project's
 own `.codex` configuration, hooks and exec policies load without a trust
-warning, and no `config.toml` is written. Claude retains the installed CLI's
-settings and permission rules. Neither adapter copies login material. Claude
-supports `low`, `medium`, `high`, `xhigh`, and `max`; omitting effort
-preserves its configured default.
+warning, and no `config.toml` is written. Neither adapter copies login
+material. Claude supports `low`, `medium`, `high`, `xhigh`, and `max`; omitting
+effort preserves its configured default.
+
+Managed Claude keeps the installed CLI's settings, MCP configuration and
+permission rules on every placement; Codewire adds no option that hides them
+and never passes a bypass or skip-permissions option. What differs is the
+permission mode:
+
+| Placement | Permission mode | Why |
+| --- | --- | --- |
+| Trusted host | None passed: the user's own default mode decides | The user's rules on their own machine |
+| Local VM, platform sandbox | `--permission-mode auto` | A headless turn can use tools such as Bash with no person to answer a prompt |
+
+Verified against the pinned Claude Code 2.1.288: `auto` is one of
+`--permission-mode`'s choices and needs no separate opt-in. The argument
+outranks `permissions.defaultMode` in the user's settings. A
+`permissions.disableAutoMode` setting (the user's or an administrator's) still
+turns auto mode off, and Claude Code then starts in its default mode, where a
+tool that needs approval is refused: nobody answers a headless turn, and the
+driver declines every control request. The provider can also refuse auto mode
+for an account or a model. Auto mode relies on safety verdicts the provider
+returns with its responses, so in a Sandbox it depends on the credential route
+passing responses through unchanged.
 
 No additional MCP server is needed to receive these messages. A native protocol
 driver owns delivery and completion. A foreground controller can forward

@@ -231,7 +231,7 @@ impl Config {
 
     /// The one hosted projection shape, from the rendered environment of a
     /// legacy Pod or from a validated bind response.
-    fn apply_hosted_projection(
+    pub(crate) fn apply_hosted_projection(
         &mut self,
         environment_id: Uuid,
         environment_generation: u64,

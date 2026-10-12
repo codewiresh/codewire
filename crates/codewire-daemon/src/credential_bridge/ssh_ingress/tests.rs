@@ -223,6 +223,17 @@ async fn request(output: &mut CredentialBridgeOutput) -> v1::CredentialSshReques
     request
 }
 
+/// The signer binds beside the HTTP ingress (asserted below). In a hosted
+/// Sandbox that is the path the shared projection gives every session, a
+/// managed agent's included, as `SSH_AUTH_SOCK`.
+#[test]
+fn hosted_signer_socket_is_the_projected_ssh_auth_sock() {
+    assert_eq!(
+        Path::new(crate::config::HOSTED_CREDENTIAL_SOCKET).with_file_name(SOCKET_NAME),
+        Path::new(codewire_access::SSH_PLATFORM_AUTH_SOCK)
+    );
+}
+
 #[tokio::test]
 async fn selected_socket_permissions_and_unselected_no_socket_are_exact() {
     let root = tempfile::tempdir().unwrap();

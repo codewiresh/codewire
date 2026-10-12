@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::Config;
 use crate::credential_bridge::CredentialBridge;
-use crate::env::{build_process_env, default_shell_for};
+use crate::env::{build_process_env, build_process_env_in, default_shell_for};
 use crate::execution::{PreparedProcess, ProcessExecution};
 
 const SESSION_DIRECTORY: &str = ".codewire/daemon/sessions";
@@ -1845,7 +1845,6 @@ impl SessionEngine {
         snapshot: PersistedSession,
         cancel: &CancellationToken,
     ) -> Result<v1::SessionRecord, SessionError> {
-        let command = &snapshot.command;
         #[cfg(target_os = "linux")]
         let platform_image = match snapshot.platform_managed_origin.as_ref() {
             Some(origin) => {
@@ -1877,57 +1876,14 @@ impl SessionEngine {
         };
         #[cfg(not(target_os = "linux"))]
         let platform_image: Option<()> = None;
-        let prepare = if platform_image.is_some() {
-            // This driver never opens the inherited personal login home or
-            // launch projection. Its fixed peer builds a separate API-only
-            // private home; the original daemon owns the typed proxy slot.
-            let environment = [
-                "HOME=/home/codewire",
-                "USER=codewire",
-                "LOGNAME=codewire",
-                "PATH=/usr/local/bin:/usr/bin:/bin",
-                "LANG=C.UTF-8",
-            ]
-            .map(str::to_owned);
-            PreparedProcess::prepare(
-                &ProcessExecution::Native,
-                command,
-                &snapshot.working_dir,
-                &environment,
-                false,
-                0,
-                0,
-            )
-        } else {
-            let environment =
-                match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term) {
-                    Ok(environment) => environment,
-                    Err(error) => {
-                        return self
-                            .record_unspawned_failure(
-                                handle,
-                                format!("prepare session environment: {error}"),
-                            )
-                            .await;
-                    }
-                };
-            PreparedProcess::prepare_configured(
-                (&self.inner.config, &self.inner.credential_bridge),
-                command,
-                &snapshot.working_dir,
-                &environment,
-                false,
-                0,
-                0,
-            )
-        };
-        let mut prepared = match prepare {
+        let mut prepared = match prepare_pipe_process(
+            &self.inner.config,
+            &self.inner.credential_bridge,
+            &snapshot,
+            std::env::vars(),
+        ) {
             Ok(prepared) => prepared,
-            Err(error) => {
-                return self
-                    .record_unspawned_failure(handle, format!("prepare session process: {error}"))
-                    .await;
-            }
+            Err(message) => return self.record_unspawned_failure(handle, message).await,
         };
         let mut process = prepared.tokio_command();
         #[cfg(target_os = "linux")]
@@ -2902,6 +2858,37 @@ async fn prune_session_records_preserving(
         })?;
     }
     Ok(())
+}
+
+/// One pipe session's process. Every session is prepared the same way, a
+/// managed agent's driver included, because a managed agent works in the
+/// user's environment: the one shared builder (the Git route, the SSH signer
+/// socket, the provider routes), then the launch projection when this daemon
+/// has one, with its own authority check for this launch. The driver, its
+/// guardian and the provider inherit the result, and the guardian adds only
+/// the managed login lockdown. Nothing resolved is kept: the values exist in
+/// the launcher and the processes it becomes, never in the session record.
+/// `daemon_environment` is this daemon's own environment, from which the
+/// builder drops the daemon's internal configuration.
+fn prepare_pipe_process(
+    config: &Config,
+    bridge: &CredentialBridge,
+    snapshot: &PersistedSession,
+    daemon_environment: impl IntoIterator<Item = (String, String)>,
+) -> Result<PreparedProcess, String> {
+    let environment =
+        build_process_env_in(config, &snapshot.env, &snapshot.term, daemon_environment)
+            .map_err(|error| format!("prepare session environment: {error}"))?;
+    PreparedProcess::prepare_configured(
+        (config, bridge),
+        &snapshot.command,
+        &snapshot.working_dir,
+        &environment,
+        false,
+        0,
+        0,
+    )
+    .map_err(|error| format!("prepare session process: {error}"))
 }
 
 async fn wait_for_launch_cancellation(handle: &SessionHandle) {

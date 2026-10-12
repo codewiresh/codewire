@@ -85,6 +85,22 @@ impl DriverEnvironment {
             Self::Guest { .. } => None,
         }
     }
+
+    /// A Sandbox placement, a local VM or a hosted Sandbox, rather than a
+    /// trusted host.
+    fn sandbox(&self) -> bool {
+        matches!(self, Self::Guest { .. })
+    }
+}
+
+/// What a managed agent may do on each placement, as its state reports it.
+fn agent_policy(sandbox: bool, agent: AgentKind) -> &'static str {
+    match (sandbox, agent) {
+        (false, AgentKind::Codex) => CODEX_POLICY,
+        (false, AgentKind::Claude) => CLAUDE_POLICY,
+        (true, AgentKind::Codex) => CODEX_SANDBOX_POLICY,
+        (true, AgentKind::Claude) => CLAUDE_SANDBOX_POLICY,
+    }
 }
 
 const DRIVER_COMMAND: &str = "_agent-driver";
@@ -115,7 +131,18 @@ const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
 const CODEX_DEFAULT_EFFORT: &str = "max";
 const CLAUDE_DEFAULT_MODEL: &str = "claude-opus-5-5";
 const CODEX_POLICY: &str = "trusted host execution: Codex app-server danger-full-access and approvalPolicy never; native approval requests are declined";
-const CLAUDE_POLICY: &str = "installed Claude CLI with the user's ordinary settings, MCP configuration and permission rules; print mode denies tools those rules do not allow";
+const CLAUDE_POLICY: &str = "trusted host execution: installed Claude CLI with the user's ordinary settings, MCP configuration and permission rules; no permission mode is passed, so the user's own default mode decides which tools run";
+const CODEX_SANDBOX_POLICY: &str = "Sandbox execution: Codex app-server danger-full-access and approvalPolicy never, through the environment's selected typed provider projection; provider material remains outside the Sandbox";
+const CLAUDE_SANDBOX_POLICY: &str = "Sandbox execution: installed Claude CLI in auto mode (--permission-mode auto), as `claude` runs for the user in this Sandbox, with the user's and the repository's Claude settings, MCP configuration and permission rules; by default it uses the selected credential through the broker, and those settings or the declared environment can choose another provider or credential; no Codewire-held credential material enters the Sandbox either way";
+/// Managed Claude's permission mode on a Sandbox placement, a local VM or a
+/// hosted Sandbox: auto mode, so that a headless turn can use tools with no
+/// person to answer a prompt. The pinned Claude Code 2.1.288 lists `auto`
+/// among `--permission-mode`'s choices and needs no separate opt-in. The
+/// argument outranks the user's own `permissions.defaultMode`; a
+/// `permissions.disableAutoMode` setting still turns auto mode off, and the
+/// provider can refuse it for an account or a model. A trusted host passes no
+/// mode: there the user's own rules decide, on their own machine.
+const CLAUDE_SANDBOX_PERMISSION_MODE: [&str; 2] = ["--permission-mode", "auto"];
 const NOT_QUALIFIED: &str = "managed agent conversations are qualified only on trusted host environments (`cw env create --local --type host`); sandbox and platform placements are not qualified yet";
 
 // ---------------------------------------------------------------------------
@@ -1964,11 +1991,7 @@ async fn run_agent_driver_inner(args: AgentDriverArgs, platform: bool) -> anyhow
             interrupt: false,
             note: "driver starting".into(),
         },
-        policy: match (environment.host(), config.agent) {
-            (Some(_), AgentKind::Codex) => CODEX_POLICY.into(),
-            (Some(_), AgentKind::Claude) => CLAUDE_POLICY.into(),
-            (None, _) => "native Linux VM execution: installed guest agent with the environment's selected typed provider projection; provider material remains outside the VM".into(),
-        },
+        policy: agent_policy(environment.sandbox(), config.agent).into(),
         last_error: None,
         started_at: started_at.clone(),
         updated_at: started_at.clone(),
@@ -2225,6 +2248,43 @@ fn codex_app_server_arguments(working_dir: &str) -> [String; 3] {
     ]
 }
 
+/// The arguments one managed Claude peer starts with, on every placement: the
+/// stream protocol, the model, its saved conversation and, on a Sandbox
+/// placement only, auto mode. Nothing else is passed, so Claude runs with the
+/// settings, MCP configuration and permission rules it would have if the user
+/// typed `claude` there.
+fn claude_arguments(
+    config: &AgentConfig,
+    sandbox: bool,
+    established: bool,
+    session: &str,
+) -> Vec<String> {
+    let mut arguments = vec![
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--replay-user-messages",
+        "--model",
+        config.model.as_str(),
+        if established {
+            "--resume"
+        } else {
+            "--session-id"
+        },
+        session,
+    ];
+    if let Some(effort) = &config.effort {
+        arguments.extend(["--effort", effort.as_str()]);
+    }
+    if sandbox {
+        arguments.extend(CLAUDE_SANDBOX_PERMISSION_MODE);
+    }
+    arguments.into_iter().map(str::to_owned).collect()
+}
+
 /// `value` as a TOML basic string, which is also a quoted TOML key.
 fn toml_basic_string(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
@@ -2339,10 +2399,10 @@ impl Peer {
         #[cfg(target_os = "linux")]
         if let Some(context) = &driver.platform {
             context.check(&driver.environment, &driver.config)?;
-            command.args(context.arguments(args)).env_clear();
-            for (name, value) in context.environment(&driver.dir)? {
-                command.env(name, value);
-            }
+            // The guardian inherits this driver's environment, the session
+            // environment the daemon built, and sets only the managed login
+            // lockdown over it for the provider.
+            command.args(context.arguments(args));
         } else {
             command.args(args);
         }
@@ -3120,35 +3180,24 @@ impl Driver {
             self.state.native_thread_id.clone(),
             self.state.native_thread_established,
         );
-        let (flag, session) = match saved {
-            (Some(session), true) => ("--resume", session),
-            (Some(session), false) => ("--session-id", session),
+        let (established, session) = match saved {
+            (Some(session), established) => (established, session),
             (None, _) => {
                 let session = uuid::Uuid::new_v4().to_string();
                 self.state.native_thread_id = Some(session.clone());
                 self.persist_state()?;
-                ("--session-id", session)
+                (false, session)
             }
         };
-        let mut args = vec![
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--replay-user-messages",
-            "--model",
-            self.config.model.as_str(),
-            flag,
-            session.as_str(),
-        ];
-        if let Some(effort) = &self.config.effort {
-            args.extend(["--effort", effort.as_str()]);
-        }
+        let arguments = claude_arguments(
+            &self.config,
+            self.environment.sandbox(),
+            established,
+            &session,
+        );
         Peer::spawn(
             &self.config.program,
-            &args,
+            &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
             &self.config.working_dir,
             self,
             "claude",
@@ -4502,6 +4551,163 @@ mod tests {
         match value {
             toml::Value::Table(table) => table,
             other => panic!("override is not a table: {other}"),
+        }
+    }
+
+    fn claude_config(effort: Option<&str>) -> AgentConfig {
+        AgentConfig {
+            version: 1,
+            driver_id: uuid::Uuid::new_v4().to_string(),
+            environment_id: uuid::Uuid::new_v4().to_string(),
+            agent: AgentKind::Claude,
+            program: PathBuf::from("/usr/bin/false"),
+            model: "synthetic-model".into(),
+            effort: effort.map(str::to_owned),
+            working_dir: "/workspace".into(),
+            name: String::new(),
+            parent: None,
+            initial_message_id: None,
+            created_at: now(),
+        }
+    }
+
+    /// Managed Claude starts in auto mode on a Sandbox placement (a local VM
+    /// or a hosted Sandbox) and with no permission mode on a trusted host,
+    /// where the user's own rules decide. No placement adds anything that
+    /// hides the user's settings or skips permission checks.
+    #[test]
+    fn claude_launch_uses_auto_mode_on_sandbox_placements_only() {
+        let session = "0b0f1a5e-6f0c-4f6e-9d53-0a4a4f1f7a10";
+        let stream = [
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--replay-user-messages",
+            "--model",
+            "synthetic-model",
+        ];
+        let host = claude_arguments(&claude_config(None), false, false, session);
+        assert_eq!(host[..9], stream);
+        assert_eq!(host[9..], ["--session-id", session]);
+        let sandbox = claude_arguments(&claude_config(None), true, false, session);
+        // The Sandbox launch is the host launch plus auto mode, last.
+        assert_eq!(sandbox[..host.len()], host[..]);
+        assert_eq!(sandbox[host.len()..], ["--permission-mode", "auto"]);
+        // A saved conversation resumes, and effort keeps its place.
+        assert_eq!(
+            claude_arguments(&claude_config(Some("high")), true, true, session)[9..],
+            [
+                "--resume",
+                session,
+                "--effort",
+                "high",
+                "--permission-mode",
+                "auto"
+            ]
+        );
+        assert_eq!(
+            claude_arguments(&claude_config(Some("high")), false, true, session)[9..],
+            ["--resume", session, "--effort", "high"]
+        );
+        for sandbox in [false, true] {
+            for effort in [None, Some("max")] {
+                let arguments = claude_arguments(&claude_config(effort), sandbox, sandbox, session);
+                assert_eq!(
+                    arguments
+                        .iter()
+                        .filter(|argument| *argument == "--permission-mode")
+                        .count(),
+                    usize::from(sandbox)
+                );
+                for forbidden in [
+                    "--dangerously-skip-permissions",
+                    "--allow-dangerously-skip-permissions",
+                    "bypassPermissions",
+                    "--setting-sources",
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    "--disable-slash-commands",
+                    "--settings",
+                ] {
+                    assert!(
+                        !arguments.iter().any(|argument| argument == forbidden),
+                        "{forbidden}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn agent_policy_names_what_each_placement_does() {
+        assert_eq!(agent_policy(false, AgentKind::Codex), CODEX_POLICY);
+        assert_eq!(agent_policy(false, AgentKind::Claude), CLAUDE_POLICY);
+        // A trusted host passes no mode; a Sandbox names auto mode.
+        assert!(CLAUDE_POLICY.starts_with("trusted host execution"));
+        assert!(CLAUDE_POLICY.contains("no permission mode is passed"));
+        let sandbox = agent_policy(true, AgentKind::Claude);
+        assert!(sandbox.starts_with("Sandbox execution"));
+        assert!(sandbox.contains(&CLAUDE_SANDBOX_PERMISSION_MODE.join(" ")));
+        assert!(agent_policy(true, AgentKind::Codex).contains("danger-full-access"));
+        assert!(
+            agent_policy(true, AgentKind::Codex)
+                .ends_with("provider material remains outside the Sandbox")
+        );
+        // With no lockdown, the broker route is Claude's default and not a
+        // guarantee: the policy says who can change it, and that no
+        // Codewire-held material is in the Sandbox whichever is used.
+        assert!(sandbox.contains("by default it uses the selected credential through the broker"));
+        assert!(sandbox.contains("the user's and the repository's Claude settings"));
+        assert!(sandbox.contains("can choose another provider or credential"));
+        assert!(
+            sandbox.ends_with("no Codewire-held credential material enters the Sandbox either way")
+        );
+        assert!(!sandbox.contains("remains outside"));
+        let guest = DriverEnvironment::Guest {
+            id: uuid::Uuid::new_v4().to_string(),
+            root: PathBuf::from("/synthetic"),
+        };
+        assert!(guest.sandbox());
+    }
+
+    /// A trusted host is never a Sandbox placement, so managed Claude there
+    /// can never be given auto mode: its launch passes no permission mode,
+    /// whatever else changes.
+    #[test]
+    fn a_trusted_host_is_not_a_sandbox_placement_and_never_gets_auto_mode() {
+        for runtime_root in [None, Some(PathBuf::from("/synthetic/runtime"))] {
+            let host = DriverEnvironment::Host(HostEnvironment {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "synthetic-host".into(),
+                path: PathBuf::from("/synthetic/project"),
+                created_at: now(),
+                state: "running".into(),
+                runtime_root,
+            });
+            assert!(!host.sandbox());
+            assert!(host.host().is_some());
+            assert_eq!(
+                agent_policy(host.sandbox(), AgentKind::Claude),
+                CLAUDE_POLICY
+            );
+            let session = uuid::Uuid::new_v4().to_string();
+            for established in [false, true] {
+                let arguments = claude_arguments(
+                    &claude_config(Some("high")),
+                    host.sandbox(),
+                    established,
+                    &session,
+                );
+                assert!(
+                    !arguments
+                        .iter()
+                        .any(|argument| argument == "--permission-mode" || argument == "auto"),
+                    "{arguments:?}"
+                );
+            }
         }
     }
 
