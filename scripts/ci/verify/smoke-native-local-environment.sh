@@ -138,6 +138,10 @@ readonly NETWORK_PROBE_URL='https://releases.codewire.sh/cw/v1/channels/stable.j
 readonly THROUGHPUT_DOWNLOAD_URL='https://releases.codewire.sh/cw/v1/blobs/sha256/8a7d291d1c796c7e7180125888af9aad64a1b56a0fbd08850225eaecf7399adc'
 readonly THROUGHPUT_DOWNLOAD_BYTES=61632080
 readonly THROUGHPUT_UPLOAD_URL='https://speed.cloudflare.com/__up'
+# Name resolution as real clients ask it; the second name must be refused.
+readonly NETWORK_DNS_NAME='example.com'
+readonly NETWORK_DNS_REFUSED_NAME='metadata.google.internal'
+readonly NETWORK_GO_MODULE='golang.org/x/text'
 readonly THROUGHPUT_UPLOAD_BYTES=33554432
 readonly THROUGHPUT_ROUNDS=3
 
@@ -219,8 +223,13 @@ host's own on the same public URLs (MB/s and guest/host ratios); then SIGKILLs
 the worker, and after stop/start the broker, while a guest HTTPS probe loop
 runs. Each kill must give a typed environment error, fail every probe from the
 kill second, leave no internet socket on the egress path, and stop/start must
-restore egress. It needs public HTTPS to releases.codewire.sh and
-speed.cloudflare.com from the host and the broker.
+restore egress. Last, it asks the guest's DNS the way real clients do: a query
+carrying an EDNS record (as dig sends), the Go resolver through the go command
+and gh, and a name that is refused, which must be answered at once instead of
+timing out. It needs public HTTPS to releases.codewire.sh and
+speed.cloudflare.com from the host and the broker, and to proxy.golang.org and
+api.github.com from the broker; gh sends a fixed synthetic token and passes on
+GitHub's own HTTP 401.
 
 --broker-renewal-observation requires --managed-credential-broker and replaces
 its application-secret, managed-agent and credential-broker scenarios. The VM
@@ -1679,6 +1688,95 @@ PY
   cat "$SMOKE_ROOT/network-throughput.json" >>"$TRANSCRIPT"
 }
 
+# DNS as real clients ask it. dig, systemd-resolved and the Go resolver (gh, go,
+# kubectl) send queries that carry an EDNS record, and a lookup the egress
+# policy or the upstream refuses must be answered, not left to time out.
+require_guest_name_resolution() {
+  log 'network: guest DNS with and without an EDNS record, a refused name, the Go resolver and gh'
+  run_cw run --no-tty -- /usr/bin/python3 -c '
+import socket
+import struct
+import sys
+import time
+
+
+def nameserver():
+    with open("/etc/resolv.conf") as resolv:
+        for line in resolv:
+            fields = line.split()
+            if len(fields) >= 2 and fields[0] == "nameserver":
+                return fields[1]
+    raise SystemExit("no nameserver")
+
+
+def ask(server, name, edns, ident):
+    query = struct.pack(">HHHHHH", ident, 0x0100, 1, 0, 0, 1 if edns else 0)
+    query += b"".join(bytes([len(label)]) + label.encode() for label in name.split("."))
+    query += b"\0" + struct.pack(">HH", 1, 1)
+    if edns:
+        # The OPT pseudo-record a stock dig sends: UDP payload 1232, no options.
+        query += b"\0" + struct.pack(">HHIH", 41, 1232, 0, 0)
+    family = socket.AF_INET6 if ":" in server else socket.AF_INET
+    with socket.socket(family, socket.SOCK_DGRAM) as client:
+        client.settimeout(5)
+        started = time.monotonic()
+        client.sendto(query, (server, 53))
+        try:
+            reply, _ = client.recvfrom(4096)
+        except socket.timeout:
+            return "timeout", 0, int((time.monotonic() - started) * 1000)
+    elapsed = int((time.monotonic() - started) * 1000)
+    if len(reply) < 12:
+        return "invalid", 0, elapsed
+    reply_id, flags, _, answers, _, _ = struct.unpack(">HHHHHH", reply[:12])
+    if reply_id != ident or not flags & 0x8000:
+        return "invalid", 0, elapsed
+    return str(flags & 0xF), answers, elapsed
+
+
+server = nameserver()
+for label, name, edns, ident in (
+    ("plain", sys.argv[1], False, 0x4357),
+    ("edns", sys.argv[1], True, 0x4358),
+    ("refused-edns", sys.argv[2], True, 0x4359),
+):
+    rcode, answers, elapsed = ask(server, name, edns, ident)
+    print(f"guest-dns {label} rcode={rcode} answers={answers} ms={elapsed}")
+' "$NETWORK_DNS_NAME" "$NETWORK_DNS_REFUSED_NAME"
+  rg -q '^guest-dns plain rcode=0 answers=[1-9][0-9]* ms=[0-9]+$' "$LAST_STDOUT" ||
+    die 'guest DNS did not answer a plain query'
+  rg -q '^guest-dns edns rcode=0 answers=[1-9][0-9]* ms=[0-9]+$' "$LAST_STDOUT" ||
+    die 'guest DNS did not answer a query carrying an EDNS record'
+  # Any DNS error code is an answer; a timeout or an address is not.
+  rg -q '^guest-dns refused-edns rcode=[1-9][0-9]* answers=0 ms=([0-9]{1,3}|1[0-9]{3})$' "$LAST_STDOUT" ||
+    die 'guest DNS did not refuse an unresolvable name at once'
+  log "network: $(rg '^guest-dns ' "$LAST_STDOUT" | tr '\n' ';')"
+  # shellcheck disable=SC2016 # Expanded by the guest shell.
+  run_cw run --no-tty -- /bin/sh -c '
+    set -eu
+    unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+    scratch="$(mktemp -d)"
+    trap "rm -rf \"$scratch\"" EXIT
+    cd "$scratch"
+    export HOME="$scratch" GOPATH="$scratch/go" GOCACHE="$scratch/cache" GOFLAGS=-mod=mod
+    export GOPROXY=https://proxy.golang.org GOSUMDB=off GODEBUG=netdns=go GOTOOLCHAIN=local
+    export PATH="/usr/local/go/bin:$PATH"
+    go mod init example.invalid/probe >/dev/null 2>&1
+    timeout 60 go list -m "$1@latest" | sed "s/^/guest-go /"
+    reply="$(GH_TOKEN=codewire-synthetic-not-a-token GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+      timeout 30 gh api /zen 2>&1)" || true
+    case "$reply" in
+      *"(HTTP 401)"*) printf "guest-gh reached-github http=401\n" ;;
+      *) printf "guest-gh did-not-reach-github\n"; exit 1 ;;
+    esac
+  ' name-resolution "$NETWORK_GO_MODULE"
+  rg -q "^guest-go ${NETWORK_GO_MODULE//./\\.} v[0-9]+\\.[0-9]+\\.[0-9]+\$" "$LAST_STDOUT" ||
+    die 'the go command did not resolve a module through the Go resolver'
+  rg -qx 'guest-gh reached-github http=401' "$LAST_STDOUT" ||
+    die 'gh did not reach GitHub through the Go resolver'
+  log "network: $(rg '^guest-(go|gh) ' "$LAST_STDOUT" | tr '\n' ';')"
+}
+
 run_network_qualification() {
   log 'network: reading the serving packet worker descriptor table under the running VM'
   require_serving_worker_boundary serving
@@ -1688,6 +1786,7 @@ run_network_qualification() {
   require_serving_worker_boundary after-worker-restart
   require_network_kill_fails_closed __native-egress-broker broker egress_broker_exit
   require_serving_worker_boundary after-broker-restart
+  require_guest_name_resolution
   log 'network: qualification passed'
 }
 
