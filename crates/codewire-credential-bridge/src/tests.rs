@@ -617,11 +617,7 @@ async fn upstream_transport_errors_are_value_blind_and_close_the_epoch() {
 #[tokio::test]
 async fn request_route_body_and_header_validation_remain_bounded() {
     let bridge = bridge();
-    for uri in [
-        "/responses",
-        "/v1/responses?query=x",
-        "https://example.invalid/v1/responses",
-    ] {
+    for uri in ["/responses", "https://example.invalid/v1/responses"] {
         let request = Request::builder()
             .method(Method::POST)
             .uri(uri)
@@ -632,8 +628,9 @@ async fn request_route_body_and_header_validation_remain_bounded() {
             StatusCode::FORBIDDEN
         );
     }
+    // Provider families admit any CRUD method; anything else is refused.
     let request = Request::builder()
-        .method(Method::GET)
+        .method(Method::OPTIONS)
         .uri("/v1/responses")
         .body(Body::empty())
         .unwrap();

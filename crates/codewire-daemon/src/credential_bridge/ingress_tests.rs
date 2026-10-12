@@ -302,8 +302,12 @@ async fn hosted_both_endpoints_are_ready_before_admission_and_share_closed_route
         for (method, path, host) in [
             ("POST", "/v1/responses", "localhost"),
             ("POST", "/_codewire/openai/v1/responses", "localhost"),
-            ("POST", "/v1/messages?beta=true", "localhost"),
-            ("POST", "/v1/messages/count_tokens", "localhost"),
+            (
+                "POST",
+                "/_codewire/anthropic/v1/messages?beta=true",
+                "localhost",
+            ),
+            ("GET", "/_codewire/anthropic/api/oauth/usage", "localhost"),
             (
                 "GET",
                 "/_codewire/github/a/b.git/info/refs?service=git-upload-pack",
@@ -319,14 +323,10 @@ async fn hosted_both_endpoints_are_ready_before_admission_and_share_closed_route
             );
         }
         for (method, path, host) in [
-            ("GET", "/v1/responses", "localhost"),
+            ("OPTIONS", "/v1/responses", "localhost"),
             ("POST", "/v1/responses", "api.github.com"),
-            ("POST", "/v1/messages?beta=false", "localhost"),
-            (
-                "POST",
-                "/_codewire/openai/v1/responses?beta=true",
-                "localhost",
-            ),
+            ("POST", "/messages", "localhost"),
+            ("POST", "/_codewire/anthropic/v1/../messages", "localhost"),
             (
                 "GET",
                 "/_codewire/github/a/b.git/info/refs?service=other",
@@ -481,7 +481,7 @@ async fn hosted_shared_budget_and_replacement_cover_both_endpoints_without_repla
         let stream = request(
             harness.connect(tcp).await,
             "POST",
-            "/v1/messages?beta=true",
+            "/_codewire/anthropic/v1/messages?beta=true",
             "localhost",
             b"{}",
         )

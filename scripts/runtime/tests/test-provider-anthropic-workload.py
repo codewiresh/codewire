@@ -271,7 +271,7 @@ actual=("$@")
 for ((index=0; index < ${#expected[@]}; index++)); do
   [[ "${actual[index]}" == "${expected[index]}" ]]
 done
-[[ "$ANTHROPIC_BASE_URL" == http://127.0.0.1:38081 ]]
+[[ "$ANTHROPIC_BASE_URL" == http://127.0.0.1:38081/_codewire/anthropic ]]
 [[ "$ANTHROPIC_AUTH_TOKEN" == codewire-managed ]]
 [[ "${ANTHROPIC_API_KEY+x}" == x && -z "$ANTHROPIC_API_KEY" ]]
 [[ "${CLAUDE_CODE_OAUTH_TOKEN+x}" == x && -z "$CLAUDE_CODE_OAUTH_TOKEN" ]]
@@ -308,7 +308,7 @@ printf '%s\\n' \\
             wrapper.chmod(0o700)
             environment = {
                 "PATH": "/usr/bin:/bin",
-                "ANTHROPIC_BASE_URL": "http://127.0.0.1:38081",
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:38081/_codewire/anthropic",
                 "ANTHROPIC_AUTH_TOKEN": "codewire-managed",
                 "ANTHROPIC_API_KEY": "",
                 "CLAUDE_CODE_OAUTH_TOKEN": "",

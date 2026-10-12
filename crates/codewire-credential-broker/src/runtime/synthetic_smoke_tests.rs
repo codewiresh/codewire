@@ -69,16 +69,15 @@ async fn anthropic_exact_routes_filter_real_injection_and_complete_stream_or_cou
     for messages in [true, false] {
         for beta in [false, true] {
             let path = if messages {
-                "/messages"
+                "/v1/messages"
             } else {
-                "/messages/count_tokens"
+                "/v1/messages/count_tokens"
             };
-            let operation = if messages { "messages" } else { "count-tokens" };
             let mut lease = Lease::new(
                 "anthropic",
                 CredentialAuthKind::ApiKey,
                 "anthropic",
-                operation,
+                "messages",
                 "anthropic-api",
             );
             lease.material = Zeroizing::new(ANTHROPIC_KEY.as_bytes().to_vec());
@@ -124,7 +123,7 @@ async fn anthropic_exact_routes_filter_real_injection_and_complete_stream_or_cou
             assert!(headers.contains_key("x-error-json"));
             let (headers, mut redaction) = policy.begin(&headers).unwrap();
             assert_eq!(headers["request-id"], "[REDACTED]");
-            assert!(!headers.contains_key("x-error-json"));
+            assert_eq!(headers["x-error-json"], "{\"error\":\"[REDACTED]\"}");
             let mut output = Vec::new();
             let mut chunks = 0;
             while let Some(chunk) = body.next().await {
@@ -177,19 +176,16 @@ async fn anthropic_exact_routes_filter_real_injection_and_complete_stream_or_cou
     }
 }
 
+/// A target the broker never builds fails the fixture; another route, method
+/// or query on the pinned origin is a stock-client request the fixture does
+/// not serve, which it answers as the provider would.
 #[tokio::test]
-async fn anthropic_rejects_target_method_and_query_changes() {
+async fn anthropic_rejects_foreign_targets_and_answers_unserved_routes() {
     for target in [
         "http://api.anthropic.com/v1/messages",
         "https://api.anthropic.com:444/v1/messages",
         "https://user@api.anthropic.com/v1/messages",
         "https://api.anthropic.com/v1/messages#fragment",
-        "https://api.anthropic.com/v1/messages?beta=false",
-        "https://api.anthropic.com/v1/messages?beta=true&beta=true",
-        "https://api.anthropic.com/v1/messages?beta=true&host=other",
-        "https://api.anthropic.com/v1/messages/count_tokens?beta=%74rue",
-        "https://api.anthropic.com/v1/models",
-        "https://api.anthropic.com/v1/messages/batches",
         "https://other.example/v1/messages",
     ] {
         let mut request = anthropic_request();
@@ -199,13 +195,22 @@ async fn anthropic_rejects_target_method_and_query_changes() {
             Err(BrokerUpstreamError::Protocol)
         ));
     }
+    for target in [
+        "https://api.anthropic.com/v1/messages?beta=false",
+        "https://api.anthropic.com/v1/messages?beta=true&beta=true",
+        "https://api.anthropic.com/v1/messages?beta=true&host=other",
+        "https://api.anthropic.com/v1/messages/count_tokens?beta=%74rue",
+        "https://api.anthropic.com/v1/models",
+        "https://api.anthropic.com/v1/messages/batches",
+    ] {
+        let mut request = anthropic_request();
+        request.target = Url::parse(target).unwrap();
+        not_found_answer(request, ANTHROPIC_KEY).await;
+    }
     for method in [Method::GET, Method::PUT, Method::DELETE] {
         let mut request = anthropic_request();
         request.method = method;
-        assert!(matches!(
-            SyntheticOpenAiSmokeTransport.execute(request).await,
-            Err(BrokerUpstreamError::Protocol)
-        ));
+        not_found_answer(request, ANTHROPIC_KEY).await;
     }
 }
 
@@ -249,8 +254,6 @@ async fn anthropic_rejects_missing_wrong_duplicate_or_caller_headers() {
         ("authorization", "Bearer caller"),
         ("cookie", "caller=session"),
         ("proxy-authorization", "caller"),
-        ("chatgpt-account-id", SYNTHETIC_CODEX_ACCOUNT_ID),
-        ("x-error-json", "caller"),
     ] {
         let mut request = anthropic_request();
         request.headers.insert(
@@ -331,7 +334,7 @@ async fn openai_api_retains_real_redaction_with_a_distinct_marker() {
     assert!(headers.contains_key("x-error-json"));
     let (headers, mut redaction) = policy.begin(&headers).unwrap();
     assert_eq!(headers["x-request-id"], "[REDACTED]");
-    assert!(!headers.contains_key("x-error-json"));
+    assert_eq!(headers["x-error-json"], "{\"error\":\"[REDACTED]\"}");
     let mut output = Vec::new();
     let mut chunks = 0;
     while let Some(chunk) = body.next().await {
@@ -433,12 +436,17 @@ async fn openai_and_chatgpt_route_and_account_negatives_remain_closed() {
                 Err(BrokerUpstreamError::Protocol)
             ));
         }
-        let mut invalid = request(target);
-        invalid.method = Method::GET;
-        assert!(matches!(
-            SyntheticOpenAiSmokeTransport.execute(invalid).await,
-            Err(BrokerUpstreamError::Protocol)
-        ));
+        let mut unserved = request(target);
+        unserved.method = Method::GET;
+        not_found_answer(
+            unserved,
+            if target.contains("chatgpt.com") {
+                CODEX_KEY
+            } else {
+                OPENAI_KEY
+            },
+        )
+        .await;
         let mut invalid = request(target);
         invalid.body.clear();
         assert!(matches!(
@@ -450,7 +458,21 @@ async fn openai_and_chatgpt_route_and_account_negatives_remain_closed() {
         "https://api.openai.com/v1/responses?other=true",
         "https://api.openai.com/v1/models",
         "https://chatgpt.com/backend-api/codex/responses?other=true",
+    ] {
+        not_found_answer(
+            request(target),
+            if target.contains("chatgpt.com") {
+                CODEX_KEY
+            } else {
+                OPENAI_KEY
+            },
+        )
+        .await;
+    }
+    for target in [
         "https://other.example/v1/responses",
+        "https://api.openai.com/v2/responses",
+        "https://chatgpt.com/backend-api/other",
     ] {
         assert!(matches!(
             SyntheticOpenAiSmokeTransport.execute(request(target)).await,
@@ -644,23 +666,19 @@ async fn exact_api_canned_routes_delegate_the_original_request_unchanged() {
 }
 
 #[test]
-fn exact_api_header_names_follow_the_owning_compiled_routes() {
+fn exact_api_accepts_transparent_client_headers_but_refuses_duplicates() {
     for family in ["openai", "anthropic"] {
-        let route = if family == "openai" {
-            crate::openai::openai_responses_route()
-        } else {
-            crate::anthropic::route()
-        };
         let mut request = exact_api_request(family);
-        for name in &route.allowed_request_headers {
-            let value = match name.as_str() {
-                "content-type" => "application/json",
-                "anthropic-version" => "2023-06-01",
-                "anthropic-beta" => "token-counting-2024-11-01",
-                _ => "synthetic",
-            };
+        for (name, value) in [
+            ("user-agent", "synthetic-client/1.0"),
+            ("x-app", "cli"),
+            ("anthropic-beta", "dangerous-tool-use-2026-09-03"),
+            ("originator", "codex_cli_rs"),
+            ("x-stainless-lang", "js"),
+            ("forwarded", "for=192.0.2.1"),
+        ] {
             request.headers.insert(
-                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderName::from_static(name),
                 HeaderValue::from_static(value),
             );
         }
@@ -672,21 +690,10 @@ fn exact_api_header_names_follow_the_owning_compiled_routes() {
             Ok(())
         );
         for name in request.headers.keys().cloned().collect::<Vec<_>>() {
-            let duplicate = request.headers[&name].clone();
-            request.headers.append(name.clone(), duplicate);
+            let original = request.headers[&name].clone();
+            request.headers.append(name.clone(), original.clone());
             exact_api_denied(&request, exact_api_key(family));
-            request.headers.remove(&name);
-            // Restore one original value after the duplicate refusal.
-            let value = match name.as_str() {
-                "authorization" => HeaderValue::from_str(&format!("Bearer {OPENAI_KEY}")).unwrap(),
-                "x-api-key" => HeaderValue::from_static(ANTHROPIC_KEY),
-                "content-type" => HeaderValue::from_static("application/json"),
-                "anthropic-version" => HeaderValue::from_static("2023-06-01"),
-                "anthropic-beta" => HeaderValue::from_static("token-counting-2024-11-01"),
-                "accept-encoding" => HeaderValue::from_static("identity"),
-                _ => HeaderValue::from_static("synthetic"),
-            };
-            request.headers.insert(name, value);
+            request.headers.insert(name, original);
         }
     }
 }
@@ -752,13 +759,10 @@ fn exact_api_authority_is_single_and_foreign_headers_refuse() {
         let mut request = exact_api_request(family);
         request.headers.remove(authority);
         exact_api_denied(&request, exact_api_key(family));
-        for foreign in [
+        let mut foreign = vec![
             "cookie",
             "proxy-authorization",
-            "chatgpt-account-id",
             "host",
-            "forwarded",
-            "x-error-json",
             "connection",
             "upgrade",
             if family == "openai" {
@@ -766,7 +770,11 @@ fn exact_api_authority_is_single_and_foreign_headers_refuse() {
             } else {
                 "authorization"
             },
-        ] {
+        ];
+        if family == "openai" {
+            foreign.push("chatgpt-account-id");
+        }
+        for foreign in foreign {
             let mut request = exact_api_request(family);
             request.headers.insert(
                 HeaderName::from_static(foreign),
@@ -873,14 +881,9 @@ fn exact_api_headers_are_bounded_and_use_existing_content_policy() {
         }
     }
     let mut request = exact_api_request("openai");
-    for name in crate::openai::openai_responses_route()
-        .allowed_request_headers
-        .iter()
-        .filter(|name| name.as_str() != "content-type")
-        .take(8)
-    {
+    for index in 0..8 {
         request.headers.insert(
-            HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderName::from_bytes(format!("x-synthetic-{index}").as_bytes()).unwrap(),
             HeaderValue::from_bytes(&vec![b'a'; 8 * 1024]).unwrap(),
         );
     }
@@ -928,4 +931,164 @@ fn exact_api_identity_encoding_and_anthropic_version_stay_fixed() {
     let mut request = exact_api_request("anthropic");
     request.headers.remove("accept-encoding");
     exact_api_denied(&request, ANTHROPIC_KEY);
+}
+
+fn transparent_openai_request(method: Method, target: &str) -> BrokerUpstreamRequest {
+    let codex = target.starts_with("https://chatgpt.com/");
+    let mut headers = HeaderMap::from_iter([(
+        http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!(
+            "Bearer {}",
+            if codex { CODEX_KEY } else { OPENAI_KEY }
+        ))
+        .unwrap(),
+    )]);
+    if codex {
+        headers.insert(
+            "chatgpt-account-id",
+            HeaderValue::from_static(SYNTHETIC_CODEX_ACCOUNT_ID),
+        );
+    }
+    BrokerUpstreamRequest {
+        method,
+        target: Url::parse(target).unwrap(),
+        headers,
+        body: Vec::new(),
+    }
+}
+
+async fn not_found_answer(request: BrokerUpstreamRequest, key: &str) {
+    let label = format!("{} {}", request.method, request.target);
+    let response = SyntheticOpenAiSmokeTransport
+        .execute(request)
+        .await
+        .unwrap_or_else(|_| panic!("{label}: an HTTP answer, not a transport failure"));
+    let (status, headers, mut body) = response.into_parts();
+    assert_eq!(status, StatusCode::NOT_FOUND, "{label}");
+    assert_eq!(headers["content-type"], "application/json", "{label}");
+    let mut output = Vec::new();
+    while let Some(chunk) = body.next().await {
+        output.extend_from_slice(&chunk.unwrap());
+    }
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("not_found"), "{label}");
+    assert!(!output.contains(key), "{label}");
+}
+
+/// Transparent routes carry every stock-client request (#2536). One the
+/// fixture does not serve is answered as a provider answers a route it lacks,
+/// with a fixed 404, never as a transport failure: the broker reports a
+/// transport failure as UpstreamFailed, which ends the whole bridge epoch and
+/// with it every other slot's requests.
+#[tokio::test]
+async fn unserved_transparent_routes_answer_404_instead_of_a_transport_failure() {
+    for (method, target) in [
+        (
+            Method::GET,
+            "https://chatgpt.com/backend-api/codex/models?client_version=0.160.0",
+        ),
+        (
+            Method::GET,
+            "https://chatgpt.com/backend-api/codex/responses",
+        ),
+        (
+            Method::POST,
+            "https://chatgpt.com/backend-api/codex/responses/compact",
+        ),
+        (Method::GET, "https://api.openai.com/v1/models"),
+        (Method::DELETE, "https://api.openai.com/v1/responses"),
+        (
+            Method::POST,
+            "https://api.openai.com/v1/responses?stream=true",
+        ),
+    ] {
+        let key = if target.contains("chatgpt.com") {
+            CODEX_KEY
+        } else {
+            OPENAI_KEY
+        };
+        not_found_answer(transparent_openai_request(method, target), key).await;
+    }
+    for (method, target) in [
+        (Method::GET, "https://api.anthropic.com/v1/models"),
+        (Method::GET, "https://api.anthropic.com/api/oauth/usage"),
+        (
+            Method::POST,
+            "https://api.anthropic.com/v1/messages/batches",
+        ),
+    ] {
+        let mut request = anthropic_request();
+        request.method = method;
+        request.target = Url::parse(target).unwrap();
+        request.body.clear();
+        not_found_answer(request, ANTHROPIC_KEY).await;
+    }
+}
+
+/// An unserved route still requires exactly the credential the broker
+/// injects: a missing, foreign or guest-supplied one is a fixture failure.
+#[tokio::test]
+async fn unserved_transparent_routes_still_require_the_injected_credential() {
+    let codex_models = "https://chatgpt.com/backend-api/codex/models";
+    let openai_models = "https://api.openai.com/v1/models";
+    let mut cases = Vec::new();
+    for target in [codex_models, openai_models] {
+        let mut missing = transparent_openai_request(Method::GET, target);
+        missing.headers.remove("authorization");
+        cases.push(missing);
+        let mut foreign = transparent_openai_request(Method::GET, target);
+        foreign.headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {ANTHROPIC_KEY}")).unwrap(),
+        );
+        cases.push(foreign);
+        for (name, value) in [("cookie", "caller"), ("proxy-authorization", "caller")] {
+            let mut caller = transparent_openai_request(Method::GET, target);
+            caller.headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+            cases.push(caller);
+        }
+    }
+    let mut wrong_account = transparent_openai_request(Method::GET, codex_models);
+    wrong_account.headers.insert(
+        "chatgpt-account-id",
+        HeaderValue::from_static("wrong-account"),
+    );
+    cases.push(wrong_account);
+    let mut guest_account = transparent_openai_request(Method::GET, openai_models);
+    guest_account.headers.insert(
+        "chatgpt-account-id",
+        HeaderValue::from_static(SYNTHETIC_CODEX_ACCOUNT_ID),
+    );
+    cases.push(guest_account);
+    for change in ["missing", "placeholder", "bearer"] {
+        let mut request = anthropic_request();
+        request.method = Method::GET;
+        request.target = Url::parse("https://api.anthropic.com/v1/models").unwrap();
+        match change {
+            "missing" => {
+                request.headers.remove("x-api-key");
+            }
+            "placeholder" => {
+                request
+                    .headers
+                    .insert("x-api-key", HeaderValue::from_static("codewire-managed"));
+            }
+            _ => {
+                request.headers.insert(
+                    "authorization",
+                    HeaderValue::from_str(&format!("Bearer {ANTHROPIC_KEY}")).unwrap(),
+                );
+            }
+        }
+        cases.push(request);
+    }
+    for request in cases {
+        assert!(matches!(
+            SyntheticOpenAiSmokeTransport.execute(request).await,
+            Err(BrokerUpstreamError::Protocol)
+        ));
+    }
 }

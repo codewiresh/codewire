@@ -9,11 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::Engine as _;
-#[cfg(feature = "kind-e2e")]
-use codewire_credential_broker::SyntheticOpenAiSmokeTransport;
 use codewire_credential_broker::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
 };
+#[cfg(feature = "kind-e2e")]
+use codewire_credential_broker::{SyntheticOpenAiSmokeTransport, SyntheticProviderHost};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use serde_json::{Value, json};
 
@@ -525,7 +525,7 @@ impl SyntheticProvider {
                 let status = if admitted.refused { 401_u16 } else { 200 };
                 // `client_identity` is a closed boolean: whether Claude Code's
                 // own `x-app` and `user-agent` reached the provider, which the
-                // broker forwards for the subscription form only.
+                // transparent broker route forwards in both forms.
                 tracing::info!(target: TARGET, event = "anthropic_response",
                     kind = admitted.kind.name(), route = admitted.route.name(),
                     stream = admitted.stream, status, refused = admitted.refused,
@@ -767,6 +767,16 @@ impl BrokerUpstreamTransport for SyntheticProvider {
         &self,
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        // A stock client's other calls on a transparent route (#2536), such
+        // as Codex's model list, reach here too. They neither count toward a
+        // schedule nor fail as a transport error, which would end the bridge
+        // epoch; the fixture answers them as the provider answers a route it
+        // lacks.
+        #[cfg(feature = "kind-e2e")]
+        if let Some(host) = SyntheticOpenAiSmokeTransport::unserved_host(&request) {
+            let (method, _, headers, _) = request.into_parts();
+            return self.unserved(host, &method, &headers);
+        }
         #[cfg(feature = "kind-e2e")]
         if let Some(family) = SyntheticOpenAiSmokeTransport::api_key_family(&request)
             && !SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(&request)
@@ -851,6 +861,78 @@ impl BrokerUpstreamTransport for SyntheticProvider {
             "https://auth.openai.com/oauth/token" => self.refresh(headers, &body),
             _ => Err(BrokerUpstreamError::Protocol),
         }
+    }
+}
+
+#[cfg(feature = "kind-e2e")]
+impl SyntheticProvider {
+    /// A transparent-route request this fixture does not serve, carrying
+    /// exactly a credential it issued: answered with the provider's 404 and
+    /// logged by host and method only. Anything else still fails the fixture.
+    fn unserved(
+        &self,
+        host: SyntheticProviderHost,
+        method: &Method,
+        headers: &HeaderMap,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        if !unserved_credential(host, headers) {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let method = match *method {
+            Method::GET => "GET",
+            Method::HEAD => "HEAD",
+            Method::POST => "POST",
+            Method::PUT => "PUT",
+            Method::PATCH => "PATCH",
+            Method::DELETE => "DELETE",
+            _ => "other",
+        };
+        tracing::info!(target: TARGET, event = "provider_unserved", host = host.name(), method,
+            "provider_unserved");
+        Ok(SyntheticOpenAiSmokeTransport::not_found(host))
+    }
+}
+
+/// The request carries exactly one credential this fixture issued for that
+/// host, the account it expects, and nothing a guest could have supplied.
+#[cfg(feature = "kind-e2e")]
+fn unserved_credential(host: SyntheticProviderHost, headers: &HeaderMap) -> bool {
+    if ["cookie", "proxy-authorization", "host"]
+        .iter()
+        .any(|name| headers.contains_key(*name))
+    {
+        return false;
+    }
+    let authorization = headers.get_all("authorization").iter().collect::<Vec<_>>();
+    let api_key = headers.get_all("x-api-key").iter().collect::<Vec<_>>();
+    match host {
+        SyntheticProviderHost::Codex => {
+            api_key.is_empty()
+                && exact_single(headers, "chatgpt-account-id", ACCOUNT)
+                && matches!(authorization.as_slice(), [bearer] if bearer
+                    .to_str()
+                    .ok()
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .is_some_and(|token| validate_access(token).is_ok()))
+        }
+        SyntheticProviderHost::OpenAi => {
+            api_key.is_empty()
+                && !headers.contains_key("chatgpt-account-id")
+                && exact_single(
+                    headers,
+                    "authorization",
+                    &format!("Bearer {OPENAI_API_KEY}"),
+                )
+        }
+        SyntheticProviderHost::Anthropic => match (authorization.as_slice(), api_key.as_slice()) {
+            ([], [key]) => [KIND_ANTHROPIC_API_KEY, ANTHROPIC_API_KEY]
+                .iter()
+                .any(|expected| key.as_bytes() == expected.as_bytes()),
+            ([bearer], []) => [KIND_CLAUDE_SUBSCRIPTION_TOKEN, KIND_CLAUDE_REFUSED_TOKEN]
+                .iter()
+                .any(|token| bearer.as_bytes() == format!("Bearer {token}").as_bytes()),
+            _ => false,
+        },
     }
 }
 
@@ -1431,7 +1513,7 @@ mod tests {
                     "model":"claude-sonnet-4-6",
                     "messages":[{"role":"user","content":"canned fixture"}],
                 });
-                if path == "/messages" {
+                if path == "/v1/messages" {
                     body["stream"] = json!(true);
                     body["max_tokens"] = json!(64);
                 }
@@ -1467,16 +1549,18 @@ mod tests {
         #[tokio::test]
         async fn typed_api_routes_redact_and_keep_legacy_schedules_independent() {
             let provider = SyntheticProvider::new();
+            // The transparent Anthropic route (#2536) leases one operation for
+            // every path, token counting included.
             for (slot, path, query, operation) in [
                 ("openai", "/responses", "", "responses"),
-                ("anthropic", "/messages", "", "messages"),
-                ("anthropic", "/messages", "beta=true", "messages"),
-                ("anthropic", "/messages/count_tokens", "", "count-tokens"),
+                ("anthropic", "/v1/messages", "", "messages"),
+                ("anthropic", "/v1/messages", "beta=true", "messages"),
+                ("anthropic", "/v1/messages/count_tokens", "", "messages"),
                 (
                     "anthropic",
-                    "/messages/count_tokens",
+                    "/v1/messages/count_tokens",
                     "beta=true",
-                    "count-tokens",
+                    "messages",
                 ),
             ] {
                 let authority = Authority::new(slot, key(slot));
@@ -1492,7 +1576,9 @@ mod tests {
                     "request-id"
                 };
                 assert_eq!(headers[request_header], "[REDACTED]");
-                assert!(!headers.contains_key("x-error-json"));
+                // Transparent routes return every provider header, redacted
+                // (#2536): the reflection survives without the key.
+                assert!(headers.contains_key("x-error-json"));
                 assert!(headers.values().all(|value| {
                     !value
                         .as_bytes()
@@ -1506,7 +1592,7 @@ mod tests {
                 }
                 let output = String::from_utf8(bytes).unwrap();
                 assert!(!output.contains(key(slot)));
-                if operation == "count-tokens" {
+                if path.ends_with("/count_tokens") {
                     assert_eq!(output, "{\"input_tokens\":42}");
                 } else {
                     assert!(output.contains(if slot == "openai" {
@@ -1584,7 +1670,7 @@ mod tests {
                     StatusCode::UNAUTHORIZED,
                 ),
             ] {
-                for path in ["/messages", "/messages/count_tokens"] {
+                for path in ["/v1/messages", "/v1/messages/count_tokens"] {
                     let mut authority = Authority::new("anthropic", material);
                     authority.kind = kind;
                     let broker = OpenAiBroker::new(authority.clone(), provider.clone()).unwrap();
@@ -1602,23 +1688,21 @@ mod tests {
                     assert!(!output.contains(material));
                     if status == StatusCode::UNAUTHORIZED {
                         assert!(output.contains("authentication_error"));
-                    } else if path == "/messages" {
+                    } else if path == "/v1/messages" {
                         assert!(output.contains(CLAUDE_MARKER));
                         assert!(!output.contains("CWCLAUDE21238"));
                     } else {
                         assert!(output.contains("input_tokens"));
                     }
                     assert_eq!(authority.reads.load(Ordering::Relaxed), 1);
+                    // The transparent route (#2536) leases one operation
+                    // for every Anthropic request, whatever its path.
                     assert_eq!(
                         *authority.calls.lock().unwrap(),
                         [(
                             id,
                             "anthropic".into(),
-                            if path == "/messages" {
-                                "messages".into()
-                            } else {
-                                "count-tokens".into()
-                            },
+                            "messages".into(),
                             "anthropic-api".into()
                         )]
                     );
@@ -1627,7 +1711,7 @@ mod tests {
                     let cw_authority = Authority::new("anthropic", ANTHROPIC_API_KEY);
                     let cw = OpenAiBroker::new(cw_authority, provider.clone()).unwrap();
                     let (status, _, mut body) = cw
-                        .execute(request("anthropic", "/messages", ""))
+                        .execute(request("anthropic", "/v1/messages", ""))
                         .await
                         .unwrap()
                         .into_parts();
@@ -1669,7 +1753,7 @@ mod tests {
                     authority.status = status;
                     let broker = OpenAiBroker::new(authority.clone(), provider.clone()).unwrap();
                     assert!(matches!(
-                        broker.execute(main_anthropic_request("/messages")).await,
+                        broker.execute(main_anthropic_request("/v1/messages")).await,
                         Err(BrokerRequestError::Denied)
                     ));
                     assert_eq!(authority.calls.lock().unwrap().len(), 1);
@@ -1702,7 +1786,7 @@ mod tests {
                 let path = if slot == "openai" {
                     "/responses"
                 } else {
-                    "/messages"
+                    "/v1/messages"
                 };
                 assert!(matches!(
                     broker.execute(request(slot, path, "")).await,
@@ -1736,7 +1820,7 @@ mod tests {
                     let path = if slot == "openai" {
                         "/responses"
                     } else {
-                        "/messages"
+                        "/v1/messages"
                     };
                     assert!(matches!(
                         broker.execute(request(slot, path, "")).await,
@@ -1749,8 +1833,14 @@ mod tests {
             }
         }
 
+        /// A foreign slot, route or oversized body is refused before any lease
+        /// or attempt. A changed method, path or query is a stock-client
+        /// request on the transparent route (#2536): it is leased and
+        /// forwarded, and the fixture answers it as the provider answers a
+        /// route it lacks, a 404 with no attempt counted. It must never be the
+        /// transport failure that ends the whole bridge epoch.
         #[tokio::test]
-        async fn invalid_typed_api_requests_refuse_before_lease_and_attempts() {
+        async fn typed_api_requests_refuse_foreign_slots_and_answer_unserved_routes() {
             for slot in ["openai", "anthropic"] {
                 let provider = SyntheticProvider::new();
                 let authority = Authority::new(slot, key(slot));
@@ -1758,16 +1848,13 @@ mod tests {
                 let path = if slot == "openai" {
                     "/responses"
                 } else {
-                    "/messages"
+                    "/v1/messages"
                 };
-                for change in ["slot", "route", "method", "path", "query", "size"] {
+                for change in ["slot", "route", "size"] {
                     let mut request = request(slot, path, "");
                     match change {
                         "slot" => request.capability_slot = "foreign".into(),
                         "route" => request.route = "github-https".into(),
-                        "method" => request.method = "GET".into(),
-                        "path" => request.path.push_str("/foreign"),
-                        "query" => request.query = "foreign=true".into(),
                         "size" => request.body.resize(MAX_BODY + 1, b' '),
                         _ => unreachable!(),
                     }
@@ -1776,15 +1863,28 @@ mod tests {
                     assert_eq!(authority.reads.load(Ordering::Relaxed), 0);
                     assert_eq!(attempts(&provider), (0, 0));
                 }
-                if slot == "anthropic" {
-                    let mut duplicate = request(slot, path, "");
-                    duplicate.headers.push(CredentialHttpHeader {
-                        name: "anthropic-version".into(),
-                        value: b"2023-06-01".to_vec(),
-                    });
-                    assert!(broker.execute(duplicate).await.is_err());
-                    assert!(authority.calls.lock().unwrap().is_empty());
-                    assert_eq!(authority.reads.load(Ordering::Relaxed), 0);
+                for (leases, change) in ["method", "path", "query"].into_iter().enumerate() {
+                    let mut request = request(slot, path, "");
+                    match change {
+                        "method" => request.method = "GET".into(),
+                        "path" => request.path.push_str("/foreign"),
+                        "query" => request.query = "foreign=true".into(),
+                        _ => unreachable!(),
+                    }
+                    let (status, _, mut body) = broker
+                        .execute(request)
+                        .await
+                        .unwrap_or_else(|_| panic!("{slot}/{change}: an HTTP answer"))
+                        .into_parts();
+                    assert_eq!(status, StatusCode::NOT_FOUND, "{slot}/{change}");
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = body.next().await {
+                        bytes.extend(chunk.unwrap());
+                    }
+                    let output = String::from_utf8(bytes).unwrap();
+                    assert!(output.contains("not_found"), "{slot}/{change}");
+                    assert!(!output.contains(key(slot)));
+                    assert_eq!(authority.calls.lock().unwrap().len(), leases + 1);
                     assert_eq!(attempts(&provider), (0, 0));
                 }
             }

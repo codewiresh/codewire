@@ -10,7 +10,10 @@
 # eight minutes in) and the 60-second authority windows. Each authority change
 # starts only while the serving bridge epoch has three minutes left before its
 # natural end; otherwise the journey first waits for the relay's next epoch,
-# usually under two and a half minutes.
+# usually under two and a half minutes. The native stage restarts
+# orchestration just before the workspace Pod it proves starts, so the relay's
+# and the workspace's tokens expire within a minute of each other, and its
+# renewal probe proves an epoch never ends without a successor there (#2641).
 set -euo pipefail
 
 if [ "${KIND_E2E_COMMON_LOADED:-0}" != "1" ]; then
