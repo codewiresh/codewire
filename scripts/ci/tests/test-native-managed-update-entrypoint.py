@@ -164,6 +164,30 @@ env() {
                 self.assertEqual(result.returncode, 13)
                 self.assertNotIn('after-function', result.stdout)
 
+    def test_invalid_broker_renewal_profiles_refuse_before_effect_tools(self):
+        base = []
+        for flag in ['cw-bin', 'mesh-bin', 'derp-bin', 'data-plane-smoke-bin',
+                     'credential-bridge-smoke-bin', 'state-probe-bin', 'artifact-root', 'artifact-lock']:
+            base.extend(['--' + flag, '/unused/' + flag])
+        renewal = ['--broker-renewal-observation']
+        profiles = [renewal, renewal + renewal + ['--managed-credential-broker'],
+                    renewal + ['--managed-credential-broker', '--managed-agent-sessions'],
+                    renewal + ['--managed-credential-broker', '--managed-agent-cw-image-receipt', '/unused/A/image.json'],
+                    renewal + ['--managed-credential-broker', '--managed-agent-update-cw-sha256', B]]
+        spy = self.root / 'bin'; spy.mkdir()
+        effects = self.root / 'effects'
+        for name in ('mktemp', 'secret-tool', 'dbus-daemon', 'gnome-keyring-daemon'):
+            path = spy / name
+            path.write_text('#!/bin/sh\nprintf "effect\\n" >>"$EFFECTS"\nexit 99\n')
+            path.chmod(0o700)
+        for args in profiles:
+            with self.subTest(args=args):
+                result = subprocess.run(['bash', str(SOURCE), *base, *args], text=True, capture_output=True,
+                    env={'PATH': str(spy) + ':/usr/bin:/bin', 'HOME': os.environ['HOME'],
+                         'EFFECTS': str(effects), 'TMPDIR': str(self.root)}, timeout=10)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertFalse(effects.exists(), 'invalid profile reached an effect tool')
+
     def test_invalid_update_profiles_refuse_before_effect_tools(self):
         base = []
         for flag in ['cw-bin', 'mesh-bin', 'derp-bin', 'data-plane-smoke-bin',
