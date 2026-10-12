@@ -32,7 +32,10 @@ readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5
 # Docker keys credentials by registry hostname. The single Harbor publisher
 # login below both pushes codewire/ images and pulls oci-approved/ inputs such
 # as the pinned SBOM tool; a second login on the same host would replace it.
-readonly SBOM_GENERATOR_IMAGE='registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7'
+# BuildKit runs the SBOM scanner on the build node, so it is pinned by its
+# multi-platform index (docker/buildkit-syft-scanner 1.12.0, promoted by
+# infra#1383): the native arm64 support build runs its arm64 variant.
+readonly SBOM_GENERATOR_IMAGE='registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9'
 readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
 readonly EXPECTED_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
 
