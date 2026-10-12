@@ -116,7 +116,7 @@
           </header>
           <p class="cw-terminal-limit" id="terminal-limit" data-terminal-limit hidden>Up to 8 terminals can be open at once. Close one to open another.</p>
           <p class="cw-terminal-session-message" role="status" data-terminal-message>Loading terminal sessions…</p><a class="cw-terminal-reload" href="terminal-tabs.html?list_search=quiet-mesa&amp;list_state=running" data-terminal-reload hidden>Reload page</a>
-          <p class="cw-terminal-empty" data-terminal-empty>Choose New terminal to start a shell. Leaving this page disconnects the browser; the shell keeps running until you close it or stop the Sandbox.</p>
+          <div class="cw-terminal-empty" data-terminal-empty-state><p role="status" data-terminal-empty>A terminal opens here when the Sandbox is ready. Leaving this page disconnects the browser; the shell keeps running until you close it or stop the Sandbox.</p><button class="cw-button cw-button--outline cw-button--small" type="button" data-terminal-retry hidden>Retry</button></div>
           <dialog class="cw-dialog" data-dialog data-terminal-rename-dialog id="rename-terminal" aria-labelledby="rename-terminal-title" aria-describedby="rename-terminal-description">
             <header class="cw-dialog-header"><h2 id="rename-terminal-title">Rename terminal</h2></header>
             <form method="dialog" data-terminal-rename-form>

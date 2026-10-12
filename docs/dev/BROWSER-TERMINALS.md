@@ -7,6 +7,17 @@ tabs, navigating away, and closing the browser transport do not launch, restart,
 or stop a shell. Close terminal requires confirmation and explicitly calls Stop.
 Removing an ended or unavailable tab only removes its browser presentation.
 
+Opening a Sandbox's page opens one terminal by itself, through the same launch
+as New terminal, at most once per page load. It launches only after a fresh
+ready status and a successful session list, while the page shows no terminal,
+no saved reference names one, and no session is live; a live session is
+re-attached instead, and a saved terminal that is gone is reported, not
+replaced. A page that has shown a terminal never opens another by itself, so
+closing the last one does not start a new shell. Two pages opened at the same
+moment may each start one. A failed list or launch replaces the empty state's
+text with the reason and a Retry button; Retry re-lists before it launches, so
+a launch whose reply was lost is re-attached, not repeated.
+
 The browser keeps up to eight independent terminal presentations. Session
 storage contains only immutable account, organization, environment and session
 references. It never contains terminal output, input, cursors, commands or

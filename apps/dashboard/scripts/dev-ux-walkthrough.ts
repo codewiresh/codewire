@@ -465,8 +465,9 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
     for (const agent of await page.locator('input[name="agent"]').all()) await agent.uncheck();
   });
-  // Time the backend start apart from the UI checks. New terminal is enabled
-  // only after setup completes and the runtime is ready.
+  // Time the backend start apart from the UI checks. The page opens its own
+  // terminal once setup completes and the runtime is ready; New terminal is
+  // enabled after that launch.
   let submitted = 0;
   let accepted = 0;
   await stage("create-submit", async () => {
@@ -495,10 +496,10 @@ export async function runDevUxWalkthrough(page: Page, options: {
   // time it from acceptance rather than from this step's own start.
   await stage("create-to-terminal-enabled", async () => {
     await visit(page, detailPath);
-    await expect(button(page, "New terminal")).toBeEnabled({ timeout: 240_000 });
+    await expect(page.getByRole("tab")).toHaveCount(1, { timeout: 240_000 });
+    await expect(button(page, "New terminal")).toBeEnabled({ timeout: 60_000 });
   }, accepted);
   await stage("terminal-attach", async () => {
-    await button(page, "New terminal").click();
     await expect(button(page, "Disconnect")).toBeEnabled({ timeout: 60_000 });
     firstId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(firstId).toBeTruthy();

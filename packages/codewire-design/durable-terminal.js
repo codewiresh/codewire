@@ -49,6 +49,10 @@
     const renameButton = root.querySelector("[data-terminal-rename]");
     const refreshButton = root.querySelector("[data-terminal-refresh]");
     const message = root.querySelector("[data-terminal-message]");
+    // With no tab open: what happens next, or why it failed beside Retry.
+    const empty = root.querySelector("[data-terminal-empty]");
+    const emptyState = root.querySelector("[data-terminal-empty-state]") || empty;
+    const retryButton = root.querySelector("[data-terminal-retry]");
     const existing = root.querySelector("[data-terminal-existing]");
     const existingForm = root.querySelector("[data-terminal-existing-form]");
     const dialog = root.querySelector("[data-terminal-close-dialog]");
@@ -83,6 +87,16 @@
     // Readiness returned while another request was pending: re-list before
     // re-attaching, because the Sandbox may have restarted.
     let relist = false;
+    // Opening the page opens one terminal. "armed" until the first session
+    // list while the Sandbox is ready decides, "opening" while that launch
+    // runs, then "off": once per page load, and never again after this page
+    // has shown a terminal, so closing the last one does not start another.
+    let autoOpen = "armed";
+    // Why the session list or a launch failed while no tab is open. It takes
+    // the empty state's place beside Retry; rearm lets Retry open a terminal
+    // again after a failed launch.
+    let failure = null;
+    let retryFocus = false;
     // Rendered lifecycle state is not fresh setup readiness. Wait for the
     // authenticated status controller before opening a transport or a shell.
     let runtimeAvailable = false;
@@ -106,6 +120,28 @@
     const readinessTone = () => runtimeAvailable && !runtimeRunning ? "neutral" : "warning";
 
     function announce(text) { message.textContent = text; }
+    // The empty state never invites an action the page cannot take: it
+    // explains readiness, a failure (with Retry), a reload, the automatic
+    // terminal on its way, or New terminal when this page has none to open.
+    function renderEmpty() {
+      const ready = runtimeReady();
+      const text = !ready ? readinessMessage()
+        : failure ? failure.text
+          : needsReload ? "Reload this page to open a terminal."
+            : autoOpen !== "off" ? "Opening a terminal…"
+              : "No terminal is open. Choose New terminal to start one; it keeps running until you close it or stop the Sandbox.";
+      // Unchanged text is not rewritten, so the live region speaks only on change.
+      if (empty.textContent !== text) empty.textContent = text;
+      emptyState.hidden = tabs.size > 0;
+      if (!retryButton) return;
+      retryButton.hidden = !ready || !failure?.retry;
+      retryButton.disabled = pending || suspended;
+      // A Retry that fails again gives focus back to Retry, not the page.
+      if (retryFocus && !pending) {
+        retryFocus = false;
+        if (!retryButton.hidden && [null, document.body].includes(document.activeElement)) retryButton.focus();
+      }
+    }
     // Output, status-bar groups and tab actions are shown or withheld together.
     function showSessions(visible) {
       panels.hidden = !visible;
@@ -117,6 +153,10 @@
       if (!authorized || !account) return;
       try {
         sessionStorage.setItem(`${storagePrefix}account`, account);
+        // Before this tab has shown a terminal there is nothing to remember.
+        // An empty record would stop the next load re-attaching a live
+        // session, such as one an interrupted automatic launch started.
+        if (!tabs.size && !references()) return;
         sessionStorage.setItem(storageKey(), JSON.stringify({ version: 1, accountId: account,
           organizationId: org, environmentId: environment, sessions: [...tabs.keys()], activeSessionId: active,
           labels: [...tabs.values()].map((tab) => ({ sessionId: tab.id, label: tab.label })) }));
@@ -177,6 +217,7 @@
         tab.remove.disabled = !authorized || pending || suspended;
         tab.presentation.terminal.options.disableStdin = openBlocked || !open || !live(tab.state);
       }
+      renderEmpty();
     }
     function clearRename() {
       renameTarget = null;
@@ -607,6 +648,9 @@
     }
     function add(session) {
       if (tabs.has(session.sessionId) || tabs.size >= maxTabs) return tabs.get(session.sessionId);
+      // This page has shown a terminal: it never opens one by itself again.
+      autoOpen = "off";
+      failure = null;
       number += 1;
       // The template holds one tab's four parts: its tab, its output panel,
       // its status-bar group and its terminal-menu actions.
@@ -697,7 +741,6 @@
       for (const session of inventory) {
         if (!tabs.has(session.sessionId)) existing.add(new Option(`${session.sessionId.slice(-8)} · ${session.state}`, session.sessionId));
       }
-      root.querySelector("[data-terminal-empty]").hidden = tabs.size > 0;
       updateControls();
     }
     async function request(action, sessionId) {
@@ -732,6 +775,7 @@
           const error = new Error("Session request failed");
           error.reload = value?.error === "request-rejected";
           error.limit = value?.error === "session-limit";
+          error.refused = value?.error === "sessions-refused";
           error.authorization = response.status === 401 || (response.status === 403 && !error.reload) || value?.error === "account-changed";
           throw error;
         }
@@ -744,6 +788,8 @@
       const current = ++epoch;
       pending = true;
       authorized = false;
+      failure = null;
+      let launch = false;
       invalidateRename();
       showSessions(false);
       for (const tab of tabs.values()) pauseForIdentity(tab);
@@ -766,8 +812,10 @@
         uncertain = false;
         const available = new Map(inventory.map((session) => [session.sessionId, session]));
         let missing = false;
+        let savedSessions = false;
         if (!tabs.size) {
           const saved = references();
+          savedSessions = !!saved?.sessions.length;
           const selected = saved ? saved.sessions : inventory.filter((session) => live(session.state)).slice(0, maxTabs).map((session) => session.sessionId);
           missing = selected.some((id) => !available.has(id));
           for (const id of selected) if (available.has(id)) {
@@ -790,24 +838,51 @@
         announce(missing ? "A saved terminal is no longer available. Choose an existing terminal or start a new one." : "");
         relist = false;
         for (const tab of tabs.values()) if (tab.available && tab.wanted) void connect(tab);
+        // The first list while the Sandbox is ready decides the page's one
+        // automatic terminal: started only when there is nothing to restore
+        // or re-attach. A saved terminal that is gone is reported, never
+        // replaced; live sessions are re-attached above instead.
+        if (autoOpen === "armed" && runtimeReady()) {
+          launch = !tabs.size && !savedSessions && !inventory.some((session) => live(session.state));
+          if (!launch) autoOpen = "off";
+        }
       } catch (error) {
         if (current !== epoch || suspended) return;
         if (error.authorization) { clearReferences(); clearPresentations(); account = null; }
         else for (const tab of tabs.values()) if (automatic(tab)) lose(tab, "Terminal sessions are unavailable.");
-        announce(error.authorization ? "Sign in with access to this Sandbox, then refresh sessions." : "Terminal sessions are unavailable. Refresh sessions to try again.");
+        if (tabs.size) {
+          announce(error.authorization ? "Sign in with access to this Sandbox, then refresh sessions."
+            : error.refused ? "This Sandbox can't list its terminals right now. Refresh sessions to try again, or restart the Sandbox."
+              : "Terminal sessions are unavailable. Refresh sessions to try again.");
+        } else {
+          // With no tab open the empty state says why, once, beside Retry.
+          announce("");
+          failure = { retry: true, rearm: false,
+            text: error.authorization ? "Sign in with access to this Sandbox, then retry."
+              : error.refused ? "This Sandbox can't list its terminals right now. Retry, or restart the Sandbox."
+                : "Terminal sessions are unavailable right now." };
+        }
       } finally {
         if (current === epoch) {
           pending = false;
+          const again = foregroundCheck && !document.hidden;
+          // Launch before rendering, so the empty state goes straight from
+          // the list to "Opening a terminal…" with its controls held.
+          if (launch && !again) void mutate("launch", undefined, true);
           showInventory();
-          if (foregroundCheck && !document.hidden) void refresh();
+          if (again) void refresh();
         }
       }
     }
-    async function mutate(action, id) {
+    // An automatic launch is the page's one terminal opened on arrival; it
+    // takes the same path and checks as New terminal.
+    async function mutate(action, id, automatic = false) {
       if (!authorized || pending || uncertain || needsReload || suspended
         || !(action === "stop" ? runtimeControlReady() : runtimeReady())) return;
       const current = epoch;
       pending = true;
+      failure = null;
+      if (automatic) autoOpen = "opening";
       updateControls();
       announce(action === "launch" ? "Starting a terminal…" : "Closing terminal…");
       try {
@@ -832,22 +907,37 @@
         store();
       } catch (error) {
         if (current !== epoch || suspended) return;
+        // Each failure has its status-line text and, for a launch with no
+        // tab open, the empty state's text beside Retry. Retry re-lists
+        // first, so a terminal that did start is re-attached, not doubled.
+        let text;
+        let opening;
         if (error.authorization) {
           authorized = false;
           clearReferences();
           clearPresentations();
           account = null;
-          announce("Your account or access changed. Refresh sessions before continuing.");
+          text = "Your account or access changed. Refresh sessions before continuing.";
+          opening = "Your account or access changed. Sign in with access to this Sandbox, then retry.";
         } else if (error.reload) {
           needsReload = true;
-          announce("Reload this page before changing terminals. The change was not retried.");
+          text = "Reload this page before changing terminals. The change was not retried.";
+          opening = "The terminal was not started. Reload this page to open one.";
         } else if (error.limit) {
-          announce("This Sandbox has reached its terminal session limit. Close a terminal you no longer need, then try again.");
+          text = "This Sandbox has reached its terminal session limit. Close a terminal you no longer need, then try again.";
+          opening = "This Sandbox has reached its session limit. Stop a session you no longer need, then retry.";
         } else {
           uncertain = true;
-          announce("The terminal change could not be confirmed. Refresh sessions to inspect the result before another change.");
+          text = "The terminal change could not be confirmed. Refresh sessions to inspect the result before another change.";
+          opening = "The terminal could not be confirmed as started. Retry looks for it before starting another.";
         }
+        if (action === "launch" && !tabs.size) {
+          announce("");
+          failure = { text: opening, retry: !error.reload, rearm: true };
+        } else announce(text);
       } finally {
+        // An automatic launch ends here, whatever happened to it.
+        if (autoOpen === "opening") autoOpen = "off";
         if (current === epoch) {
           pending = false;
           showInventory();
@@ -873,6 +963,14 @@
     }
     renameButton.addEventListener("click", () => startRename(renameButton));
     refreshButton.addEventListener("click", () => { void refresh(); });
+    // Retry re-lists. After a failed launch it also lets the page open its
+    // terminal again: one launch per click, and only if none is live by then.
+    retryButton?.addEventListener("click", () => {
+      if (pending || suspended || !failure) return;
+      if (failure.rearm && !tabs.size) autoOpen = "armed";
+      retryFocus = true;
+      void refresh();
+    });
     existing.addEventListener("change", updateControls);
     existingForm.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -1060,8 +1158,6 @@
           else connectionText(tab, "Disconnected. Reconnect to resume this terminal.");
         }
       }
-      root.querySelector("[data-terminal-empty]").textContent = !ready ? readinessMessage()
-        : "Choose New terminal to start a shell. Leaving this page disconnects the browser; the shell keeps running until you close it or stop the Sandbox.";
       updateControls();
       if (ready && !initialStatusReceived && !pending && !suspended && !document.hidden) {
         initialStatusReceived = true;
@@ -1070,9 +1166,11 @@
         void refresh();
       } else if (ready && !wasReady && initialStatusReceived) {
         // The Sandbox may have restarted: re-list before re-attaching so ended
-        // sessions become unavailable. Readiness never launches a shell.
+        // sessions become unavailable. Readiness itself never launches a
+        // shell; a page still waiting to open its first terminal re-lists,
+        // and that list decides.
         const waiting = [...tabs.values()].filter((tab) => automatic(tab) && !tab.socket);
-        if (!waiting.length) return;
+        if (!waiting.length && !(autoOpen === "armed" && !tabs.size)) return;
         if (!pending) void refresh();
         else {
           relist = true;
@@ -1098,7 +1196,6 @@
     }
     // Until a Sandbox status arrives, the empty state explains the wait.
     announce("");
-    root.querySelector("[data-terminal-empty]").textContent = readinessMessage();
     updateControls();
   }
 
