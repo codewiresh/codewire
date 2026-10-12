@@ -359,8 +359,11 @@ assert 'scripts/dev/test-macos-vz-workload-network.py' in policy_helpers
 assert 'scripts/ci/tests/test-darwin-cross-check.sh' in policy_helpers
 canary_guard = 'crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py'
 assert canary_guard in policy_helpers, 'composition fixture omitted the actual crate-local policy guard'
+# Merge lanes run beside policy, so every selected family's terminal helper is
+# synthetic too (this selection's security family audits the JS supply chain).
 for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh',
-               'scripts/ci/verify/compile-all-targets.sh']:
+               'scripts/ci/verify/compile-all-targets.sh',
+               'scripts/checks/security/audit-js-supply-chain.sh']:
     destination = fixture / helper
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.suffix == '.sh':
@@ -375,6 +378,16 @@ for helper in ('scripts/dev/preflight.sh', 'scripts/ci/select/select-verificatio
     destination = fixture / helper
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(source_root / helper, destination)
+# The environment precheck is a terminal check here; its own fixture lives in
+# test-pre-push-worktree.sh. Merge state lives in ignored .tmp/, as in the repo.
+environment_check = fixture / 'scripts/dev/preflight-environment.sh'
+environment_check.write_text('#!/usr/bin/env bash\nexit 0\n')
+environment_check.chmod(0o755)
+# The merge pass key reads the toolchain identity; never reach a real rustup.
+rustc = binary / 'rustc'
+rustc.write_text('#!/usr/bin/env bash\nprintf "rustc 0.0.0 (composition fixture)\\n"\n')
+rustc.chmod(0o755)
+(fixture / '.gitignore').write_text('.tmp/\n')
 git_env = dict(environment, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
 
 def git(*args):
@@ -404,19 +417,25 @@ receipt_cases += [dict(COMPOSITION_FAIL_ARGS=json.dumps(command)) for command in
                  (darwin_check, workload_test, workload_clippy, client_test, client_clippy, transcript_test)]
 for injected in receipt_cases:
     trace.write_text('')
-    result = subprocess.run([str(preflight), '--for-push', '--emit-receipt'], cwd=fixture,
+    # An injected failure lives in the environment, outside the exact-tree
+    # pass key, so each case starts without earlier passes.
+    shutil.rmtree(fixture / '.tmp', ignore_errors=True)
+    result = subprocess.run([str(preflight), '--for-merge', '--emit-receipt'], cwd=fixture,
                             env=dict(git_env, **injected), capture_output=True, text=True)
     assert result.returncode != 0, result.stdout
-    assert 'preflight push mode: default' in result.stdout, result.stdout
+    assert 'preflight merge mode: default' in result.stdout, result.stdout
     assert 'receipt=emitted' not in result.stdout and 'receipt_path=' not in result.stdout
     assert 'preflight: OK' not in result.stdout
+    assert "FAILED" in result.stderr, result.stderr
     records = [json.loads(line) for line in trace.read_text().splitlines()]
     assert records, (result.stdout, result.stderr)
+    # Lanes run concurrently, so the failing command need not be the last
+    # traced one; it must have run and stopped qualification.
     if 'COMPOSITION_FAIL_TOOL' in injected:
-        assert records[-1]['tool'] == injected['COMPOSITION_FAIL_TOOL'], records
+        assert any(r['tool'] == injected['COMPOSITION_FAIL_TOOL'] for r in records), (records, result.stderr[-3000:])
     else:
-        assert records[-1]['args'] == json.loads(injected['COMPOSITION_FAIL_ARGS']), records
-    missing = subprocess.run([str(receipt_owner), 'verify'], cwd=fixture,
+        assert any(r['args'] == json.loads(injected['COMPOSITION_FAIL_ARGS']) for r in records), (records, result.stderr[-3000:])
+    missing = subprocess.run([str(receipt_owner), 'verify', '--accept-scope', 'merge'], cwd=fixture,
                              env=git_env, capture_output=True, text=True)
     assert missing.returncode != 0 and 'missing' in missing.stdout, missing.stdout
     assert not list((fixture / '.git/codewire-receipts').rglob('*.json'))
