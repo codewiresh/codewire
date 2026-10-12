@@ -1299,21 +1299,35 @@ fn shutdown_pauses_only_a_run_noel_can_resume_and_queues_its_parents_notice_once
 }
 
 #[test]
-fn shutdown_never_pauses_a_run_an_explicit_stop_recorded_its_interrupt_for() {
-    let f = Fixture::host();
-    let (lead, driver, session) = f.lead_and_worker();
-    let task = f.busy(&driver, &session, Some(RUN));
-    f.resumable(&driver);
-    f.interrupt_before_stop(&driver, &session).unwrap();
-    assert_eq!(
-        f.pause_before_shutdown(&driver, &session).unwrap(),
-        json!({"agent": "noel", "paused": null})
-    );
-    assert_eq!(
-        load_message(&f.dir(&driver), &task.id).unwrap().state,
-        MessageState::Running
-    );
-    assert!(f.notices(&lead, &task.id).is_empty());
+fn shutdown_never_pauses_a_run_an_explicit_stop_is_recorded_for() {
+    // The stop's interrupt, which this helper records for the message, or
+    // the stop intent the host daemon writes itself when this helper fails.
+    for daemon_intent in [false, true] {
+        let f = Fixture::host();
+        let (lead, driver, session) = f.lead_and_worker();
+        let task = f.busy(&driver, &session, Some(RUN));
+        f.resumable(&driver);
+        if daemon_intent {
+            let root = f.environment.root();
+            for path in [root.join("sessions"), root.join("sessions").join(&session)] {
+                private_directory(&path).unwrap();
+            }
+            codewire_daemon::stop_evidence::record_stop_intent(&root, &session).unwrap();
+        } else {
+            f.interrupt_before_stop(&driver, &session).unwrap();
+        }
+        assert_eq!(
+            f.pause_before_shutdown(&driver, &session).unwrap(),
+            json!({"agent": "noel", "paused": null}),
+            "{daemon_intent}"
+        );
+        assert_eq!(
+            load_message(&f.dir(&driver), &task.id).unwrap().state,
+            MessageState::Running,
+            "{daemon_intent}"
+        );
+        assert!(f.notices(&lead, &task.id).is_empty(), "{daemon_intent}");
+    }
 }
 
 #[test]

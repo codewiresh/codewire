@@ -6,17 +6,24 @@
 //! host daemon's record helper pauses the active run before the daemon's
 //! first signal reaches the conversation (`pause_before_shutdown`), so how
 //! the 250 ms between its SIGTERM and SIGKILL fall never changes the outcome.
-//! The driver pauses the run itself only with evidence of the takedown. An
-//! explicit stop or restart never pauses a message, and never later resumes
-//! it. Codex and Claude cannot resume a run, so their message still ends
-//! unknown.
+//! An explicit stop or restart never pauses a message, and never later
+//! resumes it. Codex and Claude cannot resume a run, so their message still
+//! ends unknown.
 //!
-//! The host daemon signals a conversation only after it has written what
-//! its stop means: an explicit stop's interrupt, or a takedown's pause or
-//! marker. So a stop signal from the daemon is decided at once by what is
-//! on disk. A signal from anywhere else is never an explicit stop: a host
-//! that shuts down signals every process at once, and the driver then waits
-//! for the marker its daemon writes when it is signalled too.
+//! The host daemon writes what a stop means before it signals a session
+//! (see `codewire_daemon::stop_evidence`): the environment's takedown marker,
+//! or an explicit stop's intent. It writes both itself, so neither depends
+//! on the conversation's record helper. A driver that is signalled reads the
+//! disk:
+//!
+//! - an explicit stop is recorded: the run ends as an explicit stop, at
+//!   once, and is never paused;
+//! - a takedown is recorded, by its marker or by the message the helper
+//!   already paused: the run is paused, at once;
+//! - neither: the signal is not the daemon's. A host that shuts down
+//!   signals every process at once, so the driver waits a moment for the
+//!   marker its daemon writes when it is signalled too, and pauses when it
+//!   comes. Without one the run ends unknown, as for any stray signal.
 //!
 //! The parent hears once that the message paused, and once of its final
 //! state. When the environment's host daemon starts again it restarts each
@@ -25,138 +32,16 @@
 //! resolves its paused message once instead, so none stays paused with
 //! nothing to resume it.
 use super::*;
+use codewire_daemon::stop_evidence;
 
 const REASON: PauseReason = PauseReason::EnvironmentStopped;
-/// How long a driver that something other than its host daemon signalled
-/// waits for the daemon's takedown marker. A host that shuts down signals
-/// the daemon in the same moment, and the daemon writes the marker first;
-/// a stray signal brings none, and the run then ends unknown.
-pub(super) const FOREIGN_SIGNAL_WAIT: Duration = Duration::from_secs(3);
+/// How long a driver that was signalled with nothing recorded waits for its
+/// daemon's takedown marker. A host that shuts down signals the daemon in
+/// the same moment, and the daemon writes the marker before it stops
+/// anything; a stray signal brings none, and the run then ends unknown.
+pub(super) const TAKEDOWN_MARKER_WAIT: Duration = Duration::from_secs(3);
 const EVIDENCE_POLL: Duration = Duration::from_millis(10);
 
-/// Who sent the driver its latest stop signal.
-#[cfg(target_os = "linux")]
-pub(super) mod sender {
-    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-
-    const SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
-    /// The process that sent the latest of them, or 0: none yet, or none
-    /// named.
-    static SENDER: AtomicI32 = AtomicI32::new(0);
-    /// The host daemon: the driver's parent when the watch began.
-    static DAEMON: AtomicI32 = AtomicI32::new(0);
-    /// What handled each signal before the watch, which still handles it.
-    static PREVIOUS: [AtomicUsize; 3] = [
-        AtomicUsize::new(libc::SIG_DFL),
-        AtomicUsize::new(libc::SIG_DFL),
-        AtomicUsize::new(libc::SIG_DFL),
-    ];
-    static PREVIOUS_FLAGS: [AtomicI32; 3] =
-        [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)];
-
-    /// Notes the sender, then runs the handler it stands in front of. It
-    /// only reads the kernel's siginfo, stores an atomic and calls that
-    /// handler, all of which a signal handler may do.
-    extern "C" fn note(
-        signal: libc::c_int,
-        info: *mut libc::siginfo_t,
-        context: *mut libc::c_void,
-    ) {
-        let Some(index) = SIGNALS.iter().position(|known| *known == signal) else {
-            return;
-        };
-        if !info.is_null() {
-            // SAFETY: the kernel passes an SA_SIGINFO handler a valid
-            // siginfo, and `kill` and `sigqueue` fill in the sender's PID.
-            let sender = unsafe {
-                if matches!((*info).si_code, libc::SI_USER | libc::SI_QUEUE) {
-                    (*info).si_pid()
-                } else {
-                    0
-                }
-            };
-            SENDER.store(sender, Ordering::SeqCst);
-        }
-        let previous = PREVIOUS[index].load(Ordering::SeqCst);
-        if previous == libc::SIG_IGN {
-            return;
-        }
-        if previous == libc::SIG_DFL {
-            // Nothing handled it before: its default action still applies.
-            // SAFETY: `signal` and `raise` are async-signal-safe.
-            unsafe {
-                libc::signal(signal, libc::SIG_DFL);
-                libc::raise(signal);
-            }
-            return;
-        }
-        // SAFETY: `previous` is the handler `sigaction` reported for this
-        // signal, called with the arguments its flags say it takes.
-        unsafe {
-            if PREVIOUS_FLAGS[index].load(Ordering::SeqCst) & libc::SA_SIGINFO != 0 {
-                let handler: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) =
-                    std::mem::transmute(previous);
-                handler(signal, info, context);
-            } else {
-                let handler: extern "C" fn(libc::c_int) = std::mem::transmute(previous);
-                handler(signal);
-            }
-        }
-    }
-
-    /// Starts noting who sends the driver's stop signals. Call it once the
-    /// runtime's own handlers for them exist: each keeps running after the
-    /// sender is noted.
-    pub(in super::super) fn watch() -> std::io::Result<()> {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        let mut result = Ok(());
-        ONCE.call_once(|| {
-            // SAFETY: getppid reads the current process identity.
-            DAEMON.store(unsafe { libc::getppid() }, Ordering::SeqCst);
-            for (index, signal) in SIGNALS.iter().enumerate() {
-                // SAFETY: both structures are plain data that sigaction
-                // fills or reads; `note` is async-signal-safe and chains to
-                // the handler saved here before it can run.
-                unsafe {
-                    let mut previous: libc::sigaction = std::mem::zeroed();
-                    if libc::sigaction(*signal, std::ptr::null(), &mut previous) != 0 {
-                        result = Err(std::io::Error::last_os_error());
-                        return;
-                    }
-                    PREVIOUS_FLAGS[index].store(previous.sa_flags, Ordering::SeqCst);
-                    PREVIOUS[index].store(previous.sa_sigaction, Ordering::SeqCst);
-                    let mut action = previous;
-                    action.sa_sigaction = note as *const () as usize;
-                    action.sa_flags = previous.sa_flags | libc::SA_SIGINFO;
-                    if libc::sigaction(*signal, &action, std::ptr::null_mut()) != 0 {
-                        result = Err(std::io::Error::last_os_error());
-                        return;
-                    }
-                }
-            }
-        });
-        result
-    }
-
-    /// The process that sent the latest stop signal, if one did.
-    pub(in super::super) fn latest() -> Option<libc::pid_t> {
-        Some(SENDER.load(Ordering::SeqCst)).filter(|sender| *sender > 0)
-    }
-
-    /// Whether the host daemon sent the latest stop signal.
-    pub(in super::super) fn by_daemon() -> bool {
-        latest().is_some_and(|sender| sender == DAEMON.load(Ordering::SeqCst))
-    }
-}
-
-/// No other host runs noel, and no other driver pauses: its stop is decided
-/// at once by what is on disk.
-#[cfg(not(target_os = "linux"))]
-pub(super) mod sender {
-    pub(in super::super) fn by_daemon() -> bool {
-        true
-    }
-}
 /// How the paused message ends when retention removes its conversation's
 /// session record.
 #[cfg(target_os = "linux")]
@@ -164,7 +49,6 @@ pub(super) const RETIRED: &str =
     "its conversation's session record was removed, so it can never resume";
 /// How it ends when its owner explicitly stops its conversation while the
 /// conversation is not running.
-#[cfg(target_os = "linux")]
 pub(super) const STOPPED: &str = "its conversation was stopped before it resumed";
 /// What the inbox notice records say while their parent has not adopted them.
 const QUEUED: &str = "queued in the parent's inbox; the parent adopts it when it runs";
@@ -322,12 +206,40 @@ fn queue_notice(
     Ok(())
 }
 
-/// Whether an explicit stop or restart recorded its interrupt for the
-/// message, which the host daemon's helper does before the daemon signals,
-/// delivered or not. Such a message is never paused, and never resumed
-/// later.
-pub(super) fn explicit_stop_recorded(dir: &Path, message_id: &str) -> bool {
-    fs::symlink_metadata(message_path(dir, &stop_interrupt_id(message_id))).is_ok()
+/// Whether the host daemon recorded an explicit stop or restart of the
+/// conversation that no start of it has acted on yet. The daemon writes it
+/// itself, before the stop can signal anything.
+fn stop_intended(environment: &DriverEnvironment, session_id: &str) -> bool {
+    environment
+        .host()
+        .is_some_and(|host| stop_evidence::stop_intended(&host.root(), session_id))
+}
+
+/// Whether an explicit stop or restart is recorded for the message: the
+/// daemon's stop intent for its conversation, or the stop's interrupt, which
+/// the daemon's record helper writes for the message before the daemon
+/// signals, delivered or not. Such a message is never paused, and never
+/// resumed later.
+pub(super) fn explicit_stop_recorded(
+    environment: &DriverEnvironment,
+    dir: &Path,
+    session_id: &str,
+    message_id: &str,
+) -> bool {
+    stop_intended(environment, session_id)
+        || fs::symlink_metadata(message_path(dir, &stop_interrupt_id(message_id))).is_ok()
+}
+
+/// How a message of a run noel could have resumed ends at its
+/// conversation's next start, when the daemon's stop intent says the
+/// conversation was stopped explicitly since.
+pub(super) fn stopped_text(paused: bool) -> String {
+    if paused {
+        format!("paused when its environment stopped; {STOPPED}; outcome unknown; not replayed")
+    } else {
+        "its conversation was stopped while this was in flight; outcome unknown; not replayed"
+            .into()
+    }
 }
 
 /// Pauses a conversation's running turn because its environment is being
@@ -344,7 +256,7 @@ pub(super) fn pause_message(
     message_id: &str,
 ) -> anyhow::Result<MessageRecord> {
     admit_host_owner(environment, config)?;
-    if explicit_stop_recorded(dir, message_id) {
+    if explicit_stop_recorded(environment, dir, &binding.session_id, message_id) {
         return load_message(dir, message_id);
     }
     let record = update_message(dir, message_id, |r| {
@@ -439,33 +351,64 @@ pub(super) fn resolve_paused(
 }
 
 /// The environment's takedown marker: `cw env stop`, `restart` and `rm`
-/// write it before they ask the host daemon to stop, and the daemon writes
-/// it first when a signal stops it. The daemon removes it when it starts.
+/// write it to ask the host daemon to stop, and the daemon writes it itself
+/// before any other shutdown stops a session. The daemon removes it when it
+/// starts.
 fn takedown_marked(environment: &DriverEnvironment) -> bool {
     environment
         .host()
-        .is_some_and(|host| host.root().join(SHUTDOWN_MARKER).is_file())
+        .is_some_and(|host| stop_evidence::takedown_marked(&host.root()))
 }
 
 impl Driver {
-    /// An explicit stop or restart of this conversation records its
-    /// interrupt before it signals, delivered or not.
+    /// An explicit stop or restart of this conversation is recorded before
+    /// it signals: by the daemon's stop intent, by the stop's interrupt for
+    /// the message, or by that interrupt reaching this driver.
     fn explicitly_stopped(&self, message_id: &str) -> bool {
-        self.stopping || explicit_stop_recorded(&self.dir, message_id)
+        self.stopping
+            || explicit_stop_recorded(
+                &self.environment,
+                &self.dir,
+                &self.binding.session_id,
+                message_id,
+            )
     }
 
-    /// Whether the stop is the whole environment's and no explicit stop of
-    /// this conversation. The takedown's evidence is its marker or, for the
-    /// run that was active, a message the daemon's helper already paused; a
-    /// message set aside at startup may still be paused from an earlier
-    /// takedown, so only the marker counts for it.
+    /// Whether the daemon's stop intent is recorded for this conversation.
+    /// A start acts on it for what the last incarnation left in flight.
+    pub(super) fn stop_intended(&self) -> bool {
+        stop_intended(&self.environment, &self.binding.session_id)
+    }
+
+    /// The start has acted on the stop intent and its records are saved.
+    pub(super) fn clear_stop_intent(&self) {
+        let Some(host) = self.environment.host() else {
+            return;
+        };
+        if let Err(error) = stop_evidence::clear_stop_intent(&host.root(), &self.binding.session_id)
+        {
+            log(format!(
+                "could not clear the conversation's stop intent: {error}; its next stop is treated as explicit"
+            ));
+        }
+    }
+
+    /// What the driver's stop signal means for a message, read from the
+    /// disk: `true` when the whole environment is being taken down and no
+    /// explicit stop of this conversation is recorded.
     ///
-    /// The daemon writes its evidence before it signals, so its signal is
-    /// decided by what is there. A signal from elsewhere waits, at most
-    /// [`FOREIGN_SIGNAL_WAIT`], for the daemon's marker, or for the daemon
-    /// to stop this conversation itself.
-    async fn taken_down(&self, message_id: &str, active: bool, by_daemon: fn() -> bool) -> bool {
-        let deadline = tokio::time::Instant::now() + FOREIGN_SIGNAL_WAIT;
+    /// The host daemon writes its evidence before it signals, so its signal
+    /// is decided at once: an explicit stop's record ends the run, never
+    /// paused, and a takedown's pauses it. The takedown's evidence is its
+    /// marker or, for the run that was active, a message the daemon's helper
+    /// already paused; a message set aside at startup may still be paused
+    /// from an earlier takedown, so only the marker counts for it.
+    ///
+    /// With neither, the signal is not the daemon's: the driver waits at
+    /// most [`TAKEDOWN_MARKER_WAIT`] for the marker of a daemon that the
+    /// same host shutdown signalled, or for an explicit stop to be recorded.
+    async fn taken_down(&self, message_id: &str, active: bool) -> bool {
+        let deadline = tokio::time::Instant::now() + TAKEDOWN_MARKER_WAIT;
         loop {
             if self.explicitly_stopped(message_id) {
                 return false;
@@ -476,7 +419,7 @@ impl Driver {
             if paused || takedown_marked(&self.environment) {
                 return true;
             }
-            if by_daemon() || tokio::time::Instant::now() >= deadline {
+            if tokio::time::Instant::now() >= deadline {
                 return false;
             }
             tokio::time::sleep(EVIDENCE_POLL).await;
@@ -485,25 +428,13 @@ impl Driver {
 
     /// A stop signal reached the driver, or noel exited by one. With
     /// evidence that the whole environment is being taken down, a run noel
-    /// can resume is paused. Otherwise, as for an explicit stop or any other
+    /// can resume is paused. Otherwise, as for an explicit stop or a stray
     /// signal, the run ends unknown and its parent hears once, as before.
     pub(super) async fn stopped(
         &mut self,
         peer: &mut Peer,
         reason: String,
         stopping: bool,
-    ) -> anyhow::Result<()> {
-        self.stopped_from(peer, reason, stopping, sender::by_daemon)
-            .await
-    }
-
-    /// [`Self::stopped`], given whether the host daemon sent the signal.
-    pub(super) async fn stopped_from(
-        &mut self,
-        peer: &mut Peer,
-        reason: String,
-        stopping: bool,
-        by_daemon: fn() -> bool,
     ) -> anyhow::Result<()> {
         let active = self.active.as_ref().map(|active| active.message_id.clone());
         let message = match &active {
@@ -516,7 +447,7 @@ impl Driver {
                 .map(|message| (message.to_owned(), false)),
         };
         if let Some((message, active)) = message
-            && self.taken_down(&message, active, by_daemon).await
+            && self.taken_down(&message, active).await
         {
             match pause_message(
                 &self.environment,
@@ -600,29 +531,27 @@ impl Driver {
     }
 }
 
-/// Whether the host daemon will never start this conversation again.
+/// Why a daemon that starts leaves a stopped conversation with a paused
+/// message stopped, if it does: its owner stopped it since, so it is not
+/// started again for a run that must not continue, or its process cleanup
+/// is unknown, so the daemon could never start it.
 #[cfg(target_os = "linux")]
-fn never_restarts(error: &codewire_daemon::client::SessionClientError) -> bool {
-    use codewire_daemon::client::SessionClientError as E;
-    match error {
-        E::Status(status) => match status.code() {
-            tonic::Code::ResourceExhausted | tonic::Code::NotFound => true,
-            tonic::Code::FailedPrecondition => {
-                let message = status.message();
-                message.contains("environment projection is no longer available")
-                    || message.contains("cleanup is unconfirmed")
-            }
-            _ => false,
-        },
-        _ => false,
+fn left_stopped(stop_intended: bool, cleanup_unknown: bool) -> Option<&'static str> {
+    if stop_intended {
+        Some(STOPPED)
+    } else if cleanup_unknown {
+        Some("its conversation's process cleanup is unknown, so it cannot start again")
+    } else {
+        None
     }
 }
 
 /// The environment's host daemon started: it restarts every noel
 /// conversation the environment's takedown paused, and no other. Each start
 /// runs the same recover path as `cw restart`, bounded by its handshake. A
-/// conversation the daemon will never start again resolves its paused
-/// messages once instead. Failures are logged to the daemon log.
+/// conversation the daemon will never start again, or whose owner stopped
+/// it since, resolves its paused messages once instead. Failures are logged
+/// to the daemon log.
 #[cfg(target_os = "linux")]
 pub(crate) async fn resume_paused(
     environment: &HostEnvironment,
@@ -661,11 +590,11 @@ pub(crate) async fn resume_paused(
                 continue;
             }
         };
-        let never = if session.cleanup_unknown {
-            Some(
-                "its conversation's process cleanup is unknown, so it cannot start again"
-                    .to_owned(),
-            )
+        let never = if let Some(why) = left_stopped(
+            stop_intended(&store, &session.session_id),
+            session.cleanup_unknown,
+        ) {
+            Some(why.to_owned())
         } else {
             match client.restart(&session.session_id).await {
                 Ok(_) => {
@@ -675,7 +604,8 @@ pub(crate) async fn resume_paused(
                     );
                     None
                 }
-                Err(error) if never_restarts(&error) => {
+                // The daemon says so itself: this refusal cannot change.
+                Err(error) if error.never_restarts().is_some() => {
                     Some(format!("its conversation cannot start again ({error})"))
                 }
                 Err(error) => {
@@ -705,14 +635,40 @@ pub(crate) async fn resume_paused(
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::*;
+    use super::{STOPPED, left_stopped};
+    use codewire_daemon::NeverRestarts;
+    use codewire_daemon::client::SessionClientError as E;
 
     #[test]
-    fn only_a_refusal_that_cannot_change_resolves_a_paused_conversation() {
-        use codewire_daemon::client::SessionClientError as E;
-        let status = |status: tonic::Status| E::Status(status);
-        // What the host daemon answers a restart it will never admit.
-        for never in [
+    fn a_daemon_that_starts_restarts_no_conversation_its_owner_stopped_or_it_cannot_start() {
+        assert_eq!(left_stopped(false, false), None);
+        // An explicit stop comes first: nothing else about the conversation
+        // lets its run continue.
+        assert_eq!(left_stopped(true, false), Some(STOPPED));
+        assert_eq!(left_stopped(true, true), Some(STOPPED));
+        assert_eq!(
+            left_stopped(false, true),
+            Some("its conversation's process cleanup is unknown, so it cannot start again")
+        );
+    }
+
+    /// What `resume_paused` asks of a refused restart.
+    fn never(error: &E) -> bool {
+        error.never_restarts().is_some()
+    }
+
+    #[test]
+    fn only_the_daemons_own_reason_resolves_a_paused_conversation() {
+        // Every reason the daemon gives for a restart it will never admit,
+        // as the daemon itself answers it.
+        for reason in NeverRestarts::ALL {
+            let refused = E::Status(reason.status("refused"));
+            assert_eq!(refused.never_restarts(), Some(reason));
+            assert!(never(&refused), "{reason:?}");
+        }
+        // The same codes and the same words without the daemon's reason
+        // decide nothing: a refusal's text is never read.
+        for unmarked in [
             tonic::Status::failed_precondition(
                 "the launch environment projection is no longer available after daemon recovery; launch a new session with the required environment overrides",
             ),
@@ -727,20 +683,20 @@ mod tests {
             ),
             tonic::Status::not_found("session not found"),
         ] {
-            assert!(never_restarts(&status(never.clone())), "{never}");
+            assert!(!never(&E::Status(unmarked.clone())), "{unmarked}");
         }
         // A daemon that is stopping again, or one that cannot be reached,
         // leaves the message paused for its next start.
         for later in [
-            status(tonic::Status::failed_precondition(
+            E::Status(tonic::Status::failed_precondition(
                 "session launch cancelled before completion",
             )),
-            status(tonic::Status::unavailable("stopping")),
-            status(tonic::Status::deadline_exceeded("slow")),
+            E::Status(tonic::Status::unavailable("stopping")),
+            E::Status(tonic::Status::deadline_exceeded("slow")),
             E::Connect,
             E::RequestClosed,
         ] {
-            assert!(!never_restarts(&later), "{later}");
+            assert!(!never(&later), "{later}");
         }
     }
 }

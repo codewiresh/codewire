@@ -2,8 +2,10 @@
 //! start resumes it: the same outcome whichever of the daemon's helper and
 //! the driver records the pause and whether the driver is killed first, one
 //! pause notice and one final notice, explicit stops that never pause or
-//! resume, and Codex and Claude unchanged.
+//! resume, and Codex and Claude unchanged. A driver decides its stop signal
+//! by what the host daemon wrote before it signalled.
 use super::*;
+use codewire_daemon::stop_evidence;
 
 const STOPPED: &str = "the driver was stopped by SIGTERM";
 const CLOSED: &str = "the native agent closed its output";
@@ -18,7 +20,17 @@ fn host(agent: AgentKind) -> Harness {
     let root = temporary.path().join("environment");
     let driver_id = uuid::Uuid::new_v4().to_string();
     let dir = root.join("agents").join(&driver_id);
-    for path in [&root, &root.join("agents"), &dir, &dir.join("messages")] {
+    let session_id = format!("session-{}", uuid::Uuid::new_v4());
+    // The host daemon keeps the conversation's session in its own directory.
+    let session = root.join("sessions").join(&session_id);
+    for path in [
+        &root,
+        &root.join("agents"),
+        &dir,
+        &dir.join("messages"),
+        &root.join("sessions"),
+        &session,
+    ] {
         private_directory(path).unwrap();
     }
     let created_at = now();
@@ -47,7 +59,7 @@ fn host(agent: AgentKind) -> Harness {
     };
     let binding = AgentBinding {
         driver_id,
-        session_id: "session".into(),
+        session_id,
         bound_at: created_at,
     };
     Harness {
@@ -56,21 +68,21 @@ fn host(agent: AgentKind) -> Harness {
     }
 }
 
-/// Who signalled the driver: its host daemon, which signals only after it
-/// has written what its stop means.
-fn daemon() -> bool {
-    true
-}
-
-/// Or anything else: a host that shuts down, or a stray signal.
-fn elsewhere() -> bool {
-    false
-}
-
-/// The environment's takedown marker, as `cw env stop` and a signalled host
-/// daemon write it.
+/// The environment's takedown marker, as `cw env stop` and a host daemon
+/// that shuts down write it before any session is signalled.
 fn mark_takedown(h: &Harness) {
-    fs::write(h.driver.environment.root().join(SHUTDOWN_MARKER), "true").unwrap();
+    stop_evidence::mark_takedown(&h.driver.environment.root()).unwrap();
+}
+
+/// The stop intent the host daemon writes itself before an explicit stop or
+/// restart signals the conversation, whatever becomes of its record helper.
+fn daemon_records_stop(h: &Harness) {
+    stop_evidence::record_stop_intent(&h.driver.environment.root(), &h.driver.binding.session_id)
+        .unwrap();
+}
+
+fn stop_intended(h: &Harness) -> bool {
+    stop_evidence::stop_intended(&h.driver.environment.root(), &h.driver.binding.session_id)
 }
 
 /// What the host daemon's record helper does before it signals.
@@ -192,7 +204,7 @@ async fn taken_down(how: Takedown) -> (Harness, PathBuf, MessageRecord) {
         Takedown::HelperThenDriver => {
             helper_pauses(&h, &main.id);
             h.driver
-                .stopped_from(&mut signalled(), STOPPED.into(), true, daemon)
+                .stopped(&mut signalled(), STOPPED.into(), true)
                 .await
                 .unwrap();
         }
@@ -202,7 +214,7 @@ async fn taken_down(how: Takedown) -> (Harness, PathBuf, MessageRecord) {
         Takedown::DriverByMarker => {
             mark_takedown(&h);
             h.driver
-                .stopped_from(&mut signalled(), STOPPED.into(), true, daemon)
+                .stopped(&mut signalled(), STOPPED.into(), true)
                 .await
                 .unwrap();
         }
@@ -281,14 +293,20 @@ async fn both_kill_orders_pause_the_message_and_resume_it_to_the_same_outcome() 
 }
 
 #[tokio::test]
-async fn a_stop_signal_without_evidence_of_a_takedown_ends_the_run_unknown_as_before() {
+async fn a_signal_with_nothing_recorded_ends_the_run_unknown_once_no_marker_came() {
+    // The host daemon writes what its stop means before it signals, so this
+    // signal is not the daemon's. The driver waits for the marker of a
+    // daemon that the same host shutdown signalled; none comes, so it was a
+    // stray signal, and the run ends unknown as before.
     let mut h = host(AgentKind::Noel);
     let parent = h.with_parent();
     let main = h.running("task", Some(RUN));
+    let started = Instant::now();
     h.driver
-        .stopped_from(&mut signalled(), STOPPED.into(), true, daemon)
+        .stopped(&mut signalled(), STOPPED.into(), true)
         .await
         .unwrap();
+    assert!(started.elapsed() >= pause::TAKEDOWN_MARKER_WAIT);
     let ended = h.load(&main.id);
     assert_eq!(
         (ended.state, ended.error.as_deref()),
@@ -319,34 +337,195 @@ async fn a_takedown_that_nothing_recorded_resumes_as_a_crash_without_a_pause_not
     assert_eq!(told(&parent, &main.id), (0, 1));
 }
 
+/// What says that a stop is explicit.
+#[derive(Clone, Copy, Debug)]
+enum Explicit {
+    /// Only the stop intent the daemon writes itself: its helper failed.
+    DaemonIntent,
+    /// The stop's interrupt, which the helper recorded for the message.
+    Recorded,
+    /// That interrupt, accepted by the driver.
+    Accepted,
+}
+
 #[tokio::test]
 async fn an_explicit_stop_never_pauses_a_message_even_while_its_environment_is_taken_down() {
-    // The stop's interrupt was accepted by the driver, or only recorded.
-    for accepted in [true, false] {
+    for evidence in [
+        Explicit::DaemonIntent,
+        Explicit::Recorded,
+        Explicit::Accepted,
+    ] {
         let mut h = host(AgentKind::Noel);
         let parent = h.with_parent();
         let main = h.running("task", Some(RUN));
         mark_takedown(&h);
-        explicit_stop(&h, &main);
-        h.driver.stopping = accepted;
-        // Neither the daemon's helper nor the driver pauses it.
+        match evidence {
+            Explicit::DaemonIntent => daemon_records_stop(&h),
+            Explicit::Recorded => {
+                explicit_stop(&h, &main);
+            }
+            Explicit::Accepted => {
+                explicit_stop(&h, &main);
+                h.driver.stopping = true;
+            }
+        }
+        // Neither the daemon's helper nor the driver pauses it, and the
+        // driver decides at once.
         assert_eq!(
             helper_pauses(&h, &main.id).state,
             MessageState::Running,
-            "{accepted}"
+            "{evidence:?}"
         );
+        let started = Instant::now();
         h.driver
-            .stopped_from(&mut signalled(), STOPPED.into(), true, daemon)
+            .stopped(&mut signalled(), STOPPED.into(), true)
             .await
             .unwrap();
+        assert!(
+            started.elapsed() < pause::TAKEDOWN_MARKER_WAIT,
+            "{evidence:?}"
+        );
         let ended = h.load(&main.id);
         assert_eq!(
             (ended.state, ended.error.as_deref()),
             (MessageState::Unknown, Some(STOPPED_UNKNOWN)),
-            "{accepted}"
+            "{evidence:?}"
         );
-        assert!(ended.pause.is_none(), "{accepted}");
-        assert_eq!(told(&parent, &main.id), (0, 1), "{accepted}");
+        assert!(ended.pause.is_none(), "{evidence:?}");
+        assert_eq!(told(&parent, &main.id), (0, 1), "{evidence:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_explicit_stop_whose_helper_failed_never_pauses_or_resumes_the_message() {
+    // The record helper failed, so the daemon's own stop intent is all that
+    // says the stop was explicit. Whether the driver handles its signal or
+    // is killed first, the message is never paused and never resumed.
+    for killed_first in [false, true] {
+        let mut h = host(AgentKind::Noel);
+        let parent = h.with_parent();
+        let main = if killed_first {
+            h.crashed(MessageAction::Message, "task", Some(RUN))
+        } else {
+            h.running("task", Some(RUN))
+        };
+        daemon_records_stop(&h);
+        // An environment that is taken down in the same moment changes
+        // nothing.
+        mark_takedown(&h);
+        if !killed_first {
+            let started = Instant::now();
+            h.driver
+                .stopped(&mut signalled(), STOPPED.into(), true)
+                .await
+                .unwrap();
+            assert!(started.elapsed() < pause::TAKEDOWN_MARKER_WAIT);
+            assert_eq!(h.load(&main.id).error.as_deref(), Some(STOPPED_UNKNOWN));
+        }
+        assert!(stop_intended(&h), "{killed_first}");
+
+        // The conversation's next start sets nothing aside for noel to
+        // resume, and has acted on the intent.
+        h.restart();
+        h.driver.recover().await.unwrap();
+        assert!(h.driver.noel.set_aside.is_none(), "{killed_first}");
+        assert!(!stop_intended(&h), "{killed_first}");
+        let ended = h.load(&main.id);
+        assert_eq!(ended.state, MessageState::Unknown, "{killed_first}");
+        if killed_first {
+            assert_eq!(
+                ended.error.as_deref(),
+                Some(
+                    "its conversation was stopped while this was in flight; outcome unknown; not replayed"
+                )
+            );
+        }
+        assert!(
+            ended.pause.is_none()
+                && ended.pause_notification.is_none()
+                && ended.native_resumed == 0,
+            "{killed_first}"
+        );
+        assert_eq!(told(&parent, &main.id), (0, 1), "{killed_first}");
+        // noel still holds the run as interrupted, and is not told to
+        // resume it.
+        let trace = h._temporary.path().join("sent.jsonl");
+        let mut peer = noel_peer(
+            &trace,
+            vec![
+                step(vec![reply(
+                    1,
+                    "get_state",
+                    Some(resumable_state(Some(last(
+                        &main.id,
+                        "interrupted",
+                        Some("model"),
+                    )))),
+                )]),
+                cleared(2),
+            ],
+        );
+        h.driver.initialize_noel(&mut peer).await.unwrap();
+        assert_eq!(
+            kinds(&trace),
+            ["get_state", "clear_queue"],
+            "{killed_first}"
+        );
+        assert_eq!(h.load(&main.id).state, MessageState::Unknown);
+        assert_eq!(told(&parent, &main.id), (0, 1), "{killed_first}");
+
+        // The intent was that stop's alone: a crash after it resumes as any
+        // crash does.
+        let next = h.crashed(MessageAction::Message, "task", Some(RUN));
+        let resumed = next_start_resumes(&mut h, &next).await;
+        assert_eq!(
+            (resumed.state, resumed.native_resumed),
+            (MessageState::Completed, 1),
+            "{killed_first}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_explicit_stop_of_a_paused_conversation_ends_its_message_at_the_next_start() {
+    // The conversation was not running when its owner stopped it, and the
+    // helper that ends its paused message failed: the daemon's stop intent
+    // still keeps the next start from resuming the run.
+    let (mut h, parent, main) = taken_down(Takedown::HelperThenKill).await;
+    daemon_records_stop(&h);
+    h.restart();
+    h.driver.recover().await.unwrap();
+    assert!(h.driver.noel.set_aside.is_none());
+    assert!(!stop_intended(&h));
+    let ended = h.load(&main.id);
+    assert_eq!(
+        (ended.state, ended.error.as_deref()),
+        (
+            MessageState::Unknown,
+            Some(
+                "paused when its environment stopped; its conversation was stopped before it resumed; outcome unknown; not replayed"
+            )
+        )
+    );
+    assert_eq!(told(&parent, &main.id), (1, 1));
+}
+
+#[tokio::test]
+async fn codex_and_claude_end_a_stopped_run_as_before_and_clear_the_stop_intent() {
+    for agent in [AgentKind::Codex, AgentKind::Claude] {
+        let mut h = host(agent);
+        let parent = h.with_parent();
+        let main = h.crashed(MessageAction::Message, "task", Some(RUN));
+        daemon_records_stop(&h);
+        h.driver.recover().await.unwrap();
+        let ended = h.load(&main.id);
+        assert_eq!(
+            (ended.state, ended.error.as_deref()),
+            (MessageState::Unknown, Some(UNKNOWN)),
+            "{agent:?}"
+        );
+        assert_eq!(told(&parent, &main.id), (0, 1), "{agent:?}");
+        assert!(!stop_intended(&h), "{agent:?}");
     }
 }
 
@@ -512,12 +691,7 @@ async fn repeated_takedowns_tell_the_parent_of_the_pause_once() {
     let record = message_path(&h.driver.dir, &main.id);
     let before = fs::read(&record).unwrap();
     h.driver
-        .stopped_from(
-            &mut signalled(),
-            "startup stopped by SIGTERM".into(),
-            true,
-            daemon,
-        )
+        .stopped(&mut signalled(), "startup stopped by SIGTERM".into(), true)
         .await
         .unwrap();
     assert_eq!(fs::read(&record).unwrap(), before);
@@ -542,7 +716,7 @@ async fn repeated_takedowns_tell_the_parent_of_the_pause_once() {
         Some(main.id.as_str())
     );
     h.driver
-        .stopped_from(&mut peer, STOPPED.into(), true, daemon)
+        .stopped(&mut peer, STOPPED.into(), true)
         .await
         .unwrap();
     let again = h.load(&main.id);
@@ -563,22 +737,22 @@ async fn repeated_takedowns_tell_the_parent_of_the_pause_once() {
 }
 
 #[tokio::test]
-async fn a_stop_during_the_handshake_without_takedown_evidence_ends_a_paused_message() {
+async fn an_explicit_stop_during_the_handshake_ends_a_paused_message_at_once() {
     // A paused message still says paused when its next start is stopped, so
-    // only the marker shows that this stop is a takedown too. Without it
-    // the stop is treated as explicit: the message ends and never resumes.
+    // only the marker shows that this stop is a takedown too. An explicit
+    // stop is recorded by the daemon first: the message ends and never
+    // resumes.
     let (mut h, parent, main) = taken_down(Takedown::HelperThenKill).await;
     h.restart();
     h.driver.recover().await.unwrap();
+    assert_eq!(h.driver.noel.set_aside_message(), Some(main.id.as_str()));
+    daemon_records_stop(&h);
+    let started = Instant::now();
     h.driver
-        .stopped_from(
-            &mut signalled(),
-            "startup stopped by SIGTERM".into(),
-            true,
-            daemon,
-        )
+        .stopped(&mut signalled(), "startup stopped by SIGTERM".into(), true)
         .await
         .unwrap();
+    assert!(started.elapsed() < pause::TAKEDOWN_MARKER_WAIT);
     let ended = h.load(&main.id);
     assert_eq!(
         (ended.state, ended.error.as_deref()),
@@ -593,6 +767,7 @@ async fn a_stop_during_the_handshake_without_takedown_evidence_ends_a_paused_mes
     h.restart();
     h.driver.recover().await.unwrap();
     assert!(h.driver.noel.set_aside.is_none());
+    assert!(!stop_intended(&h));
 }
 
 #[tokio::test]
@@ -603,12 +778,7 @@ async fn a_takedown_during_the_handshake_pauses_a_message_a_crash_left_running()
     h.driver.recover().await.unwrap();
     mark_takedown(&h);
     h.driver
-        .stopped_from(
-            &mut signalled(),
-            "startup stopped by SIGTERM".into(),
-            true,
-            daemon,
-        )
+        .stopped(&mut signalled(), "startup stopped by SIGTERM".into(), true)
         .await
         .unwrap();
     assert_eq!(h.load(&main.id).state, MessageState::Paused);
@@ -651,7 +821,7 @@ async fn a_pause_ends_steers_unknown_keeps_interrupts_for_the_next_start_and_lea
 
     mark_takedown(&h);
     h.driver
-        .stopped_from(&mut signalled(), STOPPED.into(), true, daemon)
+        .stopped(&mut signalled(), STOPPED.into(), true)
         .await
         .unwrap();
     assert_eq!(h.load(&main.id).state, MessageState::Paused);
@@ -731,17 +901,19 @@ async fn noel_ended_by_its_sessions_signal_pauses_only_with_the_takedowns_eviden
         Respawn::Signalled
     );
     h.driver
-        .stopped_from(&mut peer, CLOSED.into(), false, daemon)
+        .stopped(&mut peer, CLOSED.into(), false)
         .await
         .unwrap();
     assert_eq!(h.load(&main.id).state, MessageState::Paused);
     assert_eq!(told(&parent, &main.id), (1, 0));
     assert_eq!(h.driver.state.phase, DriverPhase::Stopped);
 
-    // Without it the message ends unknown and the driver fails, as before.
+    // With an explicit stop recorded instead, the message ends unknown and
+    // the driver fails, as before.
     let mut h = host(AgentKind::Noel);
     let parent = h.with_parent();
     let main = h.running("task", Some(RUN));
+    daemon_records_stop(&h);
     let mut peer = signalled();
     assert_eq!(
         h.driver.respawn_noel(&mut peer, CLOSED).await,
@@ -749,7 +921,7 @@ async fn noel_ended_by_its_sessions_signal_pauses_only_with_the_takedowns_eviden
     );
     assert!(
         h.driver
-            .stopped_from(&mut peer, CLOSED.into(), false, daemon)
+            .stopped(&mut peer, CLOSED.into(), false)
             .await
             .is_err()
     );
@@ -778,7 +950,7 @@ async fn codex_claude_and_a_noel_that_cannot_resume_keep_their_stop_in_a_takedow
         mark_takedown(&h);
         let started = Instant::now();
         h.driver
-            .stopped_from(&mut signalled(), STOPPED.into(), true, daemon)
+            .stopped(&mut signalled(), STOPPED.into(), true)
             .await
             .unwrap();
         let ended = h.load(&main.id);
@@ -878,7 +1050,7 @@ async fn a_parent_adopts_notices_in_the_order_they_were_made() {
 }
 
 #[tokio::test]
-async fn a_signal_from_elsewhere_waits_for_the_marker_its_daemon_writes() {
+async fn a_signal_with_nothing_recorded_waits_for_the_marker_its_daemon_writes() {
     // A host that shuts down signals the driver and its daemon at once: the
     // marker comes a moment after the driver's own signal.
     let mut h = host(AgentKind::Noel);
@@ -886,95 +1058,48 @@ async fn a_signal_from_elsewhere_waits_for_the_marker_its_daemon_writes() {
     let main = h.running("task", Some(RUN));
     let late = Duration::from_millis(400);
     let marked = {
-        let marker = h.driver.environment.root().join(SHUTDOWN_MARKER);
+        let root = h.driver.environment.root();
         std::thread::spawn(move || {
             std::thread::sleep(late);
-            fs::write(marker, "true").unwrap();
+            stop_evidence::mark_takedown(&root).unwrap();
         })
     };
     let started = Instant::now();
     h.driver
-        .stopped_from(&mut signalled(), STOPPED.into(), true, elsewhere)
+        .stopped(&mut signalled(), STOPPED.into(), true)
         .await
         .unwrap();
     marked.join().unwrap();
     assert!(started.elapsed() >= late);
+    assert!(started.elapsed() < pause::TAKEDOWN_MARKER_WAIT);
     assert_eq!(h.load(&main.id).state, MessageState::Paused);
     assert_eq!(told(&parent, &main.id), (1, 0));
 }
 
 #[tokio::test]
-async fn a_stray_signal_ends_the_run_unknown_once_no_marker_came() {
-    let mut h = host(AgentKind::Noel);
-    let parent = h.with_parent();
-    let main = h.running("task", Some(RUN));
-    let started = Instant::now();
-    h.driver
-        .stopped_from(&mut signalled(), STOPPED.into(), true, elsewhere)
-        .await
-        .unwrap();
-    assert!(started.elapsed() >= pause::FOREIGN_SIGNAL_WAIT);
-    let ended = h.load(&main.id);
-    assert_eq!(
-        (ended.state, ended.error.as_deref()),
-        (MessageState::Unknown, Some(STOPPED_UNKNOWN))
-    );
-    assert_eq!(told(&parent, &main.id), (0, 1));
-}
-
-#[tokio::test]
-async fn an_explicit_stop_that_follows_a_signal_from_elsewhere_ends_the_wait() {
+async fn an_explicit_stop_recorded_during_the_wait_ends_it() {
     // While the driver waits for a marker, its conversation is stopped
-    // explicitly: the stop's recorded interrupt decides at once.
+    // explicitly: what the daemon records for that stop decides at once.
     let mut h = host(AgentKind::Noel);
     let parent = h.with_parent();
     let main = h.running("task", Some(RUN));
     let recorded = {
-        let (dir, driver, session, message) = (
-            h.driver.dir.clone(),
-            h.driver.config.driver_id.clone(),
+        let (root, session) = (
+            h.driver.environment.root(),
             h.driver.binding.session_id.clone(),
-            main.id.clone(),
         );
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
-            let mut interrupt =
-                MessageRecord::new(&driver, &session, MessageAction::Interrupt, String::new());
-            interrupt.id = stop_interrupt_id(&message);
-            interrupt.expected_active_message_id = Some(message);
-            assert!(create_message(&dir, &interrupt).unwrap());
+            stop_evidence::record_stop_intent(&root, &session).unwrap();
         })
     };
     let started = Instant::now();
     h.driver
-        .stopped_from(&mut signalled(), STOPPED.into(), true, elsewhere)
+        .stopped(&mut signalled(), STOPPED.into(), true)
         .await
         .unwrap();
     recorded.join().unwrap();
-    assert!(started.elapsed() < pause::FOREIGN_SIGNAL_WAIT);
+    assert!(started.elapsed() < pause::TAKEDOWN_MARKER_WAIT);
     assert_eq!(h.load(&main.id).state, MessageState::Unknown);
     assert_eq!(told(&parent, &main.id), (0, 1));
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn the_driver_learns_who_sent_its_stop_signal_and_the_runtime_still_hears_it() {
-    use tokio::signal::unix::{SignalKind, signal};
-    // As in the driver: the runtime's handlers first, then the watch.
-    let mut hangup = signal(SignalKind::hangup()).unwrap();
-    let _terminate = signal(SignalKind::terminate()).unwrap();
-    let _interrupt = signal(SignalKind::interrupt()).unwrap();
-    pause::sender::watch().unwrap();
-    pause::sender::watch().unwrap();
-    // SAFETY: getpid reads the current process identity, and the signal
-    // goes to this process, which now handles it.
-    let me = unsafe { libc::getpid() };
-    assert_eq!(unsafe { libc::kill(me, libc::SIGHUP) }, 0);
-    tokio::time::timeout(Duration::from_secs(10), hangup.recv())
-        .await
-        .expect("the runtime's own handler still runs")
-        .unwrap();
-    assert_eq!(pause::sender::latest(), Some(me));
-    // This test process is not its own parent, so it is not "the daemon".
-    assert!(!pause::sender::by_daemon());
 }

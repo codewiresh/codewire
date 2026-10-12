@@ -1,6 +1,7 @@
 //! Trusted local placements use the ordinary daemon session owner, not a VM.
 //! Runtime state is private and separate from the child's real HOME/workspace.
 use super::*;
+use codewire_daemon::stop_evidence::SHUTDOWN_MARKER;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -13,13 +14,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// A session stop or restart may first spend up to 10 s interrupting an
 /// agent's active run; its request deadline covers that and the stop.
 const SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(20);
-/// The environment's takedown marker, in its runtime root. `cw env stop`,
-/// `restart` and `rm` write it before the host daemon is asked to stop, and
-/// the daemon writes it first when a signal stops it. The daemon removes it
-/// when it starts, so a marker always means a takedown that is under way or
-/// done. A managed noel driver reads it as evidence that its stop signal is
-/// the whole environment's.
-pub(crate) const SHUTDOWN_MARKER: &str = "shutdown.json";
 
 fn ensure_host_supported() -> anyhow::Result<()> {
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
@@ -751,22 +745,19 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
     let shutdown = async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("install host daemon SIGTERM observer");
-        let signalled = tokio::select! {
-            _=term.recv()=>true,
-            _=tokio::signal::ctrl_c()=>true,
+        // A signal takes the environment down as `cw env stop` does. The
+        // daemon marks the takedown itself before it stops anything (see
+        // `codewire_daemon::stop_evidence`), so a conversation's driver that
+        // a rebooting host signals in the same moment finds the marker.
+        tokio::select! {
+            _=term.recv()=>{},
+            _=tokio::signal::ctrl_c()=>{},
             _=async {
                 loop {
                     if shutdown_root.join(SHUTDOWN_MARKER).is_file(){break;}
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-            }=>false,
-        };
-        if signalled {
-            // A signal takes the environment down as `cw env stop` does, and
-            // a rebooting host signals every process at once. The marker is
-            // written before anything is stopped, so a conversation's driver
-            // that is signalled too finds the takedown's evidence.
-            let _ = write_private_json(&shutdown_root.join(SHUTDOWN_MARKER), &true);
+            }=>{},
         }
     };
     // The environment is its conversations' executor: each noel conversation

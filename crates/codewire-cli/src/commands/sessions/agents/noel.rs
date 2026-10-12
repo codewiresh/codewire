@@ -604,7 +604,12 @@ impl Driver {
             && self.noel.set_aside.is_none()
         {
             let paused = record.state == MessageState::Paused;
-            let stopped = pause::explicit_stop_recorded(&self.dir, &record.id);
+            let stopped = pause::explicit_stop_recorded(
+                &self.environment,
+                &self.dir,
+                &self.binding.session_id,
+                &record.id,
+            );
             log(format!(
                 "message {} was {} when the driver stopped; noel's journal decides it at startup",
                 record.id,

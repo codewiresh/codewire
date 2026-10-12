@@ -3042,11 +3042,6 @@ impl Driver {
         let mut terminate = signal(SignalKind::terminate())?;
         let mut interrupt = signal(SignalKind::interrupt())?;
         let mut hangup = signal(SignalKind::hangup())?;
-        // Only a noel run pauses, by who stops it and why.
-        #[cfg(target_os = "linux")]
-        if self.config.agent == AgentKind::Noel {
-            pause::sender::watch().context("watch who stops the conversation")?;
-        }
         // Keep the spawned peer outside the initialization future. Cancelling
         // a stalled protocol handshake must retain the guardian and its family
         // until cleanup is proved, just like shutdown during a running turn.
@@ -3295,6 +3290,14 @@ impl Driver {
         let initial = self.config.initial_message_id.clone();
         let started_at = self.started_at.clone();
         let generation = self.message_generations()?;
+        // The host daemon's stop intent: the conversation was stopped or
+        // restarted explicitly and no start has acted on it. Whatever that
+        // stop left in flight never resumes, even when neither the daemon's
+        // record helper nor the stopped driver recorded anything. It is read
+        // once: an intent written after this belongs to a stop of this
+        // incarnation, whose signal reads it.
+        let intended = self.stop_intended();
+        let stopped = intended && self.config.agent == AgentKind::Noel;
         let mut unknown = Vec::new();
         for id in ordered_message_ids(&self.dir)? {
             let record = load_message(&self.dir, &id)?;
@@ -3325,11 +3328,20 @@ impl Driver {
                 // Its delivery line may still be in this driver's pipe.
                 continue;
             }
-            if self.config.agent == AgentKind::Noel && self.set_aside(&record) {
+            if self.config.agent == AgentKind::Noel && !stopped && self.set_aside(&record) {
                 continue;
             }
             let previous = record.state;
             let updated = update_message(&self.dir, &record.id, |r| match r.state {
+                // An explicitly stopped conversation's run never resumes.
+                MessageState::Running | MessageState::Paused
+                    if stopped && r.action.starts_turn() =>
+                {
+                    r.fail(
+                        MessageState::Unknown,
+                        pause::stopped_text(r.state == MessageState::Paused),
+                    );
+                }
                 // Only noel pauses; any other agent's paused record could
                 // never resume and ends as a running one does.
                 MessageState::Running | MessageState::Paused => {
@@ -3373,6 +3385,12 @@ impl Driver {
             }
         }
         self.persist_state()?;
+        // Every record the stop intent decided is saved: this start has
+        // acted on it. A driver of any agent clears it, so the intent never
+        // outlives the start that follows its stop.
+        if intended {
+            self.clear_stop_intent();
+        }
         // A pause whose writer stopped between its two writes still owes
         // the parent its notice.
         if let Some(id) = self.noel.set_aside_message().map(str::to_owned) {
