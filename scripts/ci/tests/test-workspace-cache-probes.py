@@ -495,8 +495,9 @@ class ProbeFixture(unittest.TestCase):
             env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
             # A hang guard only: the probe's own deadlines are asserted by the
-            # native-timeout cases. A loaded shared runner needs more than 35 s.
-            output, _ = process.communicate(timeout=120)
+            # native-timeout cases. The harness needs about 25 s of CPU; with
+            # other verification beside it on a loaded host it took over 120 s.
+            output, _ = process.communicate(timeout=600)
         except subprocess.TimeoutExpired:
             # TERM the actual GNU timeout owner so it forwards cancellation and
             # lets the harness reap children; subprocess.run would KILL it first.
