@@ -163,9 +163,10 @@ impl CwRuntimeCatalog {
 }
 
 /// The sealed release toolchains a cw payload may name. A catalog retains the
-/// payloads of earlier releases for their conversations, so a toolchain move
-/// adds its release and keeps the previous one for as long as a catalog may
-/// still hold a payload built with it.
+/// payloads of earlier releases for their conversations, and a rollback
+/// selects the previous release's payload, so a toolchain move adds its
+/// release here. An earlier one leaves when no supported release ships a
+/// payload built with it.
 const CW_RUNTIME_RUSTC_RELEASES: [&str; 2] = ["1.93.0", "1.99.0"];
 
 fn sealed_rustc(identity: &str) -> bool {
@@ -389,19 +390,38 @@ mod tests {
         changed = catalog.clone();
         changed.runtimes.reverse();
         assert!(changed.validate().is_err());
-        for unsealed in [
-            "rustc 1.98.1 (synthetic fixture)",
-            "rustc 1.99.0",
-            "rustc 1.99.0-beta.1 (synthetic fixture)",
-            "cargo 1.99.0 (synthetic fixture)",
-        ] {
-            changed = catalog.clone();
-            changed.runtimes[1].payload.rustc = unsealed.to_owned();
-            assert!(changed.validate().is_err(), "{unsealed}");
-        }
         changed = catalog;
         changed.runtimes = vec![old; CW_RUNTIME_MAX_VERSIONS + 1];
         assert!(changed.validate().is_err());
+    }
+    #[test]
+    fn cw_payload_admits_only_the_sealed_release_toolchains() {
+        let (_, bytes) = fixture();
+        let provenance = CwRuntimeProvenance::decode(&bytes).unwrap();
+        for sealed in [
+            "rustc 1.93.0 (254b59607 2026-01-19)",
+            "rustc 1.99.0 (b940084d7 2026-09-28)",
+        ] {
+            let mut admitted = provenance.clone();
+            admitted.payload.rustc = sealed.to_owned();
+            admitted.validate().unwrap();
+        }
+        for refused in [
+            "rustc 1.91.1 (synthetic fixture)",
+            "rustc 1.98.1 (synthetic fixture)",
+            "rustc 1.99.1 (synthetic fixture)",
+            "rustc 1.100.0 (synthetic fixture)",
+            "rustc 1.99.0-beta.1 (synthetic fixture)",
+            "rustc 1.99.0",
+            "rustc  1.99.0 (synthetic fixture)",
+            "cargo 1.99.0 (synthetic fixture)",
+            "1.99.0 (synthetic fixture)",
+            "",
+        ] {
+            let mut changed = provenance.clone();
+            changed.payload.rustc = refused.to_owned();
+            assert!(changed.validate().is_err(), "{refused:?}");
+        }
     }
     #[test]
     fn cw_provenance_binds_image_payload_and_protocol() {
