@@ -1073,9 +1073,10 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/dev/test-cli-local-vm-macos.py|scripts/dev/test-cli-local-vm-docker-macos.py|\
-      scripts/dev/test-local-vm-hostile-guest-macos.py|scripts/dev/hostile-guest-probe.py)
-        # Developer-only Apple silicon journeys and the hostile-guest battery:
-        # they start real local VMs on a Mac and never run in CI.
+      scripts/dev/test-local-vm-hostile-guest-macos.py|scripts/dev/hostile-guest-probe.py|\
+      scripts/dev/test-local-vm-hostile-guest.py)
+        # Developer-only local VM journeys and the hostile-guest battery: they
+        # run against real local VMs and never in CI.
         select_token policy
         recognized=true
         ;;
