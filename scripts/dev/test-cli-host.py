@@ -11,7 +11,9 @@ lead can invoke cw itself and a Claude worker's result starts a parent turn.
 Inherited CW_ENVIRONMENT and CW_SESSION_ID are dropped: a journey run by a
 managed agent never hands its own conversation identity to the host it starts.
 The real-noel option runs only the noel journey, with that binary as noel and
-its faux/echo model; noel gets a private HOME and pi agent directory, offline.
+its faux/echo and faux/script models; noel gets a private HOME and pi agent
+directory, offline. Both noel journeys kill noel and its driver mid-turn with
+SIGKILL and prove noel resumes the run once.
 All runtime/config/workspace files and processes belong to this invocation.
 Linux joins every owned descendant through a child subreaper. Darwin has none,
 so macOS runs the journey as a new session leader and requires that no live
@@ -879,6 +881,166 @@ class Journey:
         assert "Also stop 3 running child sessions" in asked[0], asked
         self.check(f"confirmed-cascade-interrupts-every-noel-run-first-in-{confirmed_time:.2f}s/"
                    "codex-and-claude-unknown")
+        self.prove_noel_resume()
+
+    def prove_noel_resume(self):
+        """A crash leaves a noel run interrupted, and its message running:
+        noel resumes the run once, and the lead hears once, at the end. Codex
+        and Claude end such a message unknown, as before."""
+        env = self.environment
+        lead = "resume-lead"
+        self.launch(lead, agent="noel", model="faux/echo")
+        self.idle(lead)
+        self.launch("resumed", agent="noel", model="faux/echo", parent=lead)
+        self.idle("resumed")
+
+        # noel is killed mid-turn: the driver starts it again and resumes.
+        message, run = self.held("resumed", "HOLD")
+        os.kill(self.native_pid("resumed", "noel"), signal.SIGKILL)
+        resumed = self.wait_message(message["id"])
+        assert resumed["state"] == "completed" and resumed["result"] == "[faux/echo] HOLD", resumed
+        assert resumed["native_resumed"] == 1 and resumed["turn_id"] == run, resumed
+        self.resumed_once("resumed", message, run)
+        self.heard_once(lead, message)
+        self.check("noel-killed-mid-turn/restarted-once/resumed-once/lead-woken-once/inbox-notes-resume")
+
+        # The driver is killed mid-turn: `cw restart` resumes the run.
+        message, run = self.held("resumed", "HOLD")
+        os.kill(self.driver_pid("resumed"), signal.SIGKILL)
+        self.ended("resumed")
+        self.call("restart", env, "resumed")
+        resumed = self.wait_message(message["id"])
+        assert resumed["state"] == "completed" and resumed["result"] == "[faux/echo] HOLD", resumed
+        assert resumed["native_resumed"] == 1 and resumed["turn_id"] == run, resumed
+        self.resumed_once("resumed", message, run)
+        self.heard_once(lead, message)
+        self.check("driver-killed-mid-turn/restart-resumes-once/lead-woken-once")
+
+        # The driver dies after sending resume_run, before the run settles:
+        # the next start resumes it again, counted, and the lead hears once.
+        message, run = self.held("resumed", "HOLD2")
+        os.kill(self.native_pid("resumed", "noel"), signal.SIGKILL)
+        resume = {"id": 3, "type": "resume_run", "expectedRunId": run}
+        self.until(lambda: self.received("resumed")[-1], lambda last: last == resume)
+        # Counted before resume_run was sent.
+        assert self.message_record("resumed", message["id"])["native_resumed"] == 1
+        os.kill(self.driver_pid("resumed"), signal.SIGKILL)
+        self.ended("resumed")
+        assert self.message_record("resumed", message["id"])["state"] == "running"
+        self.call("restart", env, "resumed")
+        resumed = self.wait_message(message["id"])
+        assert resumed["state"] == "completed" and resumed["result"] == "[faux/echo] HOLD2", resumed
+        assert resumed["native_resumed"] == 2, resumed
+        self.resumed_once("resumed", message, run, resumes=2)
+        self.heard_once(lead, message)
+        self.check("driver-killed-after-resume-run/resumed-again-counted-twice/lead-woken-once")
+
+        # Codex and Claude: a killed driver or native agent leaves the
+        # message unknown, as before, and the agent is never started again
+        # within a driver.
+        for agent in ("codex", "claude"):
+            name = agent + "-crashed"
+            self.launch(name, agent=agent, parent=lead)
+            self.idle(name)
+            message, _ = self.hold(name, turn=agent == "codex")
+            os.kill(self.driver_pid(name), signal.SIGKILL)
+            self.ended(name)
+            self.call("restart", env, name)
+            self.idle(name)
+            record = self.wait_message(message["id"], ok=False)
+            assert record["state"] == "unknown" and record["error"] == (
+                "the driver restarted while this was in flight; outcome unknown; not replayed"), record
+            assert "native_resumed" not in record, record
+            self.heard_once(lead, message)
+            message, _ = self.hold(name, turn=agent == "codex")
+            starts = self.peer_starts(agent, name)
+            os.kill(self.native_pid(name, agent), signal.SIGKILL)
+            record = self.wait_message(message["id"], ok=False)
+            assert record["state"] == "unknown" and "the turn outcome is unknown and is not replayed" in \
+                record["error"], record
+            self.ended(name)
+            assert self.peer_starts(agent, name) == starts, f"{agent} was started again"
+            self.heard_once(lead, message)
+            self.call("restart", env, name)
+            self.idle(name)
+            after = self.call("msg", env, name, "AFTER", "--output", "json", data=True)
+            assert self.wait_message(after["id"])["result"] == "RESULT:AFTER"
+        self.check("codex-and-claude-killed-driver-or-agent-unknown-as-before/never-restarted")
+
+    def processes(self):
+        """Live processes as (pid, parent pid, argv)."""
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text().rsplit(") ", 1)[1].split()
+                argv = (entry / "cmdline").read_bytes().split(b"\0")[:-1]
+            except OSError:
+                continue
+            if argv and stat[0] not in ("Z", "X"):
+                yield int(entry.name), int(stat[1]), [arg.decode(errors="replace") for arg in argv]
+
+    def driver_pid(self, name):
+        """The live driver of conversation NAME."""
+        driver = self.inbox(name)["driver_id"]
+        found = [pid for pid, _, argv in self.processes() if "_agent-driver" in argv and driver in argv]
+        assert len(found) == 1, (name, found)
+        return found[0]
+
+    def native_pid(self, name, agent):
+        """The live native agent of conversation NAME: its driver's AGENT."""
+        driver, program = self.driver_pid(name), str(self.root / "bin" / agent)
+        found = [pid for pid, parent, argv in self.processes() if parent == driver and program in argv]
+        assert len(found) == 1, (name, found)
+        return found[0]
+
+    def ended(self, name):
+        """Waits until conversation NAME's session no longer runs."""
+        return self.until(lambda: next(v for v in self.call("list", self.environment, "--output", "json",
+                                                             data=True) if v["name"] == name),
+                          lambda view: view["state"] != "Running")
+
+    def message_record(self, name, message_id):
+        return next(m for m in self.inbox(name)["messages"] if m["id"] == message_id)
+
+    def peer_starts(self, agent, name):
+        """How often the synthetic AGENT of conversation NAME started."""
+        seen = [json.loads(line) for line in
+                (self.workspace / "agent-identity.jsonl").read_text().splitlines()]
+        return sum(e["agent"] == agent and e["session"] == self.session_ids[name] for e in seen)
+
+    def heard_once(self, lead, message, said=None):
+        """LEAD heard exactly once that MESSAGE finished, and started one turn
+        for it: SAID lists the lead's prompts (by default the synthetic
+        noel's)."""
+        inbox = self.until(lambda: self.inbox(lead), lambda v: any(
+            m["action"] == "notification" and m["source"]["message_id"] == message["id"]
+            and m["state"] == "completed" for m in v["messages"]), timeout=60)
+        notes = [m for m in inbox["messages"] if m["action"] == "notification"
+                 and m["source"]["message_id"] == message["id"]]
+        assert len(notes) == 1, notes
+        said = said() if said else [r["message"] for r in self.received(lead) if r["type"] == "prompt"]
+        assert sum(message["id"] in text for text in said) == 1, said
+
+    def resumed_once(self, name, message, run, resumes=1):
+        """MESSAGE was prompted once, and its RUN resumed RESUMES times, each
+        by a new synthetic noel of NAME that was first asked how its last run
+        stood and had its queue cleared. The inbox and the session log say
+        noel resumed it."""
+        trace = self.noel_trace(name)
+        received = [entry["received"] for entry in trace if "received" in entry]
+        prompts = [r for r in received if r["type"] == "prompt" and r.get("requestId") == message["id"]]
+        assert len(prompts) == 1, prompts
+        begins = [i for i, entry in enumerate(trace) if entry.get("event") == "start"]
+        handshakes = [[e["received"] for e in trace[i:] if "received" in e][:3] for i in begins[-resumes:]]
+        assert handshakes == [[{"id": 1, "type": "get_state"}, {"id": 2, "type": "clear_queue"},
+                               {"id": 3, "type": "resume_run", "expectedRunId": run}]] * resumes, handshakes
+        assert sum(r["type"] == "resume_run" and r["expectedRunId"] == run for r in received) == resumes
+        note = "(resumed by noel)" if resumes == 1 else f"(resumed by noel {resumes} times)"
+        inbox = self.call("inbox", self.environment, name).stdout
+        assert next(line for line in inbox.splitlines() if line.startswith(message["id"])).endswith(note), inbox
+        logs = self.call("logs", self.environment, name).stdout
+        assert f"message {message['id']} resumed by noel: run {run}, resume {resumes} of 3" in logs, logs
 
     def tree(self, prefix, agents=("noel", "codex", "claude"), text="HOLD", env=()):
         """A noel lead and a worker of each agent, every one running TEXT.
@@ -1085,6 +1247,7 @@ class Journey:
         assert len(wakes) == 5, wakes
         assert [sum(f"as {state}." in text for text in wakes) for state in ("interrupted", "unknown")] == [3, 0], wakes
         self.check("real-noel-lead-woken-once-per-worker-message")
+        self.prove_real_resume(private)
 
         # Stopping a lead and its worker interrupts both runs first.
         long_story = "Write a long story about a lighthouse keeper and the sea."
@@ -1112,6 +1275,138 @@ class Journey:
         message = self.wait_message(paused["paused-noel"][0]["id"], ok=False)
         assert message["state"] in ("running", "unknown"), message
         self.check("real-noel-env-stop-leaves-run-interrupted-not-aborted")
+
+    def prove_real_resume(self, private):
+        """A crash leaves a real noel run interrupted, and its message running.
+        noel resumes the run once: a cut-off model request is sent again, a
+        cut-off bash call never runs again, and the lead hears once, at the end."""
+        env = self.environment
+        lead = "resume-lead"
+        self.launch(lead, agent="noel", model="faux/echo", env=private)
+        self.idle(lead)
+        lead_journal = self.root / "pi-agent" / "sessions" / f"{self.noel_session(lead)}.jsonl"
+
+        def lead_said():
+            entries = [json.loads(line) for line in lead_journal.read_text().splitlines()]
+            return [e["message"]["content"] for e in entries
+                    if e.get("type") == "message" and e["message"]["role"] == "user"]
+
+        def scripted(name, responses):
+            """A worker of the lead whose faux/script model answers with
+            RESPONSES in order. Returns where noel logs its model requests."""
+            script, log = self.root / f"{name}-script.json", self.root / f"{name}-requests.jsonl"
+            script.write_text(json.dumps(responses))
+            self.launch(name, agent="noel", model="faux/script", parent=lead,
+                        env=private + [f"PI_FAUX_SCRIPT={script}", f"PI_FAUX_SCRIPT_LOG={log}", "SHELL=/bin/sh"])
+            self.idle(name)
+            return log
+
+        def requests(log, count):
+            """noel's logged model requests, once there are COUNT."""
+            return self.until(lambda: [json.loads(line) for line in log.read_text().splitlines()]
+                              if log.exists() else [], lambda sent: len(sent) >= count)
+
+        def held(marker):
+            return [{"wait_for_file": f"never-{marker}"}, {"text": "never sent"}]
+
+        # noel is killed while its model request is cut off: the driver starts
+        # it again, and the resumed run sends that request once more.
+        log = scripted("noel-model", [held("model"), [{"text": "Answered after the resend."}]])
+        message, run = self.held("noel-model", "Count the lighthouses.")
+        requests(log, 1)
+        os.kill(self.native_pid("noel-model", "noel"), signal.SIGKILL)
+        done = self.wait_message(message["id"])
+        assert done["state"] == "completed" and done["result"] == "Answered after the resend.", done
+        assert done["native_resumed"] == 1 and done["turn_id"] == run, done
+        sent = requests(log, 2)
+        assert len(sent) == 2 and sent[0]["messages"] == sent[1]["messages"] == [
+            {"role": "user", "content": "Count the lighthouses."}], sent
+        self.real_resumed("noel-model", message, run)
+        self.heard_once(lead, message, lead_said)
+        print(f"cli-host: noel resend logged: {json.dumps(sent[1]['messages'])}", flush=True)
+        self.check("real-noel-killed-mid-model-request/request-sent-again-once/resumed-once/lead-woken-once")
+
+        # noel is killed while its bash call sleeps after appending a line:
+        # the resumed run never runs the call again.
+        counter = self.root / "tool-counter.txt"
+        command = (f"printf 'ran\\n' >> {counter}; n=0; "
+                   "while [ $n -lt 600 ] && kill -0 $PPID 2>/dev/null; do sleep 0.1; n=$((n+1)); done")
+        log = scripted("noel-tool", [[{"tool_call": {"name": "bash", "arguments": {"command": command}}}],
+                                     [{"text": "The counter was written once."}]])
+        message, run = self.held("noel-tool", "Append a line to the counter.")
+        self.until(lambda: counter.read_text().splitlines() if counter.exists() else [],
+                   lambda lines: lines == ["ran"])
+        os.kill(self.native_pid("noel-tool", "noel"), signal.SIGKILL)
+        done = self.wait_message(message["id"])
+        assert done["state"] == "completed" and done["result"] == "The counter was written once.", done
+        assert done["native_resumed"] == 1 and done["turn_id"] == run, done
+        time.sleep(1)  # a second run of the call would have appended by now
+        assert counter.read_text().splitlines() == ["ran"], counter.read_text()
+        sent = requests(log, 2)
+        assert len(sent) == 2, sent
+        results = [(m["tool_name"], m["content"]) for m in sent[1]["messages"] if m["role"] == "tool"]
+        assert results == [("bash", "tool call bash did not complete before the session continued")], sent
+        assert "bash is reported interrupted, not run again" in self.call("logs", env, "noel-tool").stdout
+        self.real_resumed("noel-tool", message, run)
+        self.heard_once(lead, message, lead_said)
+        print(f"cli-host: noel interrupted bash once; counter {counter.read_text().splitlines()}, "
+              f"model told {results[0][1]!r}", flush=True)
+        self.check("real-noel-killed-during-bash/bash-not-run-again/counter-has-one-line/lead-woken-once")
+
+        # The driver is killed mid-turn: `cw restart` resumes the run.
+        log = scripted("noel-driver", [held("driver"), [{"text": "Answered after the driver restarted."}]])
+        message, run = self.held("noel-driver", "Map the coast.")
+        requests(log, 1)
+        os.kill(self.driver_pid("noel-driver"), signal.SIGKILL)
+        self.ended("noel-driver")
+        self.call("restart", env, "noel-driver")
+        done = self.wait_message(message["id"])
+        assert done["state"] == "completed" and done["result"] == "Answered after the driver restarted.", done
+        assert done["native_resumed"] == 1 and done["turn_id"] == run, done
+        sent = requests(log, 2)
+        assert len(sent) == 2 and sent[0]["messages"] == sent[1]["messages"], sent
+        self.real_resumed("noel-driver", message, run)
+        self.heard_once(lead, message, lead_said)
+        self.check("real-noel-driver-killed-mid-turn/restart-resumes-once/lead-woken-once")
+
+        # The driver dies after sending resume_run, before the run settles: the
+        # next start resumes it again, counted, and the lead hears once.
+        log = scripted("noel-twice", [held("first"), held("second"), [{"text": "Survived both crashes."}]])
+        message, run = self.held("noel-twice", "Cross the bay.")
+        requests(log, 1)
+        os.kill(self.native_pid("noel-twice", "noel"), signal.SIGKILL)
+        requests(log, 2)
+        # Counted before resume_run was sent.
+        assert self.message_record("noel-twice", message["id"])["native_resumed"] == 1
+        os.kill(self.driver_pid("noel-twice"), signal.SIGKILL)
+        self.ended("noel-twice")
+        assert self.message_record("noel-twice", message["id"])["state"] == "running"
+        self.call("restart", env, "noel-twice")
+        done = self.wait_message(message["id"])
+        assert done["state"] == "completed" and done["result"] == "Survived both crashes.", done
+        assert done["native_resumed"] == 2 and done["turn_id"] == run, done
+        sent = requests(log, 3)
+        assert len(sent) == 3 and sent[0]["messages"] == sent[1]["messages"] == sent[2]["messages"], sent
+        self.real_resumed("noel-twice", message, run, resumes=2)
+        self.heard_once(lead, message, lead_said)
+        self.check("real-noel-driver-killed-after-resume-run/resumed-again-counted-twice/lead-woken-once")
+
+    def real_resumed(self, name, message, run, resumes=1):
+        """noel's journal for NAME holds MESSAGE's prompt once and its RUN
+        completed; the inbox and the session log say noel resumed it."""
+        journal = self.root / "pi-agent" / "sessions" / f"{self.noel_session(name)}.jsonl"
+        entries = [json.loads(line) for line in journal.read_text().splitlines()]
+        prompts = [e["message"]["content"] for e in entries
+                   if e.get("type") == "message" and e["message"]["role"] == "user"]
+        assert prompts == [message["text"]], prompts
+        assert journal_runs(journal) == {run: "completed"}, journal_runs(journal)
+        note = "(resumed by noel)" if resumes == 1 else f"(resumed by noel {resumes} times)"
+        inbox = self.call("inbox", self.environment, name).stdout
+        assert next(line for line in inbox.splitlines() if line.startswith(message["id"])).endswith(note), inbox
+        logs = self.call("logs", self.environment, name).stdout
+        assert f"message {message['id']} resumed by noel: run {run}, resume {resumes} of 3" in logs, logs
+        print(f"cli-host: noel inbox: {next(l for l in inbox.splitlines() if l.startswith(message['id']))}",
+              flush=True)
 
     def cleanup(self, preserve=False):
         try:

@@ -484,6 +484,20 @@ The synthetic journey also proves Codex and Claude keep their unknown outcome
 on each of those routes, and that each agent, and no other session, receives
 its conversation identity. The real-noel journey needs noel built from pi
 commit `ef09c03f` or later.
+
+The synthetic noel also keeps noel's durable runs and queue, and answers a
+repeated `requestId`, `resume_run` and `get_last_assistant_text` as noel
+`ef09c03f` does. Both journeys prove crash resume with `kill -9`: noel killed
+mid-turn, and the driver killed mid-turn and then restarted, each resume the
+run once; the lead hears once, and `cw inbox` and `cw logs` note the resume.
+When the driver is killed after it sent `resume_run`, the next start resumes
+the run again, counted twice. The real-noel journey adds noel's `faux/script`
+model: a model request the kill cut off is sent again (noel's
+`PI_FAUX_SCRIPT_LOG` holds it twice), and a `bash` call killed while it
+sleeps after appending a line to a file never runs again (the file keeps one
+line). The synthetic journey also proves a killed Codex or Claude driver or
+process still ends the message unknown, and that neither agent is started
+again by its driver.
 None replaces the matching native Linux hardware or retained Kind sandbox
 journey. Program #2255 holds current commands, outcomes and landing evidence.
 
