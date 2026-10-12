@@ -578,6 +578,41 @@ class SourceDigestTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, f"needs {gcc}, or cargo-zigbuild and zig"):
                         native.compiler_route(target, path, home)
 
+    def test_native_managed_build_reuses_one_public_cargo_home_per_target(self):
+        spec = importlib.util.spec_from_file_location(
+            "build_native_managed_agent", ROOT / "scripts/dev/build-native-managed-agent.py")
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        cache = self.base / "public-cargo-cache"
+        (cache / "registry").mkdir(parents=True)
+        (cache / "git").mkdir()
+        target = self.base / "public-cargo-target"
+        home = native.public_cargo_home(target, cache)
+        self.assertEqual(home, target / "native-managed-agent-cargo-home")
+        self.assertEqual({entry.name: os.readlink(entry) for entry in home.iterdir()},
+                         {"registry": str(cache / "registry"), "git": str(cache / "git")})
+        # Cargo's own lock and cache-tracking files are kept; the path is reused.
+        for name in native.CARGO_BOOKKEEPING:
+            (home / name).write_bytes(b"")
+        self.assertEqual(native.public_cargo_home(target, cache), home)
+        for name, make in (("config.toml", lambda path: path.write_text("[build]\n")),
+                           ("credentials.toml", lambda path: path.write_text("")),
+                           ("bin", lambda path: path.mkdir())):
+            with self.subTest(name):
+                make(home / name)
+                with self.assertRaisesRegex(RuntimeError, "not this build's public Cargo home"):
+                    native.public_cargo_home(target, cache)
+                (shutil.rmtree if (home / name).is_dir() else os.unlink)(home / name)
+        other = self.base / "other-cargo-cache"
+        (other / "registry").mkdir(parents=True)
+        (other / "git").mkdir()
+        with self.assertRaisesRegex(RuntimeError, "not this build's public Cargo home"):
+            native.public_cargo_home(target, other)
+        os.unlink(home / ".global-cache")
+        os.symlink(cache, home / ".global-cache")
+        with self.assertRaisesRegex(RuntimeError, "not this build's public Cargo home"):
+            native.public_cargo_home(target, cache)
+
     def test_compiled_inputs_must_all_be_in_the_source_digest(self):
         base = self.base / "depinfo"
         base.mkdir()
