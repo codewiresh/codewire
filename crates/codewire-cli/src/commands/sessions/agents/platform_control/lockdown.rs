@@ -1,8 +1,14 @@
-//! Credential-free private homes and closed API-only native launch projection.
-//! This never opens the inherited HOME, auth.json, settings or environment.
+//! The managed-only login lockdown of a hosted managed agent.
+//!
+//! The agent runs in the Sandbox session environment its driver was started
+//! with. The shared `codewire-access` projection gives it the Git route, the
+//! SSH signer socket and the provider variables exactly as an interactive
+//! session has them, so this module sets none of them. It holds only what
+//! keeps the agent on the selected broker route instead of a login saved in
+//! the Sandbox: its own private Codex or Claude home with exact configuration,
+//! and fixed arguments. It never opens `~/.codex`, `~/.claude`, `auth.json` or
+//! the user's agent settings.
 use super::*;
-pub(super) const OPENAI: &str = "http://127.0.0.1:38081/_codewire/openai/v1";
-pub(super) const ANTHROPIC: &str = "http://127.0.0.1:38081/_codewire/anthropic";
 const CODEX_CONFIG: &str = concat!(
     "model_provider = \"codewire_platform_api\"\n",
     "forced_login_method = \"api\"\n",
@@ -44,19 +50,26 @@ fn write_config(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     fs::File::open(path.parent().context("proxy config parent")?)?.sync_all()?;
     Ok(())
 }
+/// The agent's private home below its driver directory, and the exact
+/// configuration file in it.
+fn private_home(agent: AgentKind) -> (&'static str, &'static str) {
+    match agent {
+        AgentKind::Codex => ("codex", "config.toml"),
+        AgentKind::Claude => ("claude", "settings.json"),
+    }
+}
 /// Write the private home for `route`, which the home then records: its exact
 /// configuration names the route for the driver's lifetime.
 pub(super) fn prepare(stage: &Path, config: &AgentConfig, route: Route) -> anyhow::Result<()> {
-    let (path, bytes) = match (config.agent, route) {
-        (AgentKind::Codex, Route::OpenAi) => ("codex/config.toml", CODEX_CONFIG.as_bytes()),
-        (AgentKind::Codex, Route::Codex) => ("codex/config.toml", CODEX_SLOT_CONFIG.as_bytes()),
-        (AgentKind::Claude, Route::Anthropic) => ("claude/settings.json", b"{}\n".as_slice()),
+    let bytes = match (config.agent, route) {
+        (AgentKind::Codex, Route::OpenAi) => CODEX_CONFIG.as_bytes(),
+        (AgentKind::Codex, Route::Codex) => CODEX_SLOT_CONFIG.as_bytes(),
+        (AgentKind::Claude, Route::Anthropic) => b"{}\n".as_slice(),
         _ => anyhow::bail!("platform route serves another agent"),
     };
-    make_directory(&stage.join("home"))?;
-    make_directory(&stage.join("codex"))?;
-    make_directory(&stage.join("claude"))?;
-    write_config(&stage.join(path), bytes)
+    let (home, file) = private_home(config.agent);
+    make_directory(&stage.join(home))?;
+    write_config(&stage.join(home).join(file), bytes)
 }
 /// The route an exact private Codex configuration names, if any.
 fn codex_route(bytes: &[u8], working_dir: &str) -> anyhow::Result<Option<Route>> {
@@ -83,13 +96,9 @@ fn codex_route(bytes: &[u8], working_dir: &str) -> anyhow::Result<Option<Route>>
 }
 /// Admit the private home and return the route its exact configuration names.
 pub(super) fn check(dir: &Path, config: &AgentConfig) -> anyhow::Result<Route> {
-    for leaf in ["home", "codex", "claude"] {
-        DirectoryPin::open(&dir.join(leaf))?.check()?;
-    }
-    let path = match config.agent {
-        AgentKind::Codex => dir.join("codex/config.toml"),
-        AgentKind::Claude => dir.join("claude/settings.json"),
-    };
+    let (home, file) = private_home(config.agent);
+    DirectoryPin::open(&dir.join(home))?.check()?;
+    let path = dir.join(home).join(file);
     let mut f = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -158,52 +167,31 @@ pub(super) fn check(dir: &Path, config: &AgentConfig) -> anyhow::Result<Route> {
     );
     Ok(route)
 }
-/// The closed child environment for `route`, which the private home must name.
+/// The lockdown variables for `route`, which the private home must name. They
+/// are set over the session environment the provider inherits, and are the
+/// only variables this path adds to it: the agent's own private home, so that
+/// it never reads a login or settings saved in the user's, and Claude's
+/// nonessential-traffic switch.
 pub(super) fn environment(
     dir: &Path,
     config: &AgentConfig,
     route: Route,
 ) -> anyhow::Result<Vec<(String, String)>> {
     ensure!(check(dir, config)? == route, "private proxy route differs");
-    let mut values = vec![
-        (
-            "HOME".into(),
-            dir.join("home").to_string_lossy().into_owned(),
-        ),
-        ("USER".into(), "codewire".into()),
-        ("LOGNAME".into(), "codewire".into()),
-        ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
-        ("LANG".into(), "C.UTF-8".into()),
-    ];
-    match route {
-        // The configuration names the route; no key or base URL is needed.
-        Route::Codex => values.push((
-            "CODEX_HOME".into(),
-            dir.join("codex").to_string_lossy().into_owned(),
-        )),
-        Route::OpenAi => values.extend([
-            (
-                "CODEX_HOME".into(),
-                dir.join("codex").to_string_lossy().into_owned(),
-            ),
-            ("OPENAI_BASE_URL".into(), OPENAI.into()),
-            ("OPENAI_API_KEY".into(), "codewire-managed".into()),
-        ]),
-        Route::Anthropic => values.extend([
-            (
-                "CLAUDE_CONFIG_DIR".into(),
-                dir.join("claude").to_string_lossy().into_owned(),
-            ),
-            ("ANTHROPIC_BASE_URL".into(), ANTHROPIC.into()),
-            ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
-            ("ANTHROPIC_API_KEY".into(), String::new()),
+    let home = dir
+        .join(private_home(config.agent).0)
+        .to_string_lossy()
+        .into_owned();
+    Ok(match config.agent {
+        AgentKind::Codex => vec![("CODEX_HOME".into(), home)],
+        AgentKind::Claude => vec![
+            ("CLAUDE_CONFIG_DIR".into(), home),
             (
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
                 "1".into(),
             ),
-        ]),
-    }
-    Ok(values)
+        ],
+    })
 }
 pub(super) fn arguments(route: Route) -> Vec<String> {
     match route {

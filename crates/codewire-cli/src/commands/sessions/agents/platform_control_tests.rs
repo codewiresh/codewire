@@ -244,29 +244,281 @@ fn platform_control_generation_filter_refuses_mixed_or_replayed_messages() {
     ));
 }
 #[test]
-fn platform_control_private_proxy_homes_never_copy_inherited_auth_or_routes() {
+fn platform_control_private_homes_never_copy_a_saved_login_and_set_only_the_lockdown() {
     let f = Fixture::new();
     let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
     let sentinel = f._temp.path().join("unrelated-auth.json");
     fs::write(&sentinel, b"synthetic unrelated login").unwrap();
-    proxy::prepare(&f.dir, &config, Route::OpenAi).unwrap();
-    let environment = proxy::environment(&f.dir, &config, Route::OpenAi)
-        .unwrap()
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(environment["OPENAI_BASE_URL"], proxy::OPENAI);
-    assert_eq!(environment["OPENAI_API_KEY"], "codewire-managed");
-    assert!(!f.dir.join("codex/auth.json").exists());
+    lockdown::prepare(&f.dir, &config, Route::OpenAi).unwrap();
+    // The route's key and base URL are the shared projection's, inherited
+    // from the session: the lockdown is only the private home.
+    assert_eq!(
+        lockdown::environment(&f.dir, &config, Route::OpenAi).unwrap(),
+        [(
+            "CODEX_HOME".to_owned(),
+            f.dir.join("codex").to_string_lossy().into_owned()
+        )]
+    );
+    assert_eq!(
+        fs::read_dir(f.dir.join("codex"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>(),
+        ["config.toml"]
+    );
+    // No private `HOME` and no home of the other agent are made.
+    assert!(!f.dir.join("home").exists());
+    assert!(!f.dir.join("claude").exists());
     assert_eq!(fs::read(&sentinel).unwrap(), b"synthetic unrelated login");
-    assert!(!environment.contains_key("HTTP_PROXY"));
-    assert!(!environment.contains_key("CODEWIRE_DAEMON_TOKEN"));
-    assert!(environment["HOME"].ends_with("/home"));
     fs::write(
         f.dir.join("codex/config.toml"),
         b"model_provider=\"unrelated\"\n",
     )
     .unwrap();
-    assert!(proxy::environment(&f.dir, &config, Route::OpenAi).is_err());
+    assert!(lockdown::environment(&f.dir, &config, Route::OpenAi).is_err());
+}
+
+#[test]
+fn platform_control_claude_lockdown_is_its_private_home_and_no_credential_form() {
+    let f = Fixture::new();
+    let mut config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+    config.agent = AgentKind::Claude;
+    lockdown::prepare(&f.dir, &config, Route::Anthropic).unwrap();
+    // The API-key or subscription form is the shared projection's, inherited
+    // from the session; a hand-written form here would ignore the selection.
+    assert_eq!(
+        lockdown::environment(&f.dir, &config, Route::Anthropic).unwrap(),
+        [
+            (
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                f.dir.join("claude").to_string_lossy().into_owned()
+            ),
+            (
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
+                "1".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(
+        fs::read(f.dir.join("claude/settings.json")).unwrap(),
+        b"{}\n"
+    );
+    assert!(!f.dir.join("home").exists());
+    assert!(!f.dir.join("codex").exists());
+}
+
+/// One daemon's session configuration with `selected` bound, as the hosted
+/// workspace daemon or a local VM's guest daemon holds it.
+fn session_config(
+    home: &Path,
+    selected: codewire_access::ManagedCredentialClients,
+    transport: codewire_daemon::CredentialBridgeTransport,
+) -> codewire_daemon::Config {
+    codewire_daemon::Config {
+        listen_addr: "unused:0".into(),
+        workspace_root: "/workspace".into(),
+        home_root: home.to_owned(),
+        auth_token: codewire_daemon::DaemonAuthToken::new("synthetic-session-environment").unwrap(),
+        process_execution: codewire_daemon::execution::ProcessExecution::Native,
+        host: None,
+        launch_projection: Some(codewire_daemon::LaunchProjectionConfig {
+            selection_sha256: [7; 32],
+            native: None,
+        }),
+        credential_bridge: Some(codewire_daemon::CredentialBridgeConfig {
+            transport,
+            environment_id: uuid::Uuid::from_u128(2559),
+            environment_generation: 1,
+            ingress_socket: "/run/codewire/fixture-only.sock".into(),
+            ingress_uid: 1000,
+            ingress_gid: 1000,
+        }),
+        managed_credential_clients: selected,
+        session_working_dir: None,
+    }
+}
+
+/// What the daemon's one shared builder gives a session started with `term`
+/// and no other input.
+fn session_environment(
+    config: &codewire_daemon::Config,
+    term: &str,
+) -> std::collections::BTreeMap<String, String> {
+    codewire_daemon::env::build_process_env(config, &[], term)
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|entry| {
+            let (name, value) = entry.split_once('=').unwrap();
+            (name.to_owned(), value.to_owned())
+        })
+        .collect()
+}
+
+/// What a provider sees when the guardian that starts it runs in `inherited`:
+/// the guardian's own provider command decides what is set over it.
+fn provider_environment(
+    inherited: &std::collections::BTreeMap<String, String>,
+    lockdown: &[(String, String)],
+) -> std::collections::BTreeMap<String, String> {
+    let command = guest_peer::provider_command(Path::new("/proc/self/exe"), &[], Some(lockdown));
+    let mut environment = inherited.clone();
+    for (name, value) in command.get_envs() {
+        let name = name.to_str().unwrap().to_owned();
+        match value {
+            Some(value) => environment.insert(name, value.to_str().unwrap().to_owned()),
+            None => environment.remove(&name),
+        };
+    }
+    environment
+}
+
+/// For the same selected slots, a hosted managed agent, a hosted interactive
+/// session and a local VM session get the same Git and SSH environment, byte
+/// for byte, from the one shared builder. The managed launch differs from the
+/// session it runs in by its login lockdown alone.
+#[test]
+fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() {
+    use codewire_access::{
+        ManagedCredentialClient, ManagedCredentialClientPlacement, ManagedCredentialClients,
+        SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK,
+    };
+    use codewire_daemon::CredentialBridgeTransport;
+    const GIT: [&str; 3] = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"];
+    const SSH: &str = "SSH_AUTH_SOCK";
+    let home = tempfile::tempdir().unwrap();
+    struct Case {
+        slots: &'static [&'static str],
+        claude_subscription: bool,
+        launches: &'static [(AgentKind, Route)],
+    }
+    fn case(slots: &'static [&'static str], launches: &'static [(AgentKind, Route)]) -> Case {
+        Case {
+            slots,
+            claude_subscription: false,
+            launches,
+        }
+    }
+    let cases = [
+        case(
+            &["codex", "github", "ssh"],
+            &[(AgentKind::Codex, Route::Codex)],
+        ),
+        case(&["openai", "github"], &[(AgentKind::Codex, Route::OpenAi)]),
+        case(
+            &["anthropic", "ssh"],
+            &[(AgentKind::Claude, Route::Anthropic)],
+        ),
+        case(
+            &["codex", "openai", "anthropic", "ssh", "github"],
+            &[
+                (AgentKind::Codex, Route::Codex),
+                (AgentKind::Claude, Route::Anthropic),
+            ],
+        ),
+        // Neither Git credential: the builder projects none of the names.
+        case(
+            &["codex", "anthropic"],
+            &[
+                (AgentKind::Codex, Route::Codex),
+                (AgentKind::Claude, Route::Anthropic),
+            ],
+        ),
+        // The Claude subscription form is part of the selection.
+        Case {
+            claude_subscription: true,
+            ..case(
+                &["anthropic", "github", "ssh"],
+                &[(AgentKind::Claude, Route::Anthropic)],
+            )
+        },
+    ];
+    for Case {
+        slots,
+        claude_subscription,
+        launches,
+    } in cases
+    {
+        let mut selected =
+            ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap();
+        if claude_subscription {
+            selected = selected.with_anthropic_subscription_token().unwrap();
+        }
+        let hosted = session_config(home.path(), selected, CredentialBridgeTransport::Hosted);
+        let native = session_config(home.path(), selected, CredentialBridgeTransport::Local);
+        // A hosted interactive session, with its terminal.
+        let shell = session_environment(&hosted, "xterm-256color");
+        // The hosted managed driver: the daemon starts it through the same
+        // builder, with no input of its own.
+        let driver = session_environment(&hosted, "");
+        // A local VM session, which a local managed agent inherits unchanged.
+        let local = session_environment(&native, "");
+        let projected = selected
+            .for_placement(ManagedCredentialClientPlacement::Platform)
+            .environment;
+
+        // An unselected name is this test process's own, if it has one; the
+        // builder passes it through to every session alike.
+        let github = selected.contains(ManagedCredentialClient::GitHub);
+        let ssh = selected.contains(ManagedCredentialClient::Ssh);
+        for name in GIT {
+            assert_eq!(projected.contains_key(name), github, "{slots:?} {name}");
+            if github {
+                assert_eq!(shell.get(name), projected.get(name), "{slots:?} {name}");
+            }
+            assert_eq!(local.get(name), shell.get(name), "{slots:?} {name}");
+        }
+        // Each placement's signer socket is where its daemon listens.
+        assert_eq!(projected.contains_key(SSH), ssh, "{slots:?}");
+        if ssh {
+            assert_eq!(shell[SSH], SSH_PLATFORM_AUTH_SOCK, "{slots:?}");
+            assert_eq!(local[SSH], SSH_NATIVE_AUTH_SOCK, "{slots:?}");
+        } else {
+            assert_eq!(local.get(SSH), shell.get(SSH), "{slots:?}");
+        }
+
+        for (agent, route) in launches {
+            let f = Fixture::new();
+            let mut config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+            config.agent = *agent;
+            lockdown::prepare(&f.dir, &config, *route).unwrap();
+            let locked = lockdown::environment(&f.dir, &config, *route).unwrap();
+            let managed = provider_environment(&driver, &locked);
+            let context = format!("{slots:?} {route:?}");
+
+            for name in GIT.into_iter().chain([SSH]) {
+                assert_eq!(managed.get(name), shell.get(name), "{context} {name}");
+            }
+            // Every provider variable is the session's too, except the home
+            // the lockdown replaces.
+            let private_home = match agent {
+                AgentKind::Codex => "CODEX_HOME",
+                AgentKind::Claude => "CLAUDE_CONFIG_DIR",
+            };
+            for (name, value) in &projected {
+                assert_eq!(shell.get(name), Some(value), "{context} {name}");
+                if name != private_home {
+                    assert_eq!(managed.get(name), Some(value), "{context} {name}");
+                }
+            }
+            assert!(
+                managed[private_home].starts_with(f.dir.to_str().unwrap()),
+                "{context}"
+            );
+            // The managed launch differs from the session by its lockdown
+            // alone: nothing else is set, changed or removed.
+            for (name, value) in &locked {
+                assert_eq!(managed.get(name), Some(value), "{context} {name}");
+            }
+            for name in driver.keys().chain(managed.keys()) {
+                assert!(
+                    managed.get(name) == driver.get(name)
+                        || locked.iter().any(|(set, _)| set == name),
+                    "{context} {name}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -290,7 +542,7 @@ fn platform_control_claude_prefix_uses_the_pinned_cli_option_names() {
     // Claude 2.1.288 exits during startup on an unknown option such as
     // `--settings-sources`; these are the names it accepts.
     assert_eq!(
-        proxy::arguments(Route::Anthropic),
+        lockdown::arguments(Route::Anthropic),
         [
             "--setting-sources",
             "",
@@ -307,7 +559,7 @@ fn platform_control_codex_private_config_allows_only_its_exact_project_suffix() 
     for route in [Route::OpenAi, Route::Codex] {
         let f = Fixture::new();
         let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
-        proxy::prepare(&f.dir, &config, route).unwrap();
+        lockdown::prepare(&f.dir, &config, route).unwrap();
         let path = f.dir.join("codex/config.toml");
         let baseline = fs::read(&path).unwrap();
         let suffix = format!(
@@ -317,8 +569,8 @@ fn platform_control_codex_private_config_allows_only_its_exact_project_suffix() 
         let mut admitted = baseline.clone();
         admitted.extend(suffix.as_bytes());
         fs::write(&path, &admitted).unwrap();
-        assert_eq!(proxy::check(&f.dir, &config).unwrap(), route);
-        assert!(proxy::environment(&f.dir, &config, route).is_ok());
+        assert_eq!(lockdown::check(&f.dir, &config).unwrap(), route);
+        assert!(lockdown::environment(&f.dir, &config, route).is_ok());
         for extra in [
             b"\n[projects.\"/other\"]\ntrust_level = \"trusted\"\n".as_slice(),
             b"\nmodel_provider = \"unrelated\"\n",
@@ -326,12 +578,12 @@ fn platform_control_codex_private_config_allows_only_its_exact_project_suffix() 
             let mut invalid = admitted.clone();
             invalid.extend(extra);
             fs::write(&path, &invalid).unwrap();
-            assert!(proxy::environment(&f.dir, &config, route).is_err());
+            assert!(lockdown::environment(&f.dir, &config, route).is_err());
         }
         fs::write(&path, admitted).unwrap();
         let mut changed = config.clone();
         changed.working_dir = "/other".into();
-        assert!(proxy::environment(&f.dir, &changed, route).is_err());
+        assert!(lockdown::environment(&f.dir, &changed, route).is_err());
     }
 }
 
@@ -353,7 +605,7 @@ fn codex_settings(dir: &Path, route: Route) -> (toml::Table, toml::Table) {
         }
     }
     let mut overrides = toml::Table::new();
-    let arguments = proxy::arguments(route);
+    let arguments = lockdown::arguments(route);
     assert_eq!(arguments.len() % 2, 0);
     for pair in arguments.chunks(2) {
         assert_eq!(pair[0], "-c");
@@ -368,9 +620,9 @@ fn platform_control_codex_slot_route_is_credential_free_through_the_codex_route(
     let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
     let sentinel = f._temp.path().join("unrelated-auth.json");
     fs::write(&sentinel, b"synthetic unrelated login").unwrap();
-    proxy::prepare(&f.dir, &config, Route::Codex).unwrap();
-    assert_eq!(proxy::check(&f.dir, &config).unwrap(), Route::Codex);
-    let environment = proxy::environment(&f.dir, &config, Route::Codex)
+    lockdown::prepare(&f.dir, &config, Route::Codex).unwrap();
+    assert_eq!(lockdown::check(&f.dir, &config).unwrap(), Route::Codex);
+    let environment = lockdown::environment(&f.dir, &config, Route::Codex)
         .unwrap()
         .into_iter()
         .collect::<std::collections::BTreeMap<_, _>>();
@@ -378,13 +630,12 @@ fn platform_control_codex_slot_route_is_credential_free_through_the_codex_route(
     // from `~/.codex`.
     assert_eq!(
         environment.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["CODEX_HOME", "HOME", "LANG", "LOGNAME", "PATH", "USER"]
+        ["CODEX_HOME"]
     );
     assert_eq!(
         environment["CODEX_HOME"],
         f.dir.join("codex").to_string_lossy()
     );
-    assert!(environment["HOME"].ends_with("/home"));
     assert!(!environment.values().any(|value| value.contains(".codex")));
     assert!(!f.dir.join("codex/auth.json").exists());
     assert_eq!(fs::read(&sentinel).unwrap(), b"synthetic unrelated login");
@@ -422,16 +673,16 @@ fn platform_control_codex_slot_route_is_credential_free_through_the_codex_route(
     assert_eq!(file, overrides);
 
     // The recorded route is the only one admitted for this home.
-    assert!(proxy::environment(&f.dir, &config, Route::OpenAi).is_err());
-    assert!(proxy::environment(&f.dir, &config, Route::Anthropic).is_err());
+    assert!(lockdown::environment(&f.dir, &config, Route::OpenAi).is_err());
+    assert!(lockdown::environment(&f.dir, &config, Route::Anthropic).is_err());
 }
 
 #[test]
 fn platform_control_openai_route_keeps_its_key_slot_configuration() {
     let f = Fixture::new();
     let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
-    proxy::prepare(&f.dir, &config, Route::OpenAi).unwrap();
-    assert_eq!(proxy::check(&f.dir, &config).unwrap(), Route::OpenAi);
+    lockdown::prepare(&f.dir, &config, Route::OpenAi).unwrap();
+    assert_eq!(lockdown::check(&f.dir, &config).unwrap(), Route::OpenAi);
     let (file, overrides) = codex_settings(&f.dir, Route::OpenAi);
     for settings in [&file, &overrides] {
         assert_eq!(
@@ -452,7 +703,7 @@ fn platform_control_openai_route_keeps_its_key_slot_configuration() {
         assert_eq!(provider["env_key"].as_str(), Some("OPENAI_API_KEY"));
     }
     assert_eq!(file, overrides);
-    assert!(proxy::environment(&f.dir, &config, Route::Codex).is_err());
+    assert!(lockdown::environment(&f.dir, &config, Route::Codex).is_err());
 }
 
 #[test]
@@ -471,13 +722,13 @@ fn platform_control_private_home_is_written_only_for_a_route_of_its_agent() {
             .path()
             .join(format!("stage-{}", uuid::Uuid::new_v4()));
         private_directory(&stage).unwrap();
-        assert!(proxy::prepare(&stage, config, route).is_err());
+        assert!(lockdown::prepare(&stage, config, route).is_err());
         assert_eq!(fs::read_dir(&stage).unwrap().count(), 0, "{route:?}");
     }
     let stage = f._temp.path().join("claude-stage");
     private_directory(&stage).unwrap();
-    proxy::prepare(&stage, &claude, Route::Anthropic).unwrap();
-    assert_eq!(proxy::check(&stage, &claude).unwrap(), Route::Anthropic);
+    lockdown::prepare(&stage, &claude, Route::Anthropic).unwrap();
+    assert_eq!(lockdown::check(&stage, &claude).unwrap(), Route::Anthropic);
 }
 
 #[test]

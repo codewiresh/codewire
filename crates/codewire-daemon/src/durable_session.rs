@@ -1877,40 +1877,36 @@ impl SessionEngine {
         };
         #[cfg(not(target_os = "linux"))]
         let platform_image: Option<()> = None;
+        // One builder for every session. A managed agent works in the user's
+        // environment: its driver, guardian and provider inherit exactly what
+        // an interactive session gets here (the Git route, the SSH signer
+        // socket, the provider routes), and the guardian adds only the
+        // managed login lockdown. A managed session carries no input of its
+        // own, as checked above.
+        let environment = match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term)
+        {
+            Ok(environment) => environment,
+            Err(error) => {
+                return self
+                    .record_unspawned_failure(
+                        handle,
+                        format!("prepare session environment: {error}"),
+                    )
+                    .await;
+            }
+        };
         let prepare = if platform_image.is_some() {
-            // This driver never opens the inherited personal login home or
-            // launch projection. Its fixed peer builds a separate API-only
-            // private home; the original daemon owns the typed proxy slot.
-            let environment = [
-                "HOME=/home/codewire",
-                "USER=codewire",
-                "LOGNAME=codewire",
-                "PATH=/usr/local/bin:/usr/bin:/bin",
-                "LANG=C.UTF-8",
-            ]
-            .map(str::to_owned);
+            // The driver is this fixed image and requests no launch projection.
             PreparedProcess::prepare(
                 &ProcessExecution::Native,
                 command,
                 &snapshot.working_dir,
-                &environment,
+                &environment.entries,
                 false,
                 0,
                 0,
             )
         } else {
-            let environment =
-                match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term) {
-                    Ok(environment) => environment,
-                    Err(error) => {
-                        return self
-                            .record_unspawned_failure(
-                                handle,
-                                format!("prepare session environment: {error}"),
-                            )
-                            .await;
-                    }
-                };
             PreparedProcess::prepare_configured(
                 (&self.inner.config, &self.inner.credential_bridge),
                 command,

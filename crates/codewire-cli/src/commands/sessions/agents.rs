@@ -2339,10 +2339,10 @@ impl Peer {
         #[cfg(target_os = "linux")]
         if let Some(context) = &driver.platform {
             context.check(&driver.environment, &driver.config)?;
-            command.args(context.arguments(args)).env_clear();
-            for (name, value) in context.environment(&driver.dir)? {
-                command.env(name, value);
-            }
+            // The guardian inherits this driver's environment, the session
+            // environment the daemon built, and sets only the managed login
+            // lockdown over it for the provider.
+            command.args(context.arguments(args));
         } else {
             command.args(args);
         }

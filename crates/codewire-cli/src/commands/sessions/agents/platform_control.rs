@@ -11,7 +11,7 @@ use std::os::unix::fs::DirBuilderExt;
 const STATE: &str = "/home/codewire/.local/state/codewire/platform-managed-agents-v1";
 const ORIGIN: &str = "platform-origin.json";
 const GENERATION: &str = "platform-generation.json";
-mod proxy;
+mod lockdown;
 const REQUEST_BYTES: u64 = 512 * 1024;
 const RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
@@ -445,7 +445,7 @@ fn prepare(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result
             generation: 1,
         },
     )?;
-    proxy::prepare(&stage, &config, route)?;
+    lockdown::prepare(&stage, &config, route)?;
     if let (Some(message), Some(text)) = (&config.initial_message_id, prompt) {
         let mut record = MessageRecord::new(
             &config.driver_id,
@@ -503,7 +503,7 @@ impl DriverContext {
             agent(origin.agent),
             &origin.provider,
         )?;
-        let route = proxy::check(&dir, &config)?;
+        let route = lockdown::check(&dir, &config)?;
         let context = Self {
             origin,
             generation,
@@ -528,22 +528,24 @@ impl DriverContext {
         );
         self.provider.check()?;
         ensure!(
-            proxy::check(&driver_dir(environment, &config.driver_id)?, config)? == self.route,
+            lockdown::check(&driver_dir(environment, &config.driver_id)?, config)? == self.route,
             "platform proxy route changed"
         );
         Ok(())
     }
-    pub(super) fn environment(&self, dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
+    /// The managed login lockdown the provider gets over the session
+    /// environment it inherits.
+    pub(super) fn lockdown(&self, dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
         let config: AgentConfig = private_record(&dir.join("config.json"))?;
         ensure!(
             config.agent == self.origin.agent && config.program == self.provider.path(),
             "platform provider changed"
         );
         self.provider.check()?;
-        proxy::environment(dir, &config, self.route)
+        lockdown::environment(dir, &config, self.route)
     }
     pub(super) fn arguments(&self, args: &[&str]) -> Vec<String> {
-        let mut fixed = proxy::arguments(self.route);
+        let mut fixed = lockdown::arguments(self.route);
         fixed.extend(args.iter().map(|s| (*s).to_owned()));
         fixed
     }
@@ -603,10 +605,10 @@ pub(crate) async fn run_platform_agent_peer(
         binding.session_id == args.session_id && args.program == context.provider.path(),
         "platform peer binding differs"
     );
-    let prefix = proxy::arguments(context.route);
+    let prefix = lockdown::arguments(context.route);
     ensure!(
         args.arguments.starts_with(&prefix),
-        "platform API-only peer arguments differ"
+        "platform peer lockdown arguments differ"
     );
     let native = &args.arguments[prefix.len()..];
     match config.agent {
@@ -647,8 +649,8 @@ pub(crate) async fn run_platform_agent_peer(
             );
         }
     }
-    let projection = context.environment(&dir)?;
-    guest_peer::run_platform_peer(args, projection)
+    let locked = context.lockdown(&dir)?;
+    guest_peer::run_platform_peer(args, locked)
         .await
         .map_err(|_| anyhow::anyhow!("platform peer refused"))
 }
