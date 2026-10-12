@@ -33,7 +33,8 @@ HOST_FACTS = {"macos", "sdk", "clang"}
 # Each part's producer files, and the pins (paths into the pins file) it uses.
 PARTS = {
     "kernel-arm64": {
-        "files": ("scripts/ci/release/build-runtime-kernel.sh", "scripts/ci/verify/build-linux-vmm-kernel.py",
+        "files": ("scripts/ci/release/build-runtime-kernel.sh", "scripts/ci/release/runtime-container.sh",
+                  "scripts/ci/verify/build-linux-vmm-kernel.py",
                   "scripts/ci/verify/linux-vmm-kernel/arm64.config",
                   "scripts/ci/verify/linux-vmm-kernel/dax.patch",
                   "scripts/ci/verify/linux-vmm-kernel/provenance.json"),

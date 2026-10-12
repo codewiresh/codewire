@@ -1722,6 +1722,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/local_runtime_parts.py|scripts/ci/release/local_runtime_sources.py|\
       scripts/ci/release/local-runtime-sources.json|scripts/ci/release/build-runtime-kernel.sh|\
       scripts/ci/release/build-local-runtime.sh|\
+      scripts/ci/release/build-runtime-guest-root.sh|scripts/ci/release/runtime-container.sh|\
       scripts/ci/tests/test-local-runtime-parts.py|\
       scripts/ci/tests/test-cw-install.py|\
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\

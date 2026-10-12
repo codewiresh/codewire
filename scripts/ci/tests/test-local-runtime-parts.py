@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -273,6 +274,101 @@ class BuildScriptTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1, args)
             self.assertIn(message, result.stderr)
         self.assertFalse(output.exists())
+
+
+class GuestRootBuilderTest(unittest.TestCase):
+    """The guest root builds in its pinned container, never on the runner's toolchain."""
+
+    RUNNER_SCRIPTS = ("build-local-runtime.sh", "build-runtime-kernel.sh", "build-runtime-guest-root.sh",
+                      "runtime-container.sh")
+
+    def test_the_runner_toolchain_is_never_changed(self):
+        # The CI runner's Rust toolchain is sealed; a rustup change fails only
+        # in CI (main dry run 12507). Nothing on the release's Linux side may
+        # depend on one.
+        for name in self.RUNNER_SCRIPTS:
+            code = [line for line in (ROOT / "scripts/ci/release" / name).read_text().splitlines()
+                    if not line.lstrip().startswith("#")]
+            with self.subTest(script=name):
+                self.assertFalse([line for line in code if re.search(r"\brustup\b", line)])
+
+    def test_the_builder_is_the_sealed_release(self):
+        pins = sources.load_pins()["guest_root_builder"]
+        script = (ROOT / "scripts/ci/verify/build-local-vmm-initramfs.sh").read_text()
+        rust = re.search(r"^readonly REQUIRED_RUST='([0-9.]+)'$", script, re.M).group(1)
+        protoc = re.search(r"^readonly REQUIRED_PROTOC='libprotoc ([0-9.]+)'$", script, re.M).group(1)
+        sealed = (ROOT / "scripts/ci/setup/assert-ci-runner-image.sh").read_text()
+        self.assertIn(f"readonly rust_version='{rust}'", sealed)
+        self.assertRegex(pins["image"], r"^docker\.io/library/rust@sha256:[0-9a-f]{64}$")
+        self.assertIn(f"rust:{rust}-", pins["origin"])
+        # The arm64 guest and the x86_64 archive packer the recipe also builds.
+        self.assertEqual(sorted(pins["rust_std"]), ["aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"])
+        for target, tarball in pins["rust_std"].items():
+            self.assertRegex(tarball["url"], rf"^https://static\.rust-lang\.org/dist/[0-9-]+/rust-std-{rust}-{target}\.tar\.xz$")
+            self.assertRegex(tarball["sha256"], r"^[0-9a-f]{64}$")
+        self.assertIn(f"/download/v{protoc}/protoc-{protoc}-linux-x86_64.zip", pins["protoc"]["url"])
+        # The same protoc zip the release workflows install on the runner.
+        workflow = (ROOT / ".gitea/workflows/cli-release.yaml").read_text()
+        self.assertIn(pins["protoc"]["url"], workflow)
+        self.assertIn(f'echo "{pins["protoc"]["sha256"]}  /tmp/protoc.zip"', workflow)
+
+    def run_with_fake_docker(self, job_mounts, *paths):
+        fake = fx.scratch("runtime-docker.")
+        self.addCleanup(shutil.rmtree, fake)
+        (fake / "docker").write_text("#!/bin/sh\n[ \"$1\" = inspect ] || exit 9\nprintf '%b' \"$FAKE_MOUNTS\"\n")
+        (fake / "docker").chmod(0o755)
+        shell = ('. "$1"; shift; runtime_container_mounts "$@" || exit $?; '
+                 'printf "%s\\n" "${RUNTIME_MOUNTS[@]}"')
+        return subprocess.run(["bash", "-c", shell, "bash", str(ROOT / "scripts/ci/release/runtime-container.sh"),
+                               *paths], capture_output=True, text=True, check=False,
+                              env={"PATH": f"{fake}:/usr/bin:/bin", "FAKE_MOUNTS": job_mounts})
+
+    def test_a_job_container_shares_only_the_mounts_that_hold_the_paths(self):
+        mounts = ("volume\tjob-workspace\t/workspace\n"
+                  "bind\t/var/run/docker.sock\t/var/run/docker.sock\n"
+                  "volume\tjob-env\t/var/run/act\n"
+                  "bind\t/srv/tools\t/workspace/tools\n")
+        result = self.run_with_fake_docker(mounts, "job1", "/workspace/repo", "/workspace/tools/protoc.zip",
+                                           "--", "/workspace/out")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sorted(result.stdout.split()), sorted([
+            "--mount", "type=volume,source=job-workspace,target=/workspace",
+            "--mount", "type=bind,source=/srv/tools,target=/workspace/tools"]))
+        refused = self.run_with_fake_docker(mounts, "job1", "/workspace/repo", "--", "/tmp/out")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("/tmp/out is not on a mount of job1", refused.stderr)
+        self.assertNotEqual(self.run_with_fake_docker(mounts, "job 1", "/workspace/repo").returncode, 0)
+
+    def test_without_a_job_container_paths_are_bound_read_only_unless_writable(self):
+        result = self.run_with_fake_docker("", "", "/src", "/in/a", "--", "/out")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), [
+            "--mount", "type=bind,source=/src,target=/src,readonly",
+            "--mount", "type=bind,source=/in/a,target=/in/a,readonly",
+            "--mount", "type=bind,source=/out,target=/out"])
+
+    def test_bad_invocations_are_refused_before_docker(self):
+        base = fx.scratch("runtime-guest-root.")
+        self.addCleanup(shutil.rmtree, base)
+        files = {name: base / name for name in ("busybox", "runc", "rust-std", "rust-std-2", "protoc.zip")}
+        for path in files.values():
+            path.write_bytes(b"not the pinned bytes\n")
+        script = str(ROOT / "scripts/ci/release/build-runtime-guest-root.sh")
+        args = ["--busybox", str(files["busybox"]), "--runc", str(files["runc"]),
+                "--rust-std", str(files["rust-std"]), "--rust-std", str(files["rust-std-2"]),
+                "--protoc-zip", str(files["protoc.zip"])]
+        for extra, message in (
+            (["--output", "relative.cpio"], "--output must be an absolute path"),
+            (["--output", str(base / "missing/initramfs.cpio")], "output parent does not exist"),
+            (["--output", str(files["runc"])], "output already exists"),
+            (["--output", str(base / "initramfs.cpio")], "no --rust-std is the pinned aarch64-unknown-linux-musl tarball"),
+        ):
+            result = subprocess.run(["bash", script, *args, *extra], capture_output=True, text=True,
+                                    check=False, env={"PATH": "/usr/bin:/bin"})
+            with self.subTest(extra=extra):
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+        self.assertEqual(sorted(path.name for path in base.iterdir()), sorted(files))
 
 
 class SourcesTest(unittest.TestCase):
