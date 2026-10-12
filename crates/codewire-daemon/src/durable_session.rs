@@ -77,6 +77,18 @@ struct SessionEngineInner {
     /// run to interrupt first.
     #[cfg(all(test, target_os = "linux"))]
     stop_interrupt_checks: std::sync::atomic::AtomicUsize,
+    /// How many shutdown stops asked the record helper to pause an active
+    /// run first.
+    #[cfg(all(test, target_os = "linux"))]
+    shutdown_pause_checks: std::sync::atomic::AtomicUsize,
+    /// How many session records retention removed after asking the record
+    /// helper to resolve what could then never resume.
+    #[cfg(all(test, target_os = "linux"))]
+    prune_retire_checks: std::sync::atomic::AtomicUsize,
+    /// How many explicit stops of a conversation that was not running asked
+    /// the record helper to end its paused messages.
+    #[cfg(all(test, target_os = "linux"))]
+    stopped_pause_checks: std::sync::atomic::AtomicUsize,
 }
 
 /// The fenced interrupt recorded for an explicit stop or restart, before it
@@ -383,6 +395,12 @@ impl SessionEngine {
                 store_refusal: Mutex::new(None),
                 #[cfg(all(test, target_os = "linux"))]
                 stop_interrupt_checks: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(all(test, target_os = "linux"))]
+                shutdown_pause_checks: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(all(test, target_os = "linux"))]
+                prune_retire_checks: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(all(test, target_os = "linux"))]
+                stopped_pause_checks: std::sync::atomic::AtomicUsize::new(0),
             }),
         }
     }
@@ -414,6 +432,28 @@ impl SessionEngine {
             .map_err(|_| SessionError::Internal("session launch cleanup did not settle".into()))?;
         if self.inner.config.host.is_some() {
             let ids = lock(&self.inner.active).keys().cloned().collect::<Vec<_>>();
+            // Every managed conversation's resumable run is paused before
+            // any session is signalled: its record is then on disk whatever
+            // becomes of its driver, and no record helper competes with a
+            // stopping session for the short time its processes have to
+            // end. What does not answer within the shutdown budget is left
+            // to its driver.
+            #[cfg(target_os = "linux")]
+            {
+                let mut pauses = tokio::task::JoinSet::new();
+                for id in &ids {
+                    let (engine, id) = (self.clone(), id.clone());
+                    pauses.spawn(async move {
+                        if let Ok(handle) = engine.handle(&id) {
+                            let _operation = handle.operation.lock().await;
+                            engine.pause_active_run_before_shutdown(&id, &handle).await;
+                        }
+                    });
+                }
+                while let Ok(Some(_)) = tokio::time::timeout_at(deadline, pauses.join_next()).await
+                {
+                }
+            }
             let mut stops = tokio::task::JoinSet::new();
             for id in ids {
                 let engine = self.clone();
@@ -658,15 +698,177 @@ impl SessionEngine {
             })?;
         }
         let _operation = handle.operation.lock().await;
+        #[cfg(target_os = "linux")]
+        self.end_paused_run_of_stopped_conversation(session_id, &handle)
+            .await;
         self.stop_active(session_id, &handle).await
+    }
+
+    /// An explicit stop of a managed conversation that is not running asks
+    /// its record helper to end a message that its environment's takedown
+    /// paused: the conversation's next start would otherwise resume a run
+    /// its owner has since stopped. A running conversation never comes
+    /// here; its active run is interrupted instead. Every such stop of a
+    /// host owner's own managed driver costs one bounded helper run; a
+    /// refusal or timeout is logged and the stop answers as before.
+    #[cfg(target_os = "linux")]
+    async fn end_paused_run_of_stopped_conversation(
+        &self,
+        session_id: &str,
+        handle: &SessionHandle,
+    ) {
+        use crate::host_control::managed;
+        if lock(&self.inner.active).contains_key(session_id) {
+            return;
+        }
+        let Some(environment) = self
+            .inner
+            .config
+            .host
+            .as_ref()
+            .and_then(|host| host.state_root.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let driver_id = {
+            let metadata = handle.metadata.lock().await;
+            let Some(driver_id) = metadata.command.get(5).cloned() else {
+                return;
+            };
+            if is_live_state(metadata.state)
+                || metadata.pty
+                || metadata.platform_managed_origin.is_some()
+                || metadata.control_origin.is_some()
+                || crate::host_control::canonical_uuid(&environment).is_err()
+                || crate::host_control::canonical_uuid(&driver_id).is_err()
+                || !managed::driver_command_shape(&metadata.command, &environment, &driver_id)
+            {
+                return;
+            }
+            driver_id
+        };
+        #[cfg(test)]
+        self.inner
+            .stopped_pause_checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match managed::helper_within(
+            &self.inner.config,
+            &environment,
+            managed::stop_paused(&driver_id, session_id),
+            managed::RESOLVE_PAUSED_BOUND,
+        )
+        .await
+        {
+            Ok(reply) => {
+                if reply["resolved"]
+                    .as_array()
+                    .is_some_and(|resolved| !resolved.is_empty())
+                {
+                    tracing::info!(
+                        session_id,
+                        driver_id = driver_id.as_str(),
+                        resolved = %reply["resolved"],
+                        "ended the paused messages of a stopped conversation"
+                    );
+                }
+            }
+            Err(_) => tracing::warn!(
+                session_id,
+                driver_id = driver_id.as_str(),
+                "could not check a stopped conversation for paused messages; its next start resumes them"
+            ),
+        }
     }
 
     /// Daemon shutdown stops each session without interrupting an agent's
     /// run: like a crash, kill or host reboot, it leaves the run resumable.
+    /// [`Self::shutdown`] has by then paused each managed conversation's run
+    /// that its agent can resume; see
+    /// [`Self::pause_active_run_before_shutdown`].
     async fn stop_for_shutdown(&self, session_id: &str) -> Result<v1::SessionRecord, SessionError> {
         let handle = self.admit_stop(session_id).await?;
         let _operation = handle.operation.lock().await;
         self.stop_active(session_id, &handle).await
+    }
+
+    /// Before shutdown signals any session, asks the record helper of each
+    /// running managed conversation on a trusted host to pause its active
+    /// run: the message is recorded paused and its parent's notice queued
+    /// before the first signal, so neither depends on what the driver
+    /// manages to do between its SIGTERM and SIGKILL. The helper decides
+    /// from the conversation's own state: it pauses only a run the agent can
+    /// resume (noel) and answers at once for any other.
+    ///
+    /// The daemon cannot tell an agent's kind from a session, so every
+    /// shutdown stop of a running managed driver costs one helper run,
+    /// bounded well inside the shutdown budget. An explicit stop or restart
+    /// never comes here: it interrupts instead. Shutdown itself does not
+    /// cancel the helper, which exists because of it. A refusal or timeout is
+    /// logged and the stop goes on; the driver then decides by its own
+    /// evidence of the takedown.
+    #[cfg(target_os = "linux")]
+    async fn pause_active_run_before_shutdown(&self, session_id: &str, handle: &SessionHandle) {
+        use crate::host_control::managed;
+        let Some(environment) = self
+            .inner
+            .config
+            .host
+            .as_ref()
+            .and_then(|host| host.state_root.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let driver_id = {
+            let metadata = handle.metadata.lock().await;
+            let Some(driver_id) = metadata.command.get(5).cloned() else {
+                return;
+            };
+            // A member's conversation never pauses: only the host owner's
+            // own agent can resume a run.
+            if metadata.state != v1::SessionLifecycleState::Running as i32
+                || metadata.pty
+                || metadata.platform_managed_origin.is_some()
+                || metadata.control_origin.is_some()
+                || crate::host_control::canonical_uuid(&environment).is_err()
+                || crate::host_control::canonical_uuid(&driver_id).is_err()
+                || !managed::driver_command_shape(&metadata.command, &environment, &driver_id)
+            {
+                return;
+            }
+            driver_id
+        };
+        #[cfg(test)]
+        self.inner
+            .shutdown_pause_checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match managed::helper_within(
+            &self.inner.config,
+            &environment,
+            managed::pause_before_shutdown(&driver_id, session_id),
+            managed::SHUTDOWN_PAUSE_BOUND,
+        )
+        .await
+        {
+            Ok(reply) => {
+                if let Some(message_id) = reply["paused"].as_str() {
+                    tracing::info!(
+                        session_id,
+                        driver_id = driver_id.as_str(),
+                        message_id,
+                        "paused the active run before shutting down"
+                    );
+                }
+            }
+            Err(_) => tracing::warn!(
+                session_id,
+                driver_id = driver_id.as_str(),
+                "could not check for an active run to pause before shutting down; its driver decides by the takedown marker"
+            ),
+        }
     }
 
     async fn admit_stop(&self, session_id: &str) -> Result<Arc<SessionHandle>, SessionError> {
@@ -3083,6 +3285,8 @@ async fn prune_session_records_preserving(
     }
     for (_, session_id, handle) in candidates.into_iter().take(needed) {
         let _operation = handle.operation.lock().await;
+        #[cfg(target_os = "linux")]
+        retire_managed_before_prune(inner, &session_id, &handle).await;
         let path = session_directory(&inner.root, &session_id)?;
         let retired = inner
             .root
@@ -3129,6 +3333,80 @@ fn prepare_pipe_process(
         0,
     )
     .map_err(|error| format!("prepare session process: {error}"))
+}
+
+/// Before retention removes a stopped managed conversation's session record
+/// on a trusted host, asks its record helper to resolve what can then never
+/// resume: a message that the environment's takedown paused ends unknown and
+/// its parent hears of it once, so none stays paused with no conversation
+/// behind it. The daemon cannot tell an agent's kind from a session, so each
+/// such record costs one bounded helper run; a member's conversation never
+/// pauses and costs none. A refusal or timeout is logged and the record is
+/// removed all the same.
+#[cfg(target_os = "linux")]
+async fn retire_managed_before_prune(
+    inner: &SessionEngineInner,
+    session_id: &str,
+    handle: &SessionHandle,
+) {
+    use crate::host_control::managed;
+    let Some(environment) = inner
+        .config
+        .host
+        .as_ref()
+        .and_then(|host| host.state_root.file_name())
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let driver_id = {
+        let metadata = handle.metadata.lock().await;
+        let Some(driver_id) = metadata.command.get(5).cloned() else {
+            return;
+        };
+        if metadata.pty
+            || metadata.platform_managed_origin.is_some()
+            || metadata.control_origin.is_some()
+            || crate::host_control::canonical_uuid(&environment).is_err()
+            || crate::host_control::canonical_uuid(&driver_id).is_err()
+            || !managed::driver_command_shape(&metadata.command, &environment, &driver_id)
+        {
+            return;
+        }
+        driver_id
+    };
+    #[cfg(test)]
+    inner
+        .prune_retire_checks
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    match managed::helper_within(
+        &inner.config,
+        &environment,
+        managed::retire_before_prune(&driver_id, session_id),
+        managed::RESOLVE_PAUSED_BOUND,
+    )
+    .await
+    {
+        Ok(reply) => {
+            if reply["resolved"]
+                .as_array()
+                .is_some_and(|resolved| !resolved.is_empty())
+            {
+                tracing::info!(
+                    session_id,
+                    driver_id = driver_id.as_str(),
+                    resolved = %reply["resolved"],
+                    "resolved paused messages before removing their conversation's session record"
+                );
+            }
+        }
+        Err(_) => tracing::warn!(
+            session_id,
+            driver_id = driver_id.as_str(),
+            "could not check for paused messages before removing a conversation's session record"
+        ),
+    }
 }
 
 async fn wait_for_launch_cancellation(handle: &SessionHandle) {

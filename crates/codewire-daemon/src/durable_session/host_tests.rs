@@ -799,6 +799,131 @@ async fn sessions_outside_a_host_owner_never_check_for_a_run_to_interrupt() {
     engine.shutdown().await.unwrap();
     engine.stop(&driver).await.unwrap();
     assert_eq!(stop_interrupt_checks(&engine), 0);
+    // Nor for one to pause, nor for one that can never resume, nor for a
+    // paused one to end.
+    assert_eq!(shutdown_pause_checks(&engine), 0);
+    assert_eq!(stopped_pause_checks(&engine), 0);
+    let _admission = engine.inner.retention_admission.lock().await;
+    prune_session_records(&engine.inner, 0, true).await.unwrap();
+    assert_eq!(prune_retire_checks(&engine), 0);
+}
+
+#[cfg(target_os = "linux")]
+fn shutdown_pause_checks(engine: &SessionEngine) -> usize {
+    engine
+        .inner
+        .shutdown_pause_checks
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+fn prune_retire_checks(engine: &SessionEngine) -> usize {
+    engine
+        .inner
+        .prune_retire_checks
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn shutdown_checks_each_running_conversation_for_a_run_to_pause_and_an_explicit_stop_never_does()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let (engine, environment) = environment_engine(temp.path());
+    let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
+    let ordinary = engine.launch(request("sleep 60", false)).await.unwrap();
+    let stopped_state = v1::SessionLifecycleState::Stopped as i32;
+
+    // An explicit stop or restart interrupts a run; it never pauses one.
+    engine.stop(&driver).await.unwrap();
+    engine.restart(&driver).await.unwrap();
+    engine.restart(&driver).await.unwrap();
+    assert_eq!(shutdown_pause_checks(&engine), 0);
+    let interrupts = stop_interrupt_checks(&engine);
+
+    // Shutdown checks the one running managed driver before it signals it,
+    // and no other session. This test image is no cw-bearing host daemon, so
+    // the record helper is refused and the stop goes on at once.
+    let started = Instant::now();
+    engine.shutdown().await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(shutdown_pause_checks(&engine), 1);
+    assert_eq!(stop_interrupt_checks(&engine), interrupts);
+    for id in [&driver, &ordinary.session_id] {
+        let after = engine.get(id).await.unwrap();
+        assert_eq!(after.state, stopped_state);
+        assert!(!after.cleanup_unknown);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn stopped_pause_checks(engine: &SessionEngine) -> usize {
+    engine
+        .inner
+        .stopped_pause_checks
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_explicit_stop_of_a_stopped_conversation_checks_for_a_paused_message_to_end() {
+    let temp = tempfile::tempdir().unwrap();
+    let (engine, environment) = environment_engine(temp.path());
+    let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
+    let ordinary = engine.launch(request("sleep 60", false)).await.unwrap();
+    let stopped_state = v1::SessionLifecycleState::Stopped as i32;
+
+    // Stopping a running conversation interrupts its run; nothing of it is
+    // paused.
+    engine.stop(&driver).await.unwrap();
+    engine.stop(&ordinary.session_id).await.unwrap();
+    assert_eq!(stopped_pause_checks(&engine), 0);
+
+    // Stopped already, it may hold a message its environment's takedown
+    // paused, which this stop must keep from resuming. The refused helper is
+    // logged and the stop answers as before.
+    let started = Instant::now();
+    let again = engine.stop(&driver).await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(again.state, stopped_state);
+    assert_eq!(stopped_pause_checks(&engine), 1);
+    // Only a host owner's managed conversation is asked.
+    engine.stop(&ordinary.session_id).await.unwrap();
+    assert_eq!(stopped_pause_checks(&engine), 1);
+
+    // A restart continues a paused run instead, and shutdown pauses.
+    engine.restart(&driver).await.unwrap();
+    engine.shutdown().await.unwrap();
+    assert_eq!(stopped_pause_checks(&engine), 1);
+    assert_eq!(shutdown_pause_checks(&engine), 1);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn retention_asks_a_stopped_conversation_what_can_never_resume_before_removing_its_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let (engine, environment) = environment_engine(temp.path());
+    let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
+    let ordinary = engine.launch(request("sleep 60", false)).await.unwrap();
+    engine.stop(&driver).await.unwrap();
+    engine.stop(&ordinary.session_id).await.unwrap();
+    assert_eq!(prune_retire_checks(&engine), 0);
+
+    // Only the managed conversation is asked. The refused helper is logged
+    // and its record is removed all the same.
+    let admission = engine.inner.retention_admission.lock().await;
+    let started = Instant::now();
+    prune_session_records(&engine.inner, 0, true).await.unwrap();
+    drop(admission);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(prune_retire_checks(&engine), 1);
+    for id in [&driver, &ordinary.session_id] {
+        assert!(matches!(
+            engine.get(id).await,
+            Err(SessionError::NotFound(_))
+        ));
+    }
+    engine.shutdown().await.unwrap();
 }
 
 #[tokio::test]

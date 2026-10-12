@@ -409,6 +409,32 @@ pub(crate) fn await_interrupt_before_stop(driver: &str, session: &str, message: 
     json!({"op":"await_interrupt_before_stop","driver_id":driver,"session_id":session,
         "message_id":message})
 }
+/// The pause before a shutdown signals a managed conversation: the helper
+/// reads and writes a few local records and waits for nothing, well inside
+/// the daemon's shutdown budget.
+pub(crate) const SHUTDOWN_PAUSE_BOUND: Duration = Duration::from_secs(2);
+/// Pauses the active run of a conversation whose whole environment is being
+/// taken down, when the conversation's agent can resume it: the message is
+/// paused and its parent's notice queued before any signal. The helper
+/// decides from the conversation's own state; for other agents it records
+/// nothing and answers at once.
+pub(crate) fn pause_before_shutdown(driver: &str, session: &str) -> Value {
+    json!({"op":"pause_before_shutdown","driver_id":driver,"session_id":session})
+}
+/// Ending the paused messages of a conversation that will not resume them:
+/// the helper reads the conversation's message records once.
+pub(crate) const RESOLVE_PAUSED_BOUND: Duration = Duration::from_secs(5);
+/// Before retention removes a stopped conversation's session record, ends
+/// each message its environment's takedown paused: nothing can resume it now.
+pub(crate) fn retire_before_prune(driver: &str, session: &str) -> Value {
+    json!({"op":"retire_before_prune","driver_id":driver,"session_id":session})
+}
+/// An explicit stop of a conversation that is not running ends each message
+/// its environment's takedown paused, so the stop is never followed by a
+/// resume.
+pub(crate) fn stop_paused(driver: &str, session: &str) -> Value {
+    json!({"op":"stop_paused","driver_id":driver,"session_id":session})
+}
 pub(crate) fn line(driver: &str, message: &str, shutdown: bool) -> Result<Vec<u8>, Error> {
     let mut bytes = serde_json::to_vec(&json!({"v":1,"op":if shutdown{"shutdown"}else{"deliver"},
         "driver_id":driver,"message_id":message}))
