@@ -28,6 +28,23 @@ pub const SSH_NATIVE_AUTH_SOCK: &str = "/run/codewire-host/ssh-agent.sock";
 pub const SSH_PLATFORM_AUTH_SOCK: &str = "/codewire/run/ssh-agent.sock";
 /// Fixed per-environment HTTP ingress; callers own listener authentication and readiness.
 pub const MANAGED_HTTP_PORT: u16 = 38_081;
+/// Hosted workspace path of the same ingress as a Unix socket. Stock `gh`
+/// reaches the GitHub API route through it.
+pub const MANAGED_HTTP_PLATFORM_SOCKET: &str = "/codewire/run/credentials.sock";
+/// Native workspace path of the same ingress as a Unix socket.
+pub const MANAGED_HTTP_NATIVE_SOCKET: &str = "/run/codewire-host/credential.sock";
+/// Hosted workspace directory holding Codewire's `gh` configuration. It is
+/// written and owned by the workspace daemon, never the user's `~/.config/gh`.
+pub const GH_PLATFORM_CONFIG_DIR: &str = "/codewire/run/gh";
+/// Native workspace directory holding Codewire's `gh` configuration, on the
+/// guest's read-only control mount.
+pub const GH_NATIVE_CONFIG_DIR: &str = "/run/codewire-host/gh";
+/// Relative path of the generated `gh` configuration in that directory.
+pub const GH_CONFIG_FILE_NAME: &str = "config.yml";
+/// Public placeholder that makes stock `gh` send requests at all. It is not a
+/// credential: the broker drops the guest's authorization and adds the
+/// owner's GitHub login outside the workspace.
+pub const GH_TOKEN_PLACEHOLDER: &str = "codewire-managed";
 /// Workspace environment variable carrying the managed clients orchestration
 /// rendered for one Pod, in [`ManagedCredentialClients::encode`] form.
 pub const MANAGED_CREDENTIAL_CLIENTS_ENV: &str = "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS";
@@ -87,6 +104,14 @@ impl ManagedCredentialClient {
             // This replaces the former checkout-only rewrite, so git in the
             // workspace keeps working after checkout. A declared variable of
             // these names is refused, never merged or overwritten.
+            //
+            // The `gh` names the client also projects are deliberately not
+            // listed. This set is bound into every environment's projection
+            // selection digest, so adding a name would refuse the launches
+            // of running environments until they restart. `GH_TOKEN` is
+            // already refused with the GitHub provider's own names
+            // (`HttpProvider::reserved_environment_keys`); a declared
+            // `GH_CONFIG_DIR` is the user's own choice of `gh` configuration.
             Self::GitHub => &["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"],
         }
     }
@@ -392,6 +417,24 @@ impl ManagedCredentialClients {
             );
             environment.insert("GIT_CONFIG_VALUE_0".into(), "https://github.com/".into());
         }
+        let gh = self.contains(ManagedCredentialClient::GitHub).then(|| {
+            // Stock `gh` speaks HTTPS to api.github.com unless its own
+            // configuration names a Unix socket. Its directory is Codewire's,
+            // so the user's `~/.config/gh` is neither read nor written while
+            // GitHub is selected. The placeholder only makes `gh` send; the
+            // route, its grants and its closed operations are the broker's.
+            let (directory, socket) = match placement {
+                ManagedCredentialClientPlacement::Native => {
+                    (GH_NATIVE_CONFIG_DIR, MANAGED_HTTP_NATIVE_SOCKET)
+                }
+                ManagedCredentialClientPlacement::Platform => {
+                    (GH_PLATFORM_CONFIG_DIR, MANAGED_HTTP_PLATFORM_SOCKET)
+                }
+            };
+            environment.insert("GH_TOKEN".into(), GH_TOKEN_PLACEHOLDER.into());
+            environment.insert("GH_CONFIG_DIR".into(), directory.into());
+            GhConfigProjection::for_socket(socket)
+        });
         if self.contains(ManagedCredentialClient::Ssh) {
             let socket = match placement {
                 ManagedCredentialClientPlacement::Native => SSH_NATIVE_AUTH_SOCK,
@@ -399,7 +442,11 @@ impl ManagedCredentialClients {
             };
             environment.insert("SSH_AUTH_SOCK".into(), socket.into());
         }
-        ManagedCredentialClientProjection { environment, codex }
+        ManagedCredentialClientProjection {
+            environment,
+            codex,
+            gh,
+        }
     }
 }
 
@@ -409,6 +456,33 @@ impl ManagedCredentialClients {
 pub struct ManagedCredentialClientProjection {
     pub environment: BTreeMap<String, String>,
     pub codex: Option<CodexProviderProjection>,
+    /// The file the placement writes as [`GH_CONFIG_FILE_NAME`] in the
+    /// projected `GH_CONFIG_DIR`, while the GitHub client is selected.
+    pub gh: Option<GhConfigProjection>,
+}
+
+/// Deterministic machine-owned `gh` configuration: where the managed ingress
+/// listens, and nothing else. It names no host, account, token or helper.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GhConfigProjection {
+    config_yml: String,
+}
+
+impl GhConfigProjection {
+    /// `socket` is one of this crate's fixed ingress paths, which need no
+    /// YAML quoting. The version line is `gh`'s current schema, so the pinned
+    /// client reads the file without migrating or rewriting it.
+    fn for_socket(socket: &str) -> Self {
+        Self {
+            config_yml: format!("version: 1\nhttp_unix_socket: {socket}\n"),
+        }
+    }
+
+    /// Return the complete UTF-8 contents to install as
+    /// [`GH_CONFIG_FILE_NAME`].
+    pub fn config_yml(&self) -> &str {
+        &self.config_yml
+    }
 }
 
 /// Deterministic machine-owned Codex configuration for a protected provider
