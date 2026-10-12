@@ -508,6 +508,7 @@ pub(super) async fn run(
         environment_id: guest.id.clone(),
         agent,
         program: PathBuf::new(),
+        program_fallback: None,
         model: model.clone(),
         effort: effort.clone(),
         working_dir: working_dir.clone(),
@@ -516,9 +517,12 @@ pub(super) async fn run(
         initial_message_id: initial_message_id.clone(),
         created_at: now(),
     };
-    guest
+    let prepared = guest
         .control(json!({"op":"prepare", "config":config}))
         .await?;
+    if let Some(notice) = program_fallback_notice(agent, &prepared) {
+        eprintln!("{notice}");
+    }
     if let Some(id) = &initial_message_id {
         save_location(&guest, &driver_id, id, None)?;
     }
@@ -594,6 +598,17 @@ pub(super) async fn run(
         return Err(error);
     }
     Ok(())
+}
+
+/// One line when the guest runs a client from PATH because its image has no
+/// admitted pinned client.
+fn program_fallback_notice(agent: AgentKind, prepared: &Value) -> Option<String> {
+    let reason = prepared["config"]["program_fallback"].as_str()?;
+    let program = prepared["config"]["program"].as_str().unwrap_or_default();
+    Some(format!(
+        "{} runs {program} from PATH, not the image's pinned client: {reason}",
+        agent.name()
+    ))
 }
 
 fn record_from_view(mut value: Value) -> anyhow::Result<MessageRecord> {
@@ -1074,5 +1089,22 @@ mod tests {
         elf[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(codewire_local_vmm::artifact::validate_static_cw(&elf).is_err());
         assert!(codewire_local_vmm::artifact::validate_static_cw(b"#!/bin/sh\n").is_err());
+    }
+    #[test]
+    fn a_client_from_path_is_named_in_one_line_and_a_pinned_one_is_silent() {
+        let fallback = serde_json::json!({"config": {
+            "program": "/home/codewire/.npm-global/bin/claude",
+            "program_fallback": "the image has no pinned Claude Code",
+        }});
+        assert_eq!(
+            program_fallback_notice(AgentKind::Claude, &fallback).as_deref(),
+            Some(
+                "claude runs /home/codewire/.npm-global/bin/claude from PATH, not the image's pinned client: the image has no pinned Claude Code"
+            )
+        );
+        let pinned = serde_json::json!({"config": {
+            "program": "/opt/codewire/agents/npm/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        }});
+        assert_eq!(program_fallback_notice(AgentKind::Claude, &pinned), None);
     }
 }
