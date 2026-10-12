@@ -218,7 +218,8 @@ class HarnessGuards(unittest.TestCase):
     def session_events():
         return [
             {"event": "baseline_completed", "codex_processes": 1, "legacy_auth_commands": 0},
-            {"event": "projected_token_rotated", "changed": True, "elapsed_ms": 600001},
+            {"event": "projected_token_rotated", "changed": True, "rotated_ms": 471000,
+             "fresh_admission": True, "elapsed_ms": 478000},
             {"event": "rotation_turn_completed", "legacy_auth_commands": 0},
             {"event": "broker_retry_completed", "legacy_auth_commands": 0, "elapsed_ms": 12},
             {"event": "broker_retry_exhausted", "legacy_auth_commands": 0, "elapsed_ms": 13},
@@ -245,6 +246,7 @@ class HarnessGuards(unittest.TestCase):
             self.session_events() if session is None else session)))
         return self.shell('''
 RUN_DIR='%s'
+log() { printf '[kind-e2e] %%s\\n' "$*"; }
 kind_credential_fixture_events() { printf '%%s\\n' '%s'; }
 assert_kind_credential_rotation '%s' 2 '%s' '%s' '%s'
 ''' % (self.rotation_directory, json.dumps(events), ENVIRONMENT, WORKSPACE_UID, RELAY_UID, path))
@@ -346,7 +348,9 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
     def test_rotation_requires_composed_token_time_authentication_and_stock_turn_proof(self):
         result = self.rotation_proof(self.rotation_events())
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "")
+        # Only the closed evidence line: times, never fixture values.
+        self.assertEqual(result.stdout, "[kind-e2e] projected workspace token replaced 471s after "
+                         "the baseline; idle ended at 478s on a fresh-token admission\n")
 
     def test_initial_unbound_auth_is_not_selected_epoch_evidence(self):
         # A queued source restart legitimately retains its workflow generation.
@@ -410,10 +414,50 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
             with self.subTest(events=reordered):
                 self.assertNotEqual(self.rotation_proof(reordered).returncode, 0)
 
+    def admission_watch(self, events):
+        directory = tempfile.TemporaryDirectory(prefix="kind-admission-watch-")
+        self.addCleanup(directory.cleanup)
+        calls = Path(directory.name) / "calls"
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+KIND_ADMISSION_WATCH_SECONDS=1
+sleep() { :; }
+kind_credential_fixture_events() { printf '%%s\\n' '%s'; }
+kubectl() { printf '%%s\\n' "$*" >> '%s'; }
+watch_kind_credential_fresh_admission '%s' workspace-pod /tmp/codewire-kind-fresh-admission-7
+''' % (json.dumps(events), calls, ENVIRONMENT))
+        return result.returncode, calls.read_text() if calls.exists() else ""
+
+    def test_the_admission_mark_follows_only_a_fresh_token_after_baseline(self):
+        baseline = {"event": "provider_response", "scenario": "baseline", "attempt": 1,
+                    "status": 200, "response_calls": 1, "refresh_calls": 0}
+        def auth(environment=ENVIRONMENT, changed=True):
+            return {"event": "bridge_authenticated", "environment_id": environment,
+                    "workspace_token_changed": changed}
+        self.assertEqual(self.admission_watch([auth(changed=False), baseline, auth()]), (
+            0, "-n dev-sandboxes exec workspace-pod -c workspace -- "
+               "touch /tmp/codewire-kind-fresh-admission-7\n"))
+        for events in ([auth(), baseline], [baseline, auth(changed=False)],
+                       [baseline, auth(environment=WORKSPACE_UID)], [auth()]):
+            with self.subTest(events=events):
+                self.assertEqual(self.admission_watch(events), (1, ""))
+
+    def test_rotation_ends_at_an_admission_mark_or_else_past_the_epoch_bound(self):
+        for changes in ({}, {"fresh_admission": False, "rotated_ms": 590000, "elapsed_ms": 600001}):
+            session = self.session_events()
+            session[1].update(changes)
+            with self.subTest(changes=changes):
+                result = self.rotation_proof(self.rotation_events(), session)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_authentication_alone_cannot_replace_rotation_duration_or_failed_terminal(self):
         for index, changes in ((0, {"codex_processes": 2}), (0, {"legacy_auth_commands": 1}),
                                (1, {"changed": False}), (1, {"elapsed_ms": 30001}),
-                               (1, {"elapsed_ms": 600000}), (1, {"elapsed_ms": 720000}),
+                               (1, {"elapsed_ms": 720000}), (1, {"rotated_ms": 479000}),
+                               (1, {"rotated_ms": -1}), (1, {"rotated_ms": None}),
+                               # Without the fixture's admission mark the epoch bound must pass.
+                               (1, {"fresh_admission": False}),
+                               (1, {"fresh_admission": False, "elapsed_ms": 600000}),
                                (2, {"legacy_auth_commands": 2}),
                                (4, {"event": "native_reread_completed"}),
                                (4, {"elapsed_ms": 30000}), (5, {"failed": 0, "completed": 4}),

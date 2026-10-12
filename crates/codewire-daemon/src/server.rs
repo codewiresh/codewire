@@ -230,10 +230,11 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
+    let codex_login = HostedCodexLogin::from_env(codex_home)?;
     serve(
         config,
         DaemonRuntimeState::ready(),
-        Some(codex_home),
+        Some(codex_login),
         None,
         None,
         incoming,
@@ -259,10 +260,11 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
+    let codex_login = HostedCodexLogin::from_env(codex_home)?;
     serve(
         config,
         DaemonRuntimeState::ready(),
-        Some(codex_home),
+        Some(codex_login),
         None,
         Some(app_ports),
         incoming,
@@ -271,8 +273,27 @@ where
     .await
 }
 
+/// Codex's home on a hosted daemon, and how often its delivered login is
+/// checked: the production period unless the Kind test deployment set
+/// [`crate::config::CODEX_LOGIN_CHECK_PERIOD_ENV`], already validated at startup.
 #[cfg(target_os = "linux")]
-type CodexLoginHome = crate::codex_home::CodexHome;
+struct HostedCodexLogin {
+    home: crate::codex_home::CodexHome,
+    check_period: std::time::Duration,
+}
+
+#[cfg(target_os = "linux")]
+impl HostedCodexLogin {
+    fn from_env(home: crate::codex_home::CodexHome) -> Result<Self> {
+        let check_period = crate::config::codex_login_check_period(
+            std::env::var_os(crate::config::CODEX_LOGIN_CHECK_PERIOD_ENV).as_deref(),
+        )?;
+        Ok(Self { home, check_period })
+    }
+}
+
+#[cfg(target_os = "linux")]
+type CodexLoginHome = HostedCodexLogin;
 #[cfg(not(target_os = "linux"))]
 type CodexLoginHome = std::convert::Infallible;
 
@@ -298,8 +319,10 @@ where
 {
     config.validate_host()?;
     #[cfg(target_os = "linux")]
-    let codex_login =
-        codex_home.and_then(|home| crate::codex_home::login::hosted_writer(&config, home));
+    let codex_login = codex_home.and_then(|login| {
+        crate::codex_home::login::hosted_writer(&config, login.home)
+            .map(|writer| (writer, login.check_period))
+    });
     #[cfg(not(target_os = "linux"))]
     let _ = codex_home;
     let selected_ssh = config
@@ -361,17 +384,19 @@ where
     // The third task: Codex's own login, beside gRPC and the guest ingress.
     // It asks only over an admitted epoch and stops with the daemon.
     #[cfg(target_os = "linux")]
-    let _codex_login = codex_login
-        .zip(bridge_owner.shared_bridge())
-        .map(|(writer, bridge)| {
-            AbortOnDropHandle::new(tokio::spawn(
-                crate::codex_home::login::run_codex_login_writer(
-                    writer,
-                    bridge,
-                    shutdown_rx.clone(),
-                ),
-            ))
-        });
+    let _codex_login =
+        codex_login
+            .zip(bridge_owner.shared_bridge())
+            .map(|((writer, check_period), bridge)| {
+                AbortOnDropHandle::new(tokio::spawn(
+                    crate::codex_home::login::run_codex_login_writer(
+                        writer,
+                        bridge,
+                        check_period,
+                        shutdown_rx.clone(),
+                    ),
+                ))
+            });
     let observer_tx = shutdown_tx.clone();
     #[cfg(target_os = "linux")]
     let observer_control = control_owner.clone();

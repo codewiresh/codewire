@@ -529,12 +529,44 @@ KIND_MATERIAL_REUSE_SECONDS=120
 # Proxied requests through the bridge while a natural epoch renewal happens.
 # The probe stops at its stop file, or after this bound as a backstop only: an
 # overlap happens within the first ten minutes, and the Codex session it spans
-# normally ends within twelve.
+# normally ends soon after it.
 KIND_BRIDGE_RENEWAL_MAX_SECONDS=900
 # About one request a second; a window spanning one renewal sees hundreds.
 KIND_BRIDGE_RENEWAL_MIN_REQUESTS=60
 # Bound on asking the in-Pod probe to stop.
 KIND_BRIDGE_RENEWAL_STOP_TIMEOUT=15s
+
+# The Codex session's rotation idle ends once the workspace token is replaced
+# and a fresh-token epoch is admitted, rather than after the full 600-second
+# epoch bound. The admission is what the credential fixture records: this
+# environment's first bridge authentication with a replaced workspace token
+# after the baseline response. Poll for it in the background of the calling
+# shell (KIND_ADMISSION_WATCH_PID) and mark it in the workspace; the session
+# still requires the replaced token itself, and assert_kind_credential_rotation
+# still asserts the whole transcript.
+KIND_ADMISSION_WATCH_SECONDS=720
+start_kind_credential_admission_watch() {
+  local environment="$1" pod="$2" marker="$3"
+  [[ "$marker" =~ ^/tmp/codewire-kind-fresh-admission-[0-9]{1,12}$ ]] || return 1
+  watch_kind_credential_fresh_admission "$environment" "$pod" "$marker" &
+  KIND_ADMISSION_WATCH_PID=$!
+}
+
+watch_kind_credential_fresh_admission() {
+  local environment="$1" pod="$2" marker="$3" deadline=$((SECONDS + KIND_ADMISSION_WATCH_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if kind_credential_fixture_events 2>/dev/null | jq -e --arg environment "$environment" '
+        (map(.event == "provider_response" and .scenario == "baseline"
+          and .attempt == 1 and .status == 200) | index(true)) as $baseline |
+        $baseline != null and (to_entries | any(.[]; .key > $baseline
+          and .value.event == "bridge_authenticated" and .value.environment_id == $environment
+          and .value.workspace_token_changed == true))' >/dev/null 2>&1; then
+      kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- touch "$marker" && return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
 
 # Start bridge_renewal.py in the exact workspace, in the background of the
 # calling shell, and set KIND_BRIDGE_RENEWAL_PID. Its stdout is the closed
@@ -868,20 +900,24 @@ assert_kind_credential_rotation() {
   evidence="$(save_kind_credential_rotation_evidence "$environment" "$generation" \
     "$workspace_uid" "$relay_uid" <<<"$events")" || return $?
   # Authentication is not Ready/admission by itself. Compose the exact live
-  # authenticator transcript with the >600s epoch bound and a successful stock
-  # turn after actual projected-token replacement; never print token digests.
+  # authenticator transcript with a successful stock turn after actual
+  # projected-token replacement and a fresh-token epoch: the fixture's
+  # admission mark, or else the >600s epoch bound. Never print token digests.
   jq -es '
     map(.event) == ["baseline_completed", "projected_token_rotated", "rotation_turn_completed",
       "broker_retry_completed", "broker_retry_exhausted", "complete"] and
     .[0].codex_processes == 1 and
     ([.[0,2,3,4].legacy_auth_commands] == [0,0,0,0]) and
-    .[1].changed == true and .[1].elapsed_ms > 600000 and .[1].elapsed_ms < 720000 and
+    .[1].changed == true and .[1].elapsed_ms < 720000 and
+    (.[1].rotated_ms | type == "number" and . >= 0) and .[1].rotated_ms <= .[1].elapsed_ms and
+    (.[1].fresh_admission == true or .[1].elapsed_ms > 600000) and
     all(.[3,4]; .elapsed_ms >= 0 and .elapsed_ms < 30000) and
     .[5] == {event:"complete", turns:4, completed:3, failed:1, same_process:true, token_changed:true}
   ' "$session" >/dev/null || {
     echo "::error::stock Codex hosted rotation/session evidence is incomplete; fixture record: $evidence" >&2
     return 1
   }
+  log "$(jq -sr '.[1] | "projected workspace token replaced \(.rotated_ms / 1000 | floor)s after the baseline; idle ended at \(.elapsed_ms / 1000 | floor)s " + (if .fresh_admission then "on a fresh-token admission" else "at the epoch bound" end)' "$session")"
   jq -e --arg environment "$environment" --argjson generation "$generation" \
     --arg workspace "$workspace_uid" --arg relay "$relay_uid" '
     def uuid: type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
@@ -965,7 +1001,7 @@ kind_credential_native_smoke() (
   local workspace_image marker
   local login_events login_generation update restart_generation renewal_stop renewal_pid=""
   local member_role_changed="" bound_revision journey_from served
-  local stage_environment="" stage_profiles="" stage_credentials=""
+  local stage_environment="" stage_profiles="" stage_credentials="" admission admission_pid=""
   # The acceptance must never die with a bare exit status again (runs 10381,
   # 10459, 10465 all lost the failing command to a silent jq exit 4). Report
   # the exact failing command before errexit unwinds the suite.
@@ -976,7 +1012,7 @@ kind_credential_native_smoke() (
   # A failed step must not leave the renewal probe running, here or in the
   # Pod, and a failure while the creator is an admin restores the seeded
   # member role, so a retained cluster can run this suite again.
-  trap '[ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"; [ -z "$member_role_changed" ] || set_kind_credential_member_role "$environment" member >/dev/null 2>&1 || true; cleanup_kind_credential_stage "$stage_environment" "$stage_profiles" "$stage_credentials"; rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
+  trap '[ -z "$admission_pid" ] || { kill "$admission_pid" 2>/dev/null; wait "$admission_pid" 2>/dev/null; }; [ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"; [ -z "$member_role_changed" ] || set_kind_credential_member_role "$environment" member >/dev/null 2>&1 || true; cleanup_kind_credential_stage "$stage_environment" "$stage_profiles" "$stage_credentials"; rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
   [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
   credential_name="kind-codex-${RANDOM}-${RANDOM}"
   profile_name="kind-profile-${RANDOM}-${RANDOM}"
@@ -1041,8 +1077,14 @@ kind_credential_native_smoke() (
   renewal_pid="$KIND_BRIDGE_RENEWAL_PID"
   # The proxy session forces the proxy provider; its broker refreshes rotate
   # the delivered login too.
-  kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - \
+  admission="/tmp/codewire-kind-fresh-admission-${RANDOM}${RANDOM}"
+  start_kind_credential_admission_watch "$environment" "$pod" "$admission" || return $?
+  admission_pid="$KIND_ADMISSION_WATCH_PID"
+  kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - "$admission" \
     < "$ROOT/scripts/ci/verify/kind/codex_session.py" | tee "$RUN_DIR/credential-native-session.jsonl"
+  kill "$admission_pid" 2>/dev/null || true
+  wait "$admission_pid" 2>/dev/null || true
+  admission_pid=""
   stop_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid" || return $?
   renewal_pid=""
   assert_kind_credential_rotation "$environment" "$generation" "$pod_uid" "$relay_uid" \

@@ -145,6 +145,9 @@ pub struct TemplateOpts {
     /// Mount `COORDINATOR_EXTRA_ROOTS_CONFIGMAP` for the daemon's coordinator
     /// trust (local clusters only).
     pub coordinator_extra_roots: bool,
+    /// The workspace daemon's Codex login check period, rendered only when the
+    /// Kind test deployment selects one; `None` keeps its production period.
+    pub codex_login_check_period_seconds: Option<u64>,
     /// The ingress controller workspace egress may reach on 80/443; empty
     /// fields keep RKE2's `kube-system`/`rke2-ingress-nginx`.
     pub ingress_namespace: String,

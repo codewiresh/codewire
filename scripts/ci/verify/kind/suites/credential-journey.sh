@@ -3,7 +3,9 @@
 # enroll/profile/native Codex acceptance and stock Claude Code with an Anthropic
 # API key and a Claude subscription token. The acceptance asserts the synthetic
 # fixture's exact provider events since its pod started, so this suite needs
-# fake credential mode and restarts the credential-service first. 10+ minutes.
+# fake credential mode and restarts the credential-service first. Its length
+# is set by a real projected-token rotation (kubelet replaces the token about
+# eight minutes in) and the 60-second authority windows.
 set -euo pipefail
 
 if [ "${KIND_E2E_COMMON_LOADED:-0}" != "1" ]; then
