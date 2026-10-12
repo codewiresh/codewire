@@ -546,7 +546,7 @@ expect_host_denied() {
 
 prove_fixture() {
   local expected_host_key="$1" before after fingerprint wrapper upload download sftp_download clone command_output
-  local pushed
+  local pushed newest_accepted
   local -a scp_options sftp_options
   require_installed
   : "${SSH_AUTH_SOCK:?managed SSH agent is required}"
@@ -617,9 +617,19 @@ WRAPPER
     -c user.email=synthetic@example.invalid commit --quiet -m 'synthetic push'
   pushed="$(/usr/bin/git -C "$clone" rev-parse HEAD)"
   [[ "$pushed" != "$(cat -- "$STATE_ROOT/revision")" ]] || fail 'Git-over-SSH push commit is not new'
+  # The push is the sixth authentication, and it must be the push's own: this
+  # target (the wrapper pins its host key) accepted five before it and exactly
+  # one more for it, from the selected public key.
+  fingerprint="$(/usr/bin/ssh-keygen -lf "$STATE_ROOT/client_key.pub" -E sha256 | awk '{print $2}')"
+  [[ "$fingerprint" == SHA256:* ]] || fail 'selected public-key fingerprint is unavailable'
+  [[ "$(accepted_count)" == 5 ]] || fail 'target did not accept exactly five authentications before the Git push'
   bounded_client env GIT_SSH="$wrapper" GIT_SSH_VARIANT=ssh \
     /usr/bin/git -C "$clone" push --quiet origin HEAD:refs/heads/main \
       >/dev/null 2>"$CLIENT_ROOT/git-push.stderr" || fail 'Git-over-SSH push failed'
+  [[ "$(accepted_count)" == 6 ]] || fail 'Git-over-SSH push did not authenticate to the target exactly once'
+  newest_accepted="$(grep -F "Accepted publickey for $TARGET_USER " "$SERVER_LOG" | tail -n 1)"
+  [[ "$newest_accepted" == *"$fingerprint"* ]] ||
+    fail 'Git-over-SSH push did not authenticate with the selected public key'
   [[ "$(/usr/bin/git --git-dir="$STATE_ROOT/repository.git" rev-parse refs/heads/main)" == "$pushed" ]] ||
     fail 'Git-over-SSH push did not advance the target branch'
   [[ "$(/usr/bin/git --git-dir="$STATE_ROOT/repository.git" show "$pushed:push.txt")" == \
@@ -635,8 +645,6 @@ WRAPPER
 
   after="$(accepted_count)"
   [[ "$after" == 6 ]] || fail "target accepted $after authentications, want 6"
-  fingerprint="$(/usr/bin/ssh-keygen -lf "$STATE_ROOT/client_key.pub" -E sha256 | awk '{print $2}')"
-  [[ "$fingerprint" == SHA256:* ]] || fail 'selected public-key fingerprint is unavailable'
   [[ "$(grep -F "Accepted publickey for $TARGET_USER " "$SERVER_LOG" | grep -cF "$fingerprint")" == 6 ]] ||
     fail 'target did not authenticate the exact selected public key six times'
   printf '%s\n' "$after" >"$STATE_ROOT/proved-accepted-count"
