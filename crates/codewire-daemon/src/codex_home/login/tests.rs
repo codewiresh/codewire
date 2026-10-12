@@ -9,6 +9,7 @@ use codewire_access::{
 use serde_json::json;
 
 use super::*;
+use crate::codex_home::FileOwner;
 
 const ACCOUNT: &str = "codewire-synthetic-account";
 const CREDENTIAL: &str = "cred-synthetic-codex";
@@ -812,7 +813,7 @@ fn codex_not_selected_removes_only_codewires_files() {
 }
 
 #[test]
-fn only_a_hosted_daemon_with_codex_selected_runs_the_writer() {
+fn a_daemon_with_a_bridge_and_codex_selected_runs_the_writer_for_its_own_placement() {
     use crate::{Config, CredentialBridgeConfig, CredentialBridgeTransport, DaemonAuthToken};
     let config = |transport: Option<CredentialBridgeTransport>, slots: &[&str]| Config {
         host: None,
@@ -833,21 +834,230 @@ fn only_a_hosted_daemon_with_codex_selected_runs_the_writer() {
         launch_projection: None,
         session_working_dir: None,
     };
-    let home = CodexHome::at("/nonexistent/.codex");
-    assert!(
-        hosted_writer(
-            &config(Some(CredentialBridgeTransport::Hosted), &["codex"]),
-            home.clone()
-        )
-        .is_some()
+    let hosted = CodexHome::at("/nonexistent/.codex");
+    let native = CodexHome::native(
+        "/nonexistent/agent-homes/codex",
+        FileOwner {
+            uid: 1000,
+            gid: 1000,
+        },
     );
-    for (transport, slots) in [
-        (Some(CredentialBridgeTransport::Hosted), &["openai"][..]),
-        (Some(CredentialBridgeTransport::Local), &["codex"]),
-        (None, &["codex"]),
+    // Each placement restores its own provider configuration.
+    let writer = login_writer(
+        &config(Some(CredentialBridgeTransport::Hosted), &["codex"]),
+        hosted.clone(),
+    )
+    .unwrap();
+    assert!(writer.proxy_config.starts_with(CODEX_MANAGED_CONFIG_HEADER));
+    let writer = login_writer(
+        &config(Some(CredentialBridgeTransport::Local), &["codex"]),
+        native.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        writer.proxy_config,
+        clients(&["codex"])
+            .for_placement(ManagedCredentialClientPlacement::Native)
+            .codex
+            .unwrap()
+            .into_config_toml()
+    );
+    for (transport, home, slots) in [
+        // Codex not selected, or no bridge.
+        (
+            Some(CredentialBridgeTransport::Hosted),
+            &hosted,
+            &["openai"][..],
+        ),
+        (Some(CredentialBridgeTransport::Local), &native, &["openai"]),
+        (None, &hosted, &["codex"]),
+        (None, &native, &["codex"]),
+        // A home of the other placement: a hosted home is the daemon's own,
+        // a native one is always kept for its workload user.
+        (Some(CredentialBridgeTransport::Local), &hosted, &["codex"]),
+        (Some(CredentialBridgeTransport::Hosted), &native, &["codex"]),
     ] {
-        assert!(hosted_writer(&config(transport, slots), home.clone()).is_none());
+        assert!(login_writer(&config(transport, slots), home.clone()).is_none());
     }
+}
+
+/// A local VM's native home: Codewire's own directory, kept by the guest
+/// daemon for the workload user. Here the owner is this test's own uid, as
+/// unprivileged tests cannot give files to another user; the guest (root)
+/// does, through each new file's descriptor.
+struct NativeFixture {
+    root: tempfile::TempDir,
+}
+
+impl NativeFixture {
+    fn new() -> Self {
+        let fixture = Self {
+            root: tempfile::tempdir().unwrap(),
+        };
+        let home = fixture.home();
+        // The guest prepared the home and its native provider configuration.
+        fs::create_dir_all(home.root()).unwrap();
+        fs::set_permissions(home.root(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(home.config_path(), native_config()).unwrap();
+        fs::set_permissions(home.config_path(), fs::Permissions::from_mode(0o600)).unwrap();
+        fixture
+    }
+
+    fn owner() -> FileOwner {
+        // SAFETY: getuid and getgid have no preconditions and cannot fail.
+        FileOwner {
+            uid: unsafe { libc::geteuid() },
+            gid: unsafe { libc::getegid() },
+        }
+    }
+
+    fn home(&self) -> CodexHome {
+        CodexHome::native(self.root.path().join("agent-homes/codex"), Self::owner())
+    }
+
+    fn writer(&self) -> CodexLoginWriter {
+        CodexLoginWriter::new(
+            self.home(),
+            native_config(),
+            self.root.path().join("tmp/codewire-codex-login"),
+            GENERATION,
+            T0,
+        )
+    }
+}
+
+fn native_config() -> String {
+    clients(&["codex"])
+        .for_placement(ManagedCredentialClientPlacement::Native)
+        .codex
+        .unwrap()
+        .into_config_toml()
+}
+
+/// A local VM gets exactly the login a hosted Sandbox gets: the same
+/// `auth.json` bytes, the placeholder refresh token and never the real one,
+/// and while it is delivered Codex uses its own login instead of the proxy.
+#[test]
+fn a_native_home_gets_the_same_login_document_as_a_hosted_one() {
+    let hosted = Fixture::new();
+    let native = NativeFixture::new();
+    let mut hosted_writer = hosted.writer();
+    let mut native_writer = native.writer();
+    assert_eq!(
+        hosted_writer
+            .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
+            .unwrap(),
+        CodexLoginSync::Written
+    );
+    assert_eq!(
+        native_writer
+            .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
+            .unwrap(),
+        CodexLoginSync::Written
+    );
+    let native_auth = fs::read(native.home().auth_path()).unwrap();
+    assert_eq!(native_auth, fs::read(hosted.auth()).unwrap());
+    let document: serde_json::Value = serde_json::from_slice(&native_auth).unwrap();
+    assert_eq!(document["auth_mode"], "chatgpt");
+    assert_eq!(
+        document["tokens"]["refresh_token"],
+        CODEX_MANAGED_REFRESH_TOKEN
+    );
+    assert_eq!(document["tokens"]["account_id"], ACCOUNT);
+    assert_eq!(document["OPENAI_API_KEY"], serde_json::Value::Null);
+    let metadata = fs::symlink_metadata(native.home().auth_path()).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(metadata.uid(), NativeFixture::owner().uid);
+    // The native proxy configuration is Codewire's and is removed while the
+    // login is delivered, so Codex uses its own login.
+    assert!(!native.home().config_path().exists());
+
+    // An explicit denial withdraws the login and restores the native proxy.
+    assert_eq!(
+        native_writer
+            .apply(CodexLoginDelivery::Denied, T0 + 60)
+            .unwrap(),
+        CodexLoginSync::Denied
+    );
+    assert!(!native.home().auth_path().exists());
+    assert_eq!(
+        fs::read_to_string(native.home().config_path()).unwrap(),
+        native_config()
+    );
+}
+
+/// The native configuration stays Codewire's after Codex adds its own
+/// project-trust entry; any other file there is the user's.
+#[test]
+fn a_native_home_recognizes_only_codewires_configuration() {
+    let native = NativeFixture::new();
+    let trusted = format!(
+        "{}\n[projects.\"/workspace\"]\ntrust_level = \"trusted\"\n",
+        native_config()
+    );
+    fs::write(native.home().config_path(), &trusted).unwrap();
+    let mut writer = native.writer();
+    writer
+        .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
+        .unwrap();
+    assert!(!native.home().config_path().exists());
+
+    let native = NativeFixture::new();
+    fs::write(native.home().config_path(), b"model = \"users\"\n").unwrap();
+    let mut writer = native.writer();
+    writer
+        .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
+        .unwrap();
+    assert_eq!(
+        fs::read(native.home().config_path()).unwrap(),
+        b"model = \"users\"\n"
+    );
+    // A missing native home is never created by the daemon.
+    let missing = CodexHome::native(native.root.path().join("missing"), NativeFixture::owner());
+    let mut writer = CodexLoginWriter::new(
+        missing.clone(),
+        native_config(),
+        native.root.path().join("tmp/missing-state"),
+        GENERATION,
+        T0,
+    );
+    assert_eq!(
+        writer
+            .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
+            .unwrap(),
+        CodexLoginSync::UserOwned
+    );
+    assert!(!missing.root().exists());
+}
+
+/// A native home of another owner, or a file of another owner in it, is
+/// never read or replaced.
+#[test]
+fn a_native_home_of_another_owner_is_left_alone() {
+    let native = NativeFixture::new();
+    let other = FileOwner {
+        uid: NativeFixture::owner().uid.wrapping_add(1),
+        gid: NativeFixture::owner().gid,
+    };
+    let home = CodexHome::native(native.home().root(), other);
+    let mut writer = CodexLoginWriter::new(
+        home,
+        native_config(),
+        native.root.path().join("tmp/other-state"),
+        GENERATION,
+        T0,
+    );
+    assert_eq!(
+        writer
+            .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
+            .unwrap(),
+        CodexLoginSync::UserOwned
+    );
+    assert!(!native.home().auth_path().exists());
+    assert_eq!(
+        fs::read_to_string(native.home().config_path()).unwrap(),
+        native_config()
+    );
 }
 
 #[test]

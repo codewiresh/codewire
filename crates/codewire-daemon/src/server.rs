@@ -278,6 +278,43 @@ where
     .await
 }
 
+/// A local VM's guest daemon: [`serve_grpc_with_incoming`] plus, while Codex
+/// is selected, the task that keeps Codex's own ChatGPT login in the native
+/// `codex_home` on the workload user's behalf ([`crate::codex_home::login`]),
+/// through the one listed direct delivery exception
+/// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions").
+#[cfg(target_os = "linux")]
+pub async fn serve_native_grpc_with_incoming<I, IO, IE, F>(
+    config: Config,
+    codex_home: crate::codex_home::CodexHome,
+    incoming: I,
+    shutdown: F,
+) -> Result<()>
+where
+    I: Stream<Item = std::result::Result<IO, IE>> + Send + 'static,
+    IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
+    IE: Into<Box<dyn Error + Send + Sync>>,
+    F: Future<Output = ()> + Send + 'static,
+{
+    anyhow::ensure!(
+        codex_home.owner().is_some(),
+        "a local VM's Codex home is kept for its workload user"
+    );
+    serve(
+        config,
+        DaemonRuntimeState::ready(),
+        Some(HostedLogins {
+            codex_home,
+            check_period: crate::config::CODEX_LOGIN_CHECK_PERIOD,
+        }),
+        None,
+        None,
+        incoming,
+        shutdown,
+    )
+    .await
+}
+
 /// Codex's home on a hosted daemon, and how often the delivered agent logins
 /// are checked: the production period unless the Kind test deployment set
 /// [`crate::config::CODEX_LOGIN_CHECK_PERIOD_ENV`], already validated at
@@ -333,7 +370,7 @@ where
     #[cfg(target_os = "linux")]
     let (codex_login, claude_login) = match logins {
         Some(logins) => (
-            crate::codex_home::login::hosted_writer(&config, logins.codex_home)
+            crate::codex_home::login::login_writer(&config, logins.codex_home)
                 .map(|writer| (writer, logins.check_period)),
             crate::claude_home::login::hosted_writer(&config)
                 .map(|writer| (writer, logins.check_period)),

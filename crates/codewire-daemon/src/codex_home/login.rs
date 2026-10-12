@@ -1,14 +1,16 @@
-//! Codex's own ChatGPT login in a hosted Sandbox: a listed direct delivery
-//! exception (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
-//! exceptions"). Codex enables `/usage`, analytics and account routing only
-//! with its own login and has no hook for a login held elsewhere, so the proxy
-//! cannot provide them.
+//! Codex's own ChatGPT login in a hosted Sandbox or a local VM: Codewire's one
+//! listed direct delivery exception (docs/dev/SECRETS-AND-CREDENTIALS.md,
+//! "Direct delivery exceptions"). Codex enables `/usage`, analytics and
+//! account routing only with its own login and has no hook for a login held
+//! elsewhere, so the proxy cannot provide them.
 //!
-//! While Codex is selected, the hosted daemon asks the broker for the Sandbox
-//! creator's personal login when it starts and every two minutes, only on a
-//! bridge epoch that lists `codex-login`, and writes it as Codex's standard
-//! `~/.codex/auth.json` with [`CODEX_MANAGED_REFRESH_TOKEN`] in place of the
-//! refresh token, which never leaves Codewire. A delivered login means Codex
+//! While Codex is selected, the daemon (hosted, or a local VM's guest) asks
+//! the broker for the environment creator's personal login when it starts and
+//! every two minutes, only on a bridge epoch that lists `codex-login`, and
+//! writes it as Codex's standard `auth.json` in Codex's home (the user's
+//! `~/.codex` when hosted, Codewire's own native home in a local VM, on the
+//! workload user's behalf) with [`CODEX_MANAGED_REFRESH_TOKEN`] in place of
+//! the refresh token, which never leaves Codewire. A delivered login means Codex
 //! uses its built-in provider, so Codewire's proxy `config.toml` is removed;
 //! a denied one restores it.
 //!
@@ -128,7 +130,8 @@ impl From<Result<OpenedCodexLogin, LoginFailure>> for CodexLoginDelivery {
     }
 }
 
-/// The one writer of Codewire's `auth.json` in one hosted container.
+/// The one writer of Codewire's `auth.json` in one hosted container or one
+/// local VM.
 #[derive(Debug)]
 pub struct CodexLoginWriter {
     home: CodexHome,
@@ -287,7 +290,11 @@ impl CodexHome {
     /// `~/.codex` for the login, never through a symlink. `None` when it is a
     /// symlink, not a directory or another uid's, or, unless `create`, absent.
     fn open_for_login(&self, create: bool) -> io::Result<Option<PrivateDirectory>> {
-        match PrivateDirectory::open(self.root()) {
+        match self.open_private() {
+            // The guest creates a native home; the daemon never does.
+            Err(error) if error.kind() == io::ErrorKind::NotFound && self.owner().is_some() => {
+                Ok(None)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
                 ensure_private_directory(self.root(), CODEX_HOME_MODE)?;
                 PrivateDirectory::open(self.root())
@@ -297,10 +304,19 @@ impl CodexHome {
         }
     }
 
+    /// The home opened for its owner: the daemon's own uid, or a native
+    /// home's workload user.
+    fn open_private(&self) -> io::Result<Option<PrivateDirectory>> {
+        match self.owner() {
+            Some(owner) => PrivateDirectory::open_for(self.root(), owner),
+            None => PrivateDirectory::open(self.root()),
+        }
+    }
+
     /// Remove Codewire's `auth.json` when Codex is not selected. The user's
     /// own login is never touched.
     pub(crate) fn remove_codewire_login(&self) -> io::Result<Removal> {
-        match PrivateDirectory::open(self.root()) {
+        match self.open_private() {
             Ok(Some(home)) => remove(&home, |_| true),
             Ok(None) => Ok(Removal::Kept),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Removal::Absent),
@@ -619,16 +635,33 @@ impl CodexLoginWriter {
     }
 }
 
-/// The login writer of a hosted daemon serving `config` in `home`, or `None`:
-/// only on a hosted bridge, and only while Codex is selected.
-pub(crate) fn hosted_writer(config: &crate::Config, home: CodexHome) -> Option<CodexLoginWriter> {
-    let bridge = config
-        .credential_bridge
-        .as_ref()
-        .filter(|bridge| bridge.transport == crate::CredentialBridgeTransport::Hosted)?;
+/// The login writer of a daemon serving `config` in `home`, or `None`: only
+/// with a credential bridge, and only while Codex is selected. A hosted
+/// daemon restores the hosted provider configuration when no login is
+/// delivered, a local VM's guest the native one; both deliver through the one
+/// listed exception (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
+/// exceptions").
+pub(crate) fn login_writer(config: &crate::Config, home: CodexHome) -> Option<CodexLoginWriter> {
+    let bridge = config.credential_bridge.as_ref()?;
+    let placement = match bridge.transport {
+        crate::CredentialBridgeTransport::Hosted => ManagedCredentialClientPlacement::Platform,
+        crate::CredentialBridgeTransport::Local => ManagedCredentialClientPlacement::Native,
+    };
+    // A native home must be kept on its workload user's behalf.
+    if (placement == ManagedCredentialClientPlacement::Native) != home.owner().is_some() {
+        return None;
+    }
+    // Only the Codex slot carries a ChatGPT login. A local VM's Codex may run
+    // on the OpenAI API-key slot alone, and then keeps no login.
+    if !config
+        .managed_credential_clients
+        .contains(codewire_access::ManagedCredentialClient::Codex)
+    {
+        return None;
+    }
     let proxy_config = config
         .managed_credential_clients
-        .for_placement(ManagedCredentialClientPlacement::Platform)
+        .for_placement(placement)
         .codex?
         .into_config_toml();
     let writer = CodexLoginWriter::new(
@@ -672,19 +705,19 @@ impl LoginWriter for CodexLoginWriter {
     }
 
     fn checked(outcome: CodexLoginSync) {
-        tracing::info!(codex_login = ?outcome, "hosted Codex login checked");
+        tracing::info!(codex_login = ?outcome, "Codex login checked");
     }
 
     fn failed(error: &io::Error) {
-        tracing::warn!(error_kind = ?error.kind(), "hosted Codex login check failed");
+        tracing::warn!(error_kind = ?error.kind(), "Codex login check failed");
     }
 
     fn stopped_unexpectedly() {
-        tracing::warn!("hosted Codex login check stopped unexpectedly");
+        tracing::warn!("Codex login check stopped unexpectedly");
     }
 }
 
-/// The hosted daemon's login task: check at start, then every
+/// The daemon's login task: check at start, then every
 /// `check_period` ([`CODEX_LOGIN_CHECK_PERIOD`] outside Kind), retrying sooner
 /// with jittered backoff while no epoch is admitted or the broker is
 /// unavailable. Stops when `shutdown` turns true.

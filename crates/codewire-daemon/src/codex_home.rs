@@ -15,6 +15,15 @@
 //! `auth.json` while the broker delivers one ([`login`]); a delivered login
 //! removes Codewire's `config.toml`, so Codex uses its built-in provider.
 //! Nothing else in the home is touched.
+//!
+//! In a local VM, Codex's home is Codewire's own directory
+//! ([`CODEX_NATIVE_HOME`] in the workspace), which the guest prepares at boot
+//! with the native provider `config.toml`. There the guest daemon, which runs
+//! as root, keeps the same login on the workload user's behalf
+//! ([`CodexHome::native`]): every file it reads or replaces must be that
+//! user's, and every file it creates is given to that user. Codewire's native
+//! `config.toml` is the one that begins with the exact native configuration,
+//! which Codex may extend with its own project-trust entry.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read as _};
@@ -23,11 +32,13 @@ use std::path::{Path, PathBuf};
 
 use codewire_access::{
     CODEX_CONFIG_FILE_NAME, CODEX_MANAGED_CONFIG_HEADER, CODEX_PLATFORM_HOME,
-    CodexProviderProjection, ManagedCredentialClientPlacement, ManagedCredentialClients,
+    CodexProviderProjection, MANAGED_HTTP_PORT, ManagedCredentialClientPlacement,
+    ManagedCredentialClients,
 };
 
+pub use crate::private_files::FileOwner;
 use crate::private_files::{
-    ensure_private_directory, sync_directory, temporary_sibling, write_new,
+    ensure_private_directory, sync_directory, temporary_sibling, write_new_as,
 };
 
 #[cfg(target_os = "linux")]
@@ -59,10 +70,25 @@ pub enum CodexConfigSync {
     UserOwned,
 }
 
-/// Codex's home in one hosted Pod.
+/// Codex's home in one hosted Pod, or in one local VM's guest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexHome {
     root: PathBuf,
+    /// The account the home and Codewire's files in it belong to; `None` is
+    /// the daemon's own (a hosted `~/.codex`).
+    owner: Option<FileOwner>,
+    marker: ConfigMarker,
+}
+
+/// How Codewire recognizes its own `config.toml`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ConfigMarker {
+    /// The first line is exactly [`CODEX_MANAGED_CONFIG_HEADER`]: the hosted
+    /// home is the user's `~/.codex`.
+    Header,
+    /// The file begins with exactly these bytes, the native provider
+    /// configuration the guest writes into Codewire's own directory.
+    Native(String),
 }
 
 impl Default for CodexHome {
@@ -74,7 +100,35 @@ impl Default for CodexHome {
 impl CodexHome {
     /// The same layout at `root`, for tests.
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            owner: None,
+            marker: ConfigMarker::Header,
+        }
+    }
+
+    /// A local VM's Codex home at `root`, the guest's path of Codewire's own
+    /// directory, kept by the guest daemon (root) for `owner`, the workload
+    /// user. The guest creates the directory and its native `config.toml` at
+    /// boot; the daemon never creates the directory.
+    pub fn native(root: impl Into<PathBuf>, owner: FileOwner) -> Self {
+        Self {
+            root: root.into(),
+            owner: Some(owner),
+            marker: ConfigMarker::Native(
+                CodexProviderProjection::for_loopback_port(MANAGED_HTTP_PORT)
+                    .expect("fixed managed HTTP port is unprivileged")
+                    .into_config_toml(),
+            ),
+        }
+    }
+
+    pub(crate) fn owner(&self) -> Option<FileOwner> {
+        self.owner
+    }
+
+    fn owner_uid(&self) -> u32 {
+        self.owner.map_or_else(effective_uid, |owner| owner.uid)
     }
 
     pub fn root(&self) -> &Path {
@@ -126,19 +180,23 @@ impl CodexHome {
 
     fn sync_config(&self, selected: Option<&str>) -> io::Result<CodexConfigSync> {
         match fs::symlink_metadata(&self.root) {
-            Ok(metadata) if !metadata.is_dir() || metadata.uid() != effective_uid() => {
+            Ok(metadata) if !metadata.is_dir() || metadata.uid() != self.owner_uid() => {
                 return Ok(CodexConfigSync::UserOwned);
             }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound && selected.is_none() => {
                 return Ok(CodexConfigSync::Absent);
             }
+            // The guest creates a native home; the daemon never does.
+            Err(error) if error.kind() == io::ErrorKind::NotFound && self.owner.is_some() => {
+                return Ok(CodexConfigSync::UserOwned);
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
         let path = self.config_path();
         let Some(contents) = selected else {
-            return match inspect(&path, None)? {
+            return match self.inspect(&path, None)? {
                 Existing::Absent => Ok(CodexConfigSync::Absent),
                 Existing::User => Ok(CodexConfigSync::UserOwned),
                 Existing::Managed { identity, .. } => {
@@ -151,16 +209,73 @@ impl CodexHome {
                 }
             };
         };
-        debug_assert!(contents.starts_with(&format!("{CODEX_MANAGED_CONFIG_HEADER}\n")));
-        ensure_private_directory(&self.root, CODEX_HOME_MODE)?;
-        match inspect(&path, Some(contents.as_bytes()))? {
+        debug_assert!(self.recognizes(contents.as_bytes()));
+        if self.owner.is_none() {
+            ensure_private_directory(&self.root, CODEX_HOME_MODE)?;
+        }
+        match self.inspect(&path, Some(contents.as_bytes()))? {
             Existing::User => Ok(CodexConfigSync::UserOwned),
             Existing::Managed { current: true, .. } => Ok(CodexConfigSync::Current),
             Existing::Managed { identity, .. } => {
-                install(&self.root, &path, contents, Some(identity))
+                install(&self.root, &path, contents, Some(identity), self.owner)
             }
-            Existing::Absent => install(&self.root, &path, contents, None),
+            Existing::Absent => install(&self.root, &path, contents, None, self.owner),
         }
+    }
+
+    /// Whether `contents` is Codewire's `config.toml` in this home.
+    fn recognizes(&self, contents: &[u8]) -> bool {
+        match &self.marker {
+            ConfigMarker::Header => {
+                contents.split(|byte| *byte == b'\n').next().unwrap_or(&[])
+                    == CODEX_MANAGED_CONFIG_HEADER.as_bytes()
+            }
+            ConfigMarker::Native(native) => contents.starts_with(native.as_bytes()),
+        }
+    }
+
+    /// Classify `path` without following a symlink. `current` is whether
+    /// Codewire's file already holds `selected` with its mode.
+    fn inspect(&self, path: &Path, selected: Option<&[u8]>) -> io::Result<Existing> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Existing::Absent),
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_file() || metadata.uid() != self.owner_uid() {
+            return Ok(Existing::User);
+        }
+        let mut file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Existing::Absent),
+            // Replaced by a symlink since the check above.
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(Existing::User),
+            Err(error) => return Err(error),
+        };
+        let opened = file.metadata()?;
+        let identity = (opened.dev(), opened.ino());
+        if identity != (metadata.dev(), metadata.ino())
+            || !opened.file_type().is_file()
+            || opened.uid() != self.owner_uid()
+        {
+            return Ok(Existing::User);
+        }
+        let mut contents = Vec::new();
+        (&mut file)
+            .take(MAX_MANAGED_CONFIG_BYTES + 1)
+            .read_to_end(&mut contents)?;
+        if !self.recognizes(&contents) {
+            return Ok(Existing::User);
+        }
+        Ok(Existing::Managed {
+            identity,
+            current: selected == Some(contents.as_slice())
+                && opened.permissions().mode() & 0o7777 == CODEX_CONFIG_MODE,
+        })
     }
 }
 
@@ -171,48 +286,6 @@ enum Existing {
     Absent,
     User,
     Managed { identity: Identity, current: bool },
-}
-
-/// Classify `path` without following a symlink. `current` is whether
-/// Codewire's file already holds `selected` with its mode.
-fn inspect(path: &Path, selected: Option<&[u8]>) -> io::Result<Existing> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Existing::Absent),
-        Err(error) => return Err(error),
-    };
-    if !metadata.file_type().is_file() || metadata.uid() != effective_uid() {
-        return Ok(Existing::User);
-    }
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Existing::Absent),
-        // Replaced by a symlink since the check above.
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(Existing::User),
-        Err(error) => return Err(error),
-    };
-    let opened = file.metadata()?;
-    let identity = (opened.dev(), opened.ino());
-    if identity != (metadata.dev(), metadata.ino()) {
-        return Ok(Existing::User);
-    }
-    let mut contents = Vec::new();
-    (&mut file)
-        .take(MAX_MANAGED_CONFIG_BYTES + 1)
-        .read_to_end(&mut contents)?;
-    let first_line = contents.split(|byte| *byte == b'\n').next().unwrap_or(&[]);
-    if first_line != CODEX_MANAGED_CONFIG_HEADER.as_bytes() {
-        return Ok(Existing::User);
-    }
-    Ok(Existing::Managed {
-        identity,
-        current: selected == Some(contents.as_slice())
-            && opened.permissions().mode() & 0o7777 == CODEX_CONFIG_MODE,
-    })
 }
 
 fn identity_of(path: &Path) -> io::Result<Option<Identity>> {
@@ -232,9 +305,10 @@ fn install(
     path: &Path,
     contents: &str,
     replace: Option<Identity>,
+    owner: Option<FileOwner>,
 ) -> io::Result<CodexConfigSync> {
     let temporary = temporary_sibling(path, "codewire")?;
-    write_new(&temporary, contents.as_bytes(), CODEX_CONFIG_MODE)?;
+    write_new_as(&temporary, contents.as_bytes(), CODEX_CONFIG_MODE, owner)?;
     let installed = match replace {
         None => match fs::hard_link(&temporary, path) {
             Ok(()) => Ok(true),
@@ -543,7 +617,14 @@ mod tests {
         // Inspected as absent, then created by the user.
         fs::write(home.config_path(), b"model = \"users\"\n").unwrap();
         assert_eq!(
-            install(home.root(), &home.config_path(), &hosted_config(), None).unwrap(),
+            install(
+                home.root(),
+                &home.config_path(),
+                &hosted_config(),
+                None,
+                None
+            )
+            .unwrap(),
             CodexConfigSync::UserOwned
         );
         assert_eq!(
@@ -558,7 +639,8 @@ mod tests {
                 home.root(),
                 &home.config_path(),
                 &hosted_config(),
-                Some(identity)
+                Some(identity),
+                None
             )
             .unwrap(),
             CodexConfigSync::UserOwned

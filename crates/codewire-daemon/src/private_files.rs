@@ -1,13 +1,27 @@
-//! Owner-only files a hosted daemon writes: its state under `/codewire/run`,
-//! Codewire's files in Codex's home and Claude Code's `~/.claude.json`. Every
-//! write goes through a temporary file created exclusively in the target
-//! directory with its final mode, so a reader never observes a partial file or
-//! a wider mode, and no write follows a symlink.
+//! Owner-only files a daemon writes: a hosted daemon's state under
+//! `/codewire/run`, Codewire's files in Codex's home and Claude Code's
+//! `~/.claude.json`. Every write goes through a temporary file created
+//! exclusively in the target directory with its final mode, so a reader never
+//! observes a partial file or a wider mode, and no write follows a symlink.
+//!
+//! The files belong to the daemon's own uid, except in a local VM, where the
+//! guest daemon runs as root and writes Codex's home for the workload user
+//! ([`FileOwner`]): every file it creates there is given to that user before
+//! it is published, and only that user's files are ever read or replaced.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
+
+/// The account a directory and the files written in it belong to, when it is
+/// not the daemon's own: a local VM's workload user, for which the guest
+/// daemon (root) writes Codex's home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileOwner {
+    pub uid: u32,
+    pub gid: u32,
+}
 
 /// Create the owner-only directory `path`, or tighten an existing one to
 /// `mode`. A symlink or other non-directory is refused.
@@ -65,6 +79,17 @@ pub(crate) fn temporary_sibling(path: &Path, tag: &str) -> io::Result<PathBuf> {
 /// Create `path` exclusively with exactly `mode`, then write and sync it. A
 /// stale file or symlink of that name is unlinked first, never followed.
 pub(crate) fn write_new(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
+    write_new_as(path, contents, mode, None)
+}
+
+/// [`write_new`], giving the new file to `owner` through its descriptor
+/// before any content is written, when the daemon writes for another user.
+pub(crate) fn write_new_as(
+    path: &Path,
+    contents: &[u8],
+    mode: u32,
+    owner: Option<FileOwner>,
+) -> io::Result<()> {
     let _ = fs::remove_file(path);
     let result = (|| {
         let mut file = OpenOptions::new()
@@ -73,6 +98,9 @@ pub(crate) fn write_new(path: &Path, contents: &[u8], mode: u32) -> io::Result<(
             .mode(mode)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)?;
+        if let Some(owner) = owner {
+            std::os::unix::fs::fchown(&file, Some(owner.uid), Some(owner.gid))?;
+        }
         // The umask may have narrowed the mode; never widen it past `mode`.
         file.set_permissions(fs::Permissions::from_mode(mode))?;
         file.write_all(contents)?;
@@ -105,12 +133,20 @@ mod at {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
     use zeroize::Zeroizing;
 
-    /// A directory opened with `O_DIRECTORY|O_NOFOLLOW`, owned by the
-    /// effective uid, or by root for [`PrivateDirectory::open_home`].
-    #[derive(Debug)]
-    pub(crate) struct PrivateDirectory(OwnedFd);
+    use super::FileOwner;
 
-    /// One regular file of the effective uid, read through a descriptor
+    /// A directory opened with `O_DIRECTORY|O_NOFOLLOW`, owned by the
+    /// effective uid, by root for [`PrivateDirectory::open_home`], or by an
+    /// explicit [`FileOwner`] for [`PrivateDirectory::open_for`].
+    #[derive(Debug)]
+    pub(crate) struct PrivateDirectory {
+        descriptor: OwnedFd,
+        /// The account whose entries are read, replaced and created here;
+        /// `None` is the effective uid.
+        owner: Option<FileOwner>,
+    }
+
+    /// One regular file of the directory's owner, read through a descriptor
     /// opened with `O_NOFOLLOW`. Its bytes are zeroized on drop.
     pub(crate) struct OwnedEntry {
         pub identity: (u64, u64),
@@ -121,8 +157,8 @@ mod at {
     /// What a name in the directory is, without following a symlink.
     pub(crate) enum Entry {
         Absent,
-        /// A symlink, a non-regular file, another uid's file, or a file
-        /// larger than the caller reads.
+        /// A symlink, a non-regular file, a file of anyone but the
+        /// directory's owner, or a file larger than the caller reads.
         Foreign,
         Owned(OwnedEntry),
     }
@@ -132,7 +168,14 @@ mod at {
         /// it is a symlink, not a directory, or another uid's; `NotFound`
         /// passes through.
         pub(crate) fn open(path: &Path) -> io::Result<Option<Self>> {
-            Self::open_owned(path, false)
+            Self::open_owned(path, false, None)
+        }
+
+        /// [`Self::open`] for a directory of `owner`, which the daemon reads
+        /// and writes on that user's behalf: only `owner`'s entries are read
+        /// or replaced, and every file it creates is given to `owner`.
+        pub(crate) fn open_for(path: &Path, owner: FileOwner) -> io::Result<Option<Self>> {
+            Self::open_owned(path, false, Some(owner))
         }
 
         /// [`Self::open`] for the workspace user's home, which root may also
@@ -141,10 +184,19 @@ mod at {
         /// uid's directory is still refused. Only entries of the effective uid
         /// are ever read or replaced in it.
         pub(crate) fn open_home(path: &Path) -> io::Result<Option<Self>> {
-            Self::open_owned(path, true)
+            Self::open_owned(path, true, None)
         }
 
-        fn open_owned(path: &Path, root_may_own: bool) -> io::Result<Option<Self>> {
+        fn owner_uid(&self) -> u32 {
+            self.owner
+                .map_or_else(|| rustix::process::geteuid().as_raw(), |owner| owner.uid)
+        }
+
+        fn open_owned(
+            path: &Path,
+            root_may_own: bool,
+            owner: Option<FileOwner>,
+        ) -> io::Result<Option<Self>> {
             let descriptor = match rustix::fs::open(
                 path,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
@@ -155,36 +207,50 @@ mod at {
                 Err(error) => return Err(error.into()),
             };
             let stat = rustix::fs::fstat(&descriptor)?;
-            let owned = stat.st_uid == rustix::process::geteuid().as_raw()
-                || (root_may_own && stat.st_uid == 0);
+            let expected =
+                owner.map_or_else(|| rustix::process::geteuid().as_raw(), |owner| owner.uid);
+            let owned = stat.st_uid == expected || (root_may_own && stat.st_uid == 0);
             if FileType::from_raw_mode(stat.st_mode) != FileType::Directory || !owned {
                 return Ok(None);
             }
-            Ok(Some(Self(descriptor)))
+            Ok(Some(Self { descriptor, owner }))
         }
 
         /// Open the directory `name` here, creating it with `mode` when it is
         /// absent. `Ok(None)` when it is a symlink, not a directory, or not
-        /// the effective uid's: it is then left exactly as it is.
+        /// this directory's owner's: it is then left exactly as it is.
         pub(crate) fn open_or_create_child(
             &self,
             name: &str,
             mode: u32,
         ) -> io::Result<Option<Self>> {
-            match rustix::fs::mkdirat(&self.0, name, Mode::from_raw_mode(mode)) {
-                Ok(()) => self.sync()?,
+            match rustix::fs::mkdirat(&self.descriptor, name, Mode::from_raw_mode(mode)) {
+                Ok(()) => {
+                    // A directory created for another user is theirs before
+                    // anything is written in it.
+                    if let Some(owner) = self.owner {
+                        rustix::fs::chownat(
+                            &self.descriptor,
+                            name,
+                            Some(rustix::fs::Uid::from_raw(owner.uid)),
+                            Some(rustix::fs::Gid::from_raw(owner.gid)),
+                            AtFlags::SYMLINK_NOFOLLOW,
+                        )?;
+                    }
+                    self.sync()?;
+                }
                 Err(rustix::io::Errno::EXIST) => {}
                 Err(error) => return Err(error.into()),
             }
             self.open_child(name)
         }
 
-        /// Open the existing directory `name` here. `Ok(None)` when it is a
-        /// symlink, not a directory, or not the effective uid's; `NotFound`
-        /// passes through.
+        /// Open the existing directory `name` here, for this directory's owner.
+        /// `Ok(None)` when it is a symlink, not a directory, or not that
+        /// owner's; `NotFound` passes through.
         pub(crate) fn open_child(&self, name: &str) -> io::Result<Option<Self>> {
             let descriptor = match rustix::fs::openat(
-                &self.0,
+                &self.descriptor,
                 name,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
@@ -195,23 +261,26 @@ mod at {
             };
             let stat = rustix::fs::fstat(&descriptor)?;
             if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
-                || stat.st_uid != rustix::process::geteuid().as_raw()
+                || stat.st_uid != self.owner_uid()
             {
                 return Ok(None);
             }
-            Ok(Some(Self(descriptor)))
+            Ok(Some(Self {
+                descriptor,
+                owner: self.owner,
+            }))
         }
 
         /// Make entries created, renamed or removed here durable.
         pub(crate) fn sync(&self) -> io::Result<()> {
-            Ok(rustix::fs::fsync(&self.0)?)
+            Ok(rustix::fs::fsync(&self.descriptor)?)
         }
 
-        /// Read `name` if it is a regular file of the effective uid of at
+        /// Read `name` if it is a regular file of the directory's owner of at
         /// most `max_bytes`.
         pub(crate) fn read(&self, name: &str, max_bytes: u64) -> io::Result<Entry> {
             let descriptor = match rustix::fs::openat(
-                &self.0,
+                &self.descriptor,
                 name,
                 OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
                 Mode::empty(),
@@ -227,7 +296,7 @@ mod at {
             let stat = rustix::fs::fstat(&descriptor)?;
             let size = u64::try_from(stat.st_size).unwrap_or(u64::MAX);
             if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
-                || stat.st_uid != rustix::process::geteuid().as_raw()
+                || stat.st_uid != self.owner_uid()
                 || size > max_bytes
             {
                 return Ok(Entry::Foreign);
@@ -253,15 +322,20 @@ mod at {
         }
 
         /// Create `name` with `O_CREAT|O_EXCL|O_NOFOLLOW` and exactly `mode`,
-        /// then write and fsync it. A failed write removes it again.
+        /// then write and fsync it. A failed write removes it again. In a
+        /// directory opened for another user the file is given to that user
+        /// through its descriptor before anything is written.
         pub(crate) fn write_new(&self, name: &str, contents: &[u8], mode: u32) -> io::Result<()> {
             let descriptor = rustix::fs::openat(
-                &self.0,
+                &self.descriptor,
                 name,
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::from_raw_mode(mode),
             )?;
             let result = (|| {
+                if let Some(owner) = self.owner {
+                    std::os::unix::fs::fchown(&descriptor, Some(owner.uid), Some(owner.gid))?;
+                }
                 // The umask may have narrowed the mode; never widen it past `mode`.
                 rustix::fs::fchmod(&descriptor, Mode::from_raw_mode(mode))?;
                 let mut file = std::fs::File::from(descriptor.try_clone()?);
@@ -276,18 +350,35 @@ mod at {
 
         /// Rename `from` to `to`, replacing `to` atomically.
         pub(crate) fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-            Ok(rustix::fs::renameat(&self.0, from, &self.0, to)?)
+            Ok(rustix::fs::renameat(
+                &self.descriptor,
+                from,
+                &self.descriptor,
+                to,
+            )?)
         }
 
         /// Rename `from` to `to` only if `to` does not exist: `Ok(false)` when
         /// it does. Where the file system has no `RENAME_NOREPLACE`, a hard
         /// link (which never replaces) and an unlink do the same.
         pub(crate) fn rename_noreplace(&self, from: &str, to: &str) -> io::Result<bool> {
-            match rustix::fs::renameat_with(&self.0, from, &self.0, to, RenameFlags::NOREPLACE) {
+            match rustix::fs::renameat_with(
+                &self.descriptor,
+                from,
+                &self.descriptor,
+                to,
+                RenameFlags::NOREPLACE,
+            ) {
                 Ok(()) => Ok(true),
                 Err(rustix::io::Errno::EXIST) => Ok(false),
                 Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS) => {
-                    match rustix::fs::linkat(&self.0, from, &self.0, to, AtFlags::empty()) {
+                    match rustix::fs::linkat(
+                        &self.descriptor,
+                        from,
+                        &self.descriptor,
+                        to,
+                        AtFlags::empty(),
+                    ) {
                         Ok(()) => {
                             self.unlink(from)?;
                             Ok(true)
@@ -308,7 +399,7 @@ mod at {
             limit: usize,
         ) -> io::Result<Vec<String>> {
             let mut names = Vec::new();
-            for item in rustix::fs::Dir::read_from(&self.0)? {
+            for item in rustix::fs::Dir::read_from(&self.descriptor)? {
                 let entry = item?;
                 let Ok(name) = entry.file_name().to_str() else {
                     continue;
@@ -325,7 +416,7 @@ mod at {
 
         /// Remove `name`; an absent name is not an error.
         pub(crate) fn unlink(&self, name: &str) -> io::Result<()> {
-            match rustix::fs::unlinkat(&self.0, name, AtFlags::empty()) {
+            match rustix::fs::unlinkat(&self.descriptor, name, AtFlags::empty()) {
                 Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
                 Err(error) => Err(error.into()),
             }
