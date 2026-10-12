@@ -2906,12 +2906,93 @@ awk '
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$edge_fixture_runner"
 for edge_fixture_command in \
     '  scripts/ci/tests/test-kind-e2e-suites.sh' \
-    '  python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py'; do
+    '  run_kind_cw_runtime_probe_fixture'; do
   [ "$(grep -cFx "$edge_fixture_command" "$edge_fixture_runner")" -eq 1 ] || {
     echo "shared edge route must invoke the owning fixture once: $edge_fixture_command" >&2
     exit 1
   }
 done
+# The probe fixture runs as the workspace user: directly for a developer, and
+# through a privilege drop where the hosted job is root. Execute the checked-in
+# helper against a stub tree for both identities.
+probe_fixture_runner="$TMP/probe-fixture-runner.sh"
+awk '
+  /^run_kind_cw_runtime_probe_fixture\(\) \{/ { capture = 1 }
+  capture { print }
+  capture && $0 == "}" { exit }
+' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$probe_fixture_runner"
+[ "$(grep -cF 'python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py' "$probe_fixture_runner")" -eq 2 ] || {
+  echo 'probe fixture helper must run the owning fixture on both identity paths' >&2
+  exit 1
+}
+probe_fixture_tree="$TMP/probe-fixture-tree"
+mkdir -p "$probe_fixture_tree/bin" "$probe_fixture_tree/scripts/ci/tests"
+git -C "$probe_fixture_tree" init -q
+printf 'fixture\n' > "$probe_fixture_tree/scripts/ci/tests/test-kind-cw-runtime-probe.py"
+git -C "$probe_fixture_tree" add -A
+git -C "$probe_fixture_tree" -c user.name=fixture -c user.email=fixture@example.invalid \
+  commit -q -m fixture
+for probe_tool in id python3 chown setpriv; do
+  cat > "$probe_fixture_tree/bin/$probe_tool" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+tool="$(basename "$0")"
+case "$tool" in
+  id) printf '%s\n' "$PROBE_FIXTURE_UID"; exit 0 ;;
+  python3)
+    printf 'python3 cwd=%s uid=%s args=%s\n' "$PWD" "${PROBE_FIXTURE_DROPPED:-direct}" "$*" >> "$PROBE_FIXTURE_CALLS"
+    [ -d .tmp ] || [ "${PROBE_FIXTURE_DROPPED:-direct}" = direct ]
+    exit "${PROBE_FIXTURE_STATUS:-0}" ;;
+  chown) printf 'chown %s\n' "$*" >> "$PROBE_FIXTURE_CALLS"; exit 0 ;;
+  setpriv)
+    printf 'setpriv %s %s %s\n' "$1" "$2" "$3" >> "$PROBE_FIXTURE_CALLS"
+    shift 3
+    PROBE_FIXTURE_DROPPED=1000 exec "$@" ;;
+esac
+SH
+  chmod +x "$probe_fixture_tree/bin/$probe_tool"
+done
+run_probe_fixture_case() {
+  local uid="$1" status="$2"
+  : > "$TMP/probe-fixture-calls"
+  (
+    cd "$probe_fixture_tree"
+    env PATH="$probe_fixture_tree/bin:$PATH" PROBE_FIXTURE_UID="$uid" PROBE_FIXTURE_STATUS="$status" \
+      PROBE_FIXTURE_CALLS="$TMP/probe-fixture-calls" RUNNER_TEMP="$TMP" \
+      bash -euo pipefail -c 'source "$1"; run_kind_cw_runtime_probe_fixture' _ "$probe_fixture_runner"
+  )
+}
+run_probe_fixture_case 1000 0
+[ "$(cat "$TMP/probe-fixture-calls")" = "python3 cwd=$probe_fixture_tree uid=direct args=-B scripts/ci/tests/test-kind-cw-runtime-probe.py" ] || {
+  echo 'workspace-user probe fixture must run directly in the checkout' >&2
+  exit 1
+}
+run_probe_fixture_case 0 0
+grep -Eq '^chown -R 1000:1000 .*/codewire-cw-probe-fixture\.[A-Za-z0-9]+$' "$TMP/probe-fixture-calls" || {
+  echo 'root probe fixture must own a private copy as the workspace user' >&2
+  exit 1
+}
+grep -Fxq 'setpriv --reuid=1000 --regid=1000 --clear-groups' "$TMP/probe-fixture-calls" || {
+  echo 'root probe fixture must drop to the workspace user' >&2
+  exit 1
+}
+grep -Eq '^python3 cwd=.*/codewire-cw-probe-fixture\.[A-Za-z0-9]+ uid=1000 args=-B scripts/ci/tests/test-kind-cw-runtime-probe.py$' \
+  "$TMP/probe-fixture-calls" || {
+  echo 'root probe fixture must run the committed copy as the workspace user' >&2
+  exit 1
+}
+if run_probe_fixture_case 0 7; then
+  echo 'root probe fixture accepted a failed fixture' >&2
+  exit 1
+fi
+if run_probe_fixture_case 1000 7; then
+  echo 'workspace-user probe fixture accepted a failed fixture' >&2
+  exit 1
+fi
+[ -z "$(find "$TMP" -maxdepth 1 -name 'codewire-cw-probe-fixture.*' -print -quit)" ] || {
+  echo 'root probe fixture left its private copy behind' >&2
+  exit 1
+}
 
 if grep -qF '    name: Manual diagnostics' "$WORKFLOW" \
   || grep -qF '  diagnostics:' "$WORKFLOW" \

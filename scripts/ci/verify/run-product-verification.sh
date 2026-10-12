@@ -746,6 +746,28 @@ install_caddy() {
   export PATH="$HOME/.local/bin:$PATH"
 }
 
+# The cw runtime probe runs in a sandbox as the workspace user (UID and GID
+# 1000), and its kernel fixture requires that identity. Hosted jobs run as
+# root, where the fixture failed and cancelled every Edge/Kind run. Run it
+# there as that user, on a private copy of the committed tree it can write to.
+run_kind_cw_runtime_probe_fixture() {
+  if [[ "$(id -u)" != 0 ]]; then
+    python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py
+    return
+  fi
+  local scratch status=0
+  scratch="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/codewire-cw-probe-fixture.XXXXXX")"
+  {
+    git archive --format=tar HEAD | tar -x -C "$scratch" \
+      && mkdir "$scratch/.tmp" \
+      && chown -R 1000:1000 "$scratch" \
+      && (cd "$scratch" && HOME="$scratch/.tmp" setpriv --reuid=1000 --regid=1000 --clear-groups \
+            python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py)
+  } || status=$?
+  rm -rf -- "$scratch"
+  return "$status"
+}
+
 run_edge() {
   (
   isolate_kind_fixture_environment
@@ -778,7 +800,7 @@ run_edge() {
   python3 scripts/checks/repo_checks.py connect-edge-routing --self-test
   scripts/ci/tests/test-kind-e2e-cleanup.sh
   scripts/ci/tests/test-kind-e2e-suites.sh
-  python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py
+  run_kind_cw_runtime_probe_fixture
   python3 -B scripts/ci/tests/test-kind-cluster-profiles.py
   python3 -B scripts/ci/tests/test-kind-dev-profile.py
   python3 -B scripts/ci/tests/test-kind-profile-artifacts.py
