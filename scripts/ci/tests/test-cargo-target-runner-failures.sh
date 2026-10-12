@@ -350,7 +350,9 @@ print(f'Rust/transport composition trace: {cases} cases passed')
 # Exercise the actual local receipt owner through the actual shared core too.
 # Only terminal checks are synthetic; selection, preflight and receipt logic
 # are copied byte-for-byte. This isolated repository has no external remote or secrets.
-policy_body = production.split('run_policy_core() {', 1)[1].split('\n}\n', 1)[0]
+# Policy core is two parts; together they hold every shared policy helper.
+policy_body = '\n'.join(production.split(part + '() {', 1)[1].split('\n}\n', 1)[0]
+                        for part in ('run_policy_core_one', 'run_policy_core_two'))
 policy_helpers = re.findall(r'^  (?:python3 (?:(?:-I|-B) )*)?((?:scripts|crates)/[\w/.-]+)', policy_body, re.M)
 image_guards = ('test-cw-image-context.py', 'test-cw-runtime-source.py',
                 'test-cw-image-source.py', 'test-cw-image-consumer.py')

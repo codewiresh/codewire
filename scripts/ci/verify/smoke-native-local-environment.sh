@@ -1479,10 +1479,20 @@ start_guest_probe_loop() {
   ' network-probe "$label" "$NETWORK_PROBE_URL" \
     >"$SMOKE_ROOT/network-probe-$label.stdout" 2>"$SMOKE_ROOT/network-probe-$label.stderr" &
   NETWORK_PROBE_PID=$!
+  # The kill follows at once, and the fail-closed check counts as "before"
+  # only probes that started more than half a second before it. So wait
+  # until the four newest probes that started at least 0.75 s ago, and the
+  # newest probe of all, succeeded.
   for _attempt in {1..240}; do
     if [[ -f "$DIRECT_RW_SOURCE/network-probe-$label.log" ]] &&
-       (( $(awk '$2 == "200"' "$DIRECT_RW_SOURCE/network-probe-$label.log" | wc -l) >= 4 )) &&
-       [[ "$(tail -n 1 "$DIRECT_RW_SOURCE/network-probe-$label.log" | awk '{print $2}')" == 200 ]]; then
+       awk -v cutoff="$(date +%s.%N)" '
+         $1 <= cutoff - 0.75 { settled[++count] = $2 }
+         { newest = $2 }
+         END {
+           if (count < 4 || newest != "200") exit 1
+           for (i = count - 3; i <= count; i++) if (settled[i] != "200") exit 1
+         }
+       ' "$DIRECT_RW_SOURCE/network-probe-$label.log"; then
       return 0
     fi
     sleep 0.25

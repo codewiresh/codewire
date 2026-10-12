@@ -13,16 +13,24 @@ fail() {
   exit 1
 }
 
+# The policy family is the parts the runner lists for the selection, run in
+# order. Extract the list, the part dispatcher and the family together.
 policy_dispatch="$TMP/run-policy.sh"
-awk '
-  /^run_policy\(\) \{/ { capture = 1 }
-  capture { print }
-  capture && /^}$/ { exit }
-' "$RUNNER" > "$policy_dispatch"
+for policy_function in policy_parts run_policy_part run_policy; do
+  awk -v name="$policy_function" '
+    $0 == name "() {" { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$RUNNER"
+done > "$policy_dispatch"
 grep -Fq 'selected policy_shell || ! selected policy_shell_omittable' \
   "$policy_dispatch" || fail 'policy runner omits the legacy-safe routing guard'
 grep -Fq 'policy-core) run_policy_core' "$RUNNER" \
   || fail 'hosted policy core has no independent entrypoint'
+grep -Fq 'policy-core-1|policy-core-2) run_policy_part "$FAMILY"' "$RUNNER" \
+  || fail 'policy core parts have no independent entrypoints'
+grep -Fq 'policy-parts) policy_parts' "$RUNNER" \
+  || fail 'the policy part list has no entrypoint'
 grep -Fq 'policy-shell) run_shell_policy' "$RUNNER" \
   || fail 'hosted ShellCheck has no independent heavy entrypoint'
 
@@ -35,9 +43,13 @@ run_dispatch_fixture() {
       printf "shell\n"
       if [ "$POLICY_FIXTURE_FAILURE" = shell ]; then return 41; fi
     }
-    run_policy_core() {
-      printf "core\n"
+    run_policy_core_one() {
+      printf "core-1\n"
       if [ "$POLICY_FIXTURE_FAILURE" = core ]; then return 42; fi
+    }
+    run_policy_core_two() {
+      printf "core-2\n"
+      if [ "$POLICY_FIXTURE_FAILURE" = core-2 ]; then return 43; fi
     }
     source "$1"
     run_policy
@@ -45,15 +57,15 @@ run_dispatch_fixture() {
 }
 
 legacy_output="$(run_dispatch_fixture '|valid:v3|policy|complete|')"
-[[ "$legacy_output" == $'shell\ncore' ]] \
+[[ "$legacy_output" == $'shell\ncore-1\ncore-2' ]] \
   || fail 'legacy trusted selection skipped ShellCheck'
 selected_output="$(run_dispatch_fixture \
   '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|')"
-[[ "$selected_output" == $'shell\ncore' ]] \
+[[ "$selected_output" == $'shell\ncore-1\ncore-2' ]] \
   || fail 'selected shell policy did not execute ShellCheck'
 omitted_output="$(run_dispatch_fixture \
   '|valid:v3|policy|policy_shell_omittable|complete|')"
-[[ "$omitted_output" == core ]] \
+[[ "$omitted_output" == $'core-1\ncore-2' ]] \
   || fail 'authoritative shell-policy omission still executed ShellCheck'
 
 # Exercise the actual shared dispatcher in a fresh shell so a failure cannot
@@ -76,15 +88,24 @@ else
 fi
 [[ "$core_failure_status" -eq 42 ]] \
   || fail 'shared policy changed the core failure status'
-[[ "$core_failure_output" == $'shell\ncore' ]] \
-  || fail 'shared policy repeated a phase before the core failure'
+[[ "$core_failure_output" == $'shell\ncore-1' ]] \
+  || fail 'shared policy repeated a phase or ran on after the core failure'
+if second_core_failure_output="$(run_dispatch_fixture \
+  '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|' core-2)"; then
+  fail 'shared policy accepted a failing second core part'
+else
+  second_core_failure_status=$?
+fi
+[[ "$second_core_failure_status" -eq 43 \
+    && "$second_core_failure_output" == $'shell\ncore-1\ncore-2' ]] \
+  || fail 'shared policy did not preserve the second core part failure'
 if omitted_failure_output="$(run_dispatch_fixture \
   '|valid:v3|policy|policy_shell_omittable|complete|' core)"; then
   fail 'shell-omitted policy accepted a failing core phase'
 else
   omitted_failure_status=$?
 fi
-[[ "$omitted_failure_status" -eq 42 && "$omitted_failure_output" == core ]] \
+[[ "$omitted_failure_status" -eq 42 && "$omitted_failure_output" == core-1 ]] \
   || fail 'shell-omitted policy did not preserve the core failure'
 
 # Validate the shared syntax owner, including a second fixed-list file and a
