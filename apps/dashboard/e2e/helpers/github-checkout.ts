@@ -182,7 +182,12 @@ export async function verifyGithubCheckout(page: Page, orgId: string, before: Gi
         // environment/configuration bytes into test output or artifacts.
         "test \"$HOME\" = /home/codewire",
         "test \"${XDG_CONFIG_HOME:-/home/codewire/.config}\" = /home/codewire/.config",
-        "test \"${GH_CONFIG_DIR:-/home/codewire/.config/gh}\" = /home/codewire/.config/gh",
+        // Stock gh is configured by Codewire while GitHub is selected: its own
+        // directory with one file naming the ingress socket, and a public
+        // placeholder token. The user's ~/.config/gh is not read.
+        "test \"$GH_CONFIG_DIR\" = /codewire/run/gh",
+        "test \"$GH_TOKEN\" = codewire-managed",
+        "test \"$(cat \"$GH_CONFIG_DIR/config.yml\")\" = \"$(printf 'version: 1\\nhttp_unix_socket: /codewire/run/credentials.sock')\"",
         "for directory in .git /home/codewire /home/codewire/.config /home/codewire/.config/git /home/codewire/.config/gh; do",
         "  test ! -L \"$directory\"",
         "  if [ -e \"$directory\" ]; then",
