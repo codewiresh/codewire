@@ -57,6 +57,25 @@ impl SessionEngine {
         let metadata = handle.metadata.lock().await;
         checked_origin(&metadata, scope, generation, historical)
     }
+    /// Restart runs the record's provider again, so it needs the provider this
+    /// release runs. A record an earlier provider wrote refuses with that
+    /// reason before any scope check or effect; launch admits its own origin.
+    pub(crate) async fn platform_restartable(&self, session: &str) -> Result<(), Error> {
+        if !self.ensure_platform_records(false).await? {
+            return Err(Error::Refused);
+        }
+        let handle = self.handle(session).map_err(|_| Error::Refused)?;
+        let metadata = handle.metadata.lock().await;
+        let origin = metadata
+            .platform_managed_origin
+            .as_ref()
+            .ok_or(Error::Refused)?;
+        origin.validate_shape(&metadata.session_id)?;
+        if !origin.current_provider() {
+            return Err(Error::EarlierProvider(origin.agent));
+        }
+        Ok(())
+    }
     pub(crate) async fn platform_list(
         &self,
         scope: &v1::PlatformManagedScope,
@@ -420,7 +439,7 @@ impl SessionEngine {
         F: FnOnce(Captured) -> Fut,
         Fut: Future<Output = Result<T, Error>>,
     {
-        origin.validate(session_id)?;
+        origin.validate_shape(session_id)?;
         if generation == 0 {
             return Err(Error::Refused);
         }
@@ -664,7 +683,7 @@ fn checked_origin(
         .platform_managed_origin
         .as_ref()
         .ok_or(Error::Refused)?;
-    origin.validate(&metadata.session_id)?;
+    origin.validate_shape(&metadata.session_id)?;
     if !origin.same_scope(scope)
         || metadata.control_origin.is_some()
         || generation == 0
@@ -678,6 +697,39 @@ fn checked_origin(
         return Err(Error::Refused);
     }
     Ok(origin.clone())
+}
+/// The first check a retained platform record fails on load, named without
+/// its environment, command arguments or other values. Load checks shape only:
+/// the provider pin of the release that wrote it is not this release's to judge.
+pub(super) fn retained_record_fault(
+    metadata: &PersistedSession,
+    host_store: bool,
+) -> Option<&'static str> {
+    let origin = metadata.platform_managed_origin.as_ref()?;
+    origin.shape_fault(&metadata.session_id).or_else(|| {
+        [
+            (host_store, "a host session store cannot hold it"),
+            (
+                metadata.control_origin.is_some(),
+                "it also carries a host control origin",
+            ),
+            (
+                metadata.command != origin.command(),
+                "its command is not its fixed driver command",
+            ),
+            (
+                metadata.launch_generation == 0,
+                "its launch generation is zero",
+            ),
+            (
+                !metadata.env.is_empty() || metadata.environment_projection_required,
+                "it carries an environment",
+            ),
+            (metadata.pty, "it is a terminal session"),
+        ]
+        .into_iter()
+        .find_map(|(failed, check)| failed.then_some(check))
+    })
 }
 fn session_value(m: &PersistedSession) -> Value {
     let state = v1::SessionLifecycleState::try_from(m.state)

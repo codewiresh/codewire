@@ -70,6 +70,9 @@ struct SessionEngineInner {
     launch_admission: Mutex<()>,
     launches: TaskTracker,
     shutdown: CancellationToken,
+    /// The reason the store last refused to open, logged once and reported
+    /// in health diagnostics until the store opens.
+    store_refusal: Mutex<Option<String>>,
 }
 
 struct SessionHandle {
@@ -314,6 +317,10 @@ pub enum SessionError {
     ResourceExhausted(String),
     #[error("{0}")]
     Internal(String),
+    /// The durable store did not open, so no session request ran. Its reason
+    /// names paths, modes and record checks, never values.
+    #[error("session store refused: {0}")]
+    StoreRefused(String),
 }
 
 impl SessionEngine {
@@ -356,6 +363,7 @@ impl SessionEngine {
                 launch_admission: Mutex::new(()),
                 launches: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
+                store_refusal: Mutex::new(None),
             }),
         }
     }
@@ -935,17 +943,47 @@ impl SessionEngine {
 
     /// A refused store is not cached: each request repeats every check, so a
     /// corrected owner or mode is admitted without restarting the daemon.
+    /// Every refusal precedes the request's own effects, so it is returned as
+    /// `StoreRefused`, never as an ambiguous outcome.
     async fn ensure_initialized(&self) -> Result<(), SessionError> {
         self.inner
             .initialized
             .get_or_try_init(|| async {
-                self.inner
-                    .initialize()
-                    .await
-                    .map_err(|error| SessionError::Internal(error.to_string()))
+                let result = self.inner.initialize().await;
+                let mut last = lock(&self.inner.store_refusal);
+                match result {
+                    Ok(()) => {
+                        if last.take().is_some() {
+                            tracing::info!("workspace daemon: the session store opened");
+                        }
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let reason = error.to_string();
+                        if last.as_deref() != Some(reason.as_str()) {
+                            tracing::error!(
+                                %reason,
+                                "workspace daemon: the session store is refused; every session request fails until it is corrected"
+                            );
+                            *last = Some(reason.clone());
+                        }
+                        Err(SessionError::StoreRefused(reason))
+                    }
+                }
             })
             .await
             .map(|_| ())
+    }
+
+    /// The store's refusal for health diagnostics, once a request has met one.
+    pub(crate) fn store_diagnostic(&self) -> Option<v1::HealthDiagnostic> {
+        lock(&self.inner.store_refusal)
+            .as_ref()
+            .map(|reason| v1::HealthDiagnostic {
+                name: "session-store".into(),
+                healthy: false,
+                message: format!("refused: {reason}"),
+            })
     }
 
     #[cfg(target_os = "linux")]
@@ -2482,7 +2520,9 @@ impl SessionEngineInner {
         let platform_tree = if crate::platform_managed::Service::available(&self.config) {
             Some(
                 crate::platform_managed::Tree::open(&self.root, true).map_err(|_| {
-                    SessionError::FailedPrecondition("platform session store refused".into())
+                    SessionError::FailedPrecondition(crate::platform_managed::tree_refusal(
+                        &self.root,
+                    ))
                 })?,
             )
         } else {
@@ -2577,32 +2617,28 @@ impl SessionEngineInner {
             let private_bytes = if platform_tree.is_some() {
                 let tree =
                     crate::platform_managed::Tree::open(&entry.path(), false).map_err(|_| {
-                        SessionError::FailedPrecondition(
-                            "platform session directory refused".into(),
-                        )
+                        SessionError::FailedPrecondition(crate::platform_managed::tree_refusal(
+                            &entry.path(),
+                        ))
                     })?;
+                let refused = |name: &str, bound: usize| {
+                    SessionError::FailedPrecondition(crate::platform_managed::leaf_refusal(
+                        &entry.path().join(name),
+                        bound,
+                    ))
+                };
                 let bytes = tree
                     .read(METADATA_FILE, 128 * 1024)
-                    .map_err(|_| {
-                        SessionError::FailedPrecondition("platform session metadata refused".into())
-                    })?
-                    .ok_or_else(|| {
-                        SessionError::FailedPrecondition("platform session metadata missing".into())
-                    })?;
+                    .map_err(|_| refused(METADATA_FILE, 128 * 1024))?
+                    .ok_or_else(|| refused(METADATA_FILE, 128 * 1024))?;
                 // Admission precedes the existing bounded output-index scan.
                 // No new recovery process or credential projection is started.
-                tree.read(
-                    OUTPUT_FILE,
-                    (2 * RETAINED_OUTPUT_BYTES
-                        + 2 * RETAINED_OUTPUT_FRAMES as u64 * OUTPUT_FRAME_HEADER_SIZE as u64
-                        + OUTPUT_BUFFER_SIZE as u64) as usize,
-                )
-                .map_err(|_| {
-                    SessionError::FailedPrecondition("platform session output refused".into())
-                })?
-                .ok_or_else(|| {
-                    SessionError::FailedPrecondition("platform session output missing".into())
-                })?;
+                let output = (2 * RETAINED_OUTPUT_BYTES
+                    + 2 * RETAINED_OUTPUT_FRAMES as u64 * OUTPUT_FRAME_HEADER_SIZE as u64
+                    + OUTPUT_BUFFER_SIZE as u64) as usize;
+                tree.read(OUTPUT_FILE, output)
+                    .map_err(|_| refused(OUTPUT_FILE, output))?
+                    .ok_or_else(|| refused(OUTPUT_FILE, output))?;
                 Some(bytes)
             } else {
                 None
@@ -2620,9 +2656,19 @@ impl SessionEngineInner {
             }
             .and_then(|bytes| {
                 serde_json::from_slice::<PersistedSession>(&bytes).map_err(|error| {
+                    // The category and position only: serde's own text can
+                    // quote a record's values, such as its environment.
                     SessionError::Internal(format!(
-                        "decode session metadata {}: {error}",
-                        path.display()
+                        "decode session metadata {}: {} at line {} column {}",
+                        path.display(),
+                        match error.classify() {
+                            serde_json::error::Category::Io => "unreadable",
+                            serde_json::error::Category::Syntax => "malformed JSON",
+                            serde_json::error::Category::Data => "an unexpected field or value",
+                            serde_json::error::Category::Eof => "truncated JSON",
+                        },
+                        error.line(),
+                        error.column()
                     ))
                 })
             })
@@ -2657,19 +2703,12 @@ impl SessionEngineInner {
                 }
             }
             #[cfg(target_os = "linux")]
-            if let Some(origin) = &metadata.platform_managed_origin
-                && (origin.validate(&session_id).is_err()
-                    || self.config.host.is_some()
-                    || metadata.control_origin.is_some()
-                    || metadata.command != origin.command()
-                    || metadata.launch_generation == 0
-                    || !metadata.env.is_empty()
-                    || metadata.environment_projection_required
-                    || metadata.pty)
+            if let Some(check) =
+                platform_managed::retained_record_fault(&metadata, self.config.host.is_some())
             {
-                return Err(SessionError::FailedPrecondition(
-                    "platform retained origin refused".into(),
-                ));
+                return Err(SessionError::FailedPrecondition(format!(
+                    "platform record {session_id}: {check}"
+                )));
             }
             let legacy_projection = !metadata.env.is_empty();
             if legacy_projection {
@@ -4251,6 +4290,9 @@ pub fn status_from_session_error(error: SessionError) -> Status {
         SessionError::FailedPrecondition(message) => Status::failed_precondition(message),
         SessionError::ResourceExhausted(message) => Status::resource_exhausted(message),
         SessionError::Internal(message) => Status::internal(message),
+        // A code no other session refusal uses: orchestration reports it as a
+        // known precondition, never as an ambiguous launch or restart outcome.
+        SessionError::StoreRefused(_) => Status::data_loss(error.to_string()),
     }
 }
 

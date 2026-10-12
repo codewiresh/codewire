@@ -373,3 +373,238 @@ async fn platform_managed_shutdown_closes_effect_admission_without_running_it() 
     assert!(matches!(result, Err(Error::Refused)));
     assert!(absent);
 }
+
+fn retained_config(root: &Path) -> Config {
+    Config {
+        listen_addr: "unused:0".into(),
+        workspace_root: root.to_owned(),
+        home_root: root.to_owned(),
+        auth_token: crate::DaemonAuthToken::new("synthetic-platform-retained").unwrap(),
+        process_execution: ProcessExecution::Native,
+        credential_bridge: None,
+        managed_credential_clients: Default::default(),
+        host: None,
+        launch_projection: None,
+        session_working_dir: None,
+    }
+}
+
+fn retained_scope(origin: &Origin) -> v1::PlatformManagedScope {
+    v1::PlatformManagedScope {
+        environment_id: origin.environment_id.clone(),
+        org_id: origin.org_id.clone(),
+        pod_uid: origin.pod_uid.clone(),
+        binding_generation: origin.binding_generation,
+        projection_selection_sha256: origin.projection_selection_sha256.to_vec(),
+        support_image_sha256: origin.support_image_sha256.to_vec(),
+        support_image_size: origin.support_image_size,
+    }
+}
+
+/// The record an earlier daemon leaves: a real finished child's record carrying
+/// a synthetic platform origin at `version`, saved as `state`.
+async fn retain(
+    engine: &SessionEngine,
+    agent: crate::platform_managed::Agent,
+    version: &str,
+    state: v1::SessionLifecycleState,
+) -> (String, Origin) {
+    let session = engine
+        .launch(v1::LaunchSessionRequest {
+            command: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .session_id;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while engine.get(&session).await.unwrap().state != v1::SessionLifecycleState::Exited as i32
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let origin = Origin {
+        version: 1,
+        environment_id: Uuid::new_v4().to_string(),
+        org_id: "fixture-org".into(),
+        pod_uid: Uuid::new_v4().to_string(),
+        binding_generation: u64::MAX,
+        projection_selection_sha256: [7; 32],
+        driver_id: session.strip_prefix("session-").unwrap().to_owned(),
+        agent,
+        support_image_sha256: [8; 32],
+        support_image_size: 1024,
+        provider: crate::platform_managed::ProviderIdentity {
+            sha256: [9; 32],
+            size: 1024,
+            version: version.into(),
+        },
+        parent_generation: None,
+    };
+    let handle = engine.handle(&session).unwrap();
+    let _operation = handle.operation.lock().await;
+    let mut metadata = handle.metadata.lock().await;
+    metadata.platform_managed_origin = Some(origin.clone());
+    metadata.command = origin.command();
+    metadata.state = state as i32;
+    persist_metadata(&engine.inner.root, &metadata)
+        .await
+        .unwrap();
+    (session, origin)
+}
+
+#[tokio::test]
+async fn platform_managed_records_an_earlier_provider_wrote_load_list_and_refuse_only_restart() {
+    use crate::platform_managed::Agent;
+    use v1::SessionLifecycleState as S;
+    let temp = tempfile::tempdir().unwrap();
+    let config = retained_config(temp.path());
+    let writer = SessionEngine::new(&config, CredentialBridge::new(None));
+    // Claude Code 2.1.238 left live by a daemon that stopped; Codex 0.157.0
+    // finished; one record of this release's provider beside them.
+    let claude = retain(&writer, Agent::Claude, "2.1.238", S::Running).await;
+    let codex = retain(&writer, Agent::Codex, "0.157.0", S::Exited).await;
+    let current = retain(&writer, Agent::Claude, "2.1.288", S::Exited).await;
+    writer.shutdown().await.unwrap();
+
+    let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+    let listed = engine.list().await.unwrap();
+    assert_eq!(listed.len(), 3);
+    assert!(engine.store_diagnostic().is_none());
+    // Today's semantics: a record left live is interrupted on load.
+    let interrupted = engine.get(&claude.0).await.unwrap();
+    assert_eq!(interrupted.state, S::Interrupted as i32);
+    assert_eq!(engine.get(&codex.0).await.unwrap().state, S::Exited as i32);
+    for (session, origin) in [&claude, &codex, &current] {
+        let page = engine
+            .platform_list(&retained_scope(origin), "", 8)
+            .await
+            .unwrap();
+        assert_eq!(page.sessions.len(), 1);
+        assert_eq!(&page.sessions[0].session_id, session);
+        // Stop's incarnation fence checks shape, not the provider pin.
+        engine
+            .with_platform_incarnation(origin, session, 1, |_| async { Ok(()) })
+            .await
+            .unwrap();
+    }
+    for ((session, _), product) in [(&claude, "Claude Code"), (&codex, "Codex")] {
+        let refused = engine.platform_restartable(session).await.unwrap_err();
+        assert!(matches!(refused, Error::EarlierProvider(_)));
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "this managed agent was started with an earlier {product}; start a new conversation"
+            )
+        );
+    }
+    engine.platform_restartable(&current.0).await.unwrap();
+    // Launch admission and the driver spawn still require this release's pin.
+    assert!(matches!(claude.1.validate(&claude.0), Err(Error::Refused)));
+    assert!(matches!(codex.1.validate(&codex.0), Err(Error::Refused)));
+    current.1.validate(&current.0).unwrap();
+    // Ordinary control of a platform record refuses, as before.
+    assert!(matches!(
+        engine.restart(&claude.0).await,
+        Err(SessionError::FailedPrecondition(_))
+    ));
+    // A new launch works beside them.
+    let launched = engine
+        .launch(v1::LaunchSessionRequest {
+            command: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(launched.launch_generation, 1);
+    assert_eq!(engine.list().await.unwrap().len(), 4);
+    // Nothing was migrated: each record keeps the provider that wrote it.
+    for (session, version) in [(&claude.0, "2.1.238"), (&codex.0, "0.157.0")] {
+        let saved: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(engine.inner.root.join(session).join(METADATA_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved["platform_managed_origin"]["provider"]["version"],
+            version
+        );
+    }
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn platform_managed_malformed_retained_record_refuses_the_store_with_its_reason() {
+    const SENTINEL: &str = "retained-env-or-argument-must-not-be-reported";
+    let temp = tempfile::tempdir().unwrap();
+    let config = retained_config(temp.path());
+    let writer = SessionEngine::new(&config, CredentialBridge::new(None));
+    let (session, _) = retain(
+        &writer,
+        crate::platform_managed::Agent::Claude,
+        "2.1.238",
+        v1::SessionLifecycleState::Exited,
+    )
+    .await;
+    writer.shutdown().await.unwrap();
+    let path = temp
+        .path()
+        .join(SESSION_DIRECTORY)
+        .join(&session)
+        .join(METADATA_FILE);
+    let saved: PersistedSession = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    type Damage = (fn(&mut PersistedSession), &'static str);
+    let damage: [Damage; 5] = [
+        (
+            |r| r.platform_managed_origin.as_mut().unwrap().provider.version = "v?".into(),
+            "the origin provider version is malformed",
+        ),
+        (
+            |r| r.platform_managed_origin.as_mut().unwrap().org_id = " org".into(),
+            "the origin organization is malformed",
+        ),
+        (
+            |r| r.platform_managed_origin.as_mut().unwrap().pod_uid = "not-a-uuid".into(),
+            "an origin identity is not a canonical UUID",
+        ),
+        (
+            |r| r.env = vec![format!("TOKEN={SENTINEL}")],
+            "it carries an environment",
+        ),
+        (
+            |r| r.command.push(SENTINEL.into()),
+            "its command is not its fixed driver command",
+        ),
+    ];
+    for (damage, check) in damage {
+        let mut record = saved.clone();
+        damage(&mut record);
+        // A daemon never saves `env`; a legacy record on disk can carry it.
+        let mut bytes = serde_json::to_value(&record).unwrap();
+        if !record.env.is_empty() {
+            bytes["env"] = json!(record.env);
+        }
+        std::fs::write(&path, serde_json::to_vec(&bytes).unwrap()).unwrap();
+        let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+        let refused = engine.list().await.unwrap_err();
+        let SessionError::StoreRefused(reason) = &refused else {
+            panic!("a malformed origin must refuse the store: {refused:?}");
+        };
+        let reason = reason.clone();
+        assert_eq!(reason, format!("platform record {session}: {check}"));
+        let diagnostic = engine.store_diagnostic().unwrap();
+        assert_eq!(diagnostic.name, "session-store");
+        assert!(!diagnostic.healthy);
+        assert_eq!(diagnostic.message, format!("refused: {reason}"));
+        assert!(!format!("{refused:?}{diagnostic:?}").contains(SENTINEL));
+        let status = status_from_session_error(refused);
+        assert_eq!(status.code(), tonic::Code::DataLoss);
+        assert_eq!(status.message(), format!("session store refused: {reason}"));
+        // Corrected on disk, the same daemon admits the store and clears it.
+        std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(engine.list().await.unwrap().len(), 1);
+        assert!(engine.store_diagnostic().is_none());
+        engine.shutdown().await.unwrap();
+    }
+}

@@ -306,6 +306,96 @@ impl Tree {
         Ok(count)
     }
 }
+/// Why `Tree::open` refused `path`: the first component that fails its check,
+/// with its mode and owner. A read-only account for the store's refusal
+/// reason; it never opens, creates or changes anything.
+pub(crate) fn tree_refusal(path: &Path) -> String {
+    tree_refusal_below(Path::new(super::HOME), path)
+}
+fn tree_refusal_below(home: &Path, path: &Path) -> String {
+    let euid = unsafe { libc::geteuid() };
+    let mut named = PathBuf::from("/");
+    for part in path.components().filter_map(|p| match p {
+        Component::Normal(p) => Some(p),
+        _ => None,
+    }) {
+        named.push(part);
+        let m = match std::fs::symlink_metadata(&named) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return format!("{} is missing", named.display());
+            }
+            Err(e) => return format!("{} cannot be inspected ({})", named.display(), e.kind()),
+        };
+        let leaf = named == path;
+        let is_home = named == home && !leaf;
+        if if is_home {
+            anchor(&m)
+        } else {
+            dir(&named, &m, leaf)
+        } {
+            continue;
+        }
+        let rule = if !m.is_dir() {
+            "it must be a real directory"
+        } else if is_home {
+            "the home must be owned by root or this user"
+        } else if leaf && m.uid() != euid {
+            "the store must be owned by this user"
+        } else if leaf {
+            "the store must be mode 0700"
+        } else if ![0, euid].contains(&m.uid()) {
+            "a directory above the store must be owned by root or this user"
+        } else {
+            "a directory above the store must not be group- or world-writable"
+        };
+        return format!(
+            "{} is {} with mode {:04o} owned by uid {}; {rule}",
+            named.display(),
+            if m.file_type().is_symlink() {
+                "a symbolic link"
+            } else if m.is_dir() {
+                "a directory"
+            } else {
+                "not a directory"
+            },
+            m.mode() & 0o7777,
+            m.uid(),
+        );
+    }
+    format!("{} changed while it was opened", path.display())
+}
+/// Why `Tree::read` refused the file at `path`, read-only, as `tree_refusal`.
+pub(crate) fn leaf_refusal(path: &Path, bound: usize) -> String {
+    let m = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return format!("{} is missing", path.display());
+        }
+        Err(e) => return format!("{} cannot be inspected ({})", path.display(), e.kind()),
+    };
+    let rule = if !m.is_file() {
+        "it must be a regular file"
+    } else if m.uid() != unsafe { libc::geteuid() } {
+        "it must be owned by this user"
+    } else if m.nlink() != 1 {
+        "it must have exactly one link"
+    } else if m.mode() & 0o7777 != 0o600 {
+        "it must be mode 0600"
+    } else if m.len() > bound as u64 {
+        "it exceeds its size bound"
+    } else {
+        "it changed while it was read"
+    };
+    format!(
+        "{} has mode {:04o}, owner uid {}, link count {} and size {}; {rule}",
+        path.display(),
+        m.mode() & 0o7777,
+        m.uid(),
+        m.nlink(),
+        m.len(),
+    )
+}
 pub(crate) fn publish_session(root: &Path, session: &str, bytes: &[u8]) -> Result<(), Error> {
     if !codewire_daemon_proto::platform_managed::valid_session(session) || bytes.len() > 128 * 1024
     {
@@ -432,6 +522,70 @@ mod tests {
                 Err(Error::Refused)
             ));
         }
+    }
+
+    #[test]
+    fn platform_files_refusal_names_the_refused_component_with_its_mode_and_owner() {
+        let base = private_root();
+        let home = base.path().join("home");
+        let codewire = home.join(".codewire");
+        let store = codewire.join("daemon/sessions");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o2775)).unwrap();
+        for dir in [&codewire, &codewire.join("daemon"), &store] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let euid = unsafe { libc::geteuid() };
+        assert!(Tree::open_below(&home, &store, false).is_ok());
+        // The old DinD bootstrap's mode on the store's parent.
+        std::fs::set_permissions(&codewire, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(matches!(
+            Tree::open_below(&home, &store, false),
+            Err(Error::Refused)
+        ));
+        assert_eq!(
+            tree_refusal_below(&home, &store),
+            format!(
+                "{} is a directory with mode 0775 owned by uid {euid}; a directory above the store must not be group- or world-writable",
+                codewire.display()
+            )
+        );
+        std::fs::set_permissions(&codewire, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert_eq!(
+            tree_refusal_below(&home, &store),
+            format!(
+                "{} is a directory with mode 0750 owned by uid {euid}; the store must be mode 0700",
+                store.display()
+            )
+        );
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let linked = codewire.join("linked");
+        symlink(&store, &linked).unwrap();
+        assert!(tree_refusal_below(&home, &linked).starts_with(&format!(
+            "{} is a symbolic link with mode ",
+            linked.display()
+        )),);
+        assert_eq!(
+            tree_refusal_below(&home, &codewire.join("absent")),
+            format!("{} is missing", codewire.join("absent").display())
+        );
+        let file = store.join("session.json");
+        std::fs::write(&file, b"{}").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            leaf_refusal(&file, 64),
+            format!(
+                "{} has mode 0644, owner uid {euid}, link count 1 and size 2; it must be mode 0600",
+                file.display()
+            )
+        );
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(leaf_refusal(&file, 1).ends_with("; it exceeds its size bound"));
+        assert_eq!(
+            leaf_refusal(&store.join("output.bin"), 64),
+            format!("{} is missing", store.join("output.bin").display())
+        );
     }
 
     #[test]
