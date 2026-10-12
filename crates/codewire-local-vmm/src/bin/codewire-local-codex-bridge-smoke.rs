@@ -1732,17 +1732,54 @@ function generalEgress(){
         excluded_pid: Option<i32>,
     ) -> SmokeResult<i32> {
         let deadline = Instant::now() + EXEC_TIMEOUT;
+        let mut overlap_until = None;
         loop {
             let mut pids = exact_broker_pids(args, environment)?;
             pids.retain(|pid| Some(*pid) != excluded_pid);
-            if pids.len() == 1 {
-                return Ok(pids[0]);
+            match exact_broker_step(&pids, Instant::now(), deadline, &mut overlap_until) {
+                Ok(Some(pid)) => return Ok(pid),
+                Ok(None) => tokio::time::sleep(Duration::from_millis(25)).await,
+                Err(error) => {
+                    // A count only: never a process identity or argv.
+                    eprintln!(
+                        "codewire-local-codex-bridge-smoke: exact broker count={}",
+                        pids.len()
+                    );
+                    return Err(error);
+                }
             }
-            require(pids.is_empty())?;
-            if Instant::now() >= deadline {
-                return Err(failed());
+        }
+    }
+
+    /// A local broker epoch renewal runs the successor beside its predecessor
+    /// from 90 seconds before the predecessor's 600-second lifetime ends until
+    /// that lifetime ends and its drain (at most 10 seconds) finishes. The
+    /// proof never chooses between two exact brokers; it waits such an overlap
+    /// out, within this bound.
+    const BROKER_RENEWAL_OVERLAP: Duration = Duration::from_secs(120);
+
+    /// One look at the exact brokers. Exactly one is the answer. None is
+    /// waited for until `deadline`. Two are a renewal overlap, waited out
+    /// for at most [`BROKER_RENEWAL_OVERLAP`] from the first look that saw
+    /// one. More than two is never a renewal and is refused at once.
+    fn exact_broker_step(
+        pids: &[i32],
+        now: Instant,
+        deadline: Instant,
+        overlap_until: &mut Option<Instant>,
+    ) -> SmokeResult<Option<i32>> {
+        match pids {
+            [pid] => Ok(Some(*pid)),
+            [] => {
+                require(now < deadline)?;
+                Ok(None)
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            [_, _] => {
+                let until = *overlap_until.get_or_insert(now + BROKER_RENEWAL_OVERLAP);
+                require(now < until)?;
+                Ok(None)
+            }
+            _ => Err(failed()),
         }
     }
 
@@ -2680,6 +2717,56 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                 .find("fail 'Git-over-SSH push did not authenticate with the selected public key'")
                 .unwrap();
             assert!(before < push && push < after && after < key);
+        }
+
+        #[test]
+        fn the_exact_broker_is_never_chosen_between_two_and_a_renewal_overlap_is_waited_out() {
+            let start = Instant::now();
+            let deadline = start + EXEC_TIMEOUT;
+            let at = |seconds| start + Duration::from_secs(seconds);
+
+            // One exact broker is the answer at once.
+            let mut overlap = None;
+            assert_eq!(
+                exact_broker_step(&[7], start, deadline, &mut overlap).unwrap(),
+                Some(7)
+            );
+
+            // A renewal overlap: two brokers are waited out, then the one
+            // left is the answer, even past the empty-wait deadline.
+            let mut overlap = None;
+            assert_eq!(
+                exact_broker_step(&[7, 9], at(1), deadline, &mut overlap).unwrap(),
+                None
+            );
+            assert_eq!(
+                exact_broker_step(&[7, 9], at(100), deadline, &mut overlap).unwrap(),
+                None
+            );
+            assert_eq!(
+                exact_broker_step(&[9], at(110), deadline, &mut overlap).unwrap(),
+                Some(9)
+            );
+
+            // Two that outlast a renewal's overlap are refused.
+            let mut overlap = None;
+            assert_eq!(
+                exact_broker_step(&[7, 9], at(1), deadline, &mut overlap).unwrap(),
+                None
+            );
+            assert!(exact_broker_step(&[7, 9], at(121), deadline, &mut overlap).is_err());
+
+            // More than two is never a renewal.
+            let mut overlap = None;
+            assert!(exact_broker_step(&[7, 9, 11], start, deadline, &mut overlap).is_err());
+
+            // None is waited for until the deadline only.
+            let mut overlap = None;
+            assert_eq!(
+                exact_broker_step(&[], at(89), deadline, &mut overlap).unwrap(),
+                None
+            );
+            assert!(exact_broker_step(&[], at(90), deadline, &mut overlap).is_err());
         }
 
         #[test]
