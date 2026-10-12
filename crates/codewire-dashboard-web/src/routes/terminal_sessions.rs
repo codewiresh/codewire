@@ -108,6 +108,19 @@ fn connect_failure(error: ConnectError, mutation: bool) -> Response {
     }
 }
 
+/// A session list the Sandbox itself refused: orchestration answers
+/// FailedPrecondition when the Sandbox is not running or its daemon is
+/// starting, out of date, unhealthy or refuses its session store. The reason
+/// stays in orchestration and the daemon status; the browser gets one closed
+/// code it can explain. Mutations never use it: there FailedPrecondition can
+/// also mean an unknown outcome.
+fn list_failure(error: ConnectError) -> Response {
+    match error.code {
+        ErrorCode::FailedPrecondition => failure(StatusCode::CONFLICT, "sessions-refused"),
+        _ => connect_failure(error, false),
+    }
+}
+
 async fn context(
     state: &AppState,
     headers: &HeaderMap,
@@ -247,7 +260,7 @@ pub(super) async fn list(
             Ok(inventory) => json(StatusCode::OK, inventory),
             Err(()) => failure(StatusCode::BAD_GATEWAY, "sessions-unavailable"),
         },
-        Err(error) => connect_failure(error, false),
+        Err(error) => list_failure(error),
     }
 }
 
@@ -403,6 +416,47 @@ mod tests {
         let (status, text) = body(connect_failure(limit, false)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(text.contains("sessions-unavailable"));
+    }
+
+    #[tokio::test]
+    async fn a_list_the_sandbox_refused_is_named_without_its_reason() {
+        use http_body_util::BodyExt;
+        let body = |response: Response| async move {
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            )
+        };
+        let refused = ConnectError::new(
+            ErrorCode::FailedPrecondition,
+            "environment session store is refused; private-reason-canary",
+        );
+        let (status, value) = body(list_failure(refused.clone())).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(value, serde_json::json!({"error": "sessions-refused"}));
+        // A refused mutation may still have run; it stays an unknown outcome.
+        let (status, value) = body(connect_failure(refused, true)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            value,
+            serde_json::json!({"error": "session-outcome-unknown"})
+        );
+        // Other list failures keep their codes; an internal one stays generic.
+        let (status, value) = body(list_failure(ConnectError::new(
+            ErrorCode::Internal,
+            "environment session request failed",
+        )))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(value, serde_json::json!({"error": "sessions-unavailable"}));
+        let (status, _) = body(list_failure(ConnectError::new(
+            ErrorCode::PermissionDenied,
+            "denied",
+        )))
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[test]
