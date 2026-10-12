@@ -73,6 +73,7 @@ with (state / "calls").open("a") as log: log.write(json.dumps(entry) + "\n")
 if tool == "kind":
     if args == ["get", "clusters"]:
         print("dev-a\ndev-b\ncodewire-e2e-ci\ncodewire-ux-2099")
+    elif args[:2] == ["get", "kubeconfig"]: print("synthetic kubeconfig")
     elif args[:2] != ["load", "docker-image"]: sys.exit(64)
 elif tool == "kubectl":
     if "get" in args and "secret" in args:
@@ -110,6 +111,10 @@ elif tool == "kubectl":
     elif "set" in args or "rollout" in args or "wait" in args or "annotate" in args:
         if os.environ.get("FAKE_KUBE_FAIL") and os.environ["FAKE_KUBE_FAIL"] in args: sys.exit(29)
     else: sys.exit(64)
+elif tool == "docker" and args[0] == "port":
+    ports = {"80": 8090, "443": 10443, "30733": 7233, "30084": 8084, "30090": 18092, "30432": 25432}
+    ports.update(json.loads(os.environ.get("FAKE_NODE_PORTS", "{}")))
+    print(f"0.0.0.0:{ports[args[2].split('/')[0]]}\n[::]:{ports[args[2].split('/')[0]]}")
 elif tool == "docker":
     aliases_path = state / "aliases.json"
     aliases = json.loads(aliases_path.read_text()) if aliases_path.exists() else {}
@@ -163,7 +168,8 @@ with (pathlib.Path(os.environ["FAKE_STATE"]) / "calls").open("a") as log:
         "cluster":os.environ.get("KIND_CLUSTER_NAME"), "profile":os.environ.get("CLUSTER"),
         "kube_context":os.environ.get("KUBE_CONTEXT"),
         "kubeconfig":os.environ.get("KUBECONFIG"), "smokes":os.environ.get("CARGO_CI_DIR"),
-        "lock_fd":os.environ.get("KIND_PROFILE_LOCK_FD")}) + "\n")
+        "lock_fd":os.environ.get("KIND_PROFILE_LOCK_FD"),
+        "postgres_port":os.environ.get("KIND_POSTGRES_HOST_PORT")}) + "\n")
 sys.exit(int(os.environ.get("FAKE_SUITE_STATUS", "0")))
 '''
 
@@ -211,11 +217,12 @@ BUILDS = {
 }
 
 
-def current_records(*stale: str, digest: str = "d" * 64, pod_image: str = "sha256:" + "c" * 64) -> str:
+def current_records(*stale: str, digest: str = "d" * 64, pod_image: str = "sha256:" + "c" * 64,
+                    daemon: str = "codewire-daemon:e2e") -> str:
     """Deployment records saying the cluster runs this tree's source, except for STALE services."""
-    # A named profile's daemon identity is the renderer's image, which the fake reports.
-    return json.dumps({service: f"{record_digest(digest, *build)} "
-                       + ("codewire-daemon:e2e" if service == "daemon" else pod_image)
+    # A named profile's daemon identity is the renderer's image, which the fake
+    # reports; a legacy cluster's is the daemon tag's image ID.
+    return json.dumps({service: f"{record_digest(digest, *build)} " + (daemon if service == "daemon" else pod_image)
                        for service, build in BUILDS.items() if service not in stale})
 
 
@@ -853,6 +860,20 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertFalse([call for call in self.calls() if call["tool"] in ("docker", "kind", "suite")])
         query, = [call["args"] for call in self.calls("kubectl") if "exec" in call["args"]]
         self.assertIn("name LIKE 'kind-%' AND desired_state <> 'destroyed'", query[-1])
+
+    def test_legacy_cluster_suites_use_its_published_ports(self) -> None:
+        legacy = {"CLUSTER": "", "KIND_CLUSTER_NAME": "codewire-ux-2099", "KIND_TEST_SUITES": "workspace-services",
+                  "FAKE_NODE_PORTS": json.dumps({"30432": 25433}), "FAKE_RECORDS": current_records(daemon=IMAGE_ID)}
+        result = self.run_script("test-selected.sh", **legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch, = self.calls("suite")
+        self.assertEqual(launch["postgres_port"], "25433")
+        self.assertFalse([call for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]])
+        self.calls_path.write_text("")
+        result = self.run_script("test-selected.sh", KIND_POSTGRES_HOST_PORT="25432", **legacy)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("KIND_POSTGRES_HOST_PORT=25432 is not the port codewire-ux-2099 publishes (25433)", result.stderr)
+        self.assertFalse(self.calls("suite"))
 
     def test_selected_stops_when_changes_are_unknown(self) -> None:
         result = self.run_script("test-selected.sh", KIND_TEST_SUITES="credentials", FAKE_CHANGES_FAIL="1")

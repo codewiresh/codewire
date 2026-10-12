@@ -226,6 +226,21 @@ else
   kind get kubeconfig --name "$KIND_CLUSTER_NAME" >"$kubeconfig" \
     || die "cannot read the kubeconfig of ${KIND_CLUSTER_NAME}"
   export KUBECONFIG="$kubeconfig"
+  # A kept cluster can publish shifted host ports. Address the ones its node
+  # publishes (the node ports of tests/e2e/kind/kind-config.yaml), never the
+  # defaults, which may belong to another cluster.
+  for binding in KIND_INGRESS_HOST_PORT:80 KIND_INGRESS_TLS_HOST_PORT:443 \
+      KIND_TEMPORAL_HOST_PORT:30733 KIND_ORCHESTRATION_HOST_PORT:30084 \
+      KIND_COORDINATOR_DIRECT_HOST_PORT:30090 KIND_POSTGRES_HOST_PORT:30432; do
+    variable="${binding%%:*}"
+    published="$(docker port "${KIND_CLUSTER_NAME}-control-plane" "${binding#*:}/tcp" 2>/dev/null \
+      | sed -n 's/^0\.0\.0\.0:\([0-9][0-9]*\)$/\1/p' | head -n 1)" || true
+    [ -n "$published" ] || die "${KIND_CLUSTER_NAME} publishes no host port for node port ${binding#*:}"
+    if [ -n "${!variable:-}" ] && [ "${!variable}" != "$published" ]; then
+      die "${variable}=${!variable} is not the port ${KIND_CLUSTER_NAME} publishes (${published})"
+    fi
+    export "${variable}=${published}"
+  done
 fi
 
 # Suites name their test environments kind-*. One still live, and not being
