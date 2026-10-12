@@ -3,6 +3,8 @@
 
 No provider calls, login files, or repository mutations. Protocol ordering and
 failures are deliberately independent of the Rust adapter implementation.
+Every start appends the conversation identity the peer was given to
+agent-identity.jsonl in its working directory.
 """
 import json
 import os
@@ -13,6 +15,13 @@ import uuid
 
 def emit(value):
     print(json.dumps(value), flush=True)
+
+
+def trace_identity(agent):
+    with Path("agent-identity.jsonl").open("a") as file:
+        file.write(json.dumps({"agent": agent, "pid": os.getpid(),
+                               "environment": os.environ.get("CW_ENVIRONMENT"),
+                               "session": os.environ.get("CW_SESSION_ID")}) + "\n")
 
 
 def noel():
@@ -50,6 +59,7 @@ def noel():
             file.write(json.dumps(record) + "\n")
 
     trace({"event": "start", "argv": args})
+    trace_identity("noel")
     if model == "fixture/json-rpc":
         for line in sys.stdin:
             value = json.loads(line)
@@ -298,6 +308,9 @@ session = next((sys.argv[i + 1] for i, value in enumerate(sys.argv[:-1])
 active = None
 model = next((sys.argv[i + 1] for i, value in enumerate(sys.argv[:-1])
               if value == "--model"), None)
+
+
+trace_identity("claude" if claude else "codex")
 
 
 def trace(method):

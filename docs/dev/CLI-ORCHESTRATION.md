@@ -125,6 +125,15 @@ turn's prompt, the commands, edits and tools the agent uses, and its reply.
 terminal, children keep running and `cw stop` names them. `cw restart` affects
 only the named session.
 
+A host conversation's native agent gets its own identity: `CW_ENVIRONMENT`
+and `CW_SESSION_ID` hold its host environment and session IDs, so a lead
+launches a worker under itself with
+`cw run "$CW_ENVIRONMENT" --parent "$CW_SESSION_ID" --agent ...`. Only a
+conversation the host user launched gets them. A member conversation on a
+host loses any copy it would inherit, and no host session inherits one from
+whatever started the host daemon. VMs and platform sandboxes are given none,
+and their agents' environment is otherwise left as their session has it.
+
 ```mermaid
 flowchart LR
     CLI[cw run / msg] --> Daemon[Host session daemon]
@@ -427,7 +436,8 @@ signal; the real noel's journal records the run aborted), while `cw env stop`
 leaves it interrupted in noel's journal, as `get_state.lastRun` reports, and
 its message unknown.
 The synthetic journey also proves Codex and Claude keep their unknown outcome
-on each of those routes. The real-noel journey needs noel built from pi
+on each of those routes, and that each agent, and no other session, receives
+its conversation identity. The real-noel journey needs noel built from pi
 commit `ef09c03f` or later.
 None replaces the matching native Linux hardware or retained Kind sandbox
 journey. Program #2255 holds current commands, outcomes and landing evidence.

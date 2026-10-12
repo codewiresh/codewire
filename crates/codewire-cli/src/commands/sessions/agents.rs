@@ -1000,6 +1000,38 @@ fn stop_interrupt_id(active_message_id: &str) -> String {
     ))
 }
 
+/// What a conversation's native agent is given of the conversation identity
+/// names, [`codewire_daemon::env::CONVERSATION_IDENTITY_ENV`].
+#[derive(Debug, PartialEq, Eq)]
+enum ConversationIdentity {
+    /// A conversation on a trusted host that the host user launched gets its
+    /// own identity: its children can name it as their parent.
+    Own([(&'static str, String); 2]),
+    /// A member's conversation on a host, whose results return to its
+    /// member, loses any copy it would inherit, so it never names a stale
+    /// parent.
+    Removed,
+    /// A VM or platform placement (#2238) is given none and loses none: its
+    /// agent keeps the environment its session was given.
+    Unchanged,
+}
+
+fn conversation_identity(
+    environment: &DriverEnvironment,
+    session_id: &str,
+    member_custody: bool,
+) -> ConversationIdentity {
+    let [environment_name, session_name] = codewire_daemon::env::CONVERSATION_IDENTITY_ENV;
+    match (environment.host().is_some(), member_custody) {
+        (true, false) => ConversationIdentity::Own([
+            (environment_name, environment.id().to_owned()),
+            (session_name, session_id.to_owned()),
+        ]),
+        (true, true) => ConversationIdentity::Removed,
+        (false, _) => ConversationIdentity::Unchanged,
+    }
+}
+
 /// Errors raised before any byte could reach the receiver's pipe.
 fn send_error_is_definitive(error: &codewire_daemon::client::SessionClientError) -> bool {
     use codewire_daemon::client::SessionClientError as E;
@@ -2477,6 +2509,27 @@ impl Peer {
             command
                 .env_remove(HOST_DATA_DIR_ENV)
                 .env_remove("CW_CONFIG_DIR");
+        }
+        #[cfg(target_os = "linux")]
+        let member_custody = guest.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let member_custody = false;
+        // `cw run "$CW_ENVIRONMENT" --parent "$CW_SESSION_ID"` launches a
+        // worker under this conversation.
+        match conversation_identity(
+            &driver.environment,
+            &driver.binding.session_id,
+            member_custody,
+        ) {
+            ConversationIdentity::Own(identity) => {
+                command.envs(identity);
+            }
+            ConversationIdentity::Removed => {
+                for name in codewire_daemon::env::CONVERSATION_IDENTITY_ENV {
+                    command.env_remove(name);
+                }
+            }
+            ConversationIdentity::Unchanged => {}
         }
         let mut child = command
             .stdin(Stdio::piped())
@@ -4455,6 +4508,47 @@ mod tests {
             notification_id("00000000-0000-4000-8000-000000000001"),
             derived_id("codewire-agent-notification:v1:00000000-0000-4000-8000-000000000001")
         );
+    }
+
+    #[test]
+    fn only_a_host_users_own_conversation_knows_its_identity() {
+        let host = DriverEnvironment::Host(HostEnvironment {
+            id: "c0ffee00-0000-4000-8000-000000000001".into(),
+            name: "host".into(),
+            path: PathBuf::from("/workspace"),
+            created_at: now(),
+            state: "running".into(),
+            runtime_root: Some(PathBuf::from(
+                "/state/hosts/c0ffee00-0000-4000-8000-000000000001",
+            )),
+        });
+        assert_eq!(
+            conversation_identity(&host, "session-a", false),
+            ConversationIdentity::Own([
+                (
+                    "CW_ENVIRONMENT",
+                    "c0ffee00-0000-4000-8000-000000000001".into()
+                ),
+                ("CW_SESSION_ID", "session-a".into()),
+            ])
+        );
+        // A member conversation's results return to its member.
+        assert_eq!(
+            conversation_identity(&host, "session-a", true),
+            ConversationIdentity::Removed
+        );
+        // Off a host the agent's environment is its session's, as it was
+        // before these names existed: a value the user declared stays.
+        let guest = DriverEnvironment::Guest {
+            id: "c0ffee00-0000-4000-8000-000000000002".into(),
+            root: PathBuf::from("/home/codewire/.codewire"),
+        };
+        for member_custody in [false, true] {
+            assert_eq!(
+                conversation_identity(&guest, "session-a", member_custody),
+                ConversationIdentity::Unchanged
+            );
+        }
     }
 
     #[test]

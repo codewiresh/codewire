@@ -8,6 +8,8 @@ Run against a built cw, without replacing HOME or accessing login files:
 
 The native option uses the installed agents' ordinary login. It proves a Codex
 lead can invoke cw itself and a Claude worker's result starts a parent turn.
+Inherited CW_ENVIRONMENT and CW_SESSION_ID are dropped: a journey run by a
+managed agent never hands its own conversation identity to the host it starts.
 The real-noel option runs only the noel journey, with that binary as noel and
 its faux/echo model; noel gets a private HOME and pi agent directory, offline.
 All runtime/config/workspace files and processes belong to this invocation.
@@ -32,6 +34,8 @@ import time
 
 
 WALL = 0x40000000  # Linux __WALL includes non-SIGCHLD clone children.
+# A host conversation's own identity, given only to its native agent.
+IDENTITY = ("CW_ENVIRONMENT", "CW_SESSION_ID")
 INTERRUPT_LOGGED = "interrupted the active run before stopping"
 LINUX = sys.platform.startswith("linux")
 MACOS = sys.platform == "darwin"
@@ -195,7 +199,7 @@ class Journey:
         self.workspace = self.root / "project"
         self.workspace.mkdir(mode=0o700)
         self.env = {key: value for key, value in os.environ.items()
-                    if not key.startswith("CODEWIRE_")}
+                    if not key.startswith("CODEWIRE_") and key not in IDENTITY}
         self.env.update(CW_HOST_DATA_DIR=str(self.root / "hosts"), CW_CONFIG_DIR=str(self.root / "config"))
         self.cw = str(Path(cw).resolve())
         if LINUX:
@@ -223,8 +227,8 @@ class Journey:
                 target.chmod(0o700)
             self.env["PATH"] = str(programs) + os.pathsep + self.env.get("PATH", "")
 
-    def call(self, *args, ok=True, timeout=45, data=False):
-        result = subprocess.run([self.cw, *args], env=self.env, cwd=self.workspace,
+    def call(self, *args, ok=True, timeout=45, data=False, env=None):
+        result = subprocess.run([self.cw, *args], env=env or self.env, cwd=self.workspace,
                                 text=True, capture_output=True, timeout=timeout)
         if ok and result.returncode != 0:
             raise AssertionError(f"cw {args}: exit {result.returncode}\n{result.stdout}\n{result.stderr}")
@@ -283,12 +287,19 @@ class Journey:
         return json.loads(result.stdout)
 
     def run(self):
+        # The host daemon this starts inherits a conversation identity, as
+        # one a lead's own cw started would. No session ever sees it.
+        stale = dict(self.env, CW_ENVIRONMENT="stale-environment", CW_SESSION_ID="session-stale")
         created = self.call("env", "create", "--local", "--type", "host", "--name", "proof",
-                            "--path", str(self.workspace), "--output", "json", data=True)
+                            "--path", str(self.workspace), "--output", "json", data=True, env=stale)
         self.environment = created["id"]
         assert created["type"] == "host"
         assert self.call("list", self.environment, "--output", "json", data=True) == []
         self.check("create/empty")
+
+        self.launch("identity", ["sh", "-c", 'printf "%s|%s" "${CW_ENVIRONMENT-unset}" "${CW_SESSION_ID-unset}"'])
+        assert self.call("wait", self.environment, "identity", "--timeout", "10s").stdout == "unset|unset"
+        self.check("ordinary-session-inherits-no-conversation-identity")
 
         self.launch("reader", ["sh", "-c", 'read -r value; printf "RECEIVED:%s" "$value"'])
         self.call("send", self.environment, "reader", "part", "--no-newline")
@@ -324,6 +335,8 @@ class Journey:
         complete = self.wait_message(message["id"])
         assert complete["state"] == "completed" and complete["native_acknowledged"], complete
         self.call("send", self.environment, "lead", "raw", ok=False)
+        if not self.native:
+            self.knows_itself("codex", "lead")
         self.check("managed-task/completion/raw-input-rejection")
 
         worker_text = "Reply with exactly WORKER_READY. Do not use tools." if self.native else "WORKER"
@@ -337,6 +350,8 @@ class Journey:
         notifications = [m for m in parent["messages"] if m["action"] == "notification"]
         assert len(notifications) == 1 and notifications[0]["source"]["session_id"] == worker["session"]["session_id"]
         self.call("steer", self.environment, "worker", "unsupported", ok=False)
+        if not self.native:
+            self.knows_itself("claude", "worker")
         self.check("claude-worker/native-ack/idle-parent-wake/no-duplicate")
 
         if self.native:
@@ -417,6 +432,16 @@ class Journey:
         refused = self.call("restart", self.environment, "projection", ok=False)
         assert "launch a new session" in refused.stderr, refused.stderr
         self.check("launch-projection/not-persisted/reload-refuses-stale-replay")
+
+    def knows_itself(self, agent, name):
+        """The synthetic AGENT of conversation NAME was given its own
+        environment and session at every start, and no peer a stale copy."""
+        seen = [json.loads(line) for line in
+                (self.workspace / "agent-identity.jsonl").read_text().splitlines()]
+        own = [e for e in seen if e["agent"] == agent and e["session"] == self.session_ids[name]]
+        assert own and all(e["environment"] == self.environment for e in own), seen
+        assert not any(e["environment"] == "stale-environment" or e["session"] == "session-stale"
+                       for e in seen), seen
 
     def pause(self, agents=("noel", "codex", "claude"), text="HOLD", env=()):
         """A conversation of each agent running TEXT (Codex and Claude HOLD)
@@ -734,6 +759,7 @@ class Journey:
                                   "totalTokens": 0, "cost": 0.0, "messages": 1}, first
         driver = self.inbox("noel-lead")["driver"]
         assert driver["phase"] == "idle" and driver["native_thread_established"], driver
+        self.knows_itself("noel", "noel-lead")
         assert driver["capabilities"]["steer"] and driver["capabilities"]["interrupt"], driver
         session = driver["native_thread_id"]
         assert "[faux/echo] Hello" in self.call("inbox", env, "noel-lead").stdout
