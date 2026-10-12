@@ -255,8 +255,17 @@ fn finite_routes_bind_exact_operations_and_never_normalize_path_aliases() {
             None,
             GitHubOperation::Graphql,
         ),
-        // The API root `gh auth status` reads: GET only, with no query.
+        // The API root `gh auth status` reads, and the README `gh repo view`
+        // shows (an owner-accepted exception, see SECRETS-AND-CREDENTIALS.md):
+        // GET only, with no query.
         ("github-api", Method::GET, "/", None, GitHubOperation::Rest),
+        (
+            "github-api",
+            Method::GET,
+            "/repos/owner/repo/readme",
+            None,
+            GitHubOperation::Rest,
+        ),
         (
             "github-api",
             Method::GET,
@@ -349,12 +358,8 @@ fn finite_routes_bind_exact_operations_and_never_normalize_path_aliases() {
     assert!(classify_request("github-api", &Method::DELETE, "/repos/owner/repo", None).is_err());
     assert!(classify_request("github-api", &Method::GET, "/graphql", None).is_err());
 
-    // Near misses of the API root admitted for stock `gh`, and the README
-    // `gh repo view` reads, which stays refused: a private repository's
-    // README carries a GitHub-minted download token, and no token enters the
-    // Sandbox.
+    // Near misses of the two requests admitted for stock `gh`.
     for (method, path, query) in [
-        (Method::GET, "/repos/owner/repo/readme", None),
         (Method::GET, "/", Some("x=1")),
         (Method::GET, "/", Some("page=1")),
         (Method::POST, "/", None),
@@ -406,14 +411,13 @@ fn finite_routes_bind_exact_operations_and_never_normalize_path_aliases() {
     }
 }
 
-/// The newly admitted API root is prepared like every other REST call: one
-/// exact path on api.github.com, the injected bearer only, and nothing of the
-/// guest's own authorization forwarded.
+/// The newly admitted API root and README are prepared like every other
+/// REST call: one exact path on api.github.com, the injected bearer only, and
+/// nothing of the guest's own authorization forwarded.
 #[test]
-fn the_api_root_goes_only_to_its_exact_api_path_with_the_injected_bearer() {
+fn the_api_root_and_readme_go_only_to_their_exact_api_path_with_the_injected_bearer() {
     let adapter = GitHubOAuthAdapter::new().unwrap();
-    let path = "/";
-    {
+    for path in ["/", "/repos/owner/repo/readme"] {
         let mut input = HeaderMap::new();
         input.insert(
             header::AUTHORIZATION,
@@ -443,8 +447,9 @@ fn the_api_root_goes_only_to_its_exact_api_path_with_the_injected_bearer() {
                 .values()
                 .any(|value| value == "token codewire-managed")
         );
-        // Its response gets the REST redaction: a provider that echoed the
-        // injected token, raw or base64, never returns it to the Sandbox.
+        // Their responses get the REST redaction: a provider that echoed the
+        // injected token, raw or base64 as a README's content would be, never
+        // returns it to the Sandbox.
         let (_, mut redacted) = response
             .begin(StatusCode::OK, &headers("application/json"))
             .unwrap();

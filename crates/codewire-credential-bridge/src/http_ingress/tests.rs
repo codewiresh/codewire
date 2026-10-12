@@ -95,6 +95,17 @@ fn provider_families_keep_provider_relative_paths_and_queries() {
             "/user",
             None,
         ),
+        // The README `gh repo view` shows: GET only, with no query (an
+        // owner-accepted exception, see SECRETS-AND-CREDENTIALS.md).
+        (
+            "GET",
+            "/repos/owner/repo/readme",
+            Some("api.github.com"),
+            "github",
+            "github-api",
+            "/repos/owner/repo/readme",
+            None,
+        ),
         (
             "GET",
             "/repos/owner/repo/issues?state=open&labels=good%20first+issue&page=2",
@@ -285,10 +296,7 @@ fn rejected_routes() -> Vec<(&'static str, &'static str, Option<&'static str>)> 
         ("POST", "/graphql?query=anything", Some("api.github.com")),
         ("HEAD", "/repos/owner/repo/issues", Some("api.github.com")),
         ("GET", "/admin", Some("api.github.com")),
-        // Near misses of the API root, and the README `gh repo view` reads:
-        // a private repository's README carries a GitHub-minted download
-        // token, and no token enters the Sandbox.
-        ("GET", "/repos/owner/repo/readme", Some("api.github.com")),
+        // Near misses of the API root and of the README.
         ("GET", "/?x=1", Some("api.github.com")),
         ("GET", "/?", Some("api.github.com")),
         ("POST", "/", Some("api.github.com")),

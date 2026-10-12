@@ -483,6 +483,13 @@ pub(crate) fn classify_request(
             ["user", "repos"] | ["orgs", _, "repos"] => matches!(m, "GET" | "POST"),
             ["users", _, "repos"] => m == "GET",
             ["repos", _, _] => m == "GET",
+            // The default README `gh repo view` shows, GET only and with no
+            // query (no other ref or directory). Owner-accepted exception:
+            // for a private repository the response carries a short-lived,
+            // GitHub-minted download URL token for that one file. See
+            // docs/dev/SECRETS-AND-CREDENTIALS.md,
+            // "Accepted exception: the README download URL token".
+            ["repos", _, _, "readme"] => m == "GET" && query.is_none_or(str::is_empty),
             ["repos", _, _, "issues" | "pulls"] => matches!(m, "GET" | "POST"),
             ["repos", _, _, "issues" | "pulls", number] if numeric_id(number) => {
                 matches!(m, "GET" | "PATCH")

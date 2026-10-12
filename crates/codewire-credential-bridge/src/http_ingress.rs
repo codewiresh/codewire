@@ -239,6 +239,12 @@ fn github_api_family(method: &Method, parts: &[&str], query: Option<&str>) -> bo
     match parts {
         ["graphql"] => method == Method::POST && query.is_none(),
         ["user"] | ["repos", _, _] | ["users", _, "repos"] => method == Method::GET,
+        // The default README `gh repo view` shows, GET only and with no query.
+        // Owner-accepted exception: for a private repository the response
+        // carries a short-lived, GitHub-minted download URL token for that one
+        // file. See docs/dev/SECRETS-AND-CREDENTIALS.md,
+        // "Accepted exception: the README download URL token".
+        ["repos", _, _, "readme"] => method == Method::GET && query.is_none(),
         ["user", "repos"] | ["orgs", _, "repos"] => {
             matches!(*method, Method::GET | Method::POST)
         }
