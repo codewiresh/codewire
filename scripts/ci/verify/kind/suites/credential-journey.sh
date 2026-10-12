@@ -5,7 +5,10 @@
 # fixture's exact provider events since its pod started, so this suite needs
 # fake credential mode and restarts the credential-service first. Its length
 # is set by a real projected-token rotation (kubelet replaces the token about
-# eight minutes in) and the 60-second authority windows.
+# eight minutes in) and the 60-second authority windows. Each authority change
+# starts only while the serving bridge epoch is three minutes from its natural
+# end; otherwise the journey first waits, up to about 90 seconds, for the
+# relay's next epoch.
 set -euo pipefail
 
 if [ "${KIND_E2E_COMMON_LOADED:-0}" != "1" ]; then
