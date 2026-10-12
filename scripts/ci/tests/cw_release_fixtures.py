@@ -67,6 +67,41 @@ def executable(target, version=VERSION, tag=b"", static=True, revision=REVISION,
     return bytes(body)
 
 
+HELPER_LIBRARIES = ("/usr/lib/libSystem.B.dylib",
+                    "/System/Library/Frameworks/Virtualization.framework/Versions/A/Virtualization",
+                    "/usr/lib/swift/libswiftCore.dylib")
+
+
+def macos_helper(libraries=HELPER_LIBRARIES, runtime=True, entitlements=None, cpu=0x0100000C, signed=True,
+                 rpaths=("@loader_path",)):
+    """A minimal thin Mach-O executable shaped as the VZ helper: dylib load
+    commands and an embedded code signature with a CodeDirectory and an
+    entitlements blob. It is never run."""
+    if entitlements is None:
+        entitlements = release.HELPER_ENTITLEMENTS.read_bytes()
+    commands = b""
+    for name in libraries:
+        path = name.encode() + b"\0"
+        size = (24 + len(path) + 7) // 8 * 8
+        commands += struct.pack("<IIIIII", 0xC, size, 24, 2, 0x10000, 0x10000) + path.ljust(size - 24, b"\0")
+    for name in rpaths:
+        path = name.encode() + b"\0"
+        size = (12 + len(path) + 7) // 8 * 8
+        commands += struct.pack("<III", 0x8000001C, size, 12) + path.ljust(size - 12, b"\0")
+    directory = struct.pack(">IIIII", 0xFADE0C02, 20, 0x20500, 0x10002 if runtime else 0x2, 0)
+    granted = struct.pack(">II", 0xFADE7171, 8 + len(entitlements)) + entitlements
+    index = 12 + 16
+    superblob = (struct.pack(">III", 0xFADE0CC0, index + len(directory) + len(granted), 2)
+                 + struct.pack(">II", 0, index) + struct.pack(">II", 5, index + len(directory)) + directory + granted)
+    ncmds = len(libraries) + len(rpaths) + (1 if signed else 0)
+    sizeofcmds = len(commands) + (16 if signed else 0)
+    dataoff = (32 + sizeofcmds + 15) // 16 * 16
+    header = struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, 0, 2, ncmds, sizeofcmds, 0, 0)
+    signature_command = struct.pack("<IIII", 0x1D, 16, dataoff, len(superblob)) if signed else b""
+    body = header + commands + signature_command
+    return body + b"\0" * (dataoff - len(body)) + (superblob if signed else b"")
+
+
 def local_runtime(revision):
     """A synthetic macOS local runtime: its canonical document and blob bytes."""
     files = {}
@@ -79,7 +114,12 @@ def local_runtime(revision):
     def spec(path):
         return {"path": path, "architecture": "aarch64", **ref(path)}
 
-    lock = {"schema_version": 1, "vz_runner": spec("codewire-vz-runner"), "kernel": spec("kernel"),
+    helper = macos_helper()
+    files[digest(helper)] = helper
+    lock = {"schema_version": 1,
+            "vz_runner": {"path": "codewire-vz-runner", "architecture": "aarch64", "sha256": digest(helper),
+                          "size": len(helper)},
+            "kernel": spec("kernel"),
             "initramfs": spec("initramfs"),
             "e2fsprogs": {name: spec(path) for name, path in (
                 ("mkfs_ext4", "mkfs.ext4"), ("e2fsck", "e2fsck"), ("resize2fs", "resize2fs"),
