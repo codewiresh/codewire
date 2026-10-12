@@ -333,6 +333,10 @@ run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
 run_paths_case service_ssh_image_verifier pull_request refs/pull/1922/head false \
   'policy security security_js' scripts/ci/tests/test-service-ssh-image-verifier.sh \
   scripts/ci/verify/service-ssh-image-contract.sh scripts/ci/verify/verify-service-ssh-image.sh
+# The public install/update/rollback acceptance journey is release tooling.
+run_paths_case release_update_journey pull_request refs/pull/3/head false \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
+  scripts/dev/test-cw-release-update.py
 run_paths_case apt_transactions pull_request refs/pull/3/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/test-apt-get-with-retry.sh

@@ -125,6 +125,54 @@ if (
   fail 'wrong Chromium version fixture was accepted'
 fi
 
+# Without an explicit browser, the pinned Chromium comes from this checkout's
+# unpacked build, else the cached verified archive, else a verified download
+# that then fills the cache. The installer verifies whichever archive it gets.
+resolver_root="$test_root/resolver"
+mkdir -p "$resolver_root/scripts/ci"
+cat >"$resolver_root/scripts/ci/install-pinned-playwright-chromium.sh" <<INSTALLER
+#!/usr/bin/env bash
+set -euo pipefail
+readonly chromium_version='${pinned_version}'
+root="\$(cd "\$(dirname "\$0")/../.." && pwd)"
+printf '%s\n' "\${CODEWIRE_CHROMIUM_ARCHIVE:-download}" >>"\$root/installs"
+if [ -n "\${CODEWIRE_CHROMIUM_ARCHIVE:-}" ] && [ "\$(cat "\$CODEWIRE_CHROMIUM_ARCHIVE")" != verified ]; then
+  exit 1
+fi
+mkdir -p "\$root/.tmp"
+dir="\$(mktemp -d "\$root/.tmp/playwright-chromium.XXXXXX")"
+[ -n "\${CODEWIRE_CHROMIUM_ARCHIVE:-}" ] || printf 'verified' >"\$dir/chrome-linux64.zip"
+mkdir "\$dir/chrome-linux64"
+printf '#!/bin/sh\nprintf "Google Chrome for Testing %s\\\\n"\n' "\$chromium_version" >"\$dir/chrome-linux64/chrome"
+chmod +x "\$dir/chrome-linux64/chrome"
+printf '%s\n' "\$dir/chrome-linux64/chrome"
+INSTALLER
+chmod +x "$resolver_root/scripts/ci/install-pinned-playwright-chromium.sh"
+(
+  # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
+  source "$BROWSER_RUNTIME"
+  export CODEWIRE_CHROMIUM_CACHE_DIR="$test_root/chromium-cache"
+  archive="$CODEWIRE_CHROMIUM_CACHE_DIR/$pinned_version/chrome-linux64.zip"
+  [ "$(PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/explicit/chrome resolve_pinned_playwright_chromium "$resolver_root")" = /explicit/chrome ]
+  unset PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+  first="$(resolve_pinned_playwright_chromium "$resolver_root")"
+  [ "$("$first" --version)" = "Google Chrome for Testing $pinned_version" ]
+  [ "$(cat "$archive")" = verified ]
+  [ "$(resolve_pinned_playwright_chromium "$resolver_root")" = "$first" ]
+  [ "$(cat "$resolver_root/installs")" = download ]
+  # Another checkout unpacks the cached archive without downloading.
+  rm -rf "$resolver_root"/.tmp/playwright-chromium.*
+  second="$(resolve_pinned_playwright_chromium "$resolver_root")"
+  [ "$second" != "$first" ] && [ -x "$second" ]
+  [ "$(cat "$resolver_root/installs")" = "download"$'\n'"$archive" ]
+  # A cached archive that fails verification is replaced by a fresh download.
+  rm -rf "$resolver_root"/.tmp/playwright-chromium.* "$resolver_root/installs"
+  printf 'tampered' >"$archive"
+  resolve_pinned_playwright_chromium "$resolver_root" >/dev/null
+  [ "$(cat "$resolver_root/installs")" = "$archive"$'\n'download ]
+  [ "$(cat "$archive")" = verified ]
+) || fail 'pinned Chromium resolution, archive cache or download fallback changed'
+
 (
   # shellcheck source=scripts/ci/verify/kind-host-runtime.sh
   source "$HOST_RUNTIME"

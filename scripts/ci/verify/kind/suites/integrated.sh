@@ -62,6 +62,7 @@ run_integrated_kind_suite() {
   rust_reconciler_ttl_e2e
   if [ "$KEEP_KIND_CLUSTER" = 1 ]; then
     mark_retained_cluster_prepared
+    record_retained_cluster_sources
   fi
   log "green"
 }

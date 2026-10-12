@@ -229,7 +229,7 @@ kind-down:
 # Rebuild one service from current source into the retained cluster, e.g.
 # `make kind-deploy SERVICE=credential-service`.
 kind-deploy:
-	@test -n "$(SERVICE)" || { echo "usage: make kind-deploy SERVICE=<idp|orchestration|credential-service|billing|coordinator|dashboard|daemon>" >&2; exit 2; }
+	@test -n "$(SERVICE)" || { echo "usage: make kind-deploy SERVICE=<idp|orchestration|credential-service|billing|coordinator|mesh|dashboard|daemon>" >&2; exit 2; }
 	./scripts/dev/kind/deploy-service.sh "$(SERVICE)"
 
 # Republish the retained cluster's synthetic trust roots (kind-deploy also
@@ -237,8 +237,9 @@ kind-deploy:
 kind-trust-roots:
 	./scripts/dev/kind/trust-roots.sh
 
-# Run only the retained Kind suites the current change needs (SUITES=... to
-# choose explicitly).
+# Deploy the services the current change feeds, then run only the retained
+# Kind suites that cover it (SUITES=... to choose explicitly). Exit 3: only the
+# full CI Kind gate covers this change.
 kind-test:
 	KIND_TEST_SUITES="$(SUITES)" ./scripts/dev/kind/test-selected.sh
 
