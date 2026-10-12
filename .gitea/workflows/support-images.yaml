@@ -99,9 +99,10 @@ jobs:
 
   # Each platform of the support pair builds in its own job, with its own time
   # budget below the protected runner's ceiling, and streams every build step
-  # into its log. amd64 also builds the admitted static CW producer; arm64
-  # runs its package installs under BuildKit's bundled emulator. Both push only
-  # by digest; the join below publishes them as one index.
+  # into its log. amd64 builds on the job's own BuildKit container and also
+  # builds the admitted static CW producer. arm64 builds natively on the
+  # protected arm64 BuildKit node over mutual TLS, never under emulation. Both
+  # push only by digest; the join below publishes them as one index.
   build-support-amd64:
     # zizmor: ignore[excessive-permissions] This exact protected job receives the scoped publisher identity for its platform of the pair.
     name: Build exact support pair (linux/amd64)
@@ -129,9 +130,9 @@ jobs:
     # zizmor: ignore[excessive-permissions] This exact protected job receives the scoped publisher identity for its platform of the pair.
     name: Build exact support pair (linux/arm64)
     runs-on: ci-protected
+    # The job's OIDC also reads the arm64 node's client certificate.
     enable-openid-connect: true
-    # The emulated leg gets nearly all of the runner's three-hour ceiling.
-    timeout-minutes: 175
+    timeout-minutes: 120
     needs: [support-selection]
     if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}
     outputs:
@@ -146,7 +147,7 @@ jobs:
       - name: Build the linux/arm64 base and workspace by digest
         id: build
         env:
-          SUPPORT_PLATFORM_BUDGET_MINUTES: '168'
+          SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
         run: scripts/ci/images/build-support-platform.sh linux/arm64
 
   publish-support-images:

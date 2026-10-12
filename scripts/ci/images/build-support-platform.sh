@@ -6,6 +6,13 @@
 # so a slow leg fails here with a clear message instead of an unexplained
 # runner kill.
 #
+# linux/amd64 builds on the job's own pinned BuildKit container. linux/arm64
+# builds natively on the protected arm64 BuildKit node (infra
+# docs/runbooks/ci-arm64-builder.md), reached over mutual TLS with the client
+# certificate this job's support-publisher role reads from OpenBao. If that
+# certificate cannot be read or the node does not answer as linux/arm64, the
+# build fails: it never falls back to emulation, which cannot finish in time.
+#
 # Usage: build-support-platform.sh linux/amd64|linux/arm64
 # Requires SUPPORT_PLATFORM_BUDGET_MINUTES; writes base_digest and
 # workspace_digest to $GITHUB_OUTPUT.
@@ -14,6 +21,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly BUILDER="$ROOT/scripts/ci/images/build-push-image.sh"
+readonly ARM64_CLIENT_FETCHER="$ROOT/scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh"
+readonly ARM64_BUILDKIT_HOST='arm64-builder.example.invalid'
+readonly ARM64_BUILDKIT_ENDPOINT="tcp://$ARM64_BUILDKIT_HOST:1234"
 
 fail() {
   printf '[build-support-platform] ERROR: %s\n' "$*" >&2
@@ -31,9 +41,49 @@ budget="${SUPPORT_PLATFORM_BUDGET_MINUTES:-}"
 output="${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 
 umask 077
-work="$(mktemp -d)"
-trap 'rm -rf -- "$work"' EXIT
+work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/codewire-support-platform.XXXXXX")"
+remote_builder=''
+cleanup() {
+  if [[ -n "$remote_builder" ]]; then
+    # Removing a remote builder only forgets it locally; the node is untouched.
+    DOCKER_CONFIG="$work/docker-config" timeout 30 docker buildx rm "$remote_builder" >/dev/null 2>&1 || true
+  fi
+  find "$work" -type f -exec shred -u {} + 2>/dev/null || true
+  rm -rf -- "$work"
+}
+trap cleanup EXIT
 readonly started="$SECONDS" deadline=$((SECONDS + budget * 60))
+
+# Attach the native arm64 node as this job's only builder, in a private
+# Docker configuration that build-push-image.sh then uses for its registry
+# login and every build.
+attach_arm64_builder() {
+  local tls="$work/arm64-buildkit-tls" platforms
+  mkdir -m 0700 "$tls" "$work/docker-config"
+  "$ARM64_CLIENT_FETCHER" "$tls" || {
+    printf '::error::the arm64 BuildKit client certificate could not be read; the linux/arm64 support build does not fall back to emulation\n' >&2
+    return 1
+  }
+  remote_builder="codewire-support-arm64-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$$"
+  DOCKER_CONFIG="$work/docker-config" docker buildx create --name "$remote_builder" \
+    --driver remote --platform linux/arm64 \
+    --driver-opt "cacert=$tls/ca.crt,cert=$tls/client.crt,key=$tls/client.key,servername=$ARM64_BUILDKIT_HOST" \
+    "$ARM64_BUILDKIT_ENDPOINT" >/dev/null
+  if ! platforms="$(DOCKER_CONFIG="$work/docker-config" timeout 120 \
+      docker buildx inspect "$remote_builder" --bootstrap 2>&1)" \
+      || ! grep -Eq '^Status: +running$' <<<"$platforms" \
+      || ! grep -Eq '^Platforms: .*linux/arm64' <<<"$platforms"; then
+    printf '::error::the native arm64 BuildKit node %s did not answer as a running linux/arm64 builder; the linux/arm64 support build does not fall back to emulation\n' \
+      "$ARM64_BUILDKIT_ENDPOINT" >&2
+    return 1
+  fi
+  printf 'Attached the native arm64 BuildKit node %s\n' "$ARM64_BUILDKIT_ENDPOINT" >&2
+}
+builder_env=()
+if [[ "$PLATFORM" == linux/arm64 ]]; then
+  attach_arm64_builder
+  builder_env=(CODEWIRE_EXTERNAL_BUILDX_BUILDER="$remote_builder" CODEWIRE_EXTERNAL_DOCKER_CONFIG="$work/docker-config")
+fi
 
 # build FAMILY DOCKERFILE CONTEXT [ENV ...] prints the verified platform digest.
 build() {
@@ -47,7 +97,7 @@ build() {
   fi
   : >"$work/$family.output"
   phase_started="$SECONDS"
-  env "$@" CODEWIRE_IMAGE_PLATFORM="$PLATFORM" GITHUB_OUTPUT="$work/$family.output" \
+  env "$@" "${builder_env[@]}" CODEWIRE_IMAGE_PLATFORM="$PLATFORM" GITHUB_OUTPUT="$work/$family.output" \
     timeout --signal=TERM --kill-after=60s "${remaining}s" \
     "$BUILDER" "$family" "$dockerfile" "$context" >&2 || status=$?
   printf 'CODEWIRE_CI_PHASE name=support-%s-%s seconds=%s status=%s\n' \

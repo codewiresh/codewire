@@ -600,7 +600,7 @@ superseded_case() {
 for platform in amd64 arm64; do
   case "$platform" in
     amd64) timeout_minutes=120 budget=110 next_job=build-support-arm64 ;;
-    arm64) timeout_minutes=175 budget=168 next_job=publish-support-images ;;
+    arm64) timeout_minutes=120 budget=110 next_job=publish-support-images ;;
   esac
   platform_job="$(sed -n "/^  build-support-$platform:/,/^  $next_job:/p" "$WORKFLOW")"
   for expected in '    runs-on: ci-protected' '    enable-openid-connect: true' \
@@ -623,16 +623,18 @@ if grep -qF 'build-support-platform.sh' <<<"$publish_job"; then
   fail 'support join rebuilds a platform'
 fi
 
-# The platform script, run against a recording builder in a copy of its tree.
+# The platform script, run in a copy of its tree against a recording builder,
+# a recording Docker and a stub for the arm64 node's client certificate.
 platform_tree="$(mktemp -d)"
 trap 'rm -rf -- "$superseded_step" "$superseded_bin" "$platform_tree"' EXIT
-mkdir -p "$platform_tree/scripts/ci/images"
+mkdir -p "$platform_tree/scripts/ci/images" "$platform_tree/scripts/ci/setup" "$platform_tree/bin" "$platform_tree/runner"
 cp "$PLATFORM_BUILDER" "$platform_tree/scripts/ci/images/"
 cat >"$platform_tree/scripts/ci/images/build-push-image.sh" <<'STUB'
 #!/usr/bin/env bash
-printf '%s|%s|%s|%s\n' "$1" "${CODEWIRE_IMAGE_PLATFORM:-}" "${CODEWIRE_BASE_IMAGE_REF:-}" "$*" >>"$STUB_CALLS"
+printf '%s|%s|%s|%s|%s\n' "$1" "${CODEWIRE_IMAGE_PLATFORM:-}" "${CODEWIRE_BASE_IMAGE_REF:-}" \
+  "${CODEWIRE_EXTERNAL_BUILDX_BUILDER:-}" "$*" >>"$STUB_CALLS"
+[[ -z "${CODEWIRE_EXTERNAL_DOCKER_CONFIG:-}" || -d "$CODEWIRE_EXTERNAL_DOCKER_CONFIG" ]] || exit 7
 case "${STUB_MODE:-ok}:$1" in
-  slow:workspace) sleep 5 ;;
   fail:base) exit 9 ;;
   nodigest:base) exit 0 ;;
 esac
@@ -642,11 +644,35 @@ case "$1" in
 esac
 printf 'platform_digest=%s\n' "$digest" >>"$GITHUB_OUTPUT"
 STUB
-chmod +x "$platform_tree/scripts/ci/images/build-push-image.sh" "$platform_tree/scripts/ci/images/build-support-platform.sh"
+cat >"$platform_tree/scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "$(stat -c '%a' "$1")" >>"$STUB_FETCHES"
+[[ "${STUB_FETCH:-ok}" == ok ]] || exit 1
+for file in ca.crt client.crt client.key; do printf 'synthetic\n' >"$1/$file"; done
+STUB
+cat >"$platform_tree/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+printf 'DOCKER_CONFIG=%s %s\n' "${DOCKER_CONFIG:-}" "$*" >>"$STUB_DOCKER"
+case "$1 $2" in
+  'buildx inspect')
+    case "${STUB_NODE:-arm64}" in
+      arm64) printf 'Name: x\nDriver: remote\nStatus:             running\nPlatforms:          linux/arm64*, linux/arm64/v8\n' ;;
+      amd64) printf 'Status:             running\nPlatforms:          linux/amd64*\n' ;;
+      stopped) printf 'Status:             stopped\nPlatforms:          linux/arm64*\n' ;;
+      down) echo 'ERROR: connection refused' >&2; exit 1 ;;
+    esac ;;
+esac
+exit 0
+STUB
+chmod +x "$platform_tree/scripts/ci/images/build-push-image.sh" "$platform_tree/scripts/ci/images/build-support-platform.sh" \
+  "$platform_tree/scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh" "$platform_tree/bin/docker"
 platform_case() {
-  local mode="$1" budget="$2" platform="$3"
-  : >"$platform_tree/calls"; : >"$platform_tree/output"
-  if env STUB_MODE="$mode" STUB_CALLS="$platform_tree/calls" GITHUB_OUTPUT="$platform_tree/output" \
+  local budget="$1" platform="$2"
+  shift 2
+  : >"$platform_tree/calls"; : >"$platform_tree/output"; : >"$platform_tree/fetches"; : >"$platform_tree/docker"
+  if env "$@" PATH="$platform_tree/bin:$PATH" RUNNER_TEMP="$platform_tree/runner" \
+      STUB_CALLS="$platform_tree/calls" STUB_FETCHES="$platform_tree/fetches" STUB_DOCKER="$platform_tree/docker" \
+      GITHUB_OUTPUT="$platform_tree/output" GITHUB_RUN_ID=77 GITHUB_RUN_ATTEMPT=1 \
       SUPPORT_PLATFORM_BUDGET_MINUTES="$budget" \
       "$platform_tree/scripts/ci/images/build-support-platform.sh" "$platform" >"$platform_tree/out" 2>&1; then
     echo ok
@@ -654,26 +680,64 @@ platform_case() {
     echo "failed $?"
   fi
 }
-[[ "$(platform_case ok 110 linux/arm64)" == ok ]] || { cat "$platform_tree/out" >&2; fail 'platform build failed'; }
-[[ "$(cat "$platform_tree/calls")" == "base|linux/arm64||base images/base/Dockerfile images/base
-workspace|linux/arm64|registry.example.invalid/codewire/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|workspace images/workspace/Dockerfile ." ]] ||
-  fail 'platform build does not build its base, then its workspace from that exact base'
-[[ "$(cat "$platform_tree/output")" == 'base_digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-workspace_digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ]] ||
+base_a=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+# amd64 builds on the job's own builder: no certificate, no remote node.
+[[ "$(platform_case 110 linux/amd64)" == ok ]] || { cat "$platform_tree/out" >&2; fail 'amd64 platform build failed'; }
+[[ "$(cat "$platform_tree/calls")" == "base|linux/amd64|||base images/base/Dockerfile images/base
+workspace|linux/amd64|registry.example.invalid/codewire/base@$base_a||workspace images/workspace/Dockerfile ." ]] ||
+  fail 'amd64 build does not build its base, then its workspace from that exact base, on its own builder'
+[[ ! -s "$platform_tree/fetches" && ! -s "$platform_tree/docker" ]] ||
+  fail 'amd64 build read the arm64 certificate or attached a remote node'
+[[ "$(cat "$platform_tree/output")" == "base_digest=$base_a
+workspace_digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ]] ||
   fail 'platform build does not report both exact digests'
-grep -Eq '^CODEWIRE_CI_PHASE name=support-arm64-workspace seconds=[0-9]+ status=0$' "$platform_tree/out" ||
+grep -Eq '^CODEWIRE_CI_PHASE name=support-amd64-workspace seconds=[0-9]+ status=0$' "$platform_tree/out" ||
   fail 'platform build does not report each phase'"'"'s time'
-[[ "$(platform_case fail 110 linux/amd64)" == 'failed 9' && ! -s "$platform_tree/output" ]] ||
+# arm64 builds natively on the protected node, attached with this job's certificate.
+[[ "$(platform_case 110 linux/arm64)" == ok ]] || { cat "$platform_tree/out" >&2; fail 'arm64 platform build failed'; }
+read -r tls_dir tls_mode <"$platform_tree/fetches"
+[[ "$tls_mode" == 700 && "$tls_dir" == "$platform_tree/runner/codewire-support-platform."*/arm64-buildkit-tls ]] ||
+  fail 'the arm64 certificate was not fetched into a private job directory'
+[[ ! -e "$tls_dir" && -z "$(find "$platform_tree/runner" -mindepth 1 -print -quit)" ]] ||
+  fail 'the arm64 certificate or the private Docker configuration survived the build'
+docker_config="${tls_dir%/arm64-buildkit-tls}/docker-config"
+builder=codewire-support-arm64-77-1-
+create_call="$(grep ' buildx create ' "$platform_tree/docker")"
+[[ "$create_call" == "DOCKER_CONFIG=$docker_config buildx create --name $builder"*" --driver remote --platform linux/arm64 --driver-opt cacert=$tls_dir/ca.crt,cert=$tls_dir/client.crt,key=$tls_dir/client.key,servername=arm64-builder.example.invalid tcp://arm64-builder.example.invalid:1234" ]] ||
+  fail "the arm64 node is not attached as the mutual-TLS remote builder: $create_call"
+remote_name="$(sed -n 's/^.* buildx create --name \([^ ]*\) .*$/\1/p' "$platform_tree/docker")"
+grep -qxF "DOCKER_CONFIG=$docker_config buildx inspect $remote_name --bootstrap" "$platform_tree/docker" ||
+  fail 'the arm64 node was not checked before building'
+grep -qxF "DOCKER_CONFIG=$docker_config buildx rm $remote_name" "$platform_tree/docker" ||
+  fail 'the remote builder was not forgotten after the build'
+[[ "$(cat "$platform_tree/calls")" == "base|linux/arm64||$remote_name|base images/base/Dockerfile images/base
+workspace|linux/arm64|registry.example.invalid/codewire/base@$base_a|$remote_name|workspace images/workspace/Dockerfile ." ]] ||
+  fail 'arm64 images were not built on the attached node'
+# The arm64 build fails closed, never falling back to emulation.
+for arm64_failure in 'STUB_FETCH=fail|client certificate could not be read' \
+    'STUB_NODE=down|did not answer as a running linux/arm64 builder' \
+    'STUB_NODE=amd64|did not answer as a running linux/arm64 builder' \
+    'STUB_NODE=stopped|did not answer as a running linux/arm64 builder'; do
+  [[ "$(platform_case 110 linux/arm64 "${arm64_failure%%|*}")" == failed* ]] ||
+    fail "arm64 build did not fail closed: ${arm64_failure%%|*}"
+  grep -qF "${arm64_failure#*|}" "$platform_tree/out" && grep -qF 'does not fall back to emulation' "$platform_tree/out" ||
+    fail "arm64 failure was not attributable: ${arm64_failure%%|*}"
+  [[ ! -s "$platform_tree/calls" ]] || fail "arm64 build ran without the native node: ${arm64_failure%%|*}"
+  [[ -z "$(find "$platform_tree/runner" -mindepth 1 -print -quit)" ]] ||
+    fail "a failed arm64 attach left the certificate behind: ${arm64_failure%%|*}"
+done
+[[ "$(platform_case 110 linux/amd64 STUB_MODE=fail)" == 'failed 9' && ! -s "$platform_tree/output" ]] ||
   fail 'a failed platform base did not fail the build with its status'
-[[ "$(platform_case nodigest 110 linux/amd64)" == 'failed 1' ]] ||
+[[ "$(platform_case 110 linux/amd64 STUB_MODE=nodigest)" == 'failed 1' ]] ||
   fail 'a platform build that reported no digest was accepted'
-[[ "$(platform_case ok 0 linux/amd64)" == failed* && "$(platform_case ok '' linux/amd64)" == failed* ]] ||
+[[ "$(platform_case 0 linux/amd64)" == failed* && "$(platform_case '' linux/amd64)" == failed* ]] ||
   fail 'a platform build without a valid budget was accepted'
-[[ "$(platform_case ok 110 linux/riscv64)" == failed* && ! -s "$platform_tree/calls" ]] ||
+[[ "$(platform_case 110 linux/riscv64)" == failed* && ! -s "$platform_tree/calls" ]] ||
   fail 'an unsupported platform was built'
 grep -qF -- '--kill-after=60s "${remaining}s"' "$PLATFORM_BUILDER" ||
   fail 'platform build does not bound each image by the remaining budget'
 grep -qF "::error::the %s support build exceeded its %s-minute budget in the %s image" "$PLATFORM_BUILDER" ||
   fail 'platform build does not explain an exhausted budget'
+"$ROOT/scripts/ci/tests/test-fetch-openbao-arm64-buildkit-client.sh" >/dev/null
 
 echo 'support-image workflow contract: OK'

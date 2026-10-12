@@ -1704,6 +1704,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/curl-transport-retry.sh|\
       scripts/ci/setup/fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/setup/fetch-openbao-harbor-credentials.sh|\
+      scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh|\
       scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/images/publish-image-to-ghcr.sh|\
       scripts/ci/images/resolve-published-support-pair.sh|\
@@ -1751,6 +1752,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-harbor-credentials.sh|\
+      scripts/ci/tests/test-fetch-openbao-arm64-buildkit-client.sh|\
       scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/tests/test-forgejo-action-mirrors.sh|\
       scripts/ci/tests/test-harbor-runtime-pull-contract.sh|\
