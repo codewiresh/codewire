@@ -1777,23 +1777,7 @@ for label, name, edns, ident in (
   log "network: $(rg '^guest-(go|gh) ' "$LAST_STDOUT" | tr '\n' ';')"
 }
 
-# The managed profile's credential-broker proof ends by killing the credential
-# authority, after which the guest refuses a fresh launch until its broker is
-# back. The qualification's own guest commands start only once one is admitted.
-wait_for_guest_launch() {
-  local attempt
-  for attempt in {1..30}; do
-    if cw_isolated run --no-tty -- /bin/true >/dev/null 2>&1; then
-      log "network: the guest admits launches (attempt $attempt)"
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
-}
-
 run_network_qualification() {
-  wait_for_guest_launch || die 'the guest admitted no launch before the network qualification'
   log 'network: reading the serving packet worker descriptor table under the running VM'
   require_serving_worker_boundary serving
   log 'network: measuring guest and host single-stream HTTPS throughput'
@@ -3318,11 +3302,20 @@ run_cw run --no-tty -- /bin/sh -lc \
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   if [[ "$BROKER_RENEWAL_OBSERVATION" -eq 1 ]]; then
     run_broker_renewal_observation
+    if [[ "$NETWORK_QUALIFICATION" -eq 1 ]]; then
+      run_network_qualification
+    fi
   else
     run_application_secret_smoke
     if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
       log 'checking actual pinned guest managed sessions and parent continuation'
       run_native_managed_agent_smoke
+    fi
+    # The credential-broker proof ends by revoking the selected credentials
+    # and killing the credential authority, after which the guest admits no
+    # fresh launch; qualify the network while the environment still serves.
+    if [[ "$NETWORK_QUALIFICATION" -eq 1 ]]; then
+      run_network_qualification
     fi
     log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
     run_managed_credential_broker_smoke
@@ -3346,10 +3339,6 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
       .[0].protected_store_persistence == "operating_system" and
       .[0].cleanup_pending == false
     ' "$LAST_STDOUT" >/dev/null || die 'synthetic SSH revocation metadata drifted'
-  fi
-
-  if [[ "$NETWORK_QUALIFICATION" -eq 1 ]]; then
-    run_network_qualification
   fi
 
   log 'stopping the VM before scanning all durable test-owned state'
