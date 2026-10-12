@@ -130,7 +130,10 @@ const CONTAINER_MACHINE_ID_DESTINATION: &str = "/etc/machine-id";
 const CONTAINER_HOSTS_DESTINATION: &str = "/etc/hosts";
 const CONTAINER_RESOLV_CONF_DESTINATION: &str = "/etc/resolv.conf";
 const CONTAINER_POWEROFF_DESTINATION: &str = "/run/codewire-host/poweroff.sock";
-const CONTAINER_CREDENTIAL_SOCKET: &str = "/run/codewire-host/credential.sock";
+const CONTAINER_CREDENTIAL_SOCKET: &str = codewire_access::MANAGED_HTTP_NATIVE_SOCKET;
+/// Codewire's `gh` configuration on the read-only control mount, which the
+/// workspace sees as [`codewire_access::GH_NATIVE_CONFIG_DIR`].
+const CONTAINER_GH_CONFIG_PATH: &str = "/run/codewire/container/gh";
 // Completion belongs to the extant root, not the shared workspace/home disk.
 // Rebuilding a lost root must install again; an intact rollback root must not.
 const INSTALL_STATE_PATH: &str = "/generation/install.state";
@@ -442,6 +445,7 @@ pub fn run_init() -> Result<()> {
     record_boot_stage("ownership-ready")?;
     prepare_install_state()?;
     let poweroff = prepare_container_control(&seed, &plan.identity)?;
+    prepare_gh_projection(&plan.identity, seed.managed_credential_clients())?;
     prepare_docker_runtime(&seed, &plan.identity)?;
     record_boot_stage("container-control-ready")?;
     let mut network = match spawn_guest_network_agent() {
@@ -3830,6 +3834,78 @@ fn prepare_codex_projection_at(
         .context("sync persistent Codex home")
 }
 
+/// Publish Codewire's `gh` configuration while the GitHub client is selected:
+/// one file naming the workspace's credential ingress socket, so stock `gh`
+/// reaches the GitHub API route through it. The directory and file belong to
+/// the workspace user (0700, 0600) and sit on the control mount, which the
+/// workspace sees read-only; the user's own `~/.config/gh` is never touched.
+fn prepare_gh_projection(
+    identity: &WorkspaceIdentity,
+    clients: codewire_access::ManagedCredentialClients,
+) -> Result<()> {
+    prepare_gh_projection_at(Path::new(CONTAINER_GH_CONFIG_PATH), identity, clients)
+}
+
+fn prepare_gh_projection_at(
+    root: &Path,
+    identity: &WorkspaceIdentity,
+    clients: codewire_access::ManagedCredentialClients,
+) -> Result<()> {
+    let path = root.join(codewire_access::GH_CONFIG_FILE_NAME);
+    let Some(projection) = clients
+        .for_placement(codewire_access::ManagedCredentialClientPlacement::Native)
+        .gh
+    else {
+        // Both are Codewire's own. Unlink never follows a symlink, and a
+        // directory holding anything else is left alone.
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("clear managed gh configuration"),
+        }
+        return match fs::remove_dir(root) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::DirectoryNotEmpty
+                        | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error).context("clear managed gh configuration directory"),
+        };
+    };
+    create_dir(root, 0o700)?;
+    lchown(root, identity.uid, identity.gid)?;
+    write_durable(&path, projection.config_yml().as_bytes(), 0o600)
+        .context("publish managed gh configuration")?;
+    lchown(&path, identity.uid, identity.gid)?;
+    let directory = fs::symlink_metadata(root).context("inspect managed gh directory")?;
+    let metadata = fs::symlink_metadata(&path).context("inspect managed gh configuration")?;
+    ensure!(
+        directory.file_type().is_dir()
+            && directory.uid() == identity.uid
+            && directory.gid() == identity.gid
+            && directory.permissions().mode() & 0o777 == 0o700
+            && metadata.file_type().is_file()
+            && metadata.uid() == identity.uid
+            && metadata.gid() == identity.gid
+            && metadata.permissions().mode() & 0o777 == 0o600
+            && metadata.nlink() == 1,
+        "managed gh configuration metadata is invalid"
+    );
+    let actual = read_bounded(&path, projection.config_yml().len().saturating_add(1))
+        .context("verify managed gh configuration")?;
+    ensure!(
+        actual == projection.config_yml().as_bytes(),
+        "managed gh configuration changed"
+    );
+    Ok(())
+}
+
 fn lchown(path: &Path, uid: libc::uid_t, gid: libc::gid_t) -> Result<()> {
     let path_bytes = CString::new(path.as_os_str().as_bytes())
         .context("persistent workspace path contains NUL")?;
@@ -6207,6 +6283,79 @@ mod tests {
         fs::create_dir(&config).unwrap();
         assert!(prepare_codex_projection_at(&codex_home, &plan, clients).is_err());
         assert!(fs::symlink_metadata(&config).unwrap().file_type().is_dir());
+    }
+
+    #[test]
+    fn gh_projection_is_one_private_file_naming_the_workspace_ingress_socket() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path().join("gh");
+        let mut identity = test_workspace_plan().identity;
+        identity.uid = unsafe { libc::geteuid() };
+        identity.gid = unsafe { libc::getegid() };
+        let config = root.join(codewire_access::GH_CONFIG_FILE_NAME);
+        let github =
+            codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap();
+        let other = codewire_access::ManagedCredentialClients::from_profile_slots(["codex", "ssh"])
+            .unwrap();
+
+        // Not selected: nothing is created.
+        prepare_gh_projection_at(&root, &identity, other).unwrap();
+        assert!(fs::symlink_metadata(&root).is_err());
+
+        prepare_gh_projection_at(&root, &identity, github).unwrap();
+        // The socket the workspace sees, beside the directory it is given.
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "version: 1\nhttp_unix_socket: /run/codewire-host/credential.sock\n"
+        );
+        assert_eq!(
+            CONTAINER_CREDENTIAL_SOCKET,
+            "/run/codewire-host/credential.sock"
+        );
+        let directory = fs::symlink_metadata(&root).unwrap();
+        assert!(directory.file_type().is_dir());
+        assert_eq!(directory.permissions().mode() & 0o777, 0o700);
+        assert_eq!(directory.uid(), identity.uid);
+        let metadata = fs::symlink_metadata(&config).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            (metadata.uid(), metadata.gid()),
+            (identity.uid, identity.gid)
+        );
+        assert_eq!(metadata.nlink(), 1);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+
+        // The guest path and the workspace path are the same directory on
+        // the control mount, and the workspace's variable names the latter.
+        assert_eq!(
+            Path::new(CONTAINER_GH_CONFIG_PATH).strip_prefix(CONTAINER_CONTROL_PATH),
+            Path::new(codewire_access::GH_NATIVE_CONFIG_DIR)
+                .strip_prefix(CONTAINER_CONTROL_DESTINATION)
+        );
+        assert_eq!(
+            Path::new(CREDENTIAL_INGRESS_SOCKET).strip_prefix(CONTAINER_CONTROL_PATH),
+            Path::new(CONTAINER_CREDENTIAL_SOCKET).strip_prefix(CONTAINER_CONTROL_DESTINATION)
+        );
+
+        // A symlink of the file's name is replaced, never followed.
+        let outside = temporary.path().join("outside");
+        fs::write(&outside, b"outside-sentinel").unwrap();
+        fs::remove_file(&config).unwrap();
+        std::os::unix::fs::symlink(&outside, &config).unwrap();
+        prepare_gh_projection_at(&root, &identity, github).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"outside-sentinel");
+        assert!(fs::symlink_metadata(&config).unwrap().file_type().is_file());
+
+        // Deselected: Codewire's file and empty directory go.
+        prepare_gh_projection_at(&root, &identity, other).unwrap();
+        assert!(fs::symlink_metadata(&root).is_err());
+        // Anything else left in the directory stays.
+        prepare_gh_projection_at(&root, &identity, github).unwrap();
+        fs::write(root.join("state.yml"), b"preserve").unwrap();
+        prepare_gh_projection_at(&root, &identity, Default::default()).unwrap();
+        assert!(!config.exists());
+        assert_eq!(fs::read(root.join("state.yml")).unwrap(), b"preserve");
     }
 
     #[test]

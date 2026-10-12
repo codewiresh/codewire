@@ -396,19 +396,22 @@ fn differing<'a>(left: &'a Environment, right: &'a Environment) -> Vec<&'a str> 
 }
 
 /// For the same selected slots, a hosted managed agent, a hosted interactive
-/// session and a local VM session get the same Git, SSH and proxy-exemption
-/// environment, byte for byte, from the one shared builder. The managed
+/// session and a local VM session get the same Git, `gh`, SSH and
+/// proxy-exemption environment, byte for byte, from the one shared builder. The managed
 /// launch differs from the session it runs in by its login lockdown alone.
 /// Each selection runs twice: with nothing declared, and with a proxy and an
 /// exemption list declared by the image and by the project.
 #[test]
 fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() {
     use codewire_access::{
+        GH_NATIVE_CONFIG_DIR, GH_PLATFORM_CONFIG_DIR, GH_TOKEN_PLACEHOLDER,
         ManagedCredentialClient, ManagedCredentialClientPlacement, ManagedCredentialClients,
         NO_PROXY_NAMES, SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK,
     };
     use codewire_daemon::CredentialBridgeTransport;
     const GIT: [&str; 3] = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"];
+    const GH_TOKEN: &str = "GH_TOKEN";
+    const GH_CONFIG_DIR: &str = "GH_CONFIG_DIR";
     const SSH: &str = "SSH_AUTH_SOCK";
     const LOOPBACK: &str = "127.0.0.1,localhost,::1";
     // A daemon's own environment, as its placement renders it.
@@ -521,6 +524,24 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
                 assert_eq!(shell.get(name), projected.get(name), "{context} {name}");
                 assert_eq!(local.get(name), shell.get(name), "{context} {name}");
             }
+            // Stock `gh`: the same public placeholder everywhere, and each
+            // placement's own Codewire-written configuration directory.
+            for name in [GH_TOKEN, GH_CONFIG_DIR] {
+                assert_eq!(projected.contains_key(name), github, "{context} {name}");
+            }
+            if github {
+                assert_eq!(shell[GH_TOKEN], GH_TOKEN_PLACEHOLDER, "{context}");
+                assert_eq!(local[GH_TOKEN], GH_TOKEN_PLACEHOLDER, "{context}");
+                assert_eq!(shell[GH_CONFIG_DIR], GH_PLATFORM_CONFIG_DIR, "{context}");
+                assert_eq!(local[GH_CONFIG_DIR], GH_NATIVE_CONFIG_DIR, "{context}");
+            } else {
+                for name in [GH_TOKEN, GH_CONFIG_DIR] {
+                    assert!(
+                        !shell.contains_key(name) && !local.contains_key(name),
+                        "{context} {name}"
+                    );
+                }
+            }
             // Each placement's signer socket is where its daemon listens.
             assert_eq!(
                 shell.get(SSH).map(String::as_str),
@@ -583,7 +604,11 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
                 let managed = provider_environment(&driver, &locked);
                 let context = format!("{context} {route:?}");
 
-                for name in GIT.into_iter().chain([SSH]).chain(NO_PROXY_NAMES) {
+                for name in GIT
+                    .into_iter()
+                    .chain([GH_TOKEN, GH_CONFIG_DIR, SSH])
+                    .chain(NO_PROXY_NAMES)
+                {
                     assert_eq!(managed.get(name), shell.get(name), "{context} {name}");
                 }
                 // Every provider variable is the session's too. Codex alone

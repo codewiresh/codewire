@@ -35,7 +35,8 @@ workspace_job="$(awk '
 grep -qF '  workspace-image:' <<<"$workspace_job" || fail 'workspace-image job is missing'
 grep -qF '    name: Container contract verification' <<<"$workspace_job" ||
   fail 'workspace job is not named for its complete non-publishing scope'
-grep -qF '    runs-on: ci-heavy' <<<"$workspace_job" ||
+# shellcheck disable=SC2016 # The workflow expression is literal text.
+grep -qxF '    runs-on: ${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-heavy-main'"'"' || '"'"'ci-heavy'"'"' }}' <<<"$workspace_job" ||
   fail 'Docker-backed workspace verification is not assigned to the heavy capability profile'
 grep -qF '    timeout-minutes: 55' <<<"$workspace_job" ||
   fail 'workspace cold-build ceiling does not preserve the runner cleanup margin'

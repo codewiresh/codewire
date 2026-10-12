@@ -152,7 +152,9 @@ class WorkflowContractTests(unittest.TestCase):
         for job_name in ("kind-product", "kind-daemon"):
             with self.subTest(job=job_name):
                 job = self.jobs[job_name]
-                self.assertEqual(job["runs-on"], "ci-heavy")
+                # A main push's Heavy jobs take the runners reserved for main.
+                self.assertEqual(job["runs-on"], "${{ github.event_name == 'push' && "
+                                 "github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}")
                 cache = named_step(job, "Select existing compiler cache")
                 clean = named_step(job, "Clean compiler cache credentials")
                 self.assertEqual(clean["if"], "${{ always() }}")

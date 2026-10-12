@@ -577,6 +577,9 @@ mod tests {
                 "data-terminal-panels",
                 "data-terminal-history-gap",
                 "data-terminal-close-dialog",
+                // The empty state's text and the Retry beside a failure.
+                "<div class=\"cw-terminal-empty\" data-terminal-empty-state><p role=\"status\" data-terminal-empty>",
+                "<button class=\"cw-button cw-button--outline cw-button--small\" type=\"button\" data-terminal-retry hidden>Retry</button>",
                 "id=\"sandbox-resize-setup-note\" data-resize-setup-note",
                 "Resize is available when setup finishes.",
             ] {
