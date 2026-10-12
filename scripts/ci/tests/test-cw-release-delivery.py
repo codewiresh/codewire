@@ -740,7 +740,7 @@ class LocalRuntimeTest(unittest.TestCase):
 
         def changed(blobs):
             path = next(blobs.iterdir())
-            path.write_bytes(path.read_bytes().replace(b"synthetic", b"Synthetic"))
+            path.write_bytes(path.read_bytes() + b"\n")
 
         def linked(blobs):
             path = next(blobs.iterdir())
@@ -767,6 +767,41 @@ class LocalRuntimeTest(unittest.TestCase):
                            ("invalid", document.replace(b'"schema_version":1', b'"schema_version":2'))):
             with self.subTest(case=name), self.assertRaises(release.ReleaseError):
                 release.embedded_local_runtime(data)
+
+    def test_the_helper_is_rechecked_without_macos(self):
+        release.check_macos_helper(fx.macos_helper())
+        networking = release.HELPER_ENTITLEMENTS.read_bytes().replace(
+            b"</dict>", b"<key>com.apple.vm.networking</key><true/></dict>")
+        cases = {
+            "x86_64": fx.macos_helper(cpu=0x01000007),
+            "no hardened runtime": fx.macos_helper(runtime=False),
+            "another entitlement": fx.macos_helper(entitlements=networking),
+            "homebrew library": fx.macos_helper(libraries=fx.HELPER_LIBRARIES + ("/opt/homebrew/lib/libz.dylib",)),
+            "rpath library": fx.macos_helper(libraries=("@rpath/libswiftCore.dylib",)),
+            "homebrew search path": fx.macos_helper(rpaths=("@loader_path", "/opt/homebrew/lib")),
+            "escaping path": fx.macos_helper(libraries=("/usr/lib/../../tmp/x.dylib",)),
+            "unsigned": fx.macos_helper(signed=False),
+            "fat": b"\xca\xfe\xba\xbe" + fx.macos_helper()[4:],
+        }
+        for label, data in cases.items():
+            with self.subTest(case=label), self.assertRaises(release.ReleaseError):
+                release.check_macos_helper(data)
+
+    def test_a_delivery_whose_helper_fails_its_recheck_is_refused(self):
+        dist = self.copy(self.dist)
+        document_path, blobs = release.local_runtime_paths(dist)[1:]
+        document = json.loads(document_path.read_bytes())
+        lock = document["targets"]["macos-aarch64"]["lock"]
+        bad = fx.macos_helper(runtime=False)
+        (blobs / lock["vz_runner"]["sha256"]).unlink()
+        (blobs / fx.digest(bad)).write_bytes(bad)
+        lock["vz_runner"].update(sha256=fx.digest(bad), size=len(bad))
+        document_path.write_bytes(release.canonical(document))
+        with self.assertRaisesRegex(release.ReleaseError, "hardened runtime"):
+            release.load_local_runtime(dist)
+            release.check_macos_helper(bad)
+        with self.assertRaises(release.ReleaseError):
+            release.verify_delivery(dist)
 
     def test_the_runtime_comes_from_the_cw_source_revision(self):
         original = fx.local_runtime
