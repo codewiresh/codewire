@@ -49,6 +49,7 @@ class Contracts(unittest.TestCase):
         values = {
             'SOURCE_ROOT': '/source with spaces', 'SMOKE_ROOT': str(self.root),
             'SMOKE_HOME': str(self.root / 'synthetic-home'), 'STATE_ROOT': '/private/state',
+            'SOCKET_DIR': '/tmp/cw-1000/0123456789abcdef',
             'PLATFORM_CONFIG': '/private/config', 'CREDENTIAL_ROOT': '/private/synthetic-credentials',
             'KEYRING_RUNTIME': '/private/synthetic-runtime',
             'KEYRING_DBUS_ADDRESS': 'unix:path=/private/synthetic-bus',
@@ -116,7 +117,7 @@ env() {
                     '--image-a': '/A image/image.json', '--sha256-a': A,
                     '--runtime-b': '/B pack/cw-runtime.lock.json', '--image-b': '/B image/image.json',
                     '--sha256-b': B, '--vm-state': '/private/state/engine/vms/' + UUID + '/state.json',
-                    '--runner-socket': '/private/state/runners/' + UUID + '.sock'}
+                    '--runner-socket': '/tmp/cw-1000/0123456789abcdef/runners/' + UUID + '.sock'}
         for key, value in expected.items():
             self.assertEqual(args.count(key), 1)
             self.assertEqual(args[args.index(key) + 1], value)

@@ -203,3 +203,22 @@ fn refresh_marks_every_socket_and_directory_as_just_used() {
         );
     }
 }
+
+#[test]
+fn the_script_helper_predicts_the_same_directory() {
+    let (_holder, _temporary, state_root) = fixture();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/dev/native_socket_dir.py");
+    let output = std::process::Command::new("python3")
+        .arg(&script)
+        .arg(&state_root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let printed = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(printed.trim_end(), predicted(&state_root).to_str().unwrap());
+}
