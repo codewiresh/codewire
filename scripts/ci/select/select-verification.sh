@@ -1073,6 +1073,7 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/dev/test-cli-local-vm-macos.py|scripts/dev/test-cli-local-vm-docker-macos.py|\
+      scripts/dev/test-cli-local-vm-inputs-macos.py|\
       scripts/dev/test-local-vm-hostile-guest-macos.py|scripts/dev/hostile-guest-probe.py|\
       scripts/dev/test-local-vm-hostile-guest.py)
         # Developer-only local VM journeys and the hostile-guest battery: they

@@ -1354,6 +1354,7 @@ run_present_paths_case mesh_ingress_protocol_unknown pull_request refs/pull/1902
 run_present_paths_case macos_local_vm_journeys pull_request refs/pull/20660/head false \
   'policy security security_js' \
   scripts/dev/test-cli-local-vm-macos.py scripts/dev/test-cli-local-vm-docker-macos.py \
+  scripts/dev/test-cli-local-vm-inputs-macos.py \
   scripts/dev/test-local-vm-hostile-guest-macos.py scripts/dev/hostile-guest-probe.py \
   scripts/dev/test-local-vm-hostile-guest.py
 run_present_paths_case macos_local_vm_journey_unknown pull_request refs/pull/20661/head false \
