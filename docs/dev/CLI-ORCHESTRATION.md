@@ -11,7 +11,7 @@ reach as errors; `cw list ENV` lists one environment.
 
 | Placement | Create | Terminal sessions | Managed agents |
 | --- | --- | --- | --- |
-| Trusted Linux host | `--local --type host` | Owner daemon and private Unix socket | Codex and Claude |
+| Trusted Linux host | `--local --type host` | Owner daemon and private Unix socket | Codex, Claude and noel |
 | Native Linux sandbox | `--local --type sandbox` | Native supervisor and guest daemon | Codex/Claude implementation; VM qualification pending |
 | Platform sandbox | `--platform --type sandbox` | Authenticated platform API | Qualification pending |
 | macOS trusted host | `--local --type host` | Owner daemon and private Unix socket | Codex and Claude |
@@ -145,6 +145,7 @@ notification without replaying a completed or ambiguous provider task.
 | Codex | App Server stdio | `turn/steer`, expected turn required | Native turn control | Saved thread ID |
 | Claude | CLI stream JSON | Explicitly unsupported | Advertised after native control probe | Saved session UUID |
 | Kimi | ACP adapter planned | Qualification pending | Qualification pending | Qualification pending |
+| noel | `noel --mode rpc` stdio, upstream pi's RPC | `steer` with `expectedRunId`, run ID required | `abort` with `expectedRunId` | Saved session ID, reopened with `--session-id` |
 
 Managed Codex uses `danger-full-access` and `approvalPolicy: never` on the
 explicitly trusted host. In every placement it starts with its working
@@ -175,6 +176,24 @@ driver declines every control request. The provider can also refuse auto mode
 for an account or a model. Auto mode relies on safety verdicts the provider
 returns with its responses, so in a Sandbox it depends on the credential route
 passing responses through unchanged.
+
+noel, the Rust port of pi, runs only on a trusted Linux host; macOS hosts,
+VMs, Mesh members and platform sandboxes refuse it. Codewire looks up `noel`
+on PATH, never an installed `pi`. It keeps the user's ordinary pi settings,
+login and project trust; its tools run without approval prompts, and the
+driver declines any extension dialog. `--model PROVIDER/ID` is required.
+`--effort` `low` to `max` becomes `--thinking`, `ultra` is refused, and
+without `--effort` noel keeps its own level. Startup requires noel to report
+the saved session, the requested model and level, and its `run-id` and
+`expected-run-id` RPC extensions; a pi build that answers JSON-RPC fails at
+once. Each prompt starts one run, whose `agent_settled` ends the message; the
+driver clears noel's queue first, so a steer an interrupt left there never
+joins the next message. An explicit `cw stop` or `cw restart` during a run
+currently ends it as it ends Codex and Claude: the host stop signals the
+driver and noel together, the message's outcome is unknown, and noel's run
+stays interrupted; the next message after a restart answers normally and
+never resumes it. Interrupting the run before the stop will come from the
+host daemon's stop path in a later change.
 
 No additional MCP server is needed to receive these messages. A native protocol
 driver owns delivery and completion. A foreground controller can forward
@@ -362,6 +381,7 @@ path after daemon shutdown; preserve that executable and their state.
 ```sh
 scripts/dev/test-cli-host.py --cw target/debug/cw
 scripts/dev/test-cli-host.py --cw target/debug/cw --native-agents
+scripts/dev/test-cli-host.py --cw target/debug/cw --real-noel /absolute/path/to/noel
 ```
 
 The first journey uses independent synthetic native peers and owned runtime
@@ -371,7 +391,17 @@ recovery. It runs on Linux and macOS; [MACOS-CLI.md](MACOS-CLI.md) describes
 the macOS process-ownership check. The second uses ordinary installed
 Codex/Claude login and observes conversation resume, Claude xhigh and a resumed
 lead invoking `cw` itself.
-Neither replaces the matching native Linux hardware or retained Kind sandbox
+The synthetic noel peer sends the records the noel binary sends for its
+`faux/echo` model; it adds only a dialog, which noel never opens, and a
+JSON-RPC mode for an older pi build. The real-noel journey runs a built noel
+with `faux/echo`, offline, with a private HOME and pi agent directory. It
+observes the first answer in `cw inbox`, a second turn in the same session,
+a worker waking its lead once per finished message, a slow turn's refused
+and acknowledged steers and interrupt, a mid-turn stop that leaves the
+outcome unknown, and a restart whose next message answers normally in the
+same session. Both passed on 2026-10-12 with noel built from pi commit
+`ba6fba82`.
+None replaces the matching native Linux hardware or retained Kind sandbox
 journey. Program #2255 holds current commands, outcomes and landing evidence.
 
 A managed agent in a local VM runs the image's pinned client, admitted by the
