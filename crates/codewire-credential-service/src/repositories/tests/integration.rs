@@ -45,6 +45,12 @@ struct Provider {
     hold: AtomicBool,
     entered: Notify,
     released: Notify,
+    /// The installation is still on the grant from before Codewire asked for
+    /// write access (#2712).
+    earlier_grant: AtomicBool,
+    reject_first_installations: AtomicBool,
+    fail_installations: AtomicBool,
+    installation_calls: AtomicUsize,
 }
 
 impl Default for Provider {
@@ -61,6 +67,10 @@ impl Default for Provider {
             hold: AtomicBool::new(false),
             entered: Notify::new(),
             released: Notify::new(),
+            earlier_grant: AtomicBool::new(false),
+            reject_first_installations: AtomicBool::new(false),
+            fail_installations: AtomicBool::new(false),
+            installation_calls: AtomicUsize::new(0),
         }
     }
 }
@@ -244,9 +254,26 @@ impl Provider {
         {
             return Err(BrokerUpstreamError::Protocol);
         }
+        self.installation_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_installations.load(Ordering::SeqCst) {
+            return json_response(StatusCode::BAD_GATEWAY, json!({}));
+        }
+        if self
+            .reject_first_installations
+            .swap(false, Ordering::SeqCst)
+        {
+            return json_response(StatusCode::UNAUTHORIZED, json!({}));
+        }
+        let permissions = if self.earlier_grant.load(Ordering::SeqCst) {
+            json!({"contents": "read", "metadata": "read"})
+        } else {
+            json!({"contents": "write", "pull_requests": "write", "metadata": "read"})
+        };
         json_response(
             StatusCode::OK,
-            json!({"installations": [{"id": 41, "app_slug": "codewire"}]}),
+            json!({"installations": [{"id": 41, "app_slug": "codewire",
+                "account": {"login": "synthetic-user", "type": "User"},
+                "repository_selection": "selected", "permissions": permissions}]}),
         )
     }
 }
@@ -360,6 +387,17 @@ impl Fixture {
             .post(&self.url)
             .header("connect-protocol-version", "1")
             .json(&json!({"pageSize":1}))
+    }
+
+    /// The live permission status of the authenticated owner's connection.
+    fn status(&self) -> reqwest::RequestBuilder {
+        self.client
+            .post(
+                self.url
+                    .replace("/ListGithubRepositories", "/ListGithubPendingPermissions"),
+            )
+            .header("connect-protocol-version", "1")
+            .json(&json!({}))
     }
 
     fn profiles(&self) -> PlatformAccessProfileStore {
@@ -935,5 +973,188 @@ async fn deadline_releases_finite_account_capacity() -> Result<()> {
         ensure!(f.owner.capacity.available_permits()==MAX_OPERATIONS);
         Ok(())
     }.await;
+    f.finish(result).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn github_pending_permissions_follow_the_live_grant_under_discovery_authority() -> Result<()>
+{
+    // #2712: the same stored App connection, read live, names its
+    // installation while GitHub still holds the earlier grant and nothing
+    // once the grant is accepted. Login, ID and kind only.
+    let f = Fixture::app().await?;
+    let result = async {
+        let original = f.app_credential().await?;
+        let pending = json!([{"account": "synthetic-user", "installationId": "41",
+            "accountKind": "GITHUB_APP_ACCOUNT_KIND_USER"}]);
+        f.provider.earlier_grant.store(true, Ordering::SeqCst);
+        for request in [
+            f.status(),
+            f.status().bearer_auth(api_key()),
+            f.status()
+                .bearer_auth("invalid")
+                .header("cookie", format!("{SESSION_COOKIE_NAME}={SESSION}")),
+        ] {
+            error(request, "unauthenticated").await?;
+        }
+        error(
+            f.status()
+                .header("cookie", format!("{SESSION_COOKIE_NAME}={SESSION}"))
+                .header("origin", "https://attacker.example"),
+            "permission_denied",
+        )
+        .await?;
+        // Another account has no GitHub connection; nothing falls back to
+        // the owner's.
+        error(f.status().bearer_auth(oauth(BOB)), "failed_precondition").await?;
+        ensure!(f.provider.installation_calls.load(Ordering::SeqCst) == 1);
+
+        let (status, value) = response(f.status().bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK && value["pendingPermissions"] == pending,
+            "{value}"
+        );
+        let rust_client = codewire_client::CodewireClient::with_http(
+            codewire_client::ClientConfig::new(
+                f.url
+                    .split("/codewire.v1.")
+                    .next()
+                    .context("synthetic origin")?,
+            )?,
+            codewire_client::StaticTokenProvider::new(oauth(ALICE))?,
+            f.client.clone(),
+        )?;
+        let generated = rust_client.list_github_pending_permissions().await?;
+        ensure!(
+            generated.pending_permissions.len() == 1
+                && generated.pending_permissions[0].account == "synthetic-user"
+                && generated.pending_permissions[0].installation_id == 41
+                && generated.pending_permissions[0].account_kind
+                    == codewire_client::GithubAppAccountKind::User
+        );
+        let (status, value) = response(
+            f.status()
+                .header("cookie", format!("{SESSION_COOKIE_NAME}={SESSION}"))
+                .header("origin", "https://codewire.example"),
+        )
+        .await?;
+        ensure!(
+            status == StatusCode::OK && value["pendingPermissions"] == pending,
+            "{value}"
+        );
+        // The owner accepts on GitHub: the same connection now names nothing.
+        f.provider.earlier_grant.store(false, Ordering::SeqCst);
+        let (status, value) = response(f.status().bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK && value.get("pendingPermissions").is_none(),
+            "{value}"
+        );
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 0);
+        let unchanged =
+            f.h.store
+                .record(&original.metadata.owner, &original.metadata.id)
+                .await?;
+        ensure!(unchanged == original);
+
+        // A refused token renews once, exactly as discovery does.
+        f.provider.earlier_grant.store(true, Ordering::SeqCst);
+        f.provider
+            .reject_first_installations
+            .store(true, Ordering::SeqCst);
+        let (status, value) = response(f.status().bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK && value["pendingPermissions"] == pending,
+            "{value}"
+        );
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 1);
+        let current =
+            f.h.store
+                .record(&original.metadata.owner, &original.metadata.id)
+                .await?;
+        ensure!(same_refreshed_record(&original, &current).is_ok());
+
+        // Any other GitHub answer is an error the caller shows as nothing.
+        f.provider.fail_installations.store(true, Ordering::SeqCst);
+        error(f.status().bearer_auth(oauth(ALICE)), "unavailable").await?;
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 1);
+        ensure!(f.provider.calls.load(Ordering::SeqCst) == 0);
+
+        // Advisory: with its own slots full it answers nothing at once,
+        // without GitHub and without taking discovery's slots.
+        f.provider.fail_installations.store(false, Ordering::SeqCst);
+        let calls = f.provider.installation_calls.load(Ordering::SeqCst);
+        let held = (0..MAX_STATUS_OPERATIONS)
+            .map(|_| Arc::clone(&f.owner.status_capacity).try_acquire_owned())
+            .collect::<Result<Vec<_>, _>>()?;
+        let (status, value) = response(f.status().bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK && value.get("pendingPermissions").is_none(),
+            "{value}"
+        );
+        ensure!(f.provider.installation_calls.load(Ordering::SeqCst) == calls);
+        ensure!(f.owner.capacity.available_permits() == MAX_OPERATIONS);
+        drop(held);
+        Ok(())
+    }
+    .await;
+    f.finish(result).await?;
+
+    // The advisory read never renews ahead of time, and when GitHub refuses
+    // the token while another renewal of the same credential is running it
+    // answers nothing at once instead of waiting for it.
+    let f = Fixture::app().await?;
+    let result = async {
+        f.provider
+            .initial_app_access_lifetime
+            .store(60, Ordering::SeqCst);
+        let original = f.app_credential().await?;
+        f.provider.earlier_grant.store(true, Ordering::SeqCst);
+        let (status, value) = response(f.status().bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK && value["pendingPermissions"][0]["installationId"] == "41",
+            "{value}"
+        );
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 0);
+        let unchanged =
+            f.h.store
+                .record(&original.metadata.owner, &original.metadata.id)
+                .await?;
+        ensure!(unchanged == original);
+
+        let attempt = uuid::Uuid::new_v4();
+        f.h.store
+            .begin_oauth_refresh(
+                &original.metadata.owner,
+                &original.metadata.id,
+                original.version,
+                attempt,
+            )
+            .await?;
+        f.provider
+            .reject_first_installations
+            .store(true, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        let (status, value) = response(f.status().bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK && value.get("pendingPermissions").is_none(),
+            "{value}"
+        );
+        ensure!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the advisory read waited for another renewal"
+        );
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 0);
+        f.h.store
+            .cancel_oauth_refresh(
+                &original.metadata.owner,
+                &original.metadata.id,
+                original.version,
+                attempt,
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
     f.finish(result).await
 }

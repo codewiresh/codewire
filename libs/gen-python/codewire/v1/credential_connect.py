@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse
+from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, ListGithubPendingPermissionsRequest, ListGithubPendingPermissionsResponse, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -280,6 +280,9 @@ class GithubRepositoryService(Protocol):
     async def list_github_repositories(self, request: ListGithubRepositoriesRequest, ctx: RequestContext[ListGithubRepositoriesRequest, ListGithubRepositoriesResponse]) -> ListGithubRepositoriesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    async def list_github_pending_permissions(self, request: ListGithubPendingPermissionsRequest, ctx: RequestContext[ListGithubPendingPermissionsRequest, ListGithubPendingPermissionsResponse]) -> ListGithubPendingPermissionsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
 
 class GithubRepositoryServiceASGIApplication(ConnectASGIApplication[GithubRepositoryService]):
     def __init__(
@@ -303,6 +306,16 @@ class GithubRepositoryServiceASGIApplication(ConnectASGIApplication[GithubReposi
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.list_github_repositories,
+                ),
+                "/codewire.v1.GithubRepositoryService/ListGithubPendingPermissions": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ListGithubPendingPermissions",
+                        service_name="codewire.v1.GithubRepositoryService",
+                        input=ListGithubPendingPermissionsRequest,
+                        output=ListGithubPendingPermissionsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.list_github_pending_permissions,
                 ),
             },
             interceptors=interceptors,
@@ -364,8 +377,33 @@ class GithubRepositoryServiceClient(ConnectClient):
             use_get=use_get,
         )
 
+    async def list_github_pending_permissions(
+        self,
+        request: ListGithubPendingPermissionsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListGithubPendingPermissionsResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListGithubPendingPermissions",
+                service_name="codewire.v1.GithubRepositoryService",
+                input=ListGithubPendingPermissionsRequest,
+                output=ListGithubPendingPermissionsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
 class GithubRepositoryServiceSync(Protocol):
     def list_github_repositories(self, request: ListGithubRepositoriesRequest, ctx: RequestContext[ListGithubRepositoriesRequest, ListGithubRepositoriesResponse]) -> ListGithubRepositoriesResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def list_github_pending_permissions(self, request: ListGithubPendingPermissionsRequest, ctx: RequestContext[ListGithubPendingPermissionsRequest, ListGithubPendingPermissionsResponse]) -> ListGithubPendingPermissionsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -389,6 +427,16 @@ class GithubRepositoryServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.list_github_repositories,
+                ),
+                "/codewire.v1.GithubRepositoryService/ListGithubPendingPermissions": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ListGithubPendingPermissions",
+                        service_name="codewire.v1.GithubRepositoryService",
+                        input=ListGithubPendingPermissionsRequest,
+                        output=ListGithubPendingPermissionsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.list_github_pending_permissions,
                 ),
             },
             interceptors=interceptors,
@@ -443,6 +491,27 @@ class GithubRepositoryServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.GithubRepositoryService",
                 input=ListGithubRepositoriesRequest,
                 output=ListGithubRepositoriesResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def list_github_pending_permissions(
+        self,
+        request: ListGithubPendingPermissionsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListGithubPendingPermissionsResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListGithubPendingPermissions",
+                service_name="codewire.v1.GithubRepositoryService",
+                input=ListGithubPendingPermissionsRequest,
+                output=ListGithubPendingPermissionsResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,

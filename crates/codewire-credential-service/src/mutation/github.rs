@@ -7,7 +7,7 @@ use codewire_proto::codewire::v1::{
 };
 
 use super::enrollment::{Completed, Outcome};
-use super::github_app::reconnect_account_matches;
+use super::github_app::{pending_permissions, reconnect_account_matches};
 use super::*;
 
 impl CredentialMutationOwner {
@@ -97,6 +97,7 @@ async fn run(
     {
         return Err(Error::EnrollmentFailed);
     }
+    let pending = pending_permissions(import.reach());
     let mut completed = Completed::GithubApp(import);
     let publication = publication::enroll(&shared, scope, &mut completed, target).await;
     let metadata = publication
@@ -107,6 +108,7 @@ async fn run(
             event: Some(enroll_github_response::Event::Credential(Box::new(
                 wire::credential(metadata),
             ))),
+            pending_permissions: pending,
             ..Default::default()
         })))
         .await?
