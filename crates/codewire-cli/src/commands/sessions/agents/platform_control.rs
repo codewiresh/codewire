@@ -144,6 +144,7 @@ fn validate_envelope(environment: &str, request: &Envelope) -> anyhow::Result<()
                 == match origin.agent {
                     AgentKind::Codex => "0.160.0",
                     AgentKind::Claude => "2.1.288",
+                    AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
                 }
             && origin.parent_generation.is_none_or(|g| g > 0),
         "platform incarnation differs"
@@ -225,6 +226,7 @@ pub(super) fn agent(agent: AgentKind) -> codewire_daemon::platform_managed::Agen
     match agent {
         AgentKind::Codex => codewire_daemon::platform_managed::Agent::Codex,
         AgentKind::Claude => codewire_daemon::platform_managed::Agent::Claude,
+        AgentKind::Noel => unreachable!("validate_envelope refuses noel"),
     }
 }
 pub(super) fn marker(
@@ -611,6 +613,7 @@ pub(crate) async fn run_platform_agent_peer(
     let state: Option<DriverState> = match config.agent {
         AgentKind::Codex => None,
         AgentKind::Claude => Some(private_record(&dir.join("state.json"))?),
+        AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
     };
     check_peer_arguments(&config, context.route, state.as_ref(), &args.arguments)?;
     let locked = context.lockdown(&dir)?;
@@ -639,6 +642,7 @@ fn check_peer_arguments(
             native == codex_app_server_arguments(&config.working_dir).as_slice(),
             "platform Codex peer differs"
         ),
+        AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
         AgentKind::Claude => {
             let state = state.context("platform Claude native thread missing")?;
             let session = state

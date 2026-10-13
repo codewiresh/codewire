@@ -144,6 +144,7 @@ impl Fixture {
                 capabilities: AgentCapabilities {
                     steer: true,
                     interrupt: true,
+                    resume: false,
                     note: "synthetic".into(),
                 },
                 policy: CODEX_POLICY.into(),
@@ -708,6 +709,7 @@ fn platform_peer_arguments_are_exactly_the_drivers_for_its_route() {
         capabilities: AgentCapabilities {
             steer: false,
             interrupt: false,
+            resume: false,
             note: "synthetic".into(),
         },
         policy: String::new(),

@@ -122,6 +122,9 @@ dialog.cw-discard-dialog {
   width: min(var(--dialog-width), calc(100vw - var(--space-8)));
 }
 
+/* Leaving Create offers three choices; they wrap rather than overflow. */
+dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
+
 .cw-dialog-header h2 {
   max-width: 100%;
   margin: 0;

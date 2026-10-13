@@ -213,6 +213,11 @@ type ResolveProgram<'a> = &'a dyn Fn(AgentKind) -> anyhow::Result<ResolvedProgra
 /// replaces it. An image without an admitted pinned client, such as a custom
 /// image, runs the client on PATH, and the conversation records why.
 fn resolve_guest_program(agent: AgentKind) -> anyhow::Result<ResolvedProgram> {
+    // No image pins noel and no guest runs it; `validate_launch` refuses it
+    // before any program is resolved.
+    if agent == AgentKind::Noel {
+        anyhow::bail!("{NOEL_HOST_ONLY}");
+    }
     let pinned = codewire_daemon::platform_managed::ProviderPin::admit_image_client(
         super::platform_control::agent(agent),
     )
@@ -608,6 +613,9 @@ fn create_or_reuse(
 // ---------------------------------------------------------------------------
 
 pub(super) fn validate_launch(config: &AgentConfig) -> anyhow::Result<()> {
+    if config.agent == AgentKind::Noel {
+        anyhow::bail!("{NOEL_HOST_ONLY}");
+    }
     if !config.program.as_os_str().is_empty() || config.program_fallback.is_some() {
         anyhow::bail!(
             "the agent program is resolved inside the guest; prepare with an empty program"
@@ -1086,7 +1094,7 @@ mod tests {
             agent,
             program: PathBuf::new(),
             program_fallback: None,
-            model: agent.default_model().into(),
+            model: agent.default_model().unwrap_or("faux/echo").into(),
             effort: agent_effort(agent, None).unwrap(),
             working_dir: "/workspace".into(),
             name: "worker".into(),
@@ -1189,6 +1197,7 @@ mod tests {
                 capabilities: AgentCapabilities {
                     steer: capable,
                     interrupt: capable,
+                    resume: false,
                     note: "reported by the test driver".into(),
                 },
                 policy: CODEX_POLICY.into(),

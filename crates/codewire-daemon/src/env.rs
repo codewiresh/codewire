@@ -11,6 +11,13 @@ use crate::config::{
 
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/// A managed conversation's own environment and session IDs on a trusted
+/// host, which its driver gives only to its native agent, so a lead can run
+/// `cw run "$CW_ENVIRONMENT" --parent "$CW_SESSION_ID"`. A host daemon keeps
+/// the environment of whatever started it, which may be such an agent; its
+/// sessions never inherit those values, so no child sees a stale identity.
+pub const CONVERSATION_IDENTITY_ENV: [&str; 2] = ["CW_ENVIRONMENT", "CW_SESSION_ID"];
+
 /// Only explicit per-command/terminal inputs outrank an application projection.
 /// Keep their names separate from the flattened image/project environment.
 #[derive(Debug)]
@@ -228,7 +235,9 @@ fn build_process_env_from(
 
     let mut env = Vec::new();
     for (key, value) in inherited {
-        if is_internal_environment_name(&key) {
+        if is_internal_environment_name(&key)
+            || (config.host.is_some() && CONVERSATION_IDENTITY_ENV.contains(&key.as_str()))
+        {
             continue;
         }
         if override_keys.contains_key(&key) {
@@ -1159,6 +1168,64 @@ mod tests {
         ] {
             assert!(!rendered.contains(marker));
         }
+    }
+
+    #[test]
+    fn host_sessions_never_inherit_a_conversation_identity_from_their_daemon() {
+        let inherited = || {
+            [
+                ("CW_ENVIRONMENT".into(), "stale-environment".into()),
+                ("CW_SESSION_ID".into(), "session-stale".into()),
+                ("INHERITED".into(), "visible".into()),
+            ]
+        };
+        let mut host = test_config(PathBuf::from("/home/codewire"));
+        host.host = Some(crate::HostConfig {
+            state_root: PathBuf::from("/state/hosts/environment"),
+        });
+        let values = env_map(&build_process_env_from(
+            &host,
+            Vec::new(),
+            &[],
+            "",
+            inherited(),
+            "/bin/sh",
+        ));
+        for name in CONVERSATION_IDENTITY_ENV {
+            assert!(!values.contains_key(name), "{name} was inherited");
+        }
+        assert_eq!(values.get("INHERITED").map(String::as_str), Some("visible"));
+        // A value the launch names itself is the caller's, not inherited.
+        let explicit = env_map(&build_process_env_from(
+            &host,
+            Vec::new(),
+            &["CW_SESSION_ID=session-explicit".into()],
+            "",
+            inherited(),
+            "/bin/sh",
+        ));
+        assert_eq!(
+            explicit.get("CW_SESSION_ID").map(String::as_str),
+            Some("session-explicit")
+        );
+        assert!(!explicit.contains_key("CW_ENVIRONMENT"));
+        // Other placements keep their inherited environment unchanged.
+        let guest = env_map(&build_process_env_from(
+            &test_config(PathBuf::from("/home/codewire")),
+            Vec::new(),
+            &[],
+            "",
+            inherited(),
+            "/bin/sh",
+        ));
+        assert_eq!(
+            guest.get("CW_ENVIRONMENT").map(String::as_str),
+            Some("stale-environment")
+        );
+        assert_eq!(
+            guest.get("CW_SESSION_ID").map(String::as_str),
+            Some("session-stale")
+        );
     }
 
     #[test]
