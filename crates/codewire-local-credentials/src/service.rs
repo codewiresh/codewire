@@ -540,21 +540,48 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
     /// start-time question is GitHub: the platform authorizes it only while
     /// the creator's connection is active, so the guest is configured for it
     /// exactly then. The connector asks as the pinned creator, material-free.
+    ///
+    /// The environment must be one a platform broker start would admit: it
+    /// has no local profile binding, the same check `ensure` makes for a
+    /// platform selection (the binding names no environment of its own). The
+    /// whole question, whatever the connector does, ends by the deadline.
     async fn platform_github_connected(
         &self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
         platform: v1::PlatformCredentialBinding,
+    ) -> Result<bool, Status> {
+        self.platform_github_connected_within(
+            environment_id,
+            environment_generation,
+            platform,
+            PLATFORM_GITHUB_STATE_DEADLINE,
+        )
+        .await
+    }
+
+    async fn platform_github_connected_within(
+        &self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        platform: v1::PlatformCredentialBinding,
+        bound: Duration,
     ) -> Result<bool, Status> {
         let binding = crate::PlatformCredentialBinding::from_proto(platform)?;
         binding.validate()?;
+        let authority = Arc::clone(&self.authority);
+        let id = environment_id.clone();
+        run_blocking(move || {
+            authority.evaluate_selected_environment_grants(&id, environment_generation, None)
+        })
+        .await?;
         let connector = self.platform_connector.as_ref().cloned().ok_or_else(|| {
             Status::unavailable("native platform credential connector is unavailable")
         })?;
-        connector
-            .github_connected(
-                binding,
-                tokio::time::Instant::now() + PLATFORM_GITHUB_STATE_DEADLINE,
-            )
+        let deadline = tokio::time::Instant::now() + bound;
+        tokio::time::timeout_at(deadline, connector.github_connected(binding, deadline))
             .await
+            .map_err(|_| Status::deadline_exceeded("platform GitHub connection state timed out"))?
     }
 
     async fn ensure(
@@ -1686,7 +1713,14 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
             return Err(Status::invalid_argument("invalid environment generation"));
         }
         if let Some(platform) = request.platform {
-            let connected = self.brokers.platform_github_connected(platform).await?;
+            let connected = self
+                .brokers
+                .platform_github_connected(
+                    &environment_id,
+                    request.environment_generation,
+                    platform,
+                )
+                .await?;
             return Ok(Response::new(v1::EvaluateEnvironmentGrantsResponse {
                 grants: Vec::new(),
                 platform_github_connected: connected,

@@ -855,17 +855,10 @@ impl SupervisorCore {
             return Err(SupervisorError::InvalidRequest);
         }
         if let Some(pinned) = sources::platform::managed_clients(environment)? {
-            let github_connected =
-                if pinned.contains(codewire_access::ManagedCredentialClient::GitHub) {
-                    self.platform_github_connected(environment, generation)
-                        .await
-                } else {
-                    None
-                };
-            return Ok(sources::platform::clients_for_start(
-                pinned,
-                github_connected,
-            ));
+            return Ok(sources::platform::clients_for_start(pinned, || {
+                self.platform_github_connected(environment, generation)
+            })
+            .await);
         }
         let Some(expected) = &environment.access_binding else {
             return Ok(codewire_access::ManagedCredentialClients::default());
