@@ -75,9 +75,10 @@ impl Fixture {
             r#"
 import os, socket, sys, time
 root = sys.argv[sys.argv.index('--root') + 1]
+path = os.environ['CW_TEST_SUPERVISOR_SOCKET']
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.bind(root + '/supervisor.sock')
-os.chmod(root + '/supervisor.sock', 0o600)
+s.bind(path)
+os.chmod(path, 0o600)
 s.listen(16)
 s.settimeout(0.05)
 with open(root + '/ready', 'w') as f: f.write(str(os.getpid()))
@@ -96,11 +97,13 @@ while time.monotonic() < end:
 "#,
         )
         .unwrap();
+        crate::socket_dir::prepare(&config.root).unwrap();
         let mut command = Command::new(&config.executable);
         command
             .args(supervisor_argv(&config).into_iter().skip(1))
             .args(extra)
             .env_clear()
+            .env("CW_TEST_SUPERVISOR_SOCKET", config.supervisor_socket())
             .env("HOME", parent.path())
             .env("LC_ALL", "C")
             .current_dir(&root)
