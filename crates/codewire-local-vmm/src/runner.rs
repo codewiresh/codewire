@@ -904,13 +904,31 @@ fn same_disk_object_ignoring_size(
         && expected.file.links == actual.file.links
 }
 
+/// `program leading_args... disk`. e2fsck and resize2fs parse a filesystem
+/// the guest wrote, so on macOS they run confined to that one disk
+/// ([`crate::darwin::disk_tool`]).
+fn disk_tool_command(
+    program: &Path,
+    leading_args: &[&str],
+    disk: &Path,
+) -> std::io::Result<tokio::process::Command> {
+    #[cfg(target_os = "macos")]
+    return crate::darwin::disk_tool::command(program, leading_args, disk);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut command = tokio::process::Command::new(program);
+        command.args(leading_args).arg(disk);
+        Ok(command)
+    }
+}
+
 async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
     let program = crate::host::e2fsprogs("e2fsck").ok_or(RunnerError::E2fsckUnavailable)?;
-    let status = tokio::process::Command::new(program)
-        .args(["-p", "-f"])
-        .arg(disk)
+    let status = disk_tool_command(&program, &["-p", "-f"], disk)
+        .map_err(|_| RunnerError::E2fsckUnavailable)?
         .env_clear()
         .env("LC_ALL", "C")
+        .env("E2FSCK_CONFIG", "/dev/null")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -925,8 +943,8 @@ async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
 
 async fn run_resize2fs(disk: &Path) -> Result<(), RunnerError> {
     let program = crate::host::e2fsprogs("resize2fs").ok_or(RunnerError::Resize2fsUnavailable)?;
-    let status = tokio::process::Command::new(program)
-        .arg(disk)
+    let status = disk_tool_command(&program, &[], disk)
+        .map_err(|_| RunnerError::Resize2fsUnavailable)?
         .env_clear()
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
