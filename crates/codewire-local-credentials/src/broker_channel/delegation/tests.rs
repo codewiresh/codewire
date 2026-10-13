@@ -179,6 +179,12 @@ struct Fixture {
 }
 
 async fn fixture(mode: ConnectorMode) -> Fixture {
+    fixture_with_projection(mode, false).await
+}
+
+/// `local_projection`: the VM also selected local application secrets, so
+/// the delegation's input passes through the projection composer.
+async fn fixture_with_projection(mode: ConnectorMode, local_projection: bool) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let store = TestProtectedStore::new(
         codewire_protected_store::ProtectedStorePersistence::ProcessLifetime,
@@ -226,7 +232,13 @@ async fn fixture(mode: ConnectorMode) -> Fixture {
         environment.clone(),
         generation,
         Arc::new(BrokerLeaseAuditLog::default()),
-        None,
+        local_projection.then(|| crate::LocalEnvironmentProjectionBinding {
+            selection: crate::LocalLaunchSecretSelection {
+                user: true,
+                ..Default::default()
+            },
+            selection_sha256: [7; 32],
+        }),
         BrokerLeaseChannelControl {
             local_profile: None,
             ready: Some(manager_ready_tx),
@@ -281,7 +293,15 @@ fn login_denied(request_id: String) -> bridge::CredentialBridgeHostMessage {
 /// any other request, still cross it.
 #[tokio::test]
 async fn a_codex_login_crosses_the_delegation_both_ways_and_keeps_it_open() {
-    let mut fixture = fixture(ConnectorMode::AnswerLogins).await;
+    for local_projection in [false, true] {
+        codex_login_crosses_the_delegation(local_projection).await;
+    }
+}
+
+/// With local application secrets selected too, the login passes the
+/// projection composer unchanged in both directions.
+async fn codex_login_crosses_the_delegation(local_projection: bool) {
+    let mut fixture = fixture_with_projection(ConnectorMode::AnswerLogins, local_projection).await;
     let expected = ready(
         &fixture.client.environment_id,
         fixture.client.environment_generation,

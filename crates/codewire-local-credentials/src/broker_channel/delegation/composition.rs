@@ -108,6 +108,12 @@ impl<S: ProtectedStore + 'static> ProjectionComposer<S> {
                 }
                 return Ok(frame);
             }
+            // The Codex login, the one listed direct delivery exception
+            // (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
+            // exceptions"), carries no projection: it passes straight to the
+            // platform broker, which decides it for the delegation's creator,
+            // and its answer passes back through `complete` unchanged.
+            Some(Payload::CodexLogin(_)) => return Ok(frame),
             _ => return Err(denied()),
         };
         if self.pending.lock().await.contains_key(request_id) {
