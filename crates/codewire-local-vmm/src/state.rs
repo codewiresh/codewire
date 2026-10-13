@@ -30,13 +30,20 @@ const EXT4_SUPERBLOCK_BYTES: usize = 0x78;
 const EXT4_MAGIC_OFFSET: usize = 0x38;
 const EXT4_UUID_OFFSET: usize = 0x68;
 
+/// A VM's paths. State, disks and logs live in `vm_dir` under the state
+/// root; its sockets live in a short private per-user directory
+/// (`sockets_dir`, see [`crate::socket_dir`]) so their paths fit the kernel's
+/// limit whatever the length of HOME (#2735).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmPaths {
     pub vm_dir: PathBuf,
+    pub sockets_dir: PathBuf,
     pub api_dir: PathBuf,
     pub api_socket: PathBuf,
     pub vsock_dir: PathBuf,
     pub vsock_socket: PathBuf,
+    /// Direct-share daemons' sockets, and the pid files virtiofsd writes
+    /// beside them.
     pub virtiofs_dir: PathBuf,
     pub disks_dir: PathBuf,
     pub state_disk: PathBuf,
@@ -59,17 +66,30 @@ impl VmPaths {
         let vm_name = vm_id.to_string();
         let vm_dir = vms_root.ensure_dir(Path::new(&vm_name), 0o700)?;
         let vm_root = PrivateRoot::open(&vm_dir)?;
-        let api_dir = vm_root.ensure_dir(Path::new("api"), 0o700)?;
-        let vsock_dir = vm_root.ensure_dir(Path::new("vsock"), 0o700)?;
-        let virtiofs_dir = vm_root.ensure_dir(Path::new("fs"), 0o700)?;
+        let sockets = crate::socket_dir::prepare(state_root.path())?;
+        let sockets_dir = crate::socket_dir::ensure_subdirectory(&sockets, &["vms", &vm_name])?;
+        let sockets_root = PrivateRoot::open(&sockets_dir)?;
+        let api_dir = sockets_root.ensure_dir(Path::new("api"), 0o700)?;
+        let vsock_dir = sockets_root.ensure_dir(Path::new("vsock"), 0o700)?;
+        let virtiofs_dir = sockets_root.ensure_dir(Path::new("fs"), 0o700)?;
         let disks_dir = vm_root.ensure_dir(Path::new("disks"), 0o700)?;
         let generations_dir = vm_root.ensure_dir(Path::new("generations"), 0o700)?;
         let seed_dir = vm_root.ensure_dir(Path::new("seed"), 0o700)?;
         let diagnostics_dir = vm_root.ensure_dir(Path::new("diagnostics"), 0o700)?;
+        let api_socket = api_dir.join("api.sock");
+        let vsock_socket = vsock_dir.join(VSOCK_SOCKET_NAME);
+        for socket in [
+            &api_socket,
+            &vsock_socket,
+            &virtiofs_dir.join(direct_share_pid_file_name(MAX_DIRECT_SHARES - 1)),
+        ] {
+            crate::socket_dir::check_length(socket)?;
+        }
         Ok(Self {
-            api_socket: api_dir.join("api.sock"),
-            vsock_socket: vsock_dir.join(VSOCK_SOCKET_NAME),
+            api_socket,
+            vsock_socket,
             virtiofs_dir,
+            sockets_dir,
             state_disk: disks_dir.join("state.raw"),
             docker_disk: disks_dir.join("docker.raw"),
             seed_disk: seed_dir.join("seed.raw"),
@@ -102,8 +122,13 @@ impl VmPaths {
         Ok(VmLock(opened.into_file()))
     }
 
+    /// Removes endpoints a previous run left; the caller holds the VM lock,
+    /// so nothing serves them. Socket directories under the state root that
+    /// releases before #2735 used are removed with their stale sockets.
     pub fn clear_stale_runtime_endpoints(&self) -> Result<(), StateError> {
-        PrivateRoot::open(&self.api_dir)?.remove_private_socket(Path::new("api.sock"))?;
+        let api = PrivateRoot::open(&self.api_dir)?;
+        api.remove_private_socket(Path::new("api.sock"))?;
+        api.remove_private_regular(Path::new("api.sock.lock"), 0o600)?;
         PrivateRoot::open(&self.vsock_dir)?.remove_private_socket(Path::new(VSOCK_SOCKET_NAME))?;
         let virtiofs = PrivateRoot::open(&self.virtiofs_dir)?;
         for index in 0..MAX_DIRECT_SHARES {
@@ -113,6 +138,28 @@ impl VmPaths {
             )?;
             virtiofs
                 .remove_private_regular(Path::new(&direct_share_pid_file_name(index)), 0o600)?;
+        }
+        let vm = self.open_vm_root()?;
+        if let Some(api) = optional_private_directory(&vm, Path::new("api"))? {
+            api.remove_private_socket(Path::new("api.sock"))?;
+            api.remove_private_regular(Path::new("api.sock.lock"), 0o600)?;
+            vm.remove_empty_private_directory(Path::new("api"))?;
+        }
+        if let Some(vsock) = optional_private_directory(&vm, Path::new("vsock"))? {
+            vsock.remove_private_socket(Path::new("vsock.sock"))?;
+            vsock.remove_private_socket(Path::new("v"))?;
+            vm.remove_empty_private_directory(Path::new("vsock"))?;
+        }
+        if let Some(virtiofs) = optional_private_directory(&vm, Path::new("fs"))? {
+            for index in 0..MAX_DIRECT_SHARES {
+                virtiofs.remove_private_socket_with_permissions(
+                    Path::new(&direct_share_socket_name(index)),
+                    &[0o600, 0o700],
+                )?;
+                virtiofs
+                    .remove_private_regular(Path::new(&direct_share_pid_file_name(index)), 0o600)?;
+            }
+            vm.remove_empty_private_directory(Path::new("fs"))?;
         }
         Ok(())
     }
@@ -507,6 +554,44 @@ pub fn cleanup_trashed_vm(
     vm.remove_private_regular(Path::new("vm.lock"), 0o600)?;
     drop(vm);
     trash.remove_empty_private_directory(Path::new(&name))?;
+    remove_vm_sockets(state_root.path(), vm_id)?;
+    Ok(())
+}
+
+/// Removes a deleted VM's socket directory (#2735), if it is still there.
+fn remove_vm_sockets(state_root: &Path, vm_id: Uuid) -> Result<(), StateError> {
+    let vms_path = crate::socket_dir::predicted(state_root).join("vms");
+    let vms = match PrivateRoot::open(&vms_path) {
+        Ok(vms) => vms,
+        Err(error) if path_error_is_not_found(&error) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let name = vm_id.to_string();
+    let Some(sockets) = optional_private_directory(&vms, Path::new(&name))? else {
+        return Ok(());
+    };
+    if let Some(api) = optional_private_directory(&sockets, Path::new("api"))? {
+        api.remove_private_socket(Path::new("api.sock"))?;
+        api.remove_private_regular(Path::new("api.sock.lock"), 0o600)?;
+        sockets.remove_empty_private_directory(Path::new("api"))?;
+    }
+    if let Some(vsock) = optional_private_directory(&sockets, Path::new("vsock"))? {
+        vsock.remove_private_socket(Path::new(VSOCK_SOCKET_NAME))?;
+        sockets.remove_empty_private_directory(Path::new("vsock"))?;
+    }
+    if let Some(virtiofs) = optional_private_directory(&sockets, Path::new("fs"))? {
+        for index in 0..MAX_DIRECT_SHARES {
+            virtiofs.remove_private_socket_with_permissions(
+                Path::new(&direct_share_socket_name(index)),
+                &[0o600, 0o700],
+            )?;
+            virtiofs
+                .remove_private_regular(Path::new(&direct_share_pid_file_name(index)), 0o600)?;
+        }
+        sockets.remove_empty_private_directory(Path::new("fs"))?;
+    }
+    drop(sockets);
+    vms.remove_empty_private_directory(Path::new(&name))?;
     Ok(())
 }
 
@@ -566,7 +651,7 @@ fn trash_name(vm_id: Uuid, operation_id: Uuid) -> String {
     format!("delete-{operation_id}-{vm_id}")
 }
 
-fn direct_share_socket_name(index: usize) -> String {
+pub(crate) fn direct_share_socket_name(index: usize) -> String {
     format!("{index:02}.sock")
 }
 
@@ -796,6 +881,8 @@ fn read_ext4_uuid(file: &File, path: &Path) -> Result<Uuid, StateError> {
 pub enum StateError {
     #[error(transparent)]
     Path(#[from] PathError),
+    #[error(transparent)]
+    SocketDir(#[from] crate::socket_dir::SocketDirError),
     #[error("VM is already owned by another supervisor process")]
     AlreadyLocked,
     #[error("unsafe existing runtime endpoint: {0}")]
@@ -946,12 +1033,26 @@ mod tests {
             &paths.diagnostics_dir,
         ];
         for (index, directory) in directories.iter().enumerate() {
-            assert_eq!(directory.parent(), Some(paths.vm_dir.as_path()));
+            // Sockets live in the short per-user directory, everything else
+            // under the state root (#2735).
+            let parent = if index < 3 {
+                &paths.sockets_dir
+            } else {
+                &paths.vm_dir
+            };
+            assert_eq!(directory.parent(), Some(parent.as_path()));
             assert_eq!(fs::metadata(directory).unwrap().mode() & 0o777, 0o700);
             for other in directories.iter().skip(index + 1) {
                 assert_ne!(directory, other);
             }
         }
+        assert_eq!(
+            paths.sockets_dir,
+            crate::socket_dir::predicted(root.path()).join(format!("vms/{}", Uuid::nil()))
+        );
+        assert!(
+            paths.vsock_socket.as_os_str().len() <= crate::socket_dir::MAXIMUM_SOCKET_PATH_BYTES
+        );
         assert_eq!(paths.state_disk.parent(), Some(paths.disks_dir.as_path()));
         assert_eq!(paths.docker_disk.parent(), Some(paths.disks_dir.as_path()));
         assert_ne!(paths.docker_disk, paths.state_disk);
@@ -1256,7 +1357,7 @@ mod tests {
             Err(StateError::UnexpectedOwnedObject(path)) if path == trash.join("unknown")
         ));
         assert!(trash.join("unknown").is_file());
-        assert!(trash.join("api").is_dir());
+        assert!(trash.join("disks").is_dir());
     }
 
     #[test]
@@ -1282,7 +1383,7 @@ mod tests {
                 if path == trash.join("generations").join("not-a-generation")
         ));
         assert!(admitted_root.is_file());
-        assert!(trash.join("api").is_dir());
+        assert!(trash.join("disks").is_dir());
     }
 
     #[test]

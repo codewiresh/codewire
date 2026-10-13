@@ -3185,11 +3185,11 @@ fi
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   log 'creating a broker-bound 2-vCPU, 16-GiB native environment'
   CREATE_DOCKER_ARGS=(--no-docker)
-  EXPECTED_OWNED_OBJECT_COUNT=6
+  EXPECTED_OWNED_OBJECT_COUNT=3
 else
   log 'creating account-free 2-vCPU, 16-GiB native environment'
   CREATE_DOCKER_ARGS=(--docker-disk 1Gi)
-  EXPECTED_OWNED_OBJECT_COUNT=7
+  EXPECTED_OWNED_OBJECT_COUNT=4
 fi
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500

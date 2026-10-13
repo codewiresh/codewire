@@ -1294,13 +1294,8 @@ fn write_state(
         for (kind, relative_path, identity_json) in [
             ("vm_tree", vm.clone(), None::<Vec<u8>>),
             ("state_disk", format!("{vm}/disks/state.raw"), None),
-            ("vmm_api_socket", format!("{vm}/api/api.sock"), None),
-            ("vmm_api_lock", format!("{vm}/api/api.sock.lock"), None),
-            (
-                "hybrid_vsock",
-                format!("{vm}/vsock/{}", crate::state::VSOCK_SOCKET_NAME),
-                None,
-            ),
+            // The VM's sockets live outside the state root, in its short
+            // per-user socket directory (#2735), and are not owned objects.
         ] {
             transaction.execute(
                 "INSERT INTO owned_objects(
@@ -3269,7 +3264,7 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .unwrap()
         };
-        assert_eq!(objects.len(), 5);
+        assert_eq!(objects.len(), 2);
         assert!(objects.iter().any(|(kind, path)| {
             kind == "state_disk"
                 && path == format!("engine/vms/{}/disks/state.raw", environment.id).as_bytes()

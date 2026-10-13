@@ -54,6 +54,7 @@ pub(crate) fn bind_owner_only_with_uid(
         .map(Path::new)
         .ok_or_else(|| UdsError::InvalidPath(socket.to_owned()))?;
     let root = PrivateRoot::open(parent)?;
+    refuse_live_socket(socket)?;
     root.remove_private_socket(name)?;
     let listener = UnixListener::bind(socket).map_err(|source| UdsError::Io {
         path: socket.to_owned(),
@@ -115,6 +116,7 @@ pub(crate) fn bind_owner_only_listener(
         .map(Path::new)
         .ok_or_else(|| UdsError::InvalidPath(socket.to_owned()))?;
     let root = PrivateRoot::open(parent)?;
+    refuse_live_socket(socket)?;
     root.remove_private_socket(name)?;
     let listener = UnixListener::bind(socket).map_err(|source| UdsError::Io {
         path: socket.to_owned(),
@@ -260,6 +262,25 @@ fn owner_only_connector_with_uid(
     }))
 }
 
+/// A socket left at `socket` is unlinked only when nothing answers on it,
+/// so binding never takes over a live server's name (#2735).
+fn refuse_live_socket(socket: &Path) -> Result<(), UdsError> {
+    match std::fs::symlink_metadata(socket) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(UdsError::Io {
+                path: socket.to_owned(),
+                source,
+            });
+        }
+        Ok(_) => {}
+    }
+    match std::os::unix::net::UnixStream::connect(socket) {
+        Ok(_) => Err(UdsError::Live(socket.to_owned())),
+        Err(_) => Ok(()),
+    }
+}
+
 pub(crate) fn remove_bound_socket(
     socket: &Path,
     identity: &SocketIdentity,
@@ -286,6 +307,8 @@ pub enum UdsError {
     InvalidPath(PathBuf),
     #[error("connect to private Unix socket failed")]
     Connect,
+    #[error("another process already serves {0}")]
+    Live(PathBuf),
     #[error(transparent)]
     Path(#[from] host_path::PathError),
     #[error("Unix socket operation failed for {path}: {source}")]
