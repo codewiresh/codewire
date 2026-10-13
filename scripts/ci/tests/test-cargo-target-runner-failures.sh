@@ -145,7 +145,7 @@ if record['tool'] == 'cargo-zigbuild':
     assert os.environ['CARGO_ZIGBUILD_ZIG_PATH'] == str(Path(sys.argv[0]).with_name('zig'))
     os.environ['COMPOSITION_DARWIN_COMPILER'] = 'pinned-zig'
     os.execv(str(Path(sys.argv[0]).with_name('cargo')), ['cargo', *sys.argv[1:]])
-if record['tool'] == 'cargo' and sys.argv[1] == 'check' and 'aarch64-apple-darwin' in sys.argv:
+if record['tool'] == 'cargo' and sys.argv[1] in ('check', 'clippy') and 'aarch64-apple-darwin' in sys.argv:
     if os.environ.get('COMPOSITION_DARWIN_COMPILER') != 'pinned-zig':
         print('fixture bare Cargo lacks the Darwin C compiler', file=sys.stderr)
         sys.exit(47)
@@ -214,11 +214,12 @@ def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None,
 
 def generic(records):
     # Privileged kernel fixtures run with --ignored only where the host can
-    # grant a mount namespace; they are not part of a package graph.
+    # grant a mount namespace; they are not part of a package graph. The
+    # Darwin cross-check's clippy is asserted on its own below.
     return [r['args'] for r in records if r['tool'] == 'cargo'
             and r['args'][0] in ('build', 'clippy', 'test')
             and '--features' not in r['args'] and '--manifest-path' not in r['args']
-            and '--ignored' not in r['args']]
+            and '--ignored' not in r['args'] and 'aarch64-apple-darwin' not in r['args']]
 
 def expected(*arguments):
     # Workspace clippy runs once in the fast compile job, not per package graph,
@@ -274,8 +275,9 @@ assert sum(r['tool'] == 'cargo' and r['args'] == product_test for r in records) 
 assert sum(r['tool'] == 'cargo' and r['args'][0] == 'clippy' and
            product_feature in r['args'] and 'codewire-macos-product-network-fixture' in r['args']
            for r in records) == 1
-darwin_check = ['check', '--locked', '-p', 'codewire-local-vmm',
-                '-p', 'codewire-vmm-guest-probe', '--target', 'aarch64-apple-darwin']
+darwin_check = ['clippy', '--locked', '-p', 'codewire-local-vmm',
+                '-p', 'codewire-vmm-guest-probe', '--target', 'aarch64-apple-darwin',
+                '--', '-D', 'warnings']
 assert sum(r['tool'] == 'cargo' and r['args'] == darwin_check for r in records) == 1
 assert sum(r['tool'] == 'cargo-zigbuild' and r['args'] == darwin_check for r in records) == 1
 assert all(r['args'] == darwin_check for r in records if 'aarch64-apple-darwin' in r['args'])
