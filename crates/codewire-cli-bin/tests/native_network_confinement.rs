@@ -7,9 +7,10 @@
 //!   applied, the worker and the broker report the typed failure, exit with
 //!   its status and never serve. A seccomp filter installed before exec makes
 //!   the one confinement syscall fail, as a kernel without that feature would.
-//! - Condition 2: a serving worker holds only the descriptors it was given.
-//!   Its `/proc/<pid>/fd` table is read and every Unix socket's peer is
-//!   resolved through `sock_diag`, as macOS reads the table with libproc.
+//! - Condition 2: a serving worker holds only the descriptors it was given:
+//!   its broker IPC sessions (#2638), bootstrap and guest streams. Its
+//!   `/proc/<pid>/fd` table is read and every Unix socket's peer is resolved
+//!   through `sock_diag`, as macOS reads the table with libproc.
 //!
 //! The roles are started with whatever capabilities this test process holds
 //! (every default one as root in a CI container, an inherited one in some
@@ -17,16 +18,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read as _, Write as _};
-use std::os::fd::{AsRawFd as _, RawFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
+use codewire_egress_broker::ipc::{BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS};
 use codewire_local_vmm::egress_broker::{
-    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_HOST_ADDRESSES_FD,
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_FIRST_SESSION_FD,
+    EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
     EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES,
     EgressBrokerStartupFailure, EgressBrokerStartupStatus, decode_egress_broker_startup_status,
     encode_developer_egress_broker_bootstrap,
@@ -55,11 +57,13 @@ const AUDIT_ARCH_NATIVE: u32 = 0xc000_003e;
 #[cfg(target_arch = "aarch64")]
 const AUDIT_ARCH_NATIVE: u32 = 0xc000_00b7;
 
-/// The child, and for a broker the runner's end of its host-address control
-/// socket, held open for the broker's lifetime.
+/// The child; for a broker, the runner's end of its host-address control
+/// socket, held open for the broker's lifetime, and the worker's ends of its
+/// inherited IPC sessions.
 struct ChildGuard(
     Child,
     #[allow(dead_code, reason = "held open, never read")] Option<UnixStream>,
+    Vec<UnixStream>,
 );
 
 impl ChildGuard {
@@ -125,9 +129,30 @@ fn spawn_role(
     let (environment_id, generation) = identity();
     let mut filter = refused.map(refusal_filter);
     let source = child_socket.as_raw_fd();
-    // A broker also takes the runner's host-address control socket (#2614).
-    let control = (role == "__native-egress-broker").then(|| UnixStream::pair().unwrap());
+    // A broker also takes the runner's host-address control socket (#2614)
+    // and its IPC sessions after the admission session (#2638), whose sources
+    // sit above every fixed target as the runner places them.
+    let broker = role == "__native-egress-broker";
+    let control = broker.then(|| UnixStream::pair().unwrap());
     let control_source = control.as_ref().map(|(_, child)| child.as_raw_fd());
+    let mut sessions = Vec::new();
+    let mut inherited_sessions = Vec::new();
+    for _ in 0..if broker {
+        EGRESS_BROKER_INHERITED_SESSIONS
+    } else {
+        0
+    } {
+        let (worker_end, broker_end) = UnixStream::pair().unwrap();
+        let duplicated = unsafe { libc::fcntl(broker_end.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
+        assert!(duplicated >= 64);
+        inherited_sessions.push(unsafe { OwnedFd::from_raw_fd(duplicated) });
+        sessions.push(worker_end);
+    }
+    let session_descriptors: Vec<(RawFd, RawFd)> = inherited_sessions
+        .iter()
+        .map(|session| session.as_raw_fd())
+        .zip(EGRESS_BROKER_FIRST_SESSION_FD..)
+        .collect();
     let mut command = Command::new(env!("CARGO_BIN_EXE_cw"));
     command
         .arg(role)
@@ -170,6 +195,11 @@ fn spawn_role(
             {
                 return Err(std::io::Error::last_os_error());
             }
+            for &(source, target) in &session_descriptors {
+                if libc::dup2(source, target) == -1 || libc::fcntl(target, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             if let Some(filter) = filter.as_mut() {
                 let program = libc::sock_fprog {
                     len: filter.len() as u16,
@@ -184,6 +214,7 @@ fn spawn_role(
     }
     let child = command.spawn().unwrap();
     drop(child_socket);
+    drop(inherited_sessions);
     let control = control.map(|(mut control, control_child)| {
         drop(control_child);
         control
@@ -191,7 +222,7 @@ fn spawn_role(
             .unwrap();
         control
     });
-    (parent, ChildGuard(child, control))
+    (parent, ChildGuard(child, control, sessions))
 }
 
 fn refusal_filter(refused: RefusedSyscall) -> Vec<libc::sock_filter> {
@@ -385,6 +416,76 @@ fn broker_refuses_to_serve_without_seccomp() {
     );
 }
 
+/// The broker holds standard I/O on /dev/null, its bootstrap (4), host-address
+/// control (5) and IPC sessions (6 to 29), and otherwise only its runtime's
+/// epoll, eventfd and Unix streams that lead back into itself. Read at
+/// PREPARED: after confinement the broker is not dumpable, so its descriptor
+/// table is closed to this test.
+#[test]
+fn a_prepared_broker_holds_exactly_its_inherited_descriptors() {
+    let directory = tempfile::tempdir().unwrap();
+    let (vm_id, generation) = identity();
+    let (mut bootstrap, broker) = spawn_role(
+        "__native-egress-broker",
+        directory.path(),
+        EGRESS_BROKER_BOOTSTRAP_FD,
+        None,
+    );
+    bootstrap
+        .write_all(
+            encode_developer_egress_broker_bootstrap(vm_id, generation, &BROKER_KEY)
+                .unwrap()
+                .as_ref(),
+        )
+        .unwrap();
+    assert_eq!(
+        read_status_frame(&mut bootstrap, EGRESS_BROKER_STATUS_MAX_BYTES),
+        EGRESS_BROKER_PREPARED_MESSAGE
+    );
+
+    let pid = broker.pid();
+    let held = descriptors(pid);
+    let unix = unix_sockets();
+    let own: BTreeSet<u64> = held
+        .values()
+        .filter_map(|target| socket_target_inode(target))
+        .collect();
+    let null = std::fs::metadata("/dev/null").unwrap().rdev();
+    let mut inherited = Vec::new();
+    for (fd, target) in &held {
+        if (0..=2).contains(fd) {
+            assert_eq!(target, "/dev/null", "broker standard fd {fd}");
+            let metadata = std::fs::metadata(format!("/proc/{pid}/fd/{fd}")).unwrap();
+            assert_eq!(metadata.rdev(), null, "broker standard fd {fd}");
+        } else if let Some(inode) = socket_target_inode(target) {
+            let socket = unix
+                .get(&inode)
+                .unwrap_or_else(|| panic!("broker fd {fd} is not a Unix socket: {held:?}"));
+            assert!(!socket.named, "broker fd {fd} is a named socket");
+            match socket.peer {
+                Some(peer) if own.contains(&peer) => {}
+                _ => inherited.push(*fd),
+            }
+        } else {
+            assert!(
+                matches!(
+                    target.as_str(),
+                    "anon_inode:[eventpoll]" | "anon_inode:[eventfd]"
+                ),
+                "broker holds fd {fd} -> {target}: {held:?}"
+            );
+        }
+    }
+    let expected: Vec<RawFd> = [EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_HOST_ADDRESSES_FD]
+        .into_iter()
+        .chain(
+            (0..EGRESS_BROKER_INHERITED_SESSIONS)
+                .map(|index| EGRESS_BROKER_FIRST_SESSION_FD + index as RawFd),
+        )
+        .collect();
+    assert_eq!(inherited, expected, "{held:?}");
+}
+
 #[test]
 fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
     let directory = tempfile::tempdir().unwrap();
@@ -430,15 +531,25 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         read_status_frame(&mut worker_bootstrap, WORKER_STATUS_MAX_BYTES),
         WORKER_PREPARED_MESSAGE
     );
-    // The broker's bootstrap stream becomes the worker's broker channel, as
-    // the runner hands it over after the broker is ready.
-    send_descriptor(
-        worker_bootstrap.as_raw_fd(),
-        broker_bootstrap.as_raw_fd(),
-        BROKER_DESCRIPTOR_MARKER,
-    );
-    let broker_channel = socket_inode(broker_bootstrap.as_raw_fd());
-    drop(broker_bootstrap);
+    // The broker's bootstrap stream becomes the worker's admission session,
+    // and the other session ends follow, as the runner hands them over after
+    // the broker is ready.
+    let sessions: Vec<UnixStream> = std::iter::once(broker_bootstrap)
+        .chain(std::mem::take(&mut broker.2))
+        .collect();
+    assert_eq!(sessions.len(), BROKER_IPC_SESSIONS);
+    for session in &sessions {
+        send_descriptor(
+            worker_bootstrap.as_raw_fd(),
+            session.as_raw_fd(),
+            BROKER_DESCRIPTOR_MARKER,
+        );
+    }
+    let broker_channels: BTreeSet<u64> = sessions
+        .iter()
+        .map(|session| socket_inode(session.as_raw_fd()))
+        .collect();
+    drop(sessions);
     assert_eq!(
         read_status_frame(&mut worker_bootstrap, WORKER_STATUS_MAX_BYTES),
         WORKER_BROKER_READY_MESSAGE
@@ -509,7 +620,7 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
                     to_test.insert(peer);
                 }
                 Some(peer)
-                    if inode == broker_channel
+                    if broker_channels.contains(&inode)
                         && !worker_sockets.contains(&peer)
                         && !test_ends.contains(&peer) =>
                 {
@@ -533,7 +644,7 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         }
     }
     assert_eq!(to_test, test_ends, "bootstrap and guest: {held:?}");
-    assert_eq!(to_broker, 1, "broker channel: {held:?}");
+    assert_eq!(to_broker, BROKER_IPC_SESSIONS, "broker sessions: {held:?}");
     eprintln!(
         "confined worker {pid}: {} descriptors, {} internal Unix streams, no file, no internet socket",
         held.len(),
