@@ -17,7 +17,9 @@ SIGKILL and prove noel resumes the run once. Both also take the environment
 down mid-turn and prove that the message is paused, not ended, and that
 starting the environment resumes the run with no `cw restart`. Both stop a
 conversation while the host daemon's record helper fails and prove that the
-message is never paused and never resumed.
+message is never paused and never resumed. Both prove that only a noel
+conversation is given the delegation skill, in its own driver directory; the
+real-noel journey then has a scripted lead run every command of that skill.
 All runtime/config/workspace files and processes belong to this invocation.
 Linux joins every owned descendant through a child subreaper. Darwin has none,
 so macOS runs the journey as a new session leader and requires that no live
@@ -30,9 +32,12 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
+import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -478,8 +483,28 @@ class Journey:
                 (self.workspace / "agent-identity.jsonl").read_text().splitlines()]
         own = [e for e in seen if e["agent"] == agent and e["session"] == self.session_ids[name]]
         assert own and all(e["environment"] == self.environment for e in own), seen
+        # Only noel is launched with a skill, and only its conversation holds one.
+        assert all(("--skill" in e["argv"]) == (agent == "noel") for e in own), own
+        skills = self.root / "hosts" / self.environment / "agents" / self.driver_ids[name] / "skills"
+        assert skills.exists() == (agent == "noel"), skills
         assert not any(e["environment"] == "stale-environment" or e["session"] == "session-stale"
                        for e in seen), seen
+
+    def delegation_skill(self, name):
+        """The delegation skill cw wrote for noel conversation NAME: in its
+        own driver directory, the owner's alone, with every command naming
+        this journey's cw by its path. Returns the file and its commands."""
+        directory = (self.root / "hosts" / self.environment / "agents" / self.driver_ids[name]
+                     / "skills" / "codewire-delegation")
+        file = directory / "SKILL.md"
+        for path, kind, mode in ((directory.parent, stat.S_ISDIR, 0o700), (directory, stat.S_ISDIR, 0o700),
+                                 (file, stat.S_ISREG, 0o600)):
+            status = path.lstat()
+            assert kind(status.st_mode) and stat.S_IMODE(status.st_mode) == mode, (path, oct(status.st_mode))
+        assert [entry.name for entry in directory.iterdir()] == ["SKILL.md"], list(directory.iterdir())
+        commands = skill_commands(file.read_text())
+        assert commands and all(shlex.split(command)[0] == self.cw for command in commands), commands
+        return file, commands
 
     def pause(self, agents=("noel", "codex", "claude"), text="HOLD", env=(), lead=None):
         """A conversation of each agent running TEXT (Codex and Claude HOLD)
@@ -1087,8 +1112,10 @@ class Journey:
         assert "[faux/echo] Hello" in self.call("inbox", env, "noel-lead").stdout
         assert "says: [faux/echo] Hello" in self.call("logs", env, "noel-lead").stdout
         trace = self.noel_trace("noel-lead")
-        assert trace[0] == {"event": "start", "argv": ["--mode", "rpc", "--session-id", session,
-                                                       "--model", "faux/echo"]}, trace[0]
+        skill, _ = self.delegation_skill("noel-lead")
+        assert trace[0]["event"] == "start" and trace[0]["argv"] == [
+            "--mode", "rpc", "--session-id", session, "--model", "faux/echo", "--skill", str(skill.parent)], trace[0]
+        assert (trace[0]["skill"]["name"], trace[0]["skill"]["file"]) == ("codewire-delegation", str(skill)), trace[0]
         received = self.received("noel-lead")
         assert [(r["type"], "id" in r) for r in received[:4]] == [
             ("get_state", True), ("clear_queue", True), ("clear_queue", False), ("prompt", True)], received
@@ -1156,6 +1183,12 @@ class Journey:
         worker = self.launch("noel-worker", agent="noel", model="faux/echo", parent="noel-lead", prompt="WORKER")
         assert self.wait_message(worker["message"]["id"])["result"] == "[faux/echo] WORKER"
         self.wakes("noel-lead", 1)
+        # Every launch writes the skill again, as a cw update needs: a stale
+        # one that others could read is replaced when the worker restarts.
+        skill, _ = self.delegation_skill("noel-worker")
+        current = skill.read_text()
+        skill.write_text("an older cw wrote this\n")
+        skill.chmod(0o644)
         cut, run, stop_time = self.stop_mid_run("noel-worker", turn=True)
         assert cut["state"] == "interrupted" and cut["turn_id"] == run, cut
         self.aborted_before_signal("noel-worker", run)
@@ -1164,6 +1197,9 @@ class Journey:
         assert self.wait_message(again["id"])["result"] == "[faux/echo] AGAIN"
         starts = [e for e in self.noel_trace("noel-worker") if e.get("event") == "start"]
         assert len(starts) == 2 and starts[0] == starts[1], starts
+        assert self.delegation_skill("noel-worker")[0].read_text() == current
+        self.check("noel-delegation-skill/own-driver-directory/owner-only/names-this-cw/passed-as-skill/"
+                   "rewritten-at-restart/codex-and-claude-get-none")
         notifications = self.wakes("noel-lead", 3)
         assert cut["id"] in {m["source"]["message_id"] for m in notifications}
         for name, agent in (("codex-stopped", "codex"), ("claude-stopped", "claude")):
@@ -1601,6 +1637,7 @@ class Journey:
         self.check("real-noel-env-stop-pauses-run/journal-interrupted/"
                    "unrestartable-conversation-resolves-unknown-once")
         self.prove_real_pause(private)
+        self.prove_real_delegation(private)
 
     def prove_real_resume(self, private):
         """A crash leaves a real noel run interrupted, and its message running.
@@ -1833,6 +1870,207 @@ class Journey:
         finally:
             self.environment = main
 
+    def prove_real_delegation(self, private):
+        """A real noel lead is told how to delegate, and delegates. cw writes
+        the delegation skill into the lead's driver directory and noel lists
+        it in the lead's system prompt. The lead's scripted model reads it
+        with noel's `read` tool and runs every command in it with noel's
+        `bash` tool, exactly as the skill writes it. It launches a worker of
+        each agent; launching the first again is refused and starts no second
+        worker; each worker message that ends wakes the lead once with its
+        result. It then reads a worker's state, follows up, steers, waits for
+        one result, interrupts and stops. The environment's daemon carries
+        noel's private settings and the lead's script. Its faux/echo is
+        slowed, so a noel worker's task runs for seconds."""
+        main = self.environment
+        script, log = self.root / "delegate-script.json", self.root / "delegate-requests.jsonl"
+        script.write_text("[]")
+        daemon = dict(self.env)
+        daemon.update(value.split("=", 1) for value in private + [
+            f"PI_FAUX_SCRIPT={script}", f"PI_FAUX_SCRIPT_LOG={log}", "SHELL=/bin/sh",
+            "PI_FAUX_STREAM_DELAY_MS=100", "PI_FAUX_STREAM_CHARS=1"])
+        created = self.call("env", "create", "--local", "--type", "host", "--name", "delegating",
+                            "--path", str(self.workspace), "--output", "json", data=True, env=daemon)
+        self.environment = env = created["id"]
+        self.extra_environments.append(env)
+        try:
+            lead, worker = "delegating-lead", "count-lighthouses"
+            self.launch(lead, agent="noel", model="faux/script")
+            self.idle(lead)
+            file, commands = self.delegation_skill(lead)
+            responses, used = [], set()
+
+            def skill(start, values):
+                """The skill's one command that begins `cw START`, with
+                VALUES in place of its placeholders."""
+                (command,) = [c for c in commands if c.startswith(f"{self.cw} {start} ")]
+                used.add(command)
+                words = command[len(self.cw):]
+                for placeholder, value in values.items():
+                    assert words.count(placeholder) == 1, (command, placeholder)
+                    words = words.replace(placeholder, value)
+                assert not any(left in words for left in ("NAME", "TASK", "TEXT", "MESSAGE_ID", "PROVIDER/ID")), words
+                return self.cw + words
+
+            def tool(name, after=None, **arguments):
+                """A model response that calls noel's tool NAME, held until
+                the file AFTER exists beside the script."""
+                held = [{"wait_for_file": after}] if after else []
+                return held + [{"tool_call": {"name": name, "arguments": arguments}}]
+
+            def respond(*more):
+                """Appends model responses to the script, which noel reads
+                again for every request. Returns which request each answers,
+                counted from 1."""
+                answered = len(responses)
+                responses.extend(more)
+                fresh = script.with_suffix(".new")
+                fresh.write_text(json.dumps(responses))
+                fresh.replace(script)
+                return range(answered + 1, len(responses) + 1)
+
+            def sent(count):
+                """The lead's logged model requests, once there are COUNT."""
+                return self.until(lambda: [json.loads(line) for line in log.read_text().splitlines()]
+                                  if log.exists() else [], lambda requests: len(requests) >= count, timeout=120)
+
+            def ran(request):
+                """What the tool call that answered REQUEST returned, as the
+                next request tells the model."""
+                messages = sent(request + 1)[request]["messages"]
+                return [m["content"] for m in messages if m["role"] == "tool"][-1]
+
+            def running(message):
+                """Waits until the worker's noel runs MESSAGE."""
+                self.until(lambda: self.inbox(worker)["driver"], lambda driver: driver["active_message_id"] == message
+                           and driver["current_turn_id"] is not None)
+
+            def notices():
+                return [m for m in self.inbox(lead)["messages"] if m["action"] == "notification"]
+
+            # The lead reads its skill, launches a worker of each agent and
+            # then the first again, with the launch commands as written.
+            said, task = [{"text": "Noted."}], "Count the lighthouses."
+            launch = skill('run "$CW_ENVIRONMENT" --agent noel',
+                           {"PROVIDER/ID": "faux/echo", "NAME": worker, "TASK": task})
+            reviews = {agent: skill(f'run "$CW_ENVIRONMENT" --agent {agent}',
+                                    {"NAME": f"review-{agent}", "TASK": f"Review the count as {agent}."})
+                       for agent in ("codex", "claude")}
+            read, launched, codex, claude, again, *_ = respond(
+                tool("read", path=str(file)), tool("bash", command=launch), tool("bash", command=reviews["codex"]),
+                tool("bash", command=reviews["claude"]), tool("bash", command=launch),
+                [{"text": "Delegated."}], said, said, said)
+            first = self.call("msg", env, lead, "Have the lighthouses counted and the count reviewed.",
+                              "--output", "json", data=True)
+            asked = sent(1)[0]
+            # A noel without the skill listing sends no system prompt at all.
+            prompt = asked["system_prompt"] or ""
+            assert "<name>codewire-delegation</name>" in prompt and f"<location>{file}</location>" in prompt, (
+                "noel did not list the delegation skill in its system prompt; this journey needs a noel built "
+                f"from noeljackson/pi main at 08566af5 or later. Its system prompt: {prompt!r}")
+            assert {"read", "bash"} <= set(asked["tools"]), asked["tools"]
+            assert ran(read) == file.read_text(), ran(read)
+            print(f"cli-host: noel system prompt lists codewire-delegation at {file}", flush=True)
+            self.check("real-noel-lead-given-delegation-skill/owner-only-in-its-driver-directory/"
+                       "system-prompt-lists-its-name-and-file/read-tool-returns-it")
+
+            assert self.wait_message(first["id"])["result"] == "Delegated."
+            ids = {worker: message_id(ran(launched)), "review-codex": message_id(ran(codex)),
+                   "review-claude": message_id(ran(claude))}
+            assert f"Launched managed noel conversation {worker} " in ran(launched), ran(launched)
+            listed = self.call("list", env, "--output", "json", data=True)
+            views = {view["name"]: view for view in listed}
+            assert all(views[name]["parent_session_id"] == self.session_ids[lead] for name in ids), listed
+            results = {worker: f"[faux/echo] {task}", "review-codex": "RESULT:Review the count as codex.",
+                       "review-claude": "RESULT:Review the count as claude."}
+            for name, message in ids.items():
+                done = self.wait_message(message)
+                assert done["state"] == "completed" and done["result"] == results[name], done
+                assert done["target_session_id"] == views[name]["session_id"], (done, views[name])
+            self.check("real-noel-lead-bash-runs-the-skills-launch-command/"
+                       "worker-of-each-agent-started-under-the-lead")
+
+            refused = ran(again)
+            assert f"session name is already retained: {worker}" in refused, refused
+            assert "Command exited with code 1" in refused and "Launched" not in refused, refused
+            assert sorted(views) == sorted([lead, *ids]) and len(listed) == 4, listed
+            print(f"cli-host: noel repeated launch refused: {refused.splitlines()[0]}", flush=True)
+            self.check("real-noel-repeated-launch-refused/session-name-already-retained/no-second-worker")
+
+            self.until(notices, lambda notes: sum(m["state"] == "completed" for m in notes) >= 3)
+            assert len(sent(len(responses))) == len(responses)
+            woken = time.monotonic()
+
+            # The lead reads the worker's state, gives it a long task, steers
+            # it and waits for its result; then interrupts a second long task
+            # and stops the worker, which has a worker of its own.
+            self.launch("lamp-keeper", agent="noel", model="faux/echo", parent=worker)
+            self.idle("lamp-keeper")
+            long = "Write a long story about a lighthouse keeper, the sea and the lamp that never went out."
+            named = {"NAME": worker}
+            follow = skill("msg", {**named, "TEXT": long})
+            looked, followed, steered = respond(
+                tool("bash", command=skill("inbox", named)), tool("bash", command=follow),
+                tool("bash", "delegate-steer", command=skill("steer", {**named, "TEXT": "Be brief."})))
+            second = self.call("msg", env, lead, "Follow up with the worker, then stop it.",
+                               "--output", "json", data=True)
+            assert f"{ids[worker]}\tprompt\tcompleted\t" in ran(looked), ran(looked)
+            follow_id = message_id(ran(followed))
+            running(follow_id)
+            waited, cut, interrupted, stopped, all_stopped, *_ = respond(
+                tool("bash", command=skill("wait", {"MESSAGE_ID": follow_id})), tool("bash", command=follow),
+                tool("bash", "delegate-interrupt", command=skill("interrupt", named)),
+                tool("bash", command=skill('stop "$CW_ENVIRONMENT"', named)),
+                tool("bash", command=skill("stop --all", named)), [{"text": "Stopped."}], said, said)
+            (self.root / "delegate-steer").write_text("")
+            cut_id = message_id(ran(cut))
+            running(cut_id)
+            (self.root / "delegate-interrupt").write_text("")
+            assert self.wait_message(second["id"])["result"] == "Stopped."
+            assert ran(waited) == "[faux/echo] Be brief.\n", ran(waited)
+            done = self.wait_message(follow_id)
+            assert done["state"] == "completed" and done["result"] == "[faux/echo] Be brief.", done
+            assert self.wait_message(message_id(ran(steered)))["state"] == "completed"
+            assert self.wait_message(message_id(ran(interrupted)))["state"] == "completed"
+            assert self.wait_message(cut_id, ok=False)["state"] == "interrupted"
+            # Without a terminal `cw stop` leaves the worker's own worker
+            # running and names it; `cw stop --all` stops it too.
+            assert re.search(rf"^{worker} +Stopped ", ran(stopped), re.M), ran(stopped)
+            assert "child session lamp-keeper is still running" in ran(stopped), ran(stopped)
+            assert "Command exited" not in ran(stopped) + ran(all_stopped), (ran(stopped), ran(all_stopped))
+            assert all(re.search(rf"^{name} +Stopped ", ran(all_stopped), re.M)
+                       for name in (worker, "lamp-keeper")), ran(all_stopped)
+            states = {view["name"]: view["state"] for view in self.call("list", env, "--output", "json", data=True)}
+            assert states == {lead: "Running", worker: "Stopped", "lamp-keeper": "Stopped",
+                              "review-codex": "Running", "review-claude": "Running"}, states
+            assert used == set(commands), set(commands) - used
+            print(f"cli-host: noel lead ran all {len(commands)} commands of its delegation skill", flush=True)
+            self.check("real-noel-lead-reads-state-follows-up-steers-waits-interrupts-and-stops-as-the-skill-writes/"
+                       "every-skill-command-ran")
+
+            # Each worker message that ended woke the lead once, with its
+            # result. The first three did so more than one scan of the
+            # lead's inbox ago, and no scan admitted one of them again.
+            finished = set(ids.values()) | {follow_id, cut_id}
+            self.until(notices, lambda notes: sum(m["state"] == "completed" for m in notes) >= 5)
+            time.sleep(max(0, 11 - (time.monotonic() - woken)))
+            notes = notices()
+            assert len(notes) == 5 and {m["source"]["message_id"] for m in notes} == finished, notes
+            requests = sent(len(responses))
+            assert len(requests) == len(responses) == 20, len(requests)
+            wakes = [m["content"] for m in requests[-1]["messages"]
+                     if m["role"] == "user" and "[Codewire] Managed worker" in m["content"]]
+            assert len(wakes) == 5 and all(sum(message in text for text in wakes) == 1 for message in finished), wakes
+            counted = next(text for text in wakes if ids[worker] in text)
+            assert counted.startswith(f"[Codewire] Managed worker {worker} (session {views[worker]['session_id']}) "
+                                      f"finished message {ids[worker]} as completed.\n\n[faux/echo] {task}\n"), counted
+            assert sum(f"finished message {cut_id} as interrupted." in text for text in wakes) == 1, wakes
+            self.check("real-noel-lead-woken-once-per-worker-message-with-its-result")
+            self.call("env", "rm", "--local", env, "--yes")
+            self.extra_environments.remove(env)
+        finally:
+            self.environment = main
+
     def real_resumed(self, name, message, run, resumes=1):
         """noel's journal for NAME holds MESSAGE's prompt once and its RUN
         completed; the inbox and the session log say noel resumed it."""
@@ -1879,6 +2117,25 @@ class Journey:
 
     def remove_files(self):
         shutil.rmtree(self.root)
+
+
+def skill_commands(text):
+    """The command lines of a skill's `sh` blocks."""
+    commands, fenced = [], False
+    for line in text.splitlines():
+        if line in ("```sh", "```"):
+            fenced = line == "```sh"
+        elif fenced:
+            commands.append(line)
+    return commands
+
+
+def message_id(printed):
+    """The message ID in what `cw run --detach --prompt`, `cw msg`, `cw steer`
+    or `cw interrupt` printed: a line `ID<tab>STATE`."""
+    found = re.findall(r"^([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\t[a-z_]+$", printed, re.M)
+    assert len(found) == 1, printed
+    return found[0]
 
 
 def journal_runs(journal):

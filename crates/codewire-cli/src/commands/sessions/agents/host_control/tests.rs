@@ -144,6 +144,7 @@ impl Fixture {
             settled: HashSet::new(),
             stopping: false,
             noel: noel::Recovery::default(),
+            cw: None,
         }
     }
 }

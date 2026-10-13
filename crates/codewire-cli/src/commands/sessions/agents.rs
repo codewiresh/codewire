@@ -2260,6 +2260,7 @@ async fn run_agent_driver_inner(args: AgentDriverArgs, platform: bool) -> anyhow
         settled: HashSet::new(),
         stopping: false,
         noel: noel::Recovery::default(),
+        cw: env::current_exe().ok(),
     };
     driver.run().await
 }
@@ -2994,6 +2995,10 @@ struct Driver {
     stopping: bool,
     /// noel only: recovery of a run a crash interrupted.
     noel: noel::Recovery,
+    /// The `cw` that runs this driver, resolved once when the driver starts:
+    /// Linux names an executable replaced on disk `PATH (deleted)` from then
+    /// on. noel's delegation skill names it.
+    cw: Option<PathBuf>,
 }
 
 impl Driver {
