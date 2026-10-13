@@ -104,6 +104,11 @@ jobs:
     needs: [protected-main, superseded]
     if: needs.superseded.outputs.superseded == 'false'
     runs-on: ci-protected
+    # A wedged step must not hold this workflow's one-at-a-time queue until
+    # the runner's 330-minute limit (run 13161 waited 5.5 h on a git fetch).
+    # Each job's limit is about three times its recent successful runs:
+    # Linux side 9.6-9.8 min, macOS 18.9-22.2 min, assembly 30.4-31.9 min.
+    timeout-minutes: 30
     outputs:
       mode: ${{ steps.select.outputs.mode }}
       present: ${{ steps.build.outputs.present }}
@@ -192,6 +197,7 @@ jobs:
     needs: [protected-main, superseded, build-runtime-linux]
     if: needs.superseded.outputs.superseded == 'false'
     runs-on: macos-arm64
+    timeout-minutes: 60
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
       runtime: ${{ steps.runtime.outputs.present }}
@@ -273,6 +279,7 @@ jobs:
     name: Assemble and verify the unsigned four-target delivery
     needs: [protected-main, build-darwin]
     runs-on: ci-protected
+    timeout-minutes: 90
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:

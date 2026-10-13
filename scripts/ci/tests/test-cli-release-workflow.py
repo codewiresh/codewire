@@ -449,6 +449,11 @@ def check_dry_run(text):
     blocks = jobs(text)
     need(list(blocks) == ["protected-main", "superseded", "build-runtime-linux", "build-darwin", "assemble"],
          "unexpected dry-run job set")
+    # A wedged step must fail within its job's limit instead of holding the
+    # one-at-a-time dry-run queue until the runner's 330-minute limit.
+    for job, limit in (("build-runtime-linux", 30), ("build-darwin", 60), ("assemble", 90)):
+        found = re.findall(r"^    timeout-minutes: ([0-9]+)$", blocks.get(job, ""), re.M)
+        need(found == [str(limit)], f"dry-run job {job} lacks its {limit}-minute limit")
     # Forgejo cancels the older push run of a workflow with no `concurrency`
     # block. With a group and `cancel-in-progress: false`, runs queue in push
     # order and each one finishes.
@@ -514,6 +519,9 @@ def check_dry_run(text):
 
 
 DRY_RUN_MUTATIONS = {
+    "Linux side without a job limit": lambda t: t.replace("    timeout-minutes: 30\n", "", 1),
+    "macOS build without a job limit": lambda t: t.replace("    timeout-minutes: 60\n", "", 1),
+    "assembly at the runner limit": lambda t: t.replace("    timeout-minutes: 90\n", "    timeout-minutes: 330\n", 1),
     "dry run without cargo network bounds": lambda t: t.replace("  CARGO_HTTP_TIMEOUT: '20'\n", "", 1),
     "dry run with an unbounded protoc download": lambda t: t.replace(
         "          scripts/ci/release/fetch-pinned.sh \"https://github.com/protocolbuffers",
