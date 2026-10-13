@@ -86,10 +86,10 @@ print(value)' "$pins" "$@"
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -c1-64; else shasum -a 256 "$1" | cut -c1-64; fi
 }
+# Bounded, logged attempts that fail a stalled connection in seconds (#2691).
 fetch() {
   local url="$1" digest="$2" target="$3"
-  curl -fsSL --retry 3 --max-time 900 -o "$target" "$url" || die "download failed: $url"
-  [ "$(sha256_of "$target")" = "$digest" ] || die "$url differs from its pinned SHA-256"
+  "$release_dir/fetch-pinned.sh" "$url" "$digest" "$target" || die "download failed: $url"
 }
 # A cached part, or a build the caller asks for; returns 0 when cached.
 cached() {

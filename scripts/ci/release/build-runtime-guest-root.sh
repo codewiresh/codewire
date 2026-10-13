@@ -117,11 +117,14 @@ exec setpriv --reuid="$BUILD_UID" --regid="$BUILD_GID" --init-groups \
 runtime_container_mounts "$job_container" "$repo" "$busybox" "$runc" "${rust_std[@]}" "$protoc_zip" -- "$parent" ||
   die "the build's paths cannot be mounted"
 started="$(date +%s)"
+# The job's bounded cargo network settings (cli-release.yaml), when set,
+# reach the probe build's git dependency fetches too (#2691).
 docker run --rm --init "${RUNTIME_MOUNTS[@]}" \
   -e BUILD_UID="$uid" -e BUILD_GID="$gid" -e REPO="$repo" -e SCRATCH="$scratch" \
   -e MEMBERS="$members" -e PROTOC_ZIP="$protoc_zip" \
   -e BUSYBOX="$busybox" -e BUSYBOX_SHA256="$busybox_sha256" -e RUNC="$runc" -e RUNC_SHA256="$runc_sha256" \
   -e OUTPUT="$output" \
+  -e CARGO_HTTP_TIMEOUT -e CARGO_NET_RETRY \
   "$image" bash -c "$inner" ||
   die "guest root build failed"
 [ -f "$output" ] || die "the build left no guest root"

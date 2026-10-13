@@ -755,6 +755,17 @@ case "${1:-} ${2:-} ${3:-}" in
     esac
     ;;
   buildx\ build\ *)
+    if [ "${FAKE_BUILD_NETWORK_FAILURES:-0}" -gt 0 ]; then
+      network_attempt=1
+      if [ -f "${FAKE_BUILD_NETWORK_STATE:?}" ]; then
+        network_attempt="$(($(cat "$FAKE_BUILD_NETWORK_STATE") + 1))"
+      fi
+      printf '%s\n' "$network_attempt" >"$FAKE_BUILD_NETWORK_STATE"
+      if [ "$network_attempt" -le "$FAKE_BUILD_NETWORK_FAILURES" ]; then
+        echo 'ERROR: failed to solve: failed to load cache key: Get "https://github.com/virtee/snpguest/releases/download/v0.10.0/snpguest": net/http: TLS handshake timeout' >&2
+        exit 1
+      fi
+    fi
     if [ "${FAKE_BUILD_FATAL:-0}" = 1 ]; then
       echo 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/test/blobs/sha256:test: 503 Service Unavailable' >&2
       exit 1
@@ -1504,6 +1515,45 @@ fi
   fail 'failed protected publication was retried'
 grep -qF '503 Service Unavailable' "$work/failed-build.out" ||
   fail 'failed protected publication was not preserved'
+
+# A build that fails on a transient network error (#2691) is retried, with
+# its error and a fixed marker in the log, and recovers within three attempts.
+rm -f "$work/build-network-state"
+network_builds_before="$(build_invocation_count)"
+if ! (
+  cd "$source_fixture"
+  FAKE_BUILD_NETWORK_FAILURES=2 FAKE_BUILD_NETWORK_STATE="$work/build-network-state" \
+    CODEWIRE_BUILD_NETWORK_RETRY_DELAY_SECONDS=0 \
+    "$BUILDER" base images/base/Dockerfile images/base
+) >"$work/network-build.out" 2>&1; then
+  sed -n '1,80p' "$work/network-build.out" >&2
+  fail 'a transient network failure was not retried to success'
+fi
+[[ "$(build_invocation_count)" -eq $((network_builds_before + 3)) ]] ||
+  fail 'a transient network failure did not use exactly three build attempts'
+[[ "$(grep -Fc '[build-network] transient network failure image=base status=1; retrying in 0s' "$work/network-build.out")" == 2 ]] ||
+  fail 'network build retries were not reported with their fixed marker'
+[[ "$(grep -Fc 'net/http: TLS handshake timeout' "$work/network-build.out")" == 2 ]] ||
+  fail 'network build retries hid the failed fetch'
+
+# Removing the published tag makes the next case build again.
+awk -F '\t' -v reference="$base_source_tag" \
+  '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
+mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
+rm -f "$work/build-network-state"
+network_builds_before="$(build_invocation_count)"
+if (
+  cd "$source_fixture"
+  FAKE_BUILD_NETWORK_FAILURES=3 FAKE_BUILD_NETWORK_STATE="$work/build-network-state" \
+    CODEWIRE_BUILD_NETWORK_RETRY_DELAY_SECONDS=0 \
+    "$BUILDER" base images/base/Dockerfile images/base
+) >"$work/network-exhausted.out" 2>&1; then
+  fail 'an exhausted network retry was accepted'
+fi
+[[ "$(build_invocation_count)" -eq $((network_builds_before + 3)) ]] ||
+  fail 'network build retries exceeded three attempts'
+grep -qF '[build-network] class=transient-exhausted image=base status=1 attempts=3' \
+  "$work/network-exhausted.out" || fail 'exhausted network build retries lack their fixed marker'
 
 # Workspace publication retains the protected compiler-cache API, but no
 # untrusted external layer cache may reach any publisher, even on source reuse.
