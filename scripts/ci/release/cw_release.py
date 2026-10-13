@@ -461,22 +461,35 @@ def depinfo_inputs(path):
     return [Path(token.replace("\0", " ")) for token in rule[1:] if token]
 
 
-def check_build_inputs(root, depinfo, allowed_outside):
+def check_build_inputs(root, depinfo, allowed_outside, embedded=None):
     """Every repository file Cargo compiled must be a source-digest input.
 
     Paths under `allowed_outside` (the Cargo target directory for build-script
     output, and the Cargo home for lockfile-checksummed dependency sources) are
-    not repository inputs. Anything else is refused.
+    not repository inputs. `embedded` maps an exact canonical file outside the
+    repository to the SHA-256 it was verified with: the local VM runtime
+    document the macOS arm64 cw embeds (#2539). Each one must be compiled in
+    and still hold exactly those bytes. Anything else is refused.
     """
     names = source_inputs(root)
     inventory = source_directory_inventory(root, names)
     root = Path(root).resolve()
     allowed = [Path(path).resolve() for path in allowed_outside]
+    embedded = dict(embedded or {})
+    for path, digest in embedded.items():
+        require(Path(path).is_absolute() and Path(path).resolve() == Path(path) and is_hex(digest, 64),
+                "embedded input is not an exact canonical file with its SHA-256")
     inputs = {os.fsdecode(name) for name in names}
-    missing, foreign, repository = [], [], 0
+    missing, foreign, repository, compiled = [], [], 0, set()
     for path in depinfo_inputs(depinfo):
         require(path.is_absolute(), "dep-info path is not absolute")
         resolved = path.resolve()
+        if path in embedded:
+            require(path == resolved, "embedded input is not canonical")
+            require(sha256(read_regular(path, MAX_JSON)) == embedded[path],
+                    "embedded input changed after it was verified")
+            compiled.add(path)
+            continue
         if any(resolved.is_relative_to(base) for base in allowed):
             continue
         if not resolved.is_relative_to(root):
@@ -490,6 +503,7 @@ def check_build_inputs(root, depinfo, allowed_outside):
         elif relative not in inputs:
             missing.append(relative)
     require(not foreign, f"compiled inputs outside the repository and Cargo home: {sorted(foreign)[:5]}")
+    require(compiled == set(embedded), "a verified embedded input was not compiled into the executable")
     require(not missing, f"compiled inputs missing from the source digest: {sorted(missing)[:8]}")
     require(repository > 0, "dep-info names no repository input")
     require(source_inputs(root) == names and source_directory_inventory(root, names) == inventory,
@@ -498,11 +512,12 @@ def check_build_inputs(root, depinfo, allowed_outside):
 
 
 def admit_build(root, executable, depinfo, target, version, revision, tree_before, rustc, allowed_outside,
-                targets=RELEASE_TARGETS):
+                targets=RELEASE_TARGETS, embedded=None):
     """Admit one freshly built cw: unchanged source, digested inputs and its record."""
     require(head_revision(root) == revision and source_tree_sha256(root) == tree_before,
             "source changed during the build; no identity is emitted")
-    inputs = check_build_inputs(root, depinfo, allowed_outside)
+    require(not embedded or target == LOCAL_RUNTIME_TARGET, "only the macOS arm64 cw embeds a local runtime")
+    inputs = check_build_inputs(root, depinfo, allowed_outside, embedded)
     data = read_regular(executable, MAX_EXECUTABLE)
     return data, make_identity(data, target, version, revision, tree_before, rustc, targets), inputs
 
@@ -1276,6 +1291,8 @@ def main(argv=None):
     admit.add_argument("--source-digest-before", required=True)
     admit.add_argument("--target-dir", type=Path, required=True)
     admit.add_argument("--cargo-home", type=Path, required=True)
+    admit.add_argument("--embedded-runtime", metavar="PATH=SHA256",
+                       help="the verified local runtime document the macOS arm64 cw embeds, with its SHA-256")
     args = parser.parse_args(argv)
     try:
         if args.command == "source-digest":
@@ -1328,10 +1345,15 @@ def main(argv=None):
             rustc = toolchain_rustc(args.source_root, subprocess.check_output(
                 ["rustc", "--version"], cwd=args.source_root, text=True))
             # Preparation later restricts the delivery to the release targets.
+            embedded = {}
+            if args.embedded_runtime:
+                path, _, digest = args.embedded_runtime.rpartition("=")
+                require(Path(path).name == LOCAL_RUNTIME_NAME, "embedded runtime is not a local runtime document")
+                embedded[Path(path)] = digest
             _, identity, inputs = admit_build(args.source_root, args.executable, args.depinfo, args.target,
                                               args.version, args.source_sha, args.source_digest_before, rustc,
                                               (args.target_dir, args.cargo_home / "registry",
-                                               args.cargo_home / "git"), DEVELOPMENT_TARGETS)
+                                               args.cargo_home / "git"), DEVELOPMENT_TARGETS, embedded)
             print(f"cw-release: admitted target={identity['target']} version={identity['package_version']} "
                   f"inputs={inputs} sha256={identity['sha256']}")
     except (ReleaseError, subprocess.CalledProcessError, OSError, KeyError, TypeError) as error:

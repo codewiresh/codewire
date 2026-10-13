@@ -33,6 +33,10 @@ pub(crate) const PACKET_QUEUE: usize = 256;
 pub(crate) const MAX_INBOUND_STREAM_FLOWS: usize = 64;
 pub(crate) const NETWORK_MTU: usize = 1_500;
 const DNS_MESSAGE_LIMIT: usize = 1_232;
+/// Guest DNS questions answered at once (#2638). Each runs in its own task, so
+/// a slow upstream lookup holds up no other packet; a question beyond the
+/// bound is answered SERVFAIL at once.
+pub(crate) const MAX_DNS_IN_FLIGHT: usize = 32;
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
@@ -314,6 +318,7 @@ async fn dispatch_packets<B: EgressBroker>(
 ) -> Result<(), NetworkSessionError> {
     let mut listeners = HashMap::<SocketAddr, tokio::task::JoinHandle<()>>::new();
     let mut inbound_bridges = JoinSet::new();
+    let mut dns_questions = JoinSet::new();
     loop {
         let packet = tokio::select! {
             packet = packets.recv() => {
@@ -347,33 +352,42 @@ async fn dispatch_packets<B: EgressBroker>(
                 let _ = completed;
                 continue;
             }
+            answered = dns_questions.join_next(), if !dns_questions.is_empty() => {
+                match answered {
+                    Some(Ok(Ok(()))) | None => {}
+                    Some(Ok(Err(error))) => return Err(error),
+                    Some(Err(_)) => return Err(NetworkSessionError::Engine),
+                }
+                continue;
+            }
         };
         if let Ok(question) = parse_ipv4_dns_question(&packet, WORKER_IP, DNS_MESSAGE_LIMIT) {
             if question.source.ip() != IpAddr::V4(GUEST_IP) {
                 continue;
             }
-            // A lookup that fails is answered at once, with the query's ID and
-            // question only, so the guest does not wait out its timeout:
-            // REFUSED when the policy refused, SERVFAIL for anything else.
-            let answer =
-                broker
-                    .resolve_dns(&question)
+            // Count only questions still in flight.
+            while let Some(answered) = dns_questions.try_join_next() {
+                match answered {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => return Err(NetworkSessionError::Engine),
+                }
+            }
+            if dns_questions.len() >= MAX_DNS_IN_FLIGHT {
+                let response =
+                    build_ipv4_dns_response(&question, DnsAnswer::ServerFailure, 0, NETWORK_MTU)
+                        .map_err(|_| NetworkSessionError::Engine)?;
+                outbound
+                    .send(response)
                     .await
-                    .unwrap_or_else(|error| BrokerDnsAnswer {
-                        answer: if error.kind() == io::ErrorKind::PermissionDenied {
-                            DnsAnswer::Refused
-                        } else {
-                            DnsAnswer::ServerFailure
-                        },
-                        ttl_seconds: 0,
-                    });
-            let response =
-                build_ipv4_dns_response(&question, answer.answer, answer.ttl_seconds, NETWORK_MTU)
                     .map_err(|_| NetworkSessionError::Engine)?;
-            outbound
-                .send(response)
-                .await
-                .map_err(|_| NetworkSessionError::Engine)?;
+                continue;
+            }
+            dns_questions.spawn(answer_dns_question(
+                question,
+                Arc::clone(&broker),
+                outbound.clone(),
+            ));
             continue;
         }
 
@@ -430,6 +444,35 @@ async fn dispatch_packets<B: EgressBroker>(
     }
 }
 
+/// Resolve one guest question and send the reply. A lookup that fails is
+/// answered at once, with the query's ID and question only, so the guest does
+/// not wait out its timeout: REFUSED when the policy refused, SERVFAIL for
+/// anything else.
+async fn answer_dns_question<B: EgressBroker>(
+    question: DnsQuestion,
+    broker: Arc<B>,
+    outbound: mpsc::Sender<Vec<u8>>,
+) -> Result<(), NetworkSessionError> {
+    let answer = broker
+        .resolve_dns(&question)
+        .await
+        .unwrap_or_else(|error| BrokerDnsAnswer {
+            answer: if error.kind() == io::ErrorKind::PermissionDenied {
+                DnsAnswer::Refused
+            } else {
+                DnsAnswer::ServerFailure
+            },
+            ttl_seconds: 0,
+        });
+    let response =
+        build_ipv4_dns_response(&question, answer.answer, answer.ttl_seconds, NETWORK_MTU)
+            .map_err(|_| NetworkSessionError::Engine)?;
+    outbound
+        .send(response)
+        .await
+        .map_err(|_| NetworkSessionError::Engine)
+}
+
 async fn next_inbound_guest_stream(
     inbound: &mut Option<mpsc::Receiver<InboundGuestStream>>,
 ) -> Option<InboundGuestStream> {
@@ -467,12 +510,14 @@ async fn serve_listener<B: EgressBroker>(mut listener: TcpListener, broker: Arc<
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddrV4;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use codewire_netstack::DnsRecordType;
     use codewire_vmm_guest_probe::{NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NetworkError};
     use tokio::io::{DuplexStream, duplex};
+    use tokio::sync::Semaphore;
 
     use super::*;
 
@@ -713,6 +758,143 @@ mod tests {
         let reply = exchange(&mut guest, &mut session, &admitted).await;
         assert_eq!(reply_code(&reply, &admitted), 0x80 | 5);
         assert_eq!(broker.questions.lock().unwrap().len(), 1);
+    }
+
+    const SLOW_DNS_NAME: &str = "slow.codewire.test";
+
+    /// Lookups of [`SLOW_DNS_NAME`] wait until released, as an upstream
+    /// lookup that times out would; every other request answers at once.
+    struct SlowLookupBroker {
+        slow: AtomicUsize,
+        release: Semaphore,
+        authorized: AtomicUsize,
+    }
+
+    impl SlowLookupBroker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                slow: AtomicUsize::new(0),
+                release: Semaphore::new(0),
+                authorized: AtomicUsize::new(0),
+            })
+        }
+
+        async fn wait_for_slow(&self, count: usize) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while self.slow.load(Ordering::Acquire) < count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the slow lookups reached the broker");
+        }
+    }
+
+    #[async_trait]
+    impl EgressBroker for SlowLookupBroker {
+        async fn authorize_tcp(&self, _flow: TcpFlow) -> io::Result<()> {
+            self.authorized.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        async fn connect_tcp(&self, _flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
+            Err(denied())
+        }
+
+        async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
+            if question.name == SLOW_DNS_NAME {
+                self.slow.fetch_add(1, Ordering::AcqRel);
+                self.release.acquire().await.unwrap().forget();
+            }
+            Ok(BrokerDnsAnswer {
+                answer: DnsAnswer::Ipv4(TEST_DNS_ANSWER),
+                ttl_seconds: 30,
+            })
+        }
+    }
+
+    /// The TCP flags of a reply packet.
+    fn tcp_flags(packet: &[u8]) -> u8 {
+        assert_eq!(packet[9], 6, "not TCP");
+        packet[20 + 13]
+    }
+
+    fn tcp_syn_packet(destination: SocketAddrV4) -> Vec<u8> {
+        let mut tcp = vec![0_u8; 20];
+        tcp[..2].copy_from_slice(&40_000_u16.to_be_bytes());
+        tcp[2..4].copy_from_slice(&destination.port().to_be_bytes());
+        tcp[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        tcp[12] = 5 << 4;
+        tcp[13] = 0x02;
+        tcp[14..16].copy_from_slice(&64_240_u16.to_be_bytes());
+        let checksum = transport_checksum(GUEST_IP, *destination.ip(), 6, &tcp);
+        tcp[16..18].copy_from_slice(&checksum.to_be_bytes());
+        ipv4_packet(GUEST_IP, *destination.ip(), 6, &tcp)
+    }
+
+    /// #2638: while one lookup waits upstream, another lookup is answered and
+    /// a TCP handshake to an admitted destination proceeds.
+    #[tokio::test]
+    async fn a_slow_lookup_holds_up_no_other_packet() {
+        let broker = SlowLookupBroker::new();
+        let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
+        let slow = dns_query_packet(WORKER_IP, 53, SLOW_DNS_NAME);
+        write_guest_packet(&mut guest, &mut session, &slow)
+            .await
+            .unwrap();
+        broker.wait_for_slow(1).await;
+
+        let fast = dns_query_packet(WORKER_IP, 53, TEST_DNS_NAME);
+        let reply = exchange(&mut guest, &mut session, &fast).await;
+        assert!(reply.ends_with(&TEST_DNS_ANSWER.octets()));
+
+        let syn = tcp_syn_packet(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 80), 443));
+        let reply = exchange(&mut guest, &mut session, &syn).await;
+        assert_eq!(tcp_flags(&reply), 0x12, "expected the stack's SYN-ACK");
+        assert_eq!(broker.authorized.load(Ordering::Acquire), 1);
+
+        broker.release.add_permits(1);
+        let reply = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_guest_packet(&mut guest, &mut session),
+        )
+        .await
+        .expect("the slow lookup was answered once released")
+        .unwrap();
+        assert!(reply.ends_with(&TEST_DNS_ANSWER.octets()));
+    }
+
+    #[tokio::test]
+    async fn a_question_beyond_the_in_flight_bound_is_answered_servfail_at_once() {
+        let broker = SlowLookupBroker::new();
+        let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
+        let slow = dns_query_packet(WORKER_IP, 53, SLOW_DNS_NAME);
+        for _ in 0..MAX_DNS_IN_FLIGHT {
+            write_guest_packet(&mut guest, &mut session, &slow)
+                .await
+                .unwrap();
+        }
+        broker.wait_for_slow(MAX_DNS_IN_FLIGHT).await;
+
+        let beyond = dns_query_packet(WORKER_IP, 53, TEST_DNS_NAME);
+        let reply = exchange(&mut guest, &mut session, &beyond).await;
+        assert_eq!(reply_code(&reply, &beyond), 0x80 | 2);
+        assert_eq!(broker.slow.load(Ordering::Acquire), MAX_DNS_IN_FLIGHT);
+
+        broker.release.add_permits(MAX_DNS_IN_FLIGHT);
+        for _ in 0..MAX_DNS_IN_FLIGHT {
+            let reply = tokio::time::timeout(
+                Duration::from_secs(2),
+                read_guest_packet(&mut guest, &mut session),
+            )
+            .await
+            .expect("every released lookup was answered")
+            .unwrap();
+            assert!(reply.ends_with(&TEST_DNS_ANSWER.octets()));
+        }
+        // With the bound free again, a question goes to the broker.
+        let reply = exchange(&mut guest, &mut session, &beyond).await;
+        assert!(reply.ends_with(&TEST_DNS_ANSWER.octets()));
     }
 
     #[tokio::test]

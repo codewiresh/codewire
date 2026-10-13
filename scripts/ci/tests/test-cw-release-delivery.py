@@ -259,6 +259,10 @@ class DeliveryTest(unittest.TestCase):
         data, identity, inputs = release.admit_build(source, executable, depinfo, target, fx.VERSION, revision, tree,
                                                      fx.RUSTC, (base / "target",))
         self.assertEqual((identity["sha256"], identity["source_tree_sha256"], inputs), (fx.digest(data), tree, 1))
+        # Only the macOS arm64 cw may embed a local runtime document.
+        with self.assertRaisesRegex(release.ReleaseError, "only the macOS arm64 cw embeds a local runtime"):
+            release.admit_build(source, executable, depinfo, target, fx.VERSION, revision, tree, fx.RUSTC,
+                                (base / "target",), embedded={(base / "local-runtime.json").resolve(): "0" * 64})
         (source / "crates/demo/src/lib.rs").write_text("pub fn mutated() {}\n")
         with self.assertRaisesRegex(release.ReleaseError, "source changed during the build"):
             release.admit_build(source, executable, depinfo, target, fx.VERSION, revision, tree, fx.RUSTC,
@@ -635,6 +639,43 @@ class SourceDigestTest(unittest.TestCase):
         with self.assertRaises(release.ReleaseError):
             release.check_build_inputs(source, self.depinfo(base, [target / "out/generated.rs"]), (target, cargo))
 
+
+    def test_only_the_verified_runtime_document_is_admitted_outside_the_repository(self):
+        base = self.base / "embedded-runtime-document"
+        base.mkdir()
+        source, _ = fx.source_repo(base)
+        target, cargo = base / "target", base / "cargo home"
+        (target / "out").mkdir(parents=True)
+        (cargo / "registry/src").mkdir(parents=True)
+        runtime = (base / "runtime").resolve()
+        (runtime / "blobs/sha256").mkdir(parents=True)
+        document = runtime / release.LOCAL_RUNTIME_NAME
+        document.write_bytes(b'{"schema":"codewire.cw.local-runtime/v1"}')
+        sibling = runtime / "blobs/sha256" / ("a" * 64)
+        sibling.write_bytes(b"blob")
+        digest = hashlib.sha256(document.read_bytes()).hexdigest()
+        lib = source / "crates/demo/src/lib.rs"
+        verified = {document: digest}
+        # Before this change admission refused the document. It still does
+        # without the verified digest.
+        with self.assertRaisesRegex(release.ReleaseError, "outside the repository"):
+            release.check_build_inputs(source, self.depinfo(base, [lib, document]), (target, cargo))
+        self.assertEqual(release.check_build_inputs(source, self.depinfo(base, [lib, document]), (target, cargo),
+                                                    verified), 1)
+        alias = base / "runtime-alias"
+        alias.symlink_to(runtime)
+        for name, paths, embedded, reason in (
+                ("sibling file in the runtime directory", [lib, document, sibling], verified, "outside the repository"),
+                ("other outside path", [lib, document, Path("/etc/hostname")], verified, "outside the repository"),
+                ("verified document not compiled in", [lib], verified, "was not compiled"),
+                ("document reached through a symlink", [lib, alias / release.LOCAL_RUNTIME_NAME],
+                 {alias / release.LOCAL_RUNTIME_NAME: digest}, "canonical"),
+                ("document with another digest", [lib, document], {document: "0" * 64}, "changed after it was verified")):
+            with self.subTest(name), self.assertRaisesRegex(release.ReleaseError, reason):
+                release.check_build_inputs(source, self.depinfo(base, paths), (target, cargo), embedded)
+        document.write_bytes(b'{"schema":"codewire.cw.local-runtime/v1","changed":true}')
+        with self.assertRaisesRegex(release.ReleaseError, "changed after it was verified"):
+            release.check_build_inputs(source, self.depinfo(base, [lib, document]), (target, cargo), verified)
 
     def test_embedded_runtime_probe_is_digested_and_admitted_without_other_python(self):
         base = self.base / "embedded-runtime-probe"
