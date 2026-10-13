@@ -211,6 +211,10 @@ run_retained_managed_agents_journey() {
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
   wait_kind_credential_environment "$environment" running
+  # As in the admitted journey: nothing is projected before the profile is
+  # bound, and the probe's session waits for environment setup to finish,
+  # which a source change requires.
+  kind_credential_probe "$environment" unselected
   update="$(kind_credential_cli env --platform update "$environment" \
     --profile "platform:$profile_name" --yes --output json)"
   generation="$(jq -er '.operation_generation |
