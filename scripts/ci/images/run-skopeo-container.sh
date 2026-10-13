@@ -96,7 +96,12 @@ else
   cat >"$stdin_file"
 fi
 
-for attempt in 1 2 3; do
+# Startup thread exhaustion is retried up to three attempts. A registry that
+# cannot be reached (a TLS handshake timeout to ghcr.io, #2691) is retried up
+# to five, with doubling delays (5, 10, 20 and 40 s by default), so a later
+# attempt resolves the registry again.
+readonly startup_attempts=3 network_attempts=5
+for ((attempt = 1; attempt <= network_attempts; attempt++)); do
   : >"$stdout_file"
   : >"$stderr_file"
   if "$docker_bin" "${docker_args[@]}" "$SKOPEO_IMAGE" "$@" \
@@ -107,11 +112,11 @@ for attempt in 1 2 3; do
     status=$?
   fi
 
-  if [ "$attempt" -lt 3 ] &&
+  if [ "$attempt" -lt "$startup_attempts" ] &&
       grep -Fq 'runtime/cgo: pthread_create failed: Resource temporarily unavailable' \
         "$stderr_file"; then
-    printf '[skopeo-runtime] transient thread exhaustion; retrying startup (%d/3)\n' \
-      "$((attempt + 1))" >&2
+    printf '[skopeo-runtime] transient thread exhaustion; retrying startup (%d/%d)\n' \
+      "$((attempt + 1))" "$startup_attempts" >&2
     sleep "$((retry_delay * attempt))"
     continue
   fi
@@ -119,12 +124,13 @@ for attempt in 1 2 3; do
   if grep -Eqi \
       '(dial (tcp|udp)[^[:cntrl:]]*(i/o timeout|connection refused|network is unreachable)|tls handshake timeout|connection reset by peer|connection timed out|context deadline exceeded|temporary failure in name resolution|no such host|unexpected eof)' \
       "$stderr_file"; then
-    if [ "$attempt" -lt 3 ]; then
-      printf '[skopeo-network] transient registry connectivity; retrying operation (%d/3)\n' \
-        "$((attempt + 1))" >&2
+    if [ "$attempt" -lt "$network_attempts" ]; then
+      wait_seconds=$((network_retry_delay << (attempt - 1)))
+      printf '[skopeo-network] transient registry connectivity; retrying operation in %ds (%d/%d)\n' \
+        "$wait_seconds" "$((attempt + 1))" "$network_attempts" >&2
       cat "$stdout_file"
       cat "$stderr_file" >&2
-      sleep "$((network_retry_delay * attempt))"
+      sleep "$wait_seconds"
       continue
     fi
     echo '[skopeo-network] class=transient-exhausted' >&2

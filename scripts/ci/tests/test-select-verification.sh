@@ -380,6 +380,11 @@ run_paths_case release pull_request refs/pull/3/head false \
   install.sh
 # Presence matters: an unlisted existing script selects unknown/full, while
 # deleted scripts deliberately remain policy-only. Prove each new owner path.
+run_present_paths_case bounded_external_downloads \
+  pull_request refs/pull/2691/head false \
+  'go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
+  scripts/ci/release/fetch-pinned.sh \
+  scripts/ci/tests/test-fetch-pinned.sh
 run_present_paths_case public_installer_test \
   pull_request refs/pull/952/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \

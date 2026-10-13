@@ -27,6 +27,12 @@ env:
   ZIG_VERSION: 0.15.2
   ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
   CARGO_ZIGBUILD_VERSION: 0.23.0
+  # Cargo fetches git dependencies (noeljackson/av, tauri-apps/wry and
+  # others) from github.com. Without a bound, a stalled connection holds
+  # the job until its deadline (#2691). This bound fails a stalled connect,
+  # TLS handshake or transfer in 20 s, and cargo logs and retries it.
+  CARGO_HTTP_TIMEOUT: '20'
+  CARGO_NET_RETRY: '5'
   OPENBAO_GITHUB_ROLE: codewire-source-cli-github-mirror
   OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-cli-github-mirror
   # The scoped R2 release route is admitted; publication and channel changes
@@ -137,8 +143,8 @@ jobs:
       - name: Install protoc (pinned)
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
-          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -204,8 +210,8 @@ jobs:
       - name: Install protoc (pinned)
         run: |
           set -euo pipefail
-          curl -fsSL -o "$HOME/protoc.zip" "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip"
-          echo "193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2  $HOME/protoc.zip" | shasum -a 256 -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip" \
+            193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2 "$HOME/protoc.zip"
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q "$HOME/protoc.zip" -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -306,8 +312,8 @@ jobs:
       - name: Install protoc (pinned)
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
-          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -319,8 +325,7 @@ jobs:
           scripts/ci/setup/assert-ci-runner-image.sh
 
           zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          curl -fsSLo zig.tar.xz "$zig_url"
-          echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "$zig_url" "$ZIG_X86_64_LINUX_SHA256" zig.tar.xz
           tar -xf zig.tar.xz
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
 
