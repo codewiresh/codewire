@@ -690,6 +690,409 @@ async fn host_control_preserves_legacy_local_stop_prelock_projection_cancellatio
     engine.shutdown().await.unwrap();
 }
 
+/// A host owner's engine, whose state root is named by its environment ID.
+#[cfg(target_os = "linux")]
+fn environment_engine(root: &Path) -> (SessionEngine, String) {
+    let environment = uuid::Uuid::from_u128(41).to_string();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let mut config = tests::test_engine(root).inner.config.clone();
+    config.host = Some(crate::HostConfig {
+        state_root: root.join("hosts").join(&environment),
+    });
+    (
+        SessionEngine::new(&config, CredentialBridge::new(None)),
+        environment,
+    )
+}
+
+/// A running session with a managed driver's command line. `sh` reads the
+/// driver argument as a script in its working directory: a synthetic sleep.
+#[cfg(target_os = "linux")]
+async fn driver_shaped_session(engine: &SessionEngine, root: &Path, environment: &str) -> String {
+    driver_shaped_session_running(engine, root, environment, "exec sleep 60\n").await
+}
+
+/// [`driver_shaped_session`] whose driver argument is `script`.
+#[cfg(target_os = "linux")]
+async fn driver_shaped_session_running(
+    engine: &SessionEngine,
+    root: &Path,
+    environment: &str,
+    script: &str,
+) -> String {
+    let directory = root.join("driver");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("_agent-driver"), script).unwrap();
+    let record = engine
+        .launch(v1::LaunchSessionRequest {
+            command: vec![
+                "/bin/sh".into(),
+                "_agent-driver".into(),
+                "--environment".into(),
+                environment.into(),
+                "--driver-id".into(),
+                uuid::Uuid::from_u128(42).to_string(),
+                "--registry-root".into(),
+                root.join("hosts").display().to_string(),
+            ],
+            working_dir: directory.display().to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(record.state, v1::SessionLifecycleState::Running as i32);
+    record.session_id
+}
+
+/// A session with a managed driver's command line whose process notes, when
+/// it is signalled, what the daemon had written by then: `intent` for the
+/// session's stop intent, `marker` for the environment's takedown marker,
+/// then `signalled`. It uses shell builtins only, so it is done well inside
+/// the time a signalled process has.
+#[cfg(target_os = "linux")]
+async fn witnessing_driver_session(
+    engine: &SessionEngine,
+    root: &Path,
+    environment: &str,
+) -> String {
+    let state = root.join("hosts").join(environment);
+    let script = format!(
+        "trap 'set -- {state}/sessions/*/{intent}; [ -e \"$1\" ] && echo intent >> seen; \
+         [ -e {state}/{marker} ] && echo marker >> seen; echo signalled >> seen; exit 0' TERM\n\
+         echo ready > ready\nsleep 60 &\nwait\n",
+        state = state.display(),
+        intent = crate::stop_evidence::STOP_INTENT_FILE,
+        marker = crate::stop_evidence::SHUTDOWN_MARKER,
+    );
+    let session = driver_shaped_session_running(engine, root, environment, &script).await;
+    witness_ready(root).await;
+    session
+}
+
+/// The witness has its handler: a signal now is noted, not fatal at once.
+#[cfg(target_os = "linux")]
+async fn witness_ready(root: &Path) {
+    let ready = root.join("driver").join("ready");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !ready.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the witnessing driver started");
+    std::fs::remove_file(ready).unwrap();
+}
+
+/// What the witness noted since it was last asked.
+#[cfg(target_os = "linux")]
+fn witnessed(root: &Path) -> Vec<String> {
+    let seen = root.join("driver").join("seen");
+    let noted = std::fs::read_to_string(&seen).unwrap_or_default();
+    let _ = std::fs::remove_file(seen);
+    noted.lines().map(str::to_owned).collect()
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn the_daemon_records_what_a_stop_means_before_it_signals_whatever_the_record_helper_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let (engine, environment) = environment_engine(temp.path());
+    let state = temp.path().join("hosts").join(&environment);
+    let driver = witnessing_driver_session(&engine, temp.path(), &environment).await;
+    let ordinary = engine.launch(request("sleep 60", false)).await.unwrap();
+    let intended = |session: &str| crate::stop_evidence::stop_intended(&state, session);
+    // What a conversation's next start does once it has acted on the intent.
+    let acted_on = |session: &str| crate::stop_evidence::clear_stop_intent(&state, session);
+
+    // An explicit stop. This test image is no cw-bearing host daemon, so the
+    // record helper is refused and records nothing: the daemon's own stop
+    // intent is on disk when the conversation is signalled all the same.
+    engine.stop(&driver).await.unwrap();
+    assert_eq!(witnessed(temp.path()), ["intent", "signalled"]);
+    assert!(intended(&driver));
+    // Only a host owner's managed conversation gets one.
+    engine.stop(&ordinary.session_id).await.unwrap();
+    assert!(!intended(&ordinary.session_id));
+
+    // Stopping a conversation that is not running records it too, so its
+    // next start does not resume what it left. Nothing is signalled.
+    acted_on(&driver).unwrap();
+    engine.stop(&driver).await.unwrap();
+    assert!(intended(&driver));
+    assert!(witnessed(temp.path()).is_empty());
+
+    // Restarting a conversation that is not running stops nothing and
+    // records nothing: it is how a run resumes.
+    acted_on(&driver).unwrap();
+    engine.restart(&driver).await.unwrap();
+    witness_ready(temp.path()).await;
+    assert!(!intended(&driver));
+    assert!(witnessed(temp.path()).is_empty());
+
+    // Restarting a running one stops that incarnation explicitly.
+    let restarted = engine.restart(&driver).await.unwrap();
+    assert_eq!(restarted.launch_generation, 3);
+    witness_ready(temp.path()).await;
+    assert_eq!(witnessed(temp.path()), ["intent", "signalled"]);
+    assert!(intended(&driver));
+    acted_on(&driver).unwrap();
+
+    // A shutdown takes the whole environment down: its marker is on disk
+    // when the conversation is signalled, and no stop intent is.
+    assert!(!crate::stop_evidence::takedown_marked(&state));
+    engine.shutdown().await.unwrap();
+    assert_eq!(witnessed(temp.path()), ["marker", "signalled"]);
+    assert!(crate::stop_evidence::takedown_marked(&state));
+    assert!(!intended(&driver));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_explicit_stop_that_cannot_be_recorded_signals_nothing_and_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let (engine, environment) = environment_engine(temp.path());
+    let driver = witnessing_driver_session(&engine, temp.path(), &environment).await;
+    // Nothing can be written where the intent goes.
+    let blocked = engine
+        .inner
+        .root
+        .join(&driver)
+        .join(crate::stop_evidence::STOP_INTENT_FILE);
+    std::fs::create_dir(&blocked).unwrap();
+
+    for restart in [false, true] {
+        let refused = if restart {
+            engine.restart(&driver).await
+        } else {
+            engine.stop(&driver).await
+        };
+        assert!(
+            matches!(
+                &refused,
+                Err(SessionError::Internal(message)) if message.contains("nothing was signalled")
+            ),
+            "{restart}: {refused:?}"
+        );
+        // The conversation runs on, in the same incarnation, unsignalled.
+        let after = engine.get(&driver).await.unwrap();
+        assert_eq!(after.state, v1::SessionLifecycleState::Running as i32);
+        assert_eq!(after.launch_generation, 1);
+        assert!(witnessed(temp.path()).is_empty(), "{restart}");
+    }
+
+    std::fs::remove_dir(&blocked).unwrap();
+    engine.stop(&driver).await.unwrap();
+    assert_eq!(witnessed(temp.path()), ["intent", "signalled"]);
+    engine.shutdown().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn stop_interrupt_checks(engine: &SessionEngine) -> usize {
+    engine
+        .inner
+        .stop_interrupt_checks
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn explicit_stop_and_restart_check_for_a_run_to_interrupt_and_shutdown_never_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let (engine, environment) = environment_engine(temp.path());
+    let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
+    let ordinary = engine.launch(request("sleep 60", false)).await.unwrap();
+    let stopped_state = v1::SessionLifecycleState::Stopped as i32;
+
+    // Only a running managed driver is checked.
+    assert_eq!(
+        engine.stop(&ordinary.session_id).await.unwrap().state,
+        stopped_state
+    );
+    assert_eq!(stop_interrupt_checks(&engine), 0);
+
+    // This test image is no cw-bearing host daemon, so the record helper is
+    // refused: the explicit stop still checks once and then stops at once.
+    let started = Instant::now();
+    let stopped = engine.stop(&driver).await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(stopped.state, stopped_state);
+    assert!(!stopped.cleanup_unknown);
+    assert_eq!(stop_interrupt_checks(&engine), 1);
+    engine.stop(&driver).await.unwrap();
+    assert_eq!(stop_interrupt_checks(&engine), 1);
+
+    // Restarting a stopped conversation has no run to interrupt; restarting
+    // a running one checks before it stops the old incarnation.
+    engine.restart(&driver).await.unwrap();
+    assert_eq!(stop_interrupt_checks(&engine), 1);
+    let restarted = engine.restart(&driver).await.unwrap();
+    assert_eq!(restarted.launch_generation, 3);
+    assert_eq!(stop_interrupt_checks(&engine), 2);
+
+    // Daemon shutdown stops the running conversation without checking: a
+    // shutdown, like a crash or reboot, leaves the run resumable.
+    engine.shutdown().await.unwrap();
+    assert_eq!(stop_interrupt_checks(&engine), 2);
+    let after = engine.get(&driver).await.unwrap();
+    assert_eq!(after.state, stopped_state);
+    assert!(!after.cleanup_unknown);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sessions_outside_a_host_owner_never_check_for_a_run_to_interrupt() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = tests::test_engine(temp.path());
+    std::fs::create_dir_all(temp.path().join("home")).unwrap();
+    let environment = uuid::Uuid::from_u128(41).to_string();
+    let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
+    engine.stop(&driver).await.unwrap();
+    engine.restart(&driver).await.unwrap();
+    engine.restart(&driver).await.unwrap();
+    engine.shutdown().await.unwrap();
+    engine.stop(&driver).await.unwrap();
+    assert_eq!(stop_interrupt_checks(&engine), 0);
+    // Nor for one to pause, nor for one that can never resume, nor for a
+    // paused one to end.
+    assert_eq!(shutdown_pause_checks(&engine), 0);
+    assert_eq!(stopped_pause_checks(&engine), 0);
+    // And nothing records what their stops mean: only a host daemon writes a
+    // stop intent or a takedown marker.
+    let intents = std::fs::read_dir(&engine.inner.root)
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .join(crate::stop_evidence::STOP_INTENT_FILE)
+                .exists()
+        })
+        .count();
+    assert_eq!(intents, 0);
+    let _admission = engine.inner.retention_admission.lock().await;
+    prune_session_records(&engine.inner, 0, true).await.unwrap();
+    assert_eq!(prune_retire_checks(&engine), 0);
+}
+
+#[cfg(target_os = "linux")]
+fn shutdown_pause_checks(engine: &SessionEngine) -> usize {
+    engine
+        .inner
+        .shutdown_pause_checks
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+fn prune_retire_checks(engine: &SessionEngine) -> usize {
+    engine
+        .inner
+        .prune_retire_checks
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn shutdown_checks_each_running_conversation_for_a_run_to_pause_and_an_explicit_stop_never_does()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let (engine, environment) = environment_engine(temp.path());
+    let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
+    let ordinary = engine.launch(request("sleep 60", false)).await.unwrap();
+    let stopped_state = v1::SessionLifecycleState::Stopped as i32;
+
+    // An explicit stop or restart interrupts a run; it never pauses one.
+    engine.stop(&driver).await.unwrap();
+    engine.restart(&driver).await.unwrap();
+    engine.restart(&driver).await.unwrap();
+    assert_eq!(shutdown_pause_checks(&engine), 0);
+    let interrupts = stop_interrupt_checks(&engine);
+
+    // Shutdown checks the one running managed driver before it signals it,
+    // and no other session. This test image is no cw-bearing host daemon, so
+    // the record helper is refused and the stop goes on at once.
+    let started = Instant::now();
+    engine.shutdown().await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(shutdown_pause_checks(&engine), 1);
+    assert_eq!(stop_interrupt_checks(&engine), interrupts);
+    for id in [&driver, &ordinary.session_id] {
+        let after = engine.get(id).await.unwrap();
+        assert_eq!(after.state, stopped_state);
+        assert!(!after.cleanup_unknown);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn stopped_pause_checks(engine: &SessionEngine) -> usize {
+    engine
+        .inner
+        .stopped_pause_checks
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_explicit_stop_of_a_stopped_conversation_checks_for_a_paused_message_to_end() {
+    let temp = tempfile::tempdir().unwrap();
+    let (engine, environment) = environment_engine(temp.path());
+    let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
+    let ordinary = engine.launch(request("sleep 60", false)).await.unwrap();
+    let stopped_state = v1::SessionLifecycleState::Stopped as i32;
+
+    // Stopping a running conversation interrupts its run; nothing of it is
+    // paused.
+    engine.stop(&driver).await.unwrap();
+    engine.stop(&ordinary.session_id).await.unwrap();
+    assert_eq!(stopped_pause_checks(&engine), 0);
+
+    // Stopped already, it may hold a message its environment's takedown
+    // paused, which this stop must keep from resuming. The refused helper is
+    // logged and the stop answers as before.
+    let started = Instant::now();
+    let again = engine.stop(&driver).await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(again.state, stopped_state);
+    assert_eq!(stopped_pause_checks(&engine), 1);
+    // Only a host owner's managed conversation is asked.
+    engine.stop(&ordinary.session_id).await.unwrap();
+    assert_eq!(stopped_pause_checks(&engine), 1);
+
+    // A restart continues a paused run instead, and shutdown pauses.
+    engine.restart(&driver).await.unwrap();
+    engine.shutdown().await.unwrap();
+    assert_eq!(stopped_pause_checks(&engine), 1);
+    assert_eq!(shutdown_pause_checks(&engine), 1);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn retention_asks_a_stopped_conversation_what_can_never_resume_before_removing_its_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let (engine, environment) = environment_engine(temp.path());
+    let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
+    let ordinary = engine.launch(request("sleep 60", false)).await.unwrap();
+    engine.stop(&driver).await.unwrap();
+    engine.stop(&ordinary.session_id).await.unwrap();
+    assert_eq!(prune_retire_checks(&engine), 0);
+
+    // Only the managed conversation is asked. The refused helper is logged
+    // and its record is removed all the same.
+    let admission = engine.inner.retention_admission.lock().await;
+    let started = Instant::now();
+    prune_session_records(&engine.inner, 0, true).await.unwrap();
+    drop(admission);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(prune_retire_checks(&engine), 1);
+    for id in [&driver, &ordinary.session_id] {
+        assert!(matches!(
+            engine.get(id).await,
+            Err(SessionError::NotFound(_))
+        ));
+    }
+    engine.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn refused_session_store_is_admitted_once_corrected() {
     let temp = tempfile::tempdir().unwrap();
@@ -1227,7 +1630,10 @@ async fn recovered_host_live_records_are_fenced_without_signaling_persisted_pid(
         assert_eq!(record.parent_session_id, None);
         assert!(matches!(
             recovered.restart(&record.session_id).await,
-            Err(SessionError::FailedPrecondition(_))
+            Err(SessionError::NeverRestarts(
+                NeverRestarts::CleanupUnconfirmed,
+                _
+            ))
         ));
     }
     assert!(matches!(
@@ -1306,7 +1712,7 @@ async fn host_launch_projection_is_memory_only_and_recovery_refuses_stale_replay
     let before = recovered.get(&record.session_id).await.unwrap();
     assert!(matches!(
         recovered.restart(&record.session_id).await,
-        Err(SessionError::FailedPrecondition(message))
+        Err(SessionError::NeverRestarts(NeverRestarts::ProjectionLost, message))
             if message.contains("launch a new session")
     ));
     let after = recovered.get(&record.session_id).await.unwrap();
@@ -1336,7 +1742,10 @@ async fn host_launch_projection_is_memory_only_and_recovery_refuses_stale_replay
     assert!(!rewritten.to_string().contains("legacy-launch-only"));
     assert!(matches!(
         recovered.restart(&record.session_id).await,
-        Err(SessionError::FailedPrecondition(_))
+        Err(SessionError::NeverRestarts(
+            NeverRestarts::ProjectionLost,
+            _
+        ))
     ));
     recovered.shutdown().await.unwrap();
 }
@@ -1701,7 +2110,10 @@ async fn restart_cannot_overwrite_cleanup_fence_published_by_its_dispatched_stop
     );
     assert!(matches!(
         engine.restart(&id).await,
-        Err(SessionError::FailedPrecondition(_))
+        Err(SessionError::NeverRestarts(
+            NeverRestarts::CleanupUnconfirmed,
+            _
+        ))
     ));
     assert!(engine.get(&id).await.unwrap().cleanup_unknown);
     assert!(!marker.exists());
@@ -2018,7 +2430,7 @@ async fn guarded_restart_rejects_unknown_cleanup_and_exhaustion_before_effects()
     }
     assert!(matches!(
         assert_guarded_restart_has_no_effects(&engine, &id, 1).await,
-        SessionError::FailedPrecondition(_)
+        SessionError::NeverRestarts(NeverRestarts::CleanupUnconfirmed, _)
     ));
     {
         let mut metadata = handle.metadata.lock().await;
@@ -2037,7 +2449,7 @@ async fn guarded_restart_rejects_unknown_cleanup_and_exhaustion_before_effects()
     }
     assert!(matches!(
         assert_guarded_restart_has_no_effects(&engine, &id, u64::MAX).await,
-        SessionError::ResourceExhausted(_)
+        SessionError::NeverRestarts(NeverRestarts::GenerationExhausted, _)
     ));
     assert!(!marker.exists());
     engine.shutdown().await.unwrap();
