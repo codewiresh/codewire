@@ -22,8 +22,10 @@
 //! as root, keeps the same login on the workload user's behalf
 //! ([`CodexHome::native`]): every file it reads or replaces must be that
 //! user's, and every file it creates is given to that user. Codewire's native
-//! `config.toml` is the one that begins with the exact native configuration,
-//! which Codex may extend with its own project-trust entry.
+//! `config.toml` is exactly the native configuration. Once Codex extends it,
+//! say with its own project-trust entry, the file is the user's: Codewire
+//! neither rewrites nor deletes it, so a delivered login then leaves Codex on
+//! the native provider rather than wipe the user's entries.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read as _};
@@ -86,8 +88,8 @@ enum ConfigMarker {
     /// The first line is exactly [`CODEX_MANAGED_CONFIG_HEADER`]: the hosted
     /// home is the user's `~/.codex`.
     Header,
-    /// The file begins with exactly these bytes, the native provider
-    /// configuration the guest writes into Codewire's own directory.
+    /// The file is exactly these bytes, the native provider configuration
+    /// the guest writes into Codewire's own directory.
     Native(String),
 }
 
@@ -230,7 +232,7 @@ impl CodexHome {
                 contents.split(|byte| *byte == b'\n').next().unwrap_or(&[])
                     == CODEX_MANAGED_CONFIG_HEADER.as_bytes()
             }
-            ConfigMarker::Native(native) => contents.starts_with(native.as_bytes()),
+            ConfigMarker::Native(native) => contents == native.as_bytes(),
         }
     }
 

@@ -986,8 +986,10 @@ fn a_native_home_gets_the_same_login_document_as_a_hosted_one() {
     );
 }
 
-/// The native configuration stays Codewire's after Codex adds its own
-/// project-trust entry; any other file there is the user's.
+/// Only the exact native configuration is Codewire's. Once Codex adds its
+/// own project-trust entry, the file is the user's: a delivered login does not
+/// delete it, and a later denial does not rewrite it, so the entry is never
+/// wiped. Any other file there is the user's too.
 #[test]
 fn a_native_home_recognizes_only_codewires_configuration() {
     let native = NativeFixture::new();
@@ -1000,7 +1002,15 @@ fn a_native_home_recognizes_only_codewires_configuration() {
     writer
         .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
         .unwrap();
-    assert!(!native.home().config_path().exists());
+    assert_eq!(
+        fs::read_to_string(native.home().config_path()).unwrap(),
+        trusted
+    );
+    writer.apply(CodexLoginDelivery::Denied, T0 + 60).unwrap();
+    assert_eq!(
+        fs::read_to_string(native.home().config_path()).unwrap(),
+        trusted
+    );
 
     let native = NativeFixture::new();
     fs::write(native.home().config_path(), b"model = \"users\"\n").unwrap();
