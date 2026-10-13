@@ -12,6 +12,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -413,6 +414,14 @@ class ProbeFixture(unittest.TestCase):
             (self.root / path).chmod(0o644)
         for path in self.root.rglob("*.sh"):
             path.chmod(0o755)
+        # The synthetic producer reports cw_release_fixtures.RUSTC, and the
+        # finalizer requires it to match the pinned channel. Pin the fixture's
+        # channel to that synthetic compiler, independent of the real pin.
+        synthetic = re.search(r'^RUSTC = "rustc ([0-9.]+) ',
+                              (ROOT / "scripts/ci/tests/cw_release_fixtures.py").read_text(), re.M)
+        toolchain = self.root / "rust-toolchain.toml"
+        toolchain.write_text(f'[toolchain]\nchannel = "{synthetic.group(1)}"\n')
+        toolchain.chmod(0o644)
         def git(*args):
             return subprocess.check_output(["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0",
                 "-C", str(self.root), *args], text=True, stderr=subprocess.DEVNULL).strip()
