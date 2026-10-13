@@ -1145,6 +1145,9 @@ run_paths_case cli_native_managed_journey pull_request refs/pull/2255/head false
 run_paths_case cli_native_update_journey pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/test-cli-native-update.py
+run_paths_case cli_native_socket_dir_helper pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/native_socket_dir.py
 run_paths_case cli_native_update_entrypoint_regression pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/ci/tests/test-native-managed-update-entrypoint.py
