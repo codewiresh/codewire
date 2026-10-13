@@ -78,7 +78,8 @@ def judge(case, outcome, detail, where="workload"):
     if case.startswith("concurrency-"):
         ok = outcome in {"handshake", "resolved"}
         return ("pass", "") if ok else ("broken", "a pending dial stopped other traffic (#2638)")
-    if case.startswith("info-") or case == "done" or case.endswith("-burst"):
+    if (case.startswith(("info-", "tcp-connect-burst")) or case == "done"
+            or case.endswith("-burst")):
         return "info", ""
     if case == "raw-icmp-socket":
         if outcome in {"EPERM", "EACCES"}:

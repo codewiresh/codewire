@@ -222,10 +222,10 @@ def dns_burst():
     emit("dns-malformed-burst", "sent", sent)
 
 
-def connect_burst():
+def connect_burst(count=300, case="tcp-connect-burst"):
     """Many parallel connects to an allowed destination, then all closed."""
     sockets, refused = [], 0
-    for _ in range(300):
+    for _ in range(count):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setblocking(False)
         try:
@@ -236,9 +236,15 @@ def connect_burst():
             refused += 1
         sockets.append(sock)
     time.sleep(3)
+    connected = 0
     for sock in sockets:
+        try:
+            sock.getpeername()
+            connected += 1
+        except OSError:
+            pass
         sock.close()
-    emit("tcp-connect-burst", "opened", f"{len(sockets)} sockets, {refused} failed at once")
+    emit(case, "opened", f"{len(sockets)} sockets, {connected} connected after 3 s, {refused} failed at once")
 
 
 def http_outcome(host, port=80):
@@ -295,17 +301,27 @@ def controls(label):
     """The allowed controls again after a burst. Each may stall while the worker
     drains the burst; record how long it took to work again, up to 60 s, so a
     slow recovery is told apart from a path that never recovers."""
-    started = time.monotonic()
+    started, failures = time.monotonic(), []
     while True:
+        attempt = time.monotonic()
         try:
             socket.getaddrinfo("example.com", 443, socket.AF_INET)
             emit(f"control-after-{label}-dns", "resolved", f"{time.monotonic() - started:.1f}")
             break
-        except socket.gaierror:
+        except socket.gaierror as error:
+            failures.append((error.errno, time.monotonic() - attempt))
             if time.monotonic() - started > RECOVERY_SECONDS:
                 emit(f"control-after-{label}-dns", "unresolved", f"{time.monotonic() - started:.1f}")
                 break
             time.sleep(0.5)
+    if failures:
+        # A lookup that fails after its full timeout got no answer; one that
+        # fails at once was answered SERVFAIL or refused.
+        errors = sorted({errno for errno, _ in failures})
+        durations = [duration for _, duration in failures]
+        emit(f"info-lookups-after-{label}", "failed",
+             f"{len(failures)} lookups failed, gaierror {errors}, "
+             f"each {min(durations):.2f}-{max(durations):.2f} s")
     started = time.monotonic()
     while True:
         outcome = http_outcome("1.1.1.1")
@@ -463,6 +479,11 @@ def main():
     controls("dns-burst")
     connect_burst()
     controls("connect-burst")
+    # #2714: a small burst straight after a large one, then the large one again.
+    connect_burst(16, "tcp-connect-burst-16-after")
+    controls("connect-burst-16-after")
+    connect_burst(300, "tcp-connect-burst-300-again")
+    controls("connect-burst-300-again")
     if raw:
         raw_burst()
         controls("raw-burst")
