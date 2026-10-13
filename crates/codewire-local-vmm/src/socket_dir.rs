@@ -307,7 +307,69 @@ fn prepare_base(
 /// Creates and checks the socket directory of `state_root`, which must be
 /// the canonical absolute path every process uses, and returns it.
 pub fn prepare(state_root: &Path) -> Result<PathBuf, SocketDirError> {
-    prepare_in(Path::new(TEMPORARY), state_root, current_uid())
+    let directory = prepare_in(Path::new(TEMPORARY), state_root, current_uid())?;
+    #[cfg(test)]
+    test_cleanup::remove_at_exit(&directory, state_root);
+    Ok(directory)
+}
+
+/// Every temporary state root a test makes gets a socket directory in the
+/// shared per-user directory. Each one this process prepared is removed when
+/// it exits, once its state root is gone, so they do not collect there; one
+/// whose root still exists (another process may still use it) is kept.
+#[cfg(test)]
+mod test_cleanup {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::{Mutex, Once, PoisonError};
+
+    static PREPARED: Mutex<Vec<(PathBuf, PathBuf)>> = Mutex::new(Vec::new());
+    static REGISTER: Once = Once::new();
+    static OWNER: AtomicI32 = AtomicI32::new(0);
+
+    pub(super) fn remove_at_exit(directory: &Path, state_root: &Path) {
+        REGISTER.call_once(|| unsafe {
+            OWNER.store(libc::getpid(), Ordering::Relaxed);
+            libc::atexit(remove_prepared);
+        });
+        let mut prepared = PREPARED.lock().unwrap_or_else(PoisonError::into_inner);
+        if !prepared.iter().any(|(known, _)| known == directory) {
+            prepared.push((directory.to_owned(), state_root.to_owned()));
+        }
+    }
+
+    extern "C" fn remove_prepared() {
+        // A forked child exiting must not remove its parent's directories.
+        if unsafe { libc::getpid() } != OWNER.load(Ordering::Relaxed) {
+            return;
+        }
+        remove_where_root_is_gone(std::mem::take(
+            &mut *PREPARED.lock().unwrap_or_else(PoisonError::into_inner),
+        ));
+    }
+
+    fn remove_where_root_is_gone(prepared: Vec<(PathBuf, PathBuf)>) {
+        for (directory, state_root) in prepared {
+            if !state_root.exists() {
+                let _ = std::fs::remove_dir_all(directory);
+            }
+        }
+    }
+
+    #[test]
+    fn only_directories_whose_state_root_is_gone_are_removed() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = |name: &str| scratch.path().join(name);
+        for name in ["live-root", "live-sockets/runners", "gone-sockets/runners"] {
+            std::fs::create_dir_all(path(name)).unwrap();
+        }
+        remove_where_root_is_gone(vec![
+            (path("live-sockets"), path("live-root")),
+            (path("gone-sockets"), path("gone-root")),
+        ]);
+        assert!(path("live-sockets/runners").is_dir());
+        assert!(!path("gone-sockets").exists());
+    }
 }
 
 fn prepare_in(temporary: &Path, state_root: &Path, uid: u32) -> Result<PathBuf, SocketDirError> {
