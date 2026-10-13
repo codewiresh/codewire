@@ -186,6 +186,7 @@ pub(super) fn environment(
             dir.join(CODEX_HOME).to_string_lossy().into_owned(),
         )],
         AgentKind::Claude => Vec::new(),
+        AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
     })
 }
 /// The fixed arguments before the driver's own. Codex gets its login lockdown

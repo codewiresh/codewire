@@ -399,6 +399,7 @@ async fn relay_observes_input_and_output_then_input_eof_drops_both_owners() {
             dropped: dropped.clone(),
             block_send: false,
         },
+        false,
         input,
     );
     requests_tx.send(Ok(cancel())).await.unwrap();
@@ -440,6 +441,7 @@ async fn relay_drop_while_send_pending_closes_input_and_upstream_without_detache
             dropped: dropped.clone(),
             block_send: true,
         },
+        false,
         input,
     );
     requests_tx.send(Ok(cancel())).await.unwrap();
@@ -468,6 +470,7 @@ async fn relay_invalid_response_ends_stream_and_closes_both_directions() {
             dropped: dropped.clone(),
             block_send: false,
         },
+        false,
         input,
     );
     responses_tx
@@ -491,4 +494,139 @@ async fn relay_invalid_response_ends_stream_and_closes_both_directions() {
         .await
         .unwrap();
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
+}
+
+fn keepalive_answer() -> DelegateCredentialsResponse {
+    DelegateCredentialsResponse {
+        output: Some(delegate_credentials_response::Output::Keepalive(
+            Box::default(),
+        )),
+        ..Default::default()
+    }
+}
+
+fn kinds(sent: &Mutex<Vec<DelegateCredentialsRequest>>) -> Vec<&'static str> {
+    sent.lock()
+        .unwrap()
+        .iter()
+        .map(|request| match request.input {
+            Some(delegate_credentials_request::Input::Keepalive(_)) => "keepalive",
+            Some(delegate_credentials_request::Input::Frame(_)) => "frame",
+            _ => "other",
+        })
+        .collect()
+}
+
+struct KeepaliveRelay {
+    requests: mpsc::Sender<Result<bridge::CredentialBridgeGuestMessage, Status>>,
+    responses: mpsc::Sender<Result<DelegateCredentialsResponse, Status>>,
+    sent: Arc<Mutex<Vec<DelegateCredentialsRequest>>>,
+    output: PlatformCredentialOutput,
+}
+
+fn keepalive_relay(keepalive: bool, block_send: bool) -> KeepaliveRelay {
+    let (requests, requests_rx) = mpsc::channel(1);
+    let (responses, responses_rx) = mpsc::channel(1);
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let output = relay(
+        FakeUpstream {
+            responses: responses_rx,
+            sent: sent.clone(),
+            dropped: Arc::new(AtomicUsize::new(0)),
+            block_send,
+        },
+        keepalive,
+        Box::pin(tokio_stream::wrappers::ReceiverStream::new(requests_rx)),
+    );
+    KeepaliveRelay {
+        requests,
+        responses,
+        sent,
+        output,
+    }
+}
+
+/// Poll the relay for `duration` of paused time; it must yield nothing.
+async fn idle(output: &mut PlatformCredentialOutput, duration: Duration) {
+    assert!(
+        tokio::time::timeout(duration, output.next()).await.is_err(),
+        "the relay yielded or ended while idle"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn relay_sends_one_keepalive_after_upstream_idleness_and_waits_for_its_answer() {
+    let mut relay = keepalive_relay(true, false);
+    idle(&mut relay.output, KEEPALIVE_IDLE - Duration::from_secs(1)).await;
+    assert!(kinds(&relay.sent).is_empty());
+    // A frame sent upstream restarts the idle period.
+    relay.requests.send(Ok(cancel())).await.unwrap();
+    idle(&mut relay.output, KEEPALIVE_IDLE - Duration::from_secs(1)).await;
+    assert_eq!(kinds(&relay.sent), ["frame"]);
+    idle(&mut relay.output, Duration::from_secs(2)).await;
+    assert_eq!(kinds(&relay.sent), ["frame", "keepalive"]);
+    // No second keepalive while the first waits for its answer.
+    idle(&mut relay.output, KEEPALIVE_IDLE * 3).await;
+    assert_eq!(kinds(&relay.sent), ["frame", "keepalive"]);
+    // The answer is consumed, never passed to the broker. The next keepalive
+    // was due one idle period after the previous one, so it goes at once.
+    relay.responses.send(Ok(keepalive_answer())).await.unwrap();
+    idle(&mut relay.output, Duration::from_secs(1)).await;
+    assert_eq!(kinds(&relay.sent), ["frame", "keepalive", "keepalive"]);
+    relay.responses.send(Ok(keepalive_answer())).await.unwrap();
+    idle(&mut relay.output, Duration::from_secs(1)).await;
+    assert_eq!(kinds(&relay.sent), ["frame", "keepalive", "keepalive"]);
+    // Operations still flow both ways.
+    relay.responses.send(Ok(response(output()))).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(WAIT, relay.output.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        output()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn relay_sends_no_keepalive_to_a_server_that_did_not_offer_them() {
+    let mut relay = keepalive_relay(false, false);
+    idle(&mut relay.output, KEEPALIVE_IDLE * 20).await;
+    assert!(kinds(&relay.sent).is_empty());
+    // And an answer it never asked for ends the epoch.
+    relay.responses.send(Ok(keepalive_answer())).await.unwrap();
+    assert_eq!(
+        relay.output.next().await.unwrap().unwrap_err().code(),
+        tonic::Code::PermissionDenied
+    );
+    assert!(relay.output.next().await.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn relay_unsolicited_keepalive_answer_ends_the_epoch() {
+    let mut relay = keepalive_relay(true, false);
+    relay.responses.send(Ok(keepalive_answer())).await.unwrap();
+    assert_eq!(
+        relay.output.next().await.unwrap().unwrap_err().code(),
+        tonic::Code::PermissionDenied
+    );
+    assert!(relay.output.next().await.is_none());
+    assert!(kinds(&relay.sent).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn relay_keepalive_send_timeout_ends_the_epoch_like_a_frame() {
+    let mut relay = keepalive_relay(true, true);
+    let started = Instant::now();
+    assert_eq!(
+        relay.output.next().await.unwrap().unwrap_err().code(),
+        tonic::Code::Unavailable
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= KEEPALIVE_IDLE + SEND_TIMEOUT && elapsed < KEEPALIVE_IDLE + SEND_TIMEOUT * 2
+    );
+    assert_eq!(kinds(&relay.sent), ["keepalive"]);
+    assert!(relay.output.next().await.is_none());
+    drop(relay.requests);
 }

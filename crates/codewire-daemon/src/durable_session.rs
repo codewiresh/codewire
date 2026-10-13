@@ -76,6 +76,35 @@ struct SessionEngineInner {
     /// The reason the store last refused to open, logged once and reported
     /// in health diagnostics until the store opens.
     store_refusal: Mutex<Option<String>>,
+    /// How many stops and restarts asked the record helper about an active
+    /// run to interrupt first.
+    #[cfg(all(test, target_os = "linux"))]
+    stop_interrupt_checks: std::sync::atomic::AtomicUsize,
+    /// How many shutdown stops asked the record helper to pause an active
+    /// run first.
+    #[cfg(all(test, target_os = "linux"))]
+    shutdown_pause_checks: std::sync::atomic::AtomicUsize,
+    /// How many session records retention removed after asking the record
+    /// helper to resolve what could then never resume.
+    #[cfg(all(test, target_os = "linux"))]
+    prune_retire_checks: std::sync::atomic::AtomicUsize,
+    /// How many explicit stops of a conversation that was not running asked
+    /// the record helper to end its paused messages.
+    #[cfg(all(test, target_os = "linux"))]
+    stopped_pause_checks: std::sync::atomic::AtomicUsize,
+}
+
+/// The fenced interrupt recorded for an explicit stop or restart, before it
+/// is delivered to the incarnation that was inspected.
+#[cfg(target_os = "linux")]
+struct StopInterrupt {
+    environment: String,
+    driver_id: String,
+    message_id: String,
+    deliver: bool,
+    token: Uuid,
+    control: mpsc::Sender<SessionControl>,
+    deadline: tokio::time::Instant,
 }
 
 struct SessionHandle {
@@ -324,6 +353,68 @@ pub enum SessionError {
     /// names paths, modes and record checks, never values.
     #[error("session store refused: {0}")]
     StoreRefused(String),
+    /// A restart that is refused the same way on every later attempt.
+    #[error("{1}")]
+    NeverRestarts(NeverRestarts, String),
+}
+
+/// Why a session can never be started again. A restart refused for one of
+/// these is refused the same way on every later attempt, so a caller that
+/// keeps work for the session's next start can stop waiting for it.
+///
+/// The reason travels with the refusal's gRPC status as metadata, beside the
+/// code and message the refusal always had: [`Self::status`] writes it and
+/// [`Self::of`] reads it. No caller decides this from a message's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NeverRestarts {
+    /// The daemon has no record of the session.
+    NoSession,
+    /// The session was launched with inline environment values, which are
+    /// not kept across a daemon restart.
+    ProjectionLost,
+    /// The cleanup of the session's last process was never confirmed.
+    CleanupUnconfirmed,
+    /// The session has used every launch generation.
+    GenerationExhausted,
+}
+
+impl NeverRestarts {
+    pub const ALL: [Self; 4] = [
+        Self::NoSession,
+        Self::ProjectionLost,
+        Self::CleanupUnconfirmed,
+        Self::GenerationExhausted,
+    ];
+    const METADATA_KEY: &str = "codewire-never-restarts";
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::NoSession => "no-session",
+            Self::ProjectionLost => "projection-lost",
+            Self::CleanupUnconfirmed => "cleanup-unconfirmed",
+            Self::GenerationExhausted => "generation-exhausted",
+        }
+    }
+
+    /// The refusal as the daemon answers it.
+    pub fn status(self, message: impl Into<String>) -> Status {
+        let mut status = match self {
+            Self::NoSession => Status::not_found(message),
+            Self::ProjectionLost | Self::CleanupUnconfirmed => Status::failed_precondition(message),
+            Self::GenerationExhausted => Status::resource_exhausted(message),
+        };
+        status.metadata_mut().insert(
+            Self::METADATA_KEY,
+            tonic::metadata::MetadataValue::from_static(self.name()),
+        );
+        status
+    }
+
+    /// The reason a refusal carries, if it carries one.
+    pub fn of(status: &Status) -> Option<Self> {
+        let name = status.metadata().get(Self::METADATA_KEY)?.to_str().ok()?;
+        Self::ALL.into_iter().find(|reason| reason.name() == name)
+    }
 }
 
 impl SessionEngine {
@@ -367,6 +458,14 @@ impl SessionEngine {
                 launches: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
                 store_refusal: Mutex::new(None),
+                #[cfg(all(test, target_os = "linux"))]
+                stop_interrupt_checks: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(all(test, target_os = "linux"))]
+                shutdown_pause_checks: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(all(test, target_os = "linux"))]
+                prune_retire_checks: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(all(test, target_os = "linux"))]
+                stopped_pause_checks: std::sync::atomic::AtomicUsize::new(0),
             }),
         }
     }
@@ -384,7 +483,17 @@ impl SessionEngine {
         self.inner.shutdown.clone().drop_guard()
     }
 
+    /// The daemon is going down: nothing more launches. A host daemon first
+    /// marks its environment as being taken down, so the marker is on disk
+    /// before a cancelled launch or [`Self::shutdown`] signals any session.
+    /// A marker that cannot be written is logged; a driver without it leaves
+    /// its run to the next start, as after a crash.
     pub(crate) fn cancel_launches(&self) {
+        if let Some(host) = &self.inner.config.host
+            && let Err(error) = crate::stop_evidence::mark_takedown(&host.state_root)
+        {
+            tracing::warn!(%error, "could not mark the environment as being taken down");
+        }
         let _admission = lock(&self.inner.launch_admission);
         self.inner.shutdown.cancel();
         self.inner.launches.close();
@@ -398,10 +507,32 @@ impl SessionEngine {
             .map_err(|_| SessionError::Internal("session launch cleanup did not settle".into()))?;
         if self.inner.config.host.is_some() {
             let ids = lock(&self.inner.active).keys().cloned().collect::<Vec<_>>();
+            // Every managed conversation's resumable run is paused before
+            // any session is signalled: its record is then on disk whatever
+            // becomes of its driver, and no record helper competes with a
+            // stopping session for the short time its processes have to
+            // end. What does not answer within the shutdown budget is left
+            // to its driver.
+            #[cfg(target_os = "linux")]
+            {
+                let mut pauses = tokio::task::JoinSet::new();
+                for id in &ids {
+                    let (engine, id) = (self.clone(), id.clone());
+                    pauses.spawn(async move {
+                        if let Ok(handle) = engine.handle(&id) {
+                            let _operation = handle.operation.lock().await;
+                            engine.pause_active_run_before_shutdown(&id, &handle).await;
+                        }
+                    });
+                }
+                while let Ok(Some(_)) = tokio::time::timeout_at(deadline, pauses.join_next()).await
+                {
+                }
+            }
             let mut stops = tokio::task::JoinSet::new();
             for id in ids {
                 let engine = self.clone();
-                stops.spawn(async move { engine.stop(&id).await });
+                stops.spawn(async move { engine.stop_for_shutdown(&id).await });
             }
             while let Some(result) = tokio::time::timeout_at(deadline, stops.join_next())
                 .await
@@ -614,17 +745,397 @@ impl SessionEngine {
         Ok(self.handle(session_id)?.metadata.lock().await.to_record())
     }
 
+    /// An explicit stop: a client asked for it. A host owner's managed
+    /// conversation has the stop recorded first; see
+    /// [`Self::record_stop_intent`]. A managed conversation whose agent takes
+    /// it then has its active run interrupted; see
+    /// [`Self::interrupt_active_run_before_stop`].
     pub async fn stop(&self, session_id: &str) -> Result<v1::SessionRecord, SessionError> {
+        let handle = self.admit_stop(session_id).await?;
+        #[cfg(target_os = "linux")]
+        if owner_conversation(&self.inner.config, &*handle.metadata.lock().await).is_some() {
+            // From its recorded intent on, the stop finishes even if this
+            // caller goes away: a conversation is never left running with a
+            // stop recorded against it.
+            let engine = self.clone();
+            let session_id = session_id.to_owned();
+            return tokio::spawn(async move {
+                engine.record_stop_intent(&session_id)?;
+                engine.stop_admitted(&session_id, handle).await
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Internal("session stop outcome could not be confirmed".into())
+            })?;
+        }
+        self.stop_admitted(session_id, handle).await
+    }
+
+    /// Records, before anything of an explicit stop or restart can signal a
+    /// host owner's managed conversation, that the stop is explicit: a stop
+    /// intent in the session's own directory (see [`crate::stop_evidence`]).
+    /// The daemon writes it itself, so it does not depend on the
+    /// conversation's record helper. The conversation's driver reads it when
+    /// its stop signal arrives and never pauses the run; if the driver is
+    /// killed first, the conversation's next start reads it and never resumes
+    /// the run. A stop whose intent cannot be written signals nothing and
+    /// fails.
+    #[cfg(target_os = "linux")]
+    fn record_stop_intent(&self, session_id: &str) -> Result<(), SessionError> {
+        let Some(host) = &self.inner.config.host else {
+            return Ok(());
+        };
+        crate::stop_evidence::record_stop_intent(&host.state_root, session_id).map_err(|error| {
+            SessionError::Internal(format!(
+                "could not record the stop of session {session_id}; nothing was signalled: {error}"
+            ))
+        })
+    }
+
+    async fn stop_admitted(
+        &self,
+        session_id: &str,
+        handle: Arc<SessionHandle>,
+    ) -> Result<v1::SessionRecord, SessionError> {
+        // Interrupt a pending projection before waiting for the serial session
+        // operation lock. A queued Stop must not wait for secret delivery.
+        handle.launch_cancellation.send_replace(true);
+        #[cfg(target_os = "linux")]
+        if let Some(interrupt) = self
+            .interrupt_active_run_before_stop(session_id, &handle)
+            .await
+        {
+            // Once its interrupt is recorded, the stop finishes even if this
+            // caller goes away, so a conversation is never left interrupted
+            // but running.
+            let engine = self.clone();
+            let session_id = session_id.to_owned();
+            return tokio::spawn(async move {
+                let _operation = handle.operation.lock().await;
+                engine
+                    .finish_interrupt_before_stop(&session_id, interrupt)
+                    .await;
+                engine.stop_active(&session_id, &handle).await
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Internal("session stop outcome could not be confirmed".into())
+            })?;
+        }
+        let _operation = handle.operation.lock().await;
+        #[cfg(target_os = "linux")]
+        self.end_paused_run_of_stopped_conversation(session_id, &handle)
+            .await;
+        self.stop_active(session_id, &handle).await
+    }
+
+    /// An explicit stop of a managed conversation that is not running asks
+    /// its record helper to end a message that its environment's takedown
+    /// paused: the conversation's next start would otherwise resume a run
+    /// its owner has since stopped. A running conversation never comes
+    /// here; its active run is interrupted instead. Every such stop of a
+    /// host owner's own managed driver costs one bounded helper run; a
+    /// refusal or timeout is logged and the stop answers as before.
+    #[cfg(target_os = "linux")]
+    async fn end_paused_run_of_stopped_conversation(
+        &self,
+        session_id: &str,
+        handle: &SessionHandle,
+    ) {
+        use crate::host_control::managed;
+        if lock(&self.inner.active).contains_key(session_id) {
+            return;
+        }
+        let (environment, driver_id) = {
+            let metadata = handle.metadata.lock().await;
+            if is_live_state(metadata.state) {
+                return;
+            }
+            let Some(conversation) = owner_conversation(&self.inner.config, &metadata) else {
+                return;
+            };
+            conversation
+        };
+        #[cfg(test)]
+        self.inner
+            .stopped_pause_checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match managed::helper_within(
+            &self.inner.config,
+            &environment,
+            managed::stop_paused(&driver_id, session_id),
+            managed::RESOLVE_PAUSED_BOUND,
+        )
+        .await
+        {
+            Ok(reply) => {
+                if reply["resolved"]
+                    .as_array()
+                    .is_some_and(|resolved| !resolved.is_empty())
+                {
+                    tracing::info!(
+                        session_id,
+                        driver_id = driver_id.as_str(),
+                        resolved = %reply["resolved"],
+                        "ended the paused messages of a stopped conversation"
+                    );
+                }
+            }
+            Err(_) => tracing::warn!(
+                session_id,
+                driver_id = driver_id.as_str(),
+                "could not check a stopped conversation for paused messages; its next start resumes them"
+            ),
+        }
+    }
+
+    /// Daemon shutdown stops each session without interrupting an agent's
+    /// run: like a crash, kill or host reboot, it leaves the run resumable.
+    /// [`Self::shutdown`] has by then paused each managed conversation's run
+    /// that its agent can resume; see
+    /// [`Self::pause_active_run_before_shutdown`].
+    async fn stop_for_shutdown(&self, session_id: &str) -> Result<v1::SessionRecord, SessionError> {
+        let handle = self.admit_stop(session_id).await?;
+        handle.launch_cancellation.send_replace(true);
+        let _operation = handle.operation.lock().await;
+        self.stop_active(session_id, &handle).await
+    }
+
+    /// Before shutdown signals any session, asks the record helper of each
+    /// running managed conversation on a trusted host to pause its active
+    /// run: the message is recorded paused and its parent's notice queued
+    /// before the first signal, so neither depends on what the driver
+    /// manages to do between its SIGTERM and SIGKILL. The helper decides
+    /// from the conversation's own state: it pauses only a run the agent can
+    /// resume (noel) and answers at once for any other.
+    ///
+    /// The daemon cannot tell an agent's kind from a session, so every
+    /// shutdown stop of a running managed driver costs one helper run,
+    /// bounded well inside the shutdown budget. An explicit stop or restart
+    /// never comes here: it interrupts instead. Shutdown itself does not
+    /// cancel the helper, which exists because of it. A refusal or timeout is
+    /// logged and the stop goes on; the driver then decides by its own
+    /// evidence of the takedown.
+    #[cfg(target_os = "linux")]
+    async fn pause_active_run_before_shutdown(&self, session_id: &str, handle: &SessionHandle) {
+        use crate::host_control::managed;
+        let (environment, driver_id) = {
+            let metadata = handle.metadata.lock().await;
+            if metadata.state != v1::SessionLifecycleState::Running as i32 {
+                return;
+            }
+            let Some(conversation) = owner_conversation(&self.inner.config, &metadata) else {
+                return;
+            };
+            conversation
+        };
+        #[cfg(test)]
+        self.inner
+            .shutdown_pause_checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match managed::helper_within(
+            &self.inner.config,
+            &environment,
+            managed::pause_before_shutdown(&driver_id, session_id),
+            managed::SHUTDOWN_PAUSE_BOUND,
+        )
+        .await
+        {
+            Ok(reply) => {
+                if let Some(message_id) = reply["paused"].as_str() {
+                    tracing::info!(
+                        session_id,
+                        driver_id = driver_id.as_str(),
+                        message_id,
+                        "paused the active run before shutting down"
+                    );
+                }
+            }
+            Err(_) => tracing::warn!(
+                session_id,
+                driver_id = driver_id.as_str(),
+                "could not check for an active run to pause before shutting down; its driver decides by the takedown marker"
+            ),
+        }
+    }
+
+    async fn admit_stop(&self, session_id: &str) -> Result<Arc<SessionHandle>, SessionError> {
         self.ensure_initialized().await?;
         validate_session_id(session_id)?;
         let handle = self.handle(session_id)?;
         #[cfg(target_os = "linux")]
         refuse_platform_managed_bypass(&*handle.metadata.lock().await)?;
-        // Interrupt a pending projection before waiting for the serial session
-        // operation lock. A queued Stop must not wait for secret delivery.
-        handle.launch_cancellation.send_replace(true);
-        let _operation = handle.operation.lock().await;
-        self.stop_active(session_id, &handle).await
+        Ok(handle)
+    }
+
+    /// Before an explicit stop or restart signals a running managed
+    /// conversation on a trusted host, asks its record helper to interrupt
+    /// the active run, so the message ends interrupted and its parent is
+    /// notified first. The helper decides from the conversation's own
+    /// config: it records the fenced interrupt only for an agent that takes
+    /// one (noel) and answers at once for any other. The interrupt is then
+    /// delivered and awaited by [`Self::finish_interrupt_before_stop`].
+    ///
+    /// The daemon cannot tell an agent's kind from a session, so every stop
+    /// of a running managed driver costs one helper run. Daemon shutdown
+    /// never comes here. A refusal or timeout is logged and the stop goes on,
+    /// leaving the message's outcome unknown as before.
+    #[cfg(target_os = "linux")]
+    async fn interrupt_active_run_before_stop(
+        &self,
+        session_id: &str,
+        handle: &SessionHandle,
+    ) -> Option<StopInterrupt> {
+        use crate::host_control::managed;
+        let environment = self
+            .inner
+            .config
+            .host
+            .as_ref()?
+            .state_root
+            .file_name()?
+            .to_str()?
+            .to_owned();
+        let (driver_id, token, control) = {
+            let metadata = handle.metadata.lock().await;
+            let driver_id = metadata.command.get(5)?.clone();
+            if metadata.state != v1::SessionLifecycleState::Running as i32
+                || metadata.pty
+                || metadata.platform_managed_origin.is_some()
+                || crate::host_control::canonical_uuid(&environment).is_err()
+                || crate::host_control::canonical_uuid(&driver_id).is_err()
+                || !managed::driver_command_shape(&metadata.command, &environment, &driver_id)
+            {
+                return None;
+            }
+            let (token, control) = lock(&self.inner.active)
+                .get(session_id)
+                .map(|active| (active.token, active.control.clone()))?;
+            (driver_id, token, control)
+        };
+        #[cfg(test)]
+        self.inner
+            .stop_interrupt_checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let deadline = tokio::time::Instant::now() + managed::STOP_INTERRUPT_BOUND;
+        let reply = tokio::select! {
+            biased;
+            _ = self.inner.shutdown.cancelled() => return None,
+            reply = tokio::time::timeout_at(
+                deadline,
+                managed::helper(
+                    &self.inner.config,
+                    &environment,
+                    managed::interrupt_before_stop(&driver_id, session_id),
+                ),
+            ) => reply,
+        };
+        let reply = match reply {
+            Ok(Ok(reply)) => reply,
+            outcome => {
+                tracing::warn!(
+                    session_id,
+                    driver_id = driver_id.as_str(),
+                    timed_out = outcome.is_err(),
+                    "could not check for an active run to interrupt before stopping; stopping without it"
+                );
+                return None;
+            }
+        };
+        let interrupt = &reply["interrupt"];
+        if interrupt.is_null() {
+            return None;
+        }
+        let message_id = interrupt["message_id"]
+            .as_str()
+            .filter(|id| crate::host_control::canonical_uuid(id).is_ok());
+        let (Some(message_id), Some(deliver)) = (message_id, interrupt["deliver"].as_bool()) else {
+            tracing::warn!(
+                session_id,
+                driver_id = driver_id.as_str(),
+                "the record helper answered an unusable interrupt; stopping without it"
+            );
+            return None;
+        };
+        Some(StopInterrupt {
+            environment,
+            driver_id,
+            message_id: message_id.to_owned(),
+            deliver,
+            token,
+            control,
+            deadline,
+        })
+    }
+
+    /// Delivers a recorded interrupt to the incarnation it was recorded for,
+    /// then lets the helper wait, at most 10 s, for the interrupted message to
+    /// end and its parent notification to be written. Bounded as a whole by
+    /// the recording's deadline; daemon shutdown ends the wait at once.
+    #[cfg(target_os = "linux")]
+    async fn finish_interrupt_before_stop(&self, session_id: &str, interrupt: StopInterrupt) {
+        use crate::host_control::managed;
+        let settle = async {
+            if interrupt.deliver {
+                let current = lock(&self.inner.active)
+                    .get(session_id)
+                    .is_some_and(|active| active.token == interrupt.token);
+                if !current {
+                    // Another stop or restart already ended this incarnation.
+                    return Ok(serde_json::Value::Null);
+                }
+                let line = managed::line(&interrupt.driver_id, &interrupt.message_id, false)
+                    .map_err(|_| "the control line could not be encoded")?;
+                self.host_managed_input(interrupt.control.clone(), line)
+                    .await
+                    .map_err(|_| "the driver did not acknowledge the control line")?;
+            }
+            managed::helper_within(
+                &self.inner.config,
+                &interrupt.environment,
+                managed::await_interrupt_before_stop(
+                    &interrupt.driver_id,
+                    session_id,
+                    &interrupt.message_id,
+                ),
+                managed::STOP_INTERRUPT_BOUND,
+            )
+            .await
+            .map_err(|_| "the record helper refused or timed out")
+        };
+        let outcome = tokio::select! {
+            biased;
+            _ = self.inner.shutdown.cancelled() => Err("the daemon is shutting down"),
+            outcome = tokio::time::timeout_at(interrupt.deadline, settle) => {
+                outcome.unwrap_or(Err("the bound expired"))
+            }
+        };
+        match outcome {
+            Ok(serde_json::Value::Null) => {}
+            Ok(settled) if settled["settled"].as_bool() == Some(true) => tracing::info!(
+                session_id,
+                driver_id = interrupt.driver_id.as_str(),
+                message_id = interrupt.message_id.as_str(),
+                message_state = settled["message_state"].as_str().unwrap_or("-"),
+                notification_state = settled["notification_state"].as_str().unwrap_or("-"),
+                "interrupted the active run before stopping"
+            ),
+            Ok(settled) => tracing::warn!(
+                session_id,
+                driver_id = interrupt.driver_id.as_str(),
+                message_id = interrupt.message_id.as_str(),
+                message_state = settled["message_state"].as_str().unwrap_or("-"),
+                interrupt_state = settled["interrupt_state"].as_str().unwrap_or("-"),
+                "the active run did not end before stopping; its outcome stays unknown"
+            ),
+            Err(reason) => tracing::warn!(
+                session_id,
+                driver_id = interrupt.driver_id.as_str(),
+                message_id = interrupt.message_id.as_str(),
+                reason,
+                "the interrupt before stopping did not settle; the run's outcome stays unknown"
+            ),
+        }
     }
 
     async fn stop_active(
@@ -696,7 +1207,12 @@ impl SessionEngine {
             admission = self.inner.retention_admission.lock() => admission,
         };
         validate_session_id(session_id)?;
-        let handle = self.handle(session_id)?;
+        let handle = self.handle(session_id).map_err(|error| match error {
+            SessionError::NotFound(message) => {
+                SessionError::NeverRestarts(NeverRestarts::NoSession, message)
+            }
+            error => error,
+        })?;
         if cancel.is_cancelled() {
             return Err(launch_cancelled_error());
         }
@@ -721,7 +1237,8 @@ impl SessionEngine {
                     "member managed restart requires its exact guardian and target-owned generation transaction".into()));
             }
             if metadata.environment_projection_required && metadata.env.is_empty() {
-                return Err(SessionError::FailedPrecondition(
+                return Err(SessionError::NeverRestarts(
+                    NeverRestarts::ProjectionLost,
                     "the launch environment projection is no longer available after daemon recovery; launch a new session with the required environment overrides".into(),
                 ));
             }
@@ -760,17 +1277,37 @@ impl SessionEngine {
                 }
             }
             if metadata.cleanup_unknown {
-                return Err(SessionError::FailedPrecondition(
+                return Err(SessionError::NeverRestarts(
+                    NeverRestarts::CleanupUnconfirmed,
                     "session launch cleanup is unconfirmed; restart is unavailable".into(),
                 ));
             }
             metadata.launch_generation.checked_add(1).ok_or_else(|| {
-                SessionError::ResourceExhausted(
+                SessionError::NeverRestarts(
+                    NeverRestarts::GenerationExhausted,
                     "session launch generation is exhausted; launch a new session".into(),
                 )
             })?
         };
         if lock(&self.inner.active).contains_key(session_id) {
+            // An explicit restart of a running conversation records its stop
+            // and interrupts an agent's active run first, as an explicit
+            // stop does. A restart of a conversation that is not running
+            // stops nothing and records nothing: it is how a run resumes.
+            #[cfg(target_os = "linux")]
+            {
+                if owner_conversation(&self.inner.config, &*handle.metadata.lock().await).is_some()
+                {
+                    self.record_stop_intent(session_id)?;
+                }
+                if let Some(interrupt) = self
+                    .interrupt_active_run_before_stop(session_id, &handle)
+                    .await
+                {
+                    self.finish_interrupt_before_stop(session_id, interrupt)
+                        .await;
+                }
+            }
             // Once Stop is dispatched, retain the operation lock until the
             // previous monitor settles. Caller loss cannot cancel its cleanup.
             self.stop_active(session_id, &handle).await?;
@@ -778,7 +1315,8 @@ impl SessionEngine {
         // Stop can settle Interrupted when group/join/drain cleanup failed.
         // Do not overwrite that newly published fence with a new launch.
         if handle.metadata.lock().await.cleanup_unknown {
-            return Err(SessionError::FailedPrecondition(
+            return Err(SessionError::NeverRestarts(
+                NeverRestarts::CleanupUnconfirmed,
                 "session process cleanup is unconfirmed; restart is unavailable".into(),
             ));
         }
@@ -1247,13 +1785,16 @@ impl SessionEngine {
         })?;
         self.make_record_room_preserving(None).await?;
         if let Some(managed) = &managed {
+            let refused =
+                |_| SessionError::FailedPrecondition("managed preparation refused".into());
             let prepared = crate::host_control::managed::helper(
                 &self.inner.config,
                 owner.environment_id(),
-                crate::host_control::managed::prepare(&request.origin(), managed),
+                crate::host_control::managed::prepare(&request.origin(), managed)
+                    .map_err(refused)?,
             )
             .await
-            .map_err(|_| SessionError::FailedPrecondition("managed preparation refused".into()))?;
+            .map_err(refused)?;
             if prepared["driver_id"].as_str() != Some(request.request_id.as_str())
                 || prepared["message_id"].as_str()
                     != Some(if managed.prompt.is_some() {
@@ -1499,7 +2040,7 @@ impl SessionEngine {
             let queued = managed::helper(
                 &self.inner.config,
                 owner.environment_id(),
-                managed::queue(&request.origin(), &control),
+                managed::queue(&request.origin(), &control)?,
             )
             .await?;
             if queued["message_id"].as_str() != Some(request.request_id.as_str()) {
@@ -2553,6 +3094,7 @@ impl SessionEngineInner {
                     OUTPUT_FILE,
                     METADATA_TEMP_FILE,
                     OUTPUT_TEMP_FILE,
+                    crate::stop_evidence::STOP_INTENT_FILE,
                 ] {
                     if let Ok(metadata) = tokio::fs::symlink_metadata(entry.path().join(name)).await
                         && !metadata.is_file()
@@ -2838,6 +3380,8 @@ async fn prune_session_records_preserving(
     }
     for (_, session_id, handle) in candidates.into_iter().take(needed) {
         let _operation = handle.operation.lock().await;
+        #[cfg(target_os = "linux")]
+        retire_managed_before_prune(inner, &session_id, &handle).await;
         let path = session_directory(&inner.root, &session_id)?;
         let retired = inner
             .root
@@ -2884,6 +3428,83 @@ fn prepare_pipe_process(
         0,
     )
     .map_err(|error| format!("prepare session process: {error}"))
+}
+
+/// The environment and driver IDs of a host owner's own managed
+/// conversation: the only kind of session whose run can pause or resume. A
+/// member's or the platform's conversation, a terminal and every other
+/// command are none.
+#[cfg(target_os = "linux")]
+fn owner_conversation(
+    config: &crate::Config,
+    metadata: &PersistedSession,
+) -> Option<(String, String)> {
+    let environment = config.host.as_ref()?.state_root.file_name()?.to_str()?;
+    let driver_id = metadata.command.get(5)?;
+    (!metadata.pty
+        && metadata.platform_managed_origin.is_none()
+        && metadata.control_origin.is_none()
+        && crate::host_control::canonical_uuid(environment).is_ok()
+        && crate::host_control::canonical_uuid(driver_id).is_ok()
+        && crate::host_control::managed::driver_command_shape(
+            &metadata.command,
+            environment,
+            driver_id,
+        ))
+    .then(|| (environment.to_owned(), driver_id.clone()))
+}
+
+/// Before retention removes a stopped managed conversation's session record
+/// on a trusted host, asks its record helper to resolve what can then never
+/// resume: a message that the environment's takedown paused ends unknown and
+/// its parent hears of it once, so none stays paused with no conversation
+/// behind it. The daemon cannot tell an agent's kind from a session, so each
+/// such record costs one bounded helper run; a member's conversation never
+/// pauses and costs none. A refusal or timeout is logged and the record is
+/// removed all the same.
+#[cfg(target_os = "linux")]
+async fn retire_managed_before_prune(
+    inner: &SessionEngineInner,
+    session_id: &str,
+    handle: &SessionHandle,
+) {
+    use crate::host_control::managed;
+    let Some((environment, driver_id)) =
+        owner_conversation(&inner.config, &*handle.metadata.lock().await)
+    else {
+        return;
+    };
+    #[cfg(test)]
+    inner
+        .prune_retire_checks
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    match managed::helper_within(
+        &inner.config,
+        &environment,
+        managed::retire_before_prune(&driver_id, session_id),
+        managed::RESOLVE_PAUSED_BOUND,
+    )
+    .await
+    {
+        Ok(reply) => {
+            if reply["resolved"]
+                .as_array()
+                .is_some_and(|resolved| !resolved.is_empty())
+            {
+                tracing::info!(
+                    session_id,
+                    driver_id = driver_id.as_str(),
+                    resolved = %reply["resolved"],
+                    "resolved paused messages before removing their conversation's session record"
+                );
+            }
+        }
+        Err(_) => tracing::warn!(
+            session_id,
+            driver_id = driver_id.as_str(),
+            "could not check for paused messages before removing a conversation's session record"
+        ),
+    }
 }
 
 async fn wait_for_launch_cancellation(handle: &SessionHandle) {
@@ -4275,6 +4896,7 @@ pub fn status_from_session_error(error: SessionError) -> Status {
         // A code no other session refusal uses: orchestration reports it as a
         // known precondition, never as an ambiguous launch or restart outcome.
         SessionError::StoreRefused(_) => Status::data_loss(error.to_string()),
+        SessionError::NeverRestarts(reason, message) => reason.status(message),
     }
 }
 
@@ -4560,7 +5182,10 @@ mod tests {
         assert!(!record.status_message.contains("not rendered"));
         assert!(matches!(
             engine.restart(&record.session_id).await,
-            Err(SessionError::FailedPrecondition(_))
+            Err(SessionError::NeverRestarts(
+                NeverRestarts::CleanupUnconfirmed,
+                _
+            ))
         ));
         assert_eq!(
             engine.stop(&record.session_id).await.unwrap().state,
@@ -4572,7 +5197,10 @@ mod tests {
         let recovered = SessionEngine::new(&config, CredentialBridge::new(None));
         assert!(matches!(
             recovered.restart(&record.session_id).await,
-            Err(SessionError::FailedPrecondition(_))
+            Err(SessionError::NeverRestarts(
+                NeverRestarts::CleanupUnconfirmed,
+                _
+            ))
         ));
         assert!(!marker.exists());
         assert!(recovered.shutdown().await.is_err());
@@ -4758,7 +5386,10 @@ mod tests {
         assert!(engine.inner.root.join(&id).exists());
         assert!(matches!(
             engine.restart(&id).await,
-            Err(SessionError::FailedPrecondition(_))
+            Err(SessionError::NeverRestarts(
+                NeverRestarts::CleanupUnconfirmed,
+                _
+            ))
         ));
         assert!(engine.shutdown().await.is_err());
     }
@@ -4842,7 +5473,10 @@ mod tests {
         );
         assert!(matches!(
             recovered.restart(&metadata.session_id).await,
-            Err(SessionError::FailedPrecondition(_))
+            Err(SessionError::NeverRestarts(
+                NeverRestarts::CleanupUnconfirmed,
+                _
+            ))
         ));
     }
 
@@ -5316,6 +5950,50 @@ mod tests {
         assert!(recovered.handle(&ambiguous).is_ok());
     }
 
+    #[test]
+    fn a_restart_that_is_never_admitted_carries_its_reason_beside_the_same_code_and_message() {
+        for (reason, code) in [
+            (NeverRestarts::NoSession, tonic::Code::NotFound),
+            (
+                NeverRestarts::ProjectionLost,
+                tonic::Code::FailedPrecondition,
+            ),
+            (
+                NeverRestarts::CleanupUnconfirmed,
+                tonic::Code::FailedPrecondition,
+            ),
+            (
+                NeverRestarts::GenerationExhausted,
+                tonic::Code::ResourceExhausted,
+            ),
+        ] {
+            let status =
+                status_from_session_error(SessionError::NeverRestarts(reason, "refused".into()));
+            assert_eq!((status.code(), status.message()), (code, "refused"));
+            assert_eq!(NeverRestarts::of(&status), Some(reason));
+            assert!(NeverRestarts::ALL.contains(&reason));
+        }
+        // No other refusal carries a reason, whatever its code and words.
+        for other in [
+            SessionError::NotFound("session not found".into()),
+            SessionError::FailedPrecondition(
+                "session launch cleanup is unconfirmed; restart is unavailable".into(),
+            ),
+            SessionError::ResourceExhausted(
+                "session launch generation is exhausted; launch a new session".into(),
+            ),
+        ] {
+            assert_eq!(NeverRestarts::of(&status_from_session_error(other)), None);
+        }
+        // A reason this build does not know decides nothing.
+        let mut unknown = Status::failed_precondition("refused");
+        unknown.metadata_mut().insert(
+            NeverRestarts::METADATA_KEY,
+            tonic::metadata::MetadataValue::from_static("a-later-reason"),
+        );
+        assert_eq!(NeverRestarts::of(&unknown), None);
+    }
+
     #[tokio::test]
     async fn restart_waiting_for_retention_cannot_resurrect_a_pruned_record() {
         let temp = tempfile::tempdir().unwrap();
@@ -5333,7 +6011,7 @@ mod tests {
         drop(admission);
         assert!(matches!(
             task.await.unwrap(),
-            Err(SessionError::NotFound(_))
+            Err(SessionError::NeverRestarts(NeverRestarts::NoSession, _))
         ));
         assert!(!engine.inner.root.join(&oldest).exists());
         assert!(!lock(&engine.inner.active).contains_key(&oldest));

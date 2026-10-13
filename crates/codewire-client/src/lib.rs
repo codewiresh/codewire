@@ -150,8 +150,9 @@ pub use codewire_proto::codewire::v1::{
     watch_environment_create_response,
 };
 pub use codewire_proto::codewire::v1::{
-    CredentialDelegationOpen, CredentialDelegationProfile, DelegateCredentialsRequest,
-    DelegateCredentialsResponse, delegate_credentials_request, delegate_credentials_response,
+    CredentialDelegationKeepalive, CredentialDelegationOpen, CredentialDelegationProfile,
+    DelegateCredentialsRequest, DelegateCredentialsResponse, delegate_credentials_request,
+    delegate_credentials_response,
 };
 pub use config::{
     CODEWIRE_API_URL_ENV, CODEWIRE_URL_ENV, ClientConfig, DEFAULT_CODEWIRE_URL,
@@ -163,7 +164,7 @@ pub use coordinator::{
     Handlers as CoordinatorHandlers, MeshCoordinateIdentity, MeshCoordinatorPeerSession,
     PrimaryCoordinateIdentity,
 };
-pub use credential_delegation::CredentialDelegationStream;
+pub use credential_delegation::{AdmittedCredentialDelegation, CredentialDelegationStream};
 pub use error::{ClientError, ErrorInfo, ValidationError};
 pub use tailnet::{
     EnvironmentTailnetDiagnostic, ExpectedTransport, NativeClientFacade, SshTransportMode,

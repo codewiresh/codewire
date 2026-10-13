@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Permit a release tag push to reuse successful exact-main CI. Every
-# uncertainty returns a fallback receipt so pre-push can run its full gate.
+# Permit a release tag push to reuse successful exact-commit main CI. The
+# tagged commit is canonical main or an ancestor of it, so main may move on
+# while a release is cut. Every uncertainty returns a fallback receipt so
+# pre-push can run its full gate.
 set -euo pipefail
 
 tmp="$(mktemp -d)"
@@ -62,20 +64,32 @@ git ls-remote "$remote" refs/heads/main >"$main_lines" 2>/dev/null \
 read -r main_sha main_ref <"$main_lines"
 [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]] && [ "$main_ref" = refs/heads/main ] \
   || fallback 'canonical-main-invalid'
-[ "$tag_commit" = "$main_sha" ] || fallback 'release-tag-not-current-main'
+# The tag names canonical main or a commit main already contains.
+if [ "$tag_commit" != "$main_sha" ]; then
+  if ! git cat-file -e "${main_sha}^{commit}" 2>/dev/null; then
+    git fetch --quiet --no-tags "$remote" refs/heads/main >/dev/null 2>&1 \
+      || fallback 'canonical-main-commit-unavailable'
+    git cat-file -e "${main_sha}^{commit}" 2>/dev/null \
+      || fallback 'canonical-main-commit-unavailable'
+  fi
+  git merge-base --is-ancestor "$tag_commit" "$main_sha" 2>/dev/null \
+    || fallback 'release-tag-not-on-canonical-main'
+fi
 
 # Forgejo evidence comes from the supported fj CLI. Main CI must be the
-# latest exact-main push run of ci.yaml with a green Required verification
-# job. Dev evidence is read from the deploy-owned promotion itself: a green
+# tagged commit's latest push run of ci.yaml on main, with a green Required
+# verification job, and it must have verified: a run that started after main
+# moved on is superseded, dispatches no capability group and still reports
+# green. Dev evidence is read from the deploy-owned promotion itself: a green
 # promote-dev run whose release commit job and acceptance job both checked
 # out this exact source.
 runs_json="$tmp/runs.json"
-fj actions runs list -R "$remote" --head "$main_sha" --workflow ci.yaml \
+fj actions runs list -R "$remote" --head "$tag_commit" --workflow ci.yaml \
   --event push -L 50 --output json >"$runs_json" 2>/dev/null \
   || fallback 'exact-main-runs-unavailable'
 jq -e '.schema_version == 1 and (.runs | type == "array")' \
   "$runs_json" >/dev/null 2>&1 || fallback 'exact-main-runs-ambiguous'
-if ! run_id="$(jq -er --arg head "$main_sha" '
+if ! run_id="$(jq -er --arg head "$tag_commit" '
     [
       .runs[]
       | select(
@@ -98,7 +112,7 @@ fi
 run_view="$tmp/run-view.json"
 fj actions runs view "$run_id" -R "$remote" --output json >"$run_view" 2>/dev/null \
   || fallback 'exact-main-jobs-unavailable'
-if ! jq -e --arg head "$main_sha" --argjson id "$run_id" '
+if ! jq -e --arg head "$tag_commit" --argjson id "$run_id" '
     .schema_version == 1
     and .run.id == $id
     and .run.head_sha == $head
@@ -111,6 +125,55 @@ if ! jq -e --arg head "$main_sha" --argjson id "$run_id" '
   fallback 'required-verification-not-successful'
 fi
 
+# job_log NAME FILE: the whole log of the run's one job called NAME, carriage
+# returns removed. Read into a file before matching: a pipeline ending in
+# grep -q can stop reading early and fail the writer under pipefail.
+job_log() {
+  local name="$1" file="$2" job
+  job="$(jq -r --arg name "$name" '
+      [.jobs[] | select(.name == $name)] | select(length == 1) | .[0].id
+    ' "$run_view")"
+  [[ "$job" =~ ^[1-9][0-9]*$ ]] || return 1
+  fj actions runs logs "$run_id" -R "$remote" --job "$job" >"$file.raw" 2>/dev/null || return 1
+  tr -d '\r' <"$file.raw" >"$file"
+}
+
+# Not superseded: the selection job's own log is readable (it records the
+# selection it made) and names no superseding commit.
+selection_log="$tmp/selection.log"
+if ! { job_log 'Verification selection' "$selection_log" \
+    && grep -Eq '^[0-9T:.-]+Z selection=\|valid:v3\|' "$selection_log"; }; then
+  fallback 'exact-main-selection-unavailable'
+fi
+if grep -Eq "^[0-9T:.-]+Z (superseded by [0-9a-f]{40}: main's queued run verifies|superseded main commit: no capability group is dispatched)" \
+    "$selection_log"; then
+  fallback 'exact-main-ci-superseded'
+fi
+# And it verified: a selected capability group ran green, or Required
+# verification accepted the exact tree an earlier PR run verified.
+if ! jq -e '
+    [.jobs[]
+      | select(.status == "success")
+      | select(
+          (.name | IN(
+            "CW release-assets verification", "Container contract verification",
+            "Policy verification", "Standard verification",
+            "Tooling / delivery contract verification", "Compile every Rust target",
+            "Rust / transport packages", "Rust / transport feature graphs",
+            "Rust / transport verification", "Database verification",
+            "Service control-plane verification", "Service runtime-plane verification"))
+          or (.name | startswith("Edge / Kind verification ("))
+        )]
+    | length > 0
+  ' "$run_view" >/dev/null 2>&1; then
+  required_log="$tmp/required.log"
+  if ! { job_log 'Required verification' "$required_log" \
+      && grep -Eq '^[0-9T:.-]+Z required verification: exact tested tree from PR #[1-9][0-9]* run [1-9][0-9]* accepted$' \
+        "$required_log"; }; then
+    fallback 'exact-main-ci-verified-nothing'
+  fi
+fi
+
 deploy_repo=(-r codewire/deploy -H git.example.invalid)
 deploy_runs="$tmp/deploy-runs.json"
 fj actions runs list "${deploy_repo[@]}" --workflow promote-dev.yaml \
@@ -121,7 +184,7 @@ jq -e '.schema_version == 1 and (.runs | type == "array")' \
 # Both the release commit job and the acceptance job check out the exact
 # source they use; the workflow requires the smoke source to equal the
 # promoted runtime source. Re-dispatches of an existing release keep both.
-checkout_line="^[0-9T:.-]+Z Checked out exact Codewire source ${main_sha}\$"
+checkout_line="^[0-9T:.-]+Z Checked out exact Codewire source ${tag_commit}\$"
 while read -r candidate; do
   [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
   view="$tmp/deploy-view-$candidate.json"
@@ -165,7 +228,13 @@ done < <(jq -r '
 [ -n "$dev_run_id" ] || fallback 'exact-source-dev-acceptance-not-successful'
 
 receipt='accepted'
-reason='signed-tag-at-exact-green-deployed-main'
-printf 'release-tag receipt: %s peels to green canonical main %s (CI run %s; Dev acceptance run %s)\n' \
-  "$tag_ref" "$main_sha" "$run_id" "$dev_run_id"
+if [ "$tag_commit" = "$main_sha" ]; then
+  reason='signed-tag-at-exact-green-deployed-main'
+  printf 'release-tag receipt: %s peels to green canonical main %s (CI run %s; Dev acceptance run %s)\n' \
+    "$tag_ref" "$main_sha" "$run_id" "$dev_run_id"
+else
+  reason='signed-tag-on-main-at-exact-green-deployed-commit'
+  printf 'release-tag receipt: %s peels to %s, green and deployed, on canonical main %s (CI run %s; Dev acceptance run %s)\n' \
+    "$tag_ref" "$tag_commit" "$main_sha" "$run_id" "$dev_run_id"
+fi
 emit_outputs
