@@ -168,6 +168,15 @@ created for the local VM. Connection expiry cannot extend the original token;
 reconnection requires fresh admission and never replays an old operation.
 The public TLS leg uses native gRPC and the direct h2c leg uses Connect under
 the same OAuth-only mount. Both share the existing broker capacity and drain.
+
+An admitted stream that carries no operation for 25 seconds sends one empty
+keepalive, which the server answers on the same stream, so the edge's idle
+limits never end it: ingress-nginx ends a request body silent for 60 seconds,
+and Cloudflare a response silent for 125 (#2702). A keepalive grants nothing,
+never reaches the broker and is accepted only after admission, with at most one
+awaiting its answer. The server offers keepalives in its admission response
+(`accepts_keepalive`), and a client sends none to a server that did not, since
+an older server ends a stream that carries one.
 The host sends Open and the matching Ready, then waits within one bounded setup
 deadline for the exact admitted-selection reply. A successful send or HTTP 200
 is not admission. Subsequent admission replies are protocol errors.

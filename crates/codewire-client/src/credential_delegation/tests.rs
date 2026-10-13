@@ -231,7 +231,12 @@ async fn assert_input_closed(body: &mut ClientBody) {
 
 #[tokio::test]
 async fn delegation_generated_setup_sends_open_then_ready_and_requires_exact_echo() {
-    for protocol in [Protocol::Connect, Protocol::Grpc] {
+    for (protocol, accepts_keepalive) in [
+        (Protocol::Connect, false),
+        (Protocol::Connect, true),
+        (Protocol::Grpc, false),
+        (Protocol::Grpc, true),
+    ] {
         let (transport, peer) = transport();
         let calls = transport.calls.clone();
         let open = opening();
@@ -245,13 +250,17 @@ async fn delegation_generated_setup_sends_open_then_ready_and_requires_exact_ech
         let mut body = receive_open_and_ready(peer.request, &open, protocol).await;
         // Successfully enqueued Open/Ready does not return an admitted stream.
         assert!(futures_util::poll!(setup.as_mut()).is_pending());
+        let mut acknowledgment = admitted(open);
+        // A server that predates keepalives never sets the flag.
+        acknowledgment.accepts_keepalive = accepts_keepalive;
         peer.response
-            .send(reply(protocol, &admitted(open).encode_to_vec()))
+            .send(reply(protocol, &acknowledgment.encode_to_vec()))
             .unwrap();
-        let mut stream = tokio::time::timeout(TEST_TIMEOUT, setup)
+        let (mut stream, accepted) = tokio::time::timeout(TEST_TIMEOUT, setup)
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(accepted, accepts_keepalive);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         stream.close_send();
         assert_input_closed(&mut body).await;
@@ -324,7 +333,14 @@ async fn delegation_admission_compares_every_selection_coordinate() {
 
 #[tokio::test]
 async fn delegation_rejects_eof_rpc_error_unknown_empty_and_operation_before_ack() {
-    for attack in ["eof", "rpc error", "unknown", "empty", "operation"] {
+    for attack in [
+        "eof",
+        "rpc error",
+        "unknown",
+        "empty",
+        "operation",
+        "keepalive",
+    ] {
         let (transport, peer) = transport();
         let open = opening();
         let mut setup = Box::pin(setup(
@@ -355,6 +371,18 @@ async fn delegation_rejects_eof_rpc_error_unknown_empty_and_operation_before_ack
                 Protocol::Connect,
                 &DelegateCredentialsResponse {
                     output: Some(delegate_credentials_response::Output::Frame(Box::default())),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+            // A keepalive answer is never an admission, even with the flag set.
+            "keepalive" => reply(
+                Protocol::Connect,
+                &DelegateCredentialsResponse {
+                    output: Some(delegate_credentials_response::Output::Keepalive(
+                        Box::default(),
+                    )),
+                    accepts_keepalive: true,
                     ..Default::default()
                 }
                 .encode_to_vec(),
