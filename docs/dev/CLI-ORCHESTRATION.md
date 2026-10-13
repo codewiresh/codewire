@@ -202,6 +202,37 @@ joins the next message. A noel that also reports `request-id` and
 its environment's takedown paused, as described below; `cw inbox --output
 json` shows it as the driver's `capabilities.resume`.
 
+**A noel conversation that has its own identity is told how to delegate.**
+Its `bash` tool can already launch workers under itself, as above; a skill
+gives its model the commands. At every launch the driver writes the skill
+`codewire-delegation` to `skills/codewire-delegation/SKILL.md` in the
+conversation's own directory under the environment's runtime root
+(`agents/DRIVER_ID`), and passes that directory to noel as `--skill`. The
+directories and the file are the owner's alone (0700 and 0600); the file is
+replaced through a rename, and a symlink in its place is never followed. noel
+lists the skill's name, description and file in its system prompt, and its
+model reads the file when a task calls for delegation.
+
+- **What it says.** When to delegate; the launch command for a Codex, Claude
+  or noel worker under this conversation; a worker name derived from the
+  task, so launching the same task again fails with `session name is already
+  retained` instead of starting a second worker; that results arrive as
+  messages, without polling; and `cw wait --message`, `cw inbox`, `cw msg`,
+  `cw steer`, `cw interrupt`, `cw stop` and `cw stop --all`.
+- **Which `cw`.** Every command names the `cw` that runs the driver by its
+  absolute path, so the lead needs no `cw` on its PATH. The skill is written
+  again at every launch: after a `cw` update, the conversation's next start
+  names the `cw` that starts it. The driver resolves that path once, when it
+  starts, so a `cw` file that is replaced while the conversation runs does
+  not change what a noel started again after a crash is told.
+- **Who gets none.** A member's conversation on a host and every other
+  placement: no file is written and no `--skill` is passed. Codex and Claude
+  are launched exactly as before.
+- **An older noel.** Listing a `--skill` directory needs a noel built from
+  noeljackson/pi `main` at `08566af5` or later. An older noel accepts the
+  option and ignores the directory: the conversation starts and works as
+  before, its model is told nothing, and nothing reports it.
+
 **Stopping or restarting a conversation cancels its active noel run.** This
 covers `cw stop`, `cw stop --all`, the confirmed parent cascade, `cw restart`,
 and StopSession or RestartSession from any client. The run is interrupted
@@ -643,7 +674,21 @@ record helper fails and its driver is killed first: the run is never resumed,
 and its cut-off model request is not sent again. The synthetic journey also
 proves Codex and Claude keep their unknown outcome on each of those routes,
 and that each agent, and no other session, receives its conversation identity.
-The real-noel journey needs noel built from pi commit `ef09c03f` or later.
+It proves the delegation skill too: a noel conversation's skill is in its own
+driver directory, owner-only, with every command naming the journey's `cw`;
+noel is passed that directory; a restart replaces a stale file; and Codex and
+Claude are passed no skill and hold none. The real-noel journey then has a
+lead with noel's `faux/script` model delegate: noel's system prompt lists the
+skill's name and file, and the lead reads the file with noel's `read` tool and
+runs every command in it with noel's `bash` tool, exactly as written. It
+launches a noel, a Codex and a Claude worker under itself; launching the first
+again is refused and starts no second worker; and the lead is woken once per
+finished worker message, with its result. It then reads a worker's state,
+follows up, steers, waits for one result, interrupts, and stops a worker that
+has a worker of its own, with `cw stop` and `cw stop --all`.
+The real-noel journey needs a noel built from noeljackson/pi `main` at
+`08566af5` or later, which lists `--skill` directories; its other checks need
+`ef09c03f`.
 
 The synthetic noel also keeps noel's durable runs and queue, and answers a
 repeated `requestId`, `resume_run` and `get_last_assistant_text` as noel
