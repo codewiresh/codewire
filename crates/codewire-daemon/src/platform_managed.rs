@@ -233,6 +233,11 @@ pub enum Error {
     /// any effect. It names only the product.
     #[error("this managed agent was started with an earlier {}; start a new conversation", .0.product())]
     EarlierProvider(Agent),
+    /// An issued launch whose environment projection was refused before the
+    /// agent's program ran, with the launcher's cleanup confirmed: nothing
+    /// started and nothing remains, so the request is refused, not unknown.
+    #[error("the environment launch was denied before the managed agent started")]
+    DeniedBeforeRun,
 }
 
 fn canonical_uuid(value: &str) -> Result<(), Error> {

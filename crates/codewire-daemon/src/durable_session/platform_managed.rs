@@ -326,6 +326,12 @@ impl SessionEngine {
             .start_process(handle.clone(), &self.inner.shutdown)
             .await
             .map_err(|_| Error::Unknown)?;
+        // A refused projection ends the launch before the launcher executes the
+        // driver. With that cleanup confirmed nothing ran and nothing remains,
+        // so it is a definite refusal (#2705), never an unknown outcome.
+        if denied_before_run(&record) {
+            return Err(Error::DeniedBeforeRun);
+        }
         Ok((record, false, false))
     }
     async fn platform_control(
@@ -737,6 +743,16 @@ fn session_value(m: &PersistedSession) -> Value {
     json!({"session_id":m.session_id,"name":m.name,"parent_session_id":m.parent_session_id.clone().unwrap_or_default(),"launch_generation":m.launch_generation,
         "state":match state{v1::SessionLifecycleState::Starting=>"starting",v1::SessionLifecycleState::Running=>"running",v1::SessionLifecycleState::Stopping=>"stopping",v1::SessionLifecycleState::Stopped=>"stopped",v1::SessionLifecycleState::Exited=>"exited",v1::SessionLifecycleState::Failed=>"failed",v1::SessionLifecycleState::Interrupted=>"interrupted",_=>"unspecified"},
         "command":m.command,"working_dir":m.working_dir,"pty":m.pty,"exit_code":m.exit_code,"cleanup_unknown":m.cleanup_unknown,"output_end_offset":m.output_end_offset,"output_start_offset":m.output_start_offset,"status_message":m.status_message})
+}
+
+/// A launch whose projection was refused, expired or cancelled before the
+/// launcher executed the driver, with the launcher's cleanup confirmed.
+pub(crate) fn denied_before_run(record: &v1::SessionRecord) -> bool {
+    record.state == v1::SessionLifecycleState::Failed as i32
+        && !record.cleanup_unknown
+        && record.started_at.is_none()
+        && record.exit_code.is_none()
+        && record.status_message == crate::durable_session::LAUNCH_PROJECTION_DENIED
 }
 
 #[cfg(test)]

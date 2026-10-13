@@ -116,3 +116,30 @@ fn contended_request_reference_and_oversized_payload_refuse_before_dispatch() {
     assert!(save_request_at(&directory, &large).is_err());
     assert!(!directory.join(format!("{REQUEST}.json")).exists());
 }
+
+#[test]
+fn an_ended_conversation_is_said_plainly_and_recognised_on_every_client() {
+    // #2705: a conversation of an earlier incarnation is named as ended with
+    // its environment, with the way to start a new one.
+    assert_eq!(
+        ended_with_environment("reviewer"),
+        "managed conversation \"reviewer\" ended when its environment stopped; \
+         start a new one with `cw run ENV --agent codex|claude`"
+    );
+    // The driver runs in the Sandbox, which is always Linux, so the client's
+    // own OS never decides whether a listed session is a managed one.
+    let driver = |second: &str| {
+        vec![
+            "/codewire/bin/cw".to_owned(),
+            second.to_owned(),
+            "--environment".to_owned(),
+            "env".to_owned(),
+            "--driver-id".to_owned(),
+            REQUEST.to_owned(),
+        ]
+    };
+    assert!(is_platform_driver(&driver("__platform-agent-driver")));
+    assert!(!is_platform_driver(&driver("__agent-driver")));
+    assert!(!is_platform_driver(&["sh".to_owned()]));
+    assert!(!is_platform_driver(&[]));
+}
