@@ -16,6 +16,7 @@ never printed.
 """
 import argparse
 import errno
+import ipaddress
 import json
 import os
 import socket
@@ -109,6 +110,33 @@ def ipv4(source, destination, protocol, payload, ident=0x2615, flags_fragment=0,
     words = 5 + len(options) // 4
     return struct.pack(">BBHHHBBH4s4s", 0x40 | words, 0, 0, ident, flags_fragment, 64, protocol, 0,
                        socket.inet_aton(source), socket.inet_aton(destination)) + options + payload
+
+
+def dns_answer_series(case, name, control, rounds=20):
+    """A name whose answers alternate between a public and a private address
+    (rbndr.us form <public-hex>.<private-hex>.rbndr.us): over repeated lookups
+    the guest must never receive the private one. `control` is the same
+    service's name with two public answers, so a name withheld whole is told
+    apart from a service the guest cannot use, and example.com from DNS being
+    down."""
+    def lookup(host):
+        try:
+            return {info[4][0] for info in socket.getaddrinfo(host, 443, socket.AF_INET)}
+        except socket.gaierror:
+            return set()
+    seen = set()
+    for _ in range(rounds):
+        seen |= lookup(name)
+        time.sleep(0.5)
+    if any(not ipaddress.ip_address(address).is_global for address in seen):
+        outcome = "private-seen"
+    elif seen:
+        outcome = "public-only"
+    elif lookup(control):
+        outcome = "withheld"
+    else:
+        outcome = "refused" if lookup("example.com") else "unresolved"
+    emit(case, outcome, " ".join(sorted(seen)))
 
 
 def raw_icmp():
@@ -213,18 +241,21 @@ def connect_burst():
     emit("tcp-connect-burst", "opened", f"{len(sockets)} sockets, {refused} failed at once")
 
 
-def http_head(case, host, port=80):
+def http_outcome(host, port=80):
     """An HTTP request over TCP that must be answered end to end, not just accepted
     by the worker's local handshake."""
     try:
         with socket.create_connection((host, port), timeout=TIMEOUT) as sock:
             sock.sendall(f"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n".encode())
-            data = sock.recv(64)
-            emit(case, "answered" if data.startswith(b"HTTP/") else "no-http", data[:12])
+            return "answered" if sock.recv(64).startswith(b"HTTP/") else "no-http"
     except socket.timeout:
-        emit(case, "timeout")
+        return "timeout"
     except OSError as error:
-        emit(case, error_name(error))
+        return error_name(error)
+
+
+def http_head(case, host, port=80):
+    emit(case, http_outcome(host, port))
 
 
 def tls(case, host, server_name):
@@ -257,9 +288,13 @@ def while_dial_pends():
     pending.close()
 
 
+RECOVERY_SECONDS = 60
+
+
 def controls(label):
-    """The allowed controls again after a burst. A lookup may stall while the worker
-    drains the burst; record how long it took to answer again, up to 10 s."""
+    """The allowed controls again after a burst. Each may stall while the worker
+    drains the burst; record how long it took to work again, up to 60 s, so a
+    slow recovery is told apart from a path that never recovers."""
     started = time.monotonic()
     while True:
         try:
@@ -267,11 +302,17 @@ def controls(label):
             emit(f"control-after-{label}-dns", "resolved", f"{time.monotonic() - started:.1f}")
             break
         except socket.gaierror:
-            if time.monotonic() - started > 10:
+            if time.monotonic() - started > RECOVERY_SECONDS:
                 emit(f"control-after-{label}-dns", "unresolved", f"{time.monotonic() - started:.1f}")
                 break
             time.sleep(0.5)
-    http_head(f"control-after-{label}-http", "1.1.1.1")
+    started = time.monotonic()
+    while True:
+        outcome = http_outcome("1.1.1.1")
+        if outcome == "answered" or time.monotonic() - started > RECOVERY_SECONDS:
+            emit(f"control-after-{label}-http", outcome, f"{time.monotonic() - started:.1f}")
+            break
+        time.sleep(0.5)
 
 
 def ping_socket():
@@ -376,6 +417,9 @@ def main():
     except OSError as error:
         emit("control-https-example.com", error_name(error))
 
+    # Before any probe that could leave a dial pending (#2638).
+    dns_answer_series("dns-alternating-answers-1.1.1.1-10.0.0.1", "01010101.0a000001.rbndr.us",
+                      "01010101.08080808.rbndr.us")
     raw = raw_icmp()
     ping_socket()
     udp("udp-8.8.8.8-53", "8.8.8.8", 53, dns_query("example.com"))
