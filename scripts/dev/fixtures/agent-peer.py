@@ -3,6 +3,8 @@
 
 No provider calls, login files, or repository mutations. Protocol ordering and
 failures are deliberately independent of the Rust adapter implementation.
+Every start appends the conversation identity and the arguments the peer was
+given to agent-identity.jsonl in its working directory.
 """
 import json
 import os
@@ -15,20 +17,57 @@ def emit(value):
     print(json.dumps(value), flush=True)
 
 
+def trace_identity(agent):
+    with Path("agent-identity.jsonl").open("a") as file:
+        file.write(json.dumps({"agent": agent, "pid": os.getpid(), "argv": sys.argv[1:],
+                               "environment": os.environ.get("CW_ENVIRONMENT"),
+                               "session": os.environ.get("CW_SESSION_ID")}) + "\n")
+
+
+def skill(path):
+    """The skill noel lists for `--skill PATH`: the name and description in
+    the frontmatter of the directory's SKILL.md, and that file. A path that
+    holds no skill loads none, as in noel."""
+    file = Path(path) / "SKILL.md"
+    try:
+        _, frontmatter, _ = file.read_text().split("---\n", 2)
+    except (OSError, ValueError):
+        return None
+    fields = dict(line.split(": ", 1) for line in frontmatter.splitlines() if ": " in line)
+    if not fields.get("description", "").strip():
+        return None
+    return {"name": fields.get("name", file.parent.name), "description": fields["description"], "file": str(file)}
+
+
 def noel():
-    """`noel --mode rpc`: upstream pi's RPC protocol with the run-id and
-    expected-run-id extensions, record for record as the noel binary sends them
-    for faux/echo. noel opens no dialogs; DIALOG stands in for an upstream
-    extension's, and the reply to its answer is the one noel gives that line.
+    """`noel --mode rpc`: upstream pi's RPC protocol with the run-id,
+    expected-run-id, request-id and resume-run extensions, record for record as
+    the noel binary (pi `ef09c03f`) sends them for faux/echo. noel opens no
+    dialogs; DIALOG stands in for an upstream extension's, and the reply to its
+    answer is the one noel gives that line.
 
     Prompts: HOLD streams until a steer or abort ends it (a steer saying WAIT
-    leaves it streaming); LATE settles as the next command arrives, as a run
-    that ends just before it is read; DIALOG asks a question first.
-    `--model fixture/json-rpc` behaves as a pre-RPC pi build. As noel does,
-    EOF exits 0 and SIGTERM 143, mid-run too, without settling: the session
-    keeps the run's prompt without a reply, and after a restart the next
-    prompt answers normally. Every command received, EOF and SIGTERM are
+    leaves it streaming); HOLD2 does so again the first time it is resumed;
+    LATE settles as the next command arrives, as a run that ends just before
+    it is read; DIALOG asks a question first. `--model fixture/json-rpc`
+    behaves as a pre-RPC pi build. As noel does, EOF exits 0 and SIGTERM 143,
+    mid-run too, without settling. Every start, with its arguments and the
+    skill `--skill DIR` loads, every command received, EOF and SIGTERM are
     traced to peer-noel-SESSION.jsonl.
+
+    Runs and the queue are durable as in noel's journal: a run is saved with
+    its requestId when it starts and with its end (completed or aborted)
+    before agent_settled, the queue whenever it changes, and each reply once
+    it ends unaborted. A run saved without an end loads as interrupted, with
+    phase `model`: its held reply was never saved. `get_state.lastRun` reports
+    it, `resume_run` continues it under the same runId and answers its last
+    user message again (after steering the restarted queue still holds), the
+    next prompt first records it as aborted, and so does an abort while idle.
+    A prompt that repeats a requestId starts nothing and names that run:
+    started while it runs or is interrupted, handled once it ended.
+
+    While a file noel-hold-start-SESSION exists, `get_state` is not answered:
+    the journey holds a restarted conversation in its startup handshake.
     """
     import signal
     import time
@@ -38,12 +77,14 @@ def noel():
     session, model = option.get("--session-id"), option.get("--model")
     trace_path = Path(f"peer-noel-{session}.jsonl")
     saved = Path(f"noel-session-{session}.json")
+    hold_start = Path(f"noel-hold-start-{session}")
 
     def trace(record):
         with trace_path.open("a") as file:
             file.write(json.dumps(record) + "\n")
 
-    trace({"event": "start", "argv": args})
+    trace({"event": "start", "argv": args, "skill": skill(option["--skill"]) if "--skill" in option else None})
+    trace_identity("noel")
     if model == "fixture/json-rpc":
         for line in sys.stdin:
             value = json.loads(line)
@@ -56,8 +97,12 @@ def noel():
         return 2
 
     run = None
-    steering, follow_up = [], []
-    messages = json.loads(saved.read_text())["messageCount"] if saved.exists() else 0
+    journal = json.loads(saved.read_text()) if saved.exists() else {}
+    messages = journal.get("messageCount", 0)
+    last_user, last_reply = journal.get("lastUser"), journal.get("lastReply")
+    steering, follow_up = journal.get("steering", []), journal.get("followUp", [])
+    runs = [dict(r, status="interrupted" if r["status"] == "running" else r["status"])
+            for r in journal.get("runs", [])]
 
     def on_term(*_):
         trace({"event": "sigterm", "active": run is not None})
@@ -83,16 +128,25 @@ def noel():
             reply["data"] = data
         emit(reply)
 
-    def save(count):
+    def save(count=0):
+        """A run without an end, resumed or not, loads as interrupted."""
         nonlocal messages
         messages += count
-        saved.write_text(json.dumps({"messageCount": messages}))
+        saved.write_text(json.dumps({"messageCount": messages, "lastUser": last_user, "lastReply": last_reply,
+                                     "steering": steering, "followUp": follow_up, "runs": runs}))
+
+    def end_interrupted():
+        if runs and runs[-1]["status"] == "interrupted":
+            runs[-1]["status"] = "aborted"
+            save()
 
     def user(text):
+        nonlocal last_user
         message = {"role": "user", "content": [{"type": "text", "text": text}], "timestamp": now()}
         emit({"type": "message_start", "message": message})
         emit({"type": "message_end", "message": message})
         run["messages"].append(message)
+        last_user = text
         save(1)
 
     def reply_start(text):
@@ -106,6 +160,7 @@ def noel():
         run["reply"] = {"assistant": assistant, "text": "[faux/echo] ", "rest": text}
 
     def reply_end(stop="stop"):
+        nonlocal last_reply
         reply = run.pop("reply")
         text = reply["text"]
         if stop == "stop":
@@ -124,10 +179,13 @@ def noel():
         emit({"type": "turn_end", "message": assistant, "toolResults": []})
         run["messages"].append(assistant)
         if stop == "stop":
+            last_reply = text
             save(1)
 
     def settle(aborted=False):
         nonlocal run
+        runs[-1]["status"] = "aborted" if aborted else "completed"
+        save()
         emit({"type": "agent_end", "messages": run["messages"], "willRetry": False})
         emit({"type": "agent_settled", "aborted": aborted, "runId": run["id"]})
         aborts, run = run["aborts"], None
@@ -159,6 +217,14 @@ def noel():
             return f"expectedRunId {expected} does not match the active run {run['id']}"
         return f"expectedRunId {expected} does not match: no run is active"
 
+    def repeated(request_id):
+        """The reply to a prompt whose requestId already started a run."""
+        known = next((r for r in reversed(runs) if request_id is not None and r["requestId"] == request_id), None)
+        if known is None:
+            return None
+        ended = known["status"] in ("completed", "failed", "aborted")
+        return {"disposition": "handled" if ended else "started", "runId": known["runId"]}
+
     def state():
         data = {}
         if model == "faux/echo":
@@ -169,9 +235,17 @@ def noel():
                     sessionFile=str(Path.cwd() / f"{session}.jsonl"), sessionId=session,
                     autoCompactionEnabled=True, messageCount=messages,
                     pendingMessageCount=len(steering) + len(follow_up),
-                    rpcExtensions=["run-id", "expected-run-id"])
+                    rpcExtensions=["run-id", "expected-run-id", "request-id", "resume-run"])
         if run:
             data["runId"] = run["id"]
+        if runs:
+            last = runs[-1]
+            data["lastRun"] = {"runId": last["runId"]}
+            if last["requestId"] is not None:
+                data["lastRun"]["requestId"] = last["requestId"]
+            data["lastRun"]["status"] = last["status"]
+            if last["status"] == "interrupted":
+                data["lastRun"]["phase"] = "model"
         return data
 
     while True:
@@ -191,20 +265,32 @@ def noel():
             run["late"] = False
             finish()
         if kind == "get_state":
+            while hold_start.exists():
+                time.sleep(0.05)
             respond(request, state())
+        elif kind == "get_last_assistant_text":
+            text = (last_reply or "").strip()
+            respond(request, {"text": text} if text else {})
         elif kind == "clear_queue":
             cleared = {"steering": list(steering), "followUp": list(follow_up)}
             steering.clear()
             follow_up.clear()
+            save()
             emit({"type": "queue_update", "steering": [], "followUp": []})
             respond(request, cleared)
+        elif kind == "prompt" and repeated(request.get("requestId")):
+            respond(request, repeated(request.get("requestId")))
         elif kind == "prompt" and run:
             behavior = request.get("streamingBehavior")
             if behavior not in ("steer", "followUp"):
                 respond(request, error="Agent is already processing. Specify streamingBehavior "
                         "('steer' or 'followUp') to queue the message.")
                 continue
+            if request.get("requestId") is not None:
+                respond(request, error="a prompt with requestId starts a run; send it when no run is active")
+                continue
             (steering if behavior == "steer" else follow_up).append(request["message"])
+            save()
             emit({"type": "queue_update", "steering": list(steering), "followUp": list(follow_up)})
             respond(request, {"disposition": "queued"})
         elif kind == "prompt":
@@ -212,7 +298,11 @@ def noel():
                 respond(request, error=f"active model is not in models config: {model}")
                 continue
             text = request["message"]
+            end_interrupted()
             run = {"id": str(uuid.uuid4()), "messages": [], "aborts": [], "late": text == "LATE"}
+            runs.append({"runId": run["id"], "requestId": request.get("requestId"), "status": "running",
+                         "resumeHolds": 1 if text == "HOLD2" else 0})
+            save()
             respond(request, {"disposition": "started", "runId": run["id"]})
             emit({"type": "agent_start", "runId": run["id"]})
             emit({"type": "turn_start"})
@@ -225,20 +315,57 @@ def noel():
                 answer = json.loads(sys.stdin.buffer.readline())
                 trace({"received": answer})
                 respond(answer, error=f"Unknown command: {answer.get('type')}")
-            if text not in ("HOLD", "LATE"):
+            if text not in ("HOLD", "HOLD2", "LATE"):
                 finish()
+        elif kind == "resume_run" and run:
+            respond(request, error="Cannot resume_run while the agent is running; wait for agent_settled")
+        elif kind == "resume_run":
+            expected = request.get("expectedRunId")
+            if expected is None:
+                respond(request, error="Invalid resume_run command: missing field `expectedRunId`")
+            elif not runs:
+                respond(request, error=f"expectedRunId {expected} does not match: the session has no run")
+            elif runs[-1]["runId"] != expected:
+                respond(request, error=f"expectedRunId {expected} does not match the last run "
+                        f"{runs[-1]['runId']}")
+            elif runs[-1]["status"] != "interrupted":
+                respond(request, error=f"run {expected} is not interrupted")
+            else:
+                last = runs[-1]
+                last["status"] = "running"
+                run = {"id": expected, "messages": [], "aborts": [], "late": False}
+                respond(request, {"disposition": "started", "runId": expected})
+                emit({"type": "agent_start", "runId": expected})
+                emit({"type": "turn_start"})
+                # The cut-off model request is sent again, after any steering
+                # the restarted queue still holds.
+                reply_start(deliver(steering) if steering else last_user)
+                if last.get("resumeHolds"):
+                    last["resumeHolds"] -= 1
+                    save()
+                else:
+                    finish()
         elif kind in ("steer", "follow_up"):
             refused = fence(request.get("expectedRunId"))
             if refused:
                 respond(request, error=refused)
                 continue
             (steering if kind == "steer" else follow_up).append(request["message"])
+            save()
             emit({"type": "queue_update", "steering": list(steering), "followUp": list(follow_up)})
             respond(request, {"disposition": "queued"})
             # The held reply finishes, then delivers the steer. WAIT keeps it
             # streaming, so an abort that follows leaves the steer queued.
             if run and kind == "steer" and request["message"] != "WAIT":
                 finish()
+        elif kind == "abort" and not run and runs and runs[-1]["status"] == "interrupted":
+            expected = request.get("expectedRunId")
+            if expected not in (None, runs[-1]["runId"]):
+                respond(request, error=f"expectedRunId {expected} does not match the "
+                        f"interrupted run {runs[-1]['runId']}")
+            else:
+                end_interrupted()
+                respond(request)
         elif kind == "abort":
             refused = fence(request.get("expectedRunId"))
             if refused:
@@ -264,6 +391,9 @@ session = next((sys.argv[i + 1] for i, value in enumerate(sys.argv[:-1])
 active = None
 model = next((sys.argv[i + 1] for i, value in enumerate(sys.argv[:-1])
               if value == "--model"), None)
+
+
+trace_identity("claude" if claude else "codex")
 
 
 def trace(method):
