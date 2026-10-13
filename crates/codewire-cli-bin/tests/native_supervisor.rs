@@ -133,7 +133,9 @@ impl Drop for OwnedSupervisor<'_> {
 async fn packaged_supervisor_serves_private_metadata_and_reopens_after_exit() {
     let mut home = fixture();
     let path = home.path().to_owned();
-    let socket = path.join("state/supervisor.sock");
+    // Sockets live in the state root's short per-user directory (#2735).
+    let socket =
+        codewire_local_vmm::socket_dir::predicted(&path.join("state")).join("supervisor.sock");
     for _ in 0..2 {
         let deadline = Instant::now() + Duration::from_secs(15);
         let process = command(&path)

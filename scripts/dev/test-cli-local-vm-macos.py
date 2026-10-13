@@ -20,11 +20,12 @@ It proves, on this Mac's macOS version:
   and VZ's own VM process is sandboxed;
 - removing the environment ends VZ's VM process.
 
-Everything runs under a private short root (Darwin limits socket paths to
-103 bytes, so cw's state root to 47) with its own HOME and a throwaway
-keychain, as a new session leader. At the end no process of the journey may
-remain, by the same owned-family check as test-cli-host.py. Needs network
-egress for the image pull and the HTTP probes.
+Everything runs under a private root with its own HOME and a throwaway
+keychain, as a new session leader. cw's sockets live in a short per-user
+directory, not under HOME (#2735), so this HOME is longer than the 27 bytes
+the old layout allowed, and env rm must leave no VM socket directory. At the
+end no process of the journey may remain, by the same owned-family check as
+test-cli-host.py. Needs network egress for the image pull and the HTTP probes.
 """
 import argparse
 import ctypes
@@ -51,6 +52,7 @@ def load(name, file):
 
 cli_host = load("cli_host", "test-cli-host.py")
 packer = load("macos_local_runtime", "macos-local-runtime.py")
+socket_dir = load("native_socket_dir", "native_socket_dir.py")
 
 IMAGE = "docker.io/library/alpine:3.22"
 NAME = "proof"
@@ -66,11 +68,13 @@ def probe_loop(log):
 
 class LocalVmJourney:
     def __init__(self, cw, runtime):
-        # cw's longest socket is <state root>/engine/vms/<uuid>/vsock/v, so its
-        # state root (<HOME>/.codewire/native-v1) may be at most 47 bytes.
+        # Before #2735 a socket lived under <HOME>/.codewire/native-v1, so
+        # HOME could be at most 27 bytes. The credential authority's socket is
+        # still under HOME (#2745), which holds this HOME under 64 bytes.
         self.root = Path(tempfile.mkdtemp(prefix="v", dir="/private/tmp"))
-        self.home = self.root / "h"
-        assert len(str(self.home / ".codewire/native-v1")) <= 47, self.home
+        self.home = self.root / "home-longer-than-the-old-limit"
+        assert 27 < len(str(self.home)) < 64, self.home
+        self.state_root = self.home / ".codewire/native-v1"
         self.project = self.root / "project"
         for directory in (self.home, self.project):
             directory.mkdir(mode=0o700)
@@ -279,7 +283,10 @@ class LocalVmJourney:
         self.call("env", "--local", "rm", NAME, "--yes", timeout=300)
         if self.environment_id:
             self.until(self.vz_vm_pid, lambda pid: pid is None, 30, "VZ's VM process ending after env rm")
-            self.check("env rm ends the VM")
+            vms = socket_dir.predicted(self.state_root / "engine") / "vms"
+            left = sorted(path.name for path in vms.iterdir()) if vms.exists() else []
+            assert not left, f"VM socket directories remain after env rm: {left}"
+            self.check("env rm ends the VM and removes its sockets")
 
     def reap(self):
         for pid in cli_host.owned_family(self.root):
@@ -307,6 +314,10 @@ class LocalVmJourney:
         if self.created:
             step(self.remove_environment)
         step(self.reap)
+        # The socket directories outlive the state root; nothing serves them
+        # once the journey's processes are gone.
+        for root in (self.state_root, self.state_root / "engine"):
+            step(lambda root=root: shutil.rmtree(socket_dir.predicted(root), ignore_errors=True))
         if self.keychain.exists():
             step(lambda: subprocess.run(["/usr/bin/security", "delete-keychain", str(self.keychain)], check=True))
         step(lambda: (self.sentinel.kill(), self.sentinel.wait(timeout=10)))

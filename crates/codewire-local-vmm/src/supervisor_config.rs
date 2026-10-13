@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 10;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 11;
 const NATIVE_SUPERVISOR_CONFIG_DIGEST_DOMAIN: &[u8] =
     b"codewire.native-supervisor.runtime-config.sha256.v1";
 
@@ -47,8 +47,20 @@ impl NativeRuntimeConfig {
         self.artifact_lock.with_file_name("cw-runtime.lock.json")
     }
 
+    /// This root's short private socket directory (#2735); see
+    /// [`crate::socket_dir`]. The supervisor creates it.
+    pub fn socket_dir(&self) -> PathBuf {
+        crate::socket_dir::predicted(&self.root)
+    }
+
     pub fn supervisor_socket(&self) -> PathBuf {
-        self.root.join("supervisor.sock")
+        self.socket_dir().join("supervisor.sock")
+    }
+
+    pub fn runner_socket(&self, environment_id: impl std::fmt::Display) -> PathBuf {
+        self.socket_dir()
+            .join("runners")
+            .join(format!("{environment_id}.sock"))
     }
 
     pub fn validate(&self) -> Result<(), SupervisorConfigError> {
@@ -76,30 +88,40 @@ impl NativeRuntimeConfig {
         if executable != self.executable {
             return Err(SupervisorConfigError::InvalidConfiguration);
         }
-        #[cfg(target_os = "macos")]
         self.validate_socket_paths()?;
         Ok(())
     }
 
-    /// Darwin's `sun_path` holds 103 bytes. Check the longest socket under
-    /// this root before anything is created: the supervisor socket, a runner
-    /// socket and a VM's hybrid-vsock socket (`engine/vms/<uuid>/vsock/v`).
-    #[cfg(target_os = "macos")]
+    /// Every socket must fit the kernel's `sun_path` (107 bytes on Linux, 103
+    /// on macOS). They live in short per-user directories, so this only fails
+    /// for an unusual fallback; it fails before anything is created, naming
+    /// the path and the limit.
     fn validate_socket_paths(&self) -> Result<(), SupervisorConfigError> {
-        const MAXIMUM_SOCKET_PATH_BYTES: usize = 103;
         let id = "00000000-0000-0000-0000-000000000000";
+        let vm = crate::socket_dir::predicted(&self.root.join("engine"))
+            .join("vms")
+            .join(id);
         for socket in [
             self.supervisor_socket(),
-            self.root.join("runners").join(format!("{id}.sock")),
-            self.root
-                .join("engine/vms")
-                .join(id)
-                .join("vsock")
-                .join(crate::state::VSOCK_SOCKET_NAME),
+            self.runner_socket(id),
+            vm.join("vsock").join(crate::state::VSOCK_SOCKET_NAME),
+            vm.join("api").join("api.sock"),
+            vm.join("fs").join(crate::state::direct_share_socket_name(
+                codewire_vmm_guest_probe::MAX_DIRECT_SHARES - 1,
+            )),
         ] {
-            if socket.as_os_str().len() > MAXIMUM_SOCKET_PATH_BYTES {
-                return Err(SupervisorConfigError::SocketPathTooLong(self.root.clone()));
-            }
+            crate::socket_dir::check_length(&socket).map_err(|error| match error {
+                crate::socket_dir::SocketDirError::PathTooLong {
+                    path,
+                    length,
+                    limit,
+                } => SupervisorConfigError::SocketPathTooLong {
+                    path,
+                    length,
+                    limit,
+                },
+                _ => SupervisorConfigError::InvalidConfiguration,
+            })?;
         }
         Ok(())
     }
@@ -191,11 +213,12 @@ pub enum SupervisorConfigError {
     InvalidSupervisorInfo,
     #[error("the running native supervisor uses a different runtime configuration")]
     SupervisorConfigurationMismatch,
-    #[cfg(target_os = "macos")]
-    #[error(
-        "local state root {0} is too long for macOS Unix sockets (103 bytes); choose a shorter path"
-    )]
-    SocketPathTooLong(PathBuf),
+    #[error("the local VM socket path {path} would be {length} bytes, over the {limit}-byte limit")]
+    SocketPathTooLong {
+        path: PathBuf,
+        length: usize,
+        limit: usize,
+    },
     #[error("filesystem operation failed for {path}: {source}")]
     Io {
         path: PathBuf,
@@ -226,7 +249,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 10);
+        assert_eq!(info.protocol_version, 11);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(
@@ -252,7 +275,13 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(
             config.supervisor_socket(),
-            config.root.join("supervisor.sock")
+            crate::socket_dir::predicted(&config.root).join("supervisor.sock")
+        );
+        assert_eq!(
+            config.runner_socket(uuid::Uuid::nil()),
+            crate::socket_dir::predicted(&config.root)
+                .join("runners")
+                .join(format!("{}.sock", uuid::Uuid::nil()))
         );
         for field in 0..7 {
             let mut invalid = config.clone();

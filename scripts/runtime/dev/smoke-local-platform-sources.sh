@@ -111,9 +111,12 @@ USAGE
 local_platform_validate_socket_paths() {
   # Match the short private layout used by smoke-native-local-environment.sh.
   # Count bytes, not locale-dependent characters; reserve sockaddr_un's NUL.
-  local LC_ALL=C smoke_home_path="$1" smoke_runtime_path="$2" socket
+  local LC_ALL=C smoke_home_path="$1" smoke_runtime_path="$2" socket engine_sockets
+  # VM sockets live in the engine's short per-user directory (#2735).
+  engine_sockets="$(python3 -I "$REPO_ROOT/scripts/dev/native_socket_dir.py" "$smoke_home_path/n/engine")" ||
+    die 'native socket directory is unavailable'
   for socket in \
-    "$smoke_home_path/n/engine/vms/00000000-0000-4000-8000-000000000000/vsock/vsock.sock" \
+    "$engine_sockets/vms/00000000-0000-4000-8000-000000000000/vsock/vsock.sock" \
     "$smoke_home_path/.codewire/credentials-v1/authority.sock" \
     "$smoke_home_path/.codewire/credentials-v1/ssh-00000000-0000-4000-8000-000000000000/agent" \
     "$smoke_runtime_path/.codewire-provider-login-00000000-0000-4000-8000-000000000000/a"; do

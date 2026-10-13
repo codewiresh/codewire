@@ -247,6 +247,14 @@ if [ "$1" = release ]; then
   printf 'release-bytecode %s\n' "${PYTHONDONTWRITEBYTECODE:-unset}" >> "$PREFLIGHT_TEST_TOOL_LOG"
 fi
 if [ "$1" = rust-compile ] && [ "${PREFLIGHT_TEST_COMPILE_FAIL:-0}" = 1 ]; then
+  # Fail only once the policy lane has started, so the case proves that the
+  # compile gate stops a running lane, whatever the host load (#2727).
+  if [ -n "${PREFLIGHT_TEST_POLICY_SLEEP:-}" ]; then
+    for _ in $(seq 1 600); do
+      ! grep -qsx 'policy-started' "$PREFLIGHT_TEST_TOOL_LOG" || break
+      sleep 0.1
+    done
+  fi
   echo 'synthetic compile failure' >&2
   exit 87
 fi
