@@ -448,6 +448,16 @@ pub(crate) struct CredentialSettingsView {
     /// The credential name a failed addition keeps for its reopened dialog.
     /// No secret field has a retained value; those always render empty.
     pub(crate) retained_name: String,
+    /// After a GitHub connect or reconnect only: installations that have not
+    /// yet granted what Codewire needs, with where their owner accepts it.
+    pub(crate) github_accept: Vec<GithubAcceptView>,
+}
+
+/// One installation still short of the permissions Codewire needs: its login
+/// and its GitHub settings page, built from validated parts.
+pub(crate) struct GithubAcceptView {
+    pub(crate) account: String,
+    pub(crate) url: String,
 }
 
 impl CredentialSettingsView {
@@ -2529,6 +2539,7 @@ mod secret_debug_tests {
             message: String::new(),
             error: String::new(),
             retained_name: MARKER.into(),
+            github_accept: Vec::new(),
         };
 
         assert_value_blind(&format!("{page:?}"));

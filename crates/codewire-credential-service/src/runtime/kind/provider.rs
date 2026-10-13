@@ -52,6 +52,9 @@ pub(super) fn github_app_callback_url(public_origin: &str) -> String {
 }
 pub(super) const GITHUB_APP_USER_TOKEN: &str = "ghu_kind_synthetic_user_token_1234567890";
 const GITHUB_APP_UNINSTALLED_USER_TOKEN: &str = "ghu_kind_synthetic_uninstalled_user_1234567890";
+/// A login whose installation still has the grant from before the App asked
+/// for write access: connect succeeds and names the pending permissions.
+const GITHUB_APP_LIMITED_USER_TOKEN: &str = "ghu_kind_synthetic_limited_user_token_1234567890";
 pub(super) const GITHUB_APP_REFRESHED_USER_TOKEN: &str =
     "ghu_kind_synthetic_refreshed_user_token_1234567890";
 const GITHUB_APP_INITIAL_REFRESH_TOKEN: &str =
@@ -390,6 +393,16 @@ impl SyntheticProvider {
                 "token_type": "bearer",
             }));
         }
+        if body
+            == self
+                .github_app_exchange_body("kind-synthetic-code-limited")
+                .as_bytes()
+        {
+            return json_response(json!({
+                "access_token": GITHUB_APP_LIMITED_USER_TOKEN,
+                "token_type": "bearer",
+            }));
+        }
         if body != github_app_refresh_body().as_bytes() {
             return Err(BrokerUpstreamError::Protocol);
         }
@@ -435,13 +448,27 @@ impl SyntheticProvider {
         {
             return Err(BrokerUpstreamError::Protocol);
         }
-        if headers.get("authorization").is_some_and(|value| {
-            value == format!("Bearer {GITHUB_APP_UNINSTALLED_USER_TOKEN}").as_str()
-        }) {
+        let bearer = |token: &str| {
+            headers
+                .get("authorization")
+                .is_some_and(|value| value == format!("Bearer {token}").as_str())
+        };
+        if bearer(GITHUB_APP_UNINSTALLED_USER_TOKEN) {
             return json_response(json!({"installations": []}));
         }
+        let account = json!({"login": "synthetic-user", "type": "User"});
+        if bearer(GITHUB_APP_LIMITED_USER_TOKEN) {
+            // The same installation before its owner accepted write access.
+            return json_response(json!({
+                "installations": [{"id": 41, "app_slug": GITHUB_APP_SLUG, "account": account,
+                    "repository_selection": "selected",
+                    "permissions": {"contents": "read", "metadata": "read"}}],
+            }));
+        }
         json_response(json!({
-            "installations": [{"id": 41, "app_slug": GITHUB_APP_SLUG}],
+            "installations": [{"id": 41, "app_slug": GITHUB_APP_SLUG, "account": account,
+                "repository_selection": "selected",
+                "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read"}}],
         }))
     }
 
@@ -1200,6 +1227,7 @@ fn github_app_api_headers(headers: &HeaderMap) -> bool {
         GITHUB_APP_USER_TOKEN,
         GITHUB_APP_REFRESHED_USER_TOKEN,
         GITHUB_APP_UNINSTALLED_USER_TOKEN,
+        GITHUB_APP_LIMITED_USER_TOKEN,
     ]
     .iter()
     .any(|token| {
@@ -2243,6 +2271,35 @@ mod tests {
             HeaderValue::from_str(&format!("Bearer {GITHUB_APP_UNINSTALLED_USER_TOKEN}")).unwrap(),
         )]);
         assert!(!github_bearer_authorization(&uninstalled));
+        // #2712: the full grant names nothing; the earlier grant connects and
+        // names its installation's settings page.
+        let full = owner
+            .complete(zeroize::Zeroizing::new(
+                GITHUB_APP_AUTHORIZATION_CODES[0].as_bytes().to_vec(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            full.reach()
+                .iter()
+                .all(|installation| installation.pending_permissions.is_none())
+        );
+        let limited = owner
+            .complete(zeroize::Zeroizing::new(
+                b"kind-synthetic-code-limited".to_vec(),
+            ))
+            .await
+            .unwrap();
+        let pending = limited.reach()[0].pending_permissions.as_ref().unwrap();
+        assert_eq!(
+            pending.settings_url(&limited.reach()[0].account),
+            "https://github.com/settings/installations/41"
+        );
+        let limited = HeaderMap::from_iter([(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {GITHUB_APP_LIMITED_USER_TOKEN}")).unwrap(),
+        )]);
+        assert!(!github_bearer_authorization(&limited));
     }
 
     fn body(marker: &str) -> Vec<u8> {

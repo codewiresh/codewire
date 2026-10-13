@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_access::{CredentialAuthKind, CredentialId};
-use codewire_credential_broker::GitHubAppAuthorizationError;
+use codewire_credential_broker::{GitHubAppAuthorizationError, GitHubAppInstallationReach};
+use codewire_proto::codewire::v1::GithubAppPendingPermissions;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
@@ -13,6 +14,29 @@ use super::enrollment::Completed;
 use super::*;
 
 const GITHUB_APP_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(45);
+/// At most this many installations are named in one connect response.
+const MAX_PENDING_PERMISSIONS: usize = 16;
+
+/// The installations that have not granted every permission Codewire needs,
+/// for the person connecting to accept. Computed from this connect's own
+/// installation listing and never stored, so it cannot go stale.
+pub(super) fn pending_permissions(
+    reach: &[GitHubAppInstallationReach],
+) -> Vec<GithubAppPendingPermissions> {
+    reach
+        .iter()
+        .filter_map(|installation| {
+            let pending = installation.pending_permissions.as_ref()?;
+            Some(GithubAppPendingPermissions {
+                account: installation.account.clone(),
+                installation_id: pending.installation_id,
+                organization: pending.organization,
+                ..Default::default()
+            })
+        })
+        .take(MAX_PENDING_PERMISSIONS)
+        .collect()
+}
 
 impl CredentialMutationOwner {
     pub(super) async fn complete_github_app_authorization(
@@ -21,7 +45,7 @@ impl CredentialMutationOwner {
         code: Zeroizing<Vec<u8>>,
         credential_id: Option<String>,
         expected_revision: Option<u64>,
-    ) -> Result<CredentialMetadata, Error> {
+    ) -> Result<(CredentialMetadata, Vec<GithubAppPendingPermissions>), Error> {
         if !authority.is_browser_session() {
             return Err(Error::Denied);
         }
@@ -64,7 +88,7 @@ async fn run(
     scope: &Scope,
     code: Zeroizing<Vec<u8>>,
     replacement: Option<(CredentialId, u64)>,
-) -> Result<CredentialMetadata, Error> {
+) -> Result<(CredentialMetadata, Vec<GithubAppPendingPermissions>), Error> {
     let target = match replacement {
         Some((id, revision)) => reconnect_target(&shared, scope, id, revision).await?,
         None => {
@@ -88,10 +112,12 @@ async fn run(
     {
         return Err(Error::EnrollmentFailed);
     }
+    let pending = pending_permissions(import.reach());
     let mut completed = Completed::GithubApp(import);
     publication::enroll(&shared, scope, &mut completed, target)
         .await
         .result
+        .map(|metadata| (metadata, pending))
 }
 
 pub(super) fn reconnect_account_matches(expected: Option<&str>, actual: &str) -> bool {
@@ -157,6 +183,34 @@ mod tests {
             github_app_error(GitHubAppAuthorizationError::Unavailable),
             Error::Unavailable
         );
+    }
+
+    #[test]
+    fn pending_permissions_name_only_installations_short_of_codewires_needs() {
+        use codewire_credential_broker::GitHubAppPendingPermissions;
+        let reach = [
+            GitHubAppInstallationReach {
+                account: "octo-org".into(),
+                all_repositories: false,
+                pending_permissions: Some(GitHubAppPendingPermissions {
+                    installation_id: 43,
+                    organization: true,
+                }),
+            },
+            GitHubAppInstallationReach {
+                account: "octo-user".into(),
+                all_repositories: true,
+                pending_permissions: None,
+            },
+        ];
+        let pending = pending_permissions(&reach);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].account, "octo-org");
+        assert_eq!(pending[0].installation_id, 43);
+        assert!(pending[0].organization);
+        assert!(pending_permissions(&reach[1..]).is_empty());
+        let many = vec![reach[0].clone(); MAX_PENDING_PERMISSIONS + 3];
+        assert_eq!(pending_permissions(&many).len(), MAX_PENDING_PERMISSIONS);
     }
 
     #[test]

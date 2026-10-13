@@ -78,36 +78,46 @@ pub(super) async fn handle(
                                 },
                             )
                             .await
+                            .map(|credential| (credential, Vec::new()))
                     }
-                    CredentialConnectProviderArg::Github => {
-                        client
-                            .enroll_github(
-                                rpc::EnrollGithubRequest {
-                                    name: request.name,
-                                    credential_id: request.credential_id,
-                                    expected_revocation_generation: request
-                                        .expected_revocation_generation,
-                                    ..Default::default()
-                                },
-                                |challenge| {
-                                    display_challenge(
-                                        label,
-                                        &challenge.verification_url,
-                                        &challenge.user_code,
-                                    )
-                                },
-                            )
-                            .await
-                    }
+                    CredentialConnectProviderArg::Github => client
+                        .enroll_github(
+                            rpc::EnrollGithubRequest {
+                                name: request.name,
+                                credential_id: request.credential_id,
+                                expected_revocation_generation: request
+                                    .expected_revocation_generation,
+                                ..Default::default()
+                            },
+                            |challenge| {
+                                display_challenge(
+                                    label,
+                                    &challenge.verification_url,
+                                    &challenge.user_code,
+                                )
+                            },
+                        )
+                        .await
+                        .map(|enrolled| (enrolled.credential, enrolled.pending_permissions)),
                 }
             };
-            let credential = tokio::select! {
+            let (credential, pending) = tokio::select! {
                 result = enrollment => result.context("enroll platform OAuth credential")?,
                 _ = tokio::signal::ctrl_c() => {
                     anyhow::bail!("enrollment cancelled; inspect the credential by name before retrying because storage acknowledgement may be unknown");
                 }
             };
-            print(&[credential], OutputFormat::Text)
+            print(&[credential], OutputFormat::Text)?;
+            for pending in &pending {
+                if let Some(notice) = super::credentials::github_pending_notice(
+                    &pending.account,
+                    pending.installation_id,
+                    pending.organization,
+                ) {
+                    eprintln!("{notice}");
+                }
+            }
+            Ok(())
         }
         CredentialsCommand::List(args) => {
             let mut credentials = Vec::new();

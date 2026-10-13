@@ -119,12 +119,12 @@ pub use codewire_proto::codewire::v1::{
     CredentialAuthenticationKind, CredentialStatus, DeleteCredentialRequest,
     DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest,
     EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse,
-    GetCredentialRequest, GetCredentialResponse, GithubDeviceChallenge, GithubRepository,
-    ListCredentialsRequest, ListCredentialsResponse, ListGithubRepositoriesRequest,
-    ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse,
-    RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest,
-    RotateApiKeyCredentialResponse, SshPublicKey, enroll_codex_response, enroll_github_response,
-    get_credential_request,
+    GetCredentialRequest, GetCredentialResponse, GithubAppPendingPermissions,
+    GithubDeviceChallenge, GithubRepository, ListCredentialsRequest, ListCredentialsResponse,
+    ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest,
+    RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse,
+    RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse, SshPublicKey,
+    enroll_codex_response, enroll_github_response, get_credential_request,
 };
 pub use codewire_proto::codewire::v1::{
     CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,
@@ -164,6 +164,7 @@ pub use coordinator::{
     PrimaryCoordinateIdentity,
 };
 pub use credential_delegation::CredentialDelegationStream;
+pub use credentials::GithubEnrollment;
 pub use error::{ClientError, ErrorInfo, ValidationError};
 pub use tailnet::{
     EnvironmentTailnetDiagnostic, ExpectedTransport, NativeClientFacade, SshTransportMode,

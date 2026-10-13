@@ -251,6 +251,8 @@ test.describe("managed provider credential browser journey", () => {
       const completedCallback = await completeGithubAppConnection(page, "kind-synthetic-code-one");
       await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&message=github-app-connected`);
       await expect(page.getByRole("status")).toHaveText("GitHub connected through the GitHub App.");
+      // The synthetic installation granted everything Codewire needs (#2712).
+      await expect(page.getByRole("region", { name: "GitHub permissions", exact: true })).toHaveCount(0);
       const enrolled = await githubConnectionMetadata(owner);
       expect(enrolled).toHaveLength(1);
       // App user authorization publishes OAuth material; the separate
@@ -403,6 +405,27 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page).toHaveURL(new RegExp(`^${ssrUrl}/${slug}/[0-9a-f-]{36}/\\?message=environment-created$`));
       await verifyGithubCheckout(page, orgId, before);
       await destroyGithubCheckout(page, orgId);
+
+      // #2712: a reconnect whose installation still has the grant from before
+      // Codewire asked for write access saves the connection and says so once,
+      // linking the installation's settings page.
+      await page.goto("/settings/credentials/");
+      row = credentialRows.filter({ hasText: name });
+      await row.locator("details.cw-menu > summary").click();
+      await row.getByRole("button", { name: "Reconnect", exact: true }).click();
+      await page.locator("dialog[open]").getByRole("checkbox").check();
+      await completeGithubAppConnection(page, "kind-synthetic-code-limited");
+      await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=github-app-connected&github_accept=u\.synthetic-user\.41$/);
+      await expect(page.getByRole("status")).toHaveText("GitHub connected through the GitHub App.");
+      const permissions = page.getByRole("region", { name: "GitHub permissions", exact: true });
+      await expect(permissions).toContainText(
+        "GitHub has not yet given Codewire write access to code and pull requests on synthetic-user.");
+      await expect(permissions.getByRole("link", { name: "Accept the updated permissions on GitHub", exact: true }))
+        .toHaveAttribute("href", "https://github.com/settings/installations/41");
+      await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
+      // Connect-time only: the next visit no longer names it.
+      await page.goto("/settings/credentials/");
+      await expect(page.getByRole("region", { name: "GitHub permissions", exact: true })).toHaveCount(0);
 
       // Delete removes the connection directly and leaves every profile as it
       // was: profiles show GitHub as missing, Create cannot browse.

@@ -534,13 +534,110 @@ fn unix_now() -> Result<u64, ConnectError> {
 /// Complete the server-side GitHub App callback. The callback code is sent
 /// only to credential-service over the authenticated mutation connection; the
 /// browser receives no token, provider response, or installation metadata.
+/// An installation of the Codewire GitHub App that has not yet granted the
+/// permissions Codewire needs, as one connect's response reported it. Shown
+/// once after that connect and never stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GithubPendingPermissions {
+    pub(crate) account: String,
+    pub(crate) installation_id: u64,
+    pub(crate) organization: bool,
+}
+
+/// At most this many installations are carried to the page after a connect.
+const MAX_GITHUB_PENDING: usize = 8;
+
+impl GithubPendingPermissions {
+    fn new(account: &str, installation_id: u64, organization: bool) -> Option<Self> {
+        (valid_github_login(account) && installation_id > 0).then(|| Self {
+            account: account.to_owned(),
+            installation_id,
+            organization,
+        })
+    }
+
+    /// GitHub's settings page for this installation, where its owner reviews
+    /// and accepts the App's permission request.
+    pub(crate) fn settings_url(&self) -> String {
+        if self.organization {
+            format!(
+                "https://github.com/organizations/{}/settings/installations/{}",
+                self.account, self.installation_id
+            )
+        } else {
+            format!(
+                "https://github.com/settings/installations/{}",
+                self.installation_id
+            )
+        }
+    }
+
+    /// The compact form the post-connect redirect carries: `u.LOGIN.ID` or
+    /// `o.LOGIN.ID`, comma-separated. GitHub logins never contain a dot.
+    pub(crate) fn encode_all(pending: &[Self]) -> String {
+        pending
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}.{}.{}",
+                    if p.organization { "o" } else { "u" },
+                    p.account,
+                    p.installation_id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// The redirect's value, validated again: anything malformed is dropped,
+    /// so a crafted link can only name a GitHub settings page.
+    pub(crate) fn decode_all(value: &str) -> Vec<Self> {
+        if value.is_empty() || value.len() > 1024 {
+            return Vec::new();
+        }
+        value
+            .split(',')
+            .filter_map(|entry| {
+                let mut parts = entry.split('.');
+                let organization = match parts.next()? {
+                    "o" => true,
+                    "u" => false,
+                    _ => return None,
+                };
+                let account = parts.next()?;
+                let digits = parts.next()?;
+                if parts.next().is_some()
+                    || digits.is_empty()
+                    || digits.len() > 20
+                    || !digits.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return None;
+                }
+                Self::new(account, digits.parse().ok()?, organization)
+            })
+            .take(MAX_GITHUB_PENDING)
+            .collect()
+    }
+}
+
+/// A GitHub login: 1–39 letters, digits or single hyphens, not at either end.
+fn valid_github_login(value: &str) -> bool {
+    (1..=39).contains(&value.len())
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && !value.contains("--")
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 pub(crate) async fn complete_github_app_authorization(
     state: &AppState,
     cookie: HeaderValue,
     code: Vec<u8>,
     credential_id: Option<String>,
     expected_generation: Option<u64>,
-) -> Result<(), ConnectError> {
+) -> Result<Vec<GithubPendingPermissions>, ConnectError> {
     let current = match (&credential_id, expected_generation) {
         (None, None) => None,
         (Some(id), Some(generation)) => {
@@ -568,7 +665,21 @@ pub(crate) async fn complete_github_app_authorization(
         .credential
         .into_option()
         .ok_or_else(invalid_metadata)?;
-    validate_github_app_authorization_ack(&credential, current.as_ref())
+    validate_github_app_authorization_ack(&credential, current.as_ref())?;
+    // Advisory only: the connection is saved either way, so a malformed entry
+    // is dropped rather than failing a connect that succeeded.
+    Ok(response
+        .pending_permissions
+        .iter()
+        .filter_map(|pending| {
+            GithubPendingPermissions::new(
+                &pending.account,
+                pending.installation_id,
+                pending.organization,
+            )
+        })
+        .take(MAX_GITHUB_PENDING)
+        .collect())
 }
 
 pub(crate) async fn validate_github_app_reconnect(
@@ -1550,6 +1661,54 @@ fn invalid_metadata() -> ConnectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_pending_permissions_round_trip_and_refuse_anything_else() {
+        let pending = vec![
+            GithubPendingPermissions::new("octo-user", 12345, false).unwrap(),
+            GithubPendingPermissions::new("octo-org", 678, true).unwrap(),
+        ];
+        let encoded = GithubPendingPermissions::encode_all(&pending);
+        assert_eq!(encoded, "u.octo-user.12345,o.octo-org.678");
+        assert_eq!(GithubPendingPermissions::decode_all(&encoded), pending);
+        assert_eq!(
+            pending[0].settings_url(),
+            "https://github.com/settings/installations/12345"
+        );
+        assert_eq!(
+            pending[1].settings_url(),
+            "https://github.com/organizations/octo-org/settings/installations/678"
+        );
+        // A crafted value can only ever name a GitHub settings page.
+        for crafted in [
+            "x.octo.1",
+            "u.octo",
+            "u.octo.1.2",
+            "u.octo.0",
+            "u.octo.-1",
+            "u.octo.1e3",
+            "u..1",
+            "u.-octo.1",
+            "u.octo--org.1",
+            "u.octo/../evil.1",
+            "o.evil.com/x.1",
+            "u.a-very-long-login-name-that-github-would-refuse.1",
+        ] {
+            assert!(
+                GithubPendingPermissions::decode_all(crafted).is_empty(),
+                "{crafted}"
+            );
+        }
+        assert_eq!(
+            GithubPendingPermissions::decode_all("u.ok.1,bad,o.org.2").len(),
+            2
+        );
+        let many = vec!["u.octo.1"; MAX_GITHUB_PENDING + 3].join(",");
+        assert_eq!(
+            GithubPendingPermissions::decode_all(&many).len(),
+            MAX_GITHUB_PENDING
+        );
+    }
 
     fn credential(
         id: &str,

@@ -310,6 +310,76 @@ pub struct GitHubAppInstallationReach {
     pub account: String,
     /// All of the account's repositories, or only the ones selected for it.
     pub all_repositories: bool,
+    /// Set when this installation has not granted every permission Codewire
+    /// needs, usually because its owner has not yet accepted the App's
+    /// updated permission request. Reported at connect time, never stored.
+    pub pending_permissions: Option<GitHubAppPendingPermissions>,
+}
+
+/// Where an installation's owner accepts the permissions Codewire needs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitHubAppPendingPermissions {
+    pub installation_id: u64,
+    /// The installation belongs to an organization, not a personal account.
+    pub organization: bool,
+}
+
+/// The permissions Codewire's GitHub route needs, with the lowest level that
+/// serves each: push and pull requests through the proxy, and repository
+/// metadata for every listing.
+const REQUIRED_PERMISSIONS: [(&str, PermissionLevel); 3] = [
+    ("contents", PermissionLevel::Write),
+    ("pull_requests", PermissionLevel::Write),
+    ("metadata", PermissionLevel::Read),
+];
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum PermissionLevel {
+    Read,
+    Write,
+    Admin,
+}
+
+impl PermissionLevel {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Self::Read),
+            "write" => Some(Self::Write),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+}
+
+/// Whether GitHub's granted permissions for an installation fall short of
+/// what Codewire needs. An installation GitHub reported no permissions for
+/// is not flagged: there is nothing to compare.
+fn permissions_fall_short(granted: &std::collections::BTreeMap<String, String>) -> bool {
+    REQUIRED_PERMISSIONS.iter().any(|(name, needed)| {
+        granted
+            .get(*name)
+            .and_then(|level| PermissionLevel::parse(level))
+            .is_none_or(|level| level < *needed)
+    })
+}
+
+impl GitHubAppPendingPermissions {
+    /// GitHub's settings page for this installation, where its owner reviews
+    /// and accepts the App's permission request. Built from the numeric
+    /// installation ID and a validated login, never from response URLs.
+    pub fn settings_url(&self, account: &str) -> String {
+        if self.organization {
+            format!(
+                "https://github.com/organizations/{account}/settings/installations/{}",
+                self.installation_id
+            )
+        } else {
+            format!(
+                "https://github.com/settings/installations/{}",
+                self.installation_id
+            )
+        }
+    }
 }
 
 /// A protected GitHub user token plus the verified GitHub login.  This type
@@ -595,12 +665,21 @@ async fn app_installations(
                 continue;
             }
             first.get_or_insert(installation.id);
-            if let Some(account) = installation.account.map(|account| account.login)
-                && valid_login(&account)
+            if let Some(account) = installation.account
+                && valid_login(&account.login)
             {
+                let pending_permissions = installation
+                    .permissions
+                    .as_ref()
+                    .filter(|granted| permissions_fall_short(granted))
+                    .map(|_| GitHubAppPendingPermissions {
+                        installation_id: installation.id,
+                        organization: account.kind == "Organization",
+                    });
                 reach.push(GitHubAppInstallationReach {
-                    account,
+                    account: account.login,
                     all_repositories: installation.repository_selection == "all",
+                    pending_permissions,
                 });
             }
         }
@@ -825,11 +904,19 @@ struct Installation {
     account: Option<InstallationAccount>,
     #[serde(default)]
     repository_selection: String,
+    /// The permissions this installation has granted, by name. GitHub keeps
+    /// an installation on its earlier grant until its owner accepts an
+    /// updated permission request.
+    #[serde(default)]
+    permissions: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
 struct InstallationAccount {
     login: String,
+    /// `User` or `Organization`.
+    #[serde(rename = "type", default)]
+    kind: String,
 }
 
 fn bundle_from_expiring_tokens(
@@ -1444,5 +1531,67 @@ mod tests {
         assert!(valid_user_token("ghu_user_token_123"));
         assert!(valid_refresh_token("ghr_refresh_token_123"));
         assert!(!valid_refresh_token("ghu_user_token_123"));
+    }
+
+    #[test]
+    fn installation_permissions_fall_short_only_below_what_codewire_needs() {
+        let granted = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(name, level)| ((*name).to_owned(), (*level).to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let full = [
+            ("contents", "write"),
+            ("pull_requests", "write"),
+            ("metadata", "read"),
+        ];
+        assert!(!permissions_fall_short(&granted(&full)));
+        // A higher level, and permissions Codewire does not use, still serve.
+        assert!(!permissions_fall_short(&granted(&[
+            ("contents", "admin"),
+            ("pull_requests", "write"),
+            ("metadata", "write"),
+            ("issues", "read"),
+        ])));
+        // The grant from before the App asked for write access.
+        assert!(permissions_fall_short(&granted(&[
+            ("contents", "read"),
+            ("metadata", "read"),
+        ])));
+        assert!(permissions_fall_short(&granted(&[
+            ("contents", "write"),
+            ("metadata", "read"),
+        ])));
+        assert!(permissions_fall_short(&granted(&[
+            ("contents", "write"),
+            ("pull_requests", "write"),
+        ])));
+        assert!(permissions_fall_short(&granted(&[
+            ("contents", "write"),
+            ("pull_requests", "maintain"),
+            ("metadata", "read"),
+        ])));
+        assert!(permissions_fall_short(&granted(&[])));
+    }
+
+    #[test]
+    fn pending_permissions_link_to_the_installation_settings_page() {
+        let personal = GitHubAppPendingPermissions {
+            installation_id: 12345,
+            organization: false,
+        };
+        assert_eq!(
+            personal.settings_url("octo-user"),
+            "https://github.com/settings/installations/12345"
+        );
+        let organization = GitHubAppPendingPermissions {
+            installation_id: 678,
+            organization: true,
+        };
+        assert_eq!(
+            organization.settings_url("octo-org"),
+            "https://github.com/organizations/octo-org/settings/installations/678"
+        );
     }
 }

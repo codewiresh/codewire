@@ -38,7 +38,7 @@ use crate::{
         CredentialRevisionSubmission, CredentialRotateSubmission, CredentialSettingsView,
         CredentialSshGenerateSubmission, CredentialSshImportSubmission,
         CredentialSubscriptionTokenSubmission, GitHubAppAuthorizationSubmission,
-        GitIdentitySubmission,
+        GitIdentitySubmission, GithubAcceptView,
     },
 };
 
@@ -57,6 +57,10 @@ pub(super) struct QueryParameters {
     error: String,
     #[serde(default)]
     dialog: String,
+    /// After a GitHub connect only: installations still short of the
+    /// permissions Codewire needs (#2712). Validated on every render.
+    #[serde(default)]
+    github_accept: String,
 }
 
 // Navigation is parsed independently of authority-bearing query fields. An
@@ -187,6 +191,17 @@ async fn render_page(
         message: approved_message(message).into(),
         error: approved_error(error).into(),
         retained_name: retained_name.into(),
+        github_accept: if message == "github-app-connected" {
+            credentials_connect::GithubPendingPermissions::decode_all(&query.github_accept)
+                .into_iter()
+                .map(|pending| GithubAcceptView {
+                    url: pending.settings_url(),
+                    account: pending.account,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
     };
     let mut response = with_csrf_cookie(
         render_credential_settings_page(CredentialSettingsTemplate {
@@ -871,7 +886,23 @@ pub(super) async fn github_app_callback(
         )
         .await
         {
-            Ok(()) => page_redirect("github-app-connected", false, &context, &headers),
+            Ok(pending) if pending.is_empty() => {
+                page_redirect("github-app-connected", false, &context, &headers)
+            }
+            // The connection is saved; GitHub has not yet granted everything
+            // Codewire needs on these installations (#2712). Said once, here.
+            Ok(pending) => redirect(
+                format!(
+                    "{}&github_accept={}",
+                    page_feedback_target(&context, "message", "github-app-connected", ""),
+                    url::form_urlencoded::byte_serialize(
+                        credentials_connect::GithubPendingPermissions::encode_all(&pending)
+                            .as_bytes()
+                    )
+                    .collect::<String>()
+                ),
+                &headers,
+            ),
             Err(error) if error.code == ErrorCode::AlreadyExists => {
                 page_error_redirect("github-app-already-connected", &dialog, &context, &headers)
             }
@@ -1705,6 +1736,24 @@ mod tests {
         navigation: &str,
         retained_name: &str,
     ) -> String {
+        rendered_page_with_github_accept(
+            active_dialog,
+            error,
+            data,
+            navigation,
+            retained_name,
+            Vec::new(),
+        )
+    }
+
+    fn rendered_page_with_github_accept(
+        active_dialog: &str,
+        error: &str,
+        data: credentials_connect::CredentialSettingsData,
+        navigation: &str,
+        retained_name: &str,
+        github_accept: Vec<GithubAcceptView>,
+    ) -> String {
         let view = DashboardView {
             user_name: "Dashboard User".into(),
             csrf_token: Default::default(),
@@ -1748,6 +1797,7 @@ mod tests {
             message: String::new(),
             error: error.into(),
             retained_name: retained_name.into(),
+            github_accept,
         };
         CredentialSettingsTemplate {
             view: &view,
@@ -1755,6 +1805,34 @@ mod tests {
         }
         .render()
         .unwrap()
+    }
+
+    #[test]
+    fn a_github_connect_names_installations_still_short_of_permissions() {
+        // #2712: the notice names each installation and links its settings
+        // page; it is absent when every installation granted what is needed.
+        let html = rendered_page_with_github_accept(
+            "",
+            "",
+            dialog_data(),
+            "?org=sample-org",
+            "",
+            vec![GithubAcceptView {
+                account: "octo-org".into(),
+                url: "https://github.com/organizations/octo-org/settings/installations/43".into(),
+            }],
+        );
+        assert!(html.contains(
+            r#"<section class="cw-alert cw-alert--warning" aria-label="GitHub permissions">"#
+        ));
+        assert!(html.contains(
+            "GitHub has not yet given Codewire write access to code and pull requests on octo-org."
+        ));
+        assert!(html.contains(
+            r#"<a class="cw-link-button" href="https://github.com/organizations/octo-org/settings/installations/43" target="_blank" rel="noopener noreferrer">Accept the updated permissions on GitHub</a>"#
+        ));
+        let html = rendered_page("", "", dialog_data(), "?org=sample-org", "");
+        assert!(!html.contains("GitHub permissions"));
     }
 
     #[test]

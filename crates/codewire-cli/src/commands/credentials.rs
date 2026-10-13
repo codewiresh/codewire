@@ -160,7 +160,52 @@ async fn connect_github(
         record.metadata.display_name, record.metadata.id
     );
     eprintln!("{}", github_reach_summary(&reach));
+    for installation in &reach {
+        if let Some(notice) = installation
+            .pending_permissions
+            .as_ref()
+            .and_then(|pending| {
+                github_pending_notice(
+                    &installation.account,
+                    pending.installation_id,
+                    pending.organization,
+                )
+            })
+        {
+            eprintln!("{notice}");
+        }
+    }
     Ok(())
+}
+
+/// Said once when GitHub is connected: an installation that has not yet
+/// granted what Codewire needs keeps reads working, but pushes and pull
+/// requests fail until its owner accepts the updated permissions (#2712).
+/// The link is built from the validated login and installation ID.
+pub(crate) fn github_pending_notice(
+    account: &str,
+    installation_id: u64,
+    organization: bool,
+) -> Option<String> {
+    let valid_login = (1..=39).contains(&account.len())
+        && !account.starts_with('-')
+        && !account.ends_with('-')
+        && !account.contains("--")
+        && account
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    if !valid_login || installation_id == 0 {
+        return None;
+    }
+    let url = codewire_credential_broker::GitHubAppPendingPermissions {
+        installation_id,
+        organization,
+    }
+    .settings_url(account);
+    Some(format!(
+        "GitHub has not yet given Codewire write access to code and pull requests on {account}. \
+         Accept the updated permissions on GitHub: {url}"
+    ))
 }
 
 /// What the Codewire GitHub App can reach for this login, and where to change
@@ -1923,16 +1968,39 @@ mod tests {
     }
 
     #[test]
+    fn github_pending_notice_names_the_installation_and_its_settings_page() {
+        assert_eq!(
+            github_pending_notice("noeljackson", 12345, false).unwrap(),
+            "GitHub has not yet given Codewire write access to code and pull requests on noeljackson. \
+             Accept the updated permissions on GitHub: https://github.com/settings/installations/12345"
+        );
+        assert_eq!(
+            github_pending_notice("octo-org", 678, true).unwrap(),
+            "GitHub has not yet given Codewire write access to code and pull requests on octo-org. \
+             Accept the updated permissions on GitHub: \
+             https://github.com/organizations/octo-org/settings/installations/678"
+        );
+        for (account, id) in [("", 1), ("-octo", 1), ("octo/evil", 1), ("octo", 0)] {
+            assert!(
+                github_pending_notice(account, id, false).is_none(),
+                "{account}"
+            );
+        }
+    }
+
+    #[test]
     fn github_reach_names_each_installation_and_the_install_page() {
         use codewire_credential_broker::GitHubAppInstallationReach;
         let summary = github_reach_summary(&[
             GitHubAppInstallationReach {
                 account: "codewiresh".into(),
                 all_repositories: true,
+                pending_permissions: None,
             },
             GitHubAppInstallationReach {
                 account: "noeljackson".into(),
                 all_repositories: false,
+                pending_permissions: None,
             },
         ]);
         assert_eq!(
