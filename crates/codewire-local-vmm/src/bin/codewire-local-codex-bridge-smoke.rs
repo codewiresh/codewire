@@ -91,6 +91,12 @@ mod linux {
     const MANAGED_PROFILE_REVISION: u64 = 4;
     const MAX_AUDIT_EVENTS: usize = 32;
     const GUEST_CALLER_BEARER: &str = "guest-supplied-bearer-must-not-pass";
+    /// A path on the managed HTTP ingress outside every provider base: the
+    /// Codex client's `/v1`, `/_codewire/openai/v1` and `/_codewire/anthropic`.
+    const OUTSIDE_MANAGED_BASES_PATH: &str = "/v2/responses";
+    /// What the synthetic upstream answers for a request on a provider base
+    /// that it does not serve (`SyntheticOpenAiSmokeTransport::not_found`).
+    const SYNTHETIC_UNSERVED_REPLY: &str = "Synthetic provider route not served";
     const EXEC_TIMEOUT: Duration = Duration::from_secs(90);
     const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
     const MAX_PROC_CMDLINE: usize = 64 * 1024;
@@ -398,14 +404,22 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         .await?;
 
         stage("managed-policy-denial");
+        // The provider routes are transparent (#2536): any method, path and
+        // query under a provider base reaches that provider. What the ingress
+        // still refuses is a request outside every base. It must answer that
+        // itself, with a client error that does not reflect the guest's bearer
+        // and before any lease. Every upstream request is leased first, so
+        // the unchanged exact audit shows the synthetic upstream never got it,
+        // and the reply is not that upstream's answer to an unserved route.
         let denied = run_http_probe(
             daemon,
             &environment.working_directory,
-            "/v1/responses?exfiltrate=true",
+            OUTSIDE_MANAGED_BASES_PATH,
         )
         .await?;
-        require(denied.status == 403)?;
+        require((400..500).contains(&denied.status))?;
         require(!denied.body.contains(GUEST_CALLER_BEARER))?;
+        require(!denied.body.contains(SYNTHETIC_UNSERVED_REPLY))?;
         require_audit(
             &mut credentials,
             environment,
