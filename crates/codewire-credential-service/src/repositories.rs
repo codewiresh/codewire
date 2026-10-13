@@ -237,9 +237,9 @@ impl GithubRepositoryOwner {
         }
     }
 
-    /// One provider read with the owner's current GitHub connection. An App
-    /// token about to expire is renewed first; a 401 renews once and asks
-    /// again. No locks span KEK or provider I/O: the original session or
+    /// One provider read with the owner's current GitHub connection. For
+    /// discovery an App token about to expire is renewed first; for either
+    /// read a 401 renews once and asks again. No locks span KEK or provider I/O: the original session or
     /// OAuth authority and the exact credential record are checked again
     /// after the answer, before anything from it is released.
     async fn read(
@@ -267,12 +267,16 @@ impl GithubRepositoryOwner {
         let mut refreshed = false;
         let mut permit = Some(permit);
 
-        let refresh_early = match app_bundle.as_ref() {
+        let due = match app_bundle.as_ref() {
             Some(bundle) => bundle
                 .should_refresh(unix_now()?)
                 .map_err(app_bundle_error)?,
             None => false,
         };
+        // The advisory status never renews ahead of time: a token GitHub
+        // still accepts is used as it is, and only one GitHub refuses renews,
+        // once, below. Page renders therefore never rotate a working token.
+        let refresh_early = due && matches!(read, Read::Repositories);
         if refresh_early {
             self.refresh_github_app(
                 Renewal {

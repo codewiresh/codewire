@@ -1100,8 +1100,9 @@ async fn github_pending_permissions_follow_the_live_grant_under_discovery_author
     .await;
     f.finish(result).await?;
 
-    // A read whose token is due for renewal while another renewal of the same
-    // credential is running answers nothing at once: it never waits for it.
+    // The advisory read never renews ahead of time, and when GitHub refuses
+    // the token while another renewal of the same credential is running it
+    // answers nothing at once instead of waiting for it.
     let f = Fixture::app().await?;
     let result = async {
         f.provider
@@ -1109,6 +1110,18 @@ async fn github_pending_permissions_follow_the_live_grant_under_discovery_author
             .store(60, Ordering::SeqCst);
         let original = f.app_credential().await?;
         f.provider.earlier_grant.store(true, Ordering::SeqCst);
+        let (status, value) = response(f.status().bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK && value["pendingPermissions"][0]["installationId"] == "41",
+            "{value}"
+        );
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 0);
+        let unchanged =
+            f.h.store
+                .record(&original.metadata.owner, &original.metadata.id)
+                .await?;
+        ensure!(unchanged == original);
+
         let attempt = uuid::Uuid::new_v4();
         f.h.store
             .begin_oauth_refresh(
@@ -1118,7 +1131,9 @@ async fn github_pending_permissions_follow_the_live_grant_under_discovery_author
                 attempt,
             )
             .await?;
-        let calls = f.provider.installation_calls.load(Ordering::SeqCst);
+        f.provider
+            .reject_first_installations
+            .store(true, Ordering::SeqCst);
         let started = std::time::Instant::now();
         let (status, value) = response(f.status().bearer_auth(oauth(ALICE))).await?;
         ensure!(
@@ -1129,7 +1144,6 @@ async fn github_pending_permissions_follow_the_live_grant_under_discovery_author
             started.elapsed() < std::time::Duration::from_secs(1),
             "the advisory read waited for another renewal"
         );
-        ensure!(f.provider.installation_calls.load(Ordering::SeqCst) == calls);
         ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 0);
         f.h.store
             .cancel_oauth_refresh(
