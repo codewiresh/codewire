@@ -154,7 +154,7 @@ notification without replaying a completed or ambiguous provider task.
 | Codex | App Server stdio | `turn/steer`, expected turn required | Native turn control | Saved thread ID |
 | Claude | CLI stream JSON | Explicitly unsupported | Advertised after native control probe | Saved session UUID |
 | Kimi | ACP adapter planned | Qualification pending | Qualification pending | Qualification pending |
-| noel | `noel --mode rpc` stdio, upstream pi's RPC | `steer` with `expectedRunId`, run ID required | `abort` with `expectedRunId` | Saved session ID, reopened with `--session-id` |
+| noel | `noel --mode rpc` stdio, upstream pi's RPC | `steer` with `expectedRunId`, run ID required | `abort` with `expectedRunId` | Saved session ID, reopened with `--session-id`; a run a crash interrupted continues with `resume_run` |
 
 Managed Codex uses `danger-full-access` and `approvalPolicy: never` on the
 explicitly trusted host. In every placement it starts with its working
@@ -197,7 +197,10 @@ the saved session, the requested model and level, and its `run-id` and
 `expected-run-id` RPC extensions; a pi build that answers JSON-RPC fails at
 once. Each prompt starts one run, whose `agent_settled` ends the message; the
 driver clears noel's queue first, so a steer an interrupt left there never
-joins the next message.
+joins the next message. A noel that also reports `request-id` and
+`resume-run` (pi `ef09c03f` or later) resumes a run a crash interrupted, as
+described below; `cw inbox --output json` shows it as the driver's
+`capabilities.resume`.
 
 **Stopping or restarting a conversation cancels its active noel run.** This
 covers `cw stop`, `cw stop --all`, the confirmed parent cascade, `cw restart`,
@@ -205,15 +208,17 @@ and StopSession or RestartSession from any client. The run is interrupted
 first, bounded at 10 s, and the message ends interrupted.
 
 **Taking the whole environment down pauses it.** This covers `cw env stop`,
-`restart` and `rm`, daemon shutdown and host reboot. The run stays interrupted
-in noel's journal and resumable (resume lands in PR 3), and the message
-outcome stays unknown, as today.
+`restart` and `rm`, and daemon shutdown, including a host's orderly reboot.
+The run stays interrupted in noel's journal, not aborted, and the message
+outcome stays unknown, as today: the driver records it unknown when its stop
+signal arrives, so a later restart does not resume it, and the next message
+ends the interrupted run.
 
 **Why:** an environment-level takedown is indistinguishable from a reboot in
-the daemon, and the owner-approved plan makes host shutdown resumable.
-`env restart` exists to come back. For `rm` the point is moot. So the semantic
-depends on the scope of the stop, not on the client or route, which keeps
-everything consistent.
+the daemon, and the owner-approved plan keeps a run that host shutdown stops
+resumable in noel's journal. `env restart` exists to come back. For `rm` the
+point is moot. So the semantic depends on the scope of the stop, not on the
+client or route, which keeps everything consistent.
 
 Before signalling a running managed conversation for a stop or restart, the
 host daemon asks the conversation's record helper whether its agent takes an
@@ -225,6 +230,46 @@ before the signal; queued messages stay accepted for the next start. A
 refusal or timeout is logged in the daemon log and the stop goes on, leaving
 the outcome unknown. Codex and Claude stops are unchanged: each costs one
 helper run, which answers at once. The host CLI allows a stop or restart 20 s.
+
+**A crash resumes the run, once per crash and at most three times.** When the
+driver or noel dies without a stop (`kill -9`, an out-of-memory kill, a
+crash, a host that loses power), the message is still running. noel's journal
+decides it:
+
+- **The driver died.** `cw restart` starts a new driver. Instead of ending
+  the running message unknown, it sets the message aside until noel's startup
+  handshake. The handshake must finish within 120 s, or the message ends
+  unknown.
+- **noel died while the driver lives.** The driver starts noel again, once
+  per message, and runs the same handshake. noel stopped by SIGTERM, SIGHUP
+  or SIGINT is never started again: that is a stop. Nor is a noel without
+  `request-id` and `resume-run`. If noel dies again, or does not start, the
+  message ends unknown, as before.
+
+After `get_state` and `clear_queue`, the handshake reads `lastRun`. The run is
+the message's when its `requestId` is the message ID:
+
+| noel's last run | The driver sends | The message |
+| --- | --- | --- |
+| The message's, running or interrupted, no interrupt accepted for it, resumed fewer than 3 times | `resume_run {expectedRunId}` | Runs again under the same run ID and ends as any run does; `cw inbox` adds "(resumed by noel)" |
+| The message's, running or interrupted, with an accepted `cw interrupt` or stop interrupt | `abort {expectedRunId}` | Interrupted |
+| The message's, completed, failed or aborted: the driver missed its settlement | `get_last_assistant_text`, for a completed run only | Completed with that reply, failed, or interrupted |
+| Another message's, none, or a noel without `request-id` and `resume-run` | `abort {expectedRunId}` if that run is interrupted | Unknown, exactly as Codex and Claude today |
+
+Each resume is counted in the record's `native_resumed` before `resume_run`
+is sent, so a driver that dies before the resumed run settles finds it
+counted. After three resumes the next crash ends the message unknown. The
+session log says `message ID resumed by noel: run RUN, resume N of 3` and what
+noel does next. A resumed run re-runs only cut-off `read`, `grep`, `find`
+and `ls` calls; noel reports every other cut-off tool call to the model as
+interrupted, so `bash`, `edit` or `write` never runs twice. A cut-off model
+request is sent again, and billed again. Steers and interrupts the driver
+accepted before the crash are never replayed: the queue is cleared before
+the resume, a steer ends unknown, and an accepted interrupt ends the run. noel
+saves no reply or reason for a failed or aborted run, so such a missed
+settlement carries none. The parent hears once, of the final state. Codex
+and Claude recovery is unchanged: their running message ends unknown at once,
+and a dead Codex or Claude process ends its driver.
 
 No additional MCP server is needed to receive these messages. A native protocol
 driver owns delivery and completion. A foreground controller can forward
@@ -439,6 +484,20 @@ The synthetic journey also proves Codex and Claude keep their unknown outcome
 on each of those routes, and that each agent, and no other session, receives
 its conversation identity. The real-noel journey needs noel built from pi
 commit `ef09c03f` or later.
+
+The synthetic noel also keeps noel's durable runs and queue, and answers a
+repeated `requestId`, `resume_run` and `get_last_assistant_text` as noel
+`ef09c03f` does. Both journeys prove crash resume with `kill -9`: noel killed
+mid-turn, and the driver killed mid-turn and then restarted, each resume the
+run once; the lead hears once, and `cw inbox` and `cw logs` note the resume.
+When the driver is killed after it sent `resume_run`, the next start resumes
+the run again, counted twice. The real-noel journey adds noel's `faux/script`
+model: a model request the kill cut off is sent again (noel's
+`PI_FAUX_SCRIPT_LOG` holds it twice), and a `bash` call killed while it
+sleeps after appending a line to a file never runs again (the file keeps one
+line). The synthetic journey also proves a killed Codex or Claude driver or
+process still ends the message unknown, and that neither agent is started
+again by its driver.
 None replaces the matching native Linux hardware or retained Kind sandbox
 journey. Program #2255 holds current commands, outcomes and landing evidence.
 

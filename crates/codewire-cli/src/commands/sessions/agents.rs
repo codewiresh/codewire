@@ -278,6 +278,10 @@ enum DriverPhase {
 struct AgentCapabilities {
     steer: bool,
     interrupt: bool,
+    /// noel only: a run a crash interrupted is resumed. Absent when false,
+    /// so other agents' state keeps its bytes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    resume: bool,
     note: String,
 }
 
@@ -423,6 +427,11 @@ struct MessageRecord {
     started_at: Option<String>,
     finished_at: Option<String>,
     native_acknowledged: bool,
+    /// noel only: how often its run was resumed after a crash, counted
+    /// before each resume is sent. Absent while zero, so other records keep
+    /// their bytes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    native_resumed: u32,
     /// Target-owned birth proof for member messages; ordinary records keep
     /// their established wire bytes and do not acquire a guessed generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -436,6 +445,10 @@ struct MessageRecord {
     usage: Option<Value>,
     source: Option<MessageSource>,
     notification: Option<ParentNotification>,
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 fn member_message_generation_matches(current: Option<u64>, record: &MessageRecord) -> bool {
@@ -478,6 +491,7 @@ impl MessageRecord {
             started_at: None,
             finished_at: None,
             native_acknowledged: false,
+            native_resumed: 0,
             member_launch_generation: None,
             platform_launch_generation: None,
             result: None,
@@ -1721,13 +1735,14 @@ pub(crate) async fn handle_agent_inbox_command(
                 let summary = summary.lines().next().unwrap_or_default();
                 let (summary, truncated) = truncate_utf8(summary, 80);
                 println!(
-                    "{}\t{}\t{}\t{}\t{}{}",
+                    "{}\t{}\t{}\t{}\t{}{}{}",
                     record.id,
                     record.action.name(),
                     record.state.name(),
                     record.created_at,
                     summary,
-                    if truncated { "…" } else { "" }
+                    if truncated { "…" } else { "" },
+                    noel::resumed_note(record)
                 );
             }
         }
@@ -2077,6 +2092,7 @@ async fn run_agent_driver_inner(args: AgentDriverArgs, platform: bool) -> anyhow
         capabilities: AgentCapabilities {
             steer: false,
             interrupt: false,
+            resume: false,
             note: "driver starting".into(),
         },
         policy: agent_policy(environment.sandbox(), config.agent).into(),
@@ -2099,6 +2115,7 @@ async fn run_agent_driver_inner(args: AgentDriverArgs, platform: bool) -> anyhow
         control_pending: HashMap::new(),
         settled: HashSet::new(),
         stopping: false,
+        noel: noel::Recovery::default(),
     };
     driver.run().await
 }
@@ -2831,6 +2848,8 @@ struct Driver {
     /// daemon signals this session right after it, so no queued message
     /// starts; each stays accepted for the next start.
     stopping: bool,
+    /// noel only: recovery of a run a crash interrupted.
+    noel: noel::Recovery,
 }
 
 impl Driver {
@@ -2954,7 +2973,10 @@ impl Driver {
                     .await;
             }
         };
-        self.state.phase = DriverPhase::Idle;
+        // Only noel's startup can resume a turn, which keeps the driver busy.
+        if self.active.is_none() {
+            self.state.phase = DriverPhase::Idle;
+        }
         self.persist_state()?;
         log(format!(
             "{} conversation ready (native thread {})",
@@ -3033,18 +3055,22 @@ impl Driver {
                     let reason = reason
                         .map(|reason| format!(": {reason}"))
                         .unwrap_or_default();
-                    return self
-                        .lose_peer(
-                            &mut peer,
-                            format!("the native agent closed its output{reason}"),
-                            false,
-                        )
-                        .await;
+                    let reason = format!("the native agent closed its output{reason}");
+                    if self.config.agent == AgentKind::Noel
+                        && self.respawn_noel(&mut peer, &reason).await
+                    {
+                        continue;
+                    }
+                    return self.lose_peer(&mut peer, reason, false).await;
                 }
                 DriverEvent::Native(None) => {
-                    return self
-                        .lose_peer(&mut peer, "the native agent output ended".into(), false)
-                        .await;
+                    let reason = "the native agent output ended".to_owned();
+                    if self.config.agent == AgentKind::Noel
+                        && self.respawn_noel(&mut peer, &reason).await
+                    {
+                        continue;
+                    }
+                    return self.lose_peer(&mut peer, reason, false).await;
                 }
                 DriverEvent::Stop(signal) => {
                     return self
@@ -3073,6 +3099,10 @@ impl Driver {
         self.state.phase = DriverPhase::Failed;
         let reason = truncate_utf8(&format!("{error:#}"), 128 * 1024).0;
         self.state.last_error = Some(reason.clone());
+        if self.config.agent == AgentKind::Noel {
+            self.set_aside_unknown(&format!("noel startup failed: {reason}"))
+                .await;
+        }
         while let Some(id) = self.queue.pop_front() {
             let record = update_message(&self.dir, &id, |record| {
                 record.fail(
@@ -3144,6 +3174,9 @@ impl Driver {
                     && record.state == MessageState::Requested);
             if pre_accept && !adoptable && record.created_at >= started_at {
                 // Its delivery line may still be in this driver's pipe.
+                continue;
+            }
+            if self.config.agent == AgentKind::Noel && self.set_aside(&record) {
                 continue;
             }
             let previous = record.state;
@@ -3287,6 +3320,7 @@ impl Driver {
         self.state.capabilities = AgentCapabilities {
             steer: true,
             interrupt: true,
+            resume: false,
             note: "Codex app-server turn/steer with expectedTurnId and turn/interrupt".into(),
         };
         self.persist_state()?;
@@ -3340,6 +3374,7 @@ impl Driver {
         self.state.capabilities = AgentCapabilities {
             steer: false,
             interrupt: detected,
+            resume: false,
             note: if detected {
                 "Claude stream-json has no qualified mid-turn steering; interrupt uses the native control request detected at startup".into()
             } else {
@@ -4140,6 +4175,9 @@ impl Driver {
             Some(status) => format!("{reason} (native agent {status})"),
             None => format!("{reason}; native peer cleanup is unknown; restart is fenced"),
         };
+        if self.config.agent == AgentKind::Noel {
+            self.set_aside_unknown(&reason).await;
+        }
         let mut issued: Vec<String> = self
             .pending
             .drain()

@@ -1197,6 +1197,7 @@ mod tests {
                 capabilities: AgentCapabilities {
                     steer: capable,
                     interrupt: capable,
+                    resume: false,
                     note: "reported by the test driver".into(),
                 },
                 policy: CODEX_POLICY.into(),
