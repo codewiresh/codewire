@@ -397,10 +397,13 @@ jobs:
     name: Container contract verification
     runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}
     # Workspace verification uses only the existing untrusted cache identity.
-    # Keep the cold-build ceiling below the heavy runner's
-    # independently enforced 90-minute task budget while allowing the admitted
-    # cold path to exceed 45 minutes.
-    timeout-minutes: 55
+    # When Kind runs the published pin, this job owns the exact-source
+    # workspace build, and its cold path ran past 55 minutes: run 13572 spent
+    # 24 minutes in the base image's apt step alone, with snapshot.ubuntu.com
+    # transfers failing and retried 4 of 6 times. The ceiling matches the Kind
+    # workspace build's (#2726) and stays 10 minutes under the Heavy runner's
+    # independently enforced 90-minute task budget.
+    timeout-minutes: 80
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.workspace_image_expected == 'true' }}
     outputs:

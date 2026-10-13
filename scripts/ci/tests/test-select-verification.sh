@@ -2127,8 +2127,8 @@ awk '
   capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  workspace-image:" { exit }
   capture { print }
 ' "$WORKFLOW" > "$workspace_block"
-grep -qF '    timeout-minutes: 55' "$workspace_block" || {
-  echo 'workspace-image: cold-build ceiling must remain 55 minutes' >&2
+grep -qF '    timeout-minutes: 80' "$workspace_block" || {
+  echo 'workspace-image: cold-build ceiling must remain 80 minutes' >&2
   exit 1
 }
 
