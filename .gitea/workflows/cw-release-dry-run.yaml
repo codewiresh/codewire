@@ -10,9 +10,10 @@ name: cw four-target dry run
 # The macOS arm64 cw embeds the local VM runtime (#2539). When one of the
 # runtime's inputs changed (local_runtime_parts.py RUNTIME_INPUTS), or on
 # dispatch, the runtime is built as a release builds it but only from cached
-# slow parts, and the delivery embeds it. Otherwise each side only checks its
-# slow parts are cached. A missing part is a warning: the next release builds
-# it.
+# slow parts, and the delivery embeds it. The Linux side also builds the
+# Linux x86_64 target (#2733), the linux fragment, which the delivery does not
+# embed yet. Otherwise each side only checks its slow parts are cached. A
+# missing part is a warning: the next release builds it.
 
 on:
   push:
@@ -109,8 +110,10 @@ jobs:
     # A wedged step must not hold this workflow's one-at-a-time queue until
     # the runner's 330-minute limit (run 13161 waited 5.5 h on a git fetch).
     # Each job's limit is about three times its recent successful runs:
-    # Linux side 9.6-9.8 min, macOS 18.9-22.2 min, assembly 30.4-31.9 min.
-    timeout-minutes: 30
+    # Linux side 9.6-9.8 min before it built the x86_64 guest root and both
+    # cw runtimes (#2733), which build-native-managed-agent.py bounds at
+    # 20 min each; macOS 18.9-22.2 min, assembly 30.4-31.9 min.
+    timeout-minutes: 75
     outputs:
       mode: ${{ steps.select.outputs.mode }}
       present: ${{ steps.build.outputs.present }}
@@ -159,7 +162,8 @@ jobs:
           mkdir -m 0700 "$work" "$work/tmp"
           status=0
           TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}" \
-            scripts/ci/release/build-local-runtime.sh linux --output "$work/linux" || status=$?
+            scripts/ci/release/build-local-runtime.sh linux --source-sha "$GITHUB_SHA" \
+            --version "$DRY_RUN_VERSION" --output "$work/linux" || status=$?
           case "$status" in
             0) ;;
             4) echo '::warning::A slow runtime part is not cached; the next release builds it. This dry run embeds no runtime.'

@@ -132,9 +132,16 @@ def check(text, ci_text):
         need(capability not in runtime, f"runtime build job holds capability {capability}")
     runtime_build = dict(steps(runtime)).get("Build the Linux side", "")
     need("        working-directory: .release-source\n" in runtime_build
-         and "scripts/ci/release/build-local-runtime.sh linux --output" in runtime_build
+         and "scripts/ci/release/build-local-runtime.sh linux --source-sha" in runtime_build
          and 'LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}"' in runtime_build,
          "the runtime's Linux side is not built by the release source's own scripts in this job's container")
+    # Its cw runtimes and the linux fragment name the selected release
+    # (#2733): the source commit every cw embeds and the release version.
+    need("          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}\n" in runtime_build
+         and "          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}\n" in runtime_build
+         and 'linux --source-sha "$SOURCE_SHA" \\\n            --version "$RELEASE_TAG" --output "$work/linux"'
+         in runtime_build,
+         "the runtime's Linux side does not build its cws from the selected release commit and version")
     need("LOCAL_RUNTIME_NO_BUILD" not in text, "a release refuses to build an uncached runtime part")
     need(not runner_targets_sealed(text), "a Linux runner job needs a Rust target or rustup change its sealed "
          f"toolchain lacks: {runner_targets_sealed(text)}")
@@ -307,6 +314,13 @@ MUTATIONS = {
     "release skips uncached parts": lambda t: t.replace(
         'TMPDIR="$work/tmp" LOCAL_RUNTIME_JOB_CONTAINER',
         'TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 LOCAL_RUNTIME_JOB_CONTAINER', 1),
+    "Linux side from the workflow commit": lambda t: t.replace(
+        "          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}\n        run: |\n"
+        "          set -euo pipefail\n          if [ ! -f scripts/ci/release/build-local-runtime.sh ]",
+        "          SOURCE_SHA: ${{ github.sha }}\n        run: |\n"
+        "          set -euo pipefail\n          if [ ! -f scripts/ci/release/build-local-runtime.sh ]", 1),
+    "Linux side cws of another version": lambda t: t.replace(
+        '--version "$RELEASE_TAG" --output "$work/linux"', '--version v0.0.0 --output "$work/linux"', 1),
     "runtime from the workflow's scripts": lambda t: t.replace(
         "      - name: Build the Linux side\n        id: build\n        working-directory: .release-source\n",
         "      - name: Build the Linux side\n        id: build\n", 1),
@@ -332,9 +346,9 @@ MUTATIONS = {
     "unsealed Linux target": lambda t: t.replace(f"CW_RELEASE_TARGETS='{LINUX_TARGETS}'",
                                                  f"CW_RELEASE_TARGETS='{LINUX_TARGETS} aarch64-unknown-linux-musl'", 1),
     "rustup on the runner": lambda t: t.replace(
-        "      - name: Build the Linux side\n        id: build\n        working-directory: .release-source\n"
+        "          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}\n"
         "        run: |\n          set -euo pipefail\n",
-        "      - name: Build the Linux side\n        id: build\n        working-directory: .release-source\n"
+        "          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}\n"
         "        run: |\n          set -euo pipefail\n          rustup target add aarch64-unknown-linux-musl\n", 1),
     "one Mac target": lambda t: t.replace(f"CW_RELEASE_TARGETS='{DARWIN_TARGETS}'",
                                           "CW_RELEASE_TARGETS='aarch64-apple-darwin'", 1),
@@ -451,7 +465,7 @@ def check_dry_run(text):
          "unexpected dry-run job set")
     # A wedged step must fail within its job's limit instead of holding the
     # one-at-a-time dry-run queue until the runner's 330-minute limit.
-    for job, limit in (("build-runtime-linux", 30), ("build-darwin", 60), ("assemble", 90)):
+    for job, limit in (("build-runtime-linux", 75), ("build-darwin", 60), ("assemble", 90)):
         found = re.findall(r"^    timeout-minutes: ([0-9]+)$", blocks.get(job, ""), re.M)
         need(found == [str(limit)], f"dry-run job {job} lacks its {limit}-minute limit")
     # Forgejo cancels the older push run of a workflow with no `concurrency`
@@ -492,6 +506,9 @@ def check_dry_run(text):
     mac_build = dict(steps(darwin)).get("Build the local VM runtime from cached parts", "")
     need("LOCAL_RUNTIME_NO_BUILD=1" in linux_build and "LOCAL_RUNTIME_NO_BUILD=1" in mac_build,
          "the dry run builds slow runtime parts")
+    need('build-local-runtime.sh linux --source-sha "$GITHUB_SHA" \\\n'
+         '            --version "$DRY_RUN_VERSION" --output "$work/linux"' in linux_build,
+         "the dry-run Linux side does not build its cws from this commit and the dry-run version")
     need("build-local-runtime.sh linux --check" in runtime and "build-local-runtime.sh macos --check" in darwin,
          "the dry run does not check the slow parts are cached")
     need('[ "$(shasum -a 256 .local-runtime-linux/runtime-linux.tar | cut -c1-64)" = "$LINUX_SHA256" ]' in mac_build,
@@ -519,7 +536,11 @@ def check_dry_run(text):
 
 
 DRY_RUN_MUTATIONS = {
-    "Linux side without a job limit": lambda t: t.replace("    timeout-minutes: 30\n", "", 1),
+    "Linux side without a job limit": lambda t: t.replace("    timeout-minutes: 75\n", "", 1),
+    "dry-run Linux side from another commit": lambda t: t.replace(
+        'linux --source-sha "$GITHUB_SHA"', 'linux --source-sha "$BEFORE"', 1),
+    "dry-run Linux side with another version": lambda t: t.replace(
+        '--version "$DRY_RUN_VERSION" --output "$work/linux"', '--version v9.9.9 --output "$work/linux"', 1),
     "macOS build without a job limit": lambda t: t.replace("    timeout-minutes: 60\n", "", 1),
     "assembly at the runner limit": lambda t: t.replace("    timeout-minutes: 90\n", "    timeout-minutes: 330\n", 1),
     "dry run without cargo network bounds": lambda t: t.replace("  CARGO_HTTP_TIMEOUT: '20'\n", "", 1),

@@ -81,6 +81,11 @@ class RecipeTest(unittest.TestCase):
         # the inputs they had before the Linux kernel joined the cache.
         for name in ("e2fsprogs-macos", "git-macos"):
             self.assertNotIn("arch", parts.PARTS[name])
+        self.assertEqual(parts.SIDE_PARTS, {"linux": ("kernel-arm64", "kernel-x86_64"),
+                                            "macos": ("e2fsprogs-macos", "git-macos")})
+        script = (ROOT / "scripts/ci/release/build-local-runtime.sh").read_text()
+        for side, names in parts.SIDE_PARTS.items():
+            self.assertIn(" ".join(names), script, side)
 
     def test_a_recipe_ignores_other_parts_inputs(self):
         before = {name: self.recipe(name, HOST if shape["host"] else None) for name, shape in parts.PARTS.items()}
@@ -299,15 +304,27 @@ class BuildScriptTest(unittest.TestCase):
         base = fx.scratch("runtime-build-script.")
         self.addCleanup(shutil.rmtree, base)
         output = base / "out"
+        head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        release_args = ("--source-sha", head, "--version", "v1.2.3")
         self.assertEqual(self.run_script().returncode, 2)
         for args, message in (
             (("windows", "--output", str(output)), "mode must be linux or macos"),
             (("macos", "--linux", str(base), "--source-sha", "a" * 40, "--output", str(output)),
              "Apple silicon Mac"),
-            (("linux", "--output", "relative"), "absolute path"),
-            (("linux", "--output", str(base)), "already exists"),
+            (("linux", *release_args, "--output", "relative"), "absolute path"),
+            (("linux", *release_args, "--output", str(base)), "already exists"),
             (("linux", "--bogus"), "unknown argument"),
             (("linux", "--check", "--output", str(output)), "--check takes no other argument"),
+            (("linux", "--check", "--version", "v1.2.3"), "--check takes no other argument"),
+            # Every cw and the document name the release commit and version.
+            (("linux", "--version", "v1.2.3", "--output", str(output)), "--source-sha must be the release commit"),
+            (("linux", "--source-sha", head, "--output", str(output)), "--version must be the release version"),
+            (("linux", "--source-sha", head, "--version", "1.2.3", "--output", str(output)),
+             "--version must be the release version"),
+            (("linux", "--source-sha", "f" * 40, "--version", "v1.2.3", "--output", str(output)),
+             "--source-sha is not this checkout's HEAD"),
+            (("linux", "--linux", str(base), *release_args, "--output", str(output)), "--linux is for the macos side"),
         ):
             result = self.run_script(*args)
             self.assertEqual(result.returncode, 1, args)

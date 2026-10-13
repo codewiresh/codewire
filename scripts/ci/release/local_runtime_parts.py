@@ -76,6 +76,8 @@ PARTS = {
         "host": True,
     },
 }
+# The slow parts each side of build-local-runtime.sh takes from the cache.
+SIDE_PARTS = {"linux": ("kernel-arm64", "kernel-x86_64"), "macos": ("e2fsprogs-macos", "git-macos")}
 # Every input of the runtime a release builds: the slow parts' producers, the
 # guest root's probe, the VZ helper, the cw runtime producers and the scripts
 # that assemble and check them. The four-target dry run builds the runtime
