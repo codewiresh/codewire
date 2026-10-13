@@ -189,8 +189,10 @@ passing responses through unchanged.
 noel, the Rust port of pi, runs only on a trusted Linux host; macOS hosts,
 VMs, Mesh members and platform sandboxes refuse it. Codewire looks up `noel`
 on PATH, never an installed `pi`. It keeps the user's ordinary noel settings
-(`~/.noel`), login and project trust; its tools run without approval prompts, and the
-driver declines any extension dialog. `--model PROVIDER/ID` is required.
+(`~/.noel`), login and project trust; its tools run without approval prompts,
+and the driver declines any extension dialog. noel's notifications, such as
+an account failover switch, appear in `cw logs` and get no answer.
+`--model PROVIDER/ID` is required.
 `--effort` `low` to `max` becomes `--thinking`, `ultra` is refused, and
 without `--effort` noel keeps its own level. Startup requires noel to report
 the saved session, the requested model and level, and its `run-id` and
@@ -641,8 +643,9 @@ recovery. It runs on Linux and macOS; [MACOS-CLI.md](MACOS-CLI.md) describes
 the macOS process-ownership check. The second uses ordinary installed
 Codex/Claude login and observes conversation resume, Claude xhigh and a
 resumed lead invoking `cw` itself. The synthetic noel peer sends the records
-the noel binary sends for its `faux/echo` model; it adds only a dialog, which
-noel never opens, and a JSON-RPC mode for an older pi build. The real-noel
+the noel binary sends for its `faux/echo` model, and the notification noel
+sends on an account failover switch; it adds only a dialog, which noel never
+opens, and a JSON-RPC mode for an older pi build. The real-noel
 journey runs a built noel with `faux/echo`, offline, with a private HOME and
 noel directory. It observes the first answer in `cw inbox`, a second turn
 in the same session, a worker waking its lead once per finished message, a
