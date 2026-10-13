@@ -41,6 +41,12 @@ struct Generation {
     driver_id: String,
     session_id: String,
     generation: u64,
+    /// Set by `adopt` (#2705): this generation continues the conversation of
+    /// that earlier Pod, which the control plane proved absent. Its guardian
+    /// custody ended with that Pod, so the driver's first start here has no
+    /// receipt to require. Cleared by the next generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resumed_from_pod_uid: Option<String>,
 }
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,6 +116,15 @@ enum Request {
         operation_id: String,
         peer: guest_peer::PeerIdentity,
     },
+    /// Continue this conversation, whose envelope origin names an earlier Pod
+    /// at its current generation, under `origin` in this Pod (#2705). Without
+    /// `commit` it only checks; with it, it moves the markers to `origin` at
+    /// the next generation.
+    Adopt {
+        origin: Origin,
+        route: Route,
+        commit: bool,
+    },
 }
 fn id(value: &str) -> anyhow::Result<()> {
     canonical_uuid(value)?;
@@ -120,16 +135,34 @@ fn id(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 fn validate_envelope(environment: &str, request: &Envelope) -> anyhow::Result<()> {
-    let origin = &request.origin;
+    ensure!(
+        request.version == 1 && request.launch_generation > 0,
+        "platform incarnation differs"
+    );
+    // Adopt names a predecessor that may have run an earlier pinned provider;
+    // its origin must still equal the saved marker, and the new origin it
+    // carries is checked against the current pin.
+    let current_pin = !matches!(request.request, Request::Adopt { .. });
+    validate_origin(
+        environment,
+        &request.session_id,
+        &request.origin,
+        current_pin,
+    )
+}
+fn validate_origin(
+    environment: &str,
+    session_id: &str,
+    origin: &Origin,
+    current_pin: bool,
+) -> anyhow::Result<()> {
     for value in [&origin.environment_id, &origin.driver_id, &origin.pod_uid] {
         id(value)?;
     }
     ensure!(
-        request.version == 1
-            && origin.version == 1
+        origin.version == 1
             && origin.environment_id == environment
-            && request.session_id == format!("session-{}", origin.driver_id)
-            && request.launch_generation > 0
+            && session_id == format!("session-{}", origin.driver_id)
             && origin.binding_generation > 0
             && !origin.org_id.is_empty()
             && origin.org_id.len() <= 256
@@ -140,11 +173,12 @@ fn validate_envelope(environment: &str, request: &Envelope) -> anyhow::Result<()
             && (4..=256 * 1024 * 1024).contains(&origin.support_image_size)
             && origin.provider.sha256 != [0; 32]
             && (4..=512 * 1024 * 1024).contains(&origin.provider.size)
-            && origin.provider.version
-                == match origin.agent {
-                    AgentKind::Codex => "0.160.0",
-                    AgentKind::Claude => "2.1.288",
-                }
+            && (!current_pin
+                || origin.provider.version
+                    == match origin.agent {
+                        AgentKind::Codex => "0.160.0",
+                        AgentKind::Claude => "2.1.288",
+                    })
             && origin.parent_generation.is_none_or(|g| g > 0),
         "platform incarnation differs"
     );
@@ -444,6 +478,7 @@ fn prepare(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result
             driver_id: config.driver_id.clone(),
             session_id: request.session_id.clone(),
             generation: 1,
+            resumed_from_pod_uid: None,
         },
     )?;
     lockdown::prepare(&stage, &config, route)?;
@@ -676,8 +711,18 @@ fn handle_fixed(environment: &DriverEnvironment, request: Envelope) -> anyhow::R
     strict_peer_files(&dir)?;
     let expected_driver = &request.origin.driver_id;
     let expected_session = &request.session_id;
+    if let Request::Adopt {
+        origin,
+        route,
+        commit,
+    } = &request.request
+    {
+        let value = adopt(environment, &dir, &request, origin, *route, *commit)?;
+        pin.check()?;
+        return Ok(value);
+    }
     let native = match &request.request {
-        Request::Prepare { .. } => unreachable!(),
+        Request::Prepare { .. } | Request::Adopt { .. } => unreachable!(),
         Request::Queue {
             driver_id,
             session_id,
@@ -897,6 +942,116 @@ fn handle_fixed(environment: &DriverEnvironment, request: Envelope) -> anyhow::R
     pin.check()?;
     Ok(value)
 }
+/// Continue in this Pod a conversation whose markers name an earlier one
+/// (#2705). The daemon calls this only for a Pod the control plane proved
+/// absent, so no process of that Pod can still run: there is no per-boot
+/// custody check, since runc Pods on one node share a boot ID. Everything is
+/// checked first; with `commit` the driver's config names the current
+/// provider, the predecessor's custody pointer is retired, and the origin
+/// and then the generation move to this Pod. The driver then starts as a
+/// Restart's does.
+fn adopt(
+    environment: &DriverEnvironment,
+    dir: &Path,
+    request: &Envelope,
+    origin: &Origin,
+    route: Route,
+    commit: bool,
+) -> anyhow::Result<Value> {
+    let previous = &request.origin;
+    validate_origin(environment.id(), &request.session_id, origin, true)?;
+    ensure!(
+        origin.environment_id == previous.environment_id
+            && origin.org_id == previous.org_id
+            && origin.driver_id == previous.driver_id
+            && origin.agent == previous.agent
+            && origin.pod_uid != previous.pod_uid
+            && origin.parent_generation.is_none()
+            && previous.parent_generation.is_none(),
+        "platform resume differs"
+    );
+    ensure!(
+        route.agent() == agent(origin.agent),
+        "platform route serves another agent"
+    );
+    let _control = StateLock::acquire(&dir.join("control.lock"))?;
+    let _driver = StateLock::try_acquire(&dir.join("driver.lock"))?
+        .context("a platform driver is still alive")?;
+    let old: Generation = private_record(&dir.join(GENERATION))?;
+    ensure!(
+        old.version == 1
+            && old.driver_id == previous.driver_id
+            && old.session_id == request.session_id
+            && old.generation == request.launch_generation,
+        "platform generation CAS refused"
+    );
+    let config: AgentConfig = private_record(&dir.join("config.json"))?;
+    config.validate(environment.id(), &previous.driver_id)?;
+    ensure!(
+        fs::metadata(&config.working_dir).is_ok_and(|m| m.is_dir()),
+        "platform working directory is gone"
+    );
+    // The saved transcript belongs to one credential identity: a changed
+    // route is the owner's decision, so the conversation ends instead.
+    ensure!(
+        lockdown::check(dir, &config)? == route,
+        "the agent's credential changed; start a new conversation"
+    );
+    let provider = codewire_daemon::platform_managed::ProviderPin::admit(
+        agent(origin.agent),
+        &origin.provider,
+    )?;
+    if !commit {
+        return Ok(json!({"launch_generation": request.launch_generation}));
+    }
+    let next = commit_adoption(dir, previous, origin, old, config, provider.path())?;
+    provider.check()?;
+    Ok(json!({"launch_generation": next}))
+}
+/// The file effects of a checked `adopt`, under its locks: the config names
+/// `program`, the predecessor's custody pointer is retired, then the origin
+/// and the generation move to this Pod.
+fn commit_adoption(
+    dir: &Path,
+    previous: &Origin,
+    origin: &Origin,
+    old: Generation,
+    mut config: AgentConfig,
+    program: &Path,
+) -> anyhow::Result<u64> {
+    let next = old
+        .generation
+        .checked_add(1)
+        .context("platform generation exhausted")?;
+    // The program is the admitted pin's own path, as `prepare` records it.
+    if config.program != program {
+        config.program = program.to_owned();
+        write_private_json(&dir.join("config.json"), &config)?;
+    }
+    match fs::remove_file(dir.join("peer-current.json")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => fs::File::open(dir)?.sync_all()?,
+    }
+    write_private_json(&dir.join(ORIGIN), origin)?;
+    write_private_json(
+        &dir.join(GENERATION),
+        &Generation {
+            generation: next,
+            resumed_from_pod_uid: Some(previous.pod_uid.clone()),
+            ..old
+        },
+    )?;
+    Ok(next)
+}
+/// Whether this driver's current generation continues an earlier Pod's
+/// conversation, whose guardian custody ended with that Pod.
+pub(super) fn resumed(environment: &DriverEnvironment, driver: &str) -> anyhow::Result<bool> {
+    if marker(environment, driver)?.is_none() {
+        return Ok(false);
+    }
+    let g: Generation = private_record(&agents_root(environment).join(driver).join(GENERATION))?;
+    Ok(g.resumed_from_pod_uid.is_some())
+}
 fn generation_control(
     dir: &Path,
     environment: &str,
@@ -941,6 +1096,7 @@ fn generation_control(
             &dir.join(GENERATION),
             &Generation {
                 generation: selected,
+                resumed_from_pod_uid: None,
                 ..old
             },
         )?;

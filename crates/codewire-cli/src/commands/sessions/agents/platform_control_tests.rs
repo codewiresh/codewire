@@ -51,6 +51,7 @@ impl Fixture {
                 driver_id: driver.clone(),
                 session_id: session.clone(),
                 generation: 1,
+                resumed_from_pod_uid: None,
             },
         )
         .unwrap();
@@ -203,6 +204,7 @@ fn platform_control_historical_read_requires_saved_original_message_generation()
             driver_id: f.origin.driver_id.clone(),
             session_id: f.session.clone(),
             generation: 2,
+            resumed_from_pod_uid: None,
         },
     )
     .unwrap();
@@ -1259,4 +1261,189 @@ fn platform_control_identity_accepts_only_fixed_platform_driver_shape_and_preser
         driver.clone(),
     ];
     assert_eq!(driver_identity(&native), Some((environment, driver)));
+}
+
+fn successor(f: &Fixture) -> Origin {
+    Origin {
+        pod_uid: uuid::Uuid::new_v4().to_string(),
+        binding_generation: 7,
+        projection_selection_sha256: [9; 32],
+        support_image_sha256: [8; 32],
+        ..f.origin.clone()
+    }
+}
+
+fn adopt_request(f: &Fixture, origin: Origin, route: Route, commit: bool) -> Envelope {
+    Envelope {
+        request: Request::Adopt {
+            origin,
+            route,
+            commit,
+        },
+        ..f.request()
+    }
+}
+
+#[test]
+fn platform_adopt_refuses_another_scope_a_live_driver_and_a_changed_route() {
+    // #2705: every refusal comes before any file changes, so the daemon can
+    // answer it as refused before issue.
+    let f = Fixture::new();
+    let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+    lockdown::prepare(&f.dir, &config, Route::Codex).unwrap();
+    let markers = || {
+        (
+            fs::read(f.dir.join(ORIGIN)).unwrap(),
+            fs::read(f.dir.join(GENERATION)).unwrap(),
+            fs::read(f.dir.join("config.json")).unwrap(),
+        )
+    };
+    let before = markers();
+    let refused = |request: Envelope, reason: &str| {
+        let error = handle_fixed(&f.environment, request)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(reason), "{error}");
+    };
+    // The same Pod stays Restart's.
+    refused(
+        adopt_request(&f, f.origin.clone(), Route::Codex, false),
+        "platform resume differs",
+    );
+    for changed in [
+        Origin {
+            org_id: "another-org".into(),
+            ..successor(&f)
+        },
+        Origin {
+            agent: AgentKind::Claude,
+            provider: codewire_daemon::platform_managed::ProviderIdentity {
+                version: "2.1.288".into(),
+                ..f.origin.provider.clone()
+            },
+            ..successor(&f)
+        },
+        Origin {
+            parent_generation: Some(1),
+            ..successor(&f)
+        },
+    ] {
+        refused(
+            adopt_request(&f, changed, Route::Codex, false),
+            "platform resume differs",
+        );
+    }
+    // The new origin must carry the current pin.
+    refused(
+        adopt_request(
+            &f,
+            Origin {
+                provider: codewire_daemon::platform_managed::ProviderIdentity {
+                    version: "0.159.0".into(),
+                    ..f.origin.provider.clone()
+                },
+                ..successor(&f)
+            },
+            Route::Codex,
+            false,
+        ),
+        "platform incarnation differs",
+    );
+    refused(
+        adopt_request(&f, successor(&f), Route::Anthropic, false),
+        "platform route serves another agent",
+    );
+    // A driver holding its lock is alive in this Pod.
+    let driver = StateLock::acquire(&f.dir.join("driver.lock")).unwrap();
+    refused(
+        adopt_request(&f, successor(&f), Route::Codex, true),
+        "a platform driver is still alive",
+    );
+    drop(driver);
+    // A stale generation.
+    let mut stale = adopt_request(&f, successor(&f), Route::Codex, true);
+    stale.launch_generation = 2;
+    assert!(handle_fixed(&f.environment, stale).is_err());
+    // The saved conversation used another credential route.
+    refused(
+        adopt_request(&f, successor(&f), Route::OpenAi, true),
+        "the agent's credential changed",
+    );
+    // The predecessor's origin may carry an earlier provider pin; a fully
+    // valid request then reaches provider admission, which needs the image.
+    let mut earlier = f.origin.clone();
+    earlier.provider.version = "0.159.0".into();
+    write_private_json(&f.dir.join(ORIGIN), &earlier).unwrap();
+    let mut request = adopt_request(&f, successor(&f), Route::Codex, true);
+    request.origin = earlier.clone();
+    // The fixture's synthetic provider identity is never the image's.
+    assert_eq!(
+        handle_fixed(&f.environment, request)
+            .unwrap_err()
+            .to_string(),
+        "platform managed incarnation refused"
+    );
+    write_private_json(&f.dir.join(ORIGIN), &f.origin).unwrap();
+    assert_eq!(markers(), before);
+}
+
+#[test]
+fn platform_adopt_commit_moves_markers_and_retires_the_predecessor_custody() {
+    let f = Fixture::new();
+    f.clean_peer();
+    let next = successor(&f);
+    let old: Generation = private_record(&f.dir.join(GENERATION)).unwrap();
+    let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+    assert!(!resumed(&f.environment, &f.origin.driver_id).unwrap());
+    assert_eq!(
+        commit_adoption(
+            &f.dir,
+            &f.origin,
+            &next,
+            old,
+            config,
+            Path::new("/usr/bin/true"),
+        )
+        .unwrap(),
+        2
+    );
+    let origin: Origin = private_record(&f.dir.join(ORIGIN)).unwrap();
+    assert!(origin == next);
+    let generation: Generation = private_record(&f.dir.join(GENERATION)).unwrap();
+    assert_eq!(generation.generation, 2);
+    assert_eq!(
+        generation.resumed_from_pod_uid.as_deref(),
+        Some(f.origin.pod_uid.as_str())
+    );
+    let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+    assert_eq!(config.program, Path::new("/usr/bin/true"));
+    assert!(!f.dir.join("peer-current.json").exists());
+    assert!(resumed(&f.environment, &f.origin.driver_id).unwrap());
+    // A pre-Stop message keeps its own generation and is never adopted into
+    // the new one.
+    let record: MessageRecord = private_record(&message_path(&f.dir, &f.message)).unwrap();
+    assert_eq!(record.platform_launch_generation, Some(1));
+    let mut read = f.request();
+    read.origin = next.clone();
+    read.launch_generation = 2;
+    assert!(handle_fixed(&f.environment, read).is_err());
+    // The old origin no longer opens anything.
+    assert!(handle_fixed(&f.environment, f.request()).is_err());
+    // The next generation clears the resumed mark.
+    let advanced = Generation {
+        generation: 3,
+        resumed_from_pod_uid: None,
+        ..generation
+    };
+    write_private_json(&f.dir.join(GENERATION), &advanced).unwrap();
+    assert!(!resumed(&f.environment, &f.origin.driver_id).unwrap());
+}
+
+#[test]
+fn platform_generation_records_without_the_resumed_mark_still_decode() {
+    let f = Fixture::new();
+    let bytes = fs::read(f.dir.join(GENERATION)).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("resumed_from_pod_uid"));
+    let generation: Generation = serde_json::from_slice(&bytes).unwrap();
+    assert!(generation.resumed_from_pod_uid.is_none());
 }

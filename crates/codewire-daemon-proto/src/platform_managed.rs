@@ -107,6 +107,26 @@ pub fn validate_mutation(r: &v1::PlatformManagedMutationRequest) -> Result<(), &
         }
         Operation::Control(c) => {
             use v1::PlatformManagedAction as A;
+            let resume = c.action == A::Resume as i32;
+            let resume_fields = if resume {
+                let scope = r.scope.as_ref().ok_or("missing platform scope")?;
+                let agent = v1::PlatformManagedAgent::try_from(c.agent)
+                    .map_err(|_| "invalid platform agent")?;
+                valid_uuid(&c.predecessor_pod_uid)
+                    && c.predecessor_pod_uid != scope.pod_uid
+                    && provider_version(agent) == Some(c.expected_provider_version.as_str())
+                    && hash(&c.expected_provider_sha256)
+                    && (4..=PROVIDER_BYTES).contains(&c.expected_provider_size)
+            } else {
+                c.predecessor_pod_uid.is_empty()
+                    && c.agent == 0
+                    && c.expected_provider_sha256.is_empty()
+                    && c.expected_provider_size == 0
+                    && c.expected_provider_version.is_empty()
+            };
+            if !resume_fields {
+                return Err("invalid platform resume");
+            }
             if !valid_uuid(&c.driver_id)
                 || c.session_id != format!("session-{}", c.driver_id)
                 || c.expected_launch_generation == 0
@@ -137,7 +157,7 @@ pub fn validate_mutation(r: &v1::PlatformManagedMutationRequest) -> Result<(), &
                         && c.reply_to.is_none()
                         && c.expected_active_message_id.is_some()
                 }
-                Ok(A::Stop | A::Restart) => {
+                Ok(A::Stop | A::Restart | A::Resume) => {
                     c.text.is_empty()
                         && c.reply_to.is_none()
                         && c.expected_turn_id.is_none()
@@ -296,6 +316,7 @@ mod tests {
                     expected_turn_id: None,
                     expected_active_message_id: None,
                     cleanup_of_request_id: None,
+                    ..Default::default()
                 },
             )),
         }

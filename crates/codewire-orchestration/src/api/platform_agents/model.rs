@@ -23,6 +23,8 @@ pub enum ManagedAction {
     Interrupt,
     Stop,
     Restart,
+    /// Continue a conversation of an earlier Pod in this one (#2705).
+    Resume,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +89,11 @@ pub struct ManagedMutation {
     pub support_image_sha256: String,
     pub support_image_size: u64,
     pub private_fingerprint: String,
+    /// Resume only: the earlier Pod this conversation continues from, as the
+    /// control plane derived it and proved it absent. Absent on every other
+    /// action, and omitted when absent so earlier rows keep their fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor_pod_uid: Option<String>,
 }
 
 impl ManagedMutation {
@@ -131,11 +138,24 @@ impl ManagedMutation {
                         private::PlatformManagedAction::Interrupt => ManagedAction::Interrupt,
                         private::PlatformManagedAction::Stop => ManagedAction::Stop,
                         private::PlatformManagedAction::Restart => ManagedAction::Restart,
+                        private::PlatformManagedAction::Resume => ManagedAction::Resume,
                         _ => return Err(invalid()),
                     };
                     (
                         action,
-                        None,
+                        if action == ManagedAction::Resume {
+                            Some(
+                                match private::PlatformManagedAgent::try_from(c.agent)
+                                    .map_err(|_| invalid())?
+                                {
+                                    private::PlatformManagedAgent::Codex => ManagedAgent::Codex,
+                                    private::PlatformManagedAgent::Claude => ManagedAgent::Claude,
+                                    _ => return Err(invalid()),
+                                },
+                            )
+                        } else {
+                            None
+                        },
                         uuid(&c.driver_id)?,
                         c.expected_launch_generation,
                         if matches!(
@@ -157,6 +177,12 @@ impl ManagedMutation {
             Operation::Launch(_) => None,
             Operation::Control(c) => c.cleanup_of_request_id.as_deref().map(uuid).transpose()?,
         };
+        let predecessor_pod_uid = match request.operation.as_ref().ok_or_else(invalid)? {
+            Operation::Control(c) if !c.predecessor_pod_uid.is_empty() => {
+                Some(c.predecessor_pod_uid.clone())
+            }
+            _ => None,
+        };
         let value = Self {
             request_id,
             organization_id: scope.org_id.clone(),
@@ -176,6 +202,7 @@ impl ManagedMutation {
             support_image_sha256: hex(&scope.support_image_sha256),
             support_image_size: scope.support_image_size,
             private_fingerprint,
+            predecessor_pod_uid,
         };
         value.validate()?;
         Ok(value)
@@ -204,7 +231,17 @@ impl ManagedMutation {
                 .as_ref()
                 .is_some_and(|s| !wire::valid_session(s))
             || self.parent_session_id.is_some() != (self.expected_parent_launch_generation > 0)
-            || (self.action == ManagedAction::Launch) != self.agent.is_some()
+            || matches!(self.action, ManagedAction::Launch | ManagedAction::Resume)
+                != self.agent.is_some()
+            || (self.action == ManagedAction::Resume) != self.predecessor_pod_uid.is_some()
+            || self
+                .predecessor_pod_uid
+                .as_deref()
+                .is_some_and(|predecessor| {
+                    !wire::valid_uuid(predecessor) || predecessor == self.pod_uid
+                })
+            || (self.action == ManagedAction::Resume
+                && (self.cleanup_of_request_id.is_some() || self.message_id.is_some()))
             || (self.action == ManagedAction::Launch
                 && (self.driver_id != self.request_id || self.expected_launch_generation != 1))
             || (self.action != ManagedAction::Launch && self.parent_session_id.is_some())
@@ -212,8 +249,10 @@ impl ManagedMutation {
                 self.action,
                 ManagedAction::Message | ManagedAction::Steer | ManagedAction::Interrupt
             ) && self.message_id != Some(self.request_id))
-            || (matches!(self.action, ManagedAction::Stop | ManagedAction::Restart)
-                && self.message_id.is_some())
+            || (matches!(
+                self.action,
+                ManagedAction::Stop | ManagedAction::Restart | ManagedAction::Resume
+            ) && self.message_id.is_some())
         {
             return Err(invalid());
         }
@@ -335,14 +374,15 @@ impl ManagedReceipt {
     }
     pub fn validate_for(&self, m: &ManagedMutation, b: &CapturedBindingFacts) -> AppResult<()> {
         m.validate_binding(b)?;
-        let generation =
-            if m.action == ManagedAction::Restart && self.phase == ManagedPhase::Completed {
-                m.expected_launch_generation
-                    .checked_add(1)
-                    .ok_or_else(invalid)?
-            } else {
-                m.expected_launch_generation
-            };
+        let generation = if matches!(m.action, ManagedAction::Restart | ManagedAction::Resume)
+            && self.phase == ManagedPhase::Completed
+        {
+            m.expected_launch_generation
+                .checked_add(1)
+                .ok_or_else(invalid)?
+        } else {
+            m.expected_launch_generation
+        };
         if self.request_id != m.request_id
             || self.organization_id != b.organization_id
             || self.environment_id != b.environment_id
@@ -390,7 +430,7 @@ impl ManagedReceipt {
                 {
                     return Err(invalid());
                 }
-                ManagedAction::Launch | ManagedAction::Restart
+                ManagedAction::Launch | ManagedAction::Restart | ManagedAction::Resume
                     if !matches!(self.lifecycle, ManagedLifecycle::Running)
                         || self.pipe_acknowledged
                         || self.native_acknowledged =>
@@ -480,6 +520,25 @@ pub(super) fn conflict() -> AppError {
 }
 pub(super) fn unavailable() -> AppError {
     AppError::ServiceUnavailable("platform managed journal is unavailable".into())
+}
+/// A Resume refused definitely, before any effect, with why in plain words.
+pub(super) fn resume_refused(detail: &'static str) -> AppError {
+    AppError::Coded {
+        status: axum::http::StatusCode::CONFLICT,
+        code: "platform_agent_resume_refused",
+        detail: std::borrow::Cow::Borrowed(detail),
+    }
+}
+/// The earlier Pod a conversation continues from, as the control plane
+/// derived it from its own journal (#2705). It is checked against Kubernetes
+/// before admission and read again, unchanged, inside the admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResumePredecessor {
+    pub pod_uid: String,
+    pub namespace: String,
+    pub pod_name: String,
+    pub generation: u64,
+    pub agent: ManagedAgent,
 }
 pub(super) fn uuid(s: &str) -> AppResult<Uuid> {
     if !wire::valid_uuid(s) {

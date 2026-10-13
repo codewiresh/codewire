@@ -125,19 +125,35 @@ cw_runtime_managed_after_restart() {
     echo '::error::the managed-agent records from the first Pod did not list after Stop/Start' >&2
     return 1
   }
-  # A conversation from the first Pod ended with it: a message to it is
-  # refused plainly, not as a scope error (#2705). Nothing is sent.
-  local ended refused
-  ended="$(jq -er '[.[] | select(.command[1] == "__platform-agent-driver")][0].session_id' <<<"$listed")"
-  if refused="$(kind_credential_cli msg "$environment" "$ended" 'cw-runtime-after-restart' \
-    --output json 2>&1)"; then
-    echo '::error::a message to a conversation from the first Pod was accepted' >&2
-    return 1
-  fi
-  grep -Fq 'ended when its environment stopped' <<<"$refused" || {
-    echo '::error::a message to an ended conversation did not say it ended with the environment' >&2
+  # A top-level conversation from the first Pod continues in this one
+  # (#2705): a new message resumes it from its saved native session, at the
+  # next generation, and is delivered to its driver here. Nothing from the
+  # first Pod is replayed.
+  local earlier generation sent message resumed waited
+  earlier="$(jq -er '[.[] | select(.command[1] == "__platform-agent-driver"
+    and (.parent_session_id // null) == null)][0]' <<<"$listed")"
+  generation="$(jq -er '.launch_generation' <<<"$earlier")"
+  sent="$(kind_credential_cli msg "$environment" "$(jq -er .session_id <<<"$earlier")" \
+    'Return the synthetic reply after Stop/Start.' --output json)" || {
+    echo '::error::a message to a conversation from the first Pod did not resume it' >&2
     return 1
   }
+  message="$(jq -er '(.messageId // .message_id)' <<<"$sent")"
+  # The journey may have revoked this agent's provider: an answered turn or
+  # the provider's own refusal both prove the resumed driver took the message.
+  waited="$(kind_credential_cli wait --message "$message" --timeout 5m --output json || true)"
+  jq -e '.state == "completed" or .state == "error"' <<<"$waited" >/dev/null || {
+    echo '::error::the message to the resumed conversation did not reach its driver' >&2
+    return 1
+  }
+  resumed="$(kind_credential_cli list "$environment" --output json | jq -er \
+    --arg id "$(jq -er .session_id <<<"$earlier")" '[.[] | select(.session_id == $id)][0].launch_generation')"
+  [ "$resumed" = "$((generation + 1))" ] || {
+    echo "::error::the resumed conversation is at generation ${resumed}, not $((generation + 1))" >&2
+    return 1
+  }
+  kind_credential_cli stop "$environment" "$(jq -er .session_id <<<"$earlier")" \
+    --output json >/dev/null
   launched="$(kind_credential_launch "$environment" --no-tty --detach --output json -- \
     sh -c 'printf cw-runtime-after-restart')"
   session="$(jq -er '.session_id | select(type == "string" and test("^session-[0-9a-f-]{36}$"))' \

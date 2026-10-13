@@ -311,6 +311,21 @@ impl Service {
                 ImagePin::admit(&self.inner.config, &origin)?;
                 ProviderPin::admit(agent, &provider)?;
             }
+            v1::platform_managed_mutation_request::Operation::Control(c)
+                if c.action == v1::PlatformManagedAction::Resume as i32 =>
+            {
+                // The record must name exactly the earlier Pod the control
+                // plane proved absent, and the resumed origin is admitted as
+                // a launch's is (#2705).
+                let origin = resume_origin(scope, c)?;
+                ImagePin::admit(&self.inner.config, &origin)?;
+                ProviderPin::admit(origin.agent, &origin.provider)?;
+                origin
+                    .agent
+                    .route(self.inner.config.managed_credential_clients)
+                    .ok_or(Error::Refused)?;
+                self.inner.engine.platform_resumable(scope, c).await?;
+            }
             v1::platform_managed_mutation_request::Operation::Control(c) => {
                 if c.action == v1::PlatformManagedAction::Restart as i32 {
                     self.inner
@@ -464,6 +479,17 @@ impl Owner {
             (!l.parent_session_id.is_empty()).then_some(l.expected_parent_launch_generation),
         )
     }
+    /// A Resume's origin in this Pod: this scope, the same driver, the
+    /// agent and the image's pinned provider. No parent: a child is never
+    /// resumed.
+    pub(crate) fn resume_origin(&self) -> Result<Origin, Error> {
+        let Some(v1::platform_managed_mutation_request::Operation::Control(c)) =
+            &self.request.operation
+        else {
+            return Err(Error::Refused);
+        };
+        resume_origin(self.request.scope.as_ref().ok_or(Error::Refused)?, c)
+    }
     pub(crate) fn release(&self) {
         if let Ok(mut active) = self.service.inner.active.lock() {
             active.remove(&self.request.request_id);
@@ -607,6 +633,33 @@ fn admit_scope(tree: &files::Tree, scope: &v1::PlatformManagedScope) -> Result<(
     }
 }
 
+fn resume_origin(
+    scope: &v1::PlatformManagedScope,
+    c: &v1::PlatformManagedControl,
+) -> Result<Origin, Error> {
+    if c.action != v1::PlatformManagedAction::Resume as i32
+        || c.predecessor_pod_uid.is_empty()
+        || c.predecessor_pod_uid == scope.pod_uid
+    {
+        return Err(Error::Refused);
+    }
+    scope_origin(
+        scope,
+        &c.driver_id,
+        Agent::try_from(c.agent)?,
+        ProviderIdentity {
+            sha256: c
+                .expected_provider_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Refused)?,
+            size: c.expected_provider_size,
+            version: c.expected_provider_version.clone(),
+        },
+        None,
+    )
+}
+
 /// An issued launch: the only request a denial before its agent ran settles
 /// as refused.
 fn issued_launch(
@@ -620,29 +673,41 @@ fn issued_launch(
         )
 }
 
-/// The receipt of a launch refused before its claim wrote anything: the same
-/// row a launch refused before issue settles to, never stored.
+/// The receipt of a launch or a Resume refused before its claim wrote
+/// anything: the same row one refused before issue settles to, never stored.
+/// A Resume refused here keeps its conversation resumable (#2705).
 fn refused_launch(
     request: &v1::PlatformManagedMutationRequest,
 ) -> Option<v1::PlatformManagedReceipt> {
-    let Some(v1::platform_managed_mutation_request::Operation::Launch(launch)) =
-        request.operation.as_ref()
-    else {
-        return None;
-    };
-    let message_id = match launch.prompt {
-        Some(_) => wire::platform_managed_initial_prompt_id(&request.request_id).ok()?,
-        None => String::new(),
+    let (driver_id, message_id, launch_generation) = match request.operation.as_ref()? {
+        v1::platform_managed_mutation_request::Operation::Launch(launch) => (
+            request.request_id.clone(),
+            match launch.prompt {
+                Some(_) => wire::platform_managed_initial_prompt_id(&request.request_id).ok()?,
+                None => String::new(),
+            },
+            1,
+        ),
+        v1::platform_managed_mutation_request::Operation::Control(c)
+            if c.action == v1::PlatformManagedAction::Resume as i32 =>
+        {
+            (
+                c.driver_id.clone(),
+                String::new(),
+                c.expected_launch_generation,
+            )
+        }
+        _ => return None,
     };
     let receipt = v1::PlatformManagedReceipt {
         request_id: request.request_id.clone(),
         scope: Some(request.scope.clone()?),
         fingerprint_sha256: wire::platform_managed_request_fingerprint(request).ok()?,
         phase: v1::PlatformManagedRequestPhase::Rejected as i32,
-        session_id: format!("session-{}", request.request_id),
-        driver_id: request.request_id.clone(),
+        session_id: format!("session-{driver_id}"),
+        driver_id,
         message_id,
-        launch_generation: 1,
+        launch_generation,
         session_state: v1::SessionLifecycleState::Unspecified as i32,
         exit_code: None,
         cleanup_unknown: false,
@@ -674,7 +739,7 @@ fn valid_settlement(
             r.launch_generation == 1 && r.state == S::Running as i32 && !pipe && !native
         }
         Some(v1::platform_managed_mutation_request::Operation::Control(c)) => {
-            let generation = if c.action == A::Restart as i32 {
+            let generation = if c.action == A::Restart as i32 || c.action == A::Resume as i32 {
                 c.expected_launch_generation.checked_add(1)
             } else {
                 Some(c.expected_launch_generation)
@@ -695,7 +760,7 @@ fn valid_settlement(
                         && !pipe
                         && !native
                 }
-                Ok(A::Restart) => r.state == S::Running as i32 && !pipe && !native,
+                Ok(A::Restart | A::Resume) => r.state == S::Running as i32 && !pipe && !native,
                 _ => false,
             }
         }
@@ -753,11 +818,11 @@ impl PlatformManagedService for Service {
         let request = r.into_inner();
         let (owner, row, dispatch) = match self.claim(request.clone()).await {
             Ok(claimed) => claimed,
-            // A refused claim wrote nothing and started nothing. For a launch,
-            // say so with a definite refusal instead of an error that leaves
-            // orchestration an unknown outcome and its deletion lease
-            // unresolved (#2705). A control keeps the error: a cleanup Stop's
-            // receipt must carry generations only its book can supply.
+            // A refused claim wrote nothing and started nothing. For a launch
+            // or a Resume, say so with a definite refusal instead of an error
+            // that leaves orchestration an unknown outcome and its deletion
+            // lease unresolved (#2705). Other controls keep the error: a
+            // cleanup Stop's receipt must carry generations only its book has.
             Err(error @ (Error::Refused | Error::EarlierProvider(_))) => {
                 return match refused_launch(&request) {
                     Some(receipt) => Ok(Response::new(receipt)),
@@ -1049,10 +1114,16 @@ mod tests {
         let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
         let mut request = launch(&scope);
         let refused = refused_launch(&request).unwrap();
-        assert_eq!(refused.phase, v1::PlatformManagedRequestPhase::Rejected as i32);
+        assert_eq!(
+            refused.phase,
+            v1::PlatformManagedRequestPhase::Rejected as i32
+        );
         assert_eq!(refused.reason, "refused-before-issue");
         assert!(!refused.cleanup_unknown);
-        assert_eq!(refused.session_id, format!("session-{}", request.request_id));
+        assert_eq!(
+            refused.session_id,
+            format!("session-{}", request.request_id)
+        );
         assert_eq!(refused.driver_id, request.request_id);
         assert_eq!(refused.launch_generation, 1);
         assert!(refused.message_id.is_empty());

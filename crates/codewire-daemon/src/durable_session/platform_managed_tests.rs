@@ -855,3 +855,92 @@ fn a_launch_is_denied_before_run_only_when_its_projection_failed_and_cleanup_is_
         assert!(!denied_before_run(&record));
     }
 }
+
+#[tokio::test]
+async fn platform_managed_resume_admits_only_the_named_earlier_pod_of_this_environment() {
+    // #2705: a Resume continues a record whose origin names exactly the
+    // earlier Pod the control plane proved absent, in this environment and
+    // organization, for the same driver and agent, at the expected generation.
+    use crate::platform_managed::Agent;
+    use v1::SessionLifecycleState as S;
+    let temp = tempfile::tempdir().unwrap();
+    let config = retained_config(temp.path());
+    let writer = SessionEngine::new(&config, CredentialBridge::new(None));
+    let (session, origin) = retain(&writer, Agent::Codex, "0.160.0", S::Running).await;
+    writer.shutdown().await.unwrap();
+    let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+    let generation = engine.get(&session).await.unwrap().launch_generation;
+    let this_pod = v1::PlatformManagedScope {
+        pod_uid: Uuid::new_v4().to_string(),
+        binding_generation: 1,
+        ..retained_scope(&origin)
+    };
+    let resume = v1::PlatformManagedControl {
+        action: v1::PlatformManagedAction::Resume as i32,
+        session_id: session.clone(),
+        driver_id: origin.driver_id.clone(),
+        expected_launch_generation: generation,
+        predecessor_pod_uid: origin.pod_uid.clone(),
+        agent: v1::PlatformManagedAgent::Codex as i32,
+        ..Default::default()
+    };
+    engine.platform_resumable(&this_pod, &resume).await.unwrap();
+    let refused = |scope: v1::PlatformManagedScope, control: v1::PlatformManagedControl| {
+        let engine = &engine;
+        async move {
+            assert!(matches!(
+                engine.platform_resumable(&scope, &control).await,
+                Err(Error::Refused)
+            ));
+        }
+    };
+    // Its own Pod stays Restart's.
+    refused(retained_scope(&origin), resume.clone()).await;
+    // Another environment or organization.
+    refused(
+        v1::PlatformManagedScope {
+            environment_id: Uuid::new_v4().to_string(),
+            ..this_pod.clone()
+        },
+        resume.clone(),
+    )
+    .await;
+    refused(
+        v1::PlatformManagedScope {
+            org_id: "another-org".into(),
+            ..this_pod.clone()
+        },
+        resume.clone(),
+    )
+    .await;
+    for control in [
+        // Not the Pod the control plane proved absent.
+        v1::PlatformManagedControl {
+            predecessor_pod_uid: Uuid::new_v4().to_string(),
+            ..resume.clone()
+        },
+        // A stale generation.
+        v1::PlatformManagedControl {
+            expected_launch_generation: generation + 1,
+            ..resume.clone()
+        },
+        // Another agent.
+        v1::PlatformManagedControl {
+            agent: v1::PlatformManagedAgent::Claude as i32,
+            ..resume.clone()
+        },
+        // Another driver.
+        v1::PlatformManagedControl {
+            driver_id: Uuid::new_v4().to_string(),
+            ..resume.clone()
+        },
+        // Not a Resume.
+        v1::PlatformManagedControl {
+            action: v1::PlatformManagedAction::Restart as i32,
+            ..resume.clone()
+        },
+    ] {
+        refused(this_pod.clone(), control).await;
+    }
+    engine.shutdown().await.unwrap();
+}

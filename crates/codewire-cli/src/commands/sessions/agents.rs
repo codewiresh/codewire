@@ -1970,13 +1970,18 @@ async fn run_agent_driver_inner(args: AgentDriverArgs, platform: bool) -> anyhow
         .filter(|state| state.driver_id == driver_id && state.agent == config.agent);
     #[cfg(target_os = "linux")]
     if host_control::guardian_required(&environment, &driver_id)? && previous.is_some() {
-        guest_peer::require_clean_previous(
+        let clean = guest_peer::require_clean_previous(
             &dir,
             environment.id(),
             &driver_id,
             &binding.session_id,
-        )?
-        .context("previous guest peer custody is missing; restart is fenced")?;
+        )?;
+        // A resumed conversation's custody ended with its earlier Pod, which
+        // the control plane proved absent; `adopt` retired its pointer.
+        anyhow::ensure!(
+            clean.is_some() || (platform && platform_control::resumed(&environment, &driver_id)?),
+            "previous guest peer custody is missing; restart is fenced"
+        );
     }
     let state = DriverState {
         version: 1,

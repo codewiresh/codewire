@@ -119,6 +119,7 @@ fn action(value: proto::EnvironmentAgentAction) -> AppResult<private::PlatformMa
         P::Interrupt => Ok(N::Interrupt),
         P::Stop => Ok(N::Stop),
         P::Restart => Ok(N::Restart),
+        P::Resume => Ok(N::Resume),
         _ => Err(invalid()),
     }
 }
@@ -172,6 +173,9 @@ pub(super) fn mutation(
                 expected_turn_id: value.expected_turn_id.clone(),
                 expected_active_message_id: value.expected_active_message_id.clone(),
                 cleanup_of_request_id: value.cleanup_of_request_id.clone(),
+                // A Resume's predecessor, agent and provider are never the
+                // client's: the control plane fills them before validation.
+                ..Default::default()
             })
         }
     };
@@ -180,8 +184,18 @@ pub(super) fn mutation(
         scope: Some(scope),
         operation: Some(operation),
     };
-    native::validate_mutation(&request).map_err(|_| invalid())?;
+    if !is_resume(&request) {
+        native::validate_mutation(&request).map_err(|_| invalid())?;
+    }
     Ok((incarnation, request))
+}
+
+pub(super) fn is_resume(request: &private::PlatformManagedMutationRequest) -> bool {
+    matches!(
+        &request.operation,
+        Some(private::platform_managed_mutation_request::Operation::Control(c))
+            if c.action == private::PlatformManagedAction::Resume as i32
+    )
 }
 
 pub(super) fn read(
