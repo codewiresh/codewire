@@ -75,6 +75,12 @@ The native supervisor owns the VM lifecycle and the guest daemon owns its
 sessions. Launch the lead and workers through the host CLI. Their parent must
 be a running managed session in this same VM.
 
+As in a platform sandbox, a managed agent runs the workspace image's pinned
+Codex or Claude Code, even after you update that CLI inside the VM; your
+updated version is what your own terminal runs. On an image without the pinned
+clients, such as a custom image, the managed agent runs the CLI on the VM's
+PATH, and `cw run --agent` prints one line naming it and the reason.
+
 In a VM or a platform sandbox, managed Claude starts in auto mode
 (`--permission-mode auto`), so it can run tools such as Bash without a prompt.
 It keeps the Sandbox user's Claude settings and permission rules; setting

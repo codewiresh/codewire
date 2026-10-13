@@ -197,6 +197,11 @@ struct AgentConfig {
     environment_id: String,
     agent: AgentKind,
     program: PathBuf,
+    /// Why a local VM conversation runs `program` from PATH instead of the
+    /// image's pinned client. Absent when the pin was used, and on every
+    /// other placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    program_fallback: Option<String>,
     model: String,
     effort: Option<String>,
     working_dir: String,
@@ -1269,6 +1274,7 @@ pub(super) async fn handle_agent_run_command(
         environment_id: environment.id.clone(),
         agent,
         program,
+        program_fallback: None,
         model: model.clone(),
         effort: effort.clone(),
         working_dir: working_dir.clone(),
@@ -4561,6 +4567,7 @@ mod tests {
             environment_id: uuid::Uuid::new_v4().to_string(),
             agent: AgentKind::Claude,
             program: PathBuf::from("/usr/bin/false"),
+            program_fallback: None,
             model: "synthetic-model".into(),
             effort: effort.map(str::to_owned),
             working_dir: "/workspace".into(),
