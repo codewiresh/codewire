@@ -62,6 +62,7 @@ impl Fixture {
                 environment_id: id,
                 agent: AgentKind::Codex,
                 program: PathBuf::from("/usr/bin/false"),
+                program_fallback: None,
                 model: "synthetic".into(),
                 effort: Some("high".into()),
                 working_dir: temp.path().to_string_lossy().into_owned(),

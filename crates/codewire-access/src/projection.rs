@@ -385,23 +385,22 @@ impl ManagedCredentialClients {
                 "ANTHROPIC_BASE_URL".into(),
                 format!("{origin}{MANAGED_ANTHROPIC_API_PREFIX}"),
             );
+            // Only the selected form's variable is projected. The other
+            // Anthropic names are reserved while the client is selected, so
+            // every placement removes an inherited value of them instead of
+            // projecting it as an empty string, which a newer Claude Code
+            // could read as set.
             if self.anthropic_subscription_token() {
                 // Claude Code's subscription mode: the placeholder makes it
                 // send its own OAuth form (bearer plus the OAuth beta) to
                 // the managed route, where the broker replaces it with the
                 // owner's Claude subscription token. The token itself never
-                // enters the Sandbox. Claude Code 2.1.288 treats the empty
-                // higher-precedence names as unset (pinned-client probe).
+                // enters the Sandbox.
                 environment.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "codewire-managed".into());
-                environment.insert("ANTHROPIC_AUTH_TOKEN".into(), String::new());
-                environment.insert("ANTHROPIC_API_KEY".into(), String::new());
             } else {
+                // The API-key form: a bearer the broker replaces with the
+                // selected API key.
                 environment.insert("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into());
-                // Clear competing inherited auth inputs; do not import or read
-                // a saved login. The stock client's exact precedence needs its
-                // own pinned-client proof, not a claim from this pure renderer.
-                environment.insert("ANTHROPIC_API_KEY".into(), String::new());
-                environment.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new());
             }
         }
         if self.contains(ManagedCredentialClient::GitHub) {

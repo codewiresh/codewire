@@ -1349,6 +1349,15 @@ run_present_paths_case mesh_ingress_protocol_guard pull_request refs/pull/1902/h
   'deploy policy policy_shell security security_js' scripts/ci/tests/test-deploy-mesh-ingress-protocol.sh
 run_present_paths_case mesh_ingress_protocol_unknown pull_request refs/pull/1902/head false \
   "$all_product_pr" scripts/ci/tests/test-mesh-ingress-protocol-future.sh
+# Developer-only Apple silicon journeys start real VMs on a Mac and never run
+# in CI; their source selects only policy, and an unknown sibling stays full.
+run_present_paths_case macos_local_vm_journeys pull_request refs/pull/20660/head false \
+  'policy security security_js' \
+  scripts/dev/test-cli-local-vm-macos.py scripts/dev/test-cli-local-vm-docker-macos.py \
+  scripts/dev/test-local-vm-hostile-guest-macos.py scripts/dev/hostile-guest-probe.py \
+  scripts/dev/test-local-vm-hostile-guest.py
+run_present_paths_case macos_local_vm_journey_unknown pull_request refs/pull/20661/head false \
+  "$all_product_pr" scripts/dev/test-local-vm-future-macos.py
 run_present_paths_case macos_console_pair pull_request refs/pull/20641/head false \
   'policy security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-vz-console-pair.py scripts/dev/test-macos-vz-console-pair.py

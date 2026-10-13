@@ -4,10 +4,19 @@ fn clients(slots: &[&str]) -> ManagedCredentialClients {
     ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap()
 }
 
-/// Every name a selection projects: its reserved names, and for GitHub the
-/// two `gh` names, which are projected without being reserved.
+/// Every name a selection projects: its reserved names, except the Anthropic
+/// form it did not select, and for GitHub the two `gh` names, which are
+/// projected without being reserved.
 fn projected_names(selected: ManagedCredentialClients) -> BTreeSet<&'static str> {
     let mut names = selected.reserved_environment_keys();
+    if selected.contains(ManagedCredentialClient::Anthropic) {
+        names.remove("ANTHROPIC_API_KEY");
+        names.remove(if selected.anthropic_subscription_token() {
+            "ANTHROPIC_AUTH_TOKEN"
+        } else {
+            "CLAUDE_CODE_OAUTH_TOKEN"
+        });
+    }
     if selected.contains(ManagedCredentialClient::GitHub) {
         names.extend(["GH_CONFIG_DIR", "GH_TOKEN"]);
     }
@@ -329,8 +338,6 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
                     "http://127.0.0.1:38081/_codewire/anthropic".into()
                 ),
                 ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
-                ("ANTHROPIC_API_KEY".into(), String::new()),
-                ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
             ])
         );
         let ssh = clients(&["ssh"]).for_placement(placement);
@@ -537,11 +544,9 @@ fn anthropic_subscription_projection_is_the_exact_claude_code_oauth_placeholder(
                     "http://127.0.0.1:38081/_codewire/anthropic".into()
                 ),
                 ("CLAUDE_CODE_OAUTH_TOKEN".into(), "codewire-managed".into()),
-                ("ANTHROPIC_AUTH_TOKEN".into(), String::new()),
-                ("ANTHROPIC_API_KEY".into(), String::new()),
             ])
         );
-        // The API-key form keeps its exact projection.
+        // The API-key form projects only its own variable too.
         assert_eq!(
             clients(&["anthropic"]).for_placement(placement).environment,
             BTreeMap::from([
@@ -550,10 +555,56 @@ fn anthropic_subscription_projection_is_the_exact_claude_code_oauth_placeholder(
                     "http://127.0.0.1:38081/_codewire/anthropic".into()
                 ),
                 ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
-                ("ANTHROPIC_API_KEY".into(), String::new()),
-                ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
             ])
         );
+    }
+}
+
+/// Each Anthropic form projects only its own variable, never the other
+/// form's and never `ANTHROPIC_API_KEY`, while all four names stay reserved,
+/// so a declared value of any of them is still refused.
+#[test]
+fn each_anthropic_form_projects_only_its_own_variable_and_reserves_all_four() {
+    let api_key = clients(&["anthropic"]);
+    let subscription = api_key.with_anthropic_subscription_token().unwrap();
+    for placement in [
+        ManagedCredentialClientPlacement::Native,
+        ManagedCredentialClientPlacement::Platform,
+    ] {
+        for (selected, own, others) in [
+            (
+                subscription,
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            ),
+            (
+                api_key,
+                "ANTHROPIC_AUTH_TOKEN",
+                ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            ),
+        ] {
+            let environment = selected.for_placement(placement).environment;
+            assert_eq!(environment[own], "codewire-managed");
+            for other in others {
+                assert!(!environment.contains_key(other), "{other}");
+            }
+            // No projected value is empty: nothing is cleared by an empty
+            // string, which a client could read as set.
+            assert!(environment.values().all(|value| !value.is_empty()));
+            for name in [
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ] {
+                assert!(selected.reserved_environment_keys().contains(name));
+                assert_eq!(
+                    selected.check_collisions([name]),
+                    Err(ProjectionError::ManagedEnvironmentCollision),
+                    "{name}"
+                );
+            }
+        }
     }
 }
 

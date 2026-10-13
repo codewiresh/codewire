@@ -466,6 +466,8 @@ fn handle(
     request: Request,
     resolve: &dyn Fn(AgentKind) -> anyhow::Result<PathBuf>,
 ) -> anyhow::Result<Value> {
+    // A trusted host runs the user's own installed client; there is no image pin.
+    let resolve = &|agent| resolve(agent).map(native::ResolvedProgram::from);
     match request {
         Request::Prepare {
             origin,
@@ -522,6 +524,7 @@ fn handle(
                 environment_id: environment.id().into(),
                 agent,
                 program: PathBuf::new(),
+                program_fallback: None,
                 model,
                 effort,
                 working_dir,

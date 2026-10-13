@@ -253,6 +253,12 @@ impl WorkspacePlan {
                     .ok_or(WorkspacePlanError::Plan)
             })
             .collect::<Result<_, _>>()?;
+        // An image value of a selected client's name is removed, whether or
+        // not that name is projected (the Anthropic form that was not
+        // selected is reserved but absent), as the daemon does for the
+        // sessions it starts.
+        let reserved = clients.reserved_environment_keys();
+        environment.retain(|name, _| !reserved.contains(name.as_str()));
         environment.extend(projection.environment);
         // Every managed HTTP route is the workspace's loopback ingress. A
         // proxy the image or the project declares must never receive those
@@ -1196,6 +1202,69 @@ mod tests {
         let environment = values(&unselected);
         assert_eq!(environment["GH_CONFIG_DIR"], "/home/codewire/.config/gh");
         assert_eq!(environment["GH_TOKEN"], "declared");
+    }
+
+    /// An image value of an Anthropic name never reaches the workspace while
+    /// the Anthropic client is selected: each form projects only its own
+    /// variable, and the other names are removed, not emptied.
+    #[test]
+    fn an_image_value_of_the_unselected_anthropic_form_is_removed() {
+        use codewire_access::ManagedCredentialClients;
+        let root = root();
+        let config = config(json!({}));
+        let header = setup(&config);
+        let mut plan =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ] {
+            plan.environment.push(format!("{name}=image-value"));
+        }
+        plan.environment.sort();
+        let names = |plan: &WorkspacePlan| -> BTreeMap<String, String> {
+            plan.environment
+                .iter()
+                .map(|entry| {
+                    let (name, value) = entry.split_once('=').unwrap();
+                    (name.to_owned(), value.to_owned())
+                })
+                .collect()
+        };
+        let api_key = ManagedCredentialClients::from_profile_slots(["anthropic"]).unwrap();
+        for (clients, own, others) in [
+            (
+                api_key,
+                "ANTHROPIC_AUTH_TOKEN",
+                ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+            ),
+            (
+                api_key.with_anthropic_subscription_token().unwrap(),
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+            ),
+        ] {
+            let environment = names(
+                &plan
+                    .clone()
+                    .with_managed_credential_clients(clients)
+                    .unwrap(),
+            );
+            assert_eq!(environment[own], "codewire-managed");
+            for other in others {
+                assert!(!environment.contains_key(other), "{other}");
+            }
+        }
+        // Without the Anthropic client the image's values are the workload's.
+        let environment = names(
+            &plan
+                .with_managed_credential_clients(
+                    ManagedCredentialClients::from_profile_slots(["codex"]).unwrap(),
+                )
+                .unwrap(),
+        );
+        assert_eq!(environment["ANTHROPIC_API_KEY"], "image-value");
     }
 
     #[test]

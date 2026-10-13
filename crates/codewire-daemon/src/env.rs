@@ -86,8 +86,16 @@ fn build_managed_process_env_from(
     };
     let managed = config.managed_credential_clients.for_placement(placement);
     let managed_names = managed.environment.keys().cloned().collect::<BTreeSet<_>>();
+    let selected_reserved = config
+        .managed_credential_clients
+        .reserved_environment_keys();
     let mut inherited = inherited.into_iter().collect::<Vec<_>>();
-    inherited.retain(|(name, _)| !managed_names.contains(name));
+    // An inherited value of a selected client's name is removed, whether or
+    // not that name is projected: the Anthropic form that was not selected,
+    // for one, is reserved but absent, never an empty string.
+    inherited.retain(|(name, _)| {
+        !managed_names.contains(name) && !selected_reserved.contains(name.as_str())
+    });
     inherited.extend(managed.environment);
     // A managed client variable is Codewire's while its client is selected.
     // Most are reserved, so a declared one was refused above or at
@@ -473,13 +481,15 @@ mod tests {
                 values["OPENAI_BASE_URL"],
                 "http://127.0.0.1:38081/_codewire/openai/v1"
             );
-            assert_eq!(values["ANTHROPIC_API_KEY"], "");
+            // The API-key form: only its own variable; the image's values of
+            // the other Anthropic names are removed, not emptied.
+            assert!(!values.contains_key("ANTHROPIC_API_KEY"));
             assert_eq!(values["ANTHROPIC_AUTH_TOKEN"], "codewire-managed");
             assert_eq!(
                 values["ANTHROPIC_BASE_URL"],
                 "http://127.0.0.1:38081/_codewire/anthropic"
             );
-            assert_eq!(values["CLAUDE_CODE_OAUTH_TOKEN"], "");
+            assert!(!values.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
             assert_eq!(values["GITHUB_TOKEN"], "unselected-image-value");
             assert_eq!(
                 values["SSH_AUTH_SOCK"],
@@ -772,10 +782,11 @@ mod tests {
             .unwrap();
             let values = env_map(&environment.entries);
             // Claude Code's subscription mode reaches the managed route with
-            // only the placeholder; the empty higher-precedence names unset.
+            // only the placeholder; the image's values of the other two
+            // names are removed, never projected as empty strings.
             assert_eq!(values["CLAUDE_CODE_OAUTH_TOKEN"], "codewire-managed");
-            assert_eq!(values["ANTHROPIC_AUTH_TOKEN"], "");
-            assert_eq!(values["ANTHROPIC_API_KEY"], "");
+            assert!(!values.contains_key("ANTHROPIC_AUTH_TOKEN"));
+            assert!(!values.contains_key("ANTHROPIC_API_KEY"));
             assert_eq!(
                 values["ANTHROPIC_BASE_URL"],
                 "http://127.0.0.1:38081/_codewire/anthropic"

@@ -221,7 +221,7 @@ pub(super) fn refuse_native_bypass(
     }
     Ok(())
 }
-fn agent(agent: AgentKind) -> codewire_daemon::platform_managed::Agent {
+pub(super) fn agent(agent: AgentKind) -> codewire_daemon::platform_managed::Agent {
     match agent {
         AgentKind::Codex => codewire_daemon::platform_managed::Agent::Codex,
         AgentKind::Claude => codewire_daemon::platform_managed::Agent::Claude,
@@ -405,6 +405,7 @@ fn prepare(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result
         environment_id: environment.id().into(),
         agent: request.origin.agent,
         program: PathBuf::new(),
+        program_fallback: None,
         model,
         effort,
         working_dir,

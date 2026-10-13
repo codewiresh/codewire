@@ -374,6 +374,18 @@ lead invoking `cw` itself.
 Neither replaces the matching native Linux hardware or retained Kind sandbox
 journey. Program #2255 holds current commands, outcomes and landing evidence.
 
+A managed agent in a local VM runs the image's pinned client, admitted by the
+same `ProviderPin` code as a hosted Sandbox: the fixed layout under
+`/opt/codewire/agents` for the guest's architecture (x86_64 or aarch64),
+root-owned and read-only files and parents, and the pinned package version
+(Codex 0.160.0, Claude Code 2.1.288). A newer client the user installs into
+`~/.npm-global`, which comes first on PATH, never replaces it. When the image
+has no admitted pinned client, the guest helper runs the client on PATH
+instead, records the reason (missing, another version, ownership or mode,
+not a complete executable) as `program_fallback` in the conversation's
+`config.json`, and `cw run --agent` prints one line naming the program and
+the reason. A trusted host always runs the user's installed client.
+
 The managed VM journey runs the actual pinned guest agents through the
 synthetic protected broker. Supply the image-derived initramfs described above,
 then add `--managed-agent-sessions --managed-agent-cw-image-receipt
@@ -383,7 +395,12 @@ verified workspace OCI receipt and existing broker assertions remain required.
 Before the first conversation, the journey observes root ownership, read-only
 mount flags, image identity and payload digest. It then checks native
 acknowledgement, two turns, resume, guest tool execution, held-turn controls,
-parent continuation, history and cleanup. Custody cases exercise detached and
+parent continuation, history and cleanup. Before the first conversation it
+stages decoy `codex` and `claude` in `~/.npm-global/bin`, shows they come first
+on PATH, and proves both managed agents run the pinned clients at their pinned
+versions while no decoy ever runs. `--synthetic-peers` needs an image without
+admitted pinned clients, since only then do the staged peers on PATH run; each
+launch must report that fallback. Custody cases exercise detached and
 TERM-resistant tools, a cancelled stop caller, driver death, safe generation
 admission, missing/stale receipt refusal and an unrelated sentinel. Provider
 responses are synthetic; live provider enrollment remains under #1902.
