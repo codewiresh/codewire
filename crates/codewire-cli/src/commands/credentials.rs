@@ -283,15 +283,15 @@ fn github_reach_summary(
         })
         .collect::<Vec<_>>();
     let reach = if accounts.is_empty() {
-        "Codewire can read repositories where the Codewire GitHub App is installed.".to_owned()
+        "Codewire can read, push to and open pull requests in repositories where the Codewire GitHub App is installed.".to_owned()
     } else {
         format!(
-            "Codewire can read repositories in: {}.",
+            "Codewire can read, push to and open pull requests in repositories of: {}.",
             accounts.join(", ")
         )
     };
     format!(
-        "{reach}\nTo add an account or organization, or choose repositories: {}",
+        "{reach}\nTo add an account or organization, or choose repositories, open {} and choose \"Only select repositories\".",
         codewire_credential_broker::provider_oauth::github::codewire_github_app_install_url()
     )
 }
@@ -2096,12 +2096,12 @@ mod tests {
         ]);
         assert_eq!(
             summary,
-            "Codewire can read repositories in: codewiresh (all repositories), noeljackson (selected repositories).\n\
-             To add an account or organization, or choose repositories: \
-             https://github.com/apps/codewire-sh/installations/new"
+            "Codewire can read, push to and open pull requests in repositories of: codewiresh (all repositories), noeljackson (selected repositories).\n\
+             To add an account or organization, or choose repositories, open \
+             https://github.com/apps/codewire-sh/installations/new and choose \"Only select repositories\"."
         );
         assert!(github_reach_summary(&[]).starts_with(
-            "Codewire can read repositories where the Codewire GitHub App is installed."
+            "Codewire can read, push to and open pull requests in repositories where the Codewire GitHub App is installed."
         ));
     }
 }

@@ -237,3 +237,100 @@ fn delegation_error_mapping_discards_upstream_diagnostics() {
         assert!(!format!("{error:?}").contains("synthetic-provider-secret-canary"));
     }
 }
+
+fn keepalive() -> proto::DelegateCredentialsRequest {
+    proto::DelegateCredentialsRequest {
+        input: Some(proto::delegate_credentials_request::Input::Keepalive(
+            Box::default(),
+        )),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn delegation_keepalive_is_answered_only_after_admission_one_at_a_time_and_never_bridged() {
+    let (keepalives, mut answers) = Keepalives::new();
+    // Before admission (the client has not seen `admitted`): the stream ends.
+    assert_eq!(
+        decode_input(keepalive(), &keepalives).unwrap_err().code(),
+        tonic::Code::PermissionDenied
+    );
+    assert!(answers.try_recv().is_err());
+    keepalives.admit();
+    // Admitted: answered here, nothing for the bridge.
+    assert_eq!(decode_input(keepalive(), &keepalives).unwrap(), None);
+    // A second before the first answer went out: the stream ends.
+    assert_eq!(
+        decode_input(keepalive(), &keepalives).unwrap_err().code(),
+        tonic::Code::ResourceExhausted
+    );
+    answers.try_recv().unwrap();
+    assert!(answers.try_recv().is_err());
+    assert_eq!(decode_input(keepalive(), &keepalives).unwrap(), None);
+    answers.try_recv().unwrap();
+    // Frames still reach the bridge unchanged, and a keepalive is not a frame
+    // to a reader that predates it.
+    let cancel = public_bridge::CredentialBridgeGuestMessage {
+        payload: Some(
+            public_bridge::credential_bridge_guest_message::Payload::Cancel(Box::new(
+                public_bridge::CredentialBridgeCancel {
+                    request_id: Uuid::new_v4().to_string(),
+                    ..Default::default()
+                },
+            )),
+        ),
+        ..Default::default()
+    };
+    assert!(matches!(
+        decode_input(request(cancel), &keepalives),
+        Ok(Some(bridge::CredentialBridgeGuestMessage {
+            payload: Some(bridge::credential_bridge_guest_message::Payload::Cancel(_))
+        }))
+    ));
+    assert!(decode_frame(keepalive()).is_err());
+    // After the response ended, a late keepalive changes nothing.
+    drop(answers);
+    assert_eq!(decode_input(keepalive(), &keepalives).unwrap(), None);
+}
+
+#[tokio::test]
+async fn delegation_response_merges_keepalive_answers_and_ends_with_the_bridge() {
+    let (keepalives, answers) = Keepalives::new();
+    keepalives.admit();
+    let (frames_tx, frames_rx) = mpsc::channel(4);
+    let frames = Box::pin(futures::stream::unfold(
+        frames_rx,
+        |mut frames| async move { frames.recv().await.map(|frame| (frame, frames)) },
+    ));
+    let mut responses = Box::pin(with_keepalive_answers(frames, answers));
+    let frame = |id: &str| {
+        let mut response = keepalive_answer();
+        response.output = Some(proto::delegate_credentials_response::Output::Frame(
+            Box::new(public_bridge::CredentialBridgeHostMessage {
+                payload: Some(
+                    public_bridge::credential_bridge_host_message::Payload::ResponseEnd(Box::new(
+                        public_bridge::CredentialBridgeResponseEnd {
+                            request_id: id.into(),
+                            ..Default::default()
+                        },
+                    )),
+                ),
+                ..Default::default()
+            }),
+        ));
+        response
+    };
+    decode_input(keepalive(), &keepalives).unwrap();
+    let answer = responses.next().await.unwrap().unwrap();
+    assert!(matches!(
+        answer.output,
+        Some(proto::delegate_credentials_response::Output::Keepalive(_))
+    ));
+    assert!(!answer.accepts_keepalive);
+    frames_tx.send(Ok(frame("first"))).await.unwrap();
+    assert_eq!(responses.next().await.unwrap().unwrap(), frame("first"));
+    // The bridge's end ends the response although keepalives could still come.
+    drop(frames_tx);
+    assert!(responses.next().await.is_none());
+    drop(keepalives);
+}

@@ -18,9 +18,9 @@ Use the dashboard or CLI to create a sandbox environment for a repository.
 Codewire provisions the sandbox and streams progress while the environment starts.
 
 {% aside(kind="note") %}
-  Hosted private-repository access is not connected to environment creation in
-  the current release. Repository URLs containing embedded credentials are
-  rejected.
+  Private GitHub repositories need a GitHub connection in your credential
+  profile; see [Repository access](@/settings/github-integration.md).
+  Repository URLs containing embedded credentials are rejected.
 {% end %}
 
 ## CLI

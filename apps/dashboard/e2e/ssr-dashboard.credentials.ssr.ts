@@ -239,6 +239,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(connection).not.toContainText("one-time code");
       await expect(connection.getByRole("link", { name: "Install/manage repository access" }))
         .toHaveAttribute("href", "https://github.com/apps/codewire-synthetic/installations/new");
+      await expect(connection).toContainText("choose Only select repositories");
       expect(await githubConnectionMetadata(owner)).toEqual([]);
       // These returns never reach provider exchange or publish a credential.
       // Each retry starts from the newly rendered form and a fresh state cookie.

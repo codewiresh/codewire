@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/credential_delegation.proto.
  */
 export const file_codewire_v1_credential_delegation: GenFile = /*@__PURE__*/
-  fileDesc("Cidjb2Rld2lyZS92MS9jcmVkZW50aWFsX2RlbGVnYXRpb24ucHJvdG8SC2NvZGV3aXJlLnYxIksKG0NyZWRlbnRpYWxEZWxlZ2F0aW9uUHJvZmlsZRISCgpwcm9maWxlX2lkGAEgASgJEhgKEHByb2ZpbGVfcmV2aXNpb24YAiABKAQi3AIKGENyZWRlbnRpYWxEZWxlZ2F0aW9uT3BlbhI5CgdydW50aW1lGAEgASgLMiguY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VPcGVuEg4KBm9yZ19pZBgCIAEoCRIYChBzZWxlY3Rpb25fc2hhMjU2GAMgASgMEhcKCnByb2plY3RfaWQYBCABKAlIAIgBARIUCgx1c2VyX3NlY3JldHMYBSABKAgSHAoUb3JnYW5pemF0aW9uX3NlY3JldHMYBiABKAgSOQoHcHJvZmlsZRgHIAEoCzIoLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWxEZWxlZ2F0aW9uUHJvZmlsZRIhChlvcmRpbmFyeV9lbnZpcm9ubWVudF9rZXlzGAggAygJEiEKGXJlc2VydmVkX2Vudmlyb25tZW50X2tleXMYCSADKAlCDQoLX3Byb2plY3RfaWQinwEKGkRlbGVnYXRlQ3JlZGVudGlhbHNSZXF1ZXN0EjUKBG9wZW4YASABKAsyJS5jb2Rld2lyZS52MS5DcmVkZW50aWFsRGVsZWdhdGlvbk9wZW5IABJBCgVmcmFtZRgCIAEoCzIwLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlR3Vlc3RNZXNzYWdlSABCBwoFaW5wdXQipAEKG0RlbGVnYXRlQ3JlZGVudGlhbHNSZXNwb25zZRJACgVmcmFtZRgBIAEoCzIvLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlSG9zdE1lc3NhZ2VIABI5CghhZG1pdHRlZBgCIAEoCzIlLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWxEZWxlZ2F0aW9uT3BlbkgAQggKBm91dHB1dDKLAQobQ3JlZGVudGlhbERlbGVnYXRpb25TZXJ2aWNlEmwKE0RlbGVnYXRlQ3JlZGVudGlhbHMSJy5jb2Rld2lyZS52MS5EZWxlZ2F0ZUNyZWRlbnRpYWxzUmVxdWVzdBooLmNvZGV3aXJlLnYxLkRlbGVnYXRlQ3JlZGVudGlhbHNSZXNwb25zZSgBMAFCvAEKD2NvbS5jb2Rld2lyZS52MUIZQ3JlZGVudGlhbERlbGVnYXRpb25Qcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_codewire_bridge_v1_bridge]);
+  fileDesc("Cidjb2Rld2lyZS92MS9jcmVkZW50aWFsX2RlbGVnYXRpb24ucHJvdG8SC2NvZGV3aXJlLnYxIksKG0NyZWRlbnRpYWxEZWxlZ2F0aW9uUHJvZmlsZRISCgpwcm9maWxlX2lkGAEgASgJEhgKEHByb2ZpbGVfcmV2aXNpb24YAiABKAQi3AIKGENyZWRlbnRpYWxEZWxlZ2F0aW9uT3BlbhI5CgdydW50aW1lGAEgASgLMiguY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VPcGVuEg4KBm9yZ19pZBgCIAEoCRIYChBzZWxlY3Rpb25fc2hhMjU2GAMgASgMEhcKCnByb2plY3RfaWQYBCABKAlIAIgBARIUCgx1c2VyX3NlY3JldHMYBSABKAgSHAoUb3JnYW5pemF0aW9uX3NlY3JldHMYBiABKAgSOQoHcHJvZmlsZRgHIAEoCzIoLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWxEZWxlZ2F0aW9uUHJvZmlsZRIhChlvcmRpbmFyeV9lbnZpcm9ubWVudF9rZXlzGAggAygJEiEKGXJlc2VydmVkX2Vudmlyb25tZW50X2tleXMYCSADKAlCDQoLX3Byb2plY3RfaWQiHwodQ3JlZGVudGlhbERlbGVnYXRpb25LZWVwYWxpdmUi4AEKGkRlbGVnYXRlQ3JlZGVudGlhbHNSZXF1ZXN0EjUKBG9wZW4YASABKAsyJS5jb2Rld2lyZS52MS5DcmVkZW50aWFsRGVsZWdhdGlvbk9wZW5IABJBCgVmcmFtZRgCIAEoCzIwLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlR3Vlc3RNZXNzYWdlSAASPwoJa2VlcGFsaXZlGAMgASgLMiouY29kZXdpcmUudjEuQ3JlZGVudGlhbERlbGVnYXRpb25LZWVwYWxpdmVIAEIHCgVpbnB1dCKAAgobRGVsZWdhdGVDcmVkZW50aWFsc1Jlc3BvbnNlEkAKBWZyYW1lGAEgASgLMi8uY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VIb3N0TWVzc2FnZUgAEjkKCGFkbWl0dGVkGAIgASgLMiUuY29kZXdpcmUudjEuQ3JlZGVudGlhbERlbGVnYXRpb25PcGVuSAASPwoJa2VlcGFsaXZlGAMgASgLMiouY29kZXdpcmUudjEuQ3JlZGVudGlhbERlbGVnYXRpb25LZWVwYWxpdmVIABIZChFhY2NlcHRzX2tlZXBhbGl2ZRgEIAEoCEIICgZvdXRwdXQyiwEKG0NyZWRlbnRpYWxEZWxlZ2F0aW9uU2VydmljZRJsChNEZWxlZ2F0ZUNyZWRlbnRpYWxzEicuY29kZXdpcmUudjEuRGVsZWdhdGVDcmVkZW50aWFsc1JlcXVlc3QaKC5jb2Rld2lyZS52MS5EZWxlZ2F0ZUNyZWRlbnRpYWxzUmVzcG9uc2UoATABQrwBCg9jb20uY29kZXdpcmUudjFCGUNyZWRlbnRpYWxEZWxlZ2F0aW9uUHJvdG9QAVpBZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL3YxO2NvZGV3aXJldjGiAgNDWFiqAgtDb2Rld2lyZS5WMcoCC0NvZGV3aXJlXFYx4gIXQ29kZXdpcmVcVjFcR1BCTWV0YWRhdGHqAgxDb2Rld2lyZTo6VjFiBnByb3RvMw", [file_codewire_bridge_v1_bridge]);
 
 /**
  * An explicit immutable selection, not a credential or transferable grant.
@@ -110,6 +110,23 @@ export const CredentialDelegationOpenSchema: GenMessage<CredentialDelegationOpen
   messageDesc(file_codewire_v1_credential_delegation, 1);
 
 /**
+ * An empty message that keeps an idle admitted stream from being ended by a
+ * proxy's idle timer. It carries no state, grants nothing and never reaches
+ * the bridge.
+ *
+ * @generated from message codewire.v1.CredentialDelegationKeepalive
+ */
+export type CredentialDelegationKeepalive = Message<"codewire.v1.CredentialDelegationKeepalive"> & {
+};
+
+/**
+ * Describes the message codewire.v1.CredentialDelegationKeepalive.
+ * Use `create(CredentialDelegationKeepaliveSchema)` to create a new message.
+ */
+export const CredentialDelegationKeepaliveSchema: GenMessage<CredentialDelegationKeepalive> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential_delegation, 2);
+
+/**
  * @generated from message codewire.v1.DelegateCredentialsRequest
  */
 export type DelegateCredentialsRequest = Message<"codewire.v1.DelegateCredentialsRequest"> & {
@@ -130,6 +147,15 @@ export type DelegateCredentialsRequest = Message<"codewire.v1.DelegateCredential
      */
     value: CredentialBridgeGuestMessage;
     case: "frame";
+  } | {
+    /**
+     * Only after admission, and only when the admitted response set
+     * accepts_keepalive. At most one may wait for its answer.
+     *
+     * @generated from field: codewire.v1.CredentialDelegationKeepalive keepalive = 3;
+     */
+    value: CredentialDelegationKeepalive;
+    case: "keepalive";
   } | { case: undefined; value?: undefined };
 };
 
@@ -138,7 +164,7 @@ export type DelegateCredentialsRequest = Message<"codewire.v1.DelegateCredential
  * Use `create(DelegateCredentialsRequestSchema)` to create a new message.
  */
 export const DelegateCredentialsRequestSchema: GenMessage<DelegateCredentialsRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 2);
+  messageDesc(file_codewire_v1_credential_delegation, 3);
 
 /**
  * @generated from message codewire.v1.DelegateCredentialsResponse
@@ -166,7 +192,24 @@ export type DelegateCredentialsResponse = Message<"codewire.v1.DelegateCredentia
      */
     value: CredentialDelegationOpen;
     case: "admitted";
+  } | {
+    /**
+     * Exactly one answer per request keepalive; never sent unasked.
+     *
+     * @generated from field: codewire.v1.CredentialDelegationKeepalive keepalive = 3;
+     */
+    value: CredentialDelegationKeepalive;
+    case: "keepalive";
   } | { case: undefined; value?: undefined };
+
+  /**
+   * Set only beside `admitted`: this server answers request keepalives.
+   * Outside the oneof, so a client that predates it ignores the field, and
+   * outside the echoed selection, so the exact admission echo is unchanged.
+   *
+   * @generated from field: bool accepts_keepalive = 4;
+   */
+  acceptsKeepalive: boolean;
 };
 
 /**
@@ -174,7 +217,7 @@ export type DelegateCredentialsResponse = Message<"codewire.v1.DelegateCredentia
  * Use `create(DelegateCredentialsResponseSchema)` to create a new message.
  */
 export const DelegateCredentialsResponseSchema: GenMessage<DelegateCredentialsResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 3);
+  messageDesc(file_codewire_v1_credential_delegation, 4);
 
 /**
  * The isolated platform credential authority serves this owner-OAuth-only

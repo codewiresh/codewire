@@ -1665,7 +1665,7 @@ fn approved_error(code: &str) -> &'static str {
             "This GitHub account is already connected. Use its Reconnect action to update repository access."
         }
         "github-installation-required" => {
-            "Install the Codewire GitHub App for your account or organization and choose its repositories. Then return here and continue with GitHub. No credential was changed."
+            "Install the Codewire GitHub App for your account or organization, choose \"Only select repositories\" and pick the repositories your Sandboxes need. Then return here and continue with GitHub. No credential was changed."
         }
         "profile-invalid" => {
             "Check the profile name and selected credentials. Use 1–128 lowercase letters, numbers, hyphens, underscores or dots; start and end with a letter or number."
