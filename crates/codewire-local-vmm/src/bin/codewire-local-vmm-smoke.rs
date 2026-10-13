@@ -3807,9 +3807,10 @@ mod linux {
 
         fn test_paths() -> VmPaths {
             let vm_dir = PathBuf::from("/state/vms/00000000-0000-4000-8000-000000000001");
-            let api_dir = vm_dir.join("api");
-            let vsock_dir = vm_dir.join("vsock");
-            let virtiofs_dir = vm_dir.join("fs");
+            let sockets_dir = PathBuf::from("/tmp/cw-0/0000000000000000/vms/vm");
+            let api_dir = sockets_dir.join("api");
+            let vsock_dir = sockets_dir.join("vsock");
+            let virtiofs_dir = sockets_dir.join("fs");
             let disks_dir = vm_dir.join("disks");
             let generations_dir = vm_dir.join("generations");
             let seed_dir = vm_dir.join("seed");
@@ -3818,6 +3819,7 @@ mod linux {
                 api_socket: api_dir.join("api.sock"),
                 vsock_socket: vsock_dir.join("vsock.sock"),
                 virtiofs_dir,
+                sockets_dir,
                 state_disk: disks_dir.join("state.raw"),
                 docker_disk: disks_dir.join("docker.raw"),
                 generations_dir,
