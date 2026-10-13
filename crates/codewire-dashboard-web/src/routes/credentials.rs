@@ -59,6 +59,13 @@ pub(super) struct QueryParameters {
     error: String,
     #[serde(default)]
     dialog: String,
+    /// What GitHub says just happened when it returns the person to the
+    /// App's Setup URL (#2712). Only `install` and `update` are recognized,
+    /// and each maps to a fixed, neutral message: anyone can craft this link,
+    /// so nothing is checked or vouched for. The `installation_id` GitHub
+    /// sends with it is ignored.
+    #[serde(default)]
+    setup_action: String,
 }
 
 // Navigation is parsed independently of authority-bearing query fields. An
@@ -158,7 +165,11 @@ async fn render_page(
         ),
         None => (
             query.dialog.as_str(),
-            query.message.as_str(),
+            match (query.message.as_str(), query.setup_action.as_str()) {
+                ("", "update") => "github-permissions-updated",
+                ("", "install") => "github-app-installed",
+                (message, _) => message,
+            },
             query.error.as_str(),
             "",
         ),
@@ -189,19 +200,17 @@ async fn render_page(
         message: approved_message(message).into(),
         error: approved_error(error).into(),
         retained_name: retained_name.into(),
-        // Set only by the GitHub callback that just completed; rendered once.
-        github_accept: match github_accept_cookie_value(headers) {
-            Some(value) if message == "github-app-connected" => {
-                credentials_connect::GithubPendingPermissions::decode_all(value)
-                    .into_iter()
-                    .map(|pending| GithubAcceptView {
-                        url: pending.settings_url().unwrap_or_default(),
-                        account: pending.account,
-                    })
-                    .collect()
-            }
-            _ => Vec::new(),
-        },
+        // Set only by a GitHub callback that just completed, for the
+        // installations it did not send the person to; rendered once.
+        github_accept: github_accept_cookie_value(headers)
+            .map(credentials_connect::GithubPendingPermissions::decode_all)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|pending| GithubAcceptView {
+                url: pending.settings_url().unwrap_or_default(),
+                account: pending.account,
+            })
+            .collect(),
     };
     let mut response = with_csrf_cookie(
         render_credential_settings_page(CredentialSettingsTemplate {
@@ -890,17 +899,7 @@ pub(super) async fn github_app_callback(
         .await
         {
             Ok(pending) => {
-                let response = page_redirect("github-app-connected", false, &context, &headers);
-                // The connection is saved; GitHub has not yet granted what
-                // Codewire needs on these installations (#2712). The next page
-                // says so once, from this short-lived cookie, never the URL.
-                match github_accept_cookie(
-                    &state.public_origin,
-                    &credentials_connect::GithubPendingPermissions::encode_all(&pending),
-                ) {
-                    Some(cookie) if !pending.is_empty() => with_response_cookie(response, cookie),
-                    _ => response,
-                }
+                github_connected_response(&state.public_origin, pending, &context, &headers)
             }
             Err(error) if error.code == ErrorCode::AlreadyExists => {
                 page_error_redirect("github-app-already-connected", &dialog, &context, &headers)
@@ -919,6 +918,38 @@ pub(super) async fn github_app_callback(
     let response =
         super::remember_organization_choice(response, &state.public_origin, &context.org);
     github_app_callback_response(response, clear)
+}
+
+/// The connection is saved. Where GitHub has not yet granted what Codewire
+/// needs (#2712), send the person straight to the first installation's
+/// settings page to accept it; the URL is built only from the validated login
+/// and numeric ID under the fixed github.com prefix. Every other installation
+/// that falls short, enterprises included, travels in a short-lived HttpOnly
+/// cookie, never the URL, for the credentials page to name once when they
+/// return.
+fn github_connected_response(
+    public_origin: &str,
+    pending: Vec<credentials_connect::GithubPendingPermissions>,
+    context: &QueryParameters,
+    headers: &HeaderMap,
+) -> Response {
+    let (accept, rest) = credentials_connect::GithubPendingPermissions::first_to_accept(pending);
+    let response = match accept {
+        Some(url) => redirect(url, headers),
+        None => page_redirect("github-app-connected", false, context, headers),
+    };
+    let cookie = if rest.is_empty() {
+        None
+    } else {
+        github_accept_cookie(
+            public_origin,
+            &credentials_connect::GithubPendingPermissions::encode_all(&rest),
+        )
+    };
+    with_response_cookie(
+        response,
+        cookie.unwrap_or_else(|| clear_github_accept_cookie(public_origin)),
+    )
 }
 
 /// GitHub reports a person's choice to cancel as `access_denied`; every other
@@ -1588,6 +1619,8 @@ fn approved_message(code: &str) -> &'static str {
         "credential-deleted" => "Credential deleted.",
         "credential-connected" => "Credential connected.",
         "github-app-connected" => "GitHub connected through the GitHub App.",
+        "github-permissions-updated" => "GitHub permissions updated.",
+        "github-app-installed" => "GitHub App installed.",
         "profile-created" => "Credential profile created.",
         "profile-updated" => "Credential profile updated.",
         "profile-renamed" => "Credential profile renamed.",
@@ -1849,6 +1882,108 @@ mod tests {
              Accept the updated permissions in the enterprise's GitHub settings."
         ));
         assert!(!html.contains("Accept the updated permissions on GitHub</a>"));
+    }
+
+    #[test]
+    fn a_github_connect_that_falls_short_sends_the_person_to_accept() {
+        use credentials_connect::{GithubAccountKind, GithubPendingPermissions};
+        // #2712: the connection is saved first (the caller only gets here
+        // then); the person goes straight to the first installation they can
+        // accept on, and the page names the rest when they return.
+        let pending = |entry: &str| GithubPendingPermissions::decode_all(entry);
+        let context = QueryParameters::default();
+        let headers = HeaderMap::new();
+        let respond = |list: Vec<GithubPendingPermissions>| {
+            let response =
+                github_connected_response("https://codewire.sh", list, &context, &headers);
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let cookies: Vec<String> = response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .map(|value| value.to_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(cookies.len(), 1, "{cookies:?}");
+            (
+                response.headers()[header::LOCATION]
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                cookies[0].clone(),
+            )
+        };
+        let cleared = "codewire_github_accept=deleted; Path=/settings/credentials/; HttpOnly; \
+                       SameSite=Lax; Max-Age=0; Secure";
+
+        // Everything granted: the page, with nothing to name.
+        let (location, cookie) = respond(Vec::new());
+        assert_eq!(
+            location,
+            "/settings/credentials/?message=github-app-connected"
+        );
+        assert_eq!(cookie, cleared);
+        // A user installation.
+        let (location, cookie) = respond(pending("u.octo-user.41"));
+        assert_eq!(location, "https://github.com/settings/installations/41");
+        assert_eq!(cookie, cleared);
+        // An organization installation.
+        let (location, cookie) = respond(pending("o.octo-org.43"));
+        assert_eq!(
+            location,
+            "https://github.com/organizations/octo-org/settings/installations/43"
+        );
+        assert_eq!(cookie, cleared);
+        // An enterprise has no page to send anyone to: only the notice.
+        let (location, cookie) = respond(pending("e.octo-ent.9"));
+        assert_eq!(
+            location,
+            "/settings/credentials/?message=github-app-connected"
+        );
+        assert!(cookie.starts_with("codewire_github_accept=e.octo-ent.9; "));
+        // Several: the first page there is; the rest wait for the return.
+        let (location, cookie) = respond(pending("e.octo-ent.9_u.octo-user.41_o.octo-org.43"));
+        assert_eq!(location, "https://github.com/settings/installations/41");
+        assert!(cookie.starts_with("codewire_github_accept=e.octo-ent.9_o.octo-org.43; "));
+        assert_eq!(
+            GithubPendingPermissions::decode_all("e.octo-ent.9_o.octo-org.43")
+                .iter()
+                .map(|pending| pending.kind)
+                .collect::<Vec<_>>(),
+            [
+                GithubAccountKind::Enterprise,
+                GithubAccountKind::Organization
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_github_setup_return_shows_a_fixed_neutral_message() {
+        use axum::http::Request;
+        // GitHub returns the person to the App's Setup URL with these
+        // parameters; anyone can craft them, so each maps to fixed text.
+        for (raw, setup_action) in [
+            ("setup_action=update&installation_id=41", "update"),
+            ("installation_id=41&setup_action=install", "install"),
+            ("setup_action=request", "request"),
+        ] {
+            let request = Request::builder()
+                .uri(format!("{PATH}?{raw}"))
+                .body(())
+                .unwrap();
+            let (mut parts, _) = request.into_parts();
+            let CredentialQuery(query) = CredentialQuery::from_request_parts(&mut parts, &())
+                .await
+                .unwrap();
+            assert_eq!(query.setup_action, setup_action);
+        }
+        assert_eq!(
+            approved_message("github-permissions-updated"),
+            "GitHub permissions updated."
+        );
+        assert_eq!(
+            approved_message("github-app-installed"),
+            "GitHub App installed."
+        );
     }
 
     #[test]

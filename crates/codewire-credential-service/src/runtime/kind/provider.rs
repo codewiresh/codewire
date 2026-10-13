@@ -52,8 +52,9 @@ pub(super) fn github_app_callback_url(public_origin: &str) -> String {
 }
 pub(super) const GITHUB_APP_USER_TOKEN: &str = "ghu_kind_synthetic_user_token_1234567890";
 const GITHUB_APP_UNINSTALLED_USER_TOKEN: &str = "ghu_kind_synthetic_uninstalled_user_1234567890";
-/// A login whose installation still has the grant from before the App asked
-/// for write access: connect succeeds and names the pending permissions.
+/// A login whose installations still have the grant from before the App asked
+/// for write access: its own and an organization's. Connect succeeds, sends
+/// the person to accept on the first and names the second.
 const GITHUB_APP_LIMITED_USER_TOKEN: &str = "ghu_kind_synthetic_limited_user_token_1234567890";
 pub(super) const GITHUB_APP_REFRESHED_USER_TOKEN: &str =
     "ghu_kind_synthetic_refreshed_user_token_1234567890";
@@ -458,11 +459,17 @@ impl SyntheticProvider {
         }
         let account = json!({"login": "synthetic-user", "type": "User"});
         if bearer(GITHUB_APP_LIMITED_USER_TOKEN) {
-            // The same installation before its owner accepted write access.
+            // The same installation before its owner accepted write access,
+            // and an organization's installation in the same state.
+            let earlier = json!({"contents": "read", "metadata": "read"});
             return json_response(json!({
-                "installations": [{"id": 41, "app_slug": GITHUB_APP_SLUG, "account": account,
-                    "repository_selection": "selected",
-                    "permissions": {"contents": "read", "metadata": "read"}}],
+                "installations": [
+                    {"id": 41, "app_slug": GITHUB_APP_SLUG, "account": account,
+                        "repository_selection": "selected", "permissions": earlier.clone()},
+                    {"id": 42, "app_slug": GITHUB_APP_SLUG,
+                        "account": {"login": "synthetic-works", "type": "Organization"},
+                        "repository_selection": "selected", "permissions": earlier},
+                ],
             }));
         }
         json_response(json!({
@@ -2294,6 +2301,11 @@ mod tests {
         assert_eq!(
             pending.settings_url(&limited.reach()[0].account).as_deref(),
             Some("https://github.com/settings/installations/41")
+        );
+        let pending = limited.reach()[1].pending_permissions.as_ref().unwrap();
+        assert_eq!(
+            pending.settings_url(&limited.reach()[1].account).as_deref(),
+            Some("https://github.com/organizations/synthetic-works/settings/installations/42")
         );
         let limited = HeaderMap::from_iter([(
             http::header::AUTHORIZATION,

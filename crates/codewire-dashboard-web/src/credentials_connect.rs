@@ -597,6 +597,20 @@ impl GithubPendingPermissions {
         }
     }
 
+    /// Split off the first installation whose owner can accept on a GitHub
+    /// settings page, to send the person there straight after connecting,
+    /// from the rest, which the credentials page names when they return. An
+    /// enterprise has no such page, so it is only ever named.
+    pub(crate) fn first_to_accept(mut pending: Vec<Self>) -> (Option<String>, Vec<Self>) {
+        match pending
+            .iter()
+            .position(|pending| pending.settings_url().is_some())
+        {
+            Some(index) => (pending.remove(index).settings_url(), pending),
+            None => (None, pending),
+        }
+    }
+
     /// The compact form the post-connect cookie carries: `u.LOGIN.ID`,
     /// `o.LOGIN.ID` or `e.LOGIN.ID`, joined by `_`. GitHub logins contain
     /// neither separator.
@@ -1726,7 +1740,29 @@ mod tests {
             GithubPendingPermissions::decode_all("u.ok.1_bad_o.org.2").len(),
             2
         );
-        let many = vec!["u.octo.1"; MAX_GITHUB_PENDING + 3].join("_");
+        // Connect sends the person to the first page there is; the rest wait
+        // for the page. Enterprises are only named, wherever they come.
+        let (first, rest) = GithubPendingPermissions::first_to_accept(pending.clone());
+        assert_eq!(
+            first.as_deref(),
+            Some("https://github.com/settings/installations/12345")
+        );
+        assert_eq!(rest, pending[1..]);
+        let (first, rest) =
+            GithubPendingPermissions::first_to_accept(vec![pending[2].clone(), pending[1].clone()]);
+        assert_eq!(
+            first.as_deref(),
+            Some("https://github.com/organizations/octo-org/settings/installations/678")
+        );
+        assert_eq!(rest, [pending[2].clone()]);
+        let (first, rest) = GithubPendingPermissions::first_to_accept(vec![pending[2].clone()]);
+        assert_eq!(first, None);
+        assert_eq!(rest, [pending[2].clone()]);
+        assert_eq!(
+            GithubPendingPermissions::first_to_accept(Vec::new()),
+            (None, Vec::new())
+        );
+        let many = ["u.octo.1"; MAX_GITHUB_PENDING + 3].join("_");
         assert_eq!(
             GithubPendingPermissions::decode_all(&many).len(),
             MAX_GITHUB_PENDING

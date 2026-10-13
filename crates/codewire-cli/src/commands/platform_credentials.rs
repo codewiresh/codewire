@@ -108,26 +108,21 @@ pub(super) async fn handle(
                 }
             };
             print(&[credential], OutputFormat::Text)?;
-            for pending in &pending {
-                if let Some(notice) = super::credentials::github_pending_notice(
-                    &pending.account,
-                    pending.installation_id,
-                    match pending.account_kind.as_known() {
-                        Some(rpc::GithubAppAccountKind::Organization) => {
-                            codewire_credential_broker::GitHubAccountKind::Organization
-                        }
-                        Some(rpc::GithubAppAccountKind::Enterprise) => {
-                            codewire_credential_broker::GitHubAccountKind::Enterprise
-                        }
-                        Some(rpc::GithubAppAccountKind::User) => {
-                            codewire_credential_broker::GitHubAccountKind::User
-                        }
-                        _ => continue,
-                    },
-                ) {
-                    eprintln!("{notice}");
-                }
-            }
+            super::credentials::report_github_pending(pending.iter().filter_map(|pending| {
+                let kind = match pending.account_kind.as_known()? {
+                    rpc::GithubAppAccountKind::Organization => {
+                        codewire_credential_broker::GitHubAccountKind::Organization
+                    }
+                    rpc::GithubAppAccountKind::Enterprise => {
+                        codewire_credential_broker::GitHubAccountKind::Enterprise
+                    }
+                    rpc::GithubAppAccountKind::User => {
+                        codewire_credential_broker::GitHubAccountKind::User
+                    }
+                    _ => return None,
+                };
+                Some((pending.account.as_str(), pending.installation_id, kind))
+            }));
             Ok(())
         }
         CredentialsCommand::List(args) => {
