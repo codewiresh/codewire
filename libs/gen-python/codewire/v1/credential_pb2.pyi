@@ -23,6 +23,13 @@ class CredentialStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     CREDENTIAL_STATUS_REVOKED: _ClassVar[CredentialStatus]
     CREDENTIAL_STATUS_EXPIRED: _ClassVar[CredentialStatus]
     CREDENTIAL_STATUS_REFRESH_FAILED: _ClassVar[CredentialStatus]
+
+class GithubAppAccountKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    GITHUB_APP_ACCOUNT_KIND_UNSPECIFIED: _ClassVar[GithubAppAccountKind]
+    GITHUB_APP_ACCOUNT_KIND_USER: _ClassVar[GithubAppAccountKind]
+    GITHUB_APP_ACCOUNT_KIND_ORGANIZATION: _ClassVar[GithubAppAccountKind]
+    GITHUB_APP_ACCOUNT_KIND_ENTERPRISE: _ClassVar[GithubAppAccountKind]
 CREDENTIAL_AUTHENTICATION_KIND_UNSPECIFIED: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_OAUTH: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_API_KEY: CredentialAuthenticationKind
@@ -34,6 +41,20 @@ CREDENTIAL_STATUS_ACTIVE: CredentialStatus
 CREDENTIAL_STATUS_REVOKED: CredentialStatus
 CREDENTIAL_STATUS_EXPIRED: CredentialStatus
 CREDENTIAL_STATUS_REFRESH_FAILED: CredentialStatus
+GITHUB_APP_ACCOUNT_KIND_UNSPECIFIED: GithubAppAccountKind
+GITHUB_APP_ACCOUNT_KIND_USER: GithubAppAccountKind
+GITHUB_APP_ACCOUNT_KIND_ORGANIZATION: GithubAppAccountKind
+GITHUB_APP_ACCOUNT_KIND_ENTERPRISE: GithubAppAccountKind
+
+class ListGithubPendingPermissionsRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class ListGithubPendingPermissionsResponse(_message.Message):
+    __slots__ = ("pending_permissions",)
+    PENDING_PERMISSIONS_FIELD_NUMBER: _ClassVar[int]
+    pending_permissions: _containers.RepeatedCompositeFieldContainer[GithubAppPendingPermissions]
+    def __init__(self, pending_permissions: _Optional[_Iterable[_Union[GithubAppPendingPermissions, _Mapping]]] = ...) -> None: ...
 
 class ListGithubRepositoriesRequest(_message.Message):
     __slots__ = ("page_size", "page_token")
@@ -282,12 +303,24 @@ class GithubDeviceChallenge(_message.Message):
     def __init__(self, verification_url: _Optional[str] = ..., user_code: _Optional[str] = ..., expires_at_unix: _Optional[int] = ...) -> None: ...
 
 class EnrollGithubResponse(_message.Message):
-    __slots__ = ("challenge", "credential")
+    __slots__ = ("challenge", "credential", "pending_permissions")
     CHALLENGE_FIELD_NUMBER: _ClassVar[int]
     CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    PENDING_PERMISSIONS_FIELD_NUMBER: _ClassVar[int]
     challenge: GithubDeviceChallenge
     credential: Credential
-    def __init__(self, challenge: _Optional[_Union[GithubDeviceChallenge, _Mapping]] = ..., credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
+    pending_permissions: _containers.RepeatedCompositeFieldContainer[GithubAppPendingPermissions]
+    def __init__(self, challenge: _Optional[_Union[GithubDeviceChallenge, _Mapping]] = ..., credential: _Optional[_Union[Credential, _Mapping]] = ..., pending_permissions: _Optional[_Iterable[_Union[GithubAppPendingPermissions, _Mapping]]] = ...) -> None: ...
+
+class GithubAppPendingPermissions(_message.Message):
+    __slots__ = ("account", "installation_id", "account_kind")
+    ACCOUNT_FIELD_NUMBER: _ClassVar[int]
+    INSTALLATION_ID_FIELD_NUMBER: _ClassVar[int]
+    ACCOUNT_KIND_FIELD_NUMBER: _ClassVar[int]
+    account: str
+    installation_id: int
+    account_kind: GithubAppAccountKind
+    def __init__(self, account: _Optional[str] = ..., installation_id: _Optional[int] = ..., account_kind: _Optional[_Union[GithubAppAccountKind, str]] = ...) -> None: ...
 
 class CompleteGithubAppAuthorizationRequest(_message.Message):
     __slots__ = ("code", "credential_id", "expected_revocation_generation")
@@ -300,10 +333,12 @@ class CompleteGithubAppAuthorizationRequest(_message.Message):
     def __init__(self, code: _Optional[bytes] = ..., credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ...) -> None: ...
 
 class CompleteGithubAppAuthorizationResponse(_message.Message):
-    __slots__ = ("credential",)
+    __slots__ = ("credential", "pending_permissions")
     CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    PENDING_PERMISSIONS_FIELD_NUMBER: _ClassVar[int]
     credential: Credential
-    def __init__(self, credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
+    pending_permissions: _containers.RepeatedCompositeFieldContainer[GithubAppPendingPermissions]
+    def __init__(self, credential: _Optional[_Union[Credential, _Mapping]] = ..., pending_permissions: _Optional[_Iterable[_Union[GithubAppPendingPermissions, _Mapping]]] = ...) -> None: ...
 
 class RevokeCredentialRequest(_message.Message):
     __slots__ = ("credential_id", "expected_revocation_generation")
