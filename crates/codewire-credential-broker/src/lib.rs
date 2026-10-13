@@ -39,9 +39,10 @@ pub use codex_oauth::{
     CanonicalCodexOAuthBundle, CodexOAuthImport, CodexOAuthMaterialError, import_codex_tokens,
 };
 pub use github_app::{
-    GitHubAppAuthorizationConfig, GitHubAppAuthorizationError, GitHubAppAuthorizationImport,
-    GitHubAppAuthorizationOwner, GitHubAppInstallationReach, GitHubAppPendingPermissions,
-    GitHubAppRefreshError, GitHubAppUserOAuthBundle, github_access_token,
+    GitHubAccountKind, GitHubAppAuthorizationConfig, GitHubAppAuthorizationError,
+    GitHubAppAuthorizationImport, GitHubAppAuthorizationOwner, GitHubAppInstallationReach,
+    GitHubAppPendingPermissions, GitHubAppRefreshError, GitHubAppUserOAuthBundle,
+    github_access_token,
 };
 pub use network::ProviderHttpsTransport;
 pub use openai::{

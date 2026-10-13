@@ -16,7 +16,7 @@ use codewire_proto::codewire::v1::{
     CredentialAuthenticationKind, CredentialMutationServiceClient, CredentialServiceClient,
     CredentialStatus, DeleteAccessProfileRequest, DeleteCredentialRequest, EnrollCodexRequest,
     EnrollCodexResponse, GenerateSshCredentialRequest, GetAccessProfileRequest,
-    GetCredentialRequest, ListAccessProfilesRequest, ListCredentialsRequest,
+    GetCredentialRequest, GithubAppAccountKind, ListAccessProfilesRequest, ListCredentialsRequest,
     RenameAccessProfileRequest, RenameCredentialRequest, RevokeCredentialRequest,
     RotateApiKeyCredentialRequest, UpdateAccessProfileRequest, enroll_codex_response,
     get_access_profile_request, get_credential_request,
@@ -531,9 +531,6 @@ fn unix_now() -> Result<u64, ConnectError> {
         .map_err(|_| invalid_metadata())
 }
 
-/// Complete the server-side GitHub App callback. The callback code is sent
-/// only to credential-service over the authenticated mutation connection; the
-/// browser receives no token, provider response, or installation metadata.
 /// An installation of the Codewire GitHub App that has not yet granted the
 /// permissions Codewire needs, as one connect's response reported it. Shown
 /// once after that connect and never stored.
@@ -541,69 +538,86 @@ fn unix_now() -> Result<u64, ConnectError> {
 pub(crate) struct GithubPendingPermissions {
     pub(crate) account: String,
     pub(crate) installation_id: u64,
-    pub(crate) organization: bool,
+    pub(crate) kind: GithubAccountKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GithubAccountKind {
+    User,
+    Organization,
+    /// Accepted in the enterprise's own settings: no page to link.
+    Enterprise,
+}
+
+impl GithubAccountKind {
+    fn code(self) -> &'static str {
+        match self {
+            Self::User => "u",
+            Self::Organization => "o",
+            Self::Enterprise => "e",
+        }
+    }
+
+    fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "u" => Some(Self::User),
+            "o" => Some(Self::Organization),
+            "e" => Some(Self::Enterprise),
+            _ => None,
+        }
+    }
 }
 
 /// At most this many installations are carried to the page after a connect.
 const MAX_GITHUB_PENDING: usize = 8;
 
 impl GithubPendingPermissions {
-    fn new(account: &str, installation_id: u64, organization: bool) -> Option<Self> {
+    fn new(account: &str, installation_id: u64, kind: GithubAccountKind) -> Option<Self> {
         (valid_github_login(account) && installation_id > 0).then(|| Self {
             account: account.to_owned(),
             installation_id,
-            organization,
+            kind,
         })
     }
 
     /// GitHub's settings page for this installation, where its owner reviews
-    /// and accepts the App's permission request.
-    pub(crate) fn settings_url(&self) -> String {
-        if self.organization {
-            format!(
-                "https://github.com/organizations/{}/settings/installations/{}",
-                self.account, self.installation_id
-            )
-        } else {
-            format!(
+    /// and accepts the App's permission request. Built only from the validated
+    /// login and numeric ID. An enterprise has no such page to link.
+    pub(crate) fn settings_url(&self) -> Option<String> {
+        match self.kind {
+            GithubAccountKind::User => Some(format!(
                 "https://github.com/settings/installations/{}",
                 self.installation_id
-            )
+            )),
+            GithubAccountKind::Organization => Some(format!(
+                "https://github.com/organizations/{}/settings/installations/{}",
+                self.account, self.installation_id
+            )),
+            GithubAccountKind::Enterprise => None,
         }
     }
 
-    /// The compact form the post-connect redirect carries: `u.LOGIN.ID` or
-    /// `o.LOGIN.ID`, comma-separated. GitHub logins never contain a dot.
+    /// The compact form the post-connect cookie carries: `u.LOGIN.ID`,
+    /// `o.LOGIN.ID` or `e.LOGIN.ID`, joined by `_`. GitHub logins contain
+    /// neither separator.
     pub(crate) fn encode_all(pending: &[Self]) -> String {
         pending
             .iter()
-            .map(|p| {
-                format!(
-                    "{}.{}.{}",
-                    if p.organization { "o" } else { "u" },
-                    p.account,
-                    p.installation_id
-                )
-            })
+            .map(|p| format!("{}.{}.{}", p.kind.code(), p.account, p.installation_id))
             .collect::<Vec<_>>()
-            .join(",")
+            .join("_")
     }
 
-    /// The redirect's value, validated again: anything malformed is dropped,
-    /// so a crafted link can only name a GitHub settings page.
+    /// The cookie's value, validated again: anything malformed is dropped.
     pub(crate) fn decode_all(value: &str) -> Vec<Self> {
         if value.is_empty() || value.len() > 1024 {
             return Vec::new();
         }
         value
-            .split(',')
+            .split('_')
             .filter_map(|entry| {
                 let mut parts = entry.split('.');
-                let organization = match parts.next()? {
-                    "o" => true,
-                    "u" => false,
-                    _ => return None,
-                };
+                let kind = GithubAccountKind::from_code(parts.next()?)?;
                 let account = parts.next()?;
                 let digits = parts.next()?;
                 if parts.next().is_some()
@@ -613,7 +627,7 @@ impl GithubPendingPermissions {
                 {
                     return None;
                 }
-                Self::new(account, digits.parse().ok()?, organization)
+                Self::new(account, digits.parse().ok()?, kind)
             })
             .take(MAX_GITHUB_PENDING)
             .collect()
@@ -631,6 +645,11 @@ fn valid_github_login(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// Complete the server-side GitHub App callback. The callback code is sent
+/// only to credential-service over the authenticated mutation connection; the
+/// browser receives no token or provider response. It does receive, once,
+/// the login and installation ID of each installation that has not granted
+/// what Codewire needs (#2712), in a short-lived HttpOnly cookie.
 pub(crate) async fn complete_github_app_authorization(
     state: &AppState,
     cookie: HeaderValue,
@@ -672,11 +691,13 @@ pub(crate) async fn complete_github_app_authorization(
         .pending_permissions
         .iter()
         .filter_map(|pending| {
-            GithubPendingPermissions::new(
-                &pending.account,
-                pending.installation_id,
-                pending.organization,
-            )
+            let kind = match pending.account_kind.as_known()? {
+                GithubAppAccountKind::User => GithubAccountKind::User,
+                GithubAppAccountKind::Organization => GithubAccountKind::Organization,
+                GithubAppAccountKind::Enterprise => GithubAccountKind::Enterprise,
+                _ => return None,
+            };
+            GithubPendingPermissions::new(&pending.account, pending.installation_id, kind)
         })
         .take(MAX_GITHUB_PENDING)
         .collect())
@@ -1665,21 +1686,23 @@ mod tests {
     #[test]
     fn github_pending_permissions_round_trip_and_refuse_anything_else() {
         let pending = vec![
-            GithubPendingPermissions::new("octo-user", 12345, false).unwrap(),
-            GithubPendingPermissions::new("octo-org", 678, true).unwrap(),
+            GithubPendingPermissions::new("octo-user", 12345, GithubAccountKind::User).unwrap(),
+            GithubPendingPermissions::new("octo-org", 678, GithubAccountKind::Organization)
+                .unwrap(),
+            GithubPendingPermissions::new("octo-ent", 9, GithubAccountKind::Enterprise).unwrap(),
         ];
         let encoded = GithubPendingPermissions::encode_all(&pending);
-        assert_eq!(encoded, "u.octo-user.12345,o.octo-org.678");
+        assert_eq!(encoded, "u.octo-user.12345_o.octo-org.678_e.octo-ent.9");
         assert_eq!(GithubPendingPermissions::decode_all(&encoded), pending);
         assert_eq!(
-            pending[0].settings_url(),
-            "https://github.com/settings/installations/12345"
+            pending[0].settings_url().as_deref(),
+            Some("https://github.com/settings/installations/12345")
         );
         assert_eq!(
-            pending[1].settings_url(),
-            "https://github.com/organizations/octo-org/settings/installations/678"
+            pending[1].settings_url().as_deref(),
+            Some("https://github.com/organizations/octo-org/settings/installations/678")
         );
-        // A crafted value can only ever name a GitHub settings page.
+        assert_eq!(pending[2].settings_url(), None);
         for crafted in [
             "x.octo.1",
             "u.octo",
@@ -1700,10 +1723,10 @@ mod tests {
             );
         }
         assert_eq!(
-            GithubPendingPermissions::decode_all("u.ok.1,bad,o.org.2").len(),
+            GithubPendingPermissions::decode_all("u.ok.1_bad_o.org.2").len(),
             2
         );
-        let many = vec!["u.octo.1"; MAX_GITHUB_PENDING + 3].join(",");
+        let many = vec!["u.octo.1"; MAX_GITHUB_PENDING + 3].join("_");
         assert_eq!(
             GithubPendingPermissions::decode_all(&many).len(),
             MAX_GITHUB_PENDING

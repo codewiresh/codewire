@@ -2292,8 +2292,8 @@ mod tests {
             .unwrap();
         let pending = limited.reach()[0].pending_permissions.as_ref().unwrap();
         assert_eq!(
-            pending.settings_url(&limited.reach()[0].account),
-            "https://github.com/settings/installations/41"
+            pending.settings_url(&limited.reach()[0].account).as_deref(),
+            Some("https://github.com/settings/installations/41")
         );
         let limited = HeaderMap::from_iter([(
             http::header::AUTHORIZATION,

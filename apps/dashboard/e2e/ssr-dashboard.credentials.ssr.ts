@@ -415,7 +415,8 @@ test.describe("managed provider credential browser journey", () => {
       await row.getByRole("button", { name: "Reconnect", exact: true }).click();
       await page.locator("dialog[open]").getByRole("checkbox").check();
       await completeGithubAppConnection(page, "kind-synthetic-code-limited");
-      await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=github-app-connected&github_accept=u\.synthetic-user\.41$/);
+      // The notice travels in a short-lived HttpOnly cookie, never the URL.
+      await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=github-app-connected$/);
       await expect(page.getByRole("status")).toHaveText("GitHub connected through the GitHub App.");
       const permissions = page.getByRole("region", { name: "GitHub permissions", exact: true });
       await expect(permissions).toContainText(

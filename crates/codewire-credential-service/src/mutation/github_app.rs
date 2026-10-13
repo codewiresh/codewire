@@ -5,8 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_access::{CredentialAuthKind, CredentialId};
-use codewire_credential_broker::{GitHubAppAuthorizationError, GitHubAppInstallationReach};
-use codewire_proto::codewire::v1::GithubAppPendingPermissions;
+use codewire_credential_broker::{
+    GitHubAccountKind, GitHubAppAuthorizationError, GitHubAppInstallationReach,
+};
+use codewire_proto::codewire::v1::{GithubAppAccountKind, GithubAppPendingPermissions};
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
@@ -30,7 +32,12 @@ pub(super) fn pending_permissions(
             Some(GithubAppPendingPermissions {
                 account: installation.account.clone(),
                 installation_id: pending.installation_id,
-                organization: pending.organization,
+                account_kind: match pending.account_kind {
+                    GitHubAccountKind::User => GithubAppAccountKind::User,
+                    GitHubAccountKind::Organization => GithubAppAccountKind::Organization,
+                    GitHubAccountKind::Enterprise => GithubAppAccountKind::Enterprise,
+                }
+                .into(),
                 ..Default::default()
             })
         })
@@ -194,7 +201,7 @@ mod tests {
                 all_repositories: false,
                 pending_permissions: Some(GitHubAppPendingPermissions {
                     installation_id: 43,
-                    organization: true,
+                    account_kind: GitHubAccountKind::Organization,
                 }),
             },
             GitHubAppInstallationReach {
@@ -207,7 +214,10 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].account, "octo-org");
         assert_eq!(pending[0].installation_id, 43);
-        assert!(pending[0].organization);
+        assert_eq!(
+            pending[0].account_kind.as_known(),
+            Some(GithubAppAccountKind::Organization)
+        );
         assert!(pending_permissions(&reach[1..]).is_empty());
         let many = vec![reach[0].clone(); MAX_PENDING_PERMISSIONS + 3];
         assert_eq!(pending_permissions(&many).len(), MAX_PENDING_PERMISSIONS);

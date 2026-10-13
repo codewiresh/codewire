@@ -454,7 +454,8 @@ pub(crate) struct CredentialSettingsView {
 }
 
 /// One installation still short of the permissions Codewire needs: its login
-/// and its GitHub settings page, built from validated parts.
+/// and its GitHub settings page, built from validated parts. The page is
+/// empty for an enterprise, which accepts in its own settings.
 pub(crate) struct GithubAcceptView {
     pub(crate) account: String,
     pub(crate) url: String,

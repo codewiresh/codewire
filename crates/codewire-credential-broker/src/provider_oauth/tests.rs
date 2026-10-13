@@ -311,7 +311,7 @@ async fn github_device_login_honors_slow_down_and_runs_the_dashboard_identity_ch
                 all_repositories: false,
                 pending_permissions: Some(crate::GitHubAppPendingPermissions {
                     installation_id: 43,
-                    organization: true,
+                    account_kind: crate::GitHubAccountKind::Organization,
                 }),
             },
             crate::GitHubAppInstallationReach {
@@ -326,8 +326,9 @@ async fn github_device_login_honors_slow_down_and_runs_the_dashboard_identity_ch
             .pending_permissions
             .as_ref()
             .unwrap()
-            .settings_url("octo-org"),
-        "https://github.com/organizations/octo-org/settings/installations/43"
+            .settings_url("octo-org")
+            .as_deref(),
+        Some("https://github.com/organizations/octo-org/settings/installations/43")
     );
     let (material, account) = import.take_import().unwrap();
     assert_eq!(material.as_slice(), GITHUB_USER_TOKEN.as_bytes());

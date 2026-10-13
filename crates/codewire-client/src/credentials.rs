@@ -675,7 +675,7 @@ mod tests {
             pending_permissions: vec![GithubAppPendingPermissions {
                 account: "octo-org".into(),
                 installation_id: 43,
-                organization: true,
+                account_kind: GithubAppAccountKind::Organization.into(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -713,7 +713,7 @@ mod tests {
             [GithubAppPendingPermissions {
                 account: "octo-org".into(),
                 installation_id: 43,
-                organization: true,
+                account_kind: GithubAppAccountKind::Organization.into(),
                 ..Default::default()
             }]
         );

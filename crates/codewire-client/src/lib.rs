@@ -119,7 +119,7 @@ pub use codewire_proto::codewire::v1::{
     CredentialAuthenticationKind, CredentialStatus, DeleteCredentialRequest,
     DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest,
     EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse,
-    GetCredentialRequest, GetCredentialResponse, GithubAppPendingPermissions,
+    GetCredentialRequest, GetCredentialResponse, GithubAppAccountKind, GithubAppPendingPermissions,
     GithubDeviceChallenge, GithubRepository, ListCredentialsRequest, ListCredentialsResponse,
     ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest,
     RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse,

@@ -23,6 +23,13 @@ class CredentialStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     CREDENTIAL_STATUS_REVOKED: _ClassVar[CredentialStatus]
     CREDENTIAL_STATUS_EXPIRED: _ClassVar[CredentialStatus]
     CREDENTIAL_STATUS_REFRESH_FAILED: _ClassVar[CredentialStatus]
+
+class GithubAppAccountKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    GITHUB_APP_ACCOUNT_KIND_UNSPECIFIED: _ClassVar[GithubAppAccountKind]
+    GITHUB_APP_ACCOUNT_KIND_USER: _ClassVar[GithubAppAccountKind]
+    GITHUB_APP_ACCOUNT_KIND_ORGANIZATION: _ClassVar[GithubAppAccountKind]
+    GITHUB_APP_ACCOUNT_KIND_ENTERPRISE: _ClassVar[GithubAppAccountKind]
 CREDENTIAL_AUTHENTICATION_KIND_UNSPECIFIED: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_OAUTH: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_API_KEY: CredentialAuthenticationKind
@@ -34,6 +41,10 @@ CREDENTIAL_STATUS_ACTIVE: CredentialStatus
 CREDENTIAL_STATUS_REVOKED: CredentialStatus
 CREDENTIAL_STATUS_EXPIRED: CredentialStatus
 CREDENTIAL_STATUS_REFRESH_FAILED: CredentialStatus
+GITHUB_APP_ACCOUNT_KIND_UNSPECIFIED: GithubAppAccountKind
+GITHUB_APP_ACCOUNT_KIND_USER: GithubAppAccountKind
+GITHUB_APP_ACCOUNT_KIND_ORGANIZATION: GithubAppAccountKind
+GITHUB_APP_ACCOUNT_KIND_ENTERPRISE: GithubAppAccountKind
 
 class ListGithubRepositoriesRequest(_message.Message):
     __slots__ = ("page_size", "page_token")
@@ -292,14 +303,14 @@ class EnrollGithubResponse(_message.Message):
     def __init__(self, challenge: _Optional[_Union[GithubDeviceChallenge, _Mapping]] = ..., credential: _Optional[_Union[Credential, _Mapping]] = ..., pending_permissions: _Optional[_Iterable[_Union[GithubAppPendingPermissions, _Mapping]]] = ...) -> None: ...
 
 class GithubAppPendingPermissions(_message.Message):
-    __slots__ = ("account", "installation_id", "organization")
+    __slots__ = ("account", "installation_id", "account_kind")
     ACCOUNT_FIELD_NUMBER: _ClassVar[int]
     INSTALLATION_ID_FIELD_NUMBER: _ClassVar[int]
-    ORGANIZATION_FIELD_NUMBER: _ClassVar[int]
+    ACCOUNT_KIND_FIELD_NUMBER: _ClassVar[int]
     account: str
     installation_id: int
-    organization: bool
-    def __init__(self, account: _Optional[str] = ..., installation_id: _Optional[int] = ..., organization: _Optional[bool] = ...) -> None: ...
+    account_kind: GithubAppAccountKind
+    def __init__(self, account: _Optional[str] = ..., installation_id: _Optional[int] = ..., account_kind: _Optional[_Union[GithubAppAccountKind, str]] = ...) -> None: ...
 
 class CompleteGithubAppAuthorizationRequest(_message.Message):
     __slots__ = ("code", "credential_id", "expected_revocation_generation")

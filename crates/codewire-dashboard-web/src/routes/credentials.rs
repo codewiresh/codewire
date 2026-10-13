@@ -25,9 +25,11 @@ use crate::{
         error_page, login_redirect, redirect, render_credential_settings_page, two_factor_redirect,
     },
     security::{
-        GitHubAppNavigation, canonical_cookie, clear_github_app_authorization_cookie, csrf_cookie,
-        github_app_authorization_continuation, github_app_authorization_cookie, new_csrf_token,
-        page_csrf_token, with_csrf_cookie, with_response_cookie,
+        GitHubAppNavigation, canonical_cookie, clear_github_accept_cookie,
+        clear_github_app_authorization_cookie, csrf_cookie, github_accept_cookie,
+        github_accept_cookie_value, github_app_authorization_continuation,
+        github_app_authorization_cookie, new_csrf_token, page_csrf_token, with_csrf_cookie,
+        with_response_cookie,
     },
     state::AppState,
     templates::CredentialSettingsTemplate,
@@ -57,10 +59,6 @@ pub(super) struct QueryParameters {
     error: String,
     #[serde(default)]
     dialog: String,
-    /// After a GitHub connect only: installations still short of the
-    /// permissions Codewire needs (#2712). Validated on every render.
-    #[serde(default)]
-    github_accept: String,
 }
 
 // Navigation is parsed independently of authority-bearing query fields. An
@@ -191,16 +189,18 @@ async fn render_page(
         message: approved_message(message).into(),
         error: approved_error(error).into(),
         retained_name: retained_name.into(),
-        github_accept: if message == "github-app-connected" {
-            credentials_connect::GithubPendingPermissions::decode_all(&query.github_accept)
-                .into_iter()
-                .map(|pending| GithubAcceptView {
-                    url: pending.settings_url(),
-                    account: pending.account,
-                })
-                .collect()
-        } else {
-            Vec::new()
+        // Set only by the GitHub callback that just completed; rendered once.
+        github_accept: match github_accept_cookie_value(headers) {
+            Some(value) if message == "github-app-connected" => {
+                credentials_connect::GithubPendingPermissions::decode_all(value)
+                    .into_iter()
+                    .map(|pending| GithubAcceptView {
+                        url: pending.settings_url().unwrap_or_default(),
+                        account: pending.account,
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
         },
     };
     let mut response = with_csrf_cookie(
@@ -210,6 +210,9 @@ async fn render_page(
         }),
         csrf_cookie(&state.public_origin, &csrf),
     );
+    if github_accept_cookie_value(headers).is_some() {
+        response = with_response_cookie(response, clear_github_accept_cookie(&state.public_origin));
+    }
     if rejected.is_some() && response.status() == StatusCode::OK {
         *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
     }
@@ -886,23 +889,19 @@ pub(super) async fn github_app_callback(
         )
         .await
         {
-            Ok(pending) if pending.is_empty() => {
-                page_redirect("github-app-connected", false, &context, &headers)
+            Ok(pending) => {
+                let response = page_redirect("github-app-connected", false, &context, &headers);
+                // The connection is saved; GitHub has not yet granted what
+                // Codewire needs on these installations (#2712). The next page
+                // says so once, from this short-lived cookie, never the URL.
+                match github_accept_cookie(
+                    &state.public_origin,
+                    &credentials_connect::GithubPendingPermissions::encode_all(&pending),
+                ) {
+                    Some(cookie) if !pending.is_empty() => with_response_cookie(response, cookie),
+                    _ => response,
+                }
             }
-            // The connection is saved; GitHub has not yet granted everything
-            // Codewire needs on these installations (#2712). Said once, here.
-            Ok(pending) => redirect(
-                format!(
-                    "{}&github_accept={}",
-                    page_feedback_target(&context, "message", "github-app-connected", ""),
-                    url::form_urlencoded::byte_serialize(
-                        credentials_connect::GithubPendingPermissions::encode_all(&pending)
-                            .as_bytes()
-                    )
-                    .collect::<String>()
-                ),
-                &headers,
-            ),
             Err(error) if error.code == ErrorCode::AlreadyExists => {
                 page_error_redirect("github-app-already-connected", &dialog, &context, &headers)
             }
@@ -1833,6 +1832,23 @@ mod tests {
         ));
         let html = rendered_page("", "", dialog_data(), "?org=sample-org", "");
         assert!(!html.contains("GitHub permissions"));
+        // An enterprise accepts in its own settings: the notice links nothing.
+        let html = rendered_page_with_github_accept(
+            "",
+            "",
+            dialog_data(),
+            "?org=sample-org",
+            "",
+            vec![GithubAcceptView {
+                account: "octo-enterprise".into(),
+                url: String::new(),
+            }],
+        );
+        assert!(html.contains(
+            "GitHub has not yet given Codewire write access to code and pull requests on octo-enterprise. \
+             Accept the updated permissions in the enterprise's GitHub settings."
+        ));
+        assert!(!html.contains("Accept the updated permissions on GitHub</a>"));
     }
 
     #[test]

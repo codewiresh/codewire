@@ -112,7 +112,18 @@ pub(super) async fn handle(
                 if let Some(notice) = super::credentials::github_pending_notice(
                     &pending.account,
                     pending.installation_id,
-                    pending.organization,
+                    match pending.account_kind.as_known() {
+                        Some(rpc::GithubAppAccountKind::Organization) => {
+                            codewire_credential_broker::GitHubAccountKind::Organization
+                        }
+                        Some(rpc::GithubAppAccountKind::Enterprise) => {
+                            codewire_credential_broker::GitHubAccountKind::Enterprise
+                        }
+                        Some(rpc::GithubAppAccountKind::User) => {
+                            codewire_credential_broker::GitHubAccountKind::User
+                        }
+                        _ => continue,
+                    },
                 ) {
                     eprintln!("{notice}");
                 }

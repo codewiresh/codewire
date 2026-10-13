@@ -320,8 +320,27 @@ pub struct GitHubAppInstallationReach {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitHubAppPendingPermissions {
     pub installation_id: u64,
-    /// The installation belongs to an organization, not a personal account.
-    pub organization: bool,
+    pub account_kind: GitHubAccountKind,
+}
+
+/// The kind of account a GitHub App installation belongs to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitHubAccountKind {
+    User,
+    Organization,
+    /// Accepted in the enterprise's own settings, which have no
+    /// per-installation page Codewire can link.
+    Enterprise,
+}
+
+impl GitHubAccountKind {
+    fn from_type(value: &str) -> Self {
+        match value {
+            "Organization" => Self::Organization,
+            "Enterprise" => Self::Enterprise,
+            _ => Self::User,
+        }
+    }
 }
 
 /// The permissions Codewire's GitHub route needs, with the lowest level that
@@ -371,18 +390,19 @@ fn permissions_fall_short(granted: Option<&std::collections::BTreeMap<String, St
 impl GitHubAppPendingPermissions {
     /// GitHub's settings page for this installation, where its owner reviews
     /// and accepts the App's permission request. Built from the numeric
-    /// installation ID and a validated login, never from response URLs.
-    pub fn settings_url(&self, account: &str) -> String {
-        if self.organization {
-            format!(
-                "https://github.com/organizations/{account}/settings/installations/{}",
-                self.installation_id
-            )
-        } else {
-            format!(
+    /// installation ID and a validated login, never from response URLs. An
+    /// enterprise has no such page to link.
+    pub fn settings_url(&self, account: &str) -> Option<String> {
+        match self.account_kind {
+            GitHubAccountKind::User => Some(format!(
                 "https://github.com/settings/installations/{}",
                 self.installation_id
-            )
+            )),
+            GitHubAccountKind::Organization => Some(format!(
+                "https://github.com/organizations/{account}/settings/installations/{}",
+                self.installation_id
+            )),
+            GitHubAccountKind::Enterprise => None,
         }
     }
 }
@@ -676,7 +696,7 @@ async fn app_installations(
                 let pending_permissions = permissions_fall_short(installation.permissions.as_ref())
                     .then(|| GitHubAppPendingPermissions {
                         installation_id: installation.id,
-                        organization: account.kind == "Organization",
+                        account_kind: GitHubAccountKind::from_type(&account.kind),
                     });
                 reach.push(GitHubAppInstallationReach {
                     account: account.login,
@@ -916,7 +936,7 @@ struct Installation {
 #[derive(Deserialize)]
 struct InstallationAccount {
     login: String,
-    /// `User` or `Organization`.
+    /// `User`, `Organization` or `Enterprise`.
     #[serde(rename = "type", default)]
     kind: String,
 }
@@ -1581,21 +1601,39 @@ mod tests {
 
     #[test]
     fn pending_permissions_link_to_the_installation_settings_page() {
-        let personal = GitHubAppPendingPermissions {
-            installation_id: 12345,
-            organization: false,
+        let pending = |installation_id, account_kind| GitHubAppPendingPermissions {
+            installation_id,
+            account_kind,
         };
         assert_eq!(
-            personal.settings_url("octo-user"),
-            "https://github.com/settings/installations/12345"
+            pending(12345, GitHubAccountKind::User)
+                .settings_url("octo-user")
+                .as_deref(),
+            Some("https://github.com/settings/installations/12345")
         );
-        let organization = GitHubAppPendingPermissions {
-            installation_id: 678,
-            organization: true,
-        };
         assert_eq!(
-            organization.settings_url("octo-org"),
-            "https://github.com/organizations/octo-org/settings/installations/678"
+            pending(678, GitHubAccountKind::Organization)
+                .settings_url("octo-org")
+                .as_deref(),
+            Some("https://github.com/organizations/octo-org/settings/installations/678")
         );
+        // An enterprise accepts in its own settings: no link is invented.
+        assert_eq!(
+            pending(9, GitHubAccountKind::Enterprise).settings_url("octo-enterprise"),
+            None
+        );
+        assert_eq!(
+            GitHubAccountKind::from_type("User"),
+            GitHubAccountKind::User
+        );
+        assert_eq!(
+            GitHubAccountKind::from_type("Organization"),
+            GitHubAccountKind::Organization
+        );
+        assert_eq!(
+            GitHubAccountKind::from_type("Enterprise"),
+            GitHubAccountKind::Enterprise
+        );
+        assert_eq!(GitHubAccountKind::from_type(""), GitHubAccountKind::User);
     }
 }

@@ -168,7 +168,7 @@ async fn connect_github(
                 github_pending_notice(
                     &installation.account,
                     pending.installation_id,
-                    pending.organization,
+                    pending.account_kind,
                 )
             })
         {
@@ -181,11 +181,12 @@ async fn connect_github(
 /// Said once when GitHub is connected: an installation that has not yet
 /// granted what Codewire needs keeps reads working, but pushes and pull
 /// requests fail until its owner accepts the updated permissions (#2712).
-/// The link is built from the validated login and installation ID.
+/// The link is built from the validated login and installation ID; an
+/// enterprise accepts in its own settings, so it gets no link.
 pub(crate) fn github_pending_notice(
     account: &str,
     installation_id: u64,
-    organization: bool,
+    kind: codewire_credential_broker::GitHubAccountKind,
 ) -> Option<String> {
     let valid_login = (1..=39).contains(&account.len())
         && !account.starts_with('-')
@@ -197,14 +198,17 @@ pub(crate) fn github_pending_notice(
     if !valid_login || installation_id == 0 {
         return None;
     }
-    let url = codewire_credential_broker::GitHubAppPendingPermissions {
+    let accept = match (codewire_credential_broker::GitHubAppPendingPermissions {
         installation_id,
-        organization,
-    }
-    .settings_url(account);
+        account_kind: kind,
+    })
+    .settings_url(account)
+    {
+        Some(url) => format!("Accept the updated permissions on GitHub: {url}"),
+        None => "Accept the updated permissions in the enterprise's GitHub settings.".to_owned(),
+    };
     Some(format!(
-        "GitHub has not yet given Codewire write access to code and pull requests on {account}. \
-         Accept the updated permissions on GitHub: {url}"
+        "GitHub has not yet given Codewire write access to code and pull requests on {account}. {accept}"
     ))
 }
 
@@ -1969,20 +1973,26 @@ mod tests {
 
     #[test]
     fn github_pending_notice_names_the_installation_and_its_settings_page() {
+        use codewire_credential_broker::GitHubAccountKind;
         assert_eq!(
-            github_pending_notice("noeljackson", 12345, false).unwrap(),
+            github_pending_notice("noeljackson", 12345, GitHubAccountKind::User).unwrap(),
             "GitHub has not yet given Codewire write access to code and pull requests on noeljackson. \
              Accept the updated permissions on GitHub: https://github.com/settings/installations/12345"
         );
         assert_eq!(
-            github_pending_notice("octo-org", 678, true).unwrap(),
+            github_pending_notice("octo-org", 678, GitHubAccountKind::Organization).unwrap(),
             "GitHub has not yet given Codewire write access to code and pull requests on octo-org. \
              Accept the updated permissions on GitHub: \
              https://github.com/organizations/octo-org/settings/installations/678"
         );
+        assert_eq!(
+            github_pending_notice("octo-ent", 9, GitHubAccountKind::Enterprise).unwrap(),
+            "GitHub has not yet given Codewire write access to code and pull requests on octo-ent. \
+             Accept the updated permissions in the enterprise's GitHub settings."
+        );
         for (account, id) in [("", 1), ("-octo", 1), ("octo/evil", 1), ("octo", 0)] {
             assert!(
-                github_pending_notice(account, id, false).is_none(),
+                github_pending_notice(account, id, GitHubAccountKind::User).is_none(),
                 "{account}"
             );
         }
