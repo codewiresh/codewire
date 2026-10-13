@@ -264,10 +264,14 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     stage.set("bridge.open");
     // Both brokers serve the Codex login, the one listed direct delivery
     // exception (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
-    // exceptions"): the local broker for the owner's own Codex sign-in, and
-    // the platform relay by passing the request to the platform broker, which
-    // decides it for the delegation's creator. Either answers a refusal as
-    // Denied, which never ends the epoch.
+    // exceptions"). The local broker serves the owner's own Codex sign-in.
+    // For a platform profile the relay passes the request through the host
+    // authority's delegation, which admits the login and its answer both
+    // ways, to the platform broker, which decides it for the delegation's
+    // creator. A refusal answers DENIED or UNAVAILABLE without ending the
+    // epoch; only the local broker's authority fault ends its epoch, because
+    // a refresh owner it holds is released only when its lease channel
+    // closes.
     let bridge = daemon
         .open_credential_bridge_with_capabilities(
             environment_uuid,

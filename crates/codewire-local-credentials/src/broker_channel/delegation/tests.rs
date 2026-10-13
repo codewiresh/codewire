@@ -93,6 +93,9 @@ fn ready_cannot_reappear_in_the_transparent_operation_stream() {
 enum ConnectorMode {
     Admit(VecDeque<Result<bridge::CredentialBridgeHostMessage, Status>>),
     Pending,
+    /// The platform broker's side of a Codex login: every login request that
+    /// crosses the delegation is answered DENIED for the same request ID.
+    AnswerLogins,
 }
 
 struct SyntheticConnector {
@@ -120,6 +123,20 @@ impl PlatformCredentialConnector for SyntheticConnector {
             ConnectorMode::Pending => Box::pin(async move {
                 let _input = input;
                 future::pending().await
+            }),
+            ConnectorMode::AnswerLogins => Box::pin(async move {
+                Ok(Box::pin(input.filter_map(|frame| async move {
+                    match frame {
+                        Ok(bridge::CredentialBridgeGuestMessage {
+                            payload:
+                                Some(bridge::credential_bridge_guest_message::Payload::CodexLogin(
+                                    request,
+                                )),
+                        }) => Some(Ok(login_denied(request.request_id))),
+                        Ok(_) => None,
+                        Err(status) => Some(Err(status)),
+                    }
+                })) as PlatformCredentialOutput)
             }),
         }
     }
@@ -229,6 +246,79 @@ async fn fixture(mode: ConnectorMode) -> Fixture {
         server,
         connector_started,
     }
+}
+
+fn login_request(request_id: &str) -> bridge::CredentialBridgeGuestMessage {
+    bridge::CredentialBridgeGuestMessage {
+        payload: Some(
+            bridge::credential_bridge_guest_message::Payload::CodexLogin(
+                bridge::CodexLoginRequest {
+                    request_id: request_id.to_owned(),
+                    recipient_public_key: vec![3; 32],
+                    deadline_unix_ms: 42,
+                },
+            ),
+        ),
+    }
+}
+
+fn login_denied(request_id: String) -> bridge::CredentialBridgeHostMessage {
+    bridge::CredentialBridgeHostMessage {
+        payload: Some(bridge::credential_bridge_host_message::Payload::CodexLogin(
+            bridge::CodexLoginResponse {
+                request_id,
+                result: Some(bridge::codex_login_response::Result::Failure(
+                    bridge::CredentialBridgeFailureReason::Denied as i32,
+                )),
+            },
+        )),
+    }
+}
+
+/// A platform-profile VM's Codex login reaches the platform broker through
+/// the host authority's delegation, and its answer comes back the same way.
+/// A refusal ends neither the delegation nor its epoch: a second login, and
+/// any other request, still cross it.
+#[tokio::test]
+async fn a_codex_login_crosses_the_delegation_both_ways_and_keeps_it_open() {
+    let mut fixture = fixture(ConnectorMode::AnswerLogins).await;
+    let expected = ready(
+        &fixture.client.environment_id,
+        fixture.client.environment_generation,
+    );
+    let (input, remaining) = tokio::sync::mpsc::channel(4);
+    let mut output = fixture
+        .client
+        .delegate_credentials(
+            expected,
+            tokio_stream::wrappers::ReceiverStream::new(remaining),
+        )
+        .await
+        .unwrap();
+    fixture.client.report_ready().await.unwrap();
+    fixture.manager_ready.await.unwrap();
+    for _ in 0..2 {
+        let request_id = Uuid::new_v4().to_string();
+        input.send(login_request(&request_id)).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), output.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            login_denied(request_id)
+        );
+    }
+    assert!(valid_remaining_frame(&login_request(
+        &Uuid::new_v4().to_string()
+    )));
+    assert!(valid_host_frame(&login_denied(Uuid::new_v4().to_string())));
+    fixture.shutdown.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), fixture.server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

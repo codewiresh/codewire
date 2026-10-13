@@ -389,6 +389,14 @@ fn validate_admission(
     }
 }
 
+/// Guest frames a platform delegation relays, and below the host frames it
+/// relays back. The Codex login, the one listed direct delivery exception
+/// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions"),
+/// crosses in both directions under the same rule: the guest's request
+/// reaches the platform broker, which decides it for the delegation's
+/// creator, and its answer (a login sealed to the guest daemon, DENIED or
+/// UNAVAILABLE) comes back. Neither may end the delegation, or one login
+/// request would end every provider, GitHub and projection with it.
 fn valid_remaining_frame(frame: &bridge::CredentialBridgeGuestMessage) -> bool {
     frame.encoded_len() <= codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
         && !matches!(&frame.payload,
@@ -400,6 +408,7 @@ fn valid_remaining_frame(frame: &bridge::CredentialBridgeGuestMessage) -> bool {
                 | Some(bridge::credential_bridge_guest_message::Payload::Cancel(_))
                 | Some(bridge::credential_bridge_guest_message::Payload::EnvironmentProjection(_))
                 | Some(bridge::credential_bridge_guest_message::Payload::Ssh(_))
+                | Some(bridge::credential_bridge_guest_message::Payload::CodexLogin(_))
         )
 }
 
@@ -416,6 +425,9 @@ fn valid_host_frame(frame: &bridge::CredentialBridgeHostMessage) -> bool {
                 | Some(bridge::credential_bridge_host_message::Payload::ResponseFailure(_))
                 | Some(bridge::credential_bridge_host_message::Payload::EnvironmentProjection(_))
                 | Some(bridge::credential_bridge_host_message::Payload::Ssh(_))
+                | Some(bridge::credential_bridge_host_message::Payload::CodexLogin(
+                    _
+                ))
         )
 }
 
