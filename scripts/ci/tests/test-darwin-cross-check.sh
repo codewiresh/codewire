@@ -14,11 +14,14 @@ import tempfile
 
 source = Path(sys.argv[1])
 check = source / 'scripts/ci/verify/check-darwin-cross.sh'
-expected_check = ['check', '--locked', '-p', 'codewire-local-vmm',
-                  '-p', 'codewire-vmm-guest-probe', '--target', 'aarch64-apple-darwin']
+# Clippy with warnings as errors: Linux clippy never compiles macOS-only code.
+expected_check = ['clippy', '--locked', '-p', 'codewire-local-vmm',
+                  '-p', 'codewire-vmm-guest-probe', '--target', 'aarch64-apple-darwin',
+                  '--', '-D', 'warnings']
 # The macOS cw links Apple frameworks, so Linux only compile-checks it.
-expected_cli = ['check', '--locked', '-p', 'codewire-cli-bin', '--bin', 'cw',
-                '--target', 'aarch64-apple-darwin', '--target', 'x86_64-apple-darwin']
+expected_cli = ['clippy', '--locked', '-p', 'codewire-cli-bin', '--bin', 'cw',
+                '--target', 'aarch64-apple-darwin', '--target', 'x86_64-apple-darwin',
+                '--', '-D', 'warnings']
 with tempfile.TemporaryDirectory(prefix='codewire-darwin-cross-') as temporary:
     root = Path(temporary)
     binary = root / 'bin'
