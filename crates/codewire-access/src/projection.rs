@@ -58,6 +58,24 @@ pub const MANAGED_ANTHROPIC_API_PREFIX: &str = "/_codewire/anthropic";
 /// Smart Git prefix on the existing managed HTTP ingress. Only the selected
 /// GitHub adapter may resolve this route to an upstream provider.
 pub const MANAGED_GITHUB_GIT_PREFIX: &str = "/_codewire/github/";
+/// The four forms of a github.com remote that Git accepts, as the prefixes
+/// Git's `url.<base>.insteadOf` matches: HTTPS, the anonymous `git://`
+/// protocol GitHub has retired, and the two SSH spellings. Each is followed by
+/// `<owner>/<repository>`. Only these are rewritten; other hosts never are.
+pub const GITHUB_HTTPS_URL: &str = "https://github.com/";
+pub const GITHUB_GIT_URL: &str = "git://github.com/";
+pub const GITHUB_SCP_URL: &str = "git@github.com:";
+pub const GITHUB_SSH_URL: &str = "ssh://git@github.com/";
+/// The HTTPS and `git://` forms, which an SSH key can serve as [`GITHUB_SCP_URL`].
+const GITHUB_HTTP_FORMS: [&str; 2] = [GITHUB_HTTPS_URL, GITHUB_GIT_URL];
+/// Every form, in the order of their `GIT_CONFIG_*` index: the HTTPS form is
+/// always index 0, which is the name the GitHub client reserves.
+const GITHUB_ALL_FORMS: [&str; 4] = [
+    GITHUB_HTTPS_URL,
+    GITHUB_GIT_URL,
+    GITHUB_SCP_URL,
+    GITHUB_SSH_URL,
+];
 /// Destinations a workspace process must reach directly, whatever proxy it is
 /// told to use: every managed HTTP route is the workspace's own loopback
 /// ingress, and a request to it carries prompts and repository content.
@@ -98,6 +116,10 @@ impl ManagedCredentialClient {
                 "ANTHROPIC_AUTH_TOKEN",
                 "CLAUDE_CODE_OAUTH_TOKEN",
             ],
+            // The Git configuration an SSH-only selection projects (see
+            // `ManagedCredentialClients::github_git_rewrite`) is deliberately
+            // not listed, for the same reason as the GitHub client's
+            // further names below: the projected value wins instead.
             Self::Ssh => &["SSH_AUTH_SOCK"],
             // Git's environment configuration routes github.com through the
             // managed GitHub route; never a provider token or a written file.
@@ -105,13 +127,15 @@ impl ManagedCredentialClient {
             // workspace keeps working after checkout. A declared variable of
             // these names is refused, never merged or overwritten.
             //
-            // The `gh` names the client also projects are deliberately not
-            // listed. This set is bound into every environment's projection
-            // selection digest, so adding a name would refuse the launches
-            // of running environments until they restart. `GH_TOKEN` is
-            // already refused with the GitHub provider's own names
-            // (`HttpProvider::reserved_environment_keys`); a declared
-            // `GH_CONFIG_DIR` is the user's own choice of `gh` configuration.
+            // The other names the client projects (`GIT_CONFIG_KEY_1` and
+            // up, `GIT_CONFIG_VALUE_1` and up, and the `gh` names) are
+            // deliberately not listed. This set is bound into every
+            // environment's projection selection digest, so adding a name
+            // would refuse the launches of running environments until they
+            // restart. Every placement lets the projected value win over a
+            // declared one of those names instead. `GH_TOKEN` is already
+            // refused with the GitHub provider's own names
+            // (`HttpProvider::reserved_environment_keys`).
             Self::GitHub => &["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"],
         }
     }
@@ -349,6 +373,32 @@ impl ManagedCredentialClients {
         Some(value)
     }
 
+    /// Where Git in the workspace sends each github.com remote form: the
+    /// rewrite base and the forms rewritten to it, or `None` without GitHub
+    /// or an SSH key. `origin` is the managed HTTP ingress.
+    ///
+    /// | Selected | Rewritten |
+    /// |---|---|
+    /// | GitHub connection only | every form to the managed GitHub route |
+    /// | SSH key only | HTTPS and `git://` to `git@github.com:`, for the key |
+    /// | both | HTTPS and `git://` to the managed GitHub route; SSH forms keep the key |
+    ///
+    /// The managed route is the broker's, which adds the owner's GitHub login
+    /// outside the workspace; the SSH key stays behind the signer. Neither
+    /// rewrite delivers a credential.
+    fn github_git_rewrite(self, origin: &str) -> Option<(String, &'static [&'static str])> {
+        let managed = || format!("{origin}{MANAGED_GITHUB_GIT_PREFIX}");
+        match (
+            self.contains(ManagedCredentialClient::GitHub),
+            self.contains(ManagedCredentialClient::Ssh),
+        ) {
+            (true, false) => Some((managed(), &GITHUB_ALL_FORMS)),
+            (true, true) => Some((managed(), &GITHUB_HTTP_FORMS)),
+            (false, true) => Some((GITHUB_SCP_URL.to_owned(), &GITHUB_HTTP_FORMS)),
+            (false, false) => None,
+        }
+    }
+
     /// Generate only fixed public routing inputs for the selected clients.
     /// Placeholder strings are not authentication: the admitted local or hosted
     /// ingress and broker grants remain responsible for authority. Both layouts
@@ -403,18 +453,20 @@ impl ManagedCredentialClients {
                 environment.insert("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into());
             }
         }
-        if self.contains(ManagedCredentialClient::GitHub) {
-            // Git 2.31+ reads configuration from the environment: every
-            // https://github.com/ remote goes to the managed GitHub route,
-            // where the broker adds the owner's GitHub login outside the
-            // workspace, so fetch, pull and push work with no login step.
-            // Only this endpoint is projected: no token, helper or file.
-            environment.insert("GIT_CONFIG_COUNT".into(), "1".into());
-            environment.insert(
-                "GIT_CONFIG_KEY_0".into(),
-                format!("url.{origin}{MANAGED_GITHUB_GIT_PREFIX}.insteadOf"),
-            );
-            environment.insert("GIT_CONFIG_VALUE_0".into(), "https://github.com/".into());
+        if let Some((base, forms)) = self.github_git_rewrite(&origin) {
+            // Git 2.31+ reads configuration from the environment. Each entry
+            // is one value of Git's own `url.<base>.insteadOf`, a multi-valued
+            // key: a github.com remote written in that form is fetched from
+            // and pushed to `<base>` instead. Only the destination changes;
+            // the remote keeps the URL as written. No token, helper or file.
+            environment.insert("GIT_CONFIG_COUNT".into(), forms.len().to_string());
+            for (index, form) in forms.iter().enumerate() {
+                environment.insert(
+                    format!("GIT_CONFIG_KEY_{index}"),
+                    format!("url.{base}.insteadOf"),
+                );
+                environment.insert(format!("GIT_CONFIG_VALUE_{index}"), (*form).into());
+            }
         }
         let gh = self.contains(ManagedCredentialClient::GitHub).then(|| {
             // Stock `gh` speaks HTTPS to api.github.com unless its own

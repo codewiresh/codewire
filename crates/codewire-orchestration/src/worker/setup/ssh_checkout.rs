@@ -2,13 +2,16 @@
 //! This module neither grants an identity nor reads provider material.
 //!
 //! A selected SSH key is preferred: an SSH source always uses it, and so does
-//! a canonical `https://github.com/` source, cloned as `git@github.com:…` with
-//! GitHub's published host keys. The latter falls back to HTTPS only when the
-//! server refuses the key or the repository ([`SSH_REFUSED_EXIT`]).
+//! a canonical `https://github.com/` or `git://github.com/` source, cloned as
+//! `git@github.com:…` with GitHub's published host keys. The latter falls back
+//! to its own URL only when the server refuses the key or the repository
+//! ([`SSH_REFUSED_EXIT`]). Without a key, a github.com source in SSH form is
+//! the GitHub connection's when that is selected ([`super::github_checkout`]).
 
 use codewire_access::{ManagedCredentialClient, ManagedCredentialClients};
 use codewire_project::{
-    canonical_repository_known_hosts, github_ssh_source, parse_repository_ssh_host,
+    canonical_repository_known_hosts, github_repository_path, github_ssh_source,
+    parse_repository_ssh_host,
 };
 
 use super::Repo;
@@ -23,8 +26,9 @@ pub(super) const SSH_REFUSED_EXIT: i32 = 77;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Command {
     pub argv: Vec<String>,
-    /// The repository source is the user's `https://github.com/` URL, which
-    /// remains its HTTPS fallback when the key is refused.
+    /// The repository source is the user's `https://github.com/` (or
+    /// `git://github.com/`) URL, which remains its fallback when the key is
+    /// refused.
     pub https_fallback: bool,
 }
 
@@ -36,6 +40,8 @@ pub(super) fn commands(
 ) -> anyhow::Result<Vec<Option<Command>>> {
     let ssh_selected =
         clients.is_some_and(|clients| clients.contains(ManagedCredentialClient::Ssh));
+    let github_selected =
+        clients.is_some_and(|clients| clients.contains(ManagedCredentialClient::GitHub));
     repositories
         .iter()
         .map(|repository| {
@@ -46,6 +52,15 @@ pub(super) fn commands(
                 "repository host trust must already be canonical"
             );
             if parse_repository_ssh_host(&repository.url)?.is_some() {
+                if !ssh_selected && github_selected {
+                    // SSH first: only without a key does a github.com source
+                    // in SSH form go through the GitHub connection.
+                    anyhow::ensure!(
+                        github_repository_path(&repository.url).is_some(),
+                        "SSH repository checkout needs an SSH key in the Sandbox's credential profile"
+                    );
+                    return Ok(None);
+                }
                 anyhow::ensure!(
                     ssh_selected,
                     "SSH repository checkout needs an SSH key in the Sandbox's credential profile"

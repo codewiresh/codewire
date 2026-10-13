@@ -7,7 +7,6 @@ use crate::{
 
 const DEFAULT_SSH_PORT: u16 = 22;
 const MAX_SSH_HOST_BYTES: usize = 253;
-const GITHUB_HTTPS_PREFIX: &str = "https://github.com/";
 const MAX_GITHUB_PATH_SEGMENT_BYTES: usize = 128;
 
 /// GitHub's published SSH host keys (`ssh_keys` at
@@ -30,12 +29,31 @@ pub struct GitHubSshSource {
     pub known_hosts: Vec<String>,
 }
 
-/// Map a canonical `https://github.com/<owner>/<repository>` source to its SSH
-/// form, so a checkout can use a selected SSH key instead of a GitHub
-/// connection. Anything else, including other hosts, extra path segments,
-/// userinfo, queries and fragments, returns `None`.
-pub fn github_ssh_source(source: &str) -> Option<GitHubSshSource> {
-    let path = source.strip_prefix(GITHUB_HTTPS_PREFIX)?;
+/// Whether a GitHub repository source is written in an SSH form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitHubSourceForm {
+    /// `https://github.com/` or the retired anonymous `git://github.com/`.
+    Http,
+    /// `git@github.com:` or `ssh://git@github.com/`.
+    Ssh,
+}
+
+/// The `<owner>/<repository>` path of a GitHub repository source, in any of
+/// the forms Git accepts for github.com (`https://github.com/`,
+/// `git://github.com/`, `git@github.com:` or `ssh://git@github.com/`, the
+/// prefixes the workspace's Git configuration rewrites), and which form it
+/// is. The path is returned verbatim, including any `.git` suffix. Anything
+/// else, including other hosts, ports, users, extra path segments, queries
+/// and fragments, returns `None`.
+pub fn github_repository_path(source: &str) -> Option<(&str, GitHubSourceForm)> {
+    let (path, form) = [
+        (codewire_access::GITHUB_HTTPS_URL, GitHubSourceForm::Http),
+        (codewire_access::GITHUB_GIT_URL, GitHubSourceForm::Http),
+        (codewire_access::GITHUB_SCP_URL, GitHubSourceForm::Ssh),
+        (codewire_access::GITHUB_SSH_URL, GitHubSourceForm::Ssh),
+    ]
+    .into_iter()
+    .find_map(|(prefix, form)| source.strip_prefix(prefix).map(|path| (path, form)))?;
     let (owner, repository) = path.split_once('/')?;
     let canonical = [owner, repository].iter().all(|part| {
         !part.is_empty()
@@ -45,10 +63,22 @@ pub fn github_ssh_source(source: &str) -> Option<GitHubSshSource> {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     });
-    canonical.then(|| GitHubSshSource {
-        source: format!("git@github.com:{owner}/{repository}"),
-        known_hosts: GITHUB_SSH_KNOWN_HOSTS.map(str::to_owned).to_vec(),
-    })
+    canonical.then_some((path, form))
+}
+
+/// Map a GitHub `https://github.com/<owner>/<repository>` or
+/// `git://github.com/<owner>/<repository>` source to its SSH form, so a
+/// checkout can use a selected SSH key instead of a GitHub connection.
+/// Anything else, including SSH forms, other hosts, extra path segments,
+/// userinfo, queries and fragments, returns `None`.
+pub fn github_ssh_source(source: &str) -> Option<GitHubSshSource> {
+    match github_repository_path(source)? {
+        (path, GitHubSourceForm::Http) => Some(GitHubSshSource {
+            source: format!("{}{path}", codewire_access::GITHUB_SCP_URL),
+            known_hosts: GITHUB_SSH_KNOWN_HOSTS.map(str::to_owned).to_vec(),
+        }),
+        (_, GitHubSourceForm::Ssh) => None,
+    }
 }
 
 /// Canonical host identity selected by an SSH repository source.
@@ -132,7 +162,10 @@ pub fn parse_repository_ssh_host(source: &str) -> Result<Option<RepositorySshHos
 
 /// Return canonical direct host-key lines for one repository source.
 ///
-/// SSH requires at least one exact host pin. Every other transport rejects
+/// SSH requires at least one exact host pin. An SSH source at github.com on
+/// the default port that pins none gets [`GITHUB_SSH_KNOWN_HOSTS`], GitHub's
+/// published keys, so `git@github.com:<owner>/<repository>` needs no pasted
+/// host key; explicit pins are kept as given. Every other transport rejects
 /// host trust input so a downstream checkout cannot silently ignore it.
 /// Adapters receiving an already-canonical typed or RPC value must additionally
 /// require the returned vector to equal their input vector.
@@ -153,6 +186,9 @@ pub fn canonical_repository_known_hosts(
         return trust_invalid("is only valid for an SSH repository source");
     };
     if lines.is_empty() {
+        if ssh_host.host() == "github.com" && ssh_host.port() == DEFAULT_SSH_PORT {
+            return Ok(GITHUB_SSH_KNOWN_HOSTS.map(str::to_owned).to_vec());
+        }
         return trust_invalid("must pin at least one SSH host key");
     }
     let expected_host = ssh_host.known_hosts_name();
@@ -533,8 +569,109 @@ mod tests {
             "https://github.com/../app",
             "https://github.com/org/a%20pp",
             "git@github.com:org/app.git",
+            "ssh://git@github.com/org/app.git",
         ] {
             assert!(github_ssh_source(source).is_none(), "mapped {source:?}");
+        }
+        // The retired anonymous protocol maps like HTTPS.
+        assert_eq!(
+            github_ssh_source("git://github.com/org/app.git")
+                .unwrap()
+                .source,
+            "git@github.com:org/app.git"
+        );
+    }
+
+    #[test]
+    fn every_github_url_form_names_the_same_repository_path() {
+        for (source, form) in [
+            ("https://github.com/org/app.git", GitHubSourceForm::Http),
+            ("git://github.com/org/app.git", GitHubSourceForm::Http),
+            ("git@github.com:org/app.git", GitHubSourceForm::Ssh),
+            ("ssh://git@github.com/org/app.git", GitHubSourceForm::Ssh),
+        ] {
+            assert_eq!(
+                github_repository_path(source),
+                Some(("org/app.git", form)),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            github_repository_path("git@github.com:My-Org/my_app.v2"),
+            Some(("My-Org/my_app.v2", GitHubSourceForm::Ssh))
+        );
+        for source in [
+            "git@gitlab.com:org/app.git",
+            "ssh://git@gitlab.com/org/app.git",
+            "git://gitlab.com/org/app.git",
+            "https://gitlab.com/org/app.git",
+            "git@GitHub.com:org/app.git",
+            "deploy@github.com:org/app.git",
+            "ssh://github.com/org/app.git",
+            "ssh://git@github.com:22/org/app.git",
+            "ssh://git@github.com:2222/org/app.git",
+            "git+ssh://git@github.com/org/app.git",
+            "git@github.com:/org/app.git",
+            "git@github.com:org",
+            "git@github.com:org/app/extra",
+            "git@github.com:org/.git",
+            "git@github.com:../app",
+            "git://github.com/org/app?x=1",
+            "git@github.com:org/a pp",
+        ] {
+            assert_eq!(github_repository_path(source), None, "{source}");
+        }
+    }
+
+    #[test]
+    fn a_github_ssh_source_without_pins_gets_githubs_published_host_keys() {
+        let published = GITHUB_SSH_KNOWN_HOSTS.map(str::to_owned).to_vec();
+        for source in [
+            "git@github.com:org/app.git",
+            "ssh://git@github.com/org/app.git",
+            "ssh://git@github.com:22/org/app.git",
+            "git@GitHub.com:org/app.git",
+        ] {
+            assert_eq!(
+                canonical_repository_known_hosts(source, Vec::new()).unwrap(),
+                published,
+                "{source}"
+            );
+            // Already canonical, as an adapter of typed values requires.
+            assert_eq!(
+                canonical_repository_known_hosts(source, published.clone()).unwrap(),
+                published
+            );
+        }
+        // Explicit pins are the user's, kept as given.
+        let own = vec!["github.com ssh-ed25519 QUJDRA==".to_owned()];
+        assert_eq!(
+            canonical_repository_known_hosts("git@github.com:org/app.git", own.clone()).unwrap(),
+            own
+        );
+        // Another host, or another port of GitHub, has no default trust.
+        for source in [
+            "git@example.com:org/app.git",
+            "ssh://git@github.com:2222/org/app.git",
+            "git@ssh.github.com:org/app.git",
+        ] {
+            assert!(
+                canonical_repository_known_hosts(source, Vec::new())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must pin at least one SSH host key"),
+                "{source}"
+            );
+        }
+        // Non-SSH sources still take no host trust.
+        for source in [
+            "https://github.com/org/app.git",
+            "git://github.com/org/app.git",
+        ] {
+            assert_eq!(
+                canonical_repository_known_hosts(source, Vec::new()).unwrap(),
+                Vec::<String>::new()
+            );
         }
     }
 

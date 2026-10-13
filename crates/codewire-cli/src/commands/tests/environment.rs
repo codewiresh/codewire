@@ -1529,6 +1529,30 @@ fn env_create_repo_specs_match_go_branch_parsing() {
             String::new()
         )
     );
+    // The SSH user of an `ssh://` URL is not a branch.
+    for (spec, url, branch) in [
+        (
+            "ssh://git@github.com/codewiresh/codewire",
+            "ssh://git@github.com/codewiresh/codewire",
+            "",
+        ),
+        (
+            "ssh://git@github.com/codewiresh/codewire@dev",
+            "ssh://git@github.com/codewiresh/codewire",
+            "dev",
+        ),
+        (
+            "git://github.com/codewiresh/codewire@dev",
+            "git://github.com/codewiresh/codewire",
+            "dev",
+        ),
+    ] {
+        assert_eq!(
+            parse_env_create_repo_spec(spec).unwrap(),
+            (url.to_string(), branch.to_string(), String::new()),
+            "{spec}"
+        );
+    }
     assert_eq!(
         parse_env_create_repo_spec(
             "https://github.com/codewiresh/codewire@dev::/workspace/platform"
@@ -1555,6 +1579,51 @@ fn env_create_repo_specs_match_go_branch_parsing() {
     assert_eq!(repos[1].branch, "v1");
     assert_eq!(repos[0].destination, "/workspace/codewire");
     assert_eq!(repos[1].destination, "/workspace/sdk");
+}
+
+/// A github.com repository in either SSH form needs no pasted host key: it
+/// gets GitHub's published keys and is a valid project. Any other SSH host
+/// still has no trust, and validation names the missing pins.
+#[test]
+fn env_create_github_ssh_repositories_carry_githubs_published_host_keys() {
+    for source in [
+        "git@github.com:noeljackson/md.git",
+        "ssh://git@github.com/noeljackson/md.git",
+    ] {
+        let repos = collect_env_create_repos(&[source.to_string()], &[], None).unwrap();
+        assert_eq!(repos[0].source, source);
+        assert_eq!(
+            repos[0].known_hosts,
+            codewire_project::GITHUB_SSH_KNOWN_HOSTS.map(str::to_owned)
+        );
+        let spec = codewire_project::ProjectSpec {
+            repositories: repos,
+            working_directory: "/workspace/md".into(),
+            ..Default::default()
+        };
+        spec.validate().unwrap();
+    }
+    for source in [
+        "https://github.com/noeljackson/md.git",
+        "git://github.com/noeljackson/md.git",
+    ] {
+        let repos = collect_env_create_repos(&[source.to_string()], &[], None).unwrap();
+        assert!(repos[0].known_hosts.is_empty(), "{source}");
+    }
+    let repos =
+        collect_env_create_repos(&["git@example.com:team/app.git".to_string()], &[], None).unwrap();
+    assert!(repos[0].known_hosts.is_empty());
+    let spec = codewire_project::ProjectSpec {
+        repositories: repos,
+        working_directory: "/workspace/app".into(),
+        ..Default::default()
+    };
+    assert!(
+        spec.validate()
+            .unwrap_err()
+            .to_string()
+            .contains("must pin at least one SSH host key")
+    );
 }
 
 #[test]
