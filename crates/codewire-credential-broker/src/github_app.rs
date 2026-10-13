@@ -352,9 +352,14 @@ impl PermissionLevel {
 }
 
 /// Whether GitHub's granted permissions for an installation fall short of
-/// what Codewire needs. An installation GitHub reported no permissions for
-/// is not flagged: there is nothing to compare.
-fn permissions_fall_short(granted: &std::collections::BTreeMap<String, String>) -> bool {
+/// what Codewire needs. GitHub always lists an installation's permissions; a
+/// listing without them is treated as falling short, so the one case this
+/// check exists for (an installation still on an earlier grant) is never
+/// passed over in silence.
+fn permissions_fall_short(granted: Option<&std::collections::BTreeMap<String, String>>) -> bool {
+    let Some(granted) = granted else {
+        return true;
+    };
     REQUIRED_PERMISSIONS.iter().any(|(name, needed)| {
         granted
             .get(*name)
@@ -668,11 +673,8 @@ async fn app_installations(
             if let Some(account) = installation.account
                 && valid_login(&account.login)
             {
-                let pending_permissions = installation
-                    .permissions
-                    .as_ref()
-                    .filter(|granted| permissions_fall_short(granted))
-                    .map(|_| GitHubAppPendingPermissions {
+                let pending_permissions = permissions_fall_short(installation.permissions.as_ref())
+                    .then(|| GitHubAppPendingPermissions {
                         installation_id: installation.id,
                         organization: account.kind == "Organization",
                     });
@@ -1546,33 +1548,35 @@ mod tests {
             ("pull_requests", "write"),
             ("metadata", "read"),
         ];
-        assert!(!permissions_fall_short(&granted(&full)));
+        assert!(!permissions_fall_short(Some(&granted(&full))));
         // A higher level, and permissions Codewire does not use, still serve.
-        assert!(!permissions_fall_short(&granted(&[
+        assert!(!permissions_fall_short(Some(&granted(&[
             ("contents", "admin"),
             ("pull_requests", "write"),
             ("metadata", "write"),
             ("issues", "read"),
-        ])));
+        ]))));
         // The grant from before the App asked for write access.
-        assert!(permissions_fall_short(&granted(&[
+        assert!(permissions_fall_short(Some(&granted(&[
             ("contents", "read"),
             ("metadata", "read"),
-        ])));
-        assert!(permissions_fall_short(&granted(&[
+        ]))));
+        assert!(permissions_fall_short(Some(&granted(&[
             ("contents", "write"),
             ("metadata", "read"),
-        ])));
-        assert!(permissions_fall_short(&granted(&[
+        ]))));
+        assert!(permissions_fall_short(Some(&granted(&[
             ("contents", "write"),
             ("pull_requests", "write"),
-        ])));
-        assert!(permissions_fall_short(&granted(&[
+        ]))));
+        assert!(permissions_fall_short(Some(&granted(&[
             ("contents", "write"),
             ("pull_requests", "maintain"),
             ("metadata", "read"),
-        ])));
-        assert!(permissions_fall_short(&granted(&[])));
+        ]))));
+        assert!(permissions_fall_short(Some(&granted(&[]))));
+        // GitHub always lists permissions; a listing without them is flagged.
+        assert!(permissions_fall_short(None));
     }
 
     #[test]
