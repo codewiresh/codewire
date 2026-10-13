@@ -108,8 +108,15 @@ if [ -n "$runtime_dir" ]; then
     *" aarch64-apple-darwin "*) ;;
     *) die "CW_RELEASE_LOCAL_RUNTIME_DIR needs the aarch64-apple-darwin build that embeds it" ;;
   esac
-  python3 "$release_py" local-runtime --dir "$runtime_dir" --source-sha "$source_sha" ||
+  # The canonical path is what Cargo records in dep-info. Admission accepts
+  # exactly this document with exactly the bytes verified here.
+  runtime_dir="$(cd "$runtime_dir" && pwd -P)" || die "CW_RELEASE_LOCAL_RUNTIME_DIR is not a directory"
+  runtime_check="$(python3 "$release_py" local-runtime --dir "$runtime_dir" --source-sha "$source_sha")" ||
     die "CW_RELEASE_LOCAL_RUNTIME_DIR is not a local runtime of the selected source"
+  printf '%s\n' "$runtime_check"
+  runtime_document_sha256="$(printf '%s\n' "$runtime_check" |
+    sed -n 's/^cw-release: local runtime document_sha256=\([0-9a-f]\{64\}\) .*$/\1/p')"
+  [ "${#runtime_document_sha256}" -eq 64 ] || die "the local runtime check reported no document digest"
 fi
 
 rm -rf "$dist_dir"
@@ -120,8 +127,10 @@ for target in $targets; do
   # shellcheck disable=SC2206
   cmd=($build_cmd)
   runtime_env=()
+  admit_runtime=()
   if [ -n "$runtime_dir" ] && [ "$target" = aarch64-apple-darwin ]; then
     runtime_env=("CODEWIRE_LOCAL_RUNTIME=$runtime_dir/local-runtime.json")
+    admit_runtime=(--embedded-runtime "$runtime_dir/local-runtime.json=$runtime_document_sha256")
   fi
   # macOS bash 3.2 treats an empty array as unbound under set -u.
   env -u CODEWIRE_LOCAL_RUNTIME ${runtime_env[@]+"${runtime_env[@]}"} \
@@ -146,7 +155,8 @@ for target in $targets; do
     --source-sha "$source_sha" \
     --source-digest-before "$source_digest_before" \
     --target-dir "$target_dir" \
-    --cargo-home "$cargo_home"
+    --cargo-home "$cargo_home" \
+    ${admit_runtime[@]+"${admit_runtime[@]}"}
   cp "$binary" "$dist_dir/cw-$version-$target"
 done
 
