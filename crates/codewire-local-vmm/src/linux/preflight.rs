@@ -89,6 +89,155 @@ pub fn preflight() -> Result<PreflightReport, PreflightError> {
     })
 }
 
+/// One unmet host prerequisite for local VMs, and what fixes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostProblem {
+    /// Whether a local VM cannot run without it (otherwise only some
+    /// workspaces need it, such as a cloned repository needing git).
+    pub required: bool,
+    pub problem: String,
+    pub fix: String,
+}
+
+/// What [`host_prerequisites`] observed; separate so the advice is tested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostFacts {
+    pub root: bool,
+    pub kvm: DeviceState,
+    pub vhost_vsock: DeviceState,
+    /// `None` when the kernel has no Landlock or it is disabled.
+    pub landlock_abi: Option<i32>,
+    pub missing_e2fsprogs: Vec<&'static str>,
+    pub git: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeviceState {
+    Usable,
+    Missing,
+    Denied,
+    Unusable,
+}
+
+/// Every unmet prerequisite for running local VMs on this host, each with
+/// its fix, checked as the user (the supervisor's own preflight enforces
+/// them again). `cw setup --local` and local create and start report these
+/// instead of a later opaque failure.
+pub fn host_prerequisites() -> Vec<HostProblem> {
+    let device = |path: &str| match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => {
+            if path == "/dev/kvm" && !matches!(kvm_api_version(&file), Ok(KVM_API_VERSION)) {
+                DeviceState::Unusable
+            } else {
+                DeviceState::Usable
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => DeviceState::Missing,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => DeviceState::Denied,
+        Err(_) => DeviceState::Unusable,
+    };
+    host_problems(&HostFacts {
+        root: current_uid() == 0,
+        kvm: device("/dev/kvm"),
+        vhost_vsock: device("/dev/vhost-vsock"),
+        landlock_abi: landlock_abi().ok(),
+        missing_e2fsprogs: ["mkfs.ext4", "e2fsck", "resize2fs", "debugfs"]
+            .into_iter()
+            .filter(|tool| super::e2fsprogs(tool).is_none())
+            .collect(),
+        git: super::git().is_some_and(|git| git.program.is_file()),
+    })
+}
+
+pub(crate) fn host_problems(facts: &HostFacts) -> Vec<HostProblem> {
+    let mut problems = Vec::new();
+    let mut required = |problem: String, fix: &str| {
+        problems.push(HostProblem {
+            required: true,
+            problem,
+            fix: fix.to_owned(),
+        })
+    };
+    if facts.root {
+        required(
+            "cw is running as root".to_owned(),
+            "run cw as your own user; local VMs never run as root",
+        );
+    }
+    match facts.kvm {
+        DeviceState::Usable => {}
+        DeviceState::Missing => required(
+            "KVM is not available (/dev/kvm does not exist)".to_owned(),
+            "enable hardware virtualization (Intel VT-x or AMD-V) in the firmware and load the kvm_intel or kvm_amd module; inside a VM, enable nested virtualization",
+        ),
+        DeviceState::Denied => required(
+            "you cannot open /dev/kvm".to_owned(),
+            "add yourself to its group: sudo usermod -aG kvm \"$USER\", then log out and back in",
+        ),
+        DeviceState::Unusable => required(
+            "/dev/kvm does not work as KVM".to_owned(),
+            "check that the kvm module loaded without errors (sudo dmesg | grep -i kvm)",
+        ),
+    }
+    match facts.vhost_vsock {
+        DeviceState::Usable => {}
+        DeviceState::Missing => required(
+            "vhost-vsock is not loaded (/dev/vhost-vsock does not exist)".to_owned(),
+            "sudo modprobe vhost_vsock; to load it at every boot: echo vhost_vsock | sudo tee /etc/modules-load.d/vhost_vsock.conf",
+        ),
+        DeviceState::Denied => required(
+            "you cannot open /dev/vhost-vsock".to_owned(),
+            "make it readable and writable by your user (most distributions ship it as mode 0666; check the udev rules)",
+        ),
+        DeviceState::Unusable => required(
+            "/dev/vhost-vsock cannot be opened".to_owned(),
+            "check that the vhost_vsock module loaded without errors (sudo dmesg | grep -i vsock)",
+        ),
+    }
+    match facts.landlock_abi {
+        Some(abi) if abi >= MINIMUM_LANDLOCK_ABI => {}
+        found => required(
+            match found {
+                Some(abi) => format!(
+                    "the kernel's Landlock ABI is {abi}; local VMs need {MINIMUM_LANDLOCK_ABI} (Linux 6.2 or later)"
+                ),
+                None => "Landlock is not enabled in this kernel; local VMs need Landlock ABI 3 (Linux 6.2 or later)".to_owned(),
+            },
+            "use a Linux 6.2 or later kernel with Landlock: the Debian 12 and Ubuntu 22.04 GA kernels are too old (use Ubuntu 22.04 HWE or 24.04, Debian 13 or Fedora); on a new enough kernel, add landlock to the lsm= boot parameter",
+        ),
+    }
+    if !facts.missing_e2fsprogs.is_empty() {
+        required(
+            format!(
+                "e2fsprogs is missing: {} not found in /usr/sbin or /usr/bin",
+                facts.missing_e2fsprogs.join(", ")
+            ),
+            "install your distribution's e2fsprogs package",
+        );
+    }
+    if !facts.git {
+        problems.push(HostProblem {
+            required: false,
+            problem: "git is not installed at /usr/bin/git".to_owned(),
+            fix:
+                "install git to clone a repository into a local VM; other workspaces do not need it"
+                    .to_owned(),
+        });
+    }
+    problems
+}
+
+/// The report `cw` prints for `problems`; `None` when nothing is required.
+pub fn host_problem_report(problems: &[HostProblem]) -> Option<String> {
+    let mut report = String::from("this host cannot run local VMs yet:");
+    let mut required = false;
+    for problem in problems.iter().filter(|problem| problem.required) {
+        required = true;
+        report.push_str(&format!("\n  - {}. Fix: {}.", problem.problem, problem.fix));
+    }
+    required.then_some(report)
+}
+
 fn kvm_api_version(kvm: &std::fs::File) -> Result<libc::c_int, PreflightError> {
     // SAFETY: KVM_GET_API_VERSION takes no pointer argument and only reads the
     // opened KVM descriptor. Passing an explicit zero variadic argument avoids
@@ -157,6 +306,85 @@ fn landlock_abi() -> Result<i32, PreflightError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ready() -> HostFacts {
+        HostFacts {
+            root: false,
+            kvm: DeviceState::Usable,
+            vhost_vsock: DeviceState::Usable,
+            landlock_abi: Some(MINIMUM_LANDLOCK_ABI),
+            missing_e2fsprogs: Vec::new(),
+            git: true,
+        }
+    }
+
+    #[test]
+    fn a_ready_host_has_no_problem() {
+        assert_eq!(host_problems(&ready()), Vec::new());
+        assert_eq!(host_problem_report(&[]), None);
+    }
+
+    #[test]
+    fn each_unmet_prerequisite_names_its_fix() {
+        let facts = HostFacts {
+            root: true,
+            kvm: DeviceState::Denied,
+            vhost_vsock: DeviceState::Missing,
+            landlock_abi: Some(1),
+            missing_e2fsprogs: vec!["e2fsck", "resize2fs"],
+            git: false,
+        };
+        let problems = host_problems(&facts);
+        assert_eq!(
+            problems.iter().filter(|problem| problem.required).count(),
+            5
+        );
+        let report = host_problem_report(&problems).unwrap();
+        for expected in [
+            "cw is running as root",
+            "you cannot open /dev/kvm. Fix: add yourself to its group: sudo usermod -aG kvm \"$USER\"",
+            "sudo modprobe vhost_vsock",
+            "Landlock ABI is 1; local VMs need 3 (Linux 6.2 or later)",
+            "Debian 12 and Ubuntu 22.04 GA kernels are too old",
+            "e2fsck, resize2fs not found in /usr/sbin or /usr/bin",
+        ] {
+            assert!(report.contains(expected), "{expected}\n{report}");
+        }
+        // git is only advice: it never blocks.
+        assert!(!report.contains("git"), "{report}");
+        let git_only = HostFacts {
+            git: false,
+            ..ready()
+        };
+        let problems = host_problems(&git_only);
+        assert_eq!(problems.len(), 1);
+        assert!(!problems[0].required);
+        assert_eq!(host_problem_report(&problems), None);
+    }
+
+    #[test]
+    fn a_kernel_without_landlock_and_a_missing_kvm_are_named() {
+        let facts = HostFacts {
+            kvm: DeviceState::Missing,
+            landlock_abi: None,
+            ..ready()
+        };
+        let report = host_problem_report(&host_problems(&facts)).unwrap();
+        assert!(
+            report.contains("KVM is not available (/dev/kvm does not exist)"),
+            "{report}"
+        );
+        assert!(
+            report.contains("Landlock is not enabled in this kernel"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn this_host_reports_without_failing() {
+        // Runs the real probes; the result depends on the host.
+        let _ = host_prerequisites();
+    }
 
     #[test]
     fn capability_status_parser_observes_ambient_set() {
