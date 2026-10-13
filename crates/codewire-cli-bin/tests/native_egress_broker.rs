@@ -3,7 +3,8 @@
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::os::fd::AsRawFd as _;
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -13,7 +14,8 @@ use codewire_egress_broker::ipc::{
 };
 use codewire_egress_policy::CompiledPolicy;
 use codewire_local_vmm::egress_broker::{
-    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_HOST_ADDRESSES_FD,
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_FIRST_SESSION_FD,
+    EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
     EGRESS_BROKER_POLICY_DIGEST_OFFSET, EGRESS_BROKER_PREPARED_MESSAGE,
     EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES, EgressBrokerStartupFailure,
     EgressBrokerStartupStatus, decode_egress_broker_startup_status,
@@ -66,27 +68,56 @@ fn identity() -> (Uuid, u64) {
     )
 }
 
-/// The broker's bootstrap and host-address control sockets (runner ends) and
-/// the broker, which has been sent `host_addresses` as its first control frame.
+/// The runner's ends of a spawned broker: its bootstrap stream (the
+/// admission session once ready), its other IPC sessions and its host-address
+/// control socket, which has been sent `host_addresses` as its first frame.
 fn spawn_broker(
     ambient_environment: bool,
     host_addresses: &[u8],
-) -> (
-    std::os::unix::net::UnixStream,
-    std::os::unix::net::UnixStream,
-    ChildGuard,
-) {
-    let (parent, child_socket) = std::os::unix::net::UnixStream::pair().unwrap();
-    let (mut control, control_child) = std::os::unix::net::UnixStream::pair().unwrap();
-    let control_source = control_child.as_raw_fd();
+) -> (StdUnixStream, Vec<StdUnixStream>, StdUnixStream, ChildGuard) {
+    spawn_broker_with_sessions(
+        ambient_environment,
+        host_addresses,
+        EGRESS_BROKER_INHERITED_SESSIONS,
+    )
+}
+
+/// Every source is duplicated above all fixed targets, as the runner does.
+fn above_targets(descriptor: &impl std::os::fd::AsRawFd) -> OwnedFd {
+    let duplicated = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
+    assert!(duplicated >= 64);
+    unsafe { OwnedFd::from_raw_fd(duplicated) }
+}
+
+fn spawn_broker_with_sessions(
+    ambient_environment: bool,
+    host_addresses: &[u8],
+    inherited_sessions: usize,
+) -> (StdUnixStream, Vec<StdUnixStream>, StdUnixStream, ChildGuard) {
+    let (parent, child_socket) = StdUnixStream::pair().unwrap();
+    let (mut control, control_child) = StdUnixStream::pair().unwrap();
     parent
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     parent
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
+    let mut sessions = Vec::new();
+    let mut inherited = vec![above_targets(&child_socket), above_targets(&control_child)];
+    for _ in 0..inherited_sessions {
+        let (worker_end, broker_end) = StdUnixStream::pair().unwrap();
+        inherited.push(above_targets(&broker_end));
+        sessions.push(worker_end);
+    }
+    let targets = [EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_HOST_ADDRESSES_FD]
+        .into_iter()
+        .chain((0..inherited_sessions).map(|index| EGRESS_BROKER_FIRST_SESSION_FD + index as i32));
+    let descriptors: Vec<(i32, i32)> = inherited
+        .iter()
+        .map(|descriptor| descriptor.as_raw_fd())
+        .zip(targets)
+        .collect();
     let (environment_id, generation) = identity();
-    let source = child_socket.as_raw_fd();
     let mut command = Command::new(env!("CARGO_BIN_EXE_cw"));
     command
         .arg("__native-egress-broker")
@@ -103,8 +134,8 @@ fn spawn_broker(
         command.env("CODEWIRE_FORGED_BROKER_ENVIRONMENT", "rejected");
     }
     // SAFETY: the hook performs only descriptor syscalls before exec. It
-    // admits exactly the connected bootstrap and host-address control
-    // capabilities at their fixed fds; both sources are well above them.
+    // admits exactly the connected bootstrap, host-address control and IPC
+    // session capabilities at their fixed fds; every source is above them.
     unsafe {
         command.pre_exec(move || {
             if libc::syscall(
@@ -116,11 +147,8 @@ fn spawn_broker(
             {
                 return Err(std::io::Error::last_os_error());
             }
-            for (source, target) in [
-                (source, EGRESS_BROKER_BOOTSTRAP_FD),
-                (control_source, EGRESS_BROKER_HOST_ADDRESSES_FD),
-            ] {
-                if source != target && libc::dup2(source, target) == -1 {
+            for &(source, target) in &descriptors {
+                if libc::dup2(source, target) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
                 if libc::fcntl(target, libc::F_SETFD, 0) == -1 {
@@ -131,10 +159,33 @@ fn spawn_broker(
         });
     }
     let child = command.spawn().unwrap();
+    drop(inherited);
     drop(child_socket);
     drop(control_child);
     control.write_all(host_addresses).unwrap();
-    (parent, control, ChildGuard(Some(child)))
+    (parent, sessions, control, ChildGuard(Some(child)))
+}
+
+/// A client over every session of a ready broker. Call it in a runtime.
+fn ipc_client(parent: StdUnixStream, sessions: Vec<StdUnixStream>) -> BrokerIpcClient {
+    let (environment_id, generation) = identity();
+    let policy = CompiledPolicy::developer_baseline();
+    let binding = BrokerIpcBinding::new(environment_id, generation, policy.digest()).unwrap();
+    parent.set_read_timeout(None).unwrap();
+    parent.set_write_timeout(None).unwrap();
+    let streams = std::iter::once(parent)
+        .chain(sessions)
+        .map(|stream| {
+            stream.set_nonblocking(true).unwrap();
+            tokio::net::UnixStream::from_std(stream).unwrap()
+        })
+        .collect();
+    BrokerIpcClient::new(
+        streams,
+        binding,
+        BrokerIpcKey::from_bytes(TEST_KEY).unwrap(),
+    )
+    .unwrap()
 }
 
 fn no_host_addresses() -> Vec<u8> {
@@ -181,7 +232,8 @@ fn cw_hidden_egress_broker_preserves_its_typed_failure_exit() {
 
 #[test]
 fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_forgery() {
-    let (ambient_parent, _control, mut ambient_child) = spawn_broker(true, &no_host_addresses());
+    let (ambient_parent, _sessions, _control, mut ambient_child) =
+        spawn_broker(true, &no_host_addresses());
     assert_eq!(
         decode_egress_broker_startup_status(&read_status_frame(&ambient_parent)),
         Some(EgressBrokerStartupStatus::Failed(
@@ -197,7 +249,7 @@ fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_for
     let mut invalid =
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     invalid[0] ^= 1;
-    let (mut invalid_parent, _control, mut invalid_child) =
+    let (mut invalid_parent, _sessions, _control, mut invalid_child) =
         spawn_broker(false, &no_host_addresses());
     invalid_parent.write_all(invalid.as_ref()).unwrap();
     assert_eq!(
@@ -214,7 +266,8 @@ fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_for
     let mut wrong_policy =
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     wrong_policy[EGRESS_BROKER_POLICY_DIGEST_OFFSET] ^= 1;
-    let (mut policy_parent, _control, mut policy_child) = spawn_broker(false, &no_host_addresses());
+    let (mut policy_parent, _sessions, _control, mut policy_child) =
+        spawn_broker(false, &no_host_addresses());
     policy_parent.write_all(wrong_policy.as_ref()).unwrap();
     assert_eq!(
         decode_egress_broker_startup_status(&read_status_frame(&policy_parent)),
@@ -229,7 +282,7 @@ fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_for
 
     let bootstrap =
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
-    let (mut admission_parent, _control, mut admission_child) =
+    let (mut admission_parent, _sessions, _control, mut admission_child) =
         spawn_broker(false, &no_host_addresses());
     admission_parent.write_all(bootstrap.as_ref()).unwrap();
     assert_eq!(
@@ -252,13 +305,26 @@ fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_for
 }
 
 #[test]
+fn a_broker_missing_an_ipc_session_refuses_to_start() {
+    let (_parent, _sessions, _control, mut child) = spawn_broker_with_sessions(
+        false,
+        &no_host_addresses(),
+        EGRESS_BROKER_INHERITED_SESSIONS - 1,
+    );
+    assert_eq!(
+        child.wait_bounded().code(),
+        Some(EgressBrokerStartupFailure::InheritedDescriptor.exit_code())
+    );
+}
+
+#[test]
 fn a_broker_without_readable_host_addresses_fails_closed_before_ready() {
     let (environment_id, generation) = identity();
     let bootstrap =
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     let mut malformed = no_host_addresses();
     malformed[0] ^= 1;
-    let (mut parent, _control, mut child) = spawn_broker(false, &malformed);
+    let (mut parent, _sessions, _control, mut child) = spawn_broker(false, &malformed);
     parent.write_all(bootstrap.as_ref()).unwrap();
     assert_eq!(
         decode_egress_broker_startup_status(&read_status_frame(&parent)),
@@ -284,29 +350,19 @@ fn confined_product_broker_refuses_host_addresses_and_fails_closed_without_their
     let bootstrap =
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     let initial = encode_frame(&HostAddressSet::new([host], [public]).unwrap());
-    let (mut parent, mut control, mut child) = spawn_broker(false, &initial);
+    let (mut parent, sessions, mut control, mut child) = spawn_broker(false, &initial);
     parent.write_all(bootstrap.as_ref()).unwrap();
     assert_eq!(read_status_frame(&parent), EGRESS_BROKER_PREPARED_MESSAGE);
     parent.write_all(EGRESS_BROKER_CONFINE_MESSAGE).unwrap();
     assert_eq!(read_status_frame(&parent), EGRESS_BROKER_READY_MESSAGE);
 
-    parent.set_read_timeout(None).unwrap();
-    parent.set_write_timeout(None).unwrap();
-    parent.set_nonblocking(true).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .unwrap();
     let client = runtime.block_on(async {
-        let policy = CompiledPolicy::developer_baseline();
-        let binding = BrokerIpcBinding::new(environment_id, generation, policy.digest()).unwrap();
-        let key = BrokerIpcKey::from_bytes(TEST_KEY).unwrap();
-        let client = BrokerIpcClient::new(
-            tokio::net::UnixStream::from_std(parent).unwrap(),
-            binding,
-            key,
-        );
+        let client = ipc_client(parent, sessions);
         for refused in [SocketAddr::new(host, 22), SocketAddr::new(public, 443)] {
             assert_eq!(
                 client.authorize_tcp(refused).await,
@@ -345,29 +401,22 @@ fn confined_product_broker_serves_authenticated_policy_and_closes_with_its_capab
     let (environment_id, generation) = identity();
     let bootstrap =
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
-    let (mut parent, _control, mut child) = spawn_broker(false, &no_host_addresses());
+    let (mut parent, sessions, _control, mut child) = spawn_broker(false, &no_host_addresses());
     parent.write_all(bootstrap.as_ref()).unwrap();
     assert_eq!(read_status_frame(&parent), EGRESS_BROKER_PREPARED_MESSAGE);
     parent.write_all(EGRESS_BROKER_CONFINE_MESSAGE).unwrap();
     assert_eq!(read_status_frame(&parent), EGRESS_BROKER_READY_MESSAGE);
 
-    parent.set_read_timeout(None).unwrap();
-    parent.set_write_timeout(None).unwrap();
-    parent.set_nonblocking(true).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .unwrap();
     runtime.block_on(async move {
-        let policy = CompiledPolicy::developer_baseline();
-        let binding = BrokerIpcBinding::new(environment_id, generation, policy.digest()).unwrap();
-        let key = BrokerIpcKey::from_bytes(TEST_KEY).unwrap();
-        let client = BrokerIpcClient::new(
-            tokio::net::UnixStream::from_std(parent).unwrap(),
-            binding,
-            key,
-        );
+        let client = ipc_client(parent, sessions);
+        // Every session, admission, DNS and connect, answers the confined
+        // broker with its own key (#2638).
+        client.verify_sessions().await.unwrap();
         assert_eq!(
             client
                 .authorize_tcp(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443))
@@ -391,29 +440,17 @@ fn connect_through_broker(
     let (environment_id, generation) = identity();
     let bootstrap =
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
-    let (mut parent, _control, _child) = spawn_broker(false, host_addresses);
+    let (mut parent, sessions, _control, _child) = spawn_broker(false, host_addresses);
     parent.write_all(bootstrap.as_ref()).unwrap();
     assert_eq!(read_status_frame(&parent), EGRESS_BROKER_PREPARED_MESSAGE);
     parent.write_all(EGRESS_BROKER_CONFINE_MESSAGE).unwrap();
     assert_eq!(read_status_frame(&parent), EGRESS_BROKER_READY_MESSAGE);
-    parent.set_read_timeout(None).unwrap();
-    parent.set_write_timeout(None).unwrap();
-    parent.set_nonblocking(true).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .unwrap();
-    runtime.block_on(async move {
-        let policy = CompiledPolicy::developer_baseline();
-        let binding = BrokerIpcBinding::new(environment_id, generation, policy.digest()).unwrap();
-        let client = BrokerIpcClient::new(
-            tokio::net::UnixStream::from_std(parent).unwrap(),
-            binding,
-            BrokerIpcKey::from_bytes(TEST_KEY).unwrap(),
-        );
-        client.connect_tcp(destination).await
-    })
+    runtime.block_on(async move { ipc_client(parent, sessions).connect_tcp(destination).await })
 }
 
 /// #2614 against a real interface. Run it in a network namespace whose

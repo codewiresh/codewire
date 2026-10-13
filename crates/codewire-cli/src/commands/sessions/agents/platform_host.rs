@@ -535,6 +535,7 @@ pub(super) async fn run(
     let kind = match agent {
         AgentKind::Codex => rpc::EnvironmentAgentKind::Codex,
         AgentKind::Claude => rpc::EnvironmentAgentKind::Claude,
+        AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
     };
     let provider = support
         .iter()
@@ -574,7 +575,7 @@ pub(super) async fn run(
         model: args
             .model
             .clone()
-            .unwrap_or_else(|| agent.default_model().into()),
+            .unwrap_or_else(|| agent.default_model().unwrap_or_default().into()),
         effort: agent_effort(agent, args.effort.as_deref())?,
         working_dir: args
             .workdir

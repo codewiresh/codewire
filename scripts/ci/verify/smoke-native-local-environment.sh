@@ -1773,17 +1773,23 @@ for label, name, edns, ident in (
     export PATH="/usr/local/go/bin:$PATH"
     go mod init example.invalid/probe >/dev/null 2>&1
     timeout 60 go list -m "$1@latest" | sed "s/^/guest-go /"
+    # With the GitHub client selected, Codewire'"'"'s own gh configuration sends gh
+    # through the credential ingress, which answers only admitted GitHub routes.
+    # This probe is about the Go resolver and the guest'"'"'s own egress, so gh
+    # runs with an empty configuration of its own.
+    export GH_CONFIG_DIR="$scratch/gh"
     reply="$(GH_TOKEN=codewire-synthetic-not-a-token GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
       timeout 30 gh api /zen 2>&1)" || true
     case "$reply" in
       *"(HTTP 401)"*) printf "guest-gh reached-github http=401\n" ;;
-      *) printf "guest-gh did-not-reach-github\n"; exit 1 ;;
+      *) printf "guest-gh did-not-reach-github reply=%s\n" \
+           "$(printf "%s" "$reply" | head -n 1 | tr -cd "[:alnum:] ():./_-" | cut -c1-160)" ;;
     esac
   ' name-resolution "$NETWORK_GO_MODULE"
   rg -q "^guest-go ${NETWORK_GO_MODULE//./\\.} v[0-9]+\\.[0-9]+\\.[0-9]+\$" "$LAST_STDOUT" ||
     die 'the go command did not resolve a module through the Go resolver'
   rg -qx 'guest-gh reached-github http=401' "$LAST_STDOUT" ||
-    die 'gh did not reach GitHub through the Go resolver'
+    die "gh did not reach GitHub through the Go resolver: $(rg -m1 '^guest-gh ' "$LAST_STDOUT" || printf 'no gh result')"
   log "network: $(rg '^guest-(go|gh) ' "$LAST_STDOUT" | tr '\n' ';')"
 }
 
