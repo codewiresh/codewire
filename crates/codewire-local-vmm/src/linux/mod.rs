@@ -4,7 +4,10 @@ pub mod preflight;
 pub mod process;
 pub(crate) mod supervisor_peer;
 
-pub use preflight::{PreflightError, PreflightReport, preflight};
+pub use preflight::{
+    HostProblem, PreflightError, PreflightReport, host_prerequisites, host_problem_report,
+    preflight,
+};
 pub use process::{LiveProcess, ProcessIdentity, RecoveryError};
 
 /// The distribution's e2fsprogs program, such as `mkfs.ext4`: the first of

@@ -18,7 +18,23 @@ pub(crate) fn require_local_vm_host() -> anyhow::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Refuse to create, start or install local VMs on a Linux host that cannot
+/// run them, naming every unmet prerequisite and its fix (#2733); the
+/// supervisor's own preflight stays a second line. Advice that does not
+/// block, such as a missing git, is printed once to stderr.
+#[cfg(target_os = "linux")]
+pub(crate) fn require_local_vm_host() -> anyhow::Result<()> {
+    let problems = codewire_local_vmm::linux::host_prerequisites();
+    if let Some(report) = codewire_local_vmm::linux::host_problem_report(&problems) {
+        anyhow::bail!(report);
+    }
+    for problem in problems.iter().filter(|problem| !problem.required) {
+        eprintln!("Note: {}. {}.", problem.problem, problem.fix);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(crate) fn require_local_vm_host() -> anyhow::Result<()> {
     Ok(())
 }
