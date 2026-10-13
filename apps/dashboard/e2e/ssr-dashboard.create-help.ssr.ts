@@ -72,6 +72,8 @@ for (const fixture of ["create-sandbox.html", "edit-sandbox-sources.html"]) {
 
     await page.getByRole("button", { name: "About provider credentials" }).click();
     await expect(page.locator("[id$='-credentials-help']")).toContainText("Private keys and tokens stay outside the Sandbox");
+    // The one documented direct-delivery exception is disclosed where it applies.
+    await expect(page.locator("[id$='-credentials-help']")).toContainText("except a personal Codex ChatGPT sign-in, which Codex receives inside the Sandbox");
     await expect(page.getByRole("link", { name: "Manage personal secrets" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Manage organization secrets" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Manage secret projects" })).toBeVisible();
