@@ -10,7 +10,7 @@
 //!
 //! | Step | Wire |
 //! | --- | --- |
-//! | Launch | `noel --mode rpc --session-id S --model PROVIDER/ID [--thinking LEVEL]`; `S` is saved before the first spawn and reopened on every restart |
+//! | Launch | `noel --mode rpc --session-id S --model PROVIDER/ID [--thinking LEVEL] [--skill DIR]`; `S` is saved before the first spawn and reopened on every restart, and `DIR` is the [`delegation`] skill |
 //! | Startup | `get_state` reports `S`, the model, the requested thinking level and both extensions; then `clear_queue` |
 //! | Turn | `clear_queue`, then `prompt {message, requestId}` while idle; the reply's `runId` is the turn ID |
 //! | Answer, usage | Text of the last assistant `message_end`; usage summed over the run's assistant `message_end` records |
@@ -19,6 +19,8 @@
 //! | Interrupt | `abort {expectedRunId}`; the reply or the run's `agent_settled` acknowledges it |
 //! | Recovery | After startup's `clear_queue`, `get_state.lastRun` decides a message still running when the driver or noel died (see [`resolve`]) |
 use super::*;
+
+mod delegation;
 
 const LEGACY: &str = "the installed noel answers JSON-RPC: it is an older build of pi without upstream pi's RPC protocol. Install a noel whose `get_state` reports the run-id and expected-run-id RPC extensions";
 const EXTENSIONS: [&str; 2] = ["run-id", "expected-run-id"];
@@ -51,10 +53,19 @@ const ACTIVITY_ARGUMENTS: [&str; 5] = ["command", "path", "pattern", "url", "que
 
 /// The launch: pi opens `session` if it exists and creates it otherwise. A
 /// requested effort is the thinking level; without one noel keeps its own.
-fn arguments<'a>(session: &'a str, model: &'a str, thinking: Option<&'a str>) -> Vec<&'a str> {
+/// `skill` is the directory of the conversation's [`delegation`] skill.
+fn arguments<'a>(
+    session: &'a str,
+    model: &'a str,
+    thinking: Option<&'a str>,
+    skill: Option<&'a str>,
+) -> Vec<&'a str> {
     let mut args = vec!["--mode", "rpc", "--session-id", session, "--model", model];
     if let Some(thinking) = thinking {
         args.extend(["--thinking", thinking]);
+    }
+    if let Some(skill) = skill {
+        args.extend(["--skill", skill]);
     }
     args
 }
@@ -537,7 +548,13 @@ impl Driver {
                 session
             }
         };
-        let args = arguments(&session, &self.config.model, self.config.effort.as_deref());
+        let skill = self.delegation_skill()?;
+        let args = arguments(
+            &session,
+            &self.config.model,
+            self.config.effort.as_deref(),
+            skill.as_deref(),
+        );
         Peer::spawn(
             &self.config.program,
             &args,
@@ -545,6 +562,25 @@ impl Driver {
             self,
             "noel",
         )
+    }
+
+    /// noel's `--skill`: the [`delegation`] skill of a conversation that is
+    /// given its own identity, as [`Peer::spawn`] decides it. Every launch
+    /// writes it again, also when noel is started again after a crash, and
+    /// each time it names the `cw` this driver resolved when it started.
+    fn delegation_skill(&self) -> anyhow::Result<Option<String>> {
+        #[cfg(target_os = "linux")]
+        let member_custody =
+            host_control::guardian_required(&self.environment, &self.config.driver_id)?;
+        #[cfg(not(target_os = "linux"))]
+        let member_custody = false;
+        let identity =
+            conversation_identity(&self.environment, &self.binding.session_id, member_custody);
+        let cw = self
+            .cw
+            .as_deref()
+            .context("the running cw executable was not found when the driver started")?;
+        delegation::prepare(&identity, &self.dir, cw).context("write the delegation skill")
     }
 
     /// The startup handshake, also after a respawn. `clear_queue` precedes
@@ -1301,6 +1337,8 @@ impl Driver {
 mod tests {
     use super::*;
 
+    /// The delegation skill a conversation with its own identity is given.
+    mod skill;
     /// A message its environment's takedown pauses, and its resume.
     mod takedown;
 
@@ -1448,6 +1486,7 @@ mod tests {
             settled: HashSet::new(),
             stopping: false,
             noel: Recovery::default(),
+            cw: env::current_exe().ok(),
         }
     }
 
@@ -1599,7 +1638,7 @@ mod tests {
     #[test]
     fn launch_reopens_the_saved_session_with_the_requested_model_and_level() {
         assert_eq!(
-            arguments(SESSION, "faux/echo", None),
+            arguments(SESSION, "faux/echo", None, None),
             [
                 "--mode",
                 "rpc",
@@ -1610,7 +1649,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            arguments(SESSION, "anthropic/claude-opus-5-5", Some("xhigh")),
+            arguments(SESSION, "anthropic/claude-opus-5-5", Some("xhigh"), None),
             [
                 "--mode",
                 "rpc",

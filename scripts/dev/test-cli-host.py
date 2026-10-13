@@ -1087,8 +1087,9 @@ class Journey:
         assert "[faux/echo] Hello" in self.call("inbox", env, "noel-lead").stdout
         assert "says: [faux/echo] Hello" in self.call("logs", env, "noel-lead").stdout
         trace = self.noel_trace("noel-lead")
+        skill = self.root / "hosts" / env / "agents" / lead["driver_id"] / "skills" / "codewire-delegation"
         assert trace[0] == {"event": "start", "argv": ["--mode", "rpc", "--session-id", session,
-                                                       "--model", "faux/echo"]}, trace[0]
+                                                       "--model", "faux/echo", "--skill", str(skill)]}, trace[0]
         received = self.received("noel-lead")
         assert [(r["type"], "id" in r) for r in received[:4]] == [
             ("get_state", True), ("clear_queue", True), ("clear_queue", False), ("prompt", True)], received

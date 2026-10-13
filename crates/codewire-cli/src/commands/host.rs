@@ -128,6 +128,14 @@ pub(crate) fn write_private_json<T: serde::Serialize>(
     path: &std::path::Path,
     value: &T,
 ) -> anyhow::Result<()> {
+    write_private(path, &serde_json::to_vec(value)?)
+}
+
+/// Replaces `path` with an owner-only file of `bytes`, in an existing
+/// owner-private directory, through an exclusive temporary sibling and a
+/// rename: a reader never sees part of it, and a symlink at `path` is
+/// replaced, never followed.
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
     let parent = path.parent().context("runtime file parent")?;
     existing_private_directory(parent)?;
@@ -137,7 +145,7 @@ pub(crate) fn write_private_json<T: serde::Serialize>(
         .create_new(true)
         .mode(0o600)
         .open(&temporary)?;
-    file.write_all(&serde_json::to_vec(value)?)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(&temporary, path)?;
     fs::File::open(parent)?.sync_all()?;

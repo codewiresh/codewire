@@ -15,7 +15,7 @@ const STOPPED_UNKNOWN: &str = "the driver was stopped by SIGTERM (native agent e
 /// An `agent` conversation the host user launched: its records are in a
 /// temporary host environment whose daemon is not running, and it has no
 /// peer.
-fn host(agent: AgentKind) -> Harness {
+pub(super) fn host(agent: AgentKind) -> Harness {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("environment");
     let driver_id = uuid::Uuid::new_v4().to_string();
