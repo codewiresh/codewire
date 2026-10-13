@@ -1174,6 +1174,17 @@ class Journey:
         assert len(answers) == 1 and answers[0]["cancelled"] is True and answers[0]["id"], answers
         self.check("noel-dialog-declined")
 
+        # A notification, such as an account failover switch, is shown in the
+        # session log and needs no answer.
+        notified = self.call("msg", env, "noel-lead", "NOTIFY", "--output", "json", data=True)
+        assert self.wait_message(notified["id"])["result"] == "[faux/echo] NOTIFY"
+        assert [r for r in self.received("noel-lead") if r["type"] == "extension_ui_response"] == answers
+        logs = self.call("logs", env, "noel-lead").stdout
+        assert ("noel warning: fixture account first is rate limited until 14:05 UTC; "
+                "switched to second") in logs, logs[-2000:]
+        assert "declined noel notify dialog" not in logs
+        self.check("noel-notify-logged-unanswered")
+
         # A worker's result wakes the lead exactly once. An explicit stop
         # mid-run interrupts noel's run first: noel is sent the abort and
         # settles the run before the stop signals it, the message ends
