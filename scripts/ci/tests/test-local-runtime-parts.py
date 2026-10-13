@@ -319,7 +319,7 @@ class GuestRootBuilderTest(unittest.TestCase):
     """The guest root builds in its pinned container, never on the runner's toolchain."""
 
     RUNNER_SCRIPTS = ("build-local-runtime.sh", "build-runtime-kernel.sh", "build-runtime-guest-root.sh",
-                      "runtime-container.sh")
+                      "build-runtime-cw.sh", "runtime-container.sh")
 
     def test_the_runner_toolchain_is_never_changed(self):
         # The CI runner's Rust toolchain is sealed; a rustup change fails only
@@ -397,6 +397,22 @@ class GuestRootBuilderTest(unittest.TestCase):
                 "--rust-std", str(files["rust-std"]), "--rust-std", str(files["rust-std-2"]),
                 "--protoc-zip", str(files["protoc.zip"])]
         for extra, message in (
+            (["--output", str(base / "initramfs.cpio")], "--target must be"),
+            (["--target", "riscv64gc-unknown-linux-musl", "--output", str(base / "initramfs.cpio")],
+             "--target must be"),
+        ):
+            result = subprocess.run(["bash", script, *args, *extra], capture_output=True, text=True,
+                                    check=False, env={"PATH": "/usr/bin:/bin"})
+            with self.subTest(extra=extra):
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+        args += ["--target", "x86_64-unknown-linux-musl"]
+        # The x86_64 recipe runs runc for its version; the read-only input
+        # reaches it as an executable copy of the checked bytes.
+        text = Path(script).read_text()
+        self.assertIn('install -m 0500 "$runc" "$scratch/runc"', text)
+        self.assertIn('-e RUNC="$scratch/runc"', text)
+        for extra, message in (
             (["--output", "relative.cpio"], "--output must be an absolute path"),
             (["--output", str(base / "missing/initramfs.cpio")], "output parent does not exist"),
             (["--output", str(files["runc"])], "output already exists"),
@@ -410,6 +426,74 @@ class GuestRootBuilderTest(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in base.iterdir()), sorted(files))
 
 
+class CwRuntimeBuilderTest(unittest.TestCase):
+    """The cw runtimes build in the pinned container with the release's own cross tools."""
+
+    def test_the_cross_tools_are_the_release_delivery_s(self):
+        builder = sources.load_pins()["cw_runtime_builder"]
+        for name in ("cli-release.yaml", "cw-release-dry-run.yaml"):
+            workflow = (ROOT / ".gitea/workflows" / name).read_text()
+            with self.subTest(workflow=name):
+                self.assertIn(f"  ZIG_VERSION: {builder['zig']['version']}\n", workflow)
+                self.assertIn(f"  ZIG_X86_64_LINUX_SHA256: {builder['zig']['sha256']}\n", workflow)
+                self.assertIn(f"  CARGO_ZIGBUILD_VERSION: {builder['cargo_zigbuild']}\n", workflow)
+        self.assertEqual(builder["zig"]["url"], f"https://ziglang.org/download/{builder['zig']['version']}/"
+                                                f"zig-x86_64-linux-{builder['zig']['version']}.tar.xz")
+        script = (ROOT / "scripts/ci/release/build-runtime-cw.sh").read_text()
+        # Exactly the pinned cargo-zigbuild, from its own lockfile, and the
+        # producer that never passes CODEWIRE_LOCAL_RUNTIME to the build.
+        self.assertIn('cargo-zigbuild --version \\"\\$ZIGBUILD\\"', script)
+        self.assertIn("cargo install --locked ", script)
+        self.assertIn("scripts/dev/build-native-managed-agent.py", script)
+        self.assertIn("check-cw-runtime", script)
+        self.assertNotIn("CODEWIRE_LOCAL_RUNTIME=", script)
+        producer = (ROOT / "scripts/dev/build-native-managed-agent.py").read_text()
+        self.assertNotIn("os.environ.copy()", producer)
+        self.assertIn('"PATH": path,', producer)
+
+    def test_bad_invocations_are_refused_before_docker(self):
+        base = fx.scratch("runtime-cw.")
+        self.addCleanup(shutil.rmtree, base)
+        files = {name: base / name for name in ("rust-std", "rust-std-2", "protoc.zip", "zig.tar.xz")}
+        for path in files.values():
+            path.write_bytes(b"not the pinned bytes\n")
+        script = str(ROOT / "scripts/ci/release/build-runtime-cw.sh")
+        inputs = ["--rust-std", str(files["rust-std"]), "--rust-std", str(files["rust-std-2"]),
+                  "--protoc-zip", str(files["protoc.zip"]), "--zig", str(files["zig.tar.xz"])]
+        good = ["--target", "x86_64-unknown-linux-musl", "--version", "v1.2.3", *inputs]
+        inside = ROOT / "scripts"
+        for args, message in (
+            (["--version", "v1.2.3", *inputs, "--output", str(base / "cw")], "--target must be"),
+            (["--target", "aarch64-unknown-linux-gnu", "--version", "v1.2.3", *inputs, "--output", str(base / "cw")],
+             "--target must be"),
+            (["--target", "x86_64-unknown-linux-musl", "--version", "1.2.3", *inputs, "--output", str(base / "cw")],
+             "--version must be vMAJOR.MINOR.PATCH"),
+            ([*good, "--output", "relative"], "--output must be an absolute path"),
+            ([*good, "--output", str(files["zig.tar.xz"])], "output already exists"),
+            ([*good, "--output", str(base / "missing/cw")], "output parent does not exist"),
+            ([*good, "--output", str(inside / "cw-runtime-test-output")], "inside the checkout and not git-ignored"),
+            ([*good, "--jobs", "16", "--output", str(base / "cw")], "--jobs must be 1 to 8"),
+            ([*good, "--output", str(base / "cw")], "no --rust-std is the pinned aarch64-unknown-linux-musl tarball"),
+        ):
+            result = subprocess.run(["bash", script, *args], capture_output=True, text=True, check=False,
+                                    env={"PATH": "/usr/bin:/bin"})
+            with self.subTest(args=args[-1]):
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(message, result.stderr)
+        self.assertEqual(sorted(path.name for path in base.iterdir()), sorted(files))
+        self.assertFalse((inside / "cw-runtime-test-output").exists())
+
+    def test_the_ci_work_directory_is_never_cw_source(self):
+        # The dry run builds inside its checkout, under .local-runtime/; the
+        # cw build's Cargo sources and target directory there must not enter
+        # the source digest its build record binds.
+        ignored = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-q", ".local-runtime/tmp/x.rs"],
+                                 check=False)
+        self.assertEqual(ignored.returncode, 0)
+        workflow = (ROOT / ".gitea/workflows/cw-release-dry-run.yaml").read_text()
+        self.assertIn('work="$GITHUB_WORKSPACE/.local-runtime"', workflow)
+
+
 class SourcesTest(unittest.TestCase):
     def setUp(self):
         self.base = fx.scratch("runtime-sources.")
@@ -418,6 +502,7 @@ class SourcesTest(unittest.TestCase):
     def test_pins_are_exact_and_agree_with_the_mac_tools(self):
         pins = sources.load_pins()
         self.assertEqual(set(pins["sources"]), {name for names in sources.SIDES.values() for name in names})
+        self.assertEqual(sources.SIDES["linux-host"], ("cloud-hypervisor", "virtiofsd"))
         for tool, name in (("macos-ext4-tool", "e2fsprogs"), ("macos-git-tool", "git")):
             module = load_tool(tool)
             self.assertEqual((pins["sources"][name]["url"], pins["sources"][name]["sha256"],
@@ -428,13 +513,42 @@ class SourcesTest(unittest.TestCase):
         self.assertTrue(pins["kernel_builder"]["image"].startswith("docker.io/library/archlinux@sha256:"))
 
     def test_initramfs_inputs_are_the_guest_root_pins(self):
-        pins = sources.load_pins()["initramfs_inputs"]
+        inputs = sources.load_pins()["initramfs_inputs"]
         script = (ROOT / "scripts/ci/verify/build-local-vmm-initramfs.sh").read_text()
-        self.assertIn(f"readonly ARM64_RUNC_SHA256='{pins['runc']['sha256']}'", script)
-        self.assertIn(f"readonly ARM64_BUSYBOX_SHA256='{pins['busybox']['member_sha256']}'", script)
-        self.assertIn(pins["busybox"]["sha256"], script)
-        self.assertIn(pins["busybox"]["url"], script)
-        self.assertIn(pins["runc"]["url"], script)
+        for target, prefix, arch, runc in (("aarch64-unknown-linux-musl", "ARM64", "aarch64", "arm64"),
+                                           ("x86_64-unknown-linux-musl", "X86_64", "x86_64", "amd64")):
+            pins = inputs[target]
+            with self.subTest(target=target):
+                self.assertIn(f"readonly {prefix}_RUNC_SHA256='{pins['runc']['sha256']}'", script)
+                self.assertIn(f"readonly {prefix}_BUSYBOX_SHA256='{pins['busybox']['member_sha256']}'", script)
+                self.assertIn(pins["busybox"]["sha256"], script)
+                self.assertIn(pins["busybox"]["url"], script)
+                self.assertEqual(pins["busybox"]["url"], "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/"
+                                                         f"{arch}/busybox-static-1.37.0-r30.apk")
+                self.assertEqual(pins["busybox"]["member"], "bin/busybox.static")
+                self.assertEqual(pins["runc"]["url"],
+                                 f"https://github.com/opencontainers/runc/releases/download/v1.5.1/runc.{runc}")
+        self.assertIn(inputs["aarch64-unknown-linux-musl"]["runc"]["url"], script)
+
+    def test_linux_runtime_pins_are_what_admission_and_qualification_require(self):
+        pins = sources.load_pins()
+        host = pins["linux_runtime"]
+        artifact = (ROOT / "crates/codewire-local-vmm/src/artifact.rs").read_text()
+        self.assertIn(f'pub const CLOUD_HYPERVISOR_RELEASE: &str = "{host["cloud_hypervisor"]["version"]}";',
+                      artifact)
+        self.assertIn(f'pub const VIRTIOFSD_RELEASE: &str = "{host["virtiofsd"]["version"]}";', artifact)
+        # The exact Cloud Hypervisor every Linux qualification ran.
+        smoke = (ROOT / "scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh").read_text()
+        self.assertIn(f"readonly REQUIRED_CH_SHA256='{host['cloud_hypervisor']['sha256']}'", smoke)
+        self.assertIn(f"readonly REQUIRED_CH_SIZE='{host['cloud_hypervisor']['size']}'", smoke)
+        self.assertEqual(host["cloud_hypervisor"]["url"], "https://github.com/cloud-hypervisor/cloud-hypervisor/"
+                                                          "releases/download/v53.0/cloud-hypervisor-static")
+        self.assertEqual(host["virtiofsd"]["member"], "target/x86_64-unknown-linux-musl/release/virtiofsd")
+        self.assertTrue(host["virtiofsd"]["url"].startswith("https://gitlab.com/-/project/21523468/uploads/"))
+        self.assertEqual(host["virtiofsd"]["release"], "https://gitlab.com/virtio-fs/virtiofsd/-/releases/v1.14.0")
+        # Each host program's source is a component of the Linux target.
+        for name, source in (("cloud_hypervisor", "cloud-hypervisor"), ("virtiofsd", "virtiofsd")):
+            self.assertEqual("v" + pins["sources"][source]["version"], host[name]["version"])
 
     def test_the_kernel_builder_installs_the_recorded_toolchains(self):
         # The builder installs exactly the toolchains the kernels' provenance
@@ -449,6 +563,27 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(x86_64["ld_version"], f"GNU ld (GNU Binutils) {packages['binutils'].split('-')[0]}")
         self.assertEqual(provenance["architectures"]["arm64"]["gcc_version"],
                          f"aarch64-linux-gnu-gcc (GCC) {packages['aarch64-linux-gnu-gcc'].split('-')[0]}")
+
+    def test_pins_of_the_wrong_shape_are_refused(self):
+        original = json.loads(sources.PINS.read_bytes())
+        for name, change in (
+            ("a guest root target is missing", lambda pins: pins["initramfs_inputs"].pop("x86_64-unknown-linux-musl")),
+            ("an unpinned BusyBox member", lambda pins: pins["initramfs_inputs"]["x86_64-unknown-linux-musl"]
+             ["busybox"].pop("member_sha256")),
+            ("another Cloud Hypervisor release", lambda pins: pins["linux_runtime"]["cloud_hypervisor"]
+             .__setitem__("version", "v52.0")),
+            ("an unpinned virtiofsd member", lambda pins: pins["linux_runtime"]["virtiofsd"].pop("member_sha256")),
+            ("an unsized Cloud Hypervisor", lambda pins: pins["linux_runtime"]["cloud_hypervisor"].pop("size")),
+            ("plain HTTP", lambda pins: pins["linux_runtime"]["virtiofsd"].__setitem__("url", "http://gitlab.com/x")),
+            ("an unpinned zig", lambda pins: pins["cw_runtime_builder"]["zig"].pop("sha256")),
+            ("a host source on no side", lambda pins: pins["sources"].__setitem__("qemu", pins["sources"]["runc"])),
+        ):
+            pins = json.loads(json.dumps(original))
+            change(pins)
+            path = self.base / f"{len(name)}-{abs(hash(name))}.json"
+            path.write_text(json.dumps(pins))
+            with self.subTest(name), self.assertRaises(sources.SourcesError):
+                sources.load_pins(path)
 
     def synthetic(self):
         """Pins whose sources are served from memory."""
@@ -493,8 +628,13 @@ class SourcesTest(unittest.TestCase):
         kernel.mkdir()
         (kernel / "linux-source.tar.xz").write_bytes(b"synthetic linux source\n")
         linux = sources.fetch_side("linux", self.base / "linux", kernel, pins, fetch)
+        host = sources.fetch_side("linux-host", self.base / "linux-host", None, pins, fetch)
         mac = sources.fetch_side("macos", self.base / "macos", None, pins, fetch)
         self.assertEqual([component["name"] for component in linux], list(sources.SIDES["linux"]))
+        self.assertEqual([component["name"] for component in host], ["cloud-hypervisor", "virtiofsd"])
+        self.assertEqual([component["file"] for component in host],
+                         ["cloud-hypervisor.tar.gz", "virtiofsd.tar.gz"])
+        self.assertEqual(host[1]["license"], "Apache-2.0 AND BSD-3-Clause")
         self.assertEqual([component["name"] for component in mac], ["e2fsprogs", "git"])
         listed = json.loads((self.base / "linux/components.json").read_bytes())
         self.assertEqual(listed, linux)

@@ -151,11 +151,14 @@ linux() {
   # Alpine BusyBox and official runc, in the pinned Rust 1.93.0 container
   # (the runner's sealed toolchain has no arm64 musl target).
   log "building the arm64 guest root"
-  fetch "$(pin initramfs_inputs busybox url)" "$(pin initramfs_inputs busybox sha256)" "$work/busybox.apk"
+  fetch "$(pin initramfs_inputs aarch64-unknown-linux-musl busybox url)" \
+    "$(pin initramfs_inputs aarch64-unknown-linux-musl busybox sha256)" "$work/busybox.apk"
   mkdir "$work/busybox"
-  tar -xzf "$work/busybox.apk" -C "$work/busybox" "$(pin initramfs_inputs busybox member)" 2>/dev/null ||
-    die "the BusyBox package holds no $(pin initramfs_inputs busybox member)"
-  fetch "$(pin initramfs_inputs runc url)" "$(pin initramfs_inputs runc sha256)" "$work/runc.arm64"
+  tar -xzf "$work/busybox.apk" -C "$work/busybox" \
+    "$(pin initramfs_inputs aarch64-unknown-linux-musl busybox member)" 2>/dev/null ||
+    die "the BusyBox package holds no $(pin initramfs_inputs aarch64-unknown-linux-musl busybox member)"
+  fetch "$(pin initramfs_inputs aarch64-unknown-linux-musl runc url)" \
+    "$(pin initramfs_inputs aarch64-unknown-linux-musl runc sha256)" "$work/runc.arm64"
   local target
   local -a rust_std=()
   for target in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
@@ -164,7 +167,8 @@ linux() {
     rust_std+=(--rust-std "$work/rust-std-$target.tar.xz")
   done
   fetch "$(pin guest_root_builder protoc url)" "$(pin guest_root_builder protoc sha256)" "$work/protoc.zip"
-  "$release_dir/build-runtime-guest-root.sh" --busybox "$work/busybox/$(pin initramfs_inputs busybox member)" \
+  "$release_dir/build-runtime-guest-root.sh" --target aarch64-unknown-linux-musl \
+    --busybox "$work/busybox/$(pin initramfs_inputs aarch64-unknown-linux-musl busybox member)" \
     --runc "$work/runc.arm64" "${rust_std[@]}" --protoc-zip "$work/protoc.zip" \
     --output "$output/initramfs.cpio" ${shared[@]+"${shared[@]}"}
 

@@ -77,9 +77,10 @@ PARTS = {
     },
 }
 # Every input of the runtime a release builds: the slow parts' producers, the
-# guest root's probe, the VZ helper and the scripts that assemble and check
-# them. The four-target dry run builds the runtime when one changes, and
-# otherwise only checks the slow parts are cached. A trailing / names a tree.
+# guest root's probe, the VZ helper, the cw runtime producers and the scripts
+# that assemble and check them. The four-target dry run builds the runtime
+# when one changes, and otherwise only checks the slow parts are cached. A
+# trailing / names a tree.
 RUNTIME_INPUTS = (
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -91,6 +92,9 @@ RUNTIME_INPUTS = (
     "scripts/ci/release/",
     "scripts/ci/select/",
     "scripts/dev/macos-local-runtime.py",
+    "scripts/dev/linux-local-runtime.py",
+    "scripts/dev/build-native-managed-agent.py",
+    "scripts/dev/cw-runtime-image.py",
     "scripts/dev/macos-ext4-tool.py",
     "scripts/dev/macos-git-tool.py",
     "scripts/dev/macos-cli.py",

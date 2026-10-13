@@ -43,16 +43,59 @@
     }
   },
   "initramfs_inputs": {
-    "busybox": {
-      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/busybox-static-1.37.0-r30.apk",
-      "sha256": "44c9abdfb970f398fa72c8382fe2d8808eea16beaf82daf6ac708b92f1b8659e",
-      "member": "bin/busybox.static",
-      "member_sha256": "198f6f675a49ac734082e054b823d3e2e947180ca2f632852ae1c09e950fd676"
+    "aarch64-unknown-linux-musl": {
+      "busybox": {
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/busybox-static-1.37.0-r30.apk",
+        "sha256": "44c9abdfb970f398fa72c8382fe2d8808eea16beaf82daf6ac708b92f1b8659e",
+        "member": "bin/busybox.static",
+        "member_sha256": "198f6f675a49ac734082e054b823d3e2e947180ca2f632852ae1c09e950fd676"
+      },
+      "runc": {
+        "url": "https://github.com/opencontainers/runc/releases/download/v1.5.1/runc.arm64",
+        "sha256": "ca70e7dbd6616ca782a59b5d3ac86909123fdaa9fa3f89dcf29051c70eee7ce9"
+      }
     },
-    "runc": {
-      "url": "https://github.com/opencontainers/runc/releases/download/v1.5.1/runc.arm64",
-      "sha256": "ca70e7dbd6616ca782a59b5d3ac86909123fdaa9fa3f89dcf29051c70eee7ce9"
+    "x86_64-unknown-linux-musl": {
+      "busybox": {
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/busybox-static-1.37.0-r30.apk",
+        "sha256": "bb30365b954f531938a33de18173342185844828863121d7e821115d2f7f29c9",
+        "member": "bin/busybox.static",
+        "member_sha256": "82bbbabec12a985ae58810cfe975c3399264dc888aa592d8e460732bdd30a8dd"
+      },
+      "runc": {
+        "url": "https://github.com/opencontainers/runc/releases/download/v1.5.1/runc.amd64",
+        "sha256": "177df879d50c913eb205e898d5c1c05a18f574053c0ce5524c471208eaf06f6f"
+      }
     }
+  },
+  "linux_runtime": {
+    "cloud_hypervisor": {
+      "version": "v53.0",
+      "origin": "the upstream release asset cloud-hypervisor-static: a static musl x86_64 build, the exact binary every Linux qualification ran",
+      "release": "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/tag/v53.0",
+      "url": "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/cloud-hypervisor-static",
+      "size": 7062256,
+      "sha256": "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
+    },
+    "virtiofsd": {
+      "version": "v1.14.0",
+      "origin": "the maintainers' upload to the v1.14.0 release: the static musl x86_64 build of upstream CI's publish job (rust:alpine, libseccomp and libcap-ng linked statically), from release commit c2540f8db14caba81c1e37fba23fc7bf2cd7f0dd",
+      "release": "https://gitlab.com/virtio-fs/virtiofsd/-/releases/v1.14.0",
+      "url": "https://gitlab.com/-/project/21523468/uploads/f505704014ae7a816e515f2a05a93d8b/virtiofsd-v1.14.0.zip",
+      "sha256": "2e4fe9571f492b00baa34bc4e708e950039c5da05b830b31a8d179cb6ac8978e",
+      "member": "target/x86_64-unknown-linux-musl/release/virtiofsd",
+      "member_size": 3303496,
+      "member_sha256": "15b2e72a78cc08a9bd8a6943e89fb69c88cb3cbeb63069efceade835342ac7d4"
+    }
+  },
+  "cw_runtime_builder": {
+    "origin": "the guest_root_builder image with the pinned zig and cargo-zigbuild, which cross-build the static musl cw as release delivery does; build-time tools only, never shipped",
+    "zig": {
+      "version": "0.15.2",
+      "url": "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz",
+      "sha256": "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"
+    },
+    "cargo_zigbuild": "0.23.0"
   },
   "sources": {
     "linux": {
@@ -188,6 +231,20 @@
       "license": "GPL-2.0-only",
       "url": "https://www.kernel.org/pub/software/scm/git/git-2.56.0.tar.xz",
       "sha256": "26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3"
+    },
+    "cloud-hypervisor": {
+      "version": "53.0",
+      "license": "Apache-2.0 AND BSD-3-Clause",
+      "url": "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/cloud-hypervisor-v53.0.tar.xz",
+      "sha256": "7d806fc1ee42dc4cf5af1293925ab0f741c676ccd29b7f1fa6cb798c01c51f1f",
+      "note": "the upstream release source, with every crate it builds vendored"
+    },
+    "virtiofsd": {
+      "version": "1.14.0",
+      "license": "Apache-2.0 AND BSD-3-Clause",
+      "url": "https://static.crates.io/crates/virtiofsd/virtiofsd-1.14.0.crate",
+      "sha256": "7051accc9cf2816e25945c8216e6d4be2b4e75fc5e77559cd7eed5e400245cc1",
+      "note": "the published crate, packaged from release commit c2540f8db14caba81c1e37fba23fc7bf2cd7f0dd"
     }
   }
 }
