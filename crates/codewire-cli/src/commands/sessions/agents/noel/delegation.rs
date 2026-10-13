@@ -10,10 +10,12 @@
 //! the path its driver resolved when it started.
 use super::*;
 
+mod skill;
+
 /// The skill's name: its frontmatter's and its directory's.
 pub(super) const NAME: &str = "codewire-delegation";
 /// The skill as checked in. [`CW`] stands for the running `cw`.
-pub(super) const SKILL: &str = include_str!("delegation/SKILL.md");
+pub(super) const SKILL: &str = skill::TEXT;
 const CW: &str = "{{cw}}";
 
 /// `path` as one word of a shell command, quoted only if it needs it.
