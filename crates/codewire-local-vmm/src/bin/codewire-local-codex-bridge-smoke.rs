@@ -188,6 +188,9 @@ socket.on('error',()=>{const code=phase==='post-handshake'?75:timedOut?74:phase=
         request_id: Option<String>,
         content_type: Option<String>,
         opaque_header_present: bool,
+        /// Whether that header names `[REDACTED]` and holds no synthetic
+        /// credential; `None` when it is absent.
+        opaque_header_redacted: Option<bool>,
         body: String,
     }
 
@@ -207,7 +210,7 @@ headers={'content-type':'application/json','anthropic-version':'2023-06-01','aut
 input={model:'claude-sonnet-4-6',messages:[{role:'user',content:'Return the synthetic marker.'}]};
 }else process.exit(83);
 const body=JSON.stringify(input);headers['content-length']=Buffer.byteLength(body);
-const request=http.request(url,{method:'POST',headers},response=>{const chunks=[];let size=0;response.on('data',chunk=>{size+=chunk.length;if(size>262144){request.destroy();process.exit(84);}chunks.push(chunk);});response.on('error',()=>process.exit(85));response.on('end',()=>process.stdout.write(JSON.stringify({status:response.statusCode,request_id:response.headers[mode==='openai'?'x-request-id':'request-id']??null,content_type:response.headers['content-type']??null,opaque_header_present:response.headers['x-error-json']!==undefined,body:Buffer.concat(chunks).toString('utf8')})));});
+const request=http.request(url,{method:'POST',headers},response=>{const chunks=[];let size=0;response.on('data',chunk=>{size+=chunk.length;if(size>262144){request.destroy();process.exit(84);}chunks.push(chunk);});response.on('error',()=>process.exit(85));response.on('end',()=>process.stdout.write(JSON.stringify({status:response.statusCode,request_id:response.headers[mode==='openai'?'x-request-id':'request-id']??null,content_type:response.headers['content-type']??null,opaque_header_present:response.headers['x-error-json']!==undefined,opaque_header_redacted:response.headers['x-error-json']===undefined?null:(String(response.headers['x-error-json']).includes('[REDACTED]')&&!String(response.headers['x-error-json']).includes('cwlocal')),body:Buffer.concat(chunks).toString('utf8')})));});
 request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.exit(86));request.end(body);"#;
 
     const CLAUDE_RESOLVER_SCRIPT: &str = "PATH=/opt/codewire/agents/npm/bin:/home/codewire/.npm-global/bin:/usr/bin:/bin; export PATH; command -v claude";
@@ -776,9 +779,11 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
                     &selected.anthropic,
                     BrokerLeaseAuditDecision::Admitted,
                 ),
+                // Each transparent route has one leased operation (#2536):
+                // a count_tokens request is leased as `messages`.
                 ExpectedAudit::AnthropicCountTokens => (
                     "anthropic",
-                    "count-tokens",
+                    "messages",
                     "anthropic-api",
                     &selected.anthropic,
                     BrokerLeaseAuditDecision::Admitted,
@@ -1339,6 +1344,10 @@ function generalEgress(){
         serde_json::from_slice(&output.stdout).map_err(Into::into)
     }
 
+    /// The transparent routes (#2536) return every upstream header, each
+    /// redacted. The synthetic upstream reflects the injected credential in
+    /// its request id and in a diagnostic `x-error-json` header; both must
+    /// arrive, and neither may hold the credential.
     fn require_selected_response_headers(
         response: &SelectedHttpProbeOutput,
         content_type: &str,
@@ -1347,7 +1356,8 @@ function generalEgress(){
             response.status == 200
                 && response.request_id.as_deref() == Some("[REDACTED]")
                 && response.content_type.as_deref() == Some(content_type)
-                && !response.opaque_header_present,
+                && response.opaque_header_present
+                && response.opaque_header_redacted == Some(true),
         )
     }
 
@@ -2587,13 +2597,14 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                 status: 200,
                 request_id: Some("[REDACTED]".into()),
                 content_type: Some(content_type.into()),
-                opaque_header_present: false,
+                opaque_header_present: true,
+                opaque_header_redacted: Some(true),
                 body,
             }
         }
 
         #[test]
-        fn selected_responses_require_exact_markers_framing_and_filtered_headers() {
+        fn selected_responses_require_exact_markers_framing_and_redacted_headers() {
             let body = String::from_utf8(SYNTHETIC_RESPONSE.to_vec())
                 .unwrap()
                 .replace(CODEX_MARKER, MANAGED_OPENAI_MARKER);
@@ -2637,13 +2648,17 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                     .is_err()
                 );
             }
-            for mode in 0..4 {
+            for mode in 0..5 {
                 let mut response = selected_response("application/json", count.clone());
                 match mode {
                     0 => response.request_id = Some("synthetic-unredacted".into()),
-                    1 => response.opaque_header_present = true,
-                    2 => response.content_type = Some("text/event-stream".into()),
-                    3 => response.status = 403,
+                    1 => {
+                        response.opaque_header_present = false;
+                        response.opaque_header_redacted = None;
+                    }
+                    2 => response.opaque_header_redacted = Some(false),
+                    3 => response.content_type = Some("text/event-stream".into()),
+                    4 => response.status = 403,
                     _ => unreachable!(),
                 }
                 assert!(validate_count_tokens_response(&response).is_err());
@@ -3396,7 +3411,7 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                 ),
                 (
                     "anthropic",
-                    "count-tokens",
+                    "messages",
                     "anthropic-api",
                     &selected.anthropic,
                 ),
@@ -3642,6 +3657,7 @@ process.stdout.write(JSON.stringify({calls,exit_code:exitCode,captured,output,ti
                 let response: SelectedHttpProbeOutput =
                     serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
                 assert!(!response.opaque_header_present);
+                assert_eq!(response.opaque_header_redacted, None);
                 assert_eq!(response.request_id.as_deref(), Some("[REDACTED]"));
             }
         }
