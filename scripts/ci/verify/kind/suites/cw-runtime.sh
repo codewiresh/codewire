@@ -101,6 +101,56 @@ cw_runtime_pod_identity() {
   jq -cn --argjson pod "$identity" --argjson pvcs "$pvcs" '$pod | del(.claims) | .workspace_pvcs = $pvcs'
 }
 
+# Stop/Start replaces the Pod (#2651, #2639). The managed-agent records the
+# journey left stay in the session store and still list, an ordinary command
+# runs, and the new Pod, with its own request book, launches a managed agent
+# and stops it. Before #2651 every managed-agent request after a Start was
+# refused, and the CLI reported it as an unknown outcome.
+cw_runtime_managed_after_restart() {
+  local environment="$1" before_pod="$2" before_uid after_uid pod launched session listed
+  local state attempt output
+  before_uid="$(kubectl -n "$SANDBOX_NS" get pod "$before_pod" -o 'jsonpath={.metadata.uid}')"
+  kind_credential_cli env --platform stop "$environment" --output json >/dev/null
+  wait_kind_credential_environment "$environment" stopped
+  kind_credential_cli env --platform start "$environment" --output json >/dev/null
+  wait_kind_credential_environment "$environment" running
+  pod="$(kind_credential_workspace "$environment")"
+  after_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
+  [ -n "$after_uid" ] && [ "$after_uid" != "$before_uid" ] || {
+    echo '::error::Stop/Start did not replace the workspace Pod' >&2
+    return 1
+  }
+  listed="$(kind_credential_cli list "$environment" --output json)"
+  jq -e 'any(.[]; .command[1] == "__platform-agent-driver")' <<<"$listed" >/dev/null || {
+    echo '::error::the managed-agent records from the first Pod did not list after Stop/Start' >&2
+    return 1
+  }
+  launched="$(kind_credential_launch "$environment" --no-tty --detach --output json -- \
+    sh -c 'printf cw-runtime-after-restart')"
+  session="$(jq -er '.session_id | select(type == "string" and test("^session-[0-9a-f-]{36}$"))' \
+    <<<"$launched")"
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    state="$(kind_credential_cli list "$environment" --output json | jq -er --arg id "$session" '
+      [.[] | select(.session_id == $id)] |
+      if length == 1 then .[0] | "\(.state) \(.exit_code // "none")"
+      else error("expected one launched session") end')"
+    case "$state" in
+      "Starting "* | "Running "*) sleep 1 ;;
+      *) break ;;
+    esac
+  done
+  output="$(kind_credential_cli logs "$environment" "$session" --raw)"
+  [ "$state" = "Exited 0" ] && [ "$output" = cw-runtime-after-restart ] || {
+    echo "::error::an ordinary command after Stop/Start ended ${state:-unknown}" >&2
+    return 1
+  }
+  launched="$(kind_credential_cli run "$environment" --agent codex --output json)"
+  session="$(jq -er '(.sessionId // .session_id)
+    | select(type == "string" and test("^session-[0-9a-f-]{36}$"))' <<<"$launched")"
+  kind_credential_cli stop "$environment" "$session" --output json >/dev/null
+  log "the restarted Pod launched and stopped managed agent ${session}"
+}
+
 run_admitted_cw_runtime_journey() {
   local task="$1" KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment
   local managed="${CW_RUNTIME_MANAGED_AGENTS:-0}" anthropic_name=''
@@ -180,7 +230,8 @@ run_admitted_cw_runtime_journey() {
   # Nothing is projected before the profile is bound.
   kind_credential_probe "$environment" unselected
   # Profile setup may replace the initial sandbox before the baseline exists.
-  # It is completed once; no environment lifecycle change occurs afterward.
+  # It is completed once; the same-Pod CW journey follows on that Pod, and
+  # the managed journey then Stops and Starts the environment.
   update="$(kind_credential_cli env --platform update "$environment" \
     --profile "platform:$profile_name" --yes --output json)"
   generation="$(jq -er '.operation_generation |
@@ -228,6 +279,8 @@ run_admitted_cw_runtime_journey() {
     kind_credential_fixture_events | jq -e '
       any(.[]; .event == "api_key_attempt" and .family == "openai" and .api_attempt > 0)
       and any(.[]; .event == "api_key_attempt" and .family == "anthropic" and .api_attempt > 0)' >/dev/null
+    cw_runtime_managed_after_restart "$environment" "$pod"
+    pod="$(kind_credential_workspace "$environment")"
   fi
   # Public cleanup runs only after the complete journey, including Observe,
   # stale-incarnation refusal and permanent Attach closure, has succeeded.

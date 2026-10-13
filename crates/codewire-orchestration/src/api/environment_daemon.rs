@@ -1345,10 +1345,16 @@ fn daemon_run_error(error: tonic::Status) -> AppError {
     }
 }
 
+/// The daemon's session store did not open, so the request ran nothing. Its
+/// reason (paths, modes, record checks) stays in `cw env daemon status`.
+const SESSION_STORE_REFUSED: &str =
+    "environment session store is refused; run `cw env daemon status` for the reason";
+
 fn daemon_session_error(error: tonic::Status) -> AppError {
     tracing::warn!(code = ?error.code(), message = %error.message(), "environment daemon session RPC failed");
     match error.code() {
         tonic::Code::NotFound => AppError::NotFound("environment session not found".into()),
+        tonic::Code::DataLoss => AppError::Precondition(SESSION_STORE_REFUSED.into()),
         tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => AppError::Precondition(
             "environment daemon upgrade is required; run `cw env daemon repair`".into(),
         ),
@@ -1402,6 +1408,27 @@ mod tests {
         assert_eq!(projection, Duration::from_secs(30));
         assert!(DaemonRequestBudget::Launch.timeout() >= projection + Duration::from_secs(10));
         assert!(DaemonRequestBudget::Launch.timeout() < Duration::from_secs(60));
+    }
+
+    #[test]
+    fn session_errors_name_a_refused_store_without_its_private_reason() {
+        let private = "/home/codewire/.codewire is a directory with mode 0775";
+        let error = daemon_session_error(tonic::Status::data_loss(private));
+        assert!(matches!(
+            &error,
+            AppError::Precondition(message) if message.as_ref() == SESSION_STORE_REFUSED
+        ));
+        assert!(!format!("{error:?}").contains(private));
+        // An upgrade-required refusal and an unknown failure keep their meaning.
+        assert!(matches!(
+            daemon_session_error(tonic::Status::failed_precondition(private)),
+            AppError::Precondition(message) if message.as_ref()
+                == "environment daemon upgrade is required; run `cw env daemon repair`"
+        ));
+        assert!(matches!(
+            daemon_session_error(tonic::Status::internal(private)),
+            AppError::InternalMsg(message) if message.as_ref() == "environment session request failed"
+        ));
     }
 
     #[test]

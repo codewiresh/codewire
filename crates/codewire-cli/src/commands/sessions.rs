@@ -64,7 +64,7 @@ impl EnvironmentSessionTarget {
         match self {
             #[cfg(unix)]
             Self::Host { environment, .. } => Ok(host_environment_session_view(
-                host_session_client(environment)
+                host_stop_client(environment)
                     .await?
                     .stop(session_id)
                     .await?,
@@ -390,7 +390,7 @@ impl EnvironmentSessionTarget {
         match self {
             #[cfg(unix)]
             Self::Host { environment, .. } => Ok(host_environment_session_view(
-                host_session_client(environment)
+                host_stop_client(environment)
                     .await?
                     .restart(session_id)
                     .await?,

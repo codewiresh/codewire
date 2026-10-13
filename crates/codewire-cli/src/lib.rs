@@ -754,7 +754,7 @@ async fn run_hosted_daemon() -> anyhow::Result<()> {
         .try_init();
     match codewire_daemon::HostedDaemonMode::from_env()? {
         codewire_daemon::HostedDaemonMode::EnvironmentToken(config) => {
-            serve_hosted_daemon(*config, false, None, None).await
+            serve_hosted_daemon(*config, false, None, None, None).await
         }
         codewire_daemon::HostedDaemonMode::Binding(config) => run_bound_hosted_daemon(config).await,
     }
@@ -785,6 +785,8 @@ async fn run_bound_hosted_daemon(
     paths
         .install_binding(&bound.binding)
         .context("install hosted daemon binding")?;
+    // The binding was accepted for exactly this Pod.
+    let pod_uid = config.pod_uid().to_owned();
     let daemon_config = config.into_config(&bound.binding);
     // Workspace access (#2460): the daemon serves SSH itself, reaching its
     // own gRPC service in-process, and the environment's application ports
@@ -831,7 +833,14 @@ async fn run_bound_hosted_daemon(
     }
     #[cfg(not(target_os = "linux"))]
     drop(connector);
-    serve_hosted_daemon(daemon_config, true, Some(local), Some(app_ports)).await
+    serve_hosted_daemon(
+        daemon_config,
+        true,
+        Some(local),
+        Some(app_ports),
+        Some(pod_uid),
+    )
+    .await
 }
 
 #[cfg(not(unix))]
@@ -846,6 +855,7 @@ async fn serve_hosted_daemon(
     bound: bool,
     local: Option<codewire_daemon::local_transport::LocalDaemonIncoming>,
     app_ports: Option<codewire_daemon::app_ports::AppPortsSender>,
+    pod_uid: Option<String>,
 ) -> anyhow::Result<()> {
     use tokio_stream::wrappers::TcpListenerStream;
 
@@ -865,6 +875,12 @@ async fn serve_hosted_daemon(
     #[cfg(target_os = "linux")]
     codewire_daemon::claude_home::ClaudeHome::new(&config.home_root, &config.workspace_root)
         .prepare(config.managed_credential_clients);
+    // Stock `gh` reaches the GitHub API route only through this daemon's Unix
+    // ingress socket. While the GitHub client is selected, sessions are given
+    // Codewire's own `gh` configuration directory; its one file is written
+    // here, beside the sockets, and removed when GitHub is not selected.
+    #[cfg(target_os = "linux")]
+    codewire_daemon::gh_config::GhConfig::default().prepare(config.managed_credential_clients);
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
         .await
         .with_context(|| format!("listen hosted daemon {}", config.listen_addr))?;
@@ -890,11 +906,12 @@ async fn serve_hosted_daemon(
     // Once listening, the hosted daemon also keeps Codex's own ChatGPT login
     // while the broker delivers one, in the same home.
     #[cfg(target_os = "linux")]
-    return match app_ports {
+    return match app_ports.zip(pod_uid) {
         // A bound daemon also accepts orchestration's application-port pushes.
-        Some(app_ports) => {
+        Some((app_ports, pod_uid)) => {
             codewire_daemon::serve_bound_hosted_grpc_with_incoming(
                 config,
+                &pod_uid,
                 codewire_daemon::codex_home::CodexHome::default(),
                 app_ports,
                 incoming,
@@ -913,7 +930,7 @@ async fn serve_hosted_daemon(
         }
     };
     #[cfg(not(target_os = "linux"))]
-    let _ = app_ports;
+    let _ = (app_ports, pod_uid);
     #[cfg(not(target_os = "linux"))]
     codewire_daemon::serve_grpc_with_incoming(config, incoming, hosted_daemon_shutdown_signal())
         .await

@@ -75,14 +75,29 @@ The native supervisor owns the VM lifecycle and the guest daemon owns its
 sessions. Launch the lead and workers through the host CLI. Their parent must
 be a running managed session in this same VM.
 
+As in a platform sandbox, a managed agent runs the workspace image's pinned
+Codex or Claude Code, even after you update that CLI inside the VM; your
+updated version is what your own terminal runs. On an image without the pinned
+clients, such as a custom image, the managed agent runs the CLI on the VM's
+PATH, and `cw run --agent` prints one line naming it and the reason.
+
+In a VM or a platform sandbox, managed Claude starts in auto mode
+(`--permission-mode auto`), so it can run tools such as Bash without a prompt.
+It keeps the Sandbox user's Claude settings and permission rules; setting
+`permissions.disableAutoMode` there turns auto mode off.
+
 ### Platform sandbox
 
 Sign in and select your organization, then use your repository URL and an
 existing platform credential profile with a credential for each agent. Codex
 uses the profile's Codex credential (your ChatGPT sign-in or an API key), or
 its OpenAI API key when it has no Codex credential. Claude uses its Anthropic
-credential. Codewire adds the credential outside the Sandbox; a managed
-agent's own Codex or Claude home holds only the local route:
+credential: an API key or a Claude subscription token. With a subscription
+token from `claude setup-token`, managed and interactive turns work, but
+Claude Code shows "Claude API" in place of your plan and `/usage` is not
+available. Codewire adds the credential outside the Sandbox. A managed Codex
+agent's own Codex home holds only the local route; a managed Claude agent uses
+the Sandbox's own Claude settings and the same local route as your terminal:
 
 ```bash
 cw setup
@@ -98,7 +113,9 @@ repository boundary.
 
 Credential profiles and application-secret sources are separate selections.
 A profile authorizes provider-specific execution or proxying; application
-secrets supply ordinary workload environment values. Keep provider credentials
+secrets supply ordinary workload environment values. In a VM or a platform
+sandbox a managed agent starts with the selected application secrets in its
+environment, as a terminal session does. Keep provider credentials
 out of task prompts and inline `--env` arguments. See
 [Secrets](@/organizations/secrets.md) for the storage and delivery distinction.
 

@@ -26,6 +26,9 @@ async fn main() -> anyhow::Result<()> {
     let session_token = required_env("SMOKE_SESSION_TOKEN")?;
     let org_id = required_env("SMOKE_ORG_ID")?;
     let cluster_name = required_env("KIND_CLUSTER_NAME")?;
+    // The suite names its checked-in entrypoint: this binary may be built in
+    // a container whose source path is not the checkout it runs against.
+    let kind_e2e = required_env("SMOKE_KIND_E2E")?;
     let image = std::env::var("SMOKE_WORKSPACE_IMAGE").unwrap_or_else(|_| {
         codewire_orchestration::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE.into()
     });
@@ -103,15 +106,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Observe the product-created template before TTL cleanup removes it.
     // Reuse the checked-in assertion; an empty template set must still fail.
-    let provenance = tokio::process::Command::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../scripts/ci/verify/kind-e2e.sh"
-    ))
-    .args(["suite", "sandbox-supply-chain"])
-    .env("KIND_CLUSTER_NAME", cluster_name)
-    .status()
-    .await
-    .context("run live sandbox provenance gate")?;
+    let provenance = tokio::process::Command::new(&kind_e2e)
+        .args(["suite", "sandbox-supply-chain"])
+        .env("KIND_CLUSTER_NAME", cluster_name)
+        .status()
+        .await
+        .context("run live sandbox provenance gate")?;
     anyhow::ensure!(provenance.success(), "live sandbox provenance gate failed");
 
     sqlx::query(

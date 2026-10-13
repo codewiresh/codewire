@@ -4,6 +4,25 @@ fn clients(slots: &[&str]) -> ManagedCredentialClients {
     ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap()
 }
 
+/// Every name a selection projects: its reserved names, except the Anthropic
+/// form it did not select, and for GitHub the two `gh` names, which are
+/// projected without being reserved.
+fn projected_names(selected: ManagedCredentialClients) -> BTreeSet<&'static str> {
+    let mut names = selected.reserved_environment_keys();
+    if selected.contains(ManagedCredentialClient::Anthropic) {
+        names.remove("ANTHROPIC_API_KEY");
+        names.remove(if selected.anthropic_subscription_token() {
+            "ANTHROPIC_AUTH_TOKEN"
+        } else {
+            "CLAUDE_CODE_OAUTH_TOKEN"
+        });
+    }
+    if selected.contains(ManagedCredentialClient::GitHub) {
+        names.extend(["GH_CONFIG_DIR", "GH_TOKEN"]);
+    }
+    names
+}
+
 #[test]
 fn managed_clients_validate_exact_slots_without_discarding_github() {
     assert_eq!(clients(&[]), ManagedCredentialClients::default());
@@ -237,12 +256,25 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
         let empty = clients(&[]).for_placement(placement);
         assert!(empty.environment.is_empty());
         assert!(empty.codex.is_none());
-        // GitHub projects only Git's URL rewrite to the managed route.
+        // GitHub projects Git's URL rewrite to the managed route, and for
+        // stock `gh` a public placeholder and Codewire's own configuration
+        // directory, whose one file names the placement's ingress socket.
         let github = clients(&["github"]).for_placement(placement);
         assert!(github.codex.is_none());
+        let (gh_directory, ingress_socket) = match placement {
+            ManagedCredentialClientPlacement::Native => (
+                "/run/codewire-host/gh",
+                "/run/codewire-host/credential.sock",
+            ),
+            ManagedCredentialClientPlacement::Platform => {
+                ("/codewire/run/gh", "/codewire/run/credentials.sock")
+            }
+        };
         assert_eq!(
             github.environment,
             BTreeMap::from([
+                ("GH_CONFIG_DIR".to_owned(), gh_directory.to_owned()),
+                ("GH_TOKEN".to_owned(), "codewire-managed".to_owned()),
                 ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()),
                 (
                     "GIT_CONFIG_KEY_0".to_owned(),
@@ -254,6 +286,11 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
                 ),
             ])
         );
+        assert_eq!(
+            github.gh.as_ref().unwrap().config_yml(),
+            format!("version: 1\nhttp_unix_socket: {ingress_socket}\n")
+        );
+        assert!(empty.gh.is_none());
         let codex = clients(&["codex"]).for_placement(placement);
         let expected_home = match placement {
             ManagedCredentialClientPlacement::Native => "/run/codewire-agent/codex",
@@ -296,10 +333,11 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
         assert_eq!(
             anthropic.environment,
             BTreeMap::from([
-                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:38081".into()),
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    "http://127.0.0.1:38081/_codewire/anthropic".into()
+                ),
                 ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
-                ("ANTHROPIC_API_KEY".into(), String::new()),
-                ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
             ])
         );
         let ssh = clients(&["ssh"]).for_placement(placement);
@@ -315,6 +353,7 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
     }
     assert_eq!(MANAGED_HTTP_PORT, 38_081);
     assert_eq!(MANAGED_OPENAI_API_PREFIX, "/_codewire/openai/v1");
+    assert_eq!(MANAGED_ANTHROPIC_API_PREFIX, "/_codewire/anthropic");
     assert_eq!(MANAGED_GITHUB_GIT_PREFIX, "/_codewire/github/");
     assert_eq!(CODEX_NATIVE_HOME, "/run/codewire-agent/codex");
     assert_eq!(SSH_NATIVE_AUTH_SOCK, "/run/codewire-host/ssh-agent.sock");
@@ -343,11 +382,15 @@ fn managed_client_projection_covers_all_owned_names_without_environment_lookup()
                     .keys()
                     .map(String::as_str)
                     .collect::<BTreeSet<_>>(),
-                selected.reserved_environment_keys()
+                projected_names(selected)
             );
             assert_eq!(
                 projection.codex.is_some(),
                 selected.contains(ManagedCredentialClient::Codex)
+            );
+            assert_eq!(
+                projection.gh.is_some(),
+                selected.contains(ManagedCredentialClient::GitHub)
             );
             assert!(
                 projection
@@ -428,7 +471,7 @@ fn anthropic_subscription_form_adds_16_canonical_encodings_and_keeps_the_api_key
                     .keys()
                     .map(String::as_str)
                     .collect::<BTreeSet<_>>(),
-                subscription.reserved_environment_keys()
+                projected_names(subscription)
             );
             for (name, value) in &reference.environment {
                 if !name.starts_with("ANTHROPIC_") && name != "CLAUDE_CODE_OAUTH_TOKEN" {
@@ -496,22 +539,72 @@ fn anthropic_subscription_projection_is_the_exact_claude_code_oauth_placeholder(
         assert_eq!(
             projection.environment,
             BTreeMap::from([
-                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:38081".into()),
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    "http://127.0.0.1:38081/_codewire/anthropic".into()
+                ),
                 ("CLAUDE_CODE_OAUTH_TOKEN".into(), "codewire-managed".into()),
-                ("ANTHROPIC_AUTH_TOKEN".into(), String::new()),
-                ("ANTHROPIC_API_KEY".into(), String::new()),
             ])
         );
-        // The API-key form keeps its exact projection.
+        // The API-key form projects only its own variable too.
         assert_eq!(
             clients(&["anthropic"]).for_placement(placement).environment,
             BTreeMap::from([
-                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:38081".into()),
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    "http://127.0.0.1:38081/_codewire/anthropic".into()
+                ),
                 ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
-                ("ANTHROPIC_API_KEY".into(), String::new()),
-                ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
             ])
         );
+    }
+}
+
+/// Each Anthropic form projects only its own variable, never the other
+/// form's and never `ANTHROPIC_API_KEY`, while all four names stay reserved,
+/// so a declared value of any of them is still refused.
+#[test]
+fn each_anthropic_form_projects_only_its_own_variable_and_reserves_all_four() {
+    let api_key = clients(&["anthropic"]);
+    let subscription = api_key.with_anthropic_subscription_token().unwrap();
+    for placement in [
+        ManagedCredentialClientPlacement::Native,
+        ManagedCredentialClientPlacement::Platform,
+    ] {
+        for (selected, own, others) in [
+            (
+                subscription,
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            ),
+            (
+                api_key,
+                "ANTHROPIC_AUTH_TOKEN",
+                ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            ),
+        ] {
+            let environment = selected.for_placement(placement).environment;
+            assert_eq!(environment[own], "codewire-managed");
+            for other in others {
+                assert!(!environment.contains_key(other), "{other}");
+            }
+            // No projected value is empty: nothing is cleared by an empty
+            // string, which a client could read as set.
+            assert!(environment.values().all(|value| !value.is_empty()));
+            for name in [
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ] {
+                assert!(selected.reserved_environment_keys().contains(name));
+                assert_eq!(
+                    selected.check_collisions([name]),
+                    Err(ProjectionError::ManagedEnvironmentCollision),
+                    "{name}"
+                );
+            }
+        }
     }
 }
 
@@ -523,6 +616,9 @@ fn github_git_configuration_is_only_the_loopback_route() {
     ] {
         let projection = clients(&["github"]).for_placement(placement);
         for (name, value) in &projection.environment {
+            if !name.starts_with("GIT_CONFIG_") {
+                continue;
+            }
             // An endpoint only: no credential, token, placeholder or userinfo.
             for forbidden in ["@", "token", "codewire-managed", "Bearer", "Basic", "gh"] {
                 assert!(
@@ -552,5 +648,165 @@ fn a_declared_git_configuration_is_refused_while_github_is_selected() {
     assert_eq!(
         github.check_collisions(["GIT_CONFIG_KEY_1", "GIT_AUTHOR_NAME"]),
         Ok(())
+    );
+}
+
+/// Every managed HTTP route is the workspace's loopback ingress, so a proxy
+/// the user declares must never receive those requests. The exemption list is
+/// extended, never replaced, and only while an HTTP client is selected.
+#[test]
+fn a_declared_proxy_is_bypassed_for_loopback_while_an_http_client_is_selected() {
+    assert_eq!(MANAGED_NO_PROXY, ["127.0.0.1", "localhost", "::1"]);
+    assert_eq!(NO_PROXY_NAMES, ["NO_PROXY", "no_proxy"]);
+    for slots in [
+        &["codex"][..],
+        &["openai"],
+        &["anthropic"],
+        &["github"],
+        &["ssh", "github"],
+        &["codex", "openai", "anthropic", "ssh", "github"],
+    ] {
+        let selected = clients(slots);
+        assert!(selected.uses_loopback_http(), "{slots:?}");
+        // Nothing declared: exactly the loopback destinations.
+        for empty in [None, Some("")] {
+            assert_eq!(
+                selected.no_proxy(empty).as_deref(),
+                Some("127.0.0.1,localhost,::1"),
+                "{slots:?}"
+            );
+        }
+        // A declared list keeps its entries, as written and in order.
+        assert_eq!(
+            selected
+                .no_proxy(Some("corp.example, 10.0.0.0/8,.internal"))
+                .as_deref(),
+            Some("corp.example, 10.0.0.0/8,.internal,127.0.0.1,localhost,::1")
+        );
+        // An entry already listed is not repeated, whatever its case.
+        assert_eq!(
+            selected
+                .no_proxy(Some("LOCALHOST,corp.example,127.0.0.1"))
+                .as_deref(),
+            Some("LOCALHOST,corp.example,127.0.0.1,::1")
+        );
+        assert_eq!(
+            selected.no_proxy(Some("*")).as_deref(),
+            Some("*,127.0.0.1,localhost,::1")
+        );
+        assert_eq!(
+            selected.no_proxy(Some("corp.example,")).as_deref(),
+            Some("corp.example,127.0.0.1,localhost,::1")
+        );
+        // Applying it again changes nothing.
+        let once = selected.no_proxy(Some("corp.example")).unwrap();
+        assert_eq!(selected.no_proxy(Some(&once)), Some(once));
+    }
+    // SSH alone, or nothing, uses no HTTP route: the value is the caller's.
+    for slots in [&[][..], &["ssh"]] {
+        let selected = clients(slots);
+        assert!(!selected.uses_loopback_http());
+        assert_eq!(selected.no_proxy(None), None);
+        assert_eq!(
+            selected.no_proxy(Some("corp.example")).as_deref(),
+            Some("corp.example")
+        );
+    }
+    // The names are not reserved and not part of the projected variables:
+    // a declared list is extended by each placement's environment builder.
+    let all = clients(&["codex", "openai", "anthropic", "ssh", "github"]);
+    assert_eq!(all.check_collisions(NO_PROXY_NAMES), Ok(()));
+    for placement in [
+        ManagedCredentialClientPlacement::Native,
+        ManagedCredentialClientPlacement::Platform,
+    ] {
+        let projection = all.for_placement(placement);
+        for name in NO_PROXY_NAMES {
+            assert!(!projection.environment.contains_key(name));
+        }
+    }
+}
+
+/// Stock `gh` is configured by a public placeholder and one Codewire-owned
+/// file. Neither can carry a credential: the placeholder is a fixed constant
+/// the broker never forwards, and the file names only a local socket.
+#[test]
+fn github_cli_configuration_is_a_public_placeholder_and_the_ingress_socket_only() {
+    assert_eq!(GH_TOKEN_PLACEHOLDER, "codewire-managed");
+    assert_eq!(GH_CONFIG_FILE_NAME, "config.yml");
+    for (placement, directory, socket, signer) in [
+        (
+            ManagedCredentialClientPlacement::Native,
+            GH_NATIVE_CONFIG_DIR,
+            MANAGED_HTTP_NATIVE_SOCKET,
+            SSH_NATIVE_AUTH_SOCK,
+        ),
+        (
+            ManagedCredentialClientPlacement::Platform,
+            GH_PLATFORM_CONFIG_DIR,
+            MANAGED_HTTP_PLATFORM_SOCKET,
+            SSH_PLATFORM_AUTH_SOCK,
+        ),
+    ] {
+        let projection = clients(&["github"]).for_placement(placement);
+        assert_eq!(projection.environment["GH_TOKEN"], GH_TOKEN_PLACEHOLDER);
+        assert_eq!(projection.environment["GH_CONFIG_DIR"], directory);
+        // No host override: `gh` keeps its own default, github.com.
+        for absent in ["GH_HOST", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_REPO"] {
+            assert!(!projection.environment.contains_key(absent), "{absent}");
+        }
+        let config = projection.gh.unwrap();
+        assert_eq!(
+            config.config_yml().lines().collect::<Vec<_>>(),
+            ["version: 1", &format!("http_unix_socket: {socket}")]
+        );
+        for forbidden in [
+            "token",
+            "oauth",
+            "hosts",
+            "user",
+            "git_protocol",
+            "@",
+            "http://",
+        ] {
+            assert!(!config.config_yml().contains(forbidden), "{forbidden}");
+        }
+        // The directory and the HTTP ingress socket sit beside the signer
+        // socket, in the placement's one runtime directory.
+        let runtime = std::path::Path::new(signer).parent().unwrap();
+        assert_eq!(std::path::Path::new(directory).parent(), Some(runtime));
+        assert_eq!(std::path::Path::new(socket).parent(), Some(runtime));
+        // Without GitHub nothing of `gh` is projected, whatever else is.
+        let others = clients(&["codex", "openai", "anthropic", "ssh"]).for_placement(placement);
+        assert!(others.gh.is_none());
+        assert!(
+            !others
+                .environment
+                .keys()
+                .any(|name| name.starts_with("GH_"))
+        );
+    }
+}
+
+/// The `gh` names are projected but not reserved. The reserved set is bound
+/// into each environment's projection selection digest, so it stays exactly
+/// Git's three names; `GH_TOKEN` is refused with the GitHub provider's own.
+#[test]
+fn github_cli_names_do_not_change_the_reserved_set() {
+    let github = clients(&["github"]);
+    assert_eq!(
+        github.reserved_environment_keys(),
+        ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        github.check_collisions(["GH_CONFIG_DIR", "GH_TOKEN"]),
+        Ok(())
+    );
+    assert!(
+        crate::HttpProvider::GitHubOAuth
+            .reserved_environment_keys()
+            .contains(&"GH_TOKEN")
     );
 }

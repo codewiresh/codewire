@@ -253,7 +253,22 @@ impl WorkspacePlan {
                     .ok_or(WorkspacePlanError::Plan)
             })
             .collect::<Result<_, _>>()?;
+        // An image value of a selected client's name is removed, whether or
+        // not that name is projected (the Anthropic form that was not
+        // selected is reserved but absent), as the daemon does for the
+        // sessions it starts.
+        let reserved = clients.reserved_environment_keys();
+        environment.retain(|name, _| !reserved.contains(name.as_str()));
         environment.extend(projection.environment);
+        // Every managed HTTP route is the workspace's loopback ingress. A
+        // proxy the image or the project declares must never receive those
+        // requests, so the exemption list is extended (never replaced) by
+        // the shared rule, as the daemon does for the sessions it starts.
+        for name in codewire_access::NO_PROXY_NAMES {
+            if let Some(value) = clients.no_proxy(environment.get(name).map(String::as_str)) {
+                environment.insert(name.to_owned(), value);
+            }
+        }
         self.environment = environment
             .into_iter()
             .map(|(key, value)| format!("{key}={value}"))
@@ -1064,6 +1079,192 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    /// The workspace's own environment exempts loopback from a declared proxy
+    /// while an HTTP client is selected, by the rule the daemon applies to
+    /// the sessions it starts: a declared list is extended, never replaced.
+    #[test]
+    fn a_declared_proxy_is_bypassed_for_loopback_while_an_http_client_is_selected() {
+        use codewire_access::ManagedCredentialClients;
+        const LOOPBACK: &str = "127.0.0.1,localhost,::1";
+        let root = root();
+        let config = config(json!({}));
+        let header = setup(&config);
+        let plain =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        let mut declared = plain.clone();
+        for (name, value) in [
+            ("HTTPS_PROXY", "http://proxy.example:3128"),
+            ("NO_PROXY", "corp.example,10.0.0.0/8"),
+        ] {
+            declared.environment.push(format!("{name}={value}"));
+            declared.explicit_environment_keys.push(name.into());
+        }
+        declared.environment.sort();
+        declared.explicit_environment_keys.sort();
+        let values = |plan: WorkspacePlan, slots: &[&str]| -> BTreeMap<String, String> {
+            plan.with_managed_credential_clients(
+                ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap(),
+            )
+            .unwrap()
+            .environment
+            .iter()
+            .map(|entry| {
+                let (name, value) = entry.split_once('=').unwrap();
+                (name.to_owned(), value.to_owned())
+            })
+            .collect()
+        };
+        for slots in [&["anthropic"][..], &["codex", "github", "ssh"]] {
+            let environment = values(plain.clone(), slots);
+            assert_eq!(environment["NO_PROXY"], LOOPBACK, "{slots:?}");
+            assert_eq!(environment["no_proxy"], LOOPBACK, "{slots:?}");
+
+            let environment = values(declared.clone(), slots);
+            assert_eq!(environment["HTTPS_PROXY"], "http://proxy.example:3128");
+            assert_eq!(
+                environment["NO_PROXY"],
+                format!("corp.example,10.0.0.0/8,{LOOPBACK}")
+            );
+            assert_eq!(environment["no_proxy"], LOOPBACK);
+        }
+        // The signer alone, or no selection, uses no HTTP route.
+        for slots in [&[][..], &["ssh"]] {
+            let environment = values(plain.clone(), slots);
+            assert!(!environment.contains_key("NO_PROXY") && !environment.contains_key("no_proxy"));
+            let environment = values(declared.clone(), slots);
+            assert_eq!(environment["NO_PROXY"], "corp.example,10.0.0.0/8");
+            assert!(!environment.contains_key("no_proxy"));
+        }
+    }
+
+    /// The `gh` names are projected without being reserved, so a declared
+    /// value is not refused. The managed value wins over it while GitHub is
+    /// selected, as it does in a hosted Sandbox, and the declared value is
+    /// the workload's own otherwise.
+    #[test]
+    fn a_declared_gh_configuration_loses_to_the_managed_one_while_github_is_selected() {
+        use codewire_access::ManagedCredentialClients;
+        let root = root();
+        let config = config(json!({}));
+        let header = setup(&config);
+        let mut declared =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        for (name, value) in [
+            ("GH_CONFIG_DIR", "/home/codewire/.config/gh"),
+            ("GH_TOKEN", "declared"),
+        ] {
+            declared.environment.push(format!("{name}={value}"));
+            declared.explicit_environment_keys.push(name.into());
+        }
+        declared.environment.sort();
+        declared.explicit_environment_keys.sort();
+        let values = |plan: &WorkspacePlan| -> BTreeMap<String, String> {
+            plan.environment
+                .iter()
+                .map(|entry| {
+                    let (name, value) = entry.split_once('=').unwrap();
+                    (name.to_owned(), value.to_owned())
+                })
+                .collect()
+        };
+
+        let selected = declared
+            .clone()
+            .with_managed_credential_clients(
+                ManagedCredentialClients::from_profile_slots(["github"]).unwrap(),
+            )
+            .unwrap();
+        let environment = values(&selected);
+        assert_eq!(
+            environment["GH_CONFIG_DIR"],
+            codewire_access::GH_NATIVE_CONFIG_DIR
+        );
+        assert_eq!(
+            environment["GH_TOKEN"],
+            codewire_access::GH_TOKEN_PLACEHOLDER
+        );
+        assert_eq!(
+            selected
+                .environment
+                .iter()
+                .filter(|entry| entry.starts_with("GH_"))
+                .count(),
+            2
+        );
+
+        let unselected = declared
+            .with_managed_credential_clients(
+                ManagedCredentialClients::from_profile_slots(["codex"]).unwrap(),
+            )
+            .unwrap();
+        let environment = values(&unselected);
+        assert_eq!(environment["GH_CONFIG_DIR"], "/home/codewire/.config/gh");
+        assert_eq!(environment["GH_TOKEN"], "declared");
+    }
+
+    /// An image value of an Anthropic name never reaches the workspace while
+    /// the Anthropic client is selected: each form projects only its own
+    /// variable, and the other names are removed, not emptied.
+    #[test]
+    fn an_image_value_of_the_unselected_anthropic_form_is_removed() {
+        use codewire_access::ManagedCredentialClients;
+        let root = root();
+        let config = config(json!({}));
+        let header = setup(&config);
+        let mut plan =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ] {
+            plan.environment.push(format!("{name}=image-value"));
+        }
+        plan.environment.sort();
+        let names = |plan: &WorkspacePlan| -> BTreeMap<String, String> {
+            plan.environment
+                .iter()
+                .map(|entry| {
+                    let (name, value) = entry.split_once('=').unwrap();
+                    (name.to_owned(), value.to_owned())
+                })
+                .collect()
+        };
+        let api_key = ManagedCredentialClients::from_profile_slots(["anthropic"]).unwrap();
+        for (clients, own, others) in [
+            (
+                api_key,
+                "ANTHROPIC_AUTH_TOKEN",
+                ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+            ),
+            (
+                api_key.with_anthropic_subscription_token().unwrap(),
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+            ),
+        ] {
+            let environment = names(
+                &plan
+                    .clone()
+                    .with_managed_credential_clients(clients)
+                    .unwrap(),
+            );
+            assert_eq!(environment[own], "codewire-managed");
+            for other in others {
+                assert!(!environment.contains_key(other), "{other}");
+            }
+        }
+        // Without the Anthropic client the image's values are the workload's.
+        let environment = names(
+            &plan
+                .with_managed_credential_clients(
+                    ManagedCredentialClients::from_profile_slots(["codex"]).unwrap(),
+                )
+                .unwrap(),
+        );
+        assert_eq!(environment["ANTHROPIC_API_KEY"], "image-value");
     }
 
     #[test]

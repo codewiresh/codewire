@@ -41,21 +41,29 @@ SERVICES = {
     "dashboard": "codewire-dashboard-web",
     "daemon": "codewire-cli-bin",
 }
-# Copied for every build: the workspace manifest and lock, the protobuf
-# sources every service compiles through codewire-daemon-proto, and the build
-# recipe (toolchain image and the kind-dev build step).
+# The build recipe: the toolchain image, the compiler wrapper it installs, and
+# the kind-dev build step.
+RECIPE_INPUTS = (
+    "deployments/docker/rust-base.Dockerfile",
+    "scripts/ci/images/run-rust-build.sh",
+    "deployments/docker/kind-dev-binary.Dockerfile",
+)
+# Copied for every build: the workspace manifest and lock, the kind-dev Cargo
+# profile and the protobuf sources every service compiles through
+# codewire-daemon-proto; plus the recipe.
 SHARED_INPUTS = (
     "Cargo.toml",
     "Cargo.lock",
+    "scripts/dev/kind/cargo-profile.toml",
     "proto",
     "libs/daemon-proto",
-    "deployments/docker/rust-base.Dockerfile",
-    "deployments/docker/kind-dev-binary.Dockerfile",
-)
+) + RECIPE_INPUTS
 # Copied files that only these crates embed.
 CRATE_INPUTS = {
     "codewire-dashboard-web": ("packages/codewire-design", "apps/cli/install.sh"),
     "codewire-cli": ("apps/cli/GPG_PUBLIC_KEY.asc",),
+    # Embedded by the cw runtime smoke example, which build-smokes.sh compiles.
+    "codewire-client": ("scripts/ci/verify/kind/cw_runtime_probe.py",),
 }
 # Every service compiles the published workspace image pin, but a retained
 # cluster keeps the workspace image it was prepared with, so a pin change is

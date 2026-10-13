@@ -458,6 +458,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-verify-release-tag-receipt.sh|\
       scripts/ci/tests/test-local-prepush-receipt.sh|\
       scripts/ci/tests/test-pre-push-worktree.sh|\
+      scripts/ci/tests/test-push-check-shellcheck.sh|\
       scripts/ci/tests/test-go-source-ownership.sh|\
       scripts/ci/tests/test-dev-deployment-smoke-receipt.sh|\
       scripts/ci/tests/test-agent-sandbox-pin.sh|\
@@ -1069,6 +1070,15 @@ if [ "$event_selected" = false ]; then
         select_token transport
         select_token transport_pkg_codewire_local_vmm
         select_token transport_pkg_codewire_vmm_guest_probe
+        recognized=true
+        ;;
+      scripts/dev/test-cli-local-vm-macos.py|scripts/dev/test-cli-local-vm-docker-macos.py|\
+      scripts/dev/test-cli-local-vm-inputs-macos.py|\
+      scripts/dev/test-local-vm-hostile-guest-macos.py|scripts/dev/hostile-guest-probe.py|\
+      scripts/dev/test-local-vm-hostile-guest.py)
+        # Developer-only local VM journeys and the hostile-guest battery: they
+        # run against real local VMs and never in CI.
+        select_token policy
         recognized=true
         ;;
       scripts/dev/macos-vz-console-pair.py|scripts/dev/test-macos-vz-console-pair.py|\
@@ -1694,6 +1704,7 @@ if [ "$event_selected" = false ]; then
       keys/production-release.asc|\
       .gitea/workflows/observe-*.yaml|\
       scripts/ci/images/build-push-image.sh|scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/images/build-support-platform.sh|\
       scripts/ci/images/compute-image-tags.sh|\
       scripts/ci/images/copy-image-to-ghcr.sh|\
       scripts/ci/images/publish-image-to-harbor.sh|\
@@ -1703,6 +1714,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/curl-transport-retry.sh|\
       scripts/ci/setup/fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/setup/fetch-openbao-harbor-credentials.sh|\
+      scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh|\
       scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/images/publish-image-to-ghcr.sh|\
       scripts/ci/images/resolve-published-support-pair.sh|\
@@ -1724,6 +1736,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/local_runtime_parts.py|scripts/ci/release/local_runtime_sources.py|\
       scripts/ci/release/local-runtime-sources.json|scripts/ci/release/build-runtime-kernel.sh|\
       scripts/ci/release/build-local-runtime.sh|\
+      scripts/ci/release/fetch-pinned.sh|scripts/ci/tests/test-fetch-pinned.sh|\
       scripts/ci/release/build-runtime-guest-root.sh|scripts/ci/release/runtime-container.sh|\
       scripts/ci/tests/test-local-runtime-parts.py|\
       scripts/ci/release/dry-run-superseded.sh|scripts/ci/tests/test-dry-run-superseded.sh|\
@@ -1750,6 +1763,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-harbor-credentials.sh|\
+      scripts/ci/tests/test-fetch-openbao-arm64-buildkit-client.sh|\
       scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/tests/test-forgejo-action-mirrors.sh|\
       scripts/ci/tests/test-harbor-runtime-pull-contract.sh|\

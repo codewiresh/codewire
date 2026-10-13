@@ -23,9 +23,9 @@ and the expected outcome:
 
 Pinned to Claude Code 2.1.288, whose probe showed that `claude -p` sends only
 POST /v1/messages?beta=true to the base URL, that CLAUDE_CODE_OAUTH_TOKEN
-selects its subscription mode, that the empty ANTHROPIC_AUTH_TOKEN and
-ANTHROPIC_API_KEY are treated as unset, and that a 401 `authentication_error`
-prints "API Error: 401" and exits 1 at once. The fresh HOME and
+selects its subscription mode, and that a 401 `authentication_error` prints
+"API Error: 401" and exits 1 at once. Each form projects only its own
+variable; the other Anthropic names are absent, never empty. The fresh HOME and
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC are harness-local: no saved login,
 telemetry or update call. Neither changes authentication.
 """
@@ -42,7 +42,7 @@ import tempfile
 
 CLAUDE = "/opt/codewire/agents/npm/bin/claude"
 CLAUDE_ARGV = (CLAUDE,)
-BASE_URL = "http://127.0.0.1:38081"
+BASE_URL = "http://127.0.0.1:38081/_codewire/anthropic"
 PLACEHOLDER = "codewire-managed"
 MARKER = "CWCLAUDE kind"
 PROMPT = "Reply with the Codewire Kind marker."
@@ -53,18 +53,15 @@ NAMES = (
     "CLAUDE_CODE_OAUTH_TOKEN",
 )
 # The daemon's exact values for each form (codewire-access projection.rs).
+# Every other name in NAMES must be absent from the session.
 PROJECTIONS = {
     "api_key": {
         "ANTHROPIC_BASE_URL": BASE_URL,
         "ANTHROPIC_AUTH_TOKEN": PLACEHOLDER,
-        "ANTHROPIC_API_KEY": "",
-        "CLAUDE_CODE_OAUTH_TOKEN": "",
     },
     "subscription_token": {
         "ANTHROPIC_BASE_URL": BASE_URL,
         "CLAUDE_CODE_OAUTH_TOKEN": PLACEHOLDER,
-        "ANTHROPIC_AUTH_TOKEN": "",
-        "ANTHROPIC_API_KEY": "",
     },
 }
 OUTCOMES = ("success", "refused")
@@ -111,15 +108,18 @@ def exposed(environ):
 
 
 def projection(form, environ):
-    """The four values the daemon projected, which must be exactly the form's."""
-    values = {name: environ.get(name) for name in NAMES}
-    if any(value is None for value in values.values()):
+    """The Anthropic names the daemon projected: exactly the form's, with its
+    values, and none of the others, not even empty."""
+    values = {name: environ[name] for name in NAMES if name in environ}
+    expected = PROJECTIONS[form]
+    if values == expected:
+        return values
+    other = next(name for name in PROJECTIONS if name != form)
+    if values == PROJECTIONS[other]:
+        raise Failure("projection_other_form")
+    if any(name not in values for name in expected):
         raise Failure("projection_missing")
-    if values != PROJECTIONS[form]:
-        other = next(name for name in PROJECTIONS if name != form)
-        raise Failure("projection_other_form" if values == PROJECTIONS[other]
-                      else "projection_values")
-    return values
+    raise Failure("projection_values")
 
 
 def onboarding(environ):

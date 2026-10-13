@@ -198,6 +198,15 @@ isolate_kind_fixture_environment() {
 }
 
 run_policy_core() {
+  run_policy_core_one
+  run_policy_core_two
+}
+
+# Policy core runs as two independent parts so local merge qualification can
+# run them side by side; CI and the policy family run both in order. Every
+# step belongs to exactly one part and keeps no state outside its own
+# scratch directory.
+run_policy_core_one() {
   (
   isolate_kind_fixture_environment
   run_verification_shell_syntax
@@ -225,7 +234,6 @@ run_policy_core() {
   python3 -I -B scripts/ci/tests/test-cw-runtime-source.py
   python3 -I -B scripts/ci/tests/test-cw-image-source.py
   python3 -I -B scripts/ci/tests/test-cw-image-consumer.py
-  scripts/ci/tests/test-workspace-image-verify-workflow.sh
   scripts/ci/tests/test-build-kind-smokes.sh
   python3 -B scripts/ci/tests/test-kind-build-artifacts.py
   scripts/ci/tests/test-openbao-only-secret-authority.sh
@@ -243,7 +251,6 @@ run_policy_core() {
   scripts/ci/tests/test-retired-local-sdk-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
   scripts/runtime/tests/test-storage-measure.sh
-  python3 scripts/ci/tests/test-repo-checks-modules.py
   python3 scripts/dev/test-macos-cli.py
   python3 scripts/dev/test-macos-ext4-tool.py
   python3 scripts/dev/test-macos-git-tool.py
@@ -269,14 +276,42 @@ run_policy_core() {
   )
 }
 
-run_policy() {
+# The two longest steps, about half of policy core's wall time.
+run_policy_core_two() {
+  (
+  isolate_kind_fixture_environment
+  scripts/ci/tests/test-workspace-image-verify-workflow.sh
+  python3 scripts/ci/tests/test-repo-checks-modules.py
+  )
+}
+
+# The parts of the policy family for this selection, one per line, in order.
+# Local merge qualification runs them as parallel lanes; nothing else decides
+# what policy consists of.
+policy_parts() {
   # A legacy trusted selector does not know when omission is authoritative, so
   # it must retain the historical full ShellCheck behavior. Only a trusted
   # selector that emits policy_shell_omittable may omit the shell domain.
   if selected policy_shell || ! selected policy_shell_omittable; then
-    run_shell_policy
+    printf 'policy-shell\n'
   fi
-  run_policy_core
+  printf 'policy-core-1\npolicy-core-2\n'
+}
+
+run_policy_part() {
+  case "$1" in
+    policy-shell) run_shell_policy ;;
+    policy-core-1) run_policy_core_one ;;
+    policy-core-2) run_policy_core_two ;;
+    *) return 2 ;;
+  esac
+}
+
+run_policy() {
+  local part
+  for part in $(policy_parts); do
+    run_policy_part "$part"
+  done
 }
 
 install_contract_toolchain() {
@@ -813,6 +848,7 @@ run_release() {
   scripts/ci/tests/test-sign-runtime-image-set.sh
   scripts/ci/tests/test-resolve-published-support-pair.sh
   scripts/ci/tests/test-run-skopeo-container.sh
+  scripts/ci/tests/test-fetch-pinned.sh
   scripts/ci/tests/test-support-images-workflow.sh
   scripts/ci/tests/test-propose-workspace-image-pin.sh
   scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
@@ -1027,6 +1063,8 @@ esac
 case "$FAMILY" in
   policy) run_policy ;;
   policy-core) run_policy_core ;;
+  policy-core-1|policy-core-2) run_policy_part "$FAMILY" ;;
+  policy-parts) policy_parts ;;
   policy-shell) run_shell_policy ;;
   contracts) run_contracts ;;
   go-support) run_go_support ;;
@@ -1050,7 +1088,7 @@ case "$FAMILY" in
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|policy-core|policy-shell|contracts|go-support|web|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-core-1|policy-core-2|policy-shell|contracts|go-support|web|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|release|deploy|security" >&2
     exit 2
     ;;
 esac

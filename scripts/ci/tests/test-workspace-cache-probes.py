@@ -495,8 +495,9 @@ class ProbeFixture(unittest.TestCase):
             env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
             # A hang guard only: the probe's own deadlines are asserted by the
-            # native-timeout cases. A loaded shared runner needs more than 35 s.
-            output, _ = process.communicate(timeout=120)
+            # native-timeout cases. The harness needs about 25 s of CPU; with
+            # other verification beside it on a loaded host it took over 120 s.
+            output, _ = process.communicate(timeout=600)
         except subprocess.TimeoutExpired:
             # TERM the actual GNU timeout owner so it forwards cancellation and
             # lets the harness reap children; subprocess.run would KILL it first.
@@ -668,7 +669,8 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn("needs.workspace-cache-measurement.result == 'success'", body)
         self.assertIn("workspace_cache_experiment == 'true'", body)
         self.assertIn("    needs: [verification-selection, workspace-image, kind-workspace, workspace-cache-measurement]", body)
-        self.assertIn("    runs-on: ci-heavy\n", body)
+        self.assertIn("    runs-on: " + chr(36) + "{{ github.event_name == 'push' && github.ref == "
+                      "'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}\n", body)
         self.assertIn("    timeout-minutes: 55\n", body)
         self.assertNotIn("continue-on-error", body)
         self.assertEqual(body.count("run: scripts/ci/setup/select-untrusted-workspace-cache.sh "), 1)

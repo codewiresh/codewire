@@ -23,9 +23,9 @@ pub(crate) const STATE: &str = "/home/codewire/.local/state/codewire/platform-ma
 const MAX_IMAGE: u64 = 256 * 1024 * 1024;
 const MAX_REQUEST: usize = 512 * 1024;
 mod files;
-pub(crate) use files::{Tree, publish_session};
+pub(crate) use files::{Tree, leaf_refusal, publish_session, tree_refusal};
 mod payload;
-pub use payload::{ProviderIdentity, ProviderPin};
+pub use payload::{PinRefusal, ProviderIdentity, ProviderPin};
 mod service;
 pub(crate) use service::{CleanupLink, Owner, RestartAdvance, Service};
 
@@ -50,6 +50,14 @@ impl Agent {
         match self {
             Self::Codex => 1,
             Self::Claude => 2,
+        }
+    }
+
+    /// The provider's product name, for user-facing messages.
+    pub(crate) fn product(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude Code",
         }
     }
 
@@ -119,32 +127,88 @@ pub(crate) struct Origin {
 }
 
 impl Origin {
+    /// The shape plus this release's provider pin. Launch and Restart run the
+    /// record's provider, so they require both; nothing else may.
     pub(crate) fn validate(&self, session: &str) -> Result<(), Error> {
-        for value in [&self.environment_id, &self.pod_uid, &self.driver_id] {
-            canonical_uuid(value)?;
-        }
-        if self.version != 1
-            || self.org_id.is_empty()
-            || self.org_id.len() > 256
-            || self.org_id.trim() != self.org_id
-            || self.org_id.chars().any(char::is_control)
-            || self.binding_generation == 0
-            || self.projection_selection_sha256 == [0; 32]
-            || self.support_image_sha256 == [0; 32]
-            || !(4..=MAX_IMAGE).contains(&self.support_image_size)
-            || self.provider.sha256 == [0; 32]
-            || !(4..=512 * 1024 * 1024).contains(&self.provider.size)
-            || self.provider.version
-                != match self.agent {
-                    Agent::Codex => "0.160.0",
-                    Agent::Claude => "2.1.288",
-                }
-            || self.parent_generation == Some(0)
-            || session != format!("session-{}", self.driver_id)
-        {
+        self.validate_shape(session)?;
+        if !self.current_provider() {
             return Err(Error::Refused);
         }
         Ok(())
+    }
+
+    /// What a retained record must satisfy to load, list, be read or be
+    /// stopped. It names no value that changes between releases, so a record
+    /// an earlier daemon wrote keeps loading after an upgrade.
+    pub(crate) fn validate_shape(&self, session: &str) -> Result<(), Error> {
+        match self.shape_fault(session) {
+            Some(_) => Err(Error::Refused),
+            None => Ok(()),
+        }
+    }
+
+    /// The first shape check this origin fails, named without any of its
+    /// values, for the store's refusal reason.
+    pub(crate) fn shape_fault(&self, session: &str) -> Option<&'static str> {
+        if [&self.environment_id, &self.pod_uid, &self.driver_id]
+            .into_iter()
+            .any(|value| canonical_uuid(value).is_err())
+        {
+            return Some("an origin identity is not a canonical UUID");
+        }
+        let version = &self.provider.version;
+        [
+            (self.version != 1, "the origin version is not 1"),
+            (
+                self.org_id.is_empty()
+                    || self.org_id.len() > 256
+                    || self.org_id.trim() != self.org_id
+                    || self.org_id.chars().any(char::is_control),
+                "the origin organization is malformed",
+            ),
+            (
+                self.binding_generation == 0,
+                "the origin binding generation is zero",
+            ),
+            (
+                self.projection_selection_sha256 == [0; 32],
+                "the origin projection selection is empty",
+            ),
+            (
+                self.support_image_sha256 == [0; 32]
+                    || !(4..=MAX_IMAGE).contains(&self.support_image_size),
+                "the origin support image is malformed",
+            ),
+            (
+                self.provider.sha256 == [0; 32]
+                    || !(4..=512 * 1024 * 1024).contains(&self.provider.size),
+                "the origin provider identity is malformed",
+            ),
+            (
+                version.is_empty()
+                    || version.len() > 64
+                    || !version.starts_with(|c: char| c.is_ascii_digit())
+                    || !version
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b)),
+                "the origin provider version is malformed",
+            ),
+            (
+                self.parent_generation == Some(0),
+                "the origin parent generation is zero",
+            ),
+            (
+                session != format!("session-{}", self.driver_id),
+                "the origin driver does not name its session",
+            ),
+        ]
+        .into_iter()
+        .find_map(|(failed, check)| failed.then_some(check))
+    }
+
+    /// Whether this record's provider is the one this release runs.
+    pub(crate) fn current_provider(&self) -> bool {
+        self.provider.version == payload::pinned_version(self.agent)
     }
 
     pub(crate) fn command(&self) -> Vec<String> {
@@ -165,6 +229,10 @@ pub enum Error {
     Refused,
     #[error("platform managed outcome is unknown; observe the original request")]
     Unknown,
+    /// Restart of a record an earlier release's provider wrote, refused before
+    /// any effect. It names only the product.
+    #[error("this managed agent was started with an earlier {}; start a new conversation", .0.product())]
+    EarlierProvider(Agent),
 }
 
 fn canonical_uuid(value: &str) -> Result<(), Error> {
@@ -226,6 +294,13 @@ pub(crate) fn validate_selection(config: &Config, origin: &Origin) -> Result<(),
         || bridge.environment_generation != origin.binding_generation
         || bridge.ingress_uid != 1000 || bridge.ingress_gid != 1000
         || projection.selection_sha256 != origin.projection_selection_sha256
+        // The driver is started through the launch projection's launcher, so
+        // that launcher must be the very image this origin pins and hashes,
+        // never merely a configured path that happens to equal it today.
+        || projection
+            .native
+            .as_ref()
+            .is_none_or(|native| native.helper_path != Path::new(IMAGE))
         || origin
             .agent
             .route(config.managed_credential_clients)
@@ -417,7 +492,10 @@ mod tests {
             host: None,
             launch_projection: Some(crate::LaunchProjectionConfig {
                 selection_sha256: [7; 32],
-                native: None,
+                native: Some(crate::NativeLaunchProjectionConfig {
+                    helper_path: IMAGE.into(),
+                    process_directory: crate::config::HOSTED_PROCESS_DIRECTORY.into(),
+                }),
             }),
             credential_bridge: Some(crate::CredentialBridgeConfig {
                 transport: CredentialBridgeTransport::Hosted,
@@ -484,6 +562,90 @@ mod tests {
             .unwrap()
             .environment_generation -= 1;
         assert!(validate_selection(&config, &origin).is_err());
+    }
+
+    /// The managed driver is started through the launch projection's
+    /// launcher. Only the pinned, hashed image may be that launcher: a
+    /// different path, or no launcher at all, refuses the selection before
+    /// any image I/O.
+    #[test]
+    fn platform_managed_selection_requires_the_pinned_image_as_the_projection_launcher() {
+        let environment = uuid::Uuid::new_v4();
+        let native = |helper: &str| {
+            Some(crate::NativeLaunchProjectionConfig {
+                helper_path: helper.into(),
+                process_directory: crate::config::HOSTED_PROCESS_DIRECTORY.into(),
+            })
+        };
+        let mut config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: "/workspace".into(),
+            home_root: HOME.into(),
+            auth_token: crate::DaemonAuthToken::new("synthetic-platform-launcher").unwrap(),
+            process_execution: ProcessExecution::Native,
+            host: None,
+            launch_projection: Some(crate::LaunchProjectionConfig {
+                selection_sha256: [7; 32],
+                native: native(IMAGE),
+            }),
+            credential_bridge: Some(crate::CredentialBridgeConfig {
+                transport: CredentialBridgeTransport::Hosted,
+                environment_id: environment,
+                environment_generation: 3,
+                ingress_socket: "/run/codewire/fixture-only.sock".into(),
+                ingress_uid: 1000,
+                ingress_gid: 1000,
+            }),
+            managed_credential_clients:
+                codewire_access::ManagedCredentialClients::from_profile_slots(["anthropic"])
+                    .unwrap(),
+            session_working_dir: None,
+        };
+        let origin = Origin {
+            version: 1,
+            environment_id: environment.to_string(),
+            org_id: "fixture".into(),
+            pod_uid: uuid::Uuid::new_v4().to_string(),
+            binding_generation: 3,
+            projection_selection_sha256: [7; 32],
+            driver_id: uuid::Uuid::new_v4().to_string(),
+            agent: Agent::Claude,
+            support_image_sha256: [8; 32],
+            support_image_size: 1024,
+            provider: ProviderIdentity {
+                sha256: [9; 32],
+                size: 1024,
+                version: "2.1.288".into(),
+            },
+            parent_generation: None,
+        };
+        assert!(validate_selection(&config, &origin).is_ok());
+        // The hosted daemon's own configuration names exactly the pinned
+        // image, so a real managed selection passes.
+        let mut hosted = config.clone();
+        hosted.apply_hosted_projection(environment, 3, [7; 32], config.managed_credential_clients);
+        assert!(validate_selection(&hosted, &origin).is_ok());
+        assert_eq!(
+            hosted
+                .launch_projection
+                .as_ref()
+                .and_then(|projection| projection.native.as_ref())
+                .map(|native| native.helper_path.as_path()),
+            Some(Path::new(IMAGE))
+        );
+        for refused in [
+            native("/codewire/bin/cw2"),
+            native("/usr/local/bin/cw"),
+            native("/codewire/bin/../bin/cw"),
+            native("codewire/bin/cw"),
+            None,
+        ] {
+            config.launch_projection.as_mut().unwrap().native = refused.clone();
+            assert!(
+                matches!(validate_selection(&config, &origin), Err(Error::Refused)),
+                "{refused:?}"
+            );
+        }
     }
 
     #[test]

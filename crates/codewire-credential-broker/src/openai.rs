@@ -3,14 +3,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use av_credential_proxy::{
     CredentialSource, ProxyInjectionConfig, ProxyResponseMode, ProxyRouteConfig, RedactionSet,
-    StreamingRedactor, ValidatedProxyRequest, build_target_url, is_websocket_attempt,
-    prepare_credentials, prepare_outbound_headers, validate_proxy_request, validate_proxy_route,
+    StreamingRedactor, prepare_credentials, validate_proxy_route,
 };
 use codewire_access::{CapabilitySlot, CredentialAuthKind, CredentialStatus};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use url::Url;
 
 use crate::codex_oauth::CodexOAuthCredential;
+use crate::transparent::TransparentRequest;
 use crate::{BrokerCredentialLease, CredentialBrokerError};
 
 const ROUTE_NAME: &str = "openai-api";
@@ -24,7 +24,13 @@ const MAX_OPENAI_API_KEY_BYTES: usize = 1024;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Immutable OpenAI Responses API-key policy used by the broker process.
+/// Headers the Codex OAuth form derives from its credential; a guest value is
+/// never forwarded.
+const CREDENTIAL_DERIVED_HEADERS: &[&str] = &["chatgpt-account-id", "x-openai-fedramp"];
+
+/// Immutable OpenAI API-key policy: a transparent route to the OpenAI API
+/// (#2536). Any CRUD request under the managed base reaches
+/// `https://api.openai.com/v1` unchanged except for its credential.
 pub struct OpenAiApiKeyAdapter {
     route: ProxyRouteConfig,
 }
@@ -38,11 +44,8 @@ impl OpenAiApiKeyAdapter {
         Ok(Self { route })
     }
 
-    /// Prepare exactly one credential-bearing upstream request.
-    ///
-    /// `path` is provider-relative and must currently be `/responses`. The
-    /// authenticated listener will remove its non-secret environment and route
-    /// prefix before invoking this method.
+    /// Prepare exactly one credential-bearing upstream request. `path` is
+    /// relative to the provider base, for example `/responses`.
     pub fn prepare<L: BrokerCredentialLease>(
         &self,
         lease: L,
@@ -66,17 +69,14 @@ impl OpenAiApiKeyAdapter {
         headers: HeaderMap,
         body: Vec<u8>,
     ) -> Result<ValidatedOpenAiRequest, CredentialBrokerError> {
-        if is_websocket_attempt(&headers) {
-            return Err(CredentialBrokerError::RequestDenied);
-        }
-        let request =
-            validate_proxy_request(&self.route, path, query, method, &headers, body.len())
-                .map_err(|_| CredentialBrokerError::RequestDenied)?;
-        Ok(ValidatedOpenAiRequest {
-            request,
+        Ok(ValidatedOpenAiRequest(TransparentRequest::admit(
+            method,
+            path,
+            query,
             headers,
             body,
-        })
+            MAX_REQUEST_BYTES,
+        )?))
     }
 
     /// Consume one already validated request and one exact authority lease.
@@ -87,13 +87,9 @@ impl OpenAiApiKeyAdapter {
         request: ValidatedOpenAiRequest,
     ) -> Result<PreparedOpenAiRequest, CredentialBrokerError> {
         validate_lease(&lease)?;
-        let ValidatedOpenAiRequest {
-            request,
-            headers,
-            body,
-        } = request;
-        let target = build_target_url(&self.route, &request)
-            .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?;
+        let ValidatedOpenAiRequest(request) = request;
+        let target = request.target(OPENAI_API_BASE_URL)?;
+        let mut headers = request.outbound_headers(CREDENTIAL_DERIVED_HEADERS);
         lease.with_material(|material| {
             if !valid_openai_api_key(material) {
                 return Err(CredentialBrokerError::InvalidCredentialMaterial);
@@ -101,28 +97,22 @@ impl OpenAiApiKeyAdapter {
             let material = std::str::from_utf8(material)
                 .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
             let source = OpenAiApiKey { material };
-            let prepared = prepare_credentials(&self.route, &source, &body)
+            let prepared = prepare_credentials(&self.route, &source, &request.body)
                 .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
-            let headers = prepare_outbound_headers(&self.route, &headers, &prepared)
-                .map_err(|_| CredentialBrokerError::RequestDenied)?;
+            headers.insert(
+                prepared.injection_name().clone(),
+                prepared.injection_value().clone(),
+            );
             let (body, redaction) = prepared.into_body_and_redaction();
-            let response = PreparedOpenAiResponse {
-                allowed_headers: self
-                    .route
-                    .allowed_response_headers
-                    .iter()
-                    .map(|name| HeaderName::from_bytes(name.as_bytes()))
-                    .collect::<Result<_, _>>()
-                    .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?,
-                max_body_bytes: self.route.max_response_bytes,
-                redaction,
-            };
             Ok(PreparedOpenAiRequest {
-                method: Method::POST,
+                method: request.method,
                 target,
                 headers,
                 body,
-                response,
+                response: PreparedOpenAiResponse::transparent(
+                    redaction,
+                    self.route.max_response_bytes,
+                ),
             })
         })
     }
@@ -179,20 +169,18 @@ impl OpenAiChatGptOAuthAdapter {
         credential: CodexOAuthCredential,
         request: ValidatedOpenAiRequest,
     ) -> Result<PreparedOpenAiRequest, CredentialBrokerError> {
-        let ValidatedOpenAiRequest {
-            request,
-            headers,
-            body,
-        } = request;
-        let target = build_target_url(&self.route, &request)
-            .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?;
+        let ValidatedOpenAiRequest(request) = request;
+        let target = request.target(CHATGPT_CODEX_BASE_URL)?;
         let source = CodexOAuthAccessToken {
             material: credential.access_token(),
         };
-        let prepared = prepare_credentials(&self.route, &source, &body)
+        let prepared = prepare_credentials(&self.route, &source, &request.body)
             .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
-        let mut headers = prepare_outbound_headers(&self.route, &headers, &prepared)
-            .map_err(|_| CredentialBrokerError::RequestDenied)?;
+        let mut headers = request.outbound_headers(CREDENTIAL_DERIVED_HEADERS);
+        headers.insert(
+            prepared.injection_name().clone(),
+            prepared.injection_value().clone(),
+        );
         let mut account_id = HeaderValue::from_str(credential.account_id())
             .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
         account_id.set_sensitive(true);
@@ -213,29 +201,20 @@ impl OpenAiChatGptOAuthAdapter {
             authorization.as_bytes(),
             credential.account_id().as_bytes(),
         ]);
-        let response = PreparedOpenAiResponse {
-            allowed_headers: response_header_names(&self.route)?,
-            max_body_bytes: self.route.max_response_bytes,
-            redaction,
-        };
         Ok(PreparedOpenAiRequest {
-            method: Method::POST,
+            method: request.method,
             target,
             headers,
             body,
-            response,
+            response: PreparedOpenAiResponse::transparent(redaction, self.route.max_response_bytes),
         })
     }
 }
 
-/// Credential-free request that has passed the immutable OpenAI route policy.
-/// It deliberately carries no authority lease or prepared authorization.
+/// Credential-free request admitted by the transparent OpenAI route. It
+/// deliberately carries no authority lease or prepared authorization.
 #[derive(Clone)]
-pub struct ValidatedOpenAiRequest {
-    request: ValidatedProxyRequest,
-    headers: HeaderMap,
-    body: Vec<u8>,
-}
+pub struct ValidatedOpenAiRequest(TransparentRequest);
 
 impl Default for OpenAiApiKeyAdapter {
     fn default() -> Self {
@@ -268,16 +247,26 @@ impl PreparedOpenAiRequest {
     }
 }
 
-/// Response-header filter, byte ceiling, and credential redaction state for
-/// one prepared OpenAI request. This type is non-cloneable and deliberately
-/// has no `Debug` implementation.
+/// Response-header policy, byte ceiling, and credential redaction state for
+/// one prepared request. OpenAI routes are transparent; GitHub reuses this
+/// with its closed header allowlist. This type is non-cloneable and
+/// deliberately has no `Debug` implementation.
 pub struct PreparedOpenAiResponse {
-    allowed_headers: Vec<HeaderName>,
+    /// `None` returns every header except framing and cookies.
+    allowed_headers: Option<Vec<HeaderName>>,
     max_body_bytes: usize,
     redaction: RedactionSet,
 }
 
 impl PreparedOpenAiResponse {
+    fn transparent(redaction: RedactionSet, max_body_bytes: usize) -> Self {
+        Self {
+            allowed_headers: None,
+            max_body_bytes,
+            redaction,
+        }
+    }
+
     /// Reuse the reviewed AV/F0 header and stream boundary for another fixed
     /// provider policy. Provider-specific media admission remains its adapter's job.
     pub(crate) fn from_route_redaction(
@@ -285,7 +274,7 @@ impl PreparedOpenAiResponse {
         redaction: RedactionSet,
     ) -> Result<Self, CredentialBrokerError> {
         Ok(Self {
-            allowed_headers: response_header_names(route)?,
+            allowed_headers: Some(response_header_names(route)?),
             max_body_bytes: route.max_response_bytes,
             redaction,
         })
@@ -297,21 +286,27 @@ impl PreparedOpenAiResponse {
         self,
         upstream_headers: &HeaderMap,
     ) -> Result<(HeaderMap, OpenAiStreamingResponse), CredentialBrokerError> {
-        validate_response_encoding(upstream_headers)?;
-        let mut headers = HeaderMap::new();
-        for name in &self.allowed_headers {
-            let values = upstream_headers.get_all(name).iter().collect::<Vec<_>>();
-            if values.len() > 1 {
-                return Err(CredentialBrokerError::ResponseDenied);
+        let headers = match &self.allowed_headers {
+            None => crate::transparent::response_headers(upstream_headers, &self.redaction)?,
+            Some(allowed) => {
+                validate_response_encoding(upstream_headers)?;
+                let mut headers = HeaderMap::new();
+                for name in allowed {
+                    let values = upstream_headers.get_all(name).iter().collect::<Vec<_>>();
+                    if values.len() > 1 {
+                        return Err(CredentialBrokerError::ResponseDenied);
+                    }
+                    for value in values {
+                        let value = self
+                            .redaction
+                            .redact_header(value)
+                            .ok_or(CredentialBrokerError::ResponseDenied)?;
+                        headers.append(name.clone(), value);
+                    }
+                }
+                headers
             }
-            for value in values {
-                let value = self
-                    .redaction
-                    .redact_header(value)
-                    .ok_or(CredentialBrokerError::ResponseDenied)?;
-                headers.append(name.clone(), value);
-            }
-        }
+        };
         Ok((
             headers,
             OpenAiStreamingResponse {
@@ -491,6 +486,8 @@ fn valid_openai_api_key(material: &[u8]) -> bool {
         && material[token_bytes..].iter().all(|byte| *byte == b'=')
 }
 
+/// AV's injection policy for the API-key form. Paths, headers and queries are
+/// the transparent layer's, not this config's.
 pub(crate) fn openai_responses_route() -> ProxyRouteConfig {
     ProxyRouteConfig {
         profile: "codewire-openai-api-key".to_owned(),
@@ -502,65 +499,15 @@ pub(crate) fn openai_responses_route() -> ProxyRouteConfig {
             secret_key: CREDENTIAL_KEY.to_owned(),
         }),
         body_substitutions: BTreeMap::new(),
-        allowed_methods: vec!["POST".to_owned()],
-        allowed_exact_paths: vec!["/responses".to_owned()],
-        allowed_path_prefixes: Vec::new(),
-        allowed_request_headers: vec![
-            "accept".to_owned(),
-            "content-type".to_owned(),
-            "openai-beta".to_owned(),
-            "originator".to_owned(),
-            "session-id".to_owned(),
-            "thread-id".to_owned(),
-            "x-client-request-id".to_owned(),
-            "x-codex-beta-features".to_owned(),
-            "x-codex-inference-call-id".to_owned(),
-            "x-codex-installation-id".to_owned(),
-            "x-codex-parent-thread-id".to_owned(),
-            "x-codex-routing-hint".to_owned(),
-            "x-codex-sandbox".to_owned(),
-            "x-codex-turn-state".to_owned(),
-            "x-codex-turn-metadata".to_owned(),
-            "x-codex-window-id".to_owned(),
-            "x-oai-attestation".to_owned(),
-            "x-openai-internal-codex-responses-lite".to_owned(),
-            "x-openai-memgen-request".to_owned(),
-            "x-openai-subagent".to_owned(),
-        ],
-        allowed_response_headers: vec![
-            "cf-ray".to_owned(),
-            "content-type".to_owned(),
-            "openai-processing-ms".to_owned(),
-            "openai-version".to_owned(),
-            "openai-model".to_owned(),
-            "retry-after".to_owned(),
-            "x-codex-active-limit".to_owned(),
-            "x-codex-credits-balance".to_owned(),
-            "x-codex-credits-has-credits".to_owned(),
-            "x-codex-credits-unlimited".to_owned(),
-            "x-codex-primary-reset-at".to_owned(),
-            "x-codex-primary-used-percent".to_owned(),
-            "x-codex-primary-window-minutes".to_owned(),
-            "x-codex-promo-message".to_owned(),
-            "x-codex-rate-limit-reached-type".to_owned(),
-            "x-codex-safety-buffering-enabled".to_owned(),
-            "x-codex-safety-buffering-faster-model".to_owned(),
-            "x-codex-secondary-primary-reset-at".to_owned(),
-            "x-codex-secondary-primary-used-percent".to_owned(),
-            "x-codex-secondary-primary-window-minutes".to_owned(),
-            "x-codex-secondary-reset-at".to_owned(),
-            "x-codex-secondary-used-percent".to_owned(),
-            "x-codex-secondary-window-minutes".to_owned(),
-            "x-codex-turn-state".to_owned(),
-            "x-models-etag".to_owned(),
-            "x-oai-request-id".to_owned(),
-            "x-openai-authorization-error".to_owned(),
-            "x-openai-model".to_owned(),
-            "x-reasoning-included".to_owned(),
-            "x-request-id".to_owned(),
-        ],
+        allowed_methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]
+            .map(String::from)
+            .into(),
+        allowed_exact_paths: Vec::new(),
+        allowed_path_prefixes: vec!["/".to_owned()],
+        allowed_request_headers: Vec::new(),
+        allowed_response_headers: Vec::new(),
         allowed_query_parameters: Vec::new(),
-        allowed_content_types: vec!["application/json".to_owned()],
+        allowed_content_types: Vec::new(),
         max_body_bytes: MAX_REQUEST_BYTES,
         response_mode: ProxyResponseMode::Streaming,
         max_response_bytes: MAX_RESPONSE_BYTES,
@@ -988,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn prepares_one_strict_openai_responses_request() {
+    fn prepares_one_transparent_openai_request() {
         let mut headers = request_headers();
         headers.insert(
             header::AUTHORIZATION,
@@ -1049,10 +996,14 @@ mod tests {
             header::CONNECTION,
             header::TRANSFER_ENCODING,
             header::CONTENT_LENGTH,
-            header::USER_AGENT,
         ] {
             assert!(!headers.contains_key(blocked));
         }
+        assert_eq!(
+            headers.get(header::USER_AGENT),
+            Some(&HeaderValue::from_static("synthetic-codex/1.0"))
+        );
+        assert_eq!(headers[header::ACCEPT_ENCODING], "identity");
         assert_eq!(
             headers.get("x-codex-turn-metadata"),
             Some(&HeaderValue::from_static("synthetic-metadata"))
@@ -1208,7 +1159,15 @@ mod tests {
                 Some(value)
             );
         }
-        assert!(!headers.contains_key("x-error-json"));
+        // Transparent: every provider header returns. Redaction matches the
+        // credential's own raw and encoded forms, not arbitrary opaque
+        // encodings of a larger value.
+        assert_eq!(
+            headers.get("x-error-json"),
+            Some(&HeaderValue::from_static(
+                "ZXJyb3ItZm9yLWFjY291bnQtd29yaw=="
+            ))
+        );
         let mut output = response
             .push(b"reflected account-work and synthetic.oauth.")
             .expect("first chunk");
@@ -1347,67 +1306,59 @@ mod tests {
     }
 
     #[test]
-    fn rejects_method_path_query_content_type_websocket_and_oversize_body() {
+    fn admits_any_crud_path_query_and_media_but_refuses_upgrades_and_oversize() {
         let adapter = OpenAiApiKeyAdapter::new().expect("adapter");
         let body = br#"{"input":"hello"}"#;
-        let cases = [
+        let mut plain = request_headers();
+        plain.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+        for (method, path, query, headers, expected) in [
             (
                 Method::GET,
                 "/responses",
                 None,
                 request_headers(),
-                body.as_slice(),
+                "https://api.openai.com/v1/responses",
             ),
             (
                 Method::POST,
                 "/models",
                 None,
                 request_headers(),
-                body.as_slice(),
+                "https://api.openai.com/v1/models",
             ),
             (
                 Method::POST,
                 "/responses",
-                Some("api-version=untrusted"),
+                Some("api-version=2"),
                 request_headers(),
-                body.as_slice(),
+                "https://api.openai.com/v1/responses?api-version=2",
             ),
-        ];
-        for (method, path, query, headers, body) in cases {
-            assert!(matches!(
-                adapter.prepare(
+            (
+                Method::POST,
+                "/responses",
+                None,
+                plain,
+                "https://api.openai.com/v1/responses",
+            ),
+        ] {
+            let (sent, target, ..) = adapter
+                .prepare(
                     lease(
                         "openai",
                         CredentialAuthKind::ApiKey,
-                        SYNTHETIC_KEY.as_bytes()
+                        SYNTHETIC_KEY.as_bytes(),
                     ),
                     &method,
                     path,
                     query,
                     &headers,
                     body,
-                ),
-                Err(CredentialBrokerError::RequestDenied)
-            ));
+                )
+                .expect("transparent request")
+                .into_parts();
+            assert_eq!(sent, method);
+            assert_eq!(target.as_str(), expected);
         }
-
-        let mut wrong_content_type = request_headers();
-        wrong_content_type.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-        assert!(matches!(
-            adapter.prepare(
-                lease(
-                    "openai",
-                    CredentialAuthKind::ApiKey,
-                    SYNTHETIC_KEY.as_bytes()
-                ),
-                &Method::POST,
-                "/responses",
-                None,
-                &wrong_content_type,
-                body,
-            ),
-            Err(CredentialBrokerError::RequestDenied)
-        ));
 
         let mut websocket = request_headers();
         websocket.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
@@ -1523,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_allowed_response_headers_fail_closed() {
+    fn transparent_responses_keep_repeated_headers_and_allowlists_still_refuse_them() {
         let prepared = OpenAiApiKeyAdapter::new()
             .expect("adapter")
             .prepare(
@@ -1541,17 +1492,19 @@ mod tests {
             .expect("prepare request");
         let (_, _, _, _, response) = prepared.into_parts();
         let mut upstream_headers = HeaderMap::new();
-        upstream_headers.append(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/event-stream"),
-        );
-        upstream_headers.append(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        upstream_headers.append("x-repeated", HeaderValue::from_static("one"));
+        upstream_headers.append("x-repeated", HeaderValue::from_static("two"));
+        let (headers, _) = response.begin(&upstream_headers).expect("transparent");
+        assert_eq!(headers.get_all("x-repeated").iter().count(), 2);
 
+        // GitHub's closed policy reuses this type with an allowlist.
+        let mut route = openai_responses_route();
+        route.allowed_response_headers = vec!["x-repeated".to_owned()];
+        let allowlisted =
+            PreparedOpenAiResponse::from_route_redaction(&route, RedactionSet::new(["unused"]))
+                .unwrap();
         assert!(matches!(
-            response.begin(&upstream_headers),
+            allowlisted.begin(&upstream_headers),
             Err(CredentialBrokerError::ResponseDenied)
         ));
     }
@@ -1693,7 +1646,12 @@ mod tests {
                 );
                 let (_, response) = response_admission_prepared(kind, SYNTHETIC_KEY);
                 let (headers, mut response) = response.begin(&upstream_headers).unwrap();
-                assert!(!headers.contains_key(header::CONTENT_ENCODING));
+                assert!(headers.get(header::CONTENT_ENCODING).is_none_or(|value| {
+                    value
+                        .as_bytes()
+                        .trim_ascii()
+                        .eq_ignore_ascii_case(b"identity")
+                }));
                 assert_eq!(
                     headers.get(header::CONTENT_TYPE).unwrap(),
                     "text/event-stream"

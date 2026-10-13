@@ -474,7 +474,9 @@ async fn shared_frame_validation_and_server_message_ceiling_remain_active() {
                     capability_slot: "codex".into(),
                     route: "openai-api".into(),
                     request_id: id.clone(),
-                    method: "DELETE".into(),
+                    // Transparent routes admit any CRUD method; this one is
+                    // still outside every route.
+                    method: "OPTIONS".into(),
                     path: "/responses".into(),
                     query: String::new(),
                     headers: vec![],

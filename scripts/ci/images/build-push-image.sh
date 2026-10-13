@@ -32,7 +32,10 @@ readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5
 # Docker keys credentials by registry hostname. The single Harbor publisher
 # login below both pushes codewire/ images and pulls oci-approved/ inputs such
 # as the pinned SBOM tool; a second login on the same host would replace it.
-readonly SBOM_GENERATOR_IMAGE='registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7'
+# BuildKit runs the SBOM scanner on the build node, so it is pinned by its
+# multi-platform index (docker/buildkit-syft-scanner 1.12.0, promoted by
+# infra#1383): the native arm64 support build runs its arm64 variant.
+readonly SBOM_GENERATOR_IMAGE='registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9'
 readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
 readonly EXPECTED_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
 
@@ -145,6 +148,53 @@ case "$image_name" in
 esac
 readonly image_platforms
 
+# support-images.yaml builds each platform of the support pair in its own job,
+# with its own time budget, and joins them into the same index. A per-platform
+# build (CODEWIRE_IMAGE_PLATFORM) builds exactly one platform of a
+# multi-platform support image, pushes it by digest without any tag, verifies
+# that image's own provenance and SBOM, and reports platform_digest. A join
+# (CODEWIRE_IMAGE_JOIN, the amd64 then the arm64 digest) creates the source-SHA
+# index from those two images, then verifies, tags and reports it exactly as
+# one multi-platform build: every platform, and only those, with its own
+# provenance and SBOM.
+readonly image_platform="${CODEWIRE_IMAGE_PLATFORM:-}"
+readonly image_join="${CODEWIRE_IMAGE_JOIN:-}"
+join_digests=()
+if [ -n "$image_platform" ] || [ -n "$image_join" ]; then
+  [ -n "$image_platforms" ] || {
+    echo 'Per-platform builds and joins apply only to a multi-platform support image' >&2
+    exit 2
+  }
+  [ -z "$image_platform" ] || [ -z "$image_join" ] || {
+    echo 'A support image is either built for one platform or joined, not both' >&2
+    exit 2
+  }
+  [ "$require_existing_source_image" = 0 ] || {
+    echo 'Per-platform builds and joins cannot require an existing source image' >&2
+    exit 2
+  }
+fi
+if [ -n "$image_platform" ]; then
+  case ",$image_platforms," in
+    *",$image_platform,"*) ;;
+    *) echo "Per-platform build names an unsupported platform: $image_platform" >&2; exit 2 ;;
+  esac
+fi
+if [ -n "$image_join" ]; then
+  read -r -a join_digests <<<"$image_join"
+  [ "${#join_digests[@]}" -eq 2 ] \
+    && [[ "${join_digests[0]}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    && [[ "${join_digests[1]}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    && [ "${join_digests[0]}" != "${join_digests[1]}" ] || {
+      echo 'A support join needs two distinct exact platform digests, amd64 then arm64' >&2
+      exit 2
+    }
+fi
+# A per-platform image is verified as the single-platform image it is.
+verify_platforms="$image_platforms"
+[ -z "$image_platform" ] || verify_platforms=''
+readonly verify_platforms
+
 tags_output="$(
   scripts/ci/images/compute-image-tags.sh \
     "$REGISTRY_REPOSITORY_PREFIX" "$image_name" "$source_sha" "$release_tag" \
@@ -203,6 +253,10 @@ buildx_builder_owned=0
 source_remote_url=''
 source_remote_changed=0
 cleanup() {
+  if [ -n "${owned_log_follower:-}" ]; then
+    kill -TERM "$owned_log_follower" 2>/dev/null || true
+    wait "$owned_log_follower" 2>/dev/null || true
+  fi
   if [ "$source_remote_changed" = 1 ] && [ -n "$source_remote_url" ]; then
     git -C "$source_dir" remote set-url origin "$source_remote_url" >/dev/null 2>&1 || true
   fi
@@ -418,12 +472,124 @@ ensure_immutable_tag() {
   fi
 }
 
+join_support_index() {
+  local create_error attempt
+  for attempt in 1 2 3; do
+    create_error="$(mktemp "$work/join-error.XXXXXX")"
+    if DOCKER_CONFIG="$docker_config" docker buildx imagetools create \
+      --tag "$source_tag" \
+      "${canonical_repository}@${join_digests[0]}" "${canonical_repository}@${join_digests[1]}" \
+      2>"$create_error"; then
+      return 0
+    fi
+    if registry_auth_error "$create_error" && [ "$attempt" -lt 3 ]; then
+      echo "Registry authentication expired while joining $source_tag; re-authenticating (attempt $((attempt + 1))/3)" >&2
+      if ! registry_login; then
+        echo "Unable to refresh registry authentication for $source_tag" >&2
+        return 1
+      fi
+      continue
+    fi
+    echo "Unable to join the support index $source_tag" >&2
+    sed -n '1,20p' "$create_error" >&2
+    return 1
+  done
+}
+
+# A support image build fetches external inputs: github.com release assets
+# through ADD and curl, and Alpine and Debian packages (#2691). A build that
+# fails on a transient network error is retried up to three attempts, after
+# 30 and then 60 seconds, so a later attempt resolves the host again. The
+# builder keeps every finished step, so a retry resumes at the failed fetch.
+# Any other failure ends the build at once.
+readonly BUILD_NETWORK_ATTEMPTS=3
+build_network_retry_delay="${CODEWIRE_BUILD_NETWORK_RETRY_DELAY_SECONDS:-30}"
+[[ "$build_network_retry_delay" =~ ^[0-9]{1,3}$ ]] || {
+  echo 'CODEWIRE_BUILD_NETWORK_RETRY_DELAY_SECONDS must be 0-999' >&2
+  exit 2
+}
+build_attempt_log="$work/build-attempt.log"
+
+# Run one build attempt, keeping its stderr (where the build streams its
+# steps) for diagnosis while it still reaches the job log.
+run_logged_build() {
+  : >"$build_attempt_log"
+  { "$@" 2>&1 1>&3 3>&- | tee -a "$build_attempt_log" >&2 3>&-; } 3>&1
+}
+
+build_network_failure() {
+  grep -Eqi \
+    '(tls handshake timeout|connection reset by peer|connection timed out|dial (tcp|udp)[^[:cntrl:]]*(i/o timeout|connection refused|network is unreachable)|temporary failure in name resolution|no such host|curl: \((5|6|7|16|18|28|35|52|55|56|92)\)|failed to connect to [^[:space:]]+ port [0-9]+)' \
+    "$build_attempt_log"
+}
+
+# retry_network_build ATTEMPT STATUS: returns 0 after logging and waiting when
+# the failed attempt may be retried.
+retry_network_build() {
+  local attempt="$1" status="$2" wait_seconds
+  if ! build_network_failure; then
+    return 1
+  fi
+  if [ "$attempt" -ge "$BUILD_NETWORK_ATTEMPTS" ]; then
+    printf '[build-network] class=transient-exhausted image=%s status=%s attempts=%s\n' \
+      "$image_name" "$status" "$BUILD_NETWORK_ATTEMPTS" >&2
+    return 1
+  fi
+  wait_seconds=$((build_network_retry_delay * attempt))
+  printf '[build-network] transient network failure image=%s status=%s; retrying in %ss (attempt %s/%s)\n' \
+    "$image_name" "$status" "$wait_seconds" "$((attempt + 1))" "$BUILD_NETWORK_ATTEMPTS" >&2
+  sleep "$wait_seconds"
+}
+
+# The CW producer and the consumer's solve write their logs to files and print
+# them only when that step ends. Follow them while they grow, so a slow or
+# killed build still shows which step it was in and how long each one took.
+owned_log_follower=''
+follow_owned_logs() {
+  python3 -B -u - "$1" <<'PY' &
+import pathlib, signal, sys, time
+root = pathlib.Path(sys.argv[1])
+offsets, partial = {}, {}
+stopping = False
+def stop(*_):
+    global stopping
+    stopping = True
+signal.signal(signal.SIGTERM, stop)
+def drain():
+    for path in sorted(root.rglob("*.log")):
+        try:
+            with path.open("rb") as log:
+                log.seek(offsets.get(path, 0))
+                data = log.read()
+                offsets[path] = log.tell()
+        except OSError:
+            continue
+        lines = (partial.pop(path, b"") + data).split(b"\n")
+        partial[path] = lines.pop()
+        name = path.relative_to(root)
+        for line in lines:
+            sys.stdout.write(f"[cw-owned {name}] {line.decode('utf-8', 'replace')}\n")
+    sys.stdout.flush()
+while not stopping:
+    drain()
+    time.sleep(5)
+drain()
+PY
+  owned_log_follower=$!
+}
+stop_owned_logs() {
+  [ -n "$owned_log_follower" ] || return 0
+  kill -TERM "$owned_log_follower" 2>/dev/null || true
+  wait "$owned_log_follower" 2>/dev/null || true
+  owned_log_follower=''
+}
+
 # A single-platform image exposes one attestation. A multi-platform index
 # exposes a map keyed by platform: every requested platform, and only those,
 # must carry its own valid attestation.
 attestation_format() {
   local field="$1" member="$2"
-  if [ -n "$image_platforms" ]; then
+  if [ -n "$verify_platforms" ]; then
     printf '{{json .%s}}' "$field"
   else
     printf '{{json .%s.%s}}' "$field" "$member"
@@ -432,7 +598,7 @@ attestation_format() {
 
 attestation_selection() {
   local member="$1" validator="$2"
-  if [ -n "$image_platforms" ]; then
+  if [ -n "$verify_platforms" ]; then
     # shellcheck disable=SC2016 # $platforms is a jq variable.
     printf 'type == "object" and keys == $platforms and all(.[]; .%s | %s)' \
       "$member" "$validator"
@@ -442,7 +608,7 @@ attestation_selection() {
 }
 
 expected_platforms_json() {
-  jq -cn --arg platforms "$image_platforms" \
+  jq -cn --arg platforms "$verify_platforms" \
     'if $platforms == "" then [] else $platforms | split(",") | sort end'
 }
 
@@ -543,7 +709,9 @@ if [ -n "$base_image_ref" ]; then
   build_args+=("--build-arg" "BASE_IMAGE_REF=$base_image_ref")
 fi
 platform_args=()
-if [ -n "$image_platforms" ]; then
+if [ -n "$image_platform" ]; then
+  platform_args=(--platform "$image_platform")
+elif [ -n "$image_platforms" ]; then
   platform_args=(--platform "$image_platforms")
 fi
 if [ "$image_name" = workspace ]; then
@@ -554,6 +722,10 @@ if [ "$image_name" = workspace ]; then
     build_args+=(--no-cache)
   else
     build_args+=(--no-cache-filter workspace-floating-tools)
+    # The Go tools cross-compile in their own build-platform stage.
+    if grep -Eqi '^FROM .+ AS workspace-floating-go$' "$dockerfile"; then
+      build_args+=(--no-cache-filter workspace-floating-go)
+    fi
   fi
   build_args+=(--build-arg "CODEWIRE_SCCACHE_MODE=$sccache_mode")
   if [ "$sccache_mode" = r2 ]; then
@@ -668,21 +840,31 @@ if [ "$build_runtime_set" = 1 ]; then
   fi
 fi
 
-if source_digest="$(inspect_manifest_digest "$source_tag")"; then
+# A per-platform image is never the source-SHA index, so it is always built.
+if [ -z "$image_platform" ] && source_digest="$(inspect_manifest_digest "$source_tag")"; then
   jq -n --arg digest "$source_digest" \
     '{"containerimage.digest": $digest}' >"$build_metadata"
   echo "Reusing immutable source image $source_tag@$source_digest"
 else
   inspect_status=$?
-  if [ "$inspect_status" -ne 3 ]; then
+  if [ -z "$image_platform" ] && [ "$inspect_status" -ne 3 ]; then
     exit "$inspect_status"
   fi
   if [ "$require_existing_source_image" = 1 ]; then
     echo "Required immutable source image is missing: $source_tag" >&2
     exit 1
   fi
-  create_buildx_builder
-  if [ -n "$product_bake_target" ]; then
+  [ -n "$image_join" ] || create_buildx_builder
+  if [ -n "$image_join" ]; then
+    join_support_index
+    if ! source_digest="$(inspect_manifest_digest "$source_tag")"; then
+      echo "Unable to read the joined support index $source_tag" >&2
+      exit 1
+    fi
+    jq -n --arg digest "$source_digest" \
+      '{"containerimage.digest": $digest}' >"$build_metadata"
+    echo "Joined ${join_digests[*]} into $source_tag@$source_digest"
+  elif [ -n "$product_bake_target" ]; then
     bake_file="$context/docker-bake.hcl"
     [ -f "$bake_file" ] || {
       echo "Canonical product Bake definition is missing: $bake_file" >&2
@@ -732,11 +914,17 @@ else
       exit 1
     }
   else
-    image_command=(docker buildx build --builder "$buildx_builder" --push
+    output_args=(--push --tag "$source_tag")
+    if [ -n "$image_platform" ]; then
+      output_args=(--output "type=image,name=$canonical_repository,push-by-digest=true,name-canonical=true,push=true")
+    fi
+    image_command=(docker buildx build --builder "$buildx_builder" --progress plain
       --provenance="$provenance" \
       --sbom="generator=$SBOM_GENERATOR_IMAGE" \
       --metadata-file "$build_metadata" "${platform_args[@]}" "${build_args[@]}" \
-      -f "$dockerfile" --tag "$source_tag" "${label_args[@]}" "$context")
+      -f "$dockerfile" "${output_args[@]}" "${label_args[@]}" "$context")
+    # The consumer runs the CW producer only when the build includes amd64,
+    # the one platform that carries the admitted static asset.
     if [ "$image_name:$dockerfile_from_context" = workspace:images/workspace/Dockerfile ]; then
       cw_selected_source_dir="$(cd "$source_dir" && pwd -P)"
       [ "$(cd "$context" && pwd -P)" = "$cw_selected_source_dir" ] || {
@@ -744,12 +932,25 @@ else
         exit 2
       }
       mkdir -p -- "$cw_image_work"
-      env DOCKER_CONFIG="$docker_config" \
-        bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
-        "${image_command[@]}"
-    else
-      env DOCKER_CONFIG="$docker_config" "${image_command[@]}"
+      follow_owned_logs "$cw_image_work"
     fi
+    build_attempt=1
+    while :; do
+      build_status=0
+      if [ "$image_name:$dockerfile_from_context" = workspace:images/workspace/Dockerfile ]; then
+        # A retry reuses an admitted CW producer result and gets a fresh
+        # consumer task (cw-image-consumer.sh).
+        run_logged_build env DOCKER_CONFIG="$docker_config" \
+          bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
+          "${image_command[@]}" || build_status=$?
+      else
+        run_logged_build env DOCKER_CONFIG="$docker_config" "${image_command[@]}" || build_status=$?
+      fi
+      [ "$build_status" -ne 0 ] || break
+      retry_network_build "$build_attempt" "$build_status" || exit "$build_status"
+      build_attempt=$((build_attempt + 1))
+    done
+    stop_owned_logs
   fi
   if ! source_digest="$(jq -er '."containerimage.digest" | select(type == "string")' "$build_metadata")" \
     || [[ ! "$source_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -760,6 +961,16 @@ fi
 
 verify_build_provenance
 verify_build_sbom
+
+if [ -n "$image_platform" ]; then
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    printf 'platform_digest=%s\n' "$source_digest" >>"$GITHUB_OUTPUT"
+  else
+    printf 'platform_digest=%s\n' "$source_digest"
+  fi
+  echo "Built and verified $image_platform $canonical_repository@$source_digest"
+  exit 0
+fi
 
 for tag in "${tags[@]}"; do
   ensure_immutable_tag "$tag" "$source_digest"

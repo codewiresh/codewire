@@ -56,6 +56,18 @@ pub enum SessionClientError {
     MissingCapability { capability: &'static str },
 }
 
+impl SessionClientError {
+    /// Why the daemon will never start the session again, when it refused a
+    /// restart for a reason that cannot change. `None` for every other
+    /// failure: a later attempt may be admitted.
+    pub fn never_restarts(&self) -> Option<crate::NeverRestarts> {
+        match self {
+            Self::Status(status) => crate::NeverRestarts::of(status),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionClient {
     inner: v1::daemon_service_client::DaemonServiceClient<Channel>,

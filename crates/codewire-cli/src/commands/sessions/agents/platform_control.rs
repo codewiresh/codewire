@@ -11,7 +11,7 @@ use std::os::unix::fs::DirBuilderExt;
 const STATE: &str = "/home/codewire/.local/state/codewire/platform-managed-agents-v1";
 const ORIGIN: &str = "platform-origin.json";
 const GENERATION: &str = "platform-generation.json";
-mod proxy;
+mod lockdown;
 const REQUEST_BYTES: u64 = 512 * 1024;
 const RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
@@ -144,6 +144,7 @@ fn validate_envelope(environment: &str, request: &Envelope) -> anyhow::Result<()
                 == match origin.agent {
                     AgentKind::Codex => "0.160.0",
                     AgentKind::Claude => "2.1.288",
+                    AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
                 }
             && origin.parent_generation.is_none_or(|g| g > 0),
         "platform incarnation differs"
@@ -221,10 +222,11 @@ pub(super) fn refuse_native_bypass(
     }
     Ok(())
 }
-fn agent(agent: AgentKind) -> codewire_daemon::platform_managed::Agent {
+pub(super) fn agent(agent: AgentKind) -> codewire_daemon::platform_managed::Agent {
     match agent {
         AgentKind::Codex => codewire_daemon::platform_managed::Agent::Codex,
         AgentKind::Claude => codewire_daemon::platform_managed::Agent::Claude,
+        AgentKind::Noel => unreachable!("validate_envelope refuses noel"),
     }
 }
 pub(super) fn marker(
@@ -405,6 +407,7 @@ fn prepare(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result
         environment_id: environment.id().into(),
         agent: request.origin.agent,
         program: PathBuf::new(),
+        program_fallback: None,
         model,
         effort,
         working_dir,
@@ -445,7 +448,7 @@ fn prepare(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result
             generation: 1,
         },
     )?;
-    proxy::prepare(&stage, &config, route)?;
+    lockdown::prepare(&stage, &config, route)?;
     if let (Some(message), Some(text)) = (&config.initial_message_id, prompt) {
         let mut record = MessageRecord::new(
             &config.driver_id,
@@ -503,7 +506,7 @@ impl DriverContext {
             agent(origin.agent),
             &origin.provider,
         )?;
-        let route = proxy::check(&dir, &config)?;
+        let route = lockdown::check(&dir, &config)?;
         let context = Self {
             origin,
             generation,
@@ -528,22 +531,24 @@ impl DriverContext {
         );
         self.provider.check()?;
         ensure!(
-            proxy::check(&driver_dir(environment, &config.driver_id)?, config)? == self.route,
+            lockdown::check(&driver_dir(environment, &config.driver_id)?, config)? == self.route,
             "platform proxy route changed"
         );
         Ok(())
     }
-    pub(super) fn environment(&self, dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
+    /// The managed login lockdown the provider gets over the session
+    /// environment it inherits.
+    pub(super) fn lockdown(&self, dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
         let config: AgentConfig = private_record(&dir.join("config.json"))?;
         ensure!(
             config.agent == self.origin.agent && config.program == self.provider.path(),
             "platform provider changed"
         );
         self.provider.check()?;
-        proxy::environment(dir, &config, self.route)
+        lockdown::environment(dir, &config, self.route)
     }
     pub(super) fn arguments(&self, args: &[&str]) -> Vec<String> {
-        let mut fixed = proxy::arguments(self.route);
+        let mut fixed = lockdown::arguments(self.route);
         fixed.extend(args.iter().map(|s| (*s).to_owned()));
         fixed
     }
@@ -603,54 +608,56 @@ pub(crate) async fn run_platform_agent_peer(
         binding.session_id == args.session_id && args.program == context.provider.path(),
         "platform peer binding differs"
     );
-    let prefix = proxy::arguments(context.route);
+    // Claude's arguments name its saved conversation, which the driver keeps
+    // in its state record.
+    let state: Option<DriverState> = match config.agent {
+        AgentKind::Codex => None,
+        AgentKind::Claude => Some(private_record(&dir.join("state.json"))?),
+        AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
+    };
+    check_peer_arguments(&config, context.route, state.as_ref(), &args.arguments)?;
+    let locked = context.lockdown(&dir)?;
+    guest_peer::run_platform_peer(args, locked)
+        .await
+        .map_err(|_| anyhow::anyhow!("platform peer refused"))
+}
+/// The only provider arguments a hosted guardian starts: the login lockdown
+/// of this driver's route, then exactly what its driver builds for a Sandbox
+/// placement, and nothing more. A caller cannot add, drop or change one, so
+/// it cannot widen the permission mode or drop the lockdown.
+fn check_peer_arguments(
+    config: &AgentConfig,
+    route: Route,
+    state: Option<&DriverState>,
+    arguments: &[String],
+) -> anyhow::Result<()> {
+    let prefix = lockdown::arguments(route);
     ensure!(
-        args.arguments.starts_with(&prefix),
-        "platform API-only peer arguments differ"
+        arguments.starts_with(&prefix),
+        "platform peer lockdown arguments differ"
     );
-    let native = &args.arguments[prefix.len()..];
+    let native = &arguments[prefix.len()..];
     match config.agent {
         AgentKind::Codex => ensure!(
             native == codex_app_server_arguments(&config.working_dir).as_slice(),
             "platform Codex peer differs"
         ),
+        AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
         AgentKind::Claude => {
-            let state: DriverState = private_record(&dir.join("state.json"))?;
+            let state = state.context("platform Claude native thread missing")?;
             let session = state
                 .native_thread_id
                 .as_deref()
                 .context("platform Claude native thread missing")?;
             id(session)?;
-            let mut expected = vec![
-                "-p",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--replay-user-messages",
-                "--model",
-                config.model.as_str(),
-                if state.native_thread_established {
-                    "--resume"
-                } else {
-                    "--session-id"
-                },
-                session,
-            ];
-            if let Some(effort) = &config.effort {
-                expected.extend(["--effort", effort]);
-            }
+            // A hosted Sandbox is a Sandbox placement: auto mode included.
             ensure!(
-                native.iter().map(String::as_str).eq(expected),
+                native == claude_arguments(config, true, state.native_thread_established, session),
                 "platform Claude peer differs"
             );
         }
     }
-    let projection = context.environment(&dir)?;
-    guest_peer::run_platform_peer(args, projection)
-        .await
-        .map_err(|_| anyhow::anyhow!("platform peer refused"))
+    Ok(())
 }
 fn handle_fixed(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result<Value> {
     validate_envelope(environment.id(), &request)?;

@@ -151,6 +151,25 @@ fn ambiguous_dispatch_has_no_retry_advice_or_private_status() {
 }
 
 #[test]
+fn a_refused_session_store_is_a_known_precondition_not_an_unknown_outcome() {
+    // The daemon refuses its store before any launch, restart or stop runs.
+    let OrganizationRuntimeMutationError::Known(error) =
+        classify_dispatch_error(tonic::Status::new(tonic::Code::DataLoss, PRIVATE_SENTINEL))
+    else {
+        panic!("a refused session store was treated as an ambiguous outcome");
+    };
+    let rendered = crate::connect::rendered_workspace_error(&error, Some("synthetic-request"));
+    let rendered = format!("{rendered:?}");
+    assert!(!rendered.contains(PRIVATE_SENTINEL));
+    assert!(!rendered.contains("outcome is unknown"));
+    assert!(matches!(
+        &error,
+        AppError::Precondition(message) if message.as_ref()
+            == "environment session store is refused; run `cw env daemon status` for the reason"
+    ));
+}
+
+#[test]
 fn setup_readiness_is_required_only_before_launch_and_restart() {
     assert!(Acknowledgement::Launch.requires_setup_ready());
     assert!(Acknowledgement::Restart(SESSION_ID.into()).requires_setup_ready());

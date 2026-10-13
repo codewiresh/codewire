@@ -2489,7 +2489,7 @@ with original_open(path, 'rb') as receipt:
             .prepare(
                 lease,
                 &Method::POST,
-                "/messages",
+                "/v1/messages",
                 Some("beta=true"),
                 &claude_request(&body).headers,
                 &serde_json::to_vec(&body).unwrap(),

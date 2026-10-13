@@ -77,7 +77,9 @@
 .cw-terminal-session-message, .cw-terminal-limit { margin: 0; padding: var(--space-1-5) var(--space-4); border-bottom: var(--border-width) solid var(--border-subtle); color: var(--fg-secondary); font-size: var(--text-small); line-height: var(--leading-body); }
 .cw-terminal-session-message:empty { display: none; }
 .cw-terminal-reload { padding: var(--space-1-5) var(--space-4); color: var(--accent-text); font-size: var(--text-small); }
-.cw-terminal-empty { display: grid; place-content: center; margin: 0; padding: var(--space-8) max(var(--space-4), calc((100% - var(--measure)) / 2)); color: var(--fg-tertiary); font-size: var(--text-secondary); line-height: var(--leading-body); text-align: center; }
+/* With no tab open: what happens next, or why it failed with Retry beneath. */
+.cw-terminal-empty { display: grid; place-content: center; justify-items: center; gap: var(--space-3); margin: 0; padding: var(--space-8) max(var(--space-4), calc((100% - var(--measure)) / 2)); color: var(--fg-tertiary); font-size: var(--text-secondary); line-height: var(--leading-body); text-align: center; }
+.cw-terminal-empty > p { margin: 0; }
 
 /* Output fills its cell edge to edge with one small inner gutter. */
 .cw-terminal-panels { min-height: 0; background: var(--bg-base); }

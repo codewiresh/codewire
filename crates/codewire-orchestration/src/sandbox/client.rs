@@ -29,11 +29,12 @@ use serde_json::Value;
 
 use super::template::{
     CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts, direct_udp_service_name,
-    render_direct_udp_service, render_sandbox_shadow_pool, render_sandbox_template,
-    render_warm_member_bridge, render_workspace_daemon_network_policy,
-    render_workspace_daemon_service, warm_member_daemon_bridge_name,
-    workspace_daemon_network_policy_name, workspace_daemon_service_name,
+    LEGACY_DIND_BOOTSTRAP_SCRIPT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts,
+    dind_bootstrap_script, direct_udp_service_name, render_direct_udp_service,
+    render_sandbox_shadow_pool, render_sandbox_template, render_warm_member_bridge,
+    render_workspace_daemon_network_policy, render_workspace_daemon_service,
+    warm_member_daemon_bridge_name, workspace_daemon_network_policy_name,
+    workspace_daemon_service_name,
 };
 use super::{
     CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
@@ -341,19 +342,35 @@ fn workspace_owned_environment_keys() -> BTreeSet<String> {
         .into_iter()
         .map(str::to_owned)
         .collect();
-    keys.extend(
-        codewire_access::ManagedCredentialClients::from_profile_slots([
-            "codex",
-            "openai",
-            "anthropic",
-            "ssh",
-            "github",
-        ])
-        .expect("closed slots")
-        .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
-        .environment
-        .into_keys(),
-    );
+    let all = codewire_access::ManagedCredentialClients::from_profile_slots([
+        "codex",
+        "openai",
+        "anthropic",
+        "ssh",
+        "github",
+    ])
+    .expect("closed slots");
+    // Every name any client projects in either Anthropic form, and every
+    // name a selected client reserves: an Anthropic name of the form that
+    // is not selected is owned too, and never rendered.
+    for selection in [
+        all,
+        all.with_anthropic_subscription_token()
+            .expect("the Anthropic client is selected"),
+    ] {
+        keys.extend(
+            selection
+                .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
+                .environment
+                .into_keys(),
+        );
+        keys.extend(
+            selection
+                .reserved_environment_keys()
+                .into_iter()
+                .map(str::to_owned),
+        );
+    }
     // Public roots previously rendered by this same owned workspace bootstrap.
     // They must not persist when the stock client uses the loopback route.
     keys.insert("CODEX_CA_CERTIFICATE".into());
@@ -431,6 +448,17 @@ fn bootstrap_environment_matches(env: &[Value], expected: &BTreeMap<String, Stri
         let Some(name) = entry.get("name").and_then(Value::as_str) else {
             return false;
         };
+        // An earlier bootstrap rendered blank placeholders for the Anthropic
+        // form that was not selected; the Pod API stores them as names with
+        // no value. A blank owned name the current bootstrap does not render
+        // is inert, so a Pod rendered before it was dropped still matches.
+        if owned.contains(name)
+            && !expected.contains_key(name)
+            && entry.get("valueFrom").is_none_or(Value::is_null)
+            && environment_value(entry) == Some("")
+        {
+            continue;
+        }
         if owned.contains(name)
             && (!seen.insert(name)
                 || !entry.get("valueFrom").is_none_or(Value::is_null)
@@ -443,8 +471,8 @@ fn bootstrap_environment_matches(env: &[Value], expected: &BTreeMap<String, Stri
     seen.len() == expected.len()
 }
 
-/// The Pod API omits an empty `value`, so a stored Pod never repeats the
-/// blank placeholders a selected client renders (for example
+/// The Pod API omits an empty `value`, so a stored Pod never repeats a blank
+/// placeholder an earlier bootstrap rendered (for example
 /// `ANTHROPIC_API_KEY`). An absent value is the empty string.
 fn environment_value(entry: &Value) -> Option<&str> {
     match entry.get("value") {
@@ -1066,6 +1094,73 @@ fn log_daemon_image_repin(
             "admitted Sandbox daemon image re-pin did not return the support image"
         ),
     }
+}
+
+/// The operations that re-render a Sandbox's legacy DinD bootstrap
+/// ([`LEGACY_DIND_BOOTSTRAP_SCRIPT`]) to the current one, which keeps the
+/// workspace home's `.codewire` 0755 so the workspace daemon opens its
+/// platform session store (#2639). Every resume and Pod replacement that
+/// re-pins the daemon image carries them, as the controller builds each new
+/// Pod from the Sandbox's own spec. They `test` the container's index, name
+/// and exact legacy script and `replace` only that script: the DinD image and
+/// environment, the workspace image, volumes and workspace contents are
+/// untouched. Any other script is left alone, and so is a confidential
+/// runtime, whose measured policy admits exactly the rendered containers.
+/// `None` when there is nothing to re-render.
+fn dind_bootstrap_refresh(sandbox: &DynamicObject) -> anyhow::Result<Option<[Value; 3]>> {
+    let spec_path = "/spec/podTemplate/spec";
+    let Some(pod_spec) = sandbox.data.pointer(spec_path) else {
+        return Ok(None);
+    };
+    let containers = match pod_spec.get("containers") {
+        None => return Ok(None),
+        Some(Value::Array(containers)) => containers,
+        Some(_) => anyhow::bail!("workspace containers are malformed"),
+    };
+    let mut dind = containers
+        .iter()
+        .enumerate()
+        .filter(|(_, container)| container.get("name").and_then(Value::as_str) == Some("dind"));
+    let (index, container) = match (dind.next(), dind.next()) {
+        (None, _) => return Ok(None),
+        (Some(found), None) => found,
+        (Some(_), Some(_)) => anyhow::bail!("workspace DinD container is duplicated"),
+    };
+    let script = container
+        .get("command")
+        .and_then(Value::as_array)
+        .filter(|command| command.len() == 3 && command[0] == "sh" && command[1] == "-ec")
+        .and_then(|command| command[2].as_str());
+    let legacy = script == Some(LEGACY_DIND_BOOTSTRAP_SCRIPT);
+    if script.is_some_and(|script| !legacy && script != dind_bootstrap_script()) {
+        tracing::warn!(
+            sandbox = sandbox.metadata.name.as_deref().unwrap_or_default(),
+            "Sandbox DinD bootstrap is neither current nor the known legacy one; it is not re-rendered"
+        );
+    }
+    let runtime_class = match pod_spec.get("runtimeClassName") {
+        None | Some(Value::Null) => "",
+        Some(class) => class
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("workspace runtime class is malformed"))?,
+    };
+    if !legacy || !["", RUNTIME_CLASS_RUNC, RUNTIME_CLASS_COMMODITY].contains(&runtime_class) {
+        return Ok(None);
+    }
+    let path = format!("{spec_path}/containers/{index}");
+    Ok(Some([
+        serde_json::json!({"op":"test","path":format!("{path}/name"),"value":"dind"}),
+        serde_json::json!({"op":"test","path":format!("{path}/command/2"),"value":LEGACY_DIND_BOOTSTRAP_SCRIPT}),
+        serde_json::json!({"op":"replace","path":format!("{path}/command/2"),"value":dind_bootstrap_script()}),
+    ]))
+}
+
+/// Log a DinD bootstrap re-render an admitted patch carried.
+fn log_dind_bootstrap_refresh(name: &str) {
+    tracing::info!(
+        name,
+        "re-rendered the Sandbox's legacy DinD bootstrap; its next Pod keeps ~/.codewire private"
+    );
 }
 
 /// Whether a SandboxTemplate or Sandbox renders an identity-free workspace:
@@ -2095,11 +2190,12 @@ impl SandboxClient {
             .is_some_and(|pod| pod.uid == uid))
     }
 
-    /// Re-pin the bound Sandbox's daemon image ([`plan_daemon_image`]) while it
+    /// Re-pin the bound Sandbox's daemon image ([`plan_daemon_image`]) and
+    /// re-render a legacy DinD bootstrap ([`dind_bootstrap_refresh`]) while it
     /// stays Running, before its Pod is replaced. The controller never
     /// rewrites a running Pod, so this changes only the next one. The patch
     /// carries no operating mode: it tests the Sandbox's UID and
-    /// resourceVersion and the daemon entry, then replaces only its image.
+    /// resourceVersion and each entry, then replaces only its image or script.
     /// The controller keeps updating a running Sandbox's status, so a
     /// conflicting write is read and planned again, at most
     /// [`DAEMON_REPIN_ATTEMPTS`] times, and only for the first observed UID.
@@ -2141,9 +2237,11 @@ impl SandboxClient {
                 .as_deref()
                 .filter(|version| !version.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("Sandbox {name} has no resource version"))?;
-            let Some(repin) = daemon_image_repin(&sandbox, support_image)? else {
+            let repin = daemon_image_repin(&sandbox, support_image)?;
+            let dind = dind_bootstrap_refresh(&sandbox)?;
+            if repin.is_none() && dind.is_none() {
                 return Ok(DaemonImageRepinOutcome::Unchanged);
-            };
+            }
             if let Some((pod_name, pod_uid)) = pod
                 && !self.workspace_pod_has_uid(pod_name, pod_uid).await?
             {
@@ -2153,7 +2251,12 @@ impl SandboxClient {
                 serde_json::json!({"op":"test","path":"/metadata/uid","value":uid}),
                 serde_json::json!({"op":"test","path":"/metadata/resourceVersion","value":version}),
             ];
-            operations.extend(repin.operations.iter().cloned());
+            operations.extend(
+                repin
+                    .iter()
+                    .flat_map(|repin| repin.operations.iter().cloned()),
+            );
+            operations.extend(dind.iter().flatten().cloned());
             let patch = Patch::Json::<()>(serde_json::from_value(Value::Array(operations))?);
             match sandboxes
                 .patch(&name, &PatchParams::default(), &patch)
@@ -2164,7 +2267,12 @@ impl SandboxClient {
                         runtime_object_uid(&updated.metadata, &self.namespace, &name)? == uid,
                         "Sandbox {name} was replaced during its daemon image re-pin"
                     );
-                    log_daemon_image_repin(&updated, &name, &repin, support_image);
+                    if let Some(repin) = &repin {
+                        log_daemon_image_repin(&updated, &name, repin, support_image);
+                    }
+                    if dind.is_some() {
+                        log_dind_bootstrap_refresh(&name);
+                    }
                     return Ok(DaemonImageRepinOutcome::Repinned);
                 }
                 // A failed `test` is 422; an apiserver conflict is 409.
@@ -3547,7 +3655,8 @@ impl SandboxClient {
     /// Mirrors `SetReplicas`: resolve the Sandbox name from the claim
     /// status, then update spec.operatingMode (Running/Suspended). The
     /// Running patch also re-pins the Sandbox's daemon image volume to
-    /// `support_image` ([`plan_daemon_image`]); a suspend never re-pins.
+    /// `support_image` ([`plan_daemon_image`]) and re-renders a legacy DinD
+    /// bootstrap ([`dind_bootstrap_refresh`]); a suspend does neither.
     pub async fn set_replicas(
         &self,
         env_id: &str,
@@ -3584,11 +3693,15 @@ impl SandboxClient {
         } else {
             "Running"
         };
-        let repin = if replicas > 0 {
-            daemon_image_repin(&sandbox, support_image)
-                .map_err(|e| anyhow::anyhow!("set operatingMode: Sandbox {name}: {e}"))?
+        let (repin, dind) = if replicas > 0 {
+            (
+                daemon_image_repin(&sandbox, support_image)
+                    .map_err(|e| anyhow::anyhow!("set operatingMode: Sandbox {name}: {e}"))?,
+                dind_bootstrap_refresh(&sandbox)
+                    .map_err(|e| anyhow::anyhow!("set operatingMode: Sandbox {name}: {e}"))?,
+            )
         } else {
-            None
+            (None, None)
         };
         // Fence the exact incarnation without conditioning the mode change on
         // unrelated controller-owned status/annotation updates. A re-pin
@@ -3597,6 +3710,7 @@ impl SandboxClient {
             {"op": "test", "path": "/metadata/uid", "value": uid}
         )];
         operations.extend(repin.iter().flat_map(|repin| repin.operations.clone()));
+        operations.extend(dind.iter().flatten().cloned());
         operations.push(serde_json::json!(
             {"op": "add", "path": "/spec/operatingMode", "value": mode}
         ));
@@ -3621,6 +3735,9 @@ impl SandboxClient {
         );
         if let Some(repin) = &repin {
             log_daemon_image_repin(&updated, &name, repin, support_image);
+        }
+        if dind.is_some() {
+            log_dind_bootstrap_refresh(&name);
         }
         tracing::info!(name, replicas, mode, "set Sandbox operating mode");
         Ok(())
@@ -3653,8 +3770,9 @@ impl SandboxClient {
     /// Unlike generic scale operations this completes a captured suspension /
     /// bootstrap sequence, so concurrent spec changes must reject publication.
     /// The caller owns the environment mutation fence and old/all-Pod absence.
-    /// A resume re-pins the daemon image volume to `support_image` in the
-    /// same patch ([`plan_daemon_image`]).
+    /// A resume re-pins the daemon image volume to `support_image` and
+    /// re-renders a legacy DinD bootstrap in the same patch
+    /// ([`plan_daemon_image`], [`dind_bootstrap_refresh`]).
     pub async fn set_replicas_for_identity(
         &self,
         claim_opts: &ClaimOpts,
@@ -3732,7 +3850,13 @@ impl SandboxClient {
             Some(image) => daemon_image_repin(sandbox, image)?.map(|repin| (image, repin)),
             None => None,
         };
+        let dind = if replicas > 0 {
+            dind_bootstrap_refresh(sandbox)?
+        } else {
+            None
+        };
         operations.extend(repin.iter().flat_map(|(_, repin)| repin.operations.clone()));
+        operations.extend(dind.iter().flatten().cloned());
         operations.push(serde_json::json!({"op":"add","path":"/spec/operatingMode","value":mode}));
         let patch = Patch::Json::<()>(serde_json::from_value(Value::Array(operations))?);
         let updated = self
@@ -3748,6 +3872,9 @@ impl SandboxClient {
         );
         if let Some((image, repin)) = &repin {
             log_daemon_image_repin(&updated, name, repin, image);
+        }
+        if dind.is_some() {
+            log_dind_bootstrap_refresh(name);
         }
         require_runtime_controller(
             &updated.metadata,

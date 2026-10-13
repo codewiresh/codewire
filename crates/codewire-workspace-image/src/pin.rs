@@ -2,18 +2,18 @@
 // the post-publish proposal rewrites this file and policy refuses other edits.
 
 /// Content digest of the published workspace image.
-pub const DIGEST: &str = "sha256:16ad1207d9598fb8c3a840e0c5f9c6b78c71b7417746e5bb60bfc3df742c3419";
+pub const DIGEST: &str = "sha256:0ce0c5eb4fe7aed222b4e3f4180757665b8ab8f227c0e4a9f7bf6f22c89e37f6";
 /// The image at the Harbor repository every deployment pulls.
-pub const HARBOR_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:16ad1207d9598fb8c3a840e0c5f9c6b78c71b7417746e5bb60bfc3df742c3419";
+pub const HARBOR_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:0ce0c5eb4fe7aed222b4e3f4180757665b8ab8f227c0e4a9f7bf6f22c89e37f6";
 /// The same digest at the public GHCR mirror, pulled anonymously by local
 /// environments.
-pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:16ad1207d9598fb8c3a840e0c5f9c6b78c71b7417746e5bb60bfc3df742c3419";
+pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:0ce0c5eb4fe7aed222b4e3f4180757665b8ab8f227c0e4a9f7bf6f22c89e37f6";
 /// Platforms the published image index serves.
-pub const PLATFORMS: &[&str] = &["linux/amd64"];
+pub const PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];
 /// Commit the image was built from.
-pub const SOURCE_SHA: &str = "784f0e23f0666feff3c154e17f7be4a620866422";
+pub const SOURCE_SHA: &str = "b0be09724b574b7421804118a13abd5372bc1b26";
 /// Identity of the image definition at `SOURCE_SHA`; see the generator.
-pub const INPUTS_SHA256: &str = "c4a5fcd762b3e4a49db06a78fb8c7a55dd4cc5ba5b87289c2097ef638a741281";
+pub const INPUTS_SHA256: &str = "94805e3c51073cd2e388ae473c4bdfb387f4223bebd3a8e11a5439c4e24a9bc5";
 /// Agent CLI versions the image definition at `SOURCE_SHA` installs.
 pub const AGENT_VERSIONS: &[(&str, &str)] = &[
     ("claude", "2.1.288"),
@@ -24,6 +24,7 @@ pub const AGENT_VERSIONS: &[(&str, &str)] = &[
 ];
 /// Earlier published digests, newest first, that older clients may send.
 pub const PREVIOUS_DIGESTS: &[&str] = &[
+    "sha256:16ad1207d9598fb8c3a840e0c5f9c6b78c71b7417746e5bb60bfc3df742c3419",
     "sha256:84902c621e8cebd99618ac9049d669aacdcef1fcec914dd53608e1a3ce1ea959",
     "sha256:ad1f2db5ff86c616ea7fb7b8c3f196b271a0bc5b75a636f4b4ffd77fb1ee2313",
     "sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",

@@ -4,17 +4,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SELECTOR="$ROOT/scripts/ci/select/select-verification.sh"
 WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
+# A main push's Heavy jobs take the runners reserved for main; every other run
+# uses the shared Heavy pool (infra forgejo-runners dispatcher).
+# shellcheck disable=SC2016 # The workflow expression is literal text.
+HEAVY_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-heavy-main'"'"' || '"'"'ci-heavy'"'"' }}'
 DIAGNOSTICS_WORKFLOW="$ROOT/.gitea/workflows/manual-diagnostics.yaml"
 CLI_RELEASE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
 TMP_ROOT="$ROOT/.tmp"
 mkdir -p "$TMP_ROOT"
 TMP="$(mktemp -d "$TMP_ROOT/selector.XXXXXX")"
-NEGATIVE_CACHE_PATH="$ROOT/scripts/ci/cache/unlisted-cache-helper.sh"
-HOST_CLASSIFICATION_NEIGHBORS=()
+# Cases that need a path to exist create it in a private root and run the
+# selector from there. Nothing is written into the checkout: policy parts run
+# side by side, and a file that appeared in the real tree would be seen by
+# every tree-reading check beside this one.
 cleanup() {
-  rm -f "$NEGATIVE_CACHE_PATH"
-  rm -f "${HOST_CLASSIFICATION_NEIGHBORS[@]}"
-  rmdir "$ROOT/scripts/ci/cache" 2>/dev/null || true
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -85,7 +88,8 @@ run_paths_case() {
     fi
   done
   printf '%s\n' "$@" > "$paths"
-  output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  # SELECTOR_CASE_ROOT runs the selector where the case's paths exist.
+  output="$(cd "${SELECTOR_CASE_ROOT:-$PWD}" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
     GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
     KIND_E2E_OPT_IN="$opt_in" "$SELECTOR" "$paths")"
   assert_tokens "$name" "$expected" "$output"
@@ -376,6 +380,11 @@ run_paths_case release pull_request refs/pull/3/head false \
   install.sh
 # Presence matters: an unlisted existing script selects unknown/full, while
 # deleted scripts deliberately remain policy-only. Prove each new owner path.
+run_present_paths_case bounded_external_downloads \
+  pull_request refs/pull/2691/head false \
+  'go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
+  scripts/ci/release/fetch-pinned.sh \
+  scripts/ci/tests/test-fetch-pinned.sh
 run_present_paths_case public_installer_test \
   pull_request refs/pull/952/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
@@ -1097,15 +1106,17 @@ run_paths_case host_managed_and_source_policy pull_request refs/pull/2255/head f
   scripts/ci/tests/test-cli-host-managed.py
 # Nearby unrecognized files retain conservative fallback; do not broaden
 # either the protected source-policy name or the exact harness path cases.
+neighbor_root="$TMP/host-neighbors.repo"
 for neighbor in .supplychain/source-policy-unlisted.json \
     scripts/dev/test-cli-host-managed-unlisted.py scripts/ci/tests/test-cli-host-managed-unlisted.py \
     scripts/dev/fixtures/host-member-managed-assets-unlisted.py; do
-  if ! (set -C; printf '%s\n' '# classifier fixture, never executed' > "$ROOT/$neighbor"); then
-    echo "classification neighbor already exists: $neighbor" >&2; exit 1
-  fi
-  HOST_CLASSIFICATION_NEIGHBORS+=("$ROOT/$neighbor")
+  [ ! -e "$ROOT/$neighbor" ] || {
+    echo "classification neighbor exists in the checkout: $neighbor" >&2; exit 1
+  }
+  mkdir -p "$neighbor_root/$(dirname "$neighbor")"
+  printf '%s\n' '# classifier fixture, never executed' > "$neighbor_root/$neighbor"
   printf '%s\n' "$neighbor" > "$TMP/host-neighbor.paths"
-  neighbor_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  neighbor_output="$(cd "$neighbor_root" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
     GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/2255/head \
     KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/host-neighbor.paths" 2>/dev/null)"
   [[ "$neighbor_output" == *'classification=unclassified'* \
@@ -1176,6 +1187,11 @@ run_paths_case workspace_image_pin_proposal pull_request refs/pull/2255/head fal
   scripts/ci/tests/test-propose-workspace-image-pin.sh \
   scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh \
   scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
+# The per-platform support build selects the release proofs, like the build helper.
+run_paths_case support_pair_platform_build pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
+  scripts/ci/images/build-support-platform.sh scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh \
+  scripts/ci/tests/test-fetch-openbao-arm64-buildkit-client.sh
 run_paths_case cw_runtime_image_tool pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/cw-runtime-image.py scripts/dev/test-cw-runtime-image.py
@@ -1338,6 +1354,16 @@ run_present_paths_case mesh_ingress_protocol_guard pull_request refs/pull/1902/h
   'deploy policy policy_shell security security_js' scripts/ci/tests/test-deploy-mesh-ingress-protocol.sh
 run_present_paths_case mesh_ingress_protocol_unknown pull_request refs/pull/1902/head false \
   "$all_product_pr" scripts/ci/tests/test-mesh-ingress-protocol-future.sh
+# Developer-only Apple silicon journeys start real VMs on a Mac and never run
+# in CI; their source selects only policy, and an unknown sibling stays full.
+run_present_paths_case macos_local_vm_journeys pull_request refs/pull/20660/head false \
+  'policy security security_js' \
+  scripts/dev/test-cli-local-vm-macos.py scripts/dev/test-cli-local-vm-docker-macos.py \
+  scripts/dev/test-cli-local-vm-inputs-macos.py \
+  scripts/dev/test-local-vm-hostile-guest-macos.py scripts/dev/hostile-guest-probe.py \
+  scripts/dev/test-local-vm-hostile-guest.py
+run_present_paths_case macos_local_vm_journey_unknown pull_request refs/pull/20661/head false \
+  "$all_product_pr" scripts/dev/test-local-vm-future-macos.py
 run_present_paths_case macos_console_pair pull_request refs/pull/20641/head false \
   'policy security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-vz-console-pair.py scripts/dev/test-macos-vz-console-pair.py
@@ -1399,14 +1425,14 @@ if grep -Fq 'scripts/ci/cache/*.sh' "$SELECTOR"; then
   echo 'Rust cache policy must not admit future cache helpers by wildcard' >&2
   exit 1
 fi
-[ ! -e "$NEGATIVE_CACHE_PATH" ] \
-  || { echo "negative cache fixture path already exists: $NEGATIVE_CACHE_PATH" >&2; exit 1; }
-mkdir -p "${NEGATIVE_CACHE_PATH%/*}"
-: > "$NEGATIVE_CACHE_PATH"
-run_paths_case rust_cache_unlisted pull_request refs/pull/201/head false "$all_product_pr" \
+[ ! -e "$ROOT/scripts/ci/cache/unlisted-cache-helper.sh" ] \
+  || { echo 'negative cache fixture path exists in the checkout' >&2; exit 1; }
+negative_cache_root="$TMP/rust_cache_unlisted.repo"
+mkdir -p "$negative_cache_root/scripts/ci/cache"
+: > "$negative_cache_root/scripts/ci/cache/unlisted-cache-helper.sh"
+SELECTOR_CASE_ROOT="$negative_cache_root" \
+  run_paths_case rust_cache_unlisted pull_request refs/pull/201/head false "$all_product_pr" \
   scripts/ci/cache/unlisted-cache-helper.sh
-rm -f "$NEGATIVE_CACHE_PATH"
-rmdir "$ROOT/scripts/ci/cache" 2>/dev/null || true
 run_present_paths_case kind_runtime_fixture_unknown pull_request refs/pull/1801/head false \
   "$all_product_pr" scripts/ci/tests/test-kind-cw-runtime-future.py
 run_paths_case unknown pull_request refs/pull/18/head false "$all_product_pr" \
@@ -1959,7 +1985,8 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
   ' "$WORKFLOW" > "$block"
   grep -qF "  ${job_id}:" "$block"
   grep -qF "    name: ${job_name}" "$block"
-  grep -qF "    runs-on: ${runner}" "$block"
+  if [ "$runner" = heavy ]; then runner="$HEAVY_RUNS_ON"; fi
+  grep -qxF "    runs-on: ${runner}" "$block"
   if [ "$job_id" = edge-kind ]; then
     # Its optional producer dependencies need an always() condition so edge-
     # only selection still runs. The executable workflow fixture also proves
@@ -1984,19 +2011,19 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     exit 1
   fi
 done <<'EOF'
-cw-release-assets|CW release-assets verification|ci-heavy|cw_release_assets
-workspace-image|Container contract verification|ci-heavy|workspace_image
-policy|Policy verification|ci-heavy|policy
-standard|Standard verification|ci-heavy|standard
-tooling|Tooling / delivery contract verification|ci-heavy|tooling
-rust-compile|Compile every Rust target|ci-heavy|rust_transport
-rust-packages|Rust / transport packages|ci-heavy|rust_transport
-rust-features|Rust / transport feature graphs|ci-heavy|rust_transport
-rust-transport|Rust / transport verification|ci-heavy|rust_transport
-database|Database verification|ci-heavy|database
-services-control|Service control-plane verification|ci-heavy|services_control
-services-runtime|Service runtime-plane verification|ci-heavy|services_runtime
-edge-kind|Edge / Kind verification|ci-heavy|edge_kind
+cw-release-assets|CW release-assets verification|heavy|cw_release_assets
+workspace-image|Container contract verification|heavy|workspace_image
+policy|Policy verification|heavy|policy
+standard|Standard verification|heavy|standard
+tooling|Tooling / delivery contract verification|heavy|tooling
+rust-compile|Compile every Rust target|heavy|rust_transport
+rust-packages|Rust / transport packages|heavy|rust_transport
+rust-features|Rust / transport feature graphs|heavy|rust_transport
+rust-transport|Rust / transport verification|heavy|rust_transport
+database|Database verification|heavy|database
+services-control|Service control-plane verification|heavy|services_control
+services-runtime|Service runtime-plane verification|heavy|services_runtime
+edge-kind|Edge / Kind verification|heavy|edge_kind
 EOF
 
 policy_block="$TMP/policy.yaml"
@@ -2376,10 +2403,14 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 18 ]] || {
-  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
+[[ "$(grep -Fxc "    runs-on: ${HEAVY_RUNS_ON}" "$WORKFLOW")" -eq 18 ]] || {
+  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe, each selecting the main-first Heavy label' >&2
   exit 1
 }
+if grep -Eq '^ *runs-on: ci-heavy(-main)?$' "$WORKFLOW"; then
+  echo 'a Codewire CI Heavy job fixes one label: main would wait behind pull requests, or pull requests would take main-only runners' >&2
+  exit 1
+fi
 [[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 2 ]] || {
   echo 'Codewire CI has not assigned selection and aggregation to ci-lite' >&2
   exit 1
@@ -2483,7 +2514,7 @@ awk '
 ' "$WORKFLOW" > "$cw_block"
 grep -qF '  cw-release-assets:' "$cw_block"
 grep -qF '    name: CW release-assets verification' "$cw_block"
-grep -qF '    runs-on: ci-heavy' "$cw_block"
+grep -qxF "    runs-on: ${HEAVY_RUNS_ON}" "$cw_block"
 grep -qF 'name: CW release assets not selected' "$cw_block"
 grep -qF "needs.verification-selection.outputs.cw_package_selected != 'true'" \
   "$cw_block"
@@ -2526,7 +2557,7 @@ awk '
 ' "$WORKFLOW" > "$workspace_block"
 grep -qF '  workspace-image:' "$workspace_block"
 grep -qF '    name: Container contract verification' "$workspace_block"
-grep -qF '    runs-on: ci-heavy' "$workspace_block"
+grep -qxF "    runs-on: ${HEAVY_RUNS_ON}" "$workspace_block"
 grep -qF '    needs: [verification-selection]' "$workspace_block"
 grep -qF 'name: Container contracts not selected' "$workspace_block"
 grep -qF 'no checkout, download, installation, or build required' "$workspace_block"
@@ -3028,12 +3059,58 @@ if grep -Eq 'run_policy_local|scripts/checks/repo_checks.py|scripts/checks/sourc
   echo 'local preflight still owns a private policy checklist' >&2
   exit 1
 fi
+# Policy core is two parts that local merge qualification runs side by side.
+# Together they are the shared core: every step is in exactly one part, the
+# aggregate runs exactly the two parts, and the policy family runs exactly the
+# parts the runner lists for the selection.
 shared_policy_core="$TMP/shared-policy-core.sh"
-awk '
-  /^run_policy_core\(\) \{/ { capture = 1 }
-  capture { print }
-  capture && /^}$/ { exit }
-' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$shared_policy_core"
+product_runner="$ROOT/scripts/ci/verify/run-product-verification.sh"
+policy_function() {
+  awk -v name="$1" '
+    $0 == name "() {" { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$product_runner"
+}
+{ policy_function run_policy_core_one; policy_function run_policy_core_two; } > "$shared_policy_core"
+policy_steps() {
+  grep -E '^  (scripts/|crates/|python3 )' | LC_ALL=C sort
+}
+[ -z "$(policy_function run_policy_core_one | policy_steps | uniq -d)" ] \
+  && [ -z "$(policy_function run_policy_core_two | policy_steps | uniq -d)" ] \
+  && [ -z "$(comm -12 <(policy_function run_policy_core_one | policy_steps) \
+      <(policy_function run_policy_core_two | policy_steps))" ] || {
+  echo 'a policy core step is repeated or belongs to both parts' >&2
+  exit 1
+}
+[ -n "$(policy_function run_policy_core_one | policy_steps)" ] \
+  && [ -n "$(policy_function run_policy_core_two | policy_steps)" ] || {
+  echo 'a policy core part has no steps' >&2
+  exit 1
+}
+[ "$(policy_function run_policy_core | sed '1d;$d')" = $'  run_policy_core_one\n  run_policy_core_two' ] || {
+  echo 'policy core is not exactly its two parts' >&2
+  exit 1
+}
+grep -qxF '  for part in $(policy_parts); do' <(policy_function run_policy) \
+  && grep -qxF '    run_policy_part "$part"' <(policy_function run_policy) || {
+  echo 'the policy family does not run the listed policy parts' >&2
+  exit 1
+}
+for selection_and_parts in \
+    '|valid:v3|policy|policy_shell_omittable|complete|=policy-core-1 policy-core-2' \
+    '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|=policy-shell policy-core-1 policy-core-2' \
+    '|valid:v3|policy|complete|=policy-shell policy-core-1 policy-core-2'; do
+  listed_parts="$(VERIFICATION_SELECTION="${selection_and_parts%%=*}" "$product_runner" policy-parts | paste -sd' ')"
+  [ "$listed_parts" = "${selection_and_parts#*=}" ] || {
+    echo "policy parts for ${selection_and_parts%%=*} are: ${listed_parts}" >&2
+    exit 1
+  }
+done
+grep -qF '"$PRODUCT_RUNNER" policy-parts' "$ROOT/scripts/dev/preflight.sh" || {
+  echo 'local merge qualification does not take policy parts from the product runner' >&2
+  exit 1
+}
 for policy_owner in \
     'run_verification_shell_syntax' \
     'scripts/ci/tests/test-rust-owned-fixtures.sh' \
@@ -3559,7 +3636,86 @@ bash -n \
 
 "$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh"
 "$ROOT/scripts/ci/tests/test-pre-push-worktree.sh"
+"$ROOT/scripts/ci/tests/test-push-check-shellcheck.sh"
 "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"
+
+# Main CI runs queue one at a time and Forgejo keeps every queued run. A main
+# push that starts after main moved on runs selection, says which commit
+# superseded it, and dispatches nothing; main's tip runs everything selected.
+# Execute the checked-in step against a stub remote.
+selection_block="$(awk '
+  $0 == "  verification-selection:" { capture = 1 }
+  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
+  capture { print }
+' "$WORKFLOW")"
+for expected in \
+    '      superseded: ${{ steps.superseded.outputs.superseded }}' \
+    '      superseded_by: ${{ steps.superseded.outputs.superseded_by }}' \
+    '          VERIFICATION_SUPERSEDED: ${{ steps.superseded.outputs.superseded }}'; do
+  grep -qxF -- "$expected" <<<"$selection_block" || {
+    echo "verification selection omits: $expected" >&2
+    exit 1
+  }
+done
+superseded_line="$(grep -n -m1 'name: Skip a superseded main commit' <<<"$selection_block" | cut -d: -f1)"
+dispatch_line="$(grep -n -m1 'name: Emit trusted capability dispatch decisions' <<<"$selection_block" | cut -d: -f1)"
+[[ -n "$superseded_line" && "$superseded_line" -lt "$dispatch_line" ]] || {
+  echo 'CI dispatches before it knows whether its main commit was superseded' >&2
+  exit 1
+}
+producer_gate="    if: \${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}"
+[[ "$(grep -cxF -- "$producer_gate" "$WORKFLOW")" -eq 3 ]] || {
+  echo 'a superseded main run still builds a Kind producer' >&2
+  exit 1
+}
+superseded_step="$TMP/ci-superseded-step.sh"
+awk '
+  /- name: Skip a superseded main commit/ { scope = 1 }
+  scope && /^        run: \|$/ { run = 1; next }
+  run && /^          / { print substr($0, 11); next }
+  run { exit }
+' "$WORKFLOW" >"$superseded_step"
+[[ -s "$superseded_step" ]] || { echo 'superseded main step was not extracted' >&2; exit 1; }
+mkdir -p "$TMP/superseded-bin"
+cat >"$TMP/superseded-bin/git" <<'GIT'
+#!/usr/bin/env bash
+printf 'git %s\n' "$*" >>"$FAKE_GIT_CALLS"
+[[ "$*" == 'ls-remote origin refs/heads/main' ]] || exit 64
+[[ -n "${FAKE_MAIN_SHA:-}" ]] || exit 1
+printf '%s\trefs/heads/main\n' "$FAKE_MAIN_SHA"
+GIT
+chmod +x "$TMP/superseded-bin/git"
+# superseded_case EVENT REF MAIN -> outputs, then "summary:" lines, or "failed"
+superseded_case() {
+  local event="$1" ref="$2" main="$3"
+  : >"$TMP/superseded-output"; : >"$TMP/superseded-summary"; : >"$TMP/git-calls"
+  if env PATH="$TMP/superseded-bin:$PATH" FAKE_MAIN_SHA="$main" FAKE_GIT_CALLS="$TMP/git-calls" \
+      EVENT_NAME="$event" EVENT_REF="$ref" GITHUB_SHA=1111111111111111111111111111111111111111 \
+      GITHUB_OUTPUT="$TMP/superseded-output" GITHUB_STEP_SUMMARY="$TMP/superseded-summary" \
+      bash "$superseded_step" >/dev/null 2>&1; then
+    cat "$TMP/superseded-output"
+    sed 's/^/summary: /' "$TMP/superseded-summary"
+  else
+    echo failed
+  fi
+}
+tip=1111111111111111111111111111111111111111
+newer=2222222222222222222222222222222222222222
+[[ "$(superseded_case push refs/heads/main "$tip")" == superseded=false ]] || {
+  echo "main's tip run was treated as superseded" >&2; exit 1; }
+[[ "$(superseded_case push refs/heads/main "$newer")" == "superseded=true
+superseded_by=$newer
+summary: superseded by $newer: main's queued run verifies this commit's changes" ]] || {
+  echo 'a main run behind main'"'"'s tip did not record its supersession' >&2; exit 1; }
+for not_main in 'pull_request refs/pull/7/head' 'workflow_dispatch refs/heads/main' 'push refs/heads/feature'; do
+  read -r event ref <<<"$not_main"
+  [[ "$(superseded_case "$event" "$ref" "$newer")" == superseded=false && ! -s "$TMP/git-calls" ]] || {
+    echo "a $event run on $ref was judged against main" >&2; exit 1; }
+done
+[[ "$(superseded_case push refs/heads/main '')" == failed ]] || {
+  echo 'an unreadable canonical main did not fail closed' >&2; exit 1; }
+[[ "$(superseded_case push refs/heads/main not-a-commit)" == failed ]] || {
+  echo 'a malformed canonical main did not fail closed' >&2; exit 1; }
 
 echo 'select-verification fixtures: OK'
 

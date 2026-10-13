@@ -255,6 +255,24 @@ fn finite_routes_bind_exact_operations_and_never_normalize_path_aliases() {
             None,
             GitHubOperation::Graphql,
         ),
+        // The API root `gh auth status` reads, and the README `gh repo view`
+        // shows (an owner-accepted exception, see SECRETS-AND-CREDENTIALS.md):
+        // GET only, with no query.
+        ("github-api", Method::GET, "/", None, GitHubOperation::Rest),
+        (
+            "github-api",
+            Method::GET,
+            "/repos/owner/repo/readme",
+            None,
+            GitHubOperation::Rest,
+        ),
+        (
+            "github-api",
+            Method::GET,
+            "/",
+            Some(""),
+            GitHubOperation::Rest,
+        ),
         (
             "github-https",
             Method::GET,
@@ -339,6 +357,113 @@ fn finite_routes_bind_exact_operations_and_never_normalize_path_aliases() {
     }
     assert!(classify_request("github-api", &Method::DELETE, "/repos/owner/repo", None).is_err());
     assert!(classify_request("github-api", &Method::GET, "/graphql", None).is_err());
+
+    // Near misses of the two requests admitted for stock `gh`.
+    for (method, path, query) in [
+        (Method::GET, "/", Some("x=1")),
+        (Method::GET, "/", Some("page=1")),
+        (Method::POST, "/", None),
+        (Method::HEAD, "/", None),
+        (Method::PUT, "/", None),
+        (Method::PATCH, "/", None),
+        (Method::DELETE, "/", None),
+        (Method::GET, "//", None),
+        (Method::GET, "/repos/owner/repo/readme/docs", None),
+        (Method::GET, "/repos/owner/repo/readme", Some("ref=x")),
+        (Method::GET, "/repos/owner/repo/readme", Some("page=1")),
+        (Method::GET, "/repos/owner/repo/readme/", None),
+        (Method::GET, "/repos/owner/repo/./readme", None),
+        (Method::GET, "/repos/owner/repo/../readme", None),
+        (Method::POST, "/repos/owner/repo/readme", None),
+        (Method::PUT, "/repos/owner/repo/readme", None),
+        (Method::DELETE, "/repos/owner/repo/readme", None),
+        (Method::HEAD, "/repos/owner/repo/readme", None),
+    ] {
+        assert!(
+            classify_request("github-api", &method, path, query).is_err(),
+            "{method} {path} {query:?}"
+        );
+    }
+    // The same requests on the Git host are never API requests.
+    for (method, path) in [
+        (Method::GET, "/"),
+        (Method::GET, "/repos/owner/repo/readme"),
+        (Method::GET, "/owner/repo/readme"),
+    ] {
+        assert!(
+            classify_request("github-https", &method, path, None).is_err(),
+            "{path}"
+        );
+    }
+    // Still refused, as before: Actions runs, arbitrary REST and release
+    // uploads.
+    for (method, path) in [
+        (Method::GET, "/repos/owner/repo/actions/runs"),
+        (Method::GET, "/repos/owner/repo/contents/README.md"),
+        (Method::GET, "/repos/owner/repo/releases/tags/v1"),
+        (Method::POST, "/repos/owner/repo/releases/1/assets"),
+        (Method::GET, "/rate_limit"),
+    ] {
+        assert!(
+            classify_request("github-api", &method, path, None).is_err(),
+            "{path}"
+        );
+    }
+}
+
+/// The newly admitted API root and README are prepared like every other
+/// REST call: one exact path on api.github.com, the injected bearer only, and
+/// nothing of the guest's own authorization forwarded.
+#[test]
+fn the_api_root_and_readme_go_only_to_their_exact_api_path_with_the_injected_bearer() {
+    let adapter = GitHubOAuthAdapter::new().unwrap();
+    for path in ["/", "/repos/owner/repo/readme"] {
+        let mut input = HeaderMap::new();
+        input.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("token codewire-managed"),
+        );
+        input.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/vnd.github.merge-info-preview+json"),
+        );
+        let valid = adapter
+            .validate_request("github-api", &Method::GET, path, None, input, vec![])
+            .unwrap();
+        assert_eq!(valid.operation(), GitHubOperation::Rest);
+        let (method, target, outbound, body, response) = adapter
+            .prepare_validated(lease(GitHubOperation::Rest), valid)
+            .unwrap()
+            .into_parts();
+        assert_eq!(method, Method::GET);
+        assert_eq!(target.as_str(), format!("https://api.github.com{path}"));
+        assert!(body.is_empty());
+        assert_eq!(
+            outbound[header::AUTHORIZATION],
+            format!("Bearer {}", std::str::from_utf8(VALUE).unwrap())
+        );
+        assert!(
+            !outbound
+                .values()
+                .any(|value| value == "token codewire-managed")
+        );
+        // Their responses get the REST redaction: a provider that echoed the
+        // injected token, raw or base64 as a README's content would be, never
+        // returns it to the Sandbox.
+        let (_, mut redacted) = response
+            .begin(StatusCode::OK, &headers("application/json"))
+            .unwrap();
+        let mut output = redacted
+            .push(format!("{{\"content\":\"{}\",\"raw\":\"", STANDARD.encode(VALUE)).as_bytes())
+            .unwrap();
+        output.extend(redacted.push(VALUE).unwrap());
+        output.extend(redacted.push(b"\"}").unwrap());
+        output.extend(redacted.finish().unwrap());
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.contains(std::str::from_utf8(VALUE).unwrap()));
+        assert!(!output.contains(&STANDARD.encode(VALUE)));
+        assert_eq!(output.matches("[REDACTED]").count(), 2, "{path}");
+    }
 }
 
 #[test]

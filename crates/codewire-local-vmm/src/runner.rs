@@ -2530,6 +2530,36 @@ fn spawn_host_port_acceptor(
     })
 }
 
+/// The running acceptor task of each published host port. Each task owns its
+/// port's listener, and a dropped `JoinHandle` only detaches its task, so
+/// dropping this map aborts them: however the forwarder ends (a dependency
+/// exited, a control error, or a stop aborting it), no listener outlives it
+/// and a later start can publish the same ports again.
+#[derive(Default)]
+struct HostPortAcceptors(std::collections::BTreeMap<u16, (HostPortBinding, JoinHandle<()>)>);
+
+impl std::ops::Deref for HostPortAcceptors {
+    type Target = std::collections::BTreeMap<u16, (HostPortBinding, JoinHandle<()>)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for HostPortAcceptors {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for HostPortAcceptors {
+    fn drop(&mut self) {
+        for (_, acceptor) in self.0.values() {
+            acceptor.abort();
+        }
+    }
+}
+
 /// The host ports published at start and the channel that changes them.
 struct HostPortIngress {
     listeners: Vec<(tokio::net::TcpListener, HostPortBinding)>,
@@ -2551,7 +2581,7 @@ async fn run_ingress_forwarder(
         listeners,
         commands: mut host_port_commands,
     } = host_ports;
-    let mut acceptors = std::collections::BTreeMap::new();
+    let mut acceptors = HostPortAcceptors::default();
     for (listener, binding) in listeners {
         let acceptor = spawn_host_port_acceptor(listener, binding, &accepted_tx, &failed_tx);
         acceptors.insert(binding.host_port, (binding, acceptor));
@@ -2637,7 +2667,7 @@ async fn run_ingress_forwarder(
                 };
                 let outcome = if accepting_host_ports {
                     apply_host_port_command(
-                        &mut acceptors,
+                        &mut acceptors.0,
                         command.add,
                         &command.remove,
                         &accepted_tx,
@@ -2661,7 +2691,7 @@ async fn run_ingress_forwarder(
                         // worker control stream here would turn the resulting
                         // fail-closed worker into a misleading worker failure.
                         accepting_host_ports = false;
-                        for (_, (_, acceptor)) in std::mem::take(&mut acceptors) {
+                        for (_, (_, acceptor)) in std::mem::take(&mut acceptors.0) {
                             acceptor.abort();
                             let _ = acceptor.await;
                         }
@@ -6091,12 +6121,24 @@ mod tests {
             HostPortBinding::new(blocked_port, 3_001).unwrap(),
         ];
 
-        assert!(matches!(
-            reserve_host_ports(&bindings),
-            Err(RunnerError::HostPortUnavailable(port)) if port == blocked_port
-        ));
-        let rebound = StdTcpListener::bind((Ipv4Addr::LOCALHOST, first_port))
-            .expect("an atomic reservation failure must release earlier listeners");
+        // Each port just released may stay busy while a concurrent test's
+        // forked child holds an inherited copy until it execs (#2678). Only
+        // `first_port` may be busy for that reason, and only briefly: the
+        // reservation must still fail at `blocked_port`.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match reserve_host_ports(&bindings) {
+                Err(RunnerError::HostPortUnavailable(port)) if port == blocked_port => break,
+                Err(RunnerError::HostPortUnavailable(port))
+                    if port == first_port && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(_) => panic!("a reservation including a held port succeeded"),
+                Err(error) => panic!("the reservation did not fail at the held port: {error:?}"),
+            }
+        }
+        let rebound = once_released(|| StdTcpListener::bind((Ipv4Addr::LOCALHOST, first_port)));
         assert_eq!(
             rebound.local_addr().unwrap(),
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, first_port).into()
@@ -6105,7 +6147,7 @@ mod tests {
         drop(rebound);
         drop(blocker);
 
-        let listeners = reserve_host_ports(&bindings).unwrap();
+        let listeners = once_released(|| reserve_host_ports(&bindings));
         assert_eq!(listeners.len(), bindings.len());
         for (listener, binding) in listeners.iter().zip(bindings) {
             assert_eq!(listener.binding, binding);
@@ -6247,6 +6289,85 @@ mod tests {
 
         vmm.signal(Signal::KILL).unwrap();
         vmm_child.wait().await.unwrap();
+    }
+
+    /// Whether the published host port is free again after the forwarder
+    /// ends on worker loss, or after a stop aborts it.
+    async fn forwarder_listener_released(abort: bool) -> bool {
+        let (mut vmm_child, vmm) = spawn_admitted_sleep("30").await;
+        let (mut worker_child, worker) = spawn_admitted_sleep("30").await;
+        let listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let host_port = listener.local_addr().unwrap().port();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let (control, _worker_control) = StdUnixStream::pair().unwrap();
+        control.set_nonblocking(true).unwrap();
+        let control = tokio::net::UnixStream::from_std(control).unwrap();
+        let (_mesh_publisher, mesh_receiver) = mesh_ingress_channel(&[]).unwrap();
+        let mut forwarder = tokio::spawn(run_ingress_forwarder(
+            control,
+            IngressControlKeys {
+                host_port: Zeroizing::new([7_u8; HOST_PORT_CONTROL_KEY_LEN]),
+                mesh: Zeroizing::new([8_u8; MESH_INGRESS_CONTROL_KEY_LEN]),
+            },
+            HostPortIngress {
+                listeners: vec![(listener, HostPortBinding::new(host_port, 3_000).unwrap())],
+                commands: tokio::sync::mpsc::channel(1).1,
+            },
+            mesh_receiver,
+            vec![
+                (
+                    HostPortDependency::Vmm,
+                    vmm.duplicate_wait_descriptor().unwrap(),
+                ),
+                (
+                    HostPortDependency::NetworkWorker,
+                    worker.duplicate_wait_descriptor().unwrap(),
+                ),
+            ],
+            Uuid::new_v4(),
+            1,
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if abort {
+            forwarder.abort();
+            let _ = (&mut forwarder).await;
+        } else {
+            worker.signal(Signal::KILL).unwrap();
+            worker_child.wait().await.unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(1), &mut forwarder).await;
+        }
+        let released = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if StdTcpListener::bind((Ipv4Addr::LOCALHOST, host_port)).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let _ = worker.signal(Signal::KILL);
+        let _ = worker_child.wait().await;
+        vmm.signal(Signal::KILL).unwrap();
+        vmm_child.wait().await.unwrap();
+        released
+    }
+
+    #[tokio::test]
+    async fn worker_loss_releases_the_host_listener() {
+        assert!(
+            forwarder_listener_released(false).await,
+            "worker loss kept the host listener"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_aborting_the_forwarder_releases_the_host_listener() {
+        assert!(
+            forwarder_listener_released(true).await,
+            "forwarder abort kept the host listener"
+        );
     }
 
     #[tokio::test]
