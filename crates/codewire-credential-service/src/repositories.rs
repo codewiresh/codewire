@@ -39,8 +39,10 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use uuid::Uuid;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// The live permission status is advisory: a page renders without it.
-const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+/// The live permission status is advisory: a page renders without it, so it
+/// gets its callers' own budget and a few slots of its own, never discovery's.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_STATUS_OPERATIONS: usize = 3;
 const MAX_PENDING_PERMISSIONS: usize = 16;
 const MAX_OPERATIONS: usize = 8;
 const DEFAULT_PAGE_SIZE: u16 = 50;
@@ -60,6 +62,9 @@ enum Error {
     Unavailable,
     Cancelled,
     Expired,
+    /// An advisory read found its slots full or another renewal of the same
+    /// credential running, and does not wait (#2712).
+    Busy,
 }
 
 pub(crate) struct GithubRepositoryOwner {
@@ -68,6 +73,7 @@ pub(crate) struct GithubRepositoryOwner {
     upstream: Arc<dyn BrokerUpstreamTransport>,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     capacity: Arc<Semaphore>,
+    status_capacity: Arc<Semaphore>,
     workers: TaskTracker,
     stop: CancellationToken,
 }
@@ -85,6 +91,7 @@ impl GithubRepositoryOwner {
             upstream,
             github_app_authorization,
             capacity: Arc::new(Semaphore::new(MAX_OPERATIONS)),
+            status_capacity: Arc::new(Semaphore::new(MAX_STATUS_OPERATIONS)),
             workers: TaskTracker::new(),
             stop: CancellationToken::new(),
         }
@@ -96,6 +103,7 @@ impl GithubRepositoryOwner {
 
     pub(crate) fn start_shutdown(&self) {
         self.capacity.close();
+        self.status_capacity.close();
         self.workers.close();
         self.stop.cancel();
     }
@@ -113,9 +121,10 @@ impl GithubRepositoryOwner {
         request: ListGithubRepositoriesRequest,
     ) -> Result<ListGithubRepositoriesResponse, Error> {
         let selection = Selection::parse(request)?;
+        let permit = acquire(&self.capacity)?;
         let operation = async {
             let (output, after_response) = self
-                .read(&authority, &selection, Read::Repositories)
+                .read(&authority, &selection, Read::Repositories, permit)
                 .await?;
             let ReadOutput::Repositories(page) = output else {
                 return Err(Error::Unavailable);
@@ -155,15 +164,27 @@ impl GithubRepositoryOwner {
     /// yet granted what Codewire needs (#2712), read live with that same
     /// connection under discovery's authority, renewal and recheck. Only a
     /// validated login, the installation ID and its account kind leave.
+    ///
+    /// Advisory, so it never holds anyone up: it has its own few slots and
+    /// answers nothing at once when they are full or when another renewal
+    /// of this credential is running. It may start a renewal itself; that
+    /// moves to the tracked worker and completes durably for the next read.
     async fn pending_permissions(
         &self,
         authority: CredentialMutationAuthority,
     ) -> Result<ListGithubPendingPermissionsResponse, Error> {
         let selection = Selection::first_page();
+        let Ok(permit) = acquire(&self.status_capacity) else {
+            return Ok(ListGithubPendingPermissionsResponse::default());
+        };
         let operation = async {
-            let (output, _) = self
-                .read(&authority, &selection, Read::PendingPermissions)
-                .await?;
+            let (output, _) = match self
+                .read(&authority, &selection, Read::PendingPermissions, permit)
+                .await
+            {
+                Err(Error::Busy) => return Ok(ListGithubPendingPermissionsResponse::default()),
+                result => result?,
+            };
             let ReadOutput::PendingPermissions(pending) = output else {
                 return Err(Error::Unavailable);
             };
@@ -226,8 +247,16 @@ impl GithubRepositoryOwner {
         authority: &CredentialMutationAuthority,
         selection: &Selection,
         read: Read,
+        permit: OwnedSemaphorePermit,
     ) -> Result<(ReadOutput, CredentialRecord), Error> {
-        let permit = self.acquire_capacity()?;
+        // Discovery waits for another renewal and takes discovery's slots;
+        // the advisory status does neither.
+        let (capacity, wait) = match read {
+            Read::Repositories => (&self.capacity, true),
+            Read::PendingPermissions => (&self.status_capacity, false),
+        };
+        let reacquire =
+            || acquire(capacity).map_err(|error| if wait { error } else { Error::Busy });
         let owner = owner_of(authority)?;
         let before = self.resolve(authority, &owner, selection).await?;
         selection.check_cursor(&owner, &before)?;
@@ -246,15 +275,18 @@ impl GithubRepositoryOwner {
         };
         if refresh_early {
             self.refresh_github_app(
-                authority.clone(),
-                owner.clone(),
-                selection.clone(),
-                before.clone(),
-                app_bundle.take().ok_or(Error::Unavailable)?,
+                Renewal {
+                    authority: authority.clone(),
+                    owner: owner.clone(),
+                    selection: selection.clone(),
+                    before: before.clone(),
+                    bundle: app_bundle.take().ok_or(Error::Unavailable)?,
+                    wait,
+                },
                 permit.take().ok_or(Error::Unavailable)?,
             )
             .await?;
-            permit = Some(self.acquire_capacity()?);
+            permit = Some(reacquire()?);
             // A continuation binds the old revocation generation. Do not
             // silently rebind it after rotating user credentials.
             if !selection.page_token.is_empty() {
@@ -280,15 +312,18 @@ impl GithubRepositoryOwner {
             // a third token generation.
             Err(Call::Unauthorized) if app_bundle.is_some() && !refreshed => {
                 self.refresh_github_app(
-                    authority.clone(),
-                    owner.clone(),
-                    selection.clone(),
-                    before.clone(),
-                    app_bundle.take().ok_or(Error::Unavailable)?,
+                    Renewal {
+                        authority: authority.clone(),
+                        owner: owner.clone(),
+                        selection: selection.clone(),
+                        before: before.clone(),
+                        bundle: app_bundle.take().ok_or(Error::Unavailable)?,
+                        wait,
+                    },
                     permit.take().ok_or(Error::Unavailable)?,
                 )
                 .await?;
-                let _retry_permit = self.acquire_capacity()?;
+                let _retry_permit = reacquire()?;
                 if !selection.page_token.is_empty() {
                     return Err(Error::CredentialChanged);
                 }
@@ -384,21 +419,19 @@ impl GithubRepositoryOwner {
         Ok((current, material))
     }
 
-    fn acquire_capacity(&self) -> Result<OwnedSemaphorePermit, Error> {
-        Arc::clone(&self.capacity)
-            .try_acquire_owned()
-            .map_err(|_| Error::Unavailable)
-    }
-
     async fn refresh_github_app(
         &self,
-        authority: CredentialMutationAuthority,
-        owner: Owner,
-        selection: Selection,
-        before: CredentialRecord,
-        bundle: GitHubAppUserOAuthBundle,
+        renewal: Renewal,
         permit: OwnedSemaphorePermit,
     ) -> Result<(), Error> {
+        let Renewal {
+            authority,
+            owner,
+            selection,
+            before,
+            bundle,
+            wait,
+        } = renewal;
         let authorization = self
             .github_app_authorization
             .as_ref()
@@ -421,6 +454,7 @@ impl GithubRepositoryOwner {
                 before,
                 bundle,
                 authorization,
+                wait,
             })
             .await;
             let _ = sender.send(result);
@@ -489,6 +523,17 @@ fn github_app_bundle(material: &ProtectedValue) -> Result<Option<GitHubAppUserOA
         .map_err(app_bundle_error)
 }
 
+/// What one read asks a renewal for: the exact record it read and whether it
+/// waits for another renewal of the same credential.
+struct Renewal {
+    authority: CredentialMutationAuthority,
+    owner: Owner,
+    selection: Selection,
+    before: CredentialRecord,
+    bundle: GitHubAppUserOAuthBundle,
+    wait: bool,
+}
+
 /// State that is immutable for one durable GitHub App refresh. It is carried
 /// intact into promotion so the successor is re-admitted against precisely
 /// the same owner, credential, and original record.
@@ -501,6 +546,9 @@ struct GitHubAppRefreshContext {
     before: CredentialRecord,
     bundle: GitHubAppUserOAuthBundle,
     authorization: Arc<GitHubAppAuthorizationOwner>,
+    /// Whether this read waits for another renewal of the same credential to
+    /// finish; an advisory read returns at once instead.
+    wait: bool,
 }
 
 async fn refresh_github_app_record(context: GitHubAppRefreshContext) -> Result<(), Error> {
@@ -513,6 +561,7 @@ async fn refresh_github_app_record(context: GitHubAppRefreshContext) -> Result<(
         before,
         bundle,
         authorization,
+        wait,
     } = context;
     let current = resolve_record(&pool, store.as_ref(), &authority, &owner, &selection).await?;
     same_record(&before, &current)?;
@@ -564,6 +613,9 @@ async fn refresh_github_app_record(context: GitHubAppRefreshContext) -> Result<(
                     if (state == OAuthRefreshState::Reserved && attempt.reservation_live)
                         || (state == OAuthRefreshState::Started && attempt.execution_live) =>
                 {
+                    if !wait {
+                        return Err(Error::Busy);
+                    }
                     if refresh_waits == REFRESH_WAIT_ATTEMPTS {
                         return Err(Error::Unavailable);
                     }
@@ -607,6 +659,7 @@ async fn refresh_github_app_record(context: GitHubAppRefreshContext) -> Result<(
             // Another process can reserve the same record between our read of
             // the journal and this begin. Observe its durable outcome instead
             // of treating that race as permission to issue a second exchange.
+            Err(PlatformCredentialError::RefreshInProgress) if !wait => return Err(Error::Busy),
             Err(PlatformCredentialError::RefreshInProgress)
                 if refresh_waits < REFRESH_WAIT_ATTEMPTS =>
             {
@@ -647,6 +700,7 @@ async fn refresh_github_app_record(context: GitHubAppRefreshContext) -> Result<(
                 before,
                 bundle,
                 authorization,
+                wait,
             },
             credential_id,
             expected,
@@ -674,6 +728,7 @@ async fn complete_github_app_refresh(
         before,
         bundle,
         authorization,
+        wait: _,
     } = context;
     let exchange = tokio::time::timeout(
         Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
@@ -813,6 +868,12 @@ impl Call {
             Self::Failed(error) => error,
         }
     }
+}
+
+fn acquire(capacity: &Arc<Semaphore>) -> Result<OwnedSemaphorePermit, Error> {
+    Arc::clone(capacity)
+        .try_acquire_owned()
+        .map_err(|_| Error::Unavailable)
 }
 
 fn owner_of(authority: &CredentialMutationAuthority) -> Result<Owner, Error> {

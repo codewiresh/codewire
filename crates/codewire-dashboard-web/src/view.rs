@@ -448,8 +448,9 @@ pub(crate) struct CredentialSettingsView {
     /// The credential name a failed addition keeps for its reopened dialog.
     /// No secret field has a retained value; those always render empty.
     pub(crate) retained_name: String,
-    /// After a GitHub connect or reconnect only: installations that have not
-    /// yet granted what Codewire needs, with where their owner accepts it.
+    /// Installations of the person's GitHub connection that have not yet
+    /// granted what Codewire needs, from the live check on this render, with
+    /// where their owner accepts it (#2712).
     pub(crate) github_accept: Vec<GithubAcceptView>,
 }
 

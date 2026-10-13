@@ -441,10 +441,19 @@ test.describe("managed provider credential browser journey", () => {
       // Nothing is carried in a cookie: the page checks live when they return.
       expect((await page.context().cookies()).map((cookie) => cookie.name))
         .not.toContain("codewire_github_accept");
-      // GitHub returns the person to the App's Setup URL after an update.
+      const permissions = page.getByRole("region", { name: "GitHub permissions", exact: true });
+      // A page load another site starts never runs the live check, so a link
+      // elsewhere cannot make the dashboard call GitHub or renew a token.
+      await Promise.all([
+        page.waitForURL(`${ssrUrl}/settings/credentials/`),
+        page.evaluate((target) => { window.location.assign(target); }, `${ssrUrl}/settings/credentials/`),
+      ]);
+      await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
+      await expect(permissions).toHaveCount(0);
+      // Back on Codewire by the person's own navigation (or a Setup URL
+      // return when the App has one), the live status names both.
       await page.goto("/settings/credentials/?installation_id=41&setup_action=update");
       await expect(page.getByRole("status")).toHaveText("GitHub permissions updated.");
-      const permissions = page.getByRole("region", { name: "GitHub permissions", exact: true });
       const waiting = "GitHub is waiting for you to accept Codewire's updated permissions on";
       await expect(permissions).toContainText(`${waiting} synthetic-user.`);
       await expect(permissions).toContainText(`${waiting} synthetic-works.`);
@@ -462,6 +471,8 @@ test.describe("managed provider credential browser journey", () => {
       // installation lists it; reconnecting stores that connection.
       await reconnectWith("kind-synthetic-code-one");
       await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=github-app-connected$/);
+      await page.goto("/settings/credentials/");
+      await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
       await expect(permissions).toHaveCount(0);
       // A GitHub error during the live check shows nothing and never blocks
       // the page: this login's listing answers its connect, then fails.

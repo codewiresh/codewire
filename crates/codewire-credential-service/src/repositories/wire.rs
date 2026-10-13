@@ -89,7 +89,7 @@ pub(super) fn error(error: Error) -> connectrpc::ConnectError {
             "GITHUB_RATE_LIMITED",
             "GitHub repository requests are rate limited",
         ),
-        Error::Unavailable => (
+        Error::Unavailable | Error::Busy => (
             ConnectCode::Unavailable,
             "GITHUB_REPOSITORIES_UNAVAILABLE",
             "GitHub repositories are temporarily unavailable",

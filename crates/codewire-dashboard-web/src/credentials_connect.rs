@@ -533,8 +533,8 @@ fn unix_now() -> Result<u64, ConnectError> {
 }
 
 /// An installation of the Codewire GitHub App that has not yet granted the
-/// permissions Codewire needs, as one connect's response reported it. Shown
-/// once after that connect and never stored.
+/// permissions Codewire needs, as a connect's response or the credentials
+/// page's live check reported it (#2712). Never stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GithubPendingPermissions {
     pub(crate) account: String,
@@ -608,6 +608,33 @@ impl GithubPendingPermissions {
             })
             .take(MAX_GITHUB_PENDING)
             .collect()
+    }
+}
+
+/// Whether this credentials page load may run the live GitHub check: never
+/// for a navigation another site started, so a link elsewhere cannot make
+/// the dashboard call GitHub or renew a token (#2712). A request without
+/// fetch metadata (no browser, or an old one) is the person's own.
+pub(crate) fn live_check_allowed(headers: &axum::http::HeaderMap, public_origin: &str) -> bool {
+    match headers
+        .get("sec-fetch-site")
+        .map(|value| value.to_str().unwrap_or("unreadable"))
+    {
+        None | Some("same-origin" | "same-site" | "none") => true,
+        Some("cross-site") => false,
+        // Anything else counts only with a referrer from this dashboard.
+        Some(_) => {
+            let origin = |value: &str| {
+                url::Url::parse(value)
+                    .ok()
+                    .map(|url| url.origin().ascii_serialization())
+            };
+            headers
+                .get(axum::http::header::REFERER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(origin)
+                .is_some_and(|referrer| Some(referrer) == origin(public_origin))
+        }
     }
 }
 
@@ -1683,6 +1710,50 @@ fn invalid_metadata() -> ConnectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_load_another_site_started_skips_the_live_check() {
+        let origin = "https://codewire.sh";
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            axum::http::HeaderMap::from_iter(pairs.iter().map(|(name, value)| {
+                (
+                    axum::http::HeaderName::from_static(name),
+                    HeaderValue::from_static(value),
+                )
+            }))
+        };
+        for allowed in [
+            headers(&[]),
+            headers(&[("sec-fetch-site", "same-origin")]),
+            headers(&[("sec-fetch-site", "same-site")]),
+            headers(&[("sec-fetch-site", "none")]),
+            headers(&[
+                ("sec-fetch-site", "cross-origin"),
+                ("referer", "https://codewire.sh/settings/"),
+            ]),
+        ] {
+            assert!(live_check_allowed(&allowed, origin), "{allowed:?}");
+        }
+        for refused in [
+            headers(&[("sec-fetch-site", "cross-site")]),
+            // A same-origin referrer does not excuse a cross-site load.
+            headers(&[
+                ("sec-fetch-site", "cross-site"),
+                ("referer", "https://codewire.sh/settings/"),
+            ]),
+            headers(&[("sec-fetch-site", "cross-origin")]),
+            headers(&[
+                ("sec-fetch-site", "cross-origin"),
+                ("referer", "https://elsewhere.example/settings/credentials/"),
+            ]),
+            headers(&[
+                ("sec-fetch-site", "cross-origin"),
+                ("referer", "https://codewire.sh.elsewhere.example/"),
+            ]),
+        ] {
+            assert!(!live_check_allowed(&refused, origin), "{refused:?}");
+        }
+    }
 
     #[test]
     fn github_pending_permissions_keep_only_validated_entries() {

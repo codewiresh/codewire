@@ -1079,6 +1079,66 @@ async fn github_pending_permissions_follow_the_live_grant_under_discovery_author
         error(f.status().bearer_auth(oauth(ALICE)), "unavailable").await?;
         ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 1);
         ensure!(f.provider.calls.load(Ordering::SeqCst) == 0);
+
+        // Advisory: with its own slots full it answers nothing at once,
+        // without GitHub and without taking discovery's slots.
+        f.provider.fail_installations.store(false, Ordering::SeqCst);
+        let calls = f.provider.installation_calls.load(Ordering::SeqCst);
+        let held = (0..MAX_STATUS_OPERATIONS)
+            .map(|_| Arc::clone(&f.owner.status_capacity).try_acquire_owned())
+            .collect::<Result<Vec<_>, _>>()?;
+        let (status, value) = response(f.status().bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK && value.get("pendingPermissions").is_none(),
+            "{value}"
+        );
+        ensure!(f.provider.installation_calls.load(Ordering::SeqCst) == calls);
+        ensure!(f.owner.capacity.available_permits() == MAX_OPERATIONS);
+        drop(held);
+        Ok(())
+    }
+    .await;
+    f.finish(result).await?;
+
+    // A read whose token is due for renewal while another renewal of the same
+    // credential is running answers nothing at once: it never waits for it.
+    let f = Fixture::app().await?;
+    let result = async {
+        f.provider
+            .initial_app_access_lifetime
+            .store(60, Ordering::SeqCst);
+        let original = f.app_credential().await?;
+        f.provider.earlier_grant.store(true, Ordering::SeqCst);
+        let attempt = uuid::Uuid::new_v4();
+        f.h.store
+            .begin_oauth_refresh(
+                &original.metadata.owner,
+                &original.metadata.id,
+                original.version,
+                attempt,
+            )
+            .await?;
+        let calls = f.provider.installation_calls.load(Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        let (status, value) = response(f.status().bearer_auth(oauth(ALICE))).await?;
+        ensure!(
+            status == StatusCode::OK && value.get("pendingPermissions").is_none(),
+            "{value}"
+        );
+        ensure!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the advisory read waited for another renewal"
+        );
+        ensure!(f.provider.installation_calls.load(Ordering::SeqCst) == calls);
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 0);
+        f.h.store
+            .cancel_oauth_refresh(
+                &original.metadata.owner,
+                &original.metadata.id,
+                original.version,
+                attempt,
+            )
+            .await?;
         Ok(())
     }
     .await;

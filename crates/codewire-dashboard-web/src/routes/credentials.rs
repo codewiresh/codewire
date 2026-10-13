@@ -143,10 +143,19 @@ async fn render_page(
         Err(error) => return error_page(error),
     };
     // The live GitHub permission status runs beside the metadata reads and
-    // never holds the page up for long (#2712).
+    // never holds the page up for long. A page load another site started
+    // renders without it, so a link elsewhere cannot make the dashboard call
+    // GitHub or renew a token (#2712).
+    let live = credentials_connect::live_check_allowed(headers, &state.public_origin);
     let (data, github_pending) = tokio::join!(
         credentials_connect::settings_data(state, cookie.clone()),
-        credentials_connect::github_pending_permissions(state, cookie),
+        async {
+            if live {
+                credentials_connect::github_pending_permissions(state, cookie).await
+            } else {
+                Vec::new()
+            }
+        },
     );
     let data = match data {
         Ok(data) => data,
