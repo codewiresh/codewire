@@ -3,8 +3,8 @@
 
 No provider calls, login files, or repository mutations. Protocol ordering and
 failures are deliberately independent of the Rust adapter implementation.
-Every start appends the conversation identity the peer was given to
-agent-identity.jsonl in its working directory.
+Every start appends the conversation identity and the arguments the peer was
+given to agent-identity.jsonl in its working directory.
 """
 import json
 import os
@@ -19,9 +19,24 @@ def emit(value):
 
 def trace_identity(agent):
     with Path("agent-identity.jsonl").open("a") as file:
-        file.write(json.dumps({"agent": agent, "pid": os.getpid(),
+        file.write(json.dumps({"agent": agent, "pid": os.getpid(), "argv": sys.argv[1:],
                                "environment": os.environ.get("CW_ENVIRONMENT"),
                                "session": os.environ.get("CW_SESSION_ID")}) + "\n")
+
+
+def skill(path):
+    """The skill noel lists for `--skill PATH`: the name and description in
+    the frontmatter of the directory's SKILL.md, and that file. A path that
+    holds no skill loads none, as in noel."""
+    file = Path(path) / "SKILL.md"
+    try:
+        _, frontmatter, _ = file.read_text().split("---\n", 2)
+    except (OSError, ValueError):
+        return None
+    fields = dict(line.split(": ", 1) for line in frontmatter.splitlines() if ": " in line)
+    if not fields.get("description", "").strip():
+        return None
+    return {"name": fields.get("name", file.parent.name), "description": fields["description"], "file": str(file)}
 
 
 def noel():
@@ -36,7 +51,8 @@ def noel():
     LATE settles as the next command arrives, as a run that ends just before
     it is read; DIALOG asks a question first. `--model fixture/json-rpc`
     behaves as a pre-RPC pi build. As noel does, EOF exits 0 and SIGTERM 143,
-    mid-run too, without settling. Every command received, EOF and SIGTERM are
+    mid-run too, without settling. Every start, with its arguments and the
+    skill `--skill DIR` loads, every command received, EOF and SIGTERM are
     traced to peer-noel-SESSION.jsonl.
 
     Runs and the queue are durable as in noel's journal: a run is saved with
@@ -67,7 +83,7 @@ def noel():
         with trace_path.open("a") as file:
             file.write(json.dumps(record) + "\n")
 
-    trace({"event": "start", "argv": args})
+    trace({"event": "start", "argv": args, "skill": skill(option["--skill"]) if "--skill" in option else None})
     trace_identity("noel")
     if model == "fixture/json-rpc":
         for line in sys.stdin:
