@@ -50,7 +50,8 @@ fn git_rewrite_entries(selected: ManagedCredentialClients) -> usize {
         selected.contains(ManagedCredentialClient::Ssh),
     ) {
         (true, false) => 4,
-        (true, true) | (false, true) => 2,
+        (true, true) => 2,
+        (false, true) => 1,
         (false, false) => 0,
     }
 }
@@ -389,11 +390,9 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
             BTreeMap::from(
                 [
                     ("SSH_AUTH_SOCK", expected_socket),
-                    ("GIT_CONFIG_COUNT", "2"),
+                    ("GIT_CONFIG_COUNT", "1"),
                     ("GIT_CONFIG_KEY_0", "url.git@github.com:.insteadOf"),
-                    ("GIT_CONFIG_VALUE_0", "https://github.com/"),
-                    ("GIT_CONFIG_KEY_1", "url.git@github.com:.insteadOf"),
-                    ("GIT_CONFIG_VALUE_1", "git://github.com/"),
+                    ("GIT_CONFIG_VALUE_0", "git://github.com/"),
                 ]
                 .map(|(name, value)| (name.to_owned(), value.to_owned()))
             )
@@ -706,7 +705,7 @@ fn github_git_configuration_is_only_the_loopback_route_or_githubs_own_url_forms(
 /// | Selected | Rewritten |
 /// |---|---|
 /// | GitHub connection only | every form to the managed GitHub route |
-/// | SSH key only | HTTPS and `git://` to `git@github.com:` |
+/// | SSH key only | `git://` to `git@github.com:`; HTTPS stays anonymous |
 /// | both | HTTPS and `git://` to the managed route; SSH forms keep the key |
 /// | neither | nothing |
 #[test]
@@ -714,6 +713,7 @@ fn each_selection_rewrites_exactly_its_github_url_forms() {
     let managed = "url.http://127.0.0.1:38081/_codewire/github/.insteadOf";
     let ssh = "url.git@github.com:.insteadOf";
     let http_forms = ["https://github.com/", "git://github.com/"];
+    let git_protocol = ["git://github.com/"];
     let all_forms = [
         "https://github.com/",
         "git://github.com/",
@@ -722,7 +722,7 @@ fn each_selection_rewrites_exactly_its_github_url_forms() {
     ];
     for (slots, key, values) in [
         (&["github"][..], Some(managed), &all_forms[..]),
-        (&["ssh"], Some(ssh), &http_forms[..]),
+        (&["ssh"], Some(ssh), &git_protocol[..]),
         (&["github", "ssh"], Some(managed), &http_forms[..]),
         (&[], None, &[][..]),
         (&["codex", "openai", "anthropic"], None, &[][..]),
@@ -792,10 +792,11 @@ fn stock_git_resolves_every_github_url_form_as_the_table_says() {
                 format!("{route}org/app.git"),
             ],
         ),
+        // A key GitHub may not accept never breaks a public HTTPS fetch.
         (
             &["ssh"],
             [
-                "git@github.com:org/app.git".to_owned(),
+                "https://github.com/org/app.git".to_owned(),
                 "git@github.com:org/app.git".to_owned(),
                 "git@github.com:org/app.git".to_owned(),
                 "ssh://git@github.com/org/app.git".to_owned(),

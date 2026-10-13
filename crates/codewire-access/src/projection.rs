@@ -66,8 +66,47 @@ pub const GITHUB_HTTPS_URL: &str = "https://github.com/";
 pub const GITHUB_GIT_URL: &str = "git://github.com/";
 pub const GITHUB_SCP_URL: &str = "git@github.com:";
 pub const GITHUB_SSH_URL: &str = "ssh://git@github.com/";
-/// The HTTPS and `git://` forms, which an SSH key can serve as [`GITHUB_SCP_URL`].
+/// GitHub's published SSH host keys (`ssh_keys` at
+/// <https://api.github.com/meta>), as canonical `known_hosts` lines in the
+/// order `codewire_project::canonical_repository_known_hosts` returns them. A test binds each
+/// key to the SHA256 fingerprint GitHub documents, so this is trust from a
+/// published channel, never from a first connection.
+pub const GITHUB_SSH_KNOWN_HOSTS: [&str; 3] = [
+    "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
+    "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+    "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=",
+];
+
+/// The bytes to append to a `known_hosts` file holding `existing` so that it
+/// lists every line of [`GITHUB_SSH_KNOWN_HOSTS`]. Each missing line is added
+/// on its own line, after a newline when `existing` does not end in one. The
+/// result is empty when every line is already present, compared as whole
+/// lines. Existing lines are never rewritten or reordered.
+pub fn github_known_hosts_additions(existing: &[u8]) -> Vec<u8> {
+    let mut additions = Vec::new();
+    for line in GITHUB_SSH_KNOWN_HOSTS {
+        let present = existing
+            .split(|byte| *byte == b'\n')
+            .any(|current| current.strip_suffix(b"\r").unwrap_or(current) == line.as_bytes());
+        if present {
+            continue;
+        }
+        if additions.is_empty() && !existing.is_empty() && !existing.ends_with(b"\n") {
+            additions.push(b'\n');
+        }
+        additions.extend_from_slice(line.as_bytes());
+        additions.push(b'\n');
+    }
+    additions
+}
+
+/// The HTTPS and `git://` forms, which the managed route serves beside an SSH
+/// key.
 const GITHUB_HTTP_FORMS: [&str; 2] = [GITHUB_HTTPS_URL, GITHUB_GIT_URL];
+/// The one form an SSH key alone takes over: GitHub no longer serves
+/// `git://`. HTTPS stays anonymous, so a key GitHub does not accept (a deploy
+/// key, another host's key) never breaks a public HTTPS fetch.
+const GITHUB_GIT_PROTOCOL_FORM: [&str; 1] = [GITHUB_GIT_URL];
 /// Every form, in the order of their `GIT_CONFIG_*` index: the HTTPS form is
 /// always index 0, which is the name the GitHub client reserves.
 const GITHUB_ALL_FORMS: [&str; 4] = [
@@ -380,7 +419,7 @@ impl ManagedCredentialClients {
     /// | Selected | Rewritten |
     /// |---|---|
     /// | GitHub connection only | every form to the managed GitHub route |
-    /// | SSH key only | HTTPS and `git://` to `git@github.com:`, for the key |
+    /// | SSH key only | `git://` to `git@github.com:`, for the key; HTTPS stays anonymous |
     /// | both | HTTPS and `git://` to the managed GitHub route; SSH forms keep the key |
     ///
     /// The managed route is the broker's, which adds the owner's GitHub login
@@ -394,7 +433,7 @@ impl ManagedCredentialClients {
         ) {
             (true, false) => Some((managed(), &GITHUB_ALL_FORMS)),
             (true, true) => Some((managed(), &GITHUB_HTTP_FORMS)),
-            (false, true) => Some((GITHUB_SCP_URL.to_owned(), &GITHUB_HTTP_FORMS)),
+            (false, true) => Some((GITHUB_SCP_URL.to_owned(), &GITHUB_GIT_PROTOCOL_FORM)),
             (false, false) => None,
         }
     }

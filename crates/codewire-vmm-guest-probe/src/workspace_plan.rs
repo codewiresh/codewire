@@ -1251,14 +1251,16 @@ mod tests {
                     ("GIT_CONFIG_VALUE_3", "ssh://git@github.com/"),
                 ][..],
             ),
+            // The key alone rewrites only `git://`; the declared entry 1 is
+            // beyond the projected count, so Git never reads it.
             (
                 &["ssh"],
                 &[
-                    ("GIT_CONFIG_COUNT", "2"),
+                    ("GIT_CONFIG_COUNT", "1"),
                     ("GIT_CONFIG_KEY_0", SSH),
-                    ("GIT_CONFIG_VALUE_0", "https://github.com/"),
-                    ("GIT_CONFIG_KEY_1", SSH),
-                    ("GIT_CONFIG_VALUE_1", "git://github.com/"),
+                    ("GIT_CONFIG_VALUE_0", "git://github.com/"),
+                    ("GIT_CONFIG_KEY_1", "core.editor"),
+                    ("GIT_CONFIG_VALUE_1", "vi"),
                 ],
             ),
             (

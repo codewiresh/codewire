@@ -609,8 +609,7 @@ mod tests {
             }
             // SSH alone, or no selection, has no HTTP route: nothing is set
             // and a declared list is the workload's own. SSH's only launch
-            // overrides are its Git rewrite of GitHub's HTTPS and `git://`
-            // forms.
+            // overrides are its Git rewrite of GitHub's `git://` form.
             let config = selected_config(PathBuf::from("/home/codewire"), &["ssh"], transport);
             let environment = env_map(
                 &build_managed_process_env_from(
@@ -639,14 +638,8 @@ mod tests {
             assert_eq!(
                 overrides,
                 BTreeSet::from(
-                    [
-                        "GIT_CONFIG_COUNT",
-                        "GIT_CONFIG_KEY_0",
-                        "GIT_CONFIG_KEY_1",
-                        "GIT_CONFIG_VALUE_0",
-                        "GIT_CONFIG_VALUE_1",
-                    ]
-                    .map(str::to_owned)
+                    ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]
+                        .map(str::to_owned)
                 )
             );
         }
@@ -823,15 +816,16 @@ mod tests {
                         ("GIT_CONFIG_VALUE_3", "ssh://git@github.com/"),
                     ][..],
                 ),
+                // The key alone rewrites only `git://`. The image's entry 1
+                // is beyond the projected count, so Git never reads it.
                 (
                     &["ssh"],
                     &["GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.editor"],
                     &[
-                        ("GIT_CONFIG_COUNT", "2"),
+                        ("GIT_CONFIG_COUNT", "1"),
                         ("GIT_CONFIG_KEY_0", SSH),
-                        ("GIT_CONFIG_VALUE_0", "https://github.com/"),
-                        ("GIT_CONFIG_KEY_1", SSH),
-                        ("GIT_CONFIG_VALUE_1", "git://github.com/"),
+                        ("GIT_CONFIG_VALUE_0", "git://github.com/"),
+                        ("GIT_CONFIG_VALUE_1", "image-value"),
                     ],
                 ),
                 (

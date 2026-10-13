@@ -9,16 +9,7 @@ const DEFAULT_SSH_PORT: u16 = 22;
 const MAX_SSH_HOST_BYTES: usize = 253;
 const MAX_GITHUB_PATH_SEGMENT_BYTES: usize = 128;
 
-/// GitHub's published SSH host keys (`ssh_keys` at
-/// <https://api.github.com/meta>), as canonical `known_hosts` lines in the
-/// order [`canonical_repository_known_hosts`] returns them. A test binds each
-/// key to the SHA256 fingerprint GitHub documents, so this is trust from a
-/// published channel, never from a first connection.
-pub const GITHUB_SSH_KNOWN_HOSTS: [&str; 3] = [
-    "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
-    "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
-    "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=",
-];
+pub use codewire_access::GITHUB_SSH_KNOWN_HOSTS;
 
 /// The SSH form of a GitHub HTTPS repository source.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +19,8 @@ pub struct GitHubSshSource {
     /// [`GITHUB_SSH_KNOWN_HOSTS`], already canonical for `source`.
     pub known_hosts: Vec<String>,
 }
+
+pub use codewire_access::github_known_hosts_additions;
 
 /// Whether a GitHub repository source is written in an SSH form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -579,6 +572,35 @@ mod tests {
                 .unwrap()
                 .source,
             "git@github.com:org/app.git"
+        );
+    }
+
+    #[test]
+    fn github_known_hosts_additions_append_only_the_missing_published_lines() {
+        let all = format!("{}\n", GITHUB_SSH_KNOWN_HOSTS.join("\n"));
+        assert_eq!(github_known_hosts_additions(b""), all.as_bytes());
+        assert!(github_known_hosts_additions(all.as_bytes()).is_empty());
+        // Another host's line stays; a missing final newline is supplied once.
+        let other = "example.com ssh-ed25519 QUJDRA==";
+        assert_eq!(
+            github_known_hosts_additions(other.as_bytes()),
+            format!("\n{all}").as_bytes()
+        );
+        // Only the lines that are missing, in GitHub's order; CRLF lines count.
+        let partial = format!("{}\r\n{other}\n", GITHUB_SSH_KNOWN_HOSTS[1]);
+        assert_eq!(
+            github_known_hosts_additions(partial.as_bytes()),
+            format!(
+                "{}\n{}\n",
+                GITHUB_SSH_KNOWN_HOSTS[0], GITHUB_SSH_KNOWN_HOSTS[2]
+            )
+            .as_bytes()
+        );
+        // A line is matched whole, never as a prefix or a hashed entry.
+        let prefix = format!("{} extra\n", GITHUB_SSH_KNOWN_HOSTS[0]);
+        assert!(
+            github_known_hosts_additions(prefix.as_bytes())
+                .starts_with(GITHUB_SSH_KNOWN_HOSTS[0].as_bytes())
         );
     }
 
