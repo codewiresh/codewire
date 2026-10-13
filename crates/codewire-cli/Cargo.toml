@@ -87,6 +87,8 @@ codewire-tls = { workspace = true, features = ["test-support"] }
 buffa = { workspace = true }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 tempfile = { workspace = true }
+# Paused time for the delegation keepalive tests.
+tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }
 
 [build-dependencies]
