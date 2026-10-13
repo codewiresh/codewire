@@ -49,6 +49,9 @@ def noel():
     next prompt first records it as aborted, and so does an abort while idle.
     A prompt that repeats a requestId starts nothing and names that run:
     started while it runs or is interrupted, handled once it ended.
+
+    While a file noel-hold-start-SESSION exists, `get_state` is not answered:
+    the journey holds a restarted conversation in its startup handshake.
     """
     import signal
     import time
@@ -58,6 +61,7 @@ def noel():
     session, model = option.get("--session-id"), option.get("--model")
     trace_path = Path(f"peer-noel-{session}.jsonl")
     saved = Path(f"noel-session-{session}.json")
+    hold_start = Path(f"noel-hold-start-{session}")
 
     def trace(record):
         with trace_path.open("a") as file:
@@ -245,6 +249,8 @@ def noel():
             run["late"] = False
             finish()
         if kind == "get_state":
+            while hold_start.exists():
+                time.sleep(0.05)
             respond(request, state())
         elif kind == "get_last_assistant_text":
             text = (last_reply or "").strip()

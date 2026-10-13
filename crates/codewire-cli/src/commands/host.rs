@@ -1,6 +1,7 @@
 //! Trusted local placements use the ordinary daemon session owner, not a VM.
 //! Runtime state is private and separate from the child's real HOME/workspace.
 use super::*;
+use codewire_daemon::stop_evidence::SHUTDOWN_MARKER;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -653,7 +654,7 @@ pub(crate) async fn host_lifecycle(
         environment = current;
         environment.state = "stopped".into();
         write_private_json(&root.join("host.json"), &environment)?;
-        write_private_json(&root.join("shutdown.json"), &true)?;
+        write_private_json(&root.join(SHUTDOWN_MARKER), &true)?;
         let deadline = Instant::now() + STOP_TIMEOUT;
         loop {
             if let Some(available) = HostLock::acquire(&root.join("daemon.lock"))? {
@@ -715,8 +716,8 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
         }
         fs::remove_file(&socket)?;
     }
-    if root.join("shutdown.json").exists() {
-        fs::remove_file(root.join("shutdown.json"))?;
+    if root.join(SHUTDOWN_MARKER).exists() {
+        fs::remove_file(root.join(SHUTDOWN_MARKER))?;
     }
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
@@ -744,17 +745,25 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
     let shutdown = async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("install host daemon SIGTERM observer");
+        // A signal takes the environment down as `cw env stop` does. The
+        // daemon marks the takedown itself before it stops anything (see
+        // `codewire_daemon::stop_evidence`), so a conversation's driver that
+        // a rebooting host signals in the same moment finds the marker.
         tokio::select! {
             _=term.recv()=>{},
             _=tokio::signal::ctrl_c()=>{},
             _=async {
                 loop {
-                    if shutdown_root.join("shutdown.json").is_file(){break;}
+                    if shutdown_root.join(SHUTDOWN_MARKER).is_file(){break;}
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }=>{},
         }
     };
+    // The environment is its conversations' executor: each noel conversation
+    // its takedown paused starts again with it, and no other.
+    #[cfg(target_os = "linux")]
+    let resume = tokio::spawn(resume_paused_conversations(environment.clone()));
     #[cfg(target_os = "linux")]
     let result = codewire_daemon::serve_host_control_grpc_with_incoming(
         config,
@@ -764,6 +773,8 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
         shutdown,
     )
     .await;
+    #[cfg(target_os = "linux")]
+    resume.abort();
     #[cfg(not(target_os = "linux"))]
     let result = codewire_daemon::serve_grpc_with_incoming(config, incoming, shutdown).await;
     if let Ok(after) = fs::symlink_metadata(&socket)
@@ -772,6 +783,27 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
         fs::remove_file(&socket)?;
     }
     result
+}
+
+/// Once this daemon answers its own socket, restarts the noel conversations
+/// its environment's takedown paused. It never starts or repairs a daemon:
+/// it is the daemon, and connects only to itself.
+#[cfg(target_os = "linux")]
+async fn resume_paused_conversations(environment: HostEnvironment) {
+    let deadline = Instant::now() + START_TIMEOUT;
+    let client = loop {
+        match connect_host(&environment, SESSION_STOP_TIMEOUT).await {
+            Ok(client) => break client,
+            Err(error) if Instant::now() >= deadline => {
+                eprintln!("cw host daemon: paused noel conversations were not resumed: {error:#}");
+                return;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    };
+    if let Err(error) = resume_paused(&environment, &client).await {
+        eprintln!("cw host daemon: paused noel conversations were not all resumed: {error:#}");
+    }
 }
 
 fn host_daemon_config(

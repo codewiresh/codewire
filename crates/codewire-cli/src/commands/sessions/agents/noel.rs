@@ -26,8 +26,9 @@ const EXTENSIONS: [&str; 2] = ["run-id", "expected-run-id"];
 /// Claude: `request-id` binds a run to its message and `resume-run` reports
 /// and continues it.
 const RESUME_EXTENSIONS: [&str; 2] = ["request-id", "resume-run"];
-/// A message's run is resumed at most this often, so a run that keeps
-/// crashing noel or the driver ends unknown.
+/// A message's run is resumed after a crash at most this often, so a run
+/// that keeps crashing noel or the driver ends unknown. A resume after its
+/// environment's takedown paused it is not a crash and does not count.
 const MAX_RESUMES: u32 = 3;
 /// How long a message set aside for the startup handshake waits for noel to
 /// decide it: one startup command's bound, for the whole handshake.
@@ -36,6 +37,9 @@ const RESUME_DEADLINE: Duration = NATIVE_RPC_TIMEOUT;
 /// The record says "{RESTARTED}; {RESTARTED_TAIL}".
 const RESTARTED: &str = "the driver restarted while this was in flight";
 const RESTARTED_TAIL: &str = "outcome unknown; not replayed";
+/// Why a paused message that its next start cannot resume ends unknown:
+/// "{PAUSED}; {RESTARTED_TAIL}".
+const PAUSED: &str = "paused when its environment stopped";
 /// How `lose_peer` ends the active message: "{reason}; {LOST_TAIL}".
 const LOST_TAIL: &str = "the turn outcome is unknown and is not replayed";
 /// noel saves no reply and no reason for a failed run, so a failure whose
@@ -310,14 +314,20 @@ fn activity(message: &Value) -> Vec<String> {
 }
 
 /// A message whose run stopped while it was running, because the driver or
-/// noel died, set aside until noel's journal decides it.
+/// noel died or its environment was taken down, set aside until noel's
+/// journal decides it.
 #[derive(Clone, Debug)]
 pub(super) struct SetAside {
     message_id: String,
     /// The run Codewire recorded for it, once noel's prompt reply arrived.
     turn_id: Option<String>,
-    /// Resumes counted so far.
+    /// Crash resumes counted so far.
     resumed: u32,
+    /// Its environment's takedown paused it: resuming it is no crash resume.
+    paused: bool,
+    /// An explicit stop or restart recorded its interrupt for it: it ends,
+    /// and is never resumed.
+    stopped: bool,
     /// Interrupts the driver had accepted for it. They end the run; it is
     /// never resumed.
     interrupts: Vec<String>,
@@ -335,6 +345,33 @@ pub(super) struct Recovery {
     set_aside: Option<SetAside>,
     /// The message noel was restarted for: once per message.
     respawned_for: Option<String>,
+}
+
+impl Recovery {
+    /// The message waiting for the startup handshake to decide it.
+    pub(super) fn set_aside_message(&self) -> Option<&str> {
+        self.set_aside
+            .as_ref()
+            .map(|aside| aside.message_id.as_str())
+    }
+
+    /// The environment's takedown leaves the set-aside message paused for
+    /// the next start, which sets it aside again.
+    pub(super) fn forget_set_aside(&mut self) {
+        self.set_aside = None;
+    }
+}
+
+/// How `respawn_noel` answered noel's exit.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Respawn {
+    /// noel was started again and the handshake decided the run.
+    Started,
+    /// A signal that stops it ended noel, as one stopping its whole session
+    /// does: never answered with a restart.
+    Signalled,
+    /// Not started again: the caller loses the peer, as before.
+    No,
 }
 
 /// `get_state.lastRun`, the session's last run.
@@ -401,12 +438,15 @@ impl RunEnd {
 /// the one Codewire recorded, if any).
 #[derive(Debug, PartialEq)]
 enum Resolution {
-    /// Bound, running or interrupted, no interrupt accepted for `M`, fewer
-    /// than [`MAX_RESUMES`] resumes: `resume_run`. `saved_reply` when the run
-    /// stopped after its last reply was saved, so resuming only completes it.
+    /// Bound, running or interrupted, no interrupt accepted for `M`, and
+    /// either paused by its environment's takedown or resumed after a crash
+    /// fewer than [`MAX_RESUMES`] times: `resume_run`. `saved_reply` when the
+    /// run stopped after its last reply was saved, so resuming only
+    /// completes it.
     Resume { run: String, saved_reply: bool },
-    /// Bound, running or interrupted, an interrupt accepted for `M`: `abort`,
-    /// and `M` ends interrupted.
+    /// Bound, running or interrupted, an interrupt accepted for `M` or an
+    /// explicit stop's interrupt recorded for it: `abort`, and `M` ends
+    /// interrupted.
     Abort { run: String },
     /// Bound and ended: the driver missed its settlement.
     Ended { run: String, end: RunEnd },
@@ -428,11 +468,15 @@ fn resolve(aside: &SetAside, last: Option<&LastRun>, resumable: bool) -> Resolut
     }
     let run = last.run_id.clone();
     match last.status.as_str() {
-        "running" | "interrupted" if !aside.interrupts.is_empty() => Resolution::Abort { run },
-        "running" | "interrupted" if aside.resumed < MAX_RESUMES => Resolution::Resume {
-            saved_reply: interrupted.is_some() && last.phase.is_none(),
-            run,
-        },
+        "running" | "interrupted" if aside.stopped || !aside.interrupts.is_empty() => {
+            Resolution::Abort { run }
+        }
+        "running" | "interrupted" if aside.paused || aside.resumed < MAX_RESUMES => {
+            Resolution::Resume {
+                saved_reply: interrupted.is_some() && last.phase.is_none(),
+                run,
+            }
+        }
         "completed" => Resolution::Ended {
             run,
             end: RunEnd::Completed,
@@ -463,13 +507,20 @@ fn stopped_by_signal(status: std::process::ExitStatus) -> bool {
             .is_some_and(|code| STOPS.iter().any(|signal| code == 128 + signal))
 }
 
-/// `cw inbox` notes a message whose run noel resumed.
+/// `cw inbox` notes a message whose run noel resumed: after a crash, counted,
+/// and after its environment stopped.
 pub(super) fn resumed_note(record: &MessageRecord) -> String {
-    match record.native_resumed {
+    let crashes = match record.native_resumed {
         0 => String::new(),
         1 => " (resumed by noel)".into(),
         times => format!(" (resumed by noel {times} times)"),
-    }
+    };
+    let paused = if record.pause.is_some() && record.state != MessageState::Paused {
+        " (resumed after its environment stopped)"
+    } else {
+        ""
+    };
+    format!("{crashes}{paused}")
 }
 
 impl Driver {
@@ -541,26 +592,38 @@ impl Driver {
             .map_or(own, |aside| own.min(aside.deadline))
     }
 
-    /// `recover()`: a message that was running when the driver stopped is
-    /// set aside for the startup handshake instead of ending unknown at
-    /// once, and an interrupt the driver had accepted for it goes with it.
-    /// Returns whether the record was taken.
+    /// `recover()`: a message that was running when the driver stopped, or
+    /// that its environment's takedown paused, is set aside for the startup
+    /// handshake instead of ending unknown at once, and an interrupt the
+    /// driver had accepted for it goes with it. A running message for which
+    /// an explicit stop or restart recorded its interrupt is ended by the
+    /// handshake, never resumed. Returns whether the record was taken.
     pub(super) fn set_aside(&mut self, record: &MessageRecord) -> bool {
-        if record.state == MessageState::Running
+        if matches!(record.state, MessageState::Running | MessageState::Paused)
             && record.action.starts_turn()
             && self.noel.set_aside.is_none()
         {
+            let paused = record.state == MessageState::Paused;
+            let stopped = pause::explicit_stop_recorded(
+                &self.environment,
+                &self.dir,
+                &self.binding.session_id,
+                &record.id,
+            );
             log(format!(
-                "message {} was running when the driver stopped; noel's journal decides it at startup",
-                record.id
+                "message {} was {} when the driver stopped; noel's journal decides it at startup",
+                record.id,
+                state_label(record)
             ));
             self.noel.set_aside = Some(SetAside {
                 message_id: record.id.clone(),
                 turn_id: record.turn_id.clone(),
                 resumed: record.native_resumed,
+                paused,
+                stopped,
                 interrupts: Vec::new(),
                 deadline: tokio::time::Instant::now() + RESUME_DEADLINE,
-                cause: RESTARTED.into(),
+                cause: if paused { PAUSED } else { RESTARTED }.into(),
                 tail: RESTARTED_TAIL,
             });
             return true;
@@ -719,12 +782,17 @@ impl Driver {
             }
         }
         // Counted before resume_run is sent, so a driver that dies before
-        // the run settles finds the resume counted.
+        // the run settles finds the resume counted. A paused message runs
+        // again in the same write, uncounted: its environment's takedown was
+        // no crash, and a driver that dies after this finds it running.
         let record = update_message(&self.dir, &aside.message_id, |r| {
-            r.native_resumed = r.native_resumed.saturating_add(1);
+            if !r.resume() {
+                r.native_resumed = r.native_resumed.saturating_add(1);
+            }
             r.turn_id = Some(run.clone());
             r.native_acknowledged = true;
         })?;
+        let after_pause = record.native_resumed == aside.resumed;
         if let Err(error) = call(
             peer,
             "resume_run",
@@ -744,10 +812,17 @@ impl Driver {
             Some("model") => "; its cut-off model request is sent again".into(),
             _ => "; its last reply was saved".into(),
         };
-        log(format!(
-            "message {} resumed by noel: run {run}, resume {} of {MAX_RESUMES}{phase}",
-            record.id, record.native_resumed
-        ));
+        if after_pause {
+            log(format!(
+                "message {} resumed by noel after its environment stopped: run {run}{phase}",
+                record.id
+            ));
+        } else {
+            log(format!(
+                "message {} resumed by noel: run {run}, resume {} of {MAX_RESUMES}{phase}",
+                record.id, record.native_resumed
+            ));
+        }
         self.active = Some(ActiveTurn {
             message_id: record.id.clone(),
             text: turn_text(&record),
@@ -834,30 +909,31 @@ impl Driver {
     /// noel's output ended while a turn was active. If noel can resume runs,
     /// exited on its own, not by a signal that stops it, and was not
     /// restarted for this message before, the turn stays running: noel is
-    /// started again and the startup handshake decides it. Returns whether
-    /// the driver goes on with the new noel; otherwise the caller loses the
-    /// peer as before.
-    pub(super) async fn respawn_noel(&mut self, peer: &mut Peer, reason: &str) -> bool {
+    /// started again and the startup handshake decides it. A signal that
+    /// stops noel is the caller's to answer, as a stop of the driver is.
+    /// Otherwise the caller loses the peer as before.
+    pub(super) async fn respawn_noel(&mut self, peer: &mut Peer, reason: &str) -> Respawn {
         let Some(message_id) = self.active.as_ref().map(|active| active.message_id.clone()) else {
-            return false;
+            return Respawn::No;
         };
-        if !self.state.capabilities.resume
-            || self.stopping
-            || self.noel.respawned_for.as_deref() == Some(message_id.as_str())
-        {
-            return false;
+        if !self.state.capabilities.resume || self.stopping {
+            return Respawn::No;
         }
         // Waiting does not close noel's input, which would itself end it.
         let status = match tokio::time::timeout(STOP_GRACE, peer.child.wait()).await {
-            Ok(Ok(status)) if !stopped_by_signal(status) => status,
-            _ => return false,
+            Ok(Ok(status)) if stopped_by_signal(status) => return Respawn::Signalled,
+            Ok(Ok(status)) => status,
+            _ => return Respawn::No,
         };
+        if self.noel.respawned_for.as_deref() == Some(message_id.as_str()) {
+            return Respawn::No;
+        }
         let resumed = match load_message(&self.dir, &message_id) {
             Ok(record) if record.state == MessageState::Running => record.native_resumed,
-            _ => return false,
+            _ => return Respawn::No,
         };
         let Some(active) = self.active.take() else {
-            return false;
+            return Respawn::No;
         };
         self.noel.respawned_for = Some(message_id.clone());
         let cause = format!("{reason} (native agent {status})");
@@ -888,13 +964,17 @@ impl Driver {
             message_id: message_id.clone(),
             turn_id: active.turn_id,
             resumed,
+            paused: false,
+            stopped: false,
             interrupts: active.interrupts,
             deadline: tokio::time::Instant::now() + RESUME_DEADLINE,
             cause: cause.clone(),
             tail: LOST_TAIL,
         });
+        // The run stays the active one on disk while noel restarts, so a
+        // stop or a takedown in the meantime still finds it.
         self.state.phase = DriverPhase::Starting;
-        self.state.active_message_id = None;
+        self.state.active_message_id = Some(message_id.clone());
         self.state.current_turn_id = None;
         if let Err(error) = self.persist_state() {
             log(format!("could not persist driver state: {error:#}"));
@@ -907,7 +987,8 @@ impl Driver {
             Err(error) => {
                 self.set_aside_unknown(&format!("noel could not be started again: {error:#}"))
                     .await;
-                return false;
+                self.state.active_message_id = None;
+                return Respawn::No;
             }
         }
         if let Err(error) = self.initialize_noel(peer).await {
@@ -915,15 +996,17 @@ impl Driver {
                 "the restarted noel did not finish its startup handshake: {error:#}"
             ))
             .await;
-            return false;
+            self.state.active_message_id = None;
+            return Respawn::No;
         }
         if self.active.is_none() {
             self.state.phase = DriverPhase::Idle;
+            self.state.active_message_id = None;
         }
         if let Err(error) = self.persist_state() {
             log(format!("could not persist driver state: {error:#}"));
         }
-        true
+        Respawn::Started
     }
 
     /// An abort or a failure leaves pi's queue for its next prompt, so the
@@ -1217,6 +1300,9 @@ impl Driver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A message its environment's takedown pauses, and its resume.
+    mod takedown;
 
     const SESSION: &str = "0b5f0a52-7d0c-4b8c-9d4c-1f4d7c2e9a10";
     const RUN: &str = "6c1a4f0e-3b2d-4e5f-8a9b-0c1d2e3f4a5b";
@@ -2128,6 +2214,8 @@ mod tests {
             message_id: message.into(),
             turn_id: run.map(str::to_owned),
             resumed,
+            paused: false,
+            stopped: false,
             interrupts: if interrupted {
                 vec!["interrupt".into()]
             } else {
@@ -2836,37 +2924,30 @@ mod tests {
         let mut h = harness();
         let parent = h.with_parent();
         let main = h.running("task", Some(RUN));
-        // A stop signal ended it: no restart.
-        let mut peer = script_peer("exit 143");
-        assert!(
-            !h.driver
-                .respawn_noel(&mut peer, "the native agent closed its output")
-                .await
-        );
+        const CLOSED: &str = "the native agent closed its output";
+        // A stop signal ended it: no restart, and the caller answers the
+        // stop, even after one restart for this message.
+        for restarted in [false, true] {
+            h.driver.noel.respawned_for = restarted.then(|| main.id.clone());
+            let mut peer = script_peer("exit 143");
+            assert_eq!(
+                h.driver.respawn_noel(&mut peer, CLOSED).await,
+                Respawn::Signalled
+            );
+        }
+        h.driver.noel.respawned_for = None;
         // An explicit stop's interrupt is underway: no restart.
         h.driver.stopping = true;
         let mut peer = script_peer("kill -9 $$");
-        assert!(
-            !h.driver
-                .respawn_noel(&mut peer, "the native agent closed its output")
-                .await
-        );
+        assert_eq!(h.driver.respawn_noel(&mut peer, CLOSED).await, Respawn::No);
         h.driver.stopping = false;
         // This noel cannot resume a run: no restart, as before.
         h.driver.state.capabilities.resume = false;
-        assert!(
-            !h.driver
-                .respawn_noel(&mut peer, "the native agent closed its output")
-                .await
-        );
+        assert_eq!(h.driver.respawn_noel(&mut peer, CLOSED).await, Respawn::No);
         h.driver.state.capabilities.resume = true;
         // Already restarted once for this message: no restart.
         h.driver.noel.respawned_for = Some(main.id.clone());
-        assert!(
-            !h.driver
-                .respawn_noel(&mut peer, "the native agent closed its output")
-                .await
-        );
+        assert_eq!(h.driver.respawn_noel(&mut peer, CLOSED).await, Respawn::No);
         assert!(h.driver.active.is_some() && h.driver.noel.set_aside.is_none());
         assert_eq!(h.load(&main.id).state, MessageState::Running);
         h.driver.noel.respawned_for = None;
@@ -2874,11 +2955,7 @@ mod tests {
         // Killed: noel is started again, which this guest placement refuses,
         // so the message ends unknown and its parent hears once.
         let mut peer = script_peer("kill -9 $$");
-        assert!(
-            !h.driver
-                .respawn_noel(&mut peer, "the native agent closed its output")
-                .await
-        );
+        assert_eq!(h.driver.respawn_noel(&mut peer, CLOSED).await, Respawn::No);
         assert_eq!(
             h.driver.noel.respawned_for.as_deref(),
             Some(main.id.as_str())
