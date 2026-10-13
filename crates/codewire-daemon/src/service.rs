@@ -1279,6 +1279,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_restart_the_daemon_never_admits_says_so_over_the_wire() {
+        let (_temp, addr, shutdown) = spawn_daemon().await;
+        let mut client = authenticated_client(addr).await;
+        let missing = format!("session-{}", uuid::Uuid::new_v4());
+        let refused = client
+            .restart_session(v1::RestartSessionRequest {
+                session_id: missing.clone(),
+                expected_launch_generation: None,
+            })
+            .await
+            .unwrap_err();
+        // The code a client always saw, and the daemon's reason beside it.
+        assert_eq!(refused.code(), tonic::Code::NotFound);
+        assert_eq!(
+            crate::NeverRestarts::of(&refused),
+            Some(crate::NeverRestarts::NoSession)
+        );
+        assert_eq!(
+            crate::client::SessionClientError::from(refused).never_restarts(),
+            Some(crate::NeverRestarts::NoSession)
+        );
+        // Another refusal with the same code carries none.
+        let other = client
+            .get_session(v1::GetSessionRequest {
+                session_id: missing,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(other.code(), tonic::Code::NotFound);
+        assert_eq!(
+            crate::client::SessionClientError::from(other).never_restarts(),
+            None
+        );
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
     async fn typed_health_returns_ready() {
         let (_temp, addr, shutdown) = spawn_daemon().await;
         let response = authenticated_client(addr)
