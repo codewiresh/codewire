@@ -189,6 +189,14 @@ pub(crate) fn report_github_pending<'a>(
     }
 }
 
+/// The notice for each installation, as `cw credentials --platform list`
+/// shows it.
+pub(crate) fn github_pending_notices<'a>(
+    pending: impl IntoIterator<Item = (&'a str, u64, codewire_credential_broker::GitHubAccountKind)>,
+) -> Vec<String> {
+    github_pending_follow_up(pending, false).0
+}
+
 /// The notices to print, and the settings page to open when `interactive`:
 /// the first one there is. An enterprise has none.
 fn github_pending_follow_up<'a>(
@@ -222,13 +230,12 @@ fn github_pending_notice(
     if !valid_github_installation(account, installation_id) {
         return None;
     }
-    let accept = match github_settings_page(account, installation_id, kind) {
-        Some(url) => format!("Accept the updated permissions on GitHub: {url}"),
-        None => "Accept the updated permissions in the enterprise's GitHub settings.".to_owned(),
-    };
-    Some(format!(
-        "GitHub has not yet given Codewire write access to code and pull requests on {account}. {accept}"
-    ))
+    let waiting =
+        format!("GitHub is waiting for you to accept Codewire's updated permissions on {account}.");
+    Some(match github_settings_page(account, installation_id, kind) {
+        Some(url) => format!("{waiting} Review on GitHub: {url}"),
+        None => waiting,
+    })
 }
 
 /// The installation's GitHub settings page, built only from a validated login
@@ -2023,19 +2030,17 @@ mod tests {
         use codewire_credential_broker::GitHubAccountKind;
         assert_eq!(
             github_pending_notice("noeljackson", 12345, GitHubAccountKind::User).unwrap(),
-            "GitHub has not yet given Codewire write access to code and pull requests on noeljackson. \
-             Accept the updated permissions on GitHub: https://github.com/settings/installations/12345"
+            "GitHub is waiting for you to accept Codewire's updated permissions on noeljackson. \
+             Review on GitHub: https://github.com/settings/installations/12345"
         );
         assert_eq!(
             github_pending_notice("octo-org", 678, GitHubAccountKind::Organization).unwrap(),
-            "GitHub has not yet given Codewire write access to code and pull requests on octo-org. \
-             Accept the updated permissions on GitHub: \
-             https://github.com/organizations/octo-org/settings/installations/678"
+            "GitHub is waiting for you to accept Codewire's updated permissions on octo-org. \
+             Review on GitHub: https://github.com/organizations/octo-org/settings/installations/678"
         );
         assert_eq!(
             github_pending_notice("octo-ent", 9, GitHubAccountKind::Enterprise).unwrap(),
-            "GitHub has not yet given Codewire write access to code and pull requests on octo-ent. \
-             Accept the updated permissions in the enterprise's GitHub settings."
+            "GitHub is waiting for you to accept Codewire's updated permissions on octo-ent."
         );
         for (account, id) in [("", 1), ("-octo", 1), ("octo/evil", 1), ("octo", 0)] {
             assert!(

@@ -25,11 +25,9 @@ use crate::{
         error_page, login_redirect, redirect, render_credential_settings_page, two_factor_redirect,
     },
     security::{
-        GitHubAppNavigation, canonical_cookie, clear_github_accept_cookie,
-        clear_github_app_authorization_cookie, csrf_cookie, github_accept_cookie,
-        github_accept_cookie_value, github_app_authorization_continuation,
-        github_app_authorization_cookie, new_csrf_token, page_csrf_token, with_csrf_cookie,
-        with_response_cookie,
+        GitHubAppNavigation, canonical_cookie, clear_github_app_authorization_cookie, csrf_cookie,
+        github_app_authorization_continuation, github_app_authorization_cookie, new_csrf_token,
+        page_csrf_token, with_csrf_cookie, with_response_cookie,
     },
     state::AppState,
     templates::CredentialSettingsTemplate,
@@ -144,7 +142,13 @@ async fn render_page(
         }
         Err(error) => return error_page(error),
     };
-    let data = match credentials_connect::settings_data(state, cookie).await {
+    // The live GitHub permission status runs beside the metadata reads and
+    // never holds the page up for long (#2712).
+    let (data, github_pending) = tokio::join!(
+        credentials_connect::settings_data(state, cookie.clone()),
+        credentials_connect::github_pending_permissions(state, cookie),
+    );
+    let data = match data {
         Ok(data) => data,
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             return login_redirect(&continuation, headers);
@@ -174,6 +178,12 @@ async fn render_page(
             "",
         ),
     };
+    // Shown while the person's own GitHub connection is active; the check is
+    // live on every render, so it is gone once GitHub has the grant.
+    let github_connected = data
+        .credentials
+        .iter()
+        .any(|credential| credential.oauth_provider == "github" && !credential.revoked);
     let page = CredentialSettingsView {
         navigation_query: page_query(query),
         creation_return_url: if dashboard.has_selected_organization {
@@ -200,17 +210,17 @@ async fn render_page(
         message: approved_message(message).into(),
         error: approved_error(error).into(),
         retained_name: retained_name.into(),
-        // Set only by a GitHub callback that just completed, for the
-        // installations it did not send the person to; rendered once.
-        github_accept: github_accept_cookie_value(headers)
-            .map(credentials_connect::GithubPendingPermissions::decode_all)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|pending| GithubAcceptView {
-                url: pending.settings_url().unwrap_or_default(),
-                account: pending.account,
-            })
-            .collect(),
+        github_accept: if github_connected {
+            github_pending
+                .into_iter()
+                .map(|pending| GithubAcceptView {
+                    url: pending.settings_url().unwrap_or_default(),
+                    account: pending.account,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
     };
     let mut response = with_csrf_cookie(
         render_credential_settings_page(CredentialSettingsTemplate {
@@ -219,9 +229,6 @@ async fn render_page(
         }),
         csrf_cookie(&state.public_origin, &csrf),
     );
-    if github_accept_cookie_value(headers).is_some() {
-        response = with_response_cookie(response, clear_github_accept_cookie(&state.public_origin));
-    }
     if rejected.is_some() && response.status() == StatusCode::OK {
         *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
     }
@@ -898,9 +905,7 @@ pub(super) async fn github_app_callback(
         )
         .await
         {
-            Ok(pending) => {
-                github_connected_response(&state.public_origin, pending, &context, &headers)
-            }
+            Ok(pending) => github_connected_response(&pending, &context, &headers),
             Err(error) if error.code == ErrorCode::AlreadyExists => {
                 page_error_redirect("github-app-already-connected", &dialog, &context, &headers)
             }
@@ -923,33 +928,18 @@ pub(super) async fn github_app_callback(
 /// The connection is saved. Where GitHub has not yet granted what Codewire
 /// needs (#2712), send the person straight to the first installation's
 /// settings page to accept it; the URL is built only from the validated login
-/// and numeric ID under the fixed github.com prefix. Every other installation
-/// that falls short, enterprises included, travels in a short-lived HttpOnly
-/// cookie, never the URL, for the credentials page to name once when they
-/// return.
+/// and numeric ID under the fixed github.com prefix. The credentials page
+/// names every installation still short, enterprises included, from its own
+/// live check when they return.
 fn github_connected_response(
-    public_origin: &str,
-    pending: Vec<credentials_connect::GithubPendingPermissions>,
+    pending: &[credentials_connect::GithubPendingPermissions],
     context: &QueryParameters,
     headers: &HeaderMap,
 ) -> Response {
-    let (accept, rest) = credentials_connect::GithubPendingPermissions::first_to_accept(pending);
-    let response = match accept {
+    match credentials_connect::GithubPendingPermissions::first_page(pending) {
         Some(url) => redirect(url, headers),
         None => page_redirect("github-app-connected", false, context, headers),
-    };
-    let cookie = if rest.is_empty() {
-        None
-    } else {
-        github_accept_cookie(
-            public_origin,
-            &credentials_connect::GithubPendingPermissions::encode_all(&rest),
-        )
-    };
-    with_response_cookie(
-        response,
-        cookie.unwrap_or_else(|| clear_github_accept_cookie(public_origin)),
-    )
+    }
 }
 
 /// GitHub reports a person's choice to cancel as `access_denied`; every other
@@ -1840,9 +1830,10 @@ mod tests {
     }
 
     #[test]
-    fn a_github_connect_names_installations_still_short_of_permissions() {
-        // #2712: the notice names each installation and links its settings
-        // page; it is absent when every installation granted what is needed.
+    fn the_page_names_installations_still_short_of_permissions() {
+        // #2712: the live status names each installation and links its
+        // settings page; it is absent when every installation granted what
+        // is needed.
         let html = rendered_page_with_github_accept(
             "",
             "",
@@ -1858,11 +1849,10 @@ mod tests {
             r#"<section class="cw-alert cw-alert--warning" aria-label="GitHub permissions">"#
         ));
         assert!(html.contains(
-            "GitHub has not yet given Codewire write access to code and pull requests on octo-org."
-        ));
-        assert!(html.contains(
-            r#"<a class="cw-link-button" href="https://github.com/organizations/octo-org/settings/installations/43" target="_blank" rel="noopener noreferrer">Accept the updated permissions on GitHub</a>"#
-        ));
+            "<p>GitHub is waiting for you to accept Codewire's updated permissions on octo-org. \
+             <a class=\"cw-link-button\" href=\"https://github.com/organizations/octo-org/settings/installations/43\" \
+             target=\"_blank\" rel=\"noopener noreferrer\">Review on GitHub</a></p>"
+        ), "{html}");
         let html = rendered_page("", "", dialog_data(), "?org=sample-org", "");
         assert!(!html.contains("GitHub permissions"));
         // An enterprise accepts in its own settings: the notice links nothing.
@@ -1878,10 +1868,9 @@ mod tests {
             }],
         );
         assert!(html.contains(
-            "GitHub has not yet given Codewire write access to code and pull requests on octo-enterprise. \
-             Accept the updated permissions in the enterprise's GitHub settings."
+            "<p>GitHub is waiting for you to accept Codewire's updated permissions on octo-enterprise.</p>"
         ));
-        assert!(!html.contains("Accept the updated permissions on GitHub</a>"));
+        assert!(!html.contains("Review on GitHub"));
     }
 
     #[test]
@@ -1889,70 +1878,47 @@ mod tests {
         use credentials_connect::{GithubAccountKind, GithubPendingPermissions};
         // #2712: the connection is saved first (the caller only gets here
         // then); the person goes straight to the first installation they can
-        // accept on, and the page names the rest when they return.
-        let pending = |entry: &str| GithubPendingPermissions::decode_all(entry);
+        // accept on. No cookie: the page checks live when they return.
+        let pending = |account: &str, id: u64, kind: GithubAccountKind| {
+            GithubPendingPermissions::new(account, id, kind).unwrap()
+        };
         let context = QueryParameters::default();
         let headers = HeaderMap::new();
-        let respond = |list: Vec<GithubPendingPermissions>| {
-            let response =
-                github_connected_response("https://codewire.sh", list, &context, &headers);
+        let respond = |list: &[GithubPendingPermissions]| {
+            let response = github_connected_response(list, &context, &headers);
             assert_eq!(response.status(), StatusCode::SEE_OTHER);
-            let cookies: Vec<String> = response
-                .headers()
-                .get_all(header::SET_COOKIE)
-                .iter()
-                .map(|value| value.to_str().unwrap().to_owned())
-                .collect();
-            assert_eq!(cookies.len(), 1, "{cookies:?}");
-            (
-                response.headers()[header::LOCATION]
-                    .to_str()
-                    .unwrap()
-                    .to_owned(),
-                cookies[0].clone(),
-            )
+            assert!(response.headers().get(header::SET_COOKIE).is_none());
+            response.headers()[header::LOCATION]
+                .to_str()
+                .unwrap()
+                .to_owned()
         };
-        let cleared = "codewire_github_accept=deleted; Path=/settings/credentials/; HttpOnly; \
-                       SameSite=Lax; Max-Age=0; Secure";
-
-        // Everything granted: the page, with nothing to name.
-        let (location, cookie) = respond(Vec::new());
-        assert_eq!(
-            location,
-            "/settings/credentials/?message=github-app-connected"
-        );
-        assert_eq!(cookie, cleared);
+        let connected = "/settings/credentials/?message=github-app-connected";
+        // Everything granted: the page.
+        assert_eq!(respond(&[]), connected);
         // A user installation.
-        let (location, cookie) = respond(pending("u.octo-user.41"));
-        assert_eq!(location, "https://github.com/settings/installations/41");
-        assert_eq!(cookie, cleared);
-        // An organization installation.
-        let (location, cookie) = respond(pending("o.octo-org.43"));
         assert_eq!(
-            location,
+            respond(&[pending("octo-user", 41, GithubAccountKind::User)]),
+            "https://github.com/settings/installations/41"
+        );
+        // An organization installation.
+        assert_eq!(
+            respond(&[pending("octo-org", 43, GithubAccountKind::Organization)]),
             "https://github.com/organizations/octo-org/settings/installations/43"
         );
-        assert_eq!(cookie, cleared);
-        // An enterprise has no page to send anyone to: only the notice.
-        let (location, cookie) = respond(pending("e.octo-ent.9"));
+        // An enterprise has no page to send anyone to: the page names it.
         assert_eq!(
-            location,
-            "/settings/credentials/?message=github-app-connected"
+            respond(&[pending("octo-ent", 9, GithubAccountKind::Enterprise)]),
+            connected
         );
-        assert!(cookie.starts_with("codewire_github_accept=e.octo-ent.9; "));
-        // Several: the first page there is; the rest wait for the return.
-        let (location, cookie) = respond(pending("e.octo-ent.9_u.octo-user.41_o.octo-org.43"));
-        assert_eq!(location, "https://github.com/settings/installations/41");
-        assert!(cookie.starts_with("codewire_github_accept=e.octo-ent.9_o.octo-org.43; "));
+        // Several: the first page there is.
         assert_eq!(
-            GithubPendingPermissions::decode_all("e.octo-ent.9_o.octo-org.43")
-                .iter()
-                .map(|pending| pending.kind)
-                .collect::<Vec<_>>(),
-            [
-                GithubAccountKind::Enterprise,
-                GithubAccountKind::Organization
-            ]
+            respond(&[
+                pending("octo-ent", 9, GithubAccountKind::Enterprise),
+                pending("octo-org", 43, GithubAccountKind::Organization),
+                pending("octo-user", 41, GithubAccountKind::User),
+            ]),
+            "https://github.com/organizations/octo-org/settings/installations/43"
         );
     }
 

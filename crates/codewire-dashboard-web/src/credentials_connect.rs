@@ -16,10 +16,11 @@ use codewire_proto::codewire::v1::{
     CredentialAuthenticationKind, CredentialMutationServiceClient, CredentialServiceClient,
     CredentialStatus, DeleteAccessProfileRequest, DeleteCredentialRequest, EnrollCodexRequest,
     EnrollCodexResponse, GenerateSshCredentialRequest, GetAccessProfileRequest,
-    GetCredentialRequest, GithubAppAccountKind, ListAccessProfilesRequest, ListCredentialsRequest,
-    RenameAccessProfileRequest, RenameCredentialRequest, RevokeCredentialRequest,
-    RotateApiKeyCredentialRequest, UpdateAccessProfileRequest, enroll_codex_response,
-    get_access_profile_request, get_credential_request,
+    GetCredentialRequest, GithubAppAccountKind, GithubAppPendingPermissions,
+    GithubRepositoryServiceClient, ListAccessProfilesRequest, ListCredentialsRequest,
+    ListGithubPendingPermissionsRequest, RenameAccessProfileRequest, RenameCredentialRequest,
+    RevokeCredentialRequest, RotateApiKeyCredentialRequest, UpdateAccessProfileRequest,
+    enroll_codex_response, get_access_profile_request, get_credential_request,
 };
 use connectrpc::{
     ConnectError, ErrorCode,
@@ -549,30 +550,18 @@ pub(crate) enum GithubAccountKind {
     Enterprise,
 }
 
-impl GithubAccountKind {
-    fn code(self) -> &'static str {
-        match self {
-            Self::User => "u",
-            Self::Organization => "o",
-            Self::Enterprise => "e",
-        }
-    }
-
-    fn from_code(code: &str) -> Option<Self> {
-        match code {
-            "u" => Some(Self::User),
-            "o" => Some(Self::Organization),
-            "e" => Some(Self::Enterprise),
-            _ => None,
-        }
-    }
-}
-
-/// At most this many installations are carried to the page after a connect.
+/// At most this many installations are named on the page.
 const MAX_GITHUB_PENDING: usize = 8;
+/// The live status is advisory: the page renders without it after this.
+const GITHUB_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_GITHUB_PENDING_RESPONSE_BYTES: usize = 16 * 1024;
 
 impl GithubPendingPermissions {
-    fn new(account: &str, installation_id: u64, kind: GithubAccountKind) -> Option<Self> {
+    pub(crate) fn new(
+        account: &str,
+        installation_id: u64,
+        kind: GithubAccountKind,
+    ) -> Option<Self> {
         (valid_github_login(account) && installation_id > 0).then(|| Self {
             account: account.to_owned(),
             installation_id,
@@ -597,54 +586,63 @@ impl GithubPendingPermissions {
         }
     }
 
-    /// Split off the first installation whose owner can accept on a GitHub
-    /// settings page, to send the person there straight after connecting,
-    /// from the rest, which the credentials page names when they return. An
-    /// enterprise has no such page, so it is only ever named.
-    pub(crate) fn first_to_accept(mut pending: Vec<Self>) -> (Option<String>, Vec<Self>) {
-        match pending
-            .iter()
-            .position(|pending| pending.settings_url().is_some())
-        {
-            Some(index) => (pending.remove(index).settings_url(), pending),
-            None => (None, pending),
-        }
+    /// The first installation's GitHub settings page there is, where
+    /// connect sends the person to accept. An enterprise has none.
+    pub(crate) fn first_page(pending: &[Self]) -> Option<String> {
+        pending.iter().find_map(Self::settings_url)
     }
 
-    /// The compact form the post-connect cookie carries: `u.LOGIN.ID`,
-    /// `o.LOGIN.ID` or `e.LOGIN.ID`, joined by `_`. GitHub logins contain
-    /// neither separator.
-    pub(crate) fn encode_all(pending: &[Self]) -> String {
+    /// The service's entries, validated again: an invalid login, a zero ID
+    /// or an unknown kind is dropped, never shown.
+    fn from_wire(pending: &[GithubAppPendingPermissions]) -> Vec<Self> {
         pending
             .iter()
-            .map(|p| format!("{}.{}.{}", p.kind.code(), p.account, p.installation_id))
-            .collect::<Vec<_>>()
-            .join("_")
-    }
-
-    /// The cookie's value, validated again: anything malformed is dropped.
-    pub(crate) fn decode_all(value: &str) -> Vec<Self> {
-        if value.is_empty() || value.len() > 1024 {
-            return Vec::new();
-        }
-        value
-            .split('_')
-            .filter_map(|entry| {
-                let mut parts = entry.split('.');
-                let kind = GithubAccountKind::from_code(parts.next()?)?;
-                let account = parts.next()?;
-                let digits = parts.next()?;
-                if parts.next().is_some()
-                    || digits.is_empty()
-                    || digits.len() > 20
-                    || !digits.bytes().all(|b| b.is_ascii_digit())
-                {
-                    return None;
-                }
-                Self::new(account, digits.parse().ok()?, kind)
+            .filter_map(|pending| {
+                let kind = match pending.account_kind.as_known()? {
+                    GithubAppAccountKind::User => GithubAccountKind::User,
+                    GithubAppAccountKind::Organization => GithubAccountKind::Organization,
+                    GithubAppAccountKind::Enterprise => GithubAccountKind::Enterprise,
+                    _ => return None,
+                };
+                Self::new(&pending.account, pending.installation_id, kind)
             })
             .take(MAX_GITHUB_PENDING)
             .collect()
+    }
+}
+
+/// The installations of the signed-in person's GitHub App connection that
+/// have not yet granted what Codewire needs, checked live by the credential
+/// service with that person's own connection and authority (#2712). Advisory:
+/// an error, or no answer within two seconds, is an empty list, so the page
+/// never fails or waits long because of GitHub.
+pub(crate) async fn github_pending_permissions(
+    state: &AppState,
+    cookie: HeaderValue,
+) -> Vec<GithubPendingPermissions> {
+    let client = GithubRepositoryServiceClient::new(
+        BrowserTransport {
+            http: state.credential_http.clone(),
+            cookie: Some(cookie),
+            origin: Some(
+                HeaderValue::from_str(&state.public_origin)
+                    .expect("validated dashboard public origin is a valid header value"),
+            ),
+        },
+        ClientConfig::new(state.credential_origin.clone())
+            .with_default_timeout(GITHUB_PENDING_TIMEOUT)
+            .with_default_max_message_size(MAX_GITHUB_PENDING_RESPONSE_BYTES),
+    );
+    match tokio::time::timeout(
+        GITHUB_PENDING_TIMEOUT,
+        client.list_github_pending_permissions(ListGithubPendingPermissionsRequest::default()),
+    )
+    .await
+    {
+        Ok(Ok(response)) => {
+            GithubPendingPermissions::from_wire(&response.into_owned().pending_permissions)
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -661,9 +659,9 @@ fn valid_github_login(value: &str) -> bool {
 
 /// Complete the server-side GitHub App callback. The callback code is sent
 /// only to credential-service over the authenticated mutation connection; the
-/// browser receives no token or provider response. It does receive, once,
-/// the login and installation ID of each installation that has not granted
-/// what Codewire needs (#2712), in a short-lived HttpOnly cookie.
+/// browser receives no token or provider response. The installations that
+/// have not granted what Codewire needs (#2712) come back for the callback to
+/// send the person to the first one's GitHub settings page.
 pub(crate) async fn complete_github_app_authorization(
     state: &AppState,
     cookie: HeaderValue,
@@ -701,20 +699,9 @@ pub(crate) async fn complete_github_app_authorization(
     validate_github_app_authorization_ack(&credential, current.as_ref())?;
     // Advisory only: the connection is saved either way, so a malformed entry
     // is dropped rather than failing a connect that succeeded.
-    Ok(response
-        .pending_permissions
-        .iter()
-        .filter_map(|pending| {
-            let kind = match pending.account_kind.as_known()? {
-                GithubAppAccountKind::User => GithubAccountKind::User,
-                GithubAppAccountKind::Organization => GithubAccountKind::Organization,
-                GithubAppAccountKind::Enterprise => GithubAccountKind::Enterprise,
-                _ => return None,
-            };
-            GithubPendingPermissions::new(&pending.account, pending.installation_id, kind)
-        })
-        .take(MAX_GITHUB_PENDING)
-        .collect())
+    Ok(GithubPendingPermissions::from_wire(
+        &response.pending_permissions,
+    ))
 }
 
 pub(crate) async fn validate_github_app_reconnect(
@@ -1698,16 +1685,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn github_pending_permissions_round_trip_and_refuse_anything_else() {
-        let pending = vec![
-            GithubPendingPermissions::new("octo-user", 12345, GithubAccountKind::User).unwrap(),
-            GithubPendingPermissions::new("octo-org", 678, GithubAccountKind::Organization)
-                .unwrap(),
-            GithubPendingPermissions::new("octo-ent", 9, GithubAccountKind::Enterprise).unwrap(),
-        ];
-        let encoded = GithubPendingPermissions::encode_all(&pending);
-        assert_eq!(encoded, "u.octo-user.12345_o.octo-org.678_e.octo-ent.9");
-        assert_eq!(GithubPendingPermissions::decode_all(&encoded), pending);
+    fn github_pending_permissions_keep_only_validated_entries() {
+        let wire = |account: &str, installation_id: u64, kind: GithubAppAccountKind| {
+            GithubAppPendingPermissions {
+                account: account.into(),
+                installation_id,
+                account_kind: kind.into(),
+                ..Default::default()
+            }
+        };
+        let pending = GithubPendingPermissions::from_wire(&[
+            wire("octo-user", 12345, GithubAppAccountKind::User),
+            wire("octo-org", 678, GithubAppAccountKind::Organization),
+            wire("octo-ent", 9, GithubAppAccountKind::Enterprise),
+            wire("octo", 1, GithubAppAccountKind::Unspecified),
+            wire("octo", 0, GithubAppAccountKind::User),
+            wire("-octo", 1, GithubAppAccountKind::User),
+            wire("octo--org", 1, GithubAppAccountKind::User),
+            wire("octo/../evil", 1, GithubAppAccountKind::User),
+            wire("evil.com/x", 1, GithubAppAccountKind::Organization),
+            wire(
+                "a-very-long-login-name-that-github-would-refuse",
+                1,
+                GithubAppAccountKind::User,
+            ),
+        ]);
+        assert_eq!(
+            pending,
+            [
+                GithubPendingPermissions::new("octo-user", 12345, GithubAccountKind::User).unwrap(),
+                GithubPendingPermissions::new("octo-org", 678, GithubAccountKind::Organization)
+                    .unwrap(),
+                GithubPendingPermissions::new("octo-ent", 9, GithubAccountKind::Enterprise)
+                    .unwrap(),
+            ]
+        );
         assert_eq!(
             pending[0].settings_url().as_deref(),
             Some("https://github.com/settings/installations/12345")
@@ -1717,56 +1729,26 @@ mod tests {
             Some("https://github.com/organizations/octo-org/settings/installations/678")
         );
         assert_eq!(pending[2].settings_url(), None);
-        for crafted in [
-            "x.octo.1",
-            "u.octo",
-            "u.octo.1.2",
-            "u.octo.0",
-            "u.octo.-1",
-            "u.octo.1e3",
-            "u..1",
-            "u.-octo.1",
-            "u.octo--org.1",
-            "u.octo/../evil.1",
-            "o.evil.com/x.1",
-            "u.a-very-long-login-name-that-github-would-refuse.1",
-        ] {
-            assert!(
-                GithubPendingPermissions::decode_all(crafted).is_empty(),
-                "{crafted}"
-            );
-        }
+        let many: Vec<_> = (1..=MAX_GITHUB_PENDING as u64 + 3)
+            .map(|id| wire("octo", id, GithubAppAccountKind::User))
+            .collect();
         assert_eq!(
-            GithubPendingPermissions::decode_all("u.ok.1_bad_o.org.2").len(),
-            2
-        );
-        // Connect sends the person to the first page there is; the rest wait
-        // for the page. Enterprises are only named, wherever they come.
-        let (first, rest) = GithubPendingPermissions::first_to_accept(pending.clone());
-        assert_eq!(
-            first.as_deref(),
-            Some("https://github.com/settings/installations/12345")
-        );
-        assert_eq!(rest, pending[1..]);
-        let (first, rest) =
-            GithubPendingPermissions::first_to_accept(vec![pending[2].clone(), pending[1].clone()]);
-        assert_eq!(
-            first.as_deref(),
-            Some("https://github.com/organizations/octo-org/settings/installations/678")
-        );
-        assert_eq!(rest, [pending[2].clone()]);
-        let (first, rest) = GithubPendingPermissions::first_to_accept(vec![pending[2].clone()]);
-        assert_eq!(first, None);
-        assert_eq!(rest, [pending[2].clone()]);
-        assert_eq!(
-            GithubPendingPermissions::first_to_accept(Vec::new()),
-            (None, Vec::new())
-        );
-        let many = ["u.octo.1"; MAX_GITHUB_PENDING + 3].join("_");
-        assert_eq!(
-            GithubPendingPermissions::decode_all(&many).len(),
+            GithubPendingPermissions::from_wire(&many).len(),
             MAX_GITHUB_PENDING
         );
+        // Connect sends the person to the first page there is; the page names
+        // every installation still short. Enterprises are only named.
+        assert_eq!(
+            GithubPendingPermissions::first_page(&pending).as_deref(),
+            Some("https://github.com/settings/installations/12345")
+        );
+        assert_eq!(
+            GithubPendingPermissions::first_page(&[pending[2].clone(), pending[1].clone()])
+                .as_deref(),
+            Some("https://github.com/organizations/octo-org/settings/installations/678")
+        );
+        assert_eq!(GithubPendingPermissions::first_page(&pending[2..]), None);
+        assert_eq!(GithubPendingPermissions::first_page(&[]), None);
     }
 
     fn credential(

@@ -56,6 +56,11 @@ const GITHUB_APP_UNINSTALLED_USER_TOKEN: &str = "ghu_kind_synthetic_uninstalled_
 /// for write access: its own and an organization's. Connect succeeds, sends
 /// the person to accept on the first and names the second.
 const GITHUB_APP_LIMITED_USER_TOKEN: &str = "ghu_kind_synthetic_limited_user_token_1234567890";
+/// A login whose installation listing answers its connect (which reads
+/// `/user` first) and fails every later live status read (#2712): the page
+/// must then show nothing and still render.
+const GITHUB_APP_UNRELIABLE_USER_TOKEN: &str =
+    "ghu_kind_synthetic_unreliable_user_token_1234567890";
 pub(super) const GITHUB_APP_REFRESHED_USER_TOKEN: &str =
     "ghu_kind_synthetic_refreshed_user_token_1234567890";
 const GITHUB_APP_INITIAL_REFRESH_TOKEN: &str =
@@ -258,6 +263,9 @@ struct Counters {
     github_refreshed_upload_packs: u64,
     anthropic_calls: u64,
     anthropic_rejections: u64,
+    /// Set by `/user` for the unreliable login; its next installation
+    /// listing, connect's, answers.
+    github_unreliable_listing: bool,
 }
 
 #[derive(Clone)]
@@ -404,6 +412,16 @@ impl SyntheticProvider {
                 "token_type": "bearer",
             }));
         }
+        if body
+            == self
+                .github_app_exchange_body("kind-synthetic-code-unreliable")
+                .as_bytes()
+        {
+            return json_response(json!({
+                "access_token": GITHUB_APP_UNRELIABLE_USER_TOKEN,
+                "token_type": "bearer",
+            }));
+        }
         if body != github_app_refresh_body().as_bytes() {
             return Err(BrokerUpstreamError::Protocol);
         }
@@ -434,6 +452,14 @@ impl SyntheticProvider {
         if !body.is_empty() || !github_app_api_headers(headers) {
             return Err(BrokerUpstreamError::Protocol);
         }
+        if headers.get("authorization").is_some_and(|value| {
+            value == format!("Bearer {GITHUB_APP_UNRELIABLE_USER_TOKEN}").as_str()
+        }) {
+            self.0
+                .lock()
+                .map_err(|_| BrokerUpstreamError::Protocol)?
+                .github_unreliable_listing = true;
+        }
         json_response(json!({"id": 7, "login": "synthetic-user"}))
     }
 
@@ -458,6 +484,30 @@ impl SyntheticProvider {
             return json_response(json!({"installations": []}));
         }
         let account = json!({"login": "synthetic-user", "type": "User"});
+        if bearer(GITHUB_APP_UNRELIABLE_USER_TOKEN) {
+            let connecting = std::mem::take(
+                &mut self
+                    .0
+                    .lock()
+                    .map_err(|_| BrokerUpstreamError::Protocol)?
+                    .github_unreliable_listing,
+            );
+            if !connecting {
+                return Ok(BrokerUpstreamResponse::new(
+                    StatusCode::BAD_GATEWAY,
+                    HeaderMap::from_iter([(
+                        http::header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )]),
+                    Box::pin(futures::stream::once(async { Ok(b"{}".to_vec().into()) })),
+                ));
+            }
+            return json_response(json!({
+                "installations": [{"id": 41, "app_slug": GITHUB_APP_SLUG, "account": account,
+                    "repository_selection": "selected",
+                    "permissions": {"contents": "read", "metadata": "read"}}],
+            }));
+        }
         if bearer(GITHUB_APP_LIMITED_USER_TOKEN) {
             // The same installation before its owner accepted write access,
             // and an organization's installation in the same state.
@@ -1235,6 +1285,7 @@ fn github_app_api_headers(headers: &HeaderMap) -> bool {
         GITHUB_APP_REFRESHED_USER_TOKEN,
         GITHUB_APP_UNINSTALLED_USER_TOKEN,
         GITHUB_APP_LIMITED_USER_TOKEN,
+        GITHUB_APP_UNRELIABLE_USER_TOKEN,
     ]
     .iter()
     .any(|token| {
@@ -2307,6 +2358,38 @@ mod tests {
             pending.settings_url(&limited.reach()[1].account).as_deref(),
             Some("https://github.com/organizations/synthetic-works/settings/installations/42")
         );
+        // The live status reads the stored connection the same way.
+        assert_eq!(
+            owner
+                .pending_permissions(GITHUB_APP_LIMITED_USER_TOKEN.as_bytes())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            owner
+                .pending_permissions(GITHUB_APP_USER_TOKEN.as_bytes())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // The unreliable login connects, then every live read fails.
+        let unreliable = owner
+            .complete(zeroize::Zeroizing::new(
+                b"kind-synthetic-code-unreliable".to_vec(),
+            ))
+            .await
+            .unwrap();
+        assert!(unreliable.reach()[0].pending_permissions.is_some());
+        for _ in 0..2 {
+            assert_eq!(
+                owner
+                    .pending_permissions(GITHUB_APP_UNRELIABLE_USER_TOKEN.as_bytes())
+                    .await,
+                Err(codewire_credential_broker::GitHubAppStatusError::Unavailable)
+            );
+        }
         let limited = HeaderMap::from_iter([(
             http::header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {GITHUB_APP_LIMITED_USER_TOKEN}")).unwrap(),

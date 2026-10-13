@@ -108,21 +108,7 @@ pub(super) async fn handle(
                 }
             };
             print(&[credential], OutputFormat::Text)?;
-            super::credentials::report_github_pending(pending.iter().filter_map(|pending| {
-                let kind = match pending.account_kind.as_known()? {
-                    rpc::GithubAppAccountKind::Organization => {
-                        codewire_credential_broker::GitHubAccountKind::Organization
-                    }
-                    rpc::GithubAppAccountKind::Enterprise => {
-                        codewire_credential_broker::GitHubAccountKind::Enterprise
-                    }
-                    rpc::GithubAppAccountKind::User => {
-                        codewire_credential_broker::GitHubAccountKind::User
-                    }
-                    _ => return None,
-                };
-                Some((pending.account.as_str(), pending.installation_id, kind))
-            }));
+            super::credentials::report_github_pending(github_pending(&pending));
             Ok(())
         }
         CredentialsCommand::List(args) => {
@@ -146,18 +132,22 @@ pub(super) async fn handle(
                 }
                 page_token = page.next_page_token;
             }
-            print(&credentials, args.output)
+            print(&credentials, args.output)?;
+            report_live_github_status(client, &credentials, args.output).await;
+            Ok(())
         }
-        CredentialsCommand::Get(args) => print(
-            &[resolve(
+        CredentialsCommand::Get(args) => {
+            let credential = resolve(
                 client,
                 args.credential
                     .as_deref()
                     .context("get requires a credential selector")?,
             )
-            .await?],
-            args.output,
-        ),
+            .await?;
+            print(std::slice::from_ref(&credential), args.output)?;
+            report_live_github_status(client, std::slice::from_ref(&credential), args.output).await;
+            Ok(())
+        }
         CredentialsCommand::Revoke(args) => {
             let current = resolve(client, &args.credential).await?;
             let response = client.revoke_credential(rpc::RevokeCredentialRequest {
@@ -532,6 +522,58 @@ pub(super) async fn resolve(
         .credential
         .into_option()
         .context("platform omitted credential metadata")
+}
+
+/// The service's pending entries as the notice takes them; an unknown kind
+/// is dropped.
+fn github_pending(
+    pending: &[rpc::GithubAppPendingPermissions],
+) -> impl Iterator<Item = (&str, u64, codewire_credential_broker::GitHubAccountKind)> {
+    pending.iter().filter_map(|pending| {
+        let kind = match pending.account_kind.as_known()? {
+            rpc::GithubAppAccountKind::Organization => {
+                codewire_credential_broker::GitHubAccountKind::Organization
+            }
+            rpc::GithubAppAccountKind::Enterprise => {
+                codewire_credential_broker::GitHubAccountKind::Enterprise
+            }
+            rpc::GithubAppAccountKind::User => codewire_credential_broker::GitHubAccountKind::User,
+            _ => return None,
+        };
+        Some((pending.account.as_str(), pending.installation_id, kind))
+    })
+}
+
+/// While the listing includes the person's active GitHub connection, name
+/// any installation still short of what Codewire needs, checked live by the
+/// platform with that connection (#2712). Advisory and text-only: an error,
+/// or no answer within two seconds, prints nothing.
+async fn report_live_github_status(
+    client: &CodewireClient,
+    credentials: &[rpc::Credential],
+    output: OutputFormat,
+) {
+    let connected = credentials.iter().any(|credential| {
+        credential.provider == "github"
+            && credential.authentication_kind == rpc::CredentialAuthenticationKind::Oauth
+            && credential.status == rpc::CredentialStatus::Active
+    });
+    if output != OutputFormat::Text || !connected {
+        return;
+    }
+    let Ok(Ok(response)) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.list_github_pending_permissions(),
+    )
+    .await
+    else {
+        return;
+    };
+    for notice in
+        super::credentials::github_pending_notices(github_pending(&response.pending_permissions))
+    {
+        eprintln!("{notice}");
+    }
 }
 
 fn print(credentials: &[rpc::Credential], output: OutputFormat) -> anyhow::Result<()> {

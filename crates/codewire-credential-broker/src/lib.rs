@@ -41,8 +41,8 @@ pub use codex_oauth::{
 pub use github_app::{
     GitHubAccountKind, GitHubAppAuthorizationConfig, GitHubAppAuthorizationError,
     GitHubAppAuthorizationImport, GitHubAppAuthorizationOwner, GitHubAppInstallationReach,
-    GitHubAppPendingPermissions, GitHubAppRefreshError, GitHubAppUserOAuthBundle,
-    github_access_token,
+    GitHubAppPendingPermissions, GitHubAppRefreshError, GitHubAppStatusError,
+    GitHubAppUserOAuthBundle, github_access_token,
 };
 pub use network::ProviderHttpsTransport;
 pub use openai::{

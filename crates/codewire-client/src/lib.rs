@@ -121,6 +121,7 @@ pub use codewire_proto::codewire::v1::{
     EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse,
     GetCredentialRequest, GetCredentialResponse, GithubAppAccountKind, GithubAppPendingPermissions,
     GithubDeviceChallenge, GithubRepository, ListCredentialsRequest, ListCredentialsResponse,
+    ListGithubPendingPermissionsRequest, ListGithubPendingPermissionsResponse,
     ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest,
     RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse,
     RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse, SshPublicKey,

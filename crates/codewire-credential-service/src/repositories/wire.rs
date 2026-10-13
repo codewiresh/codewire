@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use codewire_proto::codewire::v1::{
-    GithubRepositoryService, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse,
+    GithubRepositoryService, ListGithubPendingPermissionsRequest,
+    ListGithubPendingPermissionsResponse, ListGithubRepositoriesRequest,
+    ListGithubRepositoriesResponse,
 };
 use codewire_server_core::connect::{credential_mutation_authority, wire_error};
 use codewire_server_core::connect_error::{
@@ -30,6 +32,20 @@ impl GithubRepositoryService for Service {
         let result = self
             .owner
             .list(authority, request.to_owned_message())
+            .await
+            .map_err(error)?;
+        Ok(connectrpc::Response::new(result).with_header("cache-control", "private, no-store"))
+    }
+
+    async fn list_github_pending_permissions(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, ListGithubPendingPermissionsRequest>,
+    ) -> ServiceResult<ListGithubPendingPermissionsResponse> {
+        let authority = credential_mutation_authority(&ctx)?.clone();
+        let result = self
+            .owner
+            .pending_permissions(authority)
             .await
             .map_err(error)?;
         Ok(connectrpc::Response::new(result).with_header("cache-control", "private, no-store"))

@@ -16,6 +16,22 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
+    /// The installations of the authenticated owner's GitHub App connection
+    /// that have not yet granted what Codewire needs, checked live (#2712).
+    /// Login, installation ID and account kind only.
+    pub async fn list_github_pending_permissions(
+        &self,
+    ) -> Result<ListGithubPendingPermissionsResponse, ClientError> {
+        self.github_repositories
+            .list_github_pending_permissions_with_options(
+                ListGithubPendingPermissionsRequest::default(),
+                self.auth_options().await?,
+            )
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     /// Rename the exact observed identity without changing its material or bindings.
     pub async fn rename_credential(
         &self,

@@ -244,42 +244,6 @@ pub(crate) fn clear_github_app_authorization_cookie(public_origin: &str) -> Stri
     .expect("static GitHub App authorization cookie")
 }
 
-/// Installations that fell short of Codewire's permissions at the GitHub
-/// connect that just completed, other than the one the callback sent the
-/// person to GitHub to accept (#2712). The credentials page renders it once,
-/// whenever the person next opens it, and clears it. Ten minutes leaves time
-/// to accept on GitHub and come back. Carried in this HttpOnly cookie, never
-/// the URL, so no crafted link can make the page vouch for an installation
-/// the person did not just connect.
-const GITHUB_ACCEPT_COOKIE: &str = "codewire_github_accept";
-const GITHUB_ACCEPT_PATH: &str = "/settings/credentials/";
-const GITHUB_ACCEPT_SECONDS: u32 = 600;
-
-pub(crate) fn github_accept_cookie(public_origin: &str, value: &str) -> Option<String> {
-    lax_scoped_secret_cookie(
-        public_origin,
-        GITHUB_ACCEPT_COOKIE,
-        value,
-        GITHUB_ACCEPT_PATH,
-        GITHUB_ACCEPT_SECONDS,
-    )
-}
-
-pub(crate) fn clear_github_accept_cookie(public_origin: &str) -> String {
-    lax_scoped_secret_cookie(
-        public_origin,
-        GITHUB_ACCEPT_COOKIE,
-        "deleted",
-        GITHUB_ACCEPT_PATH,
-        0,
-    )
-    .expect("static GitHub permissions notice cookie")
-}
-
-pub(crate) fn github_accept_cookie_value(headers: &HeaderMap) -> Option<&str> {
-    cookie_value(headers, GITHUB_ACCEPT_COOKIE).filter(|value| *value != "deleted")
-}
-
 pub(crate) fn csrf_cookie(public_origin: &str, token: &str) -> String {
     let secure = if public_origin.starts_with("https://") {
         "; Secure"
@@ -606,37 +570,6 @@ mod tests {
             )
             .is_none()
         );
-    }
-
-    #[test]
-    fn github_permissions_notice_cookie_is_short_lived_lax_and_scoped_to_the_page() {
-        assert_eq!(
-            github_accept_cookie("https://codewire.sh", "u.octo-user.41").unwrap(),
-            "codewire_github_accept=u.octo-user.41; Path=/settings/credentials/; HttpOnly; \
-             SameSite=Lax; Max-Age=600; Secure"
-        );
-        assert_eq!(
-            clear_github_accept_cookie("https://codewire.sh"),
-            "codewire_github_accept=deleted; Path=/settings/credentials/; HttpOnly; \
-             SameSite=Lax; Max-Age=0; Secure"
-        );
-        assert!(
-            github_accept_cookie("http://127.0.0.1:8090", "u.octo-user.41")
-                .unwrap()
-                .ends_with("Max-Age=600")
-        );
-        assert!(github_accept_cookie("https://codewire.sh", "u.octo;evil").is_none());
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_static("codewire_github_accept=o.octo-org.43"),
-        );
-        assert_eq!(github_accept_cookie_value(&headers), Some("o.octo-org.43"));
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_static("codewire_github_accept=deleted"),
-        );
-        assert_eq!(github_accept_cookie_value(&headers), None);
     }
 
     #[test]

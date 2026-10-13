@@ -545,6 +545,49 @@ impl GitHubAppAuthorizationOwner {
             .map_err(GitHubAppRefreshError::permanent)
     }
 
+    /// The installations of this App that the connection's user can see and
+    /// that fall short of what Codewire needs: connect's own
+    /// `/user/installations` comparison, on the first page of 100 (#2712).
+    /// `material` is the stored connection, an App bundle or a non-expiring
+    /// token. Read only: it never rotates anything. Each entry carries a
+    /// validated login, the numeric installation ID and the account kind,
+    /// nothing else from GitHub. A 401 is `Unauthorized`, so the caller may
+    /// renew an App bundle once and ask again; any other answer that is not
+    /// a listing is `Unavailable`.
+    pub async fn pending_permissions(
+        &self,
+        material: &[u8],
+    ) -> Result<Vec<GitHubAppInstallationReach>, GitHubAppStatusError> {
+        let token = GitHubOAuthCredential::parse(material)
+            .and_then(|credential| credential.access_token())
+            .map_err(|_| GitHubAppStatusError::Unavailable)?;
+        let response = request(
+            self.upstream.as_ref(),
+            Method::GET,
+            &format!("{INSTALLATIONS_URL}?per_page=100&page=1"),
+            authorization_headers(&token).map_err(|_| GitHubAppStatusError::Unavailable)?,
+            Vec::new(),
+        )
+        .await
+        .map_err(|_| GitHubAppStatusError::Unavailable)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(GitHubAppStatusError::Unauthorized);
+        }
+        let listing: InstallationsResponse = response_json(response)
+            .await
+            .map_err(|_| GitHubAppStatusError::Unavailable)?;
+        let mut pending: Vec<_> = listing
+            .installations
+            .into_iter()
+            .filter(|installation| installation.id > 0 && installation.app_slug == self.app_slug())
+            .filter_map(installation_reach)
+            .filter(|reach| reach.pending_permissions.is_some())
+            .collect();
+        pending.sort_by(|left, right| left.account.cmp(&right.account));
+        pending.dedup();
+        Ok(pending)
+    }
+
     async fn exchange_authorization_code(
         &self,
         authorization_code: &[u8],
@@ -690,20 +733,7 @@ async fn app_installations(
                 continue;
             }
             first.get_or_insert(installation.id);
-            if let Some(account) = installation.account
-                && valid_login(&account.login)
-            {
-                let pending_permissions = permissions_fall_short(installation.permissions.as_ref())
-                    .then(|| GitHubAppPendingPermissions {
-                        installation_id: installation.id,
-                        account_kind: GitHubAccountKind::from_type(&account.kind),
-                    });
-                reach.push(GitHubAppInstallationReach {
-                    account: account.login,
-                    all_repositories: installation.repository_selection == "all",
-                    pending_permissions,
-                });
-            }
+            reach.extend(installation_reach(installation));
         }
         if last {
             let installation_id = first.ok_or(GitHubAppAuthorizationError::InstallationRequired)?;
@@ -717,6 +747,28 @@ async fn app_installations(
         Some(installation_id) => Ok((installation_id, reach)),
         None => Err(GitHubAppAuthorizationError::Unavailable),
     }
+}
+
+/// What one installation of this App reaches, compared with what Codewire
+/// needs. Connect and the live status check share it (#2712). An account
+/// without a valid login is omitted; it never widens access.
+fn installation_reach(installation: Installation) -> Option<GitHubAppInstallationReach> {
+    let account = installation.account?;
+    if !valid_login(&account.login) {
+        return None;
+    }
+    let pending_permissions =
+        permissions_fall_short(installation.permissions.as_ref()).then(|| {
+            GitHubAppPendingPermissions {
+                installation_id: installation.id,
+                account_kind: GitHubAccountKind::from_type(&account.kind),
+            }
+        });
+    Some(GitHubAppInstallationReach {
+        account: account.login,
+        all_repositories: installation.repository_selection == "all",
+        pending_permissions,
+    })
 }
 
 async fn user(
@@ -801,6 +853,15 @@ pub enum GitHubAppAuthorizationError {
     Unavailable,
     #[error("GitHub App authorization response is invalid")]
     InvalidResponse,
+}
+
+/// Why the live permission status could not be read. Carries nothing from
+/// GitHub.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitHubAppStatusError {
+    /// GitHub refused the access token: renew it once, then ask again.
+    Unauthorized,
+    Unavailable,
 }
 
 /// Refresh outcome classification used only by the credential authority after
@@ -1406,6 +1467,143 @@ mod tests {
             requests[5].1,
             "https://api.github.com/user/installations?per_page=100&page=1"
         );
+    }
+
+    /// Answers `/user/installations` with one fixed status and body.
+    struct StatusProvider {
+        status: StatusCode,
+        body: serde_json::Value,
+        requests: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl BrokerUpstreamTransport for StatusProvider {
+        async fn execute(
+            &self,
+            request: BrokerUpstreamRequest,
+        ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+            let (method, target, headers, _) = request.into_parts();
+            assert_eq!(method, Method::GET);
+            assert_eq!(
+                headers.get(header::AUTHORIZATION).unwrap(),
+                "Bearer ghu_synthetic_user_token_1234567890"
+            );
+            self.requests
+                .lock()
+                .unwrap()
+                .push(target.as_str().to_owned());
+            let body = serde_json::to_vec(&self.body).unwrap();
+            Ok(BrokerUpstreamResponse::new(
+                self.status,
+                HeaderMap::from_iter([(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )]),
+                Box::pin(futures::stream::once(async move { Ok(Bytes::from(body)) })),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_live_status_names_only_installations_short_of_the_grant() {
+        // #2712: connect's own comparison, read live with a stored bundle.
+        let mut imported =
+            GitHubAppAuthorizationOwner::new(config(), Arc::new(ExpiringProvider::default()))
+                .complete(Zeroizing::new(b"synthetic-code-123".to_vec()))
+                .await
+                .unwrap();
+        let material = imported.take_import().unwrap().0;
+        assert!(GitHubAppUserOAuthBundle::is_tagged(&material));
+        let full =
+            serde_json::json!({"contents": "write", "pull_requests": "write", "metadata": "read"});
+        let earlier = serde_json::json!({"contents": "read", "metadata": "read"});
+        let status = |status: StatusCode, body: serde_json::Value| {
+            Arc::new(StatusProvider {
+                status,
+                body,
+                requests: Mutex::new(Vec::new()),
+            })
+        };
+        let provider = status(
+            StatusCode::OK,
+            serde_json::json!({"installations": [
+                {"id": 41, "app_slug": "codewire", "permissions": full,
+                    "account": {"login": "octo-user", "type": "User"}},
+                {"id": 43, "app_slug": "codewire", "permissions": earlier,
+                    "account": {"login": "octo-org", "type": "Organization"}},
+                {"id": 44, "app_slug": "another-app", "permissions": earlier,
+                    "account": {"login": "elsewhere", "type": "User"}},
+                {"id": 45, "app_slug": "codewire", "permissions": earlier,
+                    "account": {"login": "bad/login", "type": "User"}},
+                {"id": 46, "app_slug": "codewire", "permissions": earlier,
+                    "account": {"login": "octo-ent", "type": "Enterprise"}},
+            ]}),
+        );
+        let owner = GitHubAppAuthorizationOwner::new(config(), provider.clone());
+        let pending = owner.pending_permissions(&material).await.unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|reach| (
+                    reach.account.as_str(),
+                    reach.pending_permissions.as_ref().unwrap().installation_id,
+                    reach.pending_permissions.as_ref().unwrap().account_kind,
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("octo-ent", 46, GitHubAccountKind::Enterprise),
+                ("octo-org", 43, GitHubAccountKind::Organization),
+            ]
+        );
+        assert_eq!(
+            *provider.requests.lock().unwrap(),
+            ["https://api.github.com/user/installations?per_page=100&page=1"]
+        );
+        // Everything granted: nothing to name.
+        let provider = status(
+            StatusCode::OK,
+            serde_json::json!({"installations": [{"id": 41, "app_slug": "codewire",
+                "permissions": full, "account": {"login": "octo-user", "type": "User"}}]}),
+        );
+        let owner = GitHubAppAuthorizationOwner::new(config(), provider);
+        assert!(
+            owner
+                .pending_permissions(&material)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // A non-expiring token is read the same way.
+        assert!(
+            owner
+                .pending_permissions(b"ghu_synthetic_user_token_1234567890")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // A refused token may be renewed once; any other answer is unavailable.
+        for (code, expected) in [
+            (StatusCode::UNAUTHORIZED, GitHubAppStatusError::Unauthorized),
+            (StatusCode::FORBIDDEN, GitHubAppStatusError::Unavailable),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                GitHubAppStatusError::Unavailable,
+            ),
+            (StatusCode::BAD_GATEWAY, GitHubAppStatusError::Unavailable),
+            (StatusCode::OK, GitHubAppStatusError::Unavailable),
+        ] {
+            let body = if code == StatusCode::OK {
+                serde_json::json!({"unexpected": true})
+            } else {
+                serde_json::json!({"message": "synthetic"})
+            };
+            let owner = GitHubAppAuthorizationOwner::new(config(), status(code, body));
+            assert_eq!(
+                owner.pending_permissions(&material).await,
+                Err(expected),
+                "{code}"
+            );
+        }
     }
 
     #[tokio::test]

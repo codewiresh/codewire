@@ -46,6 +46,16 @@ GITHUB_APP_ACCOUNT_KIND_USER: GithubAppAccountKind
 GITHUB_APP_ACCOUNT_KIND_ORGANIZATION: GithubAppAccountKind
 GITHUB_APP_ACCOUNT_KIND_ENTERPRISE: GithubAppAccountKind
 
+class ListGithubPendingPermissionsRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class ListGithubPendingPermissionsResponse(_message.Message):
+    __slots__ = ("pending_permissions",)
+    PENDING_PERMISSIONS_FIELD_NUMBER: _ClassVar[int]
+    pending_permissions: _containers.RepeatedCompositeFieldContainer[GithubAppPendingPermissions]
+    def __init__(self, pending_permissions: _Optional[_Iterable[_Union[GithubAppPendingPermissions, _Mapping]]] = ...) -> None: ...
+
 class ListGithubRepositoriesRequest(_message.Message):
     __slots__ = ("page_size", "page_token")
     PAGE_SIZE_FIELD_NUMBER: _ClassVar[int]

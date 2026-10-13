@@ -426,36 +426,50 @@ test.describe("managed provider credential browser journey", () => {
       // #2712: a reconnect whose installations still have the grant from
       // before Codewire asked for write access saves the connection, then
       // sends the person straight to the first installation's GitHub settings
-      // page to accept (the helper answers it on-cluster) and names the other
-      // installation when they return.
-      await page.goto("/settings/credentials/");
-      row = credentialRows.filter({ hasText: name });
-      await row.locator("details.cw-menu > summary").click();
-      await row.getByRole("button", { name: "Reconnect", exact: true }).click();
-      await page.locator("dialog[open]").getByRole("checkbox").check();
-      await completeGithubAppConnection(page, "kind-synthetic-code-limited");
+      // page to accept (the helper answers it on-cluster, never following it).
+      const reconnectWith = async (code: string) => {
+        await page.goto("/settings/credentials/");
+        row = credentialRows.filter({ hasText: name });
+        await row.locator("details.cw-menu > summary").click();
+        await row.getByRole("button", { name: "Reconnect", exact: true }).click();
+        await page.locator("dialog[open]").getByRole("checkbox").check();
+        await completeGithubAppConnection(page, code);
+      };
+      await reconnectWith("kind-synthetic-code-limited");
       // The helper requires the page to be exactly the callback's Location.
       await expect(page).toHaveURL("https://github.com/settings/installations/41");
-      // The rest travels in a short-lived HttpOnly cookie, never the URL.
-      const remaining = (await page.context().cookies(`${ssrUrl}/settings/credentials/`))
-        .find((cookie) => cookie.name === "codewire_github_accept");
-      expect(remaining?.value).toBe("o.synthetic-works.42");
-      expect(remaining?.httpOnly).toBe(true);
-      expect(remaining?.sameSite).toBe("Lax");
-      expect(remaining?.path).toBe("/settings/credentials/");
+      // Nothing is carried in a cookie: the page checks live when they return.
+      expect((await page.context().cookies()).map((cookie) => cookie.name))
+        .not.toContain("codewire_github_accept");
       // GitHub returns the person to the App's Setup URL after an update.
       await page.goto("/settings/credentials/?installation_id=41&setup_action=update");
       await expect(page.getByRole("status")).toHaveText("GitHub permissions updated.");
       const permissions = page.getByRole("region", { name: "GitHub permissions", exact: true });
-      await expect(permissions).toContainText(
-        "GitHub has not yet given Codewire write access to code and pull requests on synthetic-works.");
-      await expect(permissions).not.toContainText("synthetic-user");
-      await expect(permissions.getByRole("link", { name: "Accept the updated permissions on GitHub", exact: true }))
+      const waiting = "GitHub is waiting for you to accept Codewire's updated permissions on";
+      await expect(permissions).toContainText(`${waiting} synthetic-user.`);
+      await expect(permissions).toContainText(`${waiting} synthetic-works.`);
+      const review = permissions.getByRole("link", { name: "Review on GitHub", exact: true });
+      await expect(review).toHaveCount(2);
+      await expect(review.nth(0)).toHaveAttribute("href", "https://github.com/settings/installations/41");
+      await expect(review.nth(1))
         .toHaveAttribute("href", "https://github.com/organizations/synthetic-works/settings/installations/42");
       await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
-      // Named once: the next visit no longer names it.
+      // It lasts: every visit checks again while GitHub holds the earlier grant.
       await page.goto("/settings/credentials/");
-      await expect(page.getByRole("region", { name: "GitHub permissions", exact: true })).toHaveCount(0);
+      await expect(permissions).toContainText(`${waiting} synthetic-user.`);
+      // Once GitHub reports the full grant for the connection, it is gone.
+      // The synthetic provider models the accepted grant as a login whose
+      // installation lists it; reconnecting stores that connection.
+      await reconnectWith("kind-synthetic-code-one");
+      await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=github-app-connected$/);
+      await expect(permissions).toHaveCount(0);
+      // A GitHub error during the live check shows nothing and never blocks
+      // the page: this login's listing answers its connect, then fails.
+      await reconnectWith("kind-synthetic-code-unreliable");
+      await expect(page).toHaveURL("https://github.com/settings/installations/41");
+      await page.goto("/settings/credentials/");
+      await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
+      await expect(permissions).toHaveCount(0);
 
       // Delete removes the connection directly and leaves every profile as it
       // was: profiles show GitHub as missing, Create cannot browse.

@@ -16,7 +16,8 @@ use codewire_credential_broker::github::repositories::{
     self as github, GithubRepositoryAccountLease, RepositoryDiscoveryError,
 };
 use codewire_credential_broker::{
-    BrokerUpstreamTransport, GitHubAppAuthorizationOwner, GitHubAppRefreshError,
+    BrokerUpstreamTransport, GitHubAccountKind, GitHubAppAuthorizationOwner,
+    GitHubAppInstallationReach, GitHubAppRefreshError, GitHubAppStatusError,
     GitHubAppUserOAuthBundle,
 };
 use codewire_platform_credentials::{
@@ -25,7 +26,9 @@ use codewire_platform_credentials::{
 };
 use codewire_protected_store::ProtectedValue;
 use codewire_proto::codewire::v1::{
-    GithubRepository, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse,
+    GithubAppAccountKind, GithubAppPendingPermissions, GithubRepository,
+    ListGithubPendingPermissionsResponse, ListGithubRepositoriesRequest,
+    ListGithubRepositoriesResponse,
 };
 use codewire_server_core::auth::{CredentialMutationAuthority, CredentialMutationAuthorityError};
 use sha2::{Digest, Sha256};
@@ -36,6 +39,9 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use uuid::Uuid;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The live permission status is advisory: a page renders without it.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PENDING_PERMISSIONS: usize = 16;
 const MAX_OPERATIONS: usize = 8;
 const DEFAULT_PAGE_SIZE: u16 = 50;
 const MAX_PAGE_TOKEN_BYTES: usize = 128;
@@ -107,116 +113,14 @@ impl GithubRepositoryOwner {
         request: ListGithubRepositoriesRequest,
     ) -> Result<ListGithubRepositoriesResponse, Error> {
         let selection = Selection::parse(request)?;
-        let permit = Arc::clone(&self.capacity)
-            .try_acquire_owned()
-            .map_err(|_| Error::Unavailable)?;
-        let owner = Owner::User(OwnerId::parse(authority.user_id()).map_err(|_| Error::Denied)?);
-        let deadline = Instant::now()
-            + authority
-                .remaining_lifetime()
-                .map_err(authority_error)?
-                .min(REQUEST_TIMEOUT);
         let operation = async {
-            let before = self.resolve(&authority, &owner, &selection).await?;
-            selection.check_cursor(&owner, &before)?;
-            let (mut record, mut material) = self
-                .load_account(&authority, &owner, &selection, &before)
+            let (output, after_response) = self
+                .read(&authority, &selection, Read::Repositories)
                 .await?;
-            let mut app_bundle = github_app_bundle(&material)?;
-            let mut refreshed = false;
-            let mut permit = Some(permit);
-
-            let refresh_early = match app_bundle.as_ref() {
-                Some(bundle) => bundle
-                    .should_refresh(unix_now()?)
-                    .map_err(app_bundle_error)?,
-                None => false,
+            let ReadOutput::Repositories(page) = output else {
+                return Err(Error::Unavailable);
             };
-            if refresh_early {
-                self.refresh_github_app(
-                    authority.clone(),
-                    owner.clone(),
-                    selection.clone(),
-                    before.clone(),
-                    app_bundle.take().ok_or(Error::Unavailable)?,
-                    permit.take().ok_or(Error::Unavailable)?,
-                )
-                .await?;
-                permit = Some(self.acquire_capacity()?);
-                // A continuation binds the old revocation generation. Do not
-                // silently rebind it after rotating user credentials.
-                if !selection.page_token.is_empty() {
-                    return Err(Error::CredentialChanged);
-                }
-                record = self.resolve(&authority, &owner, &selection).await?;
-                same_refreshed_record(&before, &record)?;
-                (record, material) = self
-                    .load_account(&authority, &owner, &selection, &record)
-                    .await?;
-                same_refreshed_record(&before, &record)?;
-                app_bundle = github_app_bundle(&material)?;
-                refreshed = true;
-            }
-
-            let first = github::list_repositories(
-                self.upstream.as_ref(),
-                AccountLease { record, material },
-                selection.page,
-                selection.page_size,
-            )
-            .await;
-            let page = match first {
-                // An early renewal already consumed this discovery request's
-                // one App rotation/replay budget. A 401 from its direct
-                // successor is a provider denial, not authority to rotate
-                // again and replay under a third token generation.
-                Err(RepositoryDiscoveryError::Unauthorized)
-                    if app_bundle.is_some() && !refreshed =>
-                {
-                    self.refresh_github_app(
-                        authority.clone(),
-                        owner.clone(),
-                        selection.clone(),
-                        before.clone(),
-                        app_bundle.take().ok_or(Error::Unavailable)?,
-                        permit.take().ok_or(Error::Unavailable)?,
-                    )
-                    .await?;
-                    let _retry_permit = self.acquire_capacity()?;
-                    if !selection.page_token.is_empty() {
-                        return Err(Error::CredentialChanged);
-                    }
-                    let successor = self.resolve(&authority, &owner, &selection).await?;
-                    same_refreshed_record(&before, &successor)?;
-                    let (successor, successor_material) = self
-                        .load_account(&authority, &owner, &selection, &successor)
-                        .await?;
-                    same_refreshed_record(&before, &successor)?;
-                    refreshed = true;
-                    // A 401 is retried once only after a durable, re-admitted
-                    // App successor. Any second 401 is a provider denial.
-                    github::list_repositories(
-                        self.upstream.as_ref(),
-                        AccountLease {
-                            record: successor,
-                            material: successor_material,
-                        },
-                        selection.page,
-                        selection.page_size,
-                    )
-                    .await
-                    .map_err(provider_error)?
-                }
-                result => result.map_err(provider_error)?,
-            };
-            // No locks span KEK/provider I/O. Recheck original session/OAuth,
-            // exact current profile and credential before releasing metadata.
-            let after_response = self.resolve(&authority, &owner, &selection).await?;
-            if refreshed {
-                same_refreshed_record(&before, &after_response)?;
-            } else {
-                same_record(&before, &after_response)?;
-            }
+            let owner = owner_of(&authority)?;
             let next_page_token = if page.has_more {
                 if selection.page >= github::MAX_PAGE {
                     return Err(Error::Unavailable);
@@ -244,8 +148,66 @@ impl GithubRepositoryOwner {
                 ..Default::default()
             })
         };
-        // Ordinary discovery is request-owned. A rotating App refresh transfers
-        // only its started durable exchange to the tracked service owner.
+        self.bounded(&authority, REQUEST_TIMEOUT, operation).await
+    }
+
+    /// The installations of the owner's GitHub App connection that have not
+    /// yet granted what Codewire needs (#2712), read live with that same
+    /// connection under discovery's authority, renewal and recheck. Only a
+    /// validated login, the installation ID and its account kind leave.
+    async fn pending_permissions(
+        &self,
+        authority: CredentialMutationAuthority,
+    ) -> Result<ListGithubPendingPermissionsResponse, Error> {
+        let selection = Selection::first_page();
+        let operation = async {
+            let (output, _) = self
+                .read(&authority, &selection, Read::PendingPermissions)
+                .await?;
+            let ReadOutput::PendingPermissions(pending) = output else {
+                return Err(Error::Unavailable);
+            };
+            Ok(ListGithubPendingPermissionsResponse {
+                pending_permissions: pending
+                    .into_iter()
+                    .take(MAX_PENDING_PERMISSIONS)
+                    .filter_map(|reach| {
+                        let pending = reach.pending_permissions?;
+                        Some(GithubAppPendingPermissions {
+                            account: reach.account,
+                            installation_id: pending.installation_id,
+                            account_kind: match pending.account_kind {
+                                GitHubAccountKind::User => GithubAppAccountKind::User,
+                                GitHubAccountKind::Organization => {
+                                    GithubAppAccountKind::Organization
+                                }
+                                GitHubAccountKind::Enterprise => GithubAppAccountKind::Enterprise,
+                            }
+                            .into(),
+                            ..Default::default()
+                        })
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+        };
+        self.bounded(&authority, STATUS_TIMEOUT, operation).await
+    }
+
+    /// Run one request-owned operation within the original authority's
+    /// remaining lifetime and `timeout`. A rotating App refresh it starts
+    /// is transferred to the tracked service owner and outlives it.
+    async fn bounded<T>(
+        &self,
+        authority: &CredentialMutationAuthority,
+        timeout: Duration,
+        operation: impl std::future::Future<Output = Result<T, Error>>,
+    ) -> Result<T, Error> {
+        let deadline = Instant::now()
+            + authority
+                .remaining_lifetime()
+                .map_err(authority_error)?
+                .min(timeout);
         tokio::select! {
             biased;
             _ = self.stop.cancelled() => Err(Error::Cancelled),
@@ -254,6 +216,148 @@ impl GithubRepositoryOwner {
         }
     }
 
+    /// One provider read with the owner's current GitHub connection. An App
+    /// token about to expire is renewed first; a 401 renews once and asks
+    /// again. No locks span KEK or provider I/O: the original session or
+    /// OAuth authority and the exact credential record are checked again
+    /// after the answer, before anything from it is released.
+    async fn read(
+        &self,
+        authority: &CredentialMutationAuthority,
+        selection: &Selection,
+        read: Read,
+    ) -> Result<(ReadOutput, CredentialRecord), Error> {
+        let permit = self.acquire_capacity()?;
+        let owner = owner_of(authority)?;
+        let before = self.resolve(authority, &owner, selection).await?;
+        selection.check_cursor(&owner, &before)?;
+        let (mut record, mut material) = self
+            .load_account(authority, &owner, selection, &before)
+            .await?;
+        let mut app_bundle = github_app_bundle(&material)?;
+        let mut refreshed = false;
+        let mut permit = Some(permit);
+
+        let refresh_early = match app_bundle.as_ref() {
+            Some(bundle) => bundle
+                .should_refresh(unix_now()?)
+                .map_err(app_bundle_error)?,
+            None => false,
+        };
+        if refresh_early {
+            self.refresh_github_app(
+                authority.clone(),
+                owner.clone(),
+                selection.clone(),
+                before.clone(),
+                app_bundle.take().ok_or(Error::Unavailable)?,
+                permit.take().ok_or(Error::Unavailable)?,
+            )
+            .await?;
+            permit = Some(self.acquire_capacity()?);
+            // A continuation binds the old revocation generation. Do not
+            // silently rebind it after rotating user credentials.
+            if !selection.page_token.is_empty() {
+                return Err(Error::CredentialChanged);
+            }
+            record = self.resolve(authority, &owner, selection).await?;
+            same_refreshed_record(&before, &record)?;
+            (record, material) = self
+                .load_account(authority, &owner, selection, &record)
+                .await?;
+            same_refreshed_record(&before, &record)?;
+            app_bundle = github_app_bundle(&material)?;
+            refreshed = true;
+        }
+
+        let first = self
+            .call(&read, selection, AccountLease { record, material })
+            .await;
+        let output = match first {
+            // An early renewal already consumed this request's one App
+            // rotation/replay budget. A 401 from its direct successor is a
+            // provider denial, not authority to rotate again and replay under
+            // a third token generation.
+            Err(Call::Unauthorized) if app_bundle.is_some() && !refreshed => {
+                self.refresh_github_app(
+                    authority.clone(),
+                    owner.clone(),
+                    selection.clone(),
+                    before.clone(),
+                    app_bundle.take().ok_or(Error::Unavailable)?,
+                    permit.take().ok_or(Error::Unavailable)?,
+                )
+                .await?;
+                let _retry_permit = self.acquire_capacity()?;
+                if !selection.page_token.is_empty() {
+                    return Err(Error::CredentialChanged);
+                }
+                let successor = self.resolve(authority, &owner, selection).await?;
+                same_refreshed_record(&before, &successor)?;
+                let (successor, successor_material) = self
+                    .load_account(authority, &owner, selection, &successor)
+                    .await?;
+                same_refreshed_record(&before, &successor)?;
+                refreshed = true;
+                // A 401 is retried once only after a durable, re-admitted
+                // App successor. Any second 401 is a provider denial.
+                self.call(
+                    &read,
+                    selection,
+                    AccountLease {
+                        record: successor,
+                        material: successor_material,
+                    },
+                )
+                .await
+                .map_err(Call::into_error)?
+            }
+            result => result.map_err(Call::into_error)?,
+        };
+        let after_response = self.resolve(authority, &owner, selection).await?;
+        if refreshed {
+            same_refreshed_record(&before, &after_response)?;
+        } else {
+            same_record(&before, &after_response)?;
+        }
+        Ok((output, after_response))
+    }
+
+    async fn call(
+        &self,
+        read: &Read,
+        selection: &Selection,
+        lease: AccountLease,
+    ) -> Result<ReadOutput, Call> {
+        match read {
+            Read::Repositories => github::list_repositories(
+                self.upstream.as_ref(),
+                lease,
+                selection.page,
+                selection.page_size,
+            )
+            .await
+            .map(ReadOutput::Repositories)
+            .map_err(|error| match error {
+                RepositoryDiscoveryError::Unauthorized => Call::Unauthorized,
+                error => Call::Failed(provider_error(error)),
+            }),
+            Read::PendingPermissions => {
+                let authorization = self
+                    .github_app_authorization
+                    .as_ref()
+                    .ok_or(Call::Failed(Error::Unavailable))?;
+                authorization
+                    .pending_permissions(lease.material.expose_secret())
+                    .await
+                    .map(ReadOutput::PendingPermissions)
+                    .map_err(|error| match error {
+                        GitHubAppStatusError::Unauthorized => Call::Unauthorized,
+                        GitHubAppStatusError::Unavailable => Call::Failed(Error::Unavailable),
+                    })
+            }
+        }
+    }
     async fn resolve(
         &self,
         authority: &CredentialMutationAuthority,
@@ -685,6 +789,38 @@ struct AccountLease {
     material: ProtectedValue,
 }
 
+/// What one account read asks GitHub for.
+enum Read {
+    Repositories,
+    PendingPermissions,
+}
+
+enum ReadOutput {
+    Repositories(github::RepositoryPage),
+    PendingPermissions(Vec<GitHubAppInstallationReach>),
+}
+
+/// A provider call's outcome before the one permitted renewal.
+enum Call {
+    Unauthorized,
+    Failed(Error),
+}
+
+impl Call {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Unauthorized => Error::ProviderDenied,
+            Self::Failed(error) => error,
+        }
+    }
+}
+
+fn owner_of(authority: &CredentialMutationAuthority) -> Result<Owner, Error> {
+    Ok(Owner::User(
+        OwnerId::parse(authority.user_id()).map_err(|_| Error::Denied)?,
+    ))
+}
+
 impl GithubRepositoryAccountLease for AccountLease {
     fn metadata(&self) -> &CredentialMetadata {
         &self.record.metadata
@@ -702,6 +838,15 @@ struct Selection {
 }
 
 impl Selection {
+    /// The selection of a read that has no pages of its own.
+    fn first_page() -> Self {
+        Self {
+            page_size: DEFAULT_PAGE_SIZE,
+            page: 1,
+            page_token: String::new(),
+        }
+    }
+
     fn parse(request: ListGithubRepositoriesRequest) -> Result<Self, Error> {
         if request.page_size < 0
             || request.page_size > i32::from(github::MAX_PAGE_SIZE)
