@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tarfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -56,9 +57,30 @@ class RecipeTest(unittest.TestCase):
         kernel = self.recipe("kernel-arm64")
         self.assertEqual(kernel, parts.recipe("kernel-arm64", host=None))
         self.assertTrue(release.is_hex(kernel, 64))
+        x86_64 = self.recipe("kernel-x86_64")
         config = self.root / "scripts/ci/verify/linux-vmm-kernel/arm64.config"
         config.write_bytes(config.read_bytes() + b"# changed\n")
         self.assertNotEqual(self.recipe("kernel-arm64"), kernel)
+        self.assertEqual(self.recipe("kernel-x86_64"), x86_64)
+        config = self.root / "scripts/ci/verify/linux-vmm-kernel/x86_64.config"
+        config.write_bytes(config.read_bytes() + b"# changed\n")
+        self.assertNotEqual(self.recipe("kernel-x86_64"), x86_64)
+
+    def test_a_kernel_recipe_names_its_architecture(self):
+        # The x86_64 kernel is its own part: its recipe takes the x86_64
+        # configuration and the architecture build-runtime-kernel.sh is given.
+        shape = parts.PARTS["kernel-x86_64"]
+        self.assertEqual(shape["arch"], "x86_64")
+        self.assertIn("scripts/ci/verify/linux-vmm-kernel/x86_64.config", shape["files"])
+        self.assertNotIn("scripts/ci/verify/linux-vmm-kernel/arm64.config", shape["files"])
+        self.assertEqual(parts.PARTS["kernel-arm64"]["arch"], "arm64")
+        before = self.recipe("kernel-x86_64")
+        with unittest.mock.patch.dict(parts.PARTS, {"kernel-x86_64": {**shape, "arch": "arm64"}}):
+            self.assertNotEqual(self.recipe("kernel-x86_64"), before)
+        # The Mac-native parts have no architecture, so their recipes keep
+        # the inputs they had before the Linux kernel joined the cache.
+        for name in ("e2fsprogs-macos", "git-macos"):
+            self.assertNotIn("arch", parts.PARTS[name])
 
     def test_a_recipe_ignores_other_parts_inputs(self):
         before = {name: self.recipe(name, HOST if shape["host"] else None) for name, shape in parts.PARTS.items()}
@@ -68,6 +90,7 @@ class RecipeTest(unittest.TestCase):
         after = {name: self.recipe(name, HOST if shape["host"] else None) for name, shape in parts.PARTS.items()}
         self.assertNotEqual(after["git-macos"], before["git-macos"])
         self.assertEqual(after["kernel-arm64"], before["kernel-arm64"])
+        self.assertEqual(after["kernel-x86_64"], before["kernel-x86_64"])
         self.assertEqual(after["e2fsprogs-macos"], before["e2fsprogs-macos"])
 
     def test_mac_native_parts_are_keyed_by_their_host(self):
@@ -108,6 +131,22 @@ class CacheTest(unittest.TestCase):
         for name in parts.PARTS["git-macos"]["outputs"]:
             self.assertEqual((out / name).read_bytes(), (self.built / name).read_bytes())
             self.assertEqual((out / name).stat().st_mode & 0o777, 0o755)
+
+    def test_only_a_part_s_executables_are_executable(self):
+        recipe = "e" * 64
+        built = self.base / "kernel"
+        built.mkdir()
+        (built / "vmlinuz-6.18.48-codewire2").write_bytes(b"synthetic bzImage\n")
+        self.fake.store(parts.record_key(recipe), parts.record("kernel-x86_64", recipe, built))
+        data = (built / "vmlinuz-6.18.48-codewire2").read_bytes()
+        self.fake.store(release.blob_key(fx.digest(data)), data)
+        out = self.base / "out"
+        self.assertTrue(parts.fetch(self.origin, "kernel-x86_64", recipe, out))
+        self.assertEqual(sorted(path.name for path in out.iterdir()), ["vmlinuz-6.18.48-codewire2"])
+        self.assertEqual((out / "vmlinuz-6.18.48-codewire2").stat().st_mode & 0o777, 0o644)
+        for name, shape in parts.PARTS.items():
+            with self.subTest(part=name):
+                self.assertLessEqual(set(shape["executables"]), set(shape["outputs"]))
 
     def test_a_miss_writes_nothing(self):
         out = self.base / "out"
@@ -396,6 +435,20 @@ class SourcesTest(unittest.TestCase):
         self.assertIn(pins["busybox"]["sha256"], script)
         self.assertIn(pins["busybox"]["url"], script)
         self.assertIn(pins["runc"]["url"], script)
+
+    def test_the_kernel_builder_installs_the_recorded_toolchains(self):
+        # The builder installs exactly the toolchains the kernels' provenance
+        # records: for x86_64 Arch gcc 16.1.1 built 2026-07-28 and binutils
+        # 2.47, which the 2026/08/11 snapshot is the last to carry.
+        pins = sources.load_pins()
+        provenance = json.loads((ROOT / "scripts/ci/verify/linux-vmm-kernel/provenance.json").read_bytes())
+        x86_64 = provenance["architectures"]["x86_64"]
+        packages = pins["kernel_builder"]["packages"]
+        self.assertEqual(x86_64["gcc_version"], "gcc (GCC) 16.1.1 20260728")
+        self.assertTrue(packages["gcc"].startswith("16.1.1+"))
+        self.assertEqual(x86_64["ld_version"], f"GNU ld (GNU Binutils) {packages['binutils'].split('-')[0]}")
+        self.assertEqual(provenance["architectures"]["arm64"]["gcc_version"],
+                         f"aarch64-linux-gnu-gcc (GCC) {packages['aarch64-linux-gnu-gcc'].split('-')[0]}")
 
     def synthetic(self):
         """Pins whose sources are served from memory."""

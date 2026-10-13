@@ -193,7 +193,7 @@ linux() {
     docker rm "$container" >/dev/null
     [ "$(sha256_of "$work/bc")" = "$(pin kernel_bc sha256)" ] || die "bc differs from its pin"
     mkdir -m 0700 "$work/kernel-parent"
-    "$release_dir/build-runtime-kernel.sh" --source "$linux_source" --bc "$work/bc" \
+    "$release_dir/build-runtime-kernel.sh" --arch arm64 --source "$linux_source" --bc "$work/bc" \
       --output "$work/kernel-parent/kernel" --jobs "${LOCAL_RUNTIME_JOBS:-4}" ${shared[@]+"${shared[@]}"}
     mkdir -m 0700 "$output/kernel"
     cp "$work/kernel-parent/kernel/Image-$(pin sources linux version)-codewire2" \
