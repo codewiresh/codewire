@@ -43,8 +43,9 @@ def noel():
     """`noel --mode rpc`: upstream pi's RPC protocol with the run-id,
     expected-run-id, request-id and resume-run extensions, record for record as
     the noel binary (pi `ef09c03f`) sends them for faux/echo. noel opens no
-    dialogs; DIALOG stands in for an upstream extension's, and the reply to its
-    answer is the one noel gives that line.
+    dialogs; DIALOG stands in for an upstream extension's, and noel gives its
+    answer no reply (noel `76843450`). NOTIFY sends the notification noel sends
+    when account failover switches accounts, before the reply.
 
     Prompts: HOLD streams until a steer or abort ends it (a steer saying WAIT
     leaves it streaming); HOLD2 does so again the first time it is resumed;
@@ -307,6 +308,10 @@ def noel():
             emit({"type": "agent_start", "runId": run["id"]})
             emit({"type": "turn_start"})
             user(text)
+            if text == "NOTIFY":
+                emit({"type": "extension_ui_request", "id": str(uuid.uuid4()), "method": "notify",
+                      "message": "fixture account first is rate limited until 14:05 UTC; switched to second",
+                      "notifyType": "warning"})
             # Steering an abort left queued joins the next prompt's first round.
             reply_start(deliver(steering) if steering else text)
             if text == "DIALOG":
@@ -314,7 +319,6 @@ def noel():
                       "title": "Continue?", "message": "A fixture extension asks."})
                 answer = json.loads(sys.stdin.buffer.readline())
                 trace({"received": answer})
-                respond(answer, error=f"Unknown command: {answer.get('type')}")
             if text not in ("HOLD", "HOLD2", "LATE"):
                 finish()
         elif kind == "resume_run" and run:

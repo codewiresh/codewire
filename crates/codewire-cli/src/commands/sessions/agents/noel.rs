@@ -97,6 +97,38 @@ fn error_text(reply: &Value) -> &str {
         .unwrap_or("no reason given")
 }
 
+/// Upstream's extension UI requests that expect no answer: noel sends a
+/// `notify` when account failover switches accounts.
+const NO_ANSWER: [&str; 5] = [
+    "notify",
+    "setStatus",
+    "setWidget",
+    "setTitle",
+    "set_editor_text",
+];
+
+/// An extension UI request from noel. A `notify` becomes a session-log line,
+/// the other requests that expect no answer are dropped (the driver has no
+/// screen for a status, widget, title or editor), and a dialog is declined.
+async fn on_ui_request(peer: &mut Peer, request: &Value) -> anyhow::Result<()> {
+    match request.get("method").and_then(Value::as_str) {
+        Some("notify") => {
+            let kind = request
+                .get("notifyType")
+                .and_then(Value::as_str)
+                .unwrap_or("info");
+            let message = request
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            log(format!("noel {kind}: {}", preview(message)));
+            Ok(())
+        }
+        Some(method) if NO_ANSWER.contains(&method) => Ok(()),
+        _ => decline(peer, request).await,
+    }
+}
+
 /// pi opens no dialogs, but upstream extensions can. The driver cannot answer
 /// one interactively, so it declines it rather than leave the run blocked.
 async fn decline(peer: &mut Peer, request: &Value) -> anyhow::Result<()> {
@@ -114,7 +146,7 @@ async fn decline(peer: &mut Peer, request: &Value) -> anyhow::Result<()> {
 
 enum StartupLine {
     Reply(anyhow::Result<Value>),
-    Dialog,
+    UiRequest,
     Other,
 }
 
@@ -153,7 +185,7 @@ fn startup_line(value: &Value, id: u64, kind: &str) -> anyhow::Result<StartupLin
                 },
             )
         }
-        Some("extension_ui_request") => StartupLine::Dialog,
+        Some("extension_ui_request") => StartupLine::UiRequest,
         _ => StartupLine::Other,
     })
 }
@@ -182,7 +214,7 @@ async fn call(
         match line {
             Some(NativeLine::Json(value)) => match startup_line(&value, id, kind)? {
                 StartupLine::Reply(reply) => return reply,
-                StartupLine::Dialog => decline(peer, &value).await?,
+                StartupLine::UiRequest => on_ui_request(peer, &value).await?,
                 StartupLine::Other => {}
             },
             Some(NativeLine::Invalid(reason)) => log(reason),
@@ -1114,7 +1146,7 @@ impl Driver {
 
     pub(super) async fn on_noel(&mut self, peer: &mut Peer, value: Value) -> anyhow::Result<()> {
         if value.get("type").and_then(Value::as_str) == Some("extension_ui_request") {
-            return decline(peer, &value).await;
+            return on_ui_request(peer, &value).await;
         }
         self.on_noel_record(&value).await
     }
@@ -1188,7 +1220,7 @@ impl Driver {
             .and_then(|id| self.pending.remove(&id))
         else {
             // Replies without a pending command: the per-prompt clear_queue,
-            // and noel's answer to a declined dialog.
+            // and an older noel's answer to a declined dialog.
             let dropped = ["/data/steering", "/data/followUp"]
                 .iter()
                 .filter_map(|path| reply.pointer(path)?.as_array().map(Vec::len))
@@ -1734,7 +1766,7 @@ mod tests {
         let dialog = json!({"type": "extension_ui_request", "id": "d1", "method": "confirm"});
         assert!(matches!(
             startup_line(&dialog, 3, "get_state").unwrap(),
-            StartupLine::Dialog
+            StartupLine::UiRequest
         ));
     }
 
@@ -1764,6 +1796,26 @@ mod tests {
         assert_eq!(
             data,
             json!({"type": "extension_ui_response", "id": "d1", "cancelled": true})
+        );
+    }
+
+    /// A request that expects no answer gets none; the dialog after it is
+    /// declined, so the next line noel reads is that dialog's answer.
+    #[tokio::test]
+    async fn requests_that_expect_no_answer_get_none() {
+        let mut peer = script_peer(concat!(
+            r#"read -r line; "#,
+            r#"printf '%s\n' '{"type":"extension_ui_request","id":"n1","method":"notify","message":"account a is rate limited; switched to b","notifyType":"warning"}'; "#,
+            r#"printf '%s\n' '{"type":"extension_ui_request","id":"s1","method":"setStatus","statusKey":"k","statusText":"busy"}'; "#,
+            r#"printf '%s\n' '{"type":"extension_ui_request","id":"d2","method":"select","title":"Which?","options":["a"]}'; "#,
+            r#"read -r answer; printf '%s\n' "{\"id\":1,\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":$answer}"; sleep 10"#
+        ));
+        let data = call(&mut peer, "get_state", json!({}), soon())
+            .await
+            .unwrap();
+        assert_eq!(
+            data,
+            json!({"type": "extension_ui_response", "id": "d2", "cancelled": true})
         );
     }
 
