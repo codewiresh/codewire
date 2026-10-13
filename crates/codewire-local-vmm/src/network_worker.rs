@@ -1075,7 +1075,37 @@ fn transferred_tokio_unix_stream(
 }
 
 struct TransferredStream {
-    descriptor: AsyncFd<OwnedFd>,
+    /// Present until drop, which hands the descriptor away to be closed.
+    descriptor: Option<AsyncFd<OwnedFd>>,
+}
+
+impl TransferredStream {
+    fn descriptor(&mut self) -> &mut AsyncFd<OwnedFd> {
+        self.descriptor
+            .as_mut()
+            .expect("a transferred stream holds its descriptor until drop")
+    }
+}
+
+impl Drop for TransferredStream {
+    /// On macOS, close the descriptor off the runtime thread. A network content
+    /// filter (Little Snitch, a VPN or an endpoint agent) can hold `close()` for
+    /// up to `net.cfil.close_wait_timeout`, 1 s by default. The worker's runtime
+    /// has one thread, so closing inline stopped all of the VM's traffic for
+    /// about a second per closed connection (#2714). Linux has no such hold,
+    /// and its confined worker may not start threads, so it closes inline.
+    fn drop(&mut self) {
+        let Some(descriptor) = self.descriptor.take() else {
+            return;
+        };
+        let descriptor = descriptor.into_inner();
+        #[cfg(target_os = "macos")]
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn_blocking(move || drop(descriptor)));
+            return;
+        }
+        drop(descriptor);
+    }
 }
 
 fn transferred_stream(descriptor: OwnedFd) -> io::Result<TransferredStream> {
@@ -1092,7 +1122,9 @@ fn transferred_stream(descriptor: OwnedFd) -> io::Result<TransferredStream> {
         return Err(io::Error::last_os_error());
     }
     let descriptor = AsyncFd::new(descriptor)?;
-    Ok(TransferredStream { descriptor })
+    Ok(TransferredStream {
+        descriptor: Some(descriptor),
+    })
 }
 
 impl AsyncRead for TransferredStream {
@@ -1105,7 +1137,7 @@ impl AsyncRead for TransferredStream {
             return Poll::Ready(Ok(()));
         }
         loop {
-            let mut ready = match self.descriptor.poll_read_ready_mut(context) {
+            let mut ready = match self.descriptor().poll_read_ready_mut(context) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(ready)) => ready,
@@ -1135,7 +1167,7 @@ impl AsyncWrite for TransferredStream {
             return Poll::Ready(Ok(0));
         }
         loop {
-            let mut ready = match self.descriptor.poll_write_ready_mut(context) {
+            let mut ready = match self.descriptor().poll_write_ready_mut(context) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(ready)) => ready,
@@ -1153,8 +1185,11 @@ impl AsyncWrite for TransferredStream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _context: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        if unsafe { libc::shutdown(self.descriptor.get_ref().as_raw_fd(), libc::SHUT_WR) } == -1 {
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        _context: &mut TaskContext<'_>,
+    ) -> Poll<io::Result<()>> {
+        if unsafe { libc::shutdown(self.descriptor().get_ref().as_raw_fd(), libc::SHUT_WR) } == -1 {
             Poll::Ready(Err(io::Error::last_os_error()))
         } else {
             Poll::Ready(Ok(()))
@@ -1722,6 +1757,25 @@ mod tests {
 
     use crate::host_port::HostPortControlFrame;
     use crate::mesh_ingress::{MeshIngressBinding, MeshIngressControlFrame};
+
+    /// #2714: a dropped stream's descriptor is still closed (by the blocking
+    /// pool on macOS, inline elsewhere), so the peer sees end of file and
+    /// nothing leaks. (Whether `close()`
+    /// blocks depends on the host's content filters; the Mac battery's
+    /// connect-burst rows are the observed proof.)
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_dropped_transferred_stream_is_closed() {
+        let (ours, peer) = StdUnixStream::pair().unwrap();
+        drop(transferred_stream(OwnedFd::from(ours)).unwrap());
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let read = tokio::task::spawn_blocking(move || {
+            let mut byte = [0_u8; 1];
+            std::io::Read::read(&mut &peer, &mut byte)
+        })
+        .await
+        .unwrap();
+        assert_eq!(read.unwrap(), 0, "the peer saw end of file");
+    }
 
     const TOKEN: &str = "local-worker-test-token-0123456789abcdef";
     const TEST_DESTINATION: SocketAddr =
