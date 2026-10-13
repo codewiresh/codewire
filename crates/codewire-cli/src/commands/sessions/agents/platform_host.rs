@@ -339,7 +339,9 @@ impl Conversation {
 }
 /// The managed driver a platform Sandbox runs; the Sandbox is always Linux.
 fn is_platform_driver(command: &[String]) -> bool {
-    command.get(1).is_some_and(|arg| arg == "__platform-agent-driver")
+    command
+        .get(1)
+        .is_some_and(|arg| arg == "__platform-agent-driver")
 }
 /// Said plainly when a conversation, or a message in it, belongs to an
 /// earlier incarnation of the environment (#2705).
@@ -828,7 +830,10 @@ async fn incarnation_ended(
             .as_option()
             .map(|incarnation| incarnation.pod_uid.clone())
     };
-    match (current.scope.as_option().and_then(pod), pod(&location.scope)) {
+    match (
+        current.scope.as_option().and_then(pod),
+        pod(&location.scope),
+    ) {
         (Some(current), Some(original)) => current != original,
         _ => false,
     }

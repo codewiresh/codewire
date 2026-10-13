@@ -1049,10 +1049,16 @@ mod tests {
         let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
         let mut request = launch(&scope);
         let refused = refused_launch(&request).unwrap();
-        assert_eq!(refused.phase, v1::PlatformManagedRequestPhase::Rejected as i32);
+        assert_eq!(
+            refused.phase,
+            v1::PlatformManagedRequestPhase::Rejected as i32
+        );
         assert_eq!(refused.reason, "refused-before-issue");
         assert!(!refused.cleanup_unknown);
-        assert_eq!(refused.session_id, format!("session-{}", request.request_id));
+        assert_eq!(
+            refused.session_id,
+            format!("session-{}", request.request_id)
+        );
         assert_eq!(refused.driver_id, request.request_id);
         assert_eq!(refused.launch_generation, 1);
         assert!(refused.message_id.is_empty());

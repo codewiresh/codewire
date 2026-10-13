@@ -1566,7 +1566,10 @@ database_case!(
         for case in 0..3 {
             let launched = f.launch().await?;
             let (mutation, lifecycle) = match case {
-                0 => (control(&launched, ManagedAction::Stop), ManagedLifecycle::Failed),
+                0 => (
+                    control(&launched, ManagedAction::Stop),
+                    ManagedLifecycle::Failed,
+                ),
                 _ => (launch(Uuid::new_v4()), ManagedLifecycle::Interrupted),
             };
             let issued = f.issue(mutation.clone()).await?;
