@@ -1,4 +1,11 @@
----
+//! The delegation skill's text.
+//!
+//! It is a string in Rust source, not a Markdown file read with `include_str!`:
+//! a release admits only compiled inputs that the source digest covers, and
+//! that digest takes Rust sources by pattern and every other file by name.
+
+/// The skill as written. `{{cw}}` stands for the running `cw`.
+pub(super) const TEXT: &str = r##"---
 name: codewire-delegation
 description: Delegate work to other agents with cw (Codewire). Launch Codex, Claude or noel workers under this conversation, get their results, follow up and stop them. Use when the user asks for delegation, sub-agents or parallel workers, or when a task clearly splits into independent parts.
 ---
@@ -58,3 +65,4 @@ go on with your own part or end your turn. Do not poll and do not sleep.
   terminal here, so nothing prompts: `stop` leaves the worker's own running
   workers alone and names them; `stop --all` stops them too.
 - Use these only on conversations you launched.
+"##;

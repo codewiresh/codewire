@@ -175,13 +175,18 @@ async fn connect(
     open: proto::CredentialDelegationOpen,
 ) -> Result<CredentialDelegationStream> {
     if protocol == Protocol::Connect {
-        return Ok(CodewireClient::with_http(
+        let admitted = CodewireClient::with_http(
             ClientConfig::new(url)?,
             StaticTokenProvider::new(oauth(ALICE))?,
             client.clone(),
         )?
         .delegate_credentials(open)
-        .await?);
+        .await?;
+        ensure!(
+            admitted.accepts_keepalive,
+            "admission did not offer keepalives"
+        );
+        return Ok(admitted.stream);
     }
     let mut stream = raw(
         client,
@@ -200,9 +205,23 @@ async fn connect(
         })
         .await?;
     stream.send(ready(&open)).await?;
-    ensure!(matches!(response(&mut stream).await?.output,
+    let acknowledgment = response(&mut stream).await?;
+    ensure!(
+        acknowledgment.accepts_keepalive,
+        "admission did not offer keepalives"
+    );
+    ensure!(matches!(acknowledgment.output,
         Some(proto::delegate_credentials_response::Output::Admitted(accepted)) if *accepted == open));
     Ok(stream)
+}
+
+fn keepalive() -> proto::DelegateCredentialsRequest {
+    proto::DelegateCredentialsRequest {
+        input: Some(proto::delegate_credentials_request::Input::Keepalive(
+            Box::default(),
+        )),
+        ..Default::default()
+    }
 }
 
 async fn journey(protocol: Protocol) -> Result<()> {
@@ -264,6 +283,16 @@ async fn journey(protocol: Protocol) -> Result<()> {
         ensure!(response(&mut wrong_runtime).await.is_err(), "wrong native generation admitted");
         drop(wrong_runtime);
 
+        // A keepalive before admission (between Open and Ready) ends the stream.
+        let mut early = raw(&client, &url, protocol, CallOptions::default().try_with_header("authorization", format!("Bearer {}", oauth(ALICE)))?).await?;
+        early.send(proto::DelegateCredentialsRequest {
+            input: Some(proto::delegate_credentials_request::Input::Open(Box::new(open.clone()))), ..Default::default()
+        }).await?;
+        early.send(keepalive()).await?;
+        let _ = early.send(ready(&open)).await;
+        ensure!(response(&mut early).await.is_err(), "keepalive before admission accepted");
+        drop(early);
+
         put(&format!("/users/{ALICE}"), "DATABASE_URL", b"synthetic-application-value", &h.db.pool).await?;
         let mut stream = connect(&client, &url, protocol, open.clone()).await?;
         // This legal bridge frame exceeds the default 4MiB Connect ceiling.
@@ -289,6 +318,15 @@ async fn journey(protocol: Protocol) -> Result<()> {
         ensure!(sealed.request_id == request.request_id);
         let Some(public_bridge::environment_projection_response::Result::SealedProjection(sealed)) = sealed.result else { anyhow::bail!("projection denied") };
         ensure!(recipient.open(&sealed, &context, unix_millis()?)?.entries().collect::<BTreeMap<_, _>>() == BTreeMap::from([("DATABASE_URL", "synthetic-application-value")]));
+
+        // Each keepalive gets exactly one answer, on the same admitted stream,
+        // and the stream still serves operations afterwards (#2702).
+        for _ in 0..2 {
+            stream.send(keepalive()).await?;
+            let answer = response(&mut stream).await?;
+            ensure!(matches!(answer.output, Some(proto::delegate_credentials_response::Output::Keepalive(_))), "keepalive not answered");
+            ensure!(!answer.accepts_keepalive, "the flag belongs to the admission only");
+        }
 
         // A repeated Open and an over-limit envelope close their own epochs.
         for oversized in [false, true] {

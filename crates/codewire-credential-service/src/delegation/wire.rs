@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use buffa::Message as _;
 use codewire_credential_broker::BrokerUpstreamTransport;
@@ -24,9 +25,10 @@ use codewire_server_core::connect::{
 };
 use codewire_workload_secrets::MAX_WORKLOAD_SECRETS;
 use connectrpc::{InboundStream, RequestContext, ServiceResult, ServiceStream};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use prost::Message as _;
 use sqlx::PgPool;
+use tokio::sync::mpsc;
 use tonic::Status;
 use uuid::Uuid;
 
@@ -86,6 +88,7 @@ where
         let oauth = oauth_bearer_authority(&ctx)?.clone();
         // Retain only the original opaque authority, never request headers.
         drop(ctx);
+        let (keepalives, answers) = Keepalives::new();
         let mut admitted = None;
         // The owner-local epoch's expiry needs no early successor here.
         let (output, _expires_at_unix) = self
@@ -123,16 +126,22 @@ where
                 )
                 .await
                 .map_err(authority_error)?;
-                let input = requests.map(|item| {
-                    let item = item.map_err(|_| {
-                        Status::unavailable("credential delegation input unavailable")
-                    })?;
-                    if item.bytes().len() > MAX_ENVELOPE_BYTES {
-                        return Err(Status::resource_exhausted(
-                            "credential delegation frame exceeds limit",
-                        ));
-                    }
-                    decode_frame(item.to_owned_message())
+                let keepalives = Arc::clone(&keepalives);
+                let input = requests.filter_map(move |item| {
+                    futures::future::ready(
+                        (|| {
+                            let item = item.map_err(|_| {
+                                Status::unavailable("credential delegation input unavailable")
+                            })?;
+                            if item.bytes().len() > MAX_ENVELOPE_BYTES {
+                                return Err(Status::resource_exhausted(
+                                    "credential delegation frame exceeds limit",
+                                ));
+                            }
+                            decode_input(item.to_owned_message(), &keepalives)
+                        })()
+                        .transpose(),
+                    )
                 });
                 Ok((authority, input))
             })
@@ -142,18 +151,24 @@ where
         let admitted = admitted.ok_or_else(|| {
             connectrpc::ConnectError::internal("credential delegation admission unavailable")
         })?;
+        // Keepalives are accepted from here on: the client sends one only
+        // after it reads this acknowledgment.
+        keepalives.admit();
         let acknowledgment = proto::DelegateCredentialsResponse {
             output: Some(proto::delegate_credentials_response::Output::Admitted(
                 admitted,
             )),
+            accepts_keepalive: true,
             ..Default::default()
         };
         // The generated response owns the SAME bounded receiver. Its drop
         // closes the broker output; no detached intermediate forwarding task.
-        connectrpc::Response::stream_ok(
-            futures::stream::once(async { Ok(acknowledgment) })
-                .chain(output.map(|item| encode_frame(item.map_err(wire_error)?))),
-        )
+        connectrpc::Response::stream_ok(futures::stream::once(async { Ok(acknowledgment) }).chain(
+            with_keepalive_answers(
+                output.map(|item| encode_frame(item.map_err(wire_error)?)),
+                answers,
+            ),
+        ))
     }
 }
 
@@ -197,6 +212,115 @@ fn selection(
     let hash = open.selection_sha256.try_into().map_err(|_| Denied)?;
     OwnerLocalSelection::new(environment, runtime.environment_generation, platform, hash)
         .map_err(authority_error)
+}
+
+/// Request keepalives of one stream. They are answered on the response, never
+/// passed to the bridge, and accepted only after admission. One answer may be
+/// pending: the client waits for it before sending another, so a second one is
+/// a protocol fault that ends the stream.
+struct Keepalives {
+    admitted: AtomicBool,
+    answers: mpsc::Sender<()>,
+}
+
+impl Keepalives {
+    fn new() -> (Arc<Self>, mpsc::Receiver<()>) {
+        let (answers, receiver) = mpsc::channel(1);
+        (
+            Arc::new(Self {
+                admitted: AtomicBool::new(false),
+                answers,
+            }),
+            receiver,
+        )
+    }
+
+    fn admit(&self) {
+        self.admitted.store(true, Ordering::Release);
+    }
+
+    fn accept(&self) -> Result<(), Status> {
+        if !self.admitted.load(Ordering::Acquire) {
+            return Err(Status::permission_denied(
+                "credential delegation keepalive before admission",
+            ));
+        }
+        match self.answers.try_send(()) {
+            // A closed receiver means the response has ended; the input ends too.
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(())) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(())) => Err(Status::resource_exhausted(
+                "credential delegation keepalive already pending",
+            )),
+        }
+    }
+}
+
+/// One request: a bridge frame for the broker, or a keepalive answered here
+/// (`None`).
+fn decode_input(
+    request: proto::DelegateCredentialsRequest,
+    keepalives: &Keepalives,
+) -> Result<Option<bridge::CredentialBridgeGuestMessage>, Status> {
+    if matches!(
+        request.input,
+        Some(proto::delegate_credentials_request::Input::Keepalive(_))
+    ) {
+        return keepalives.accept().map(|()| None);
+    }
+    decode_frame(request).map(Some)
+}
+
+fn keepalive_answer() -> proto::DelegateCredentialsResponse {
+    proto::DelegateCredentialsResponse {
+        output: Some(proto::delegate_credentials_response::Output::Keepalive(
+            Box::default(),
+        )),
+        ..Default::default()
+    }
+}
+
+/// The broker's responses with each keepalive answer merged in. It ends with
+/// the broker's responses, whether or not the answer channel has closed.
+fn with_keepalive_answers<S>(
+    frames: S,
+    answers: mpsc::Receiver<()>,
+) -> impl Stream<Item = Result<proto::DelegateCredentialsResponse, connectrpc::ConnectError>>
+where
+    S: Stream<Item = Result<proto::DelegateCredentialsResponse, connectrpc::ConnectError>>
+        + Send
+        + Unpin,
+{
+    enum Next<T> {
+        Frame(Option<T>),
+        Answer(Option<()>),
+    }
+    futures::stream::unfold(
+        (frames, Some(answers)),
+        |(mut frames, mut answers)| async move {
+            loop {
+                let next = {
+                    let answer = async {
+                        match answers.as_mut() {
+                            Some(answers) => answers.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    };
+                    tokio::select! {
+                        biased;
+                        frame = frames.next() => Next::Frame(frame),
+                        answer = answer => Next::Answer(answer),
+                    }
+                };
+                match next {
+                    Next::Frame(frame) => return frame.map(|frame| (frame, (frames, answers))),
+                    Next::Answer(Some(())) => {
+                        return Some((Ok(keepalive_answer()), (frames, answers)));
+                    }
+                    Next::Answer(None) => answers = None,
+                }
+            }
+        },
+    )
 }
 
 fn decode_frame(
