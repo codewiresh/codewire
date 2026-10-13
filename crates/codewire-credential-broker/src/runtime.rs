@@ -587,6 +587,10 @@ impl BrokerUpstreamResponse {
     pub(crate) fn into_parts(self) -> (StatusCode, HeaderMap, BrokerUpstreamBody) {
         (self.status, self.headers, self.body)
     }
+
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
 }
 
 /// Non-shipping upstream used only by the checked-in local broker product

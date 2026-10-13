@@ -1184,50 +1184,68 @@ async fn actual_pod_clients_require_exact_token_env_mounts_and_init_not_just_sel
     }
 }
 
+/// The current bootstrap renders only the selected Anthropic form's variable.
+/// A Pod rendered earlier also carries blank placeholders for the other
+/// names, which the Pod API stores without a value; it still certifies its
+/// bootstrap. An unexpected owned name with a value never does.
 #[tokio::test]
-async fn stored_pod_omitting_blank_client_values_still_certifies_its_bootstrap() {
+async fn stored_pod_with_former_blank_anthropic_placeholders_still_certifies_its_bootstrap() {
     let mut opts = opts();
     opts.managed_credential_clients =
         codewire_access::ManagedCredentialClients::from_profile_slots(["openai", "anthropic"])
             .unwrap();
-    // The Pod API omits an empty `value`, so a stored Pod keeps only the name
-    // of each blank placeholder the Anthropic client renders.
-    let stored = |opts: &TemplateOpts| {
+    let rendered = |opts: &TemplateOpts| {
         let mut fixture = fixture();
         install_selected_client_recipe(&mut fixture, opts);
-        let mut blank = Vec::new();
-        for entry in fixture.pod["spec"]["containers"][1]["env"]
-            .as_array_mut()
-            .unwrap()
-        {
-            if entry["value"] == "" {
-                entry.as_object_mut().unwrap().remove("value");
-                blank.push(entry["name"].as_str().unwrap().to_owned());
-            }
-        }
-        (fixture, blank)
+        fixture
     };
-    let (fixture, blank) = stored(&opts);
-    assert!(blank.contains(&"ANTHROPIC_API_KEY".to_owned()), "{blank:?}");
-    let (stored_client, _) = client(fixture);
+    // The current render: no blank Anthropic name at all.
+    let fixture = rendered(&opts);
+    let names: Vec<String> = fixture.pod["spec"]["containers"][1]["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap().to_owned())
+        .collect();
+    for absent in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] {
+        assert!(!names.iter().any(|name| name == absent), "{absent}");
+    }
+    let (current, _) = client(fixture);
     assert!(
-        stored_client
+        current
             .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
             .await
             .unwrap()
     );
 
-    // A placeholder that must stay blank still fails when it carries a value.
-    let (mut fixture, _) = stored(&opts);
-    fixture.pod["spec"]["containers"][1]["env"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|entry| entry["name"] == "ANTHROPIC_API_KEY")
-        .unwrap()["value"] = json!("unexpected-routing-placeholder");
-    let (valued_client, _) = client(fixture);
+    // A Pod stored by the earlier render: the same, plus the blank names.
+    let former = |value: Option<&str>| {
+        let mut fixture = rendered(&opts);
+        let env = fixture.pod["spec"]["containers"][1]["env"]
+            .as_array_mut()
+            .unwrap();
+        for name in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] {
+            env.push(match value {
+                None => json!({ "name": name }),
+                Some(value) => json!({ "name": name, "value": value }),
+            });
+        }
+        fixture
+    };
+    for blank in [None, Some("")] {
+        let (stored, _) = client(former(blank));
+        assert!(
+            stored
+                .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
+                .await
+                .unwrap(),
+            "{blank:?}"
+        );
+    }
+    // A value in a name the bootstrap does not render still fails.
+    let (valued, _) = client(former(Some("unexpected-routing-placeholder")));
     assert!(
-        !valued_client
+        !valued
             .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
             .await
             .unwrap()

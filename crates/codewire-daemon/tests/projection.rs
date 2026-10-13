@@ -657,6 +657,11 @@ async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool, reopen
         assert!(error.message().contains(
             "the launch environment projection is no longer available after daemon recovery"
         ));
+        // A client decides by the daemon's own reason, never by those words.
+        assert_eq!(
+            codewire_daemon::NeverRestarts::of(&error),
+            Some(codewire_daemon::NeverRestarts::ProjectionLost)
+        );
         assert_eq!(harness.exited(&id).await, recovered);
         assert_eq!(harness.persisted_metadata(&id), metadata);
         assert_eq!(harness.output(&id, 0, pty).await, output);

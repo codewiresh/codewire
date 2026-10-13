@@ -865,6 +865,27 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertIn("usage: build-smokes.sh", result.stderr)
         self.assertFalse(self.calls("docker"))
 
+    def test_dev_builds_use_the_local_kind_dev_profile(self) -> None:
+        import tomllib
+        # The workspace manifest, which CI and shipped builds read, does not
+        # define it; only the kind-dev build passes this file with --config.
+        self.assertNotIn("kind-dev", tomllib.loads((ROOT / "Cargo.toml").read_text())["profile"])
+        profiles = tomllib.loads((ROOT / "scripts/dev/kind/cargo-profile.toml").read_text())["profile"]
+        # It only lowers the workspace's own optimization; external crates keep
+        # the ci profile's settings, share the compiler cache and keep the
+        # services fast.
+        self.assertEqual(list(profiles), ["kind-dev"])
+        dev = dict(profiles["kind-dev"])
+        packages = dev.pop("package")
+        self.assertEqual(dev, {"inherits": "ci", "opt-level": 1, "codegen-units": 256})
+        self.assertEqual(packages, {"*": {"opt-level": 3, "codegen-units": 16}})
+        dockerfile = (ROOT / "deployments/docker/kind-dev-binary.Dockerfile").read_text()
+        builder = dockerfile[:dockerfile.index("FROM scratch")]
+        self.assertEqual(re.findall(r"cargo (?:build|test) --locked (--config \S+ --profile \S+)", builder),
+                         ["--config scripts/dev/kind/cargo-profile.toml --profile kind-dev"] * 3)
+        self.assertNotIn("$CARGO_TARGET_DIR/ci/", builder)
+        self.assertEqual(builder.count("$CARGO_TARGET_DIR/kind-dev/"), 2)
+
     def test_every_copied_input_is_content_hashed(self) -> None:
         # Cargo judges freshness by modification time; the target's content
         # record is what keeps it from reusing a crate built from other source
@@ -1061,7 +1082,7 @@ class SelectionTableTests(unittest.TestCase):
         builder = dockerfile[:dockerfile.index("FROM scratch")]
         copied = {source for line in builder.splitlines() if line.startswith("COPY ") and "--from" not in line
                   for source in line.split()[1:-1]}
-        declared = {"crates"} | {path for path in sources.SHARED_INPUTS if not path.startswith("deployments/")}
+        declared = {"crates"} | {path for path in sources.SHARED_INPUTS if path not in sources.RECIPE_INPUTS}
         declared |= {path for paths in sources.CRATE_INPUTS.values() for path in paths}
         self.assertEqual(copied, declared)
         for path in sources.SHARED_INPUTS:
@@ -1120,12 +1141,13 @@ class ServiceSourcesTests(unittest.TestCase):
         for path in ("Cargo.toml", "Cargo.lock", "proto/codewire/v1/a.proto", "libs/daemon-proto/proto/b.proto",
                      "packages/codewire-design/styles.css", "apps/cli/install.sh", "apps/cli/GPG_PUBLIC_KEY.asc",
                      "deployments/docker/rust-base.Dockerfile", "deployments/docker/kind-dev-binary.Dockerfile",
+                     "scripts/ci/images/run-rust-build.sh", "scripts/dev/kind/cargo-profile.toml",
                      "docs/README.md"):
             (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
             (self.repo / path).write_text(path + "\n")
         (self.repo / ".gitignore").write_text("target/\n")
         helper = self.repo / "scripts/dev/kind/service-sources.py"
-        helper.parent.mkdir(parents=True)
+        helper.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(CONSUMERS / "scripts/dev/kind/service-sources.py", helper)
         metadata = Path(temp.name) / "metadata.json"
         metadata.write_text(json.dumps({"packages": packages}))
@@ -1183,6 +1205,16 @@ class ServiceSourcesTests(unittest.TestCase):
         self.edit("proto/codewire/v1/a.proto")
         sources = load_service_sources()
         self.assertEqual(self.changes(), [f"service {name}" for name in sources.SERVICES])
+
+    def test_build_recipe_feeds_every_service(self) -> None:
+        # The compiler wrapper the toolchain image installs and the kind-dev
+        # Cargo profile decide the build, like the Dockerfiles themselves.
+        sources = load_service_sources()
+        for path in sources.RECIPE_INPUTS + ("scripts/dev/kind/cargo-profile.toml",):
+            with self.subTest(path=path):
+                self.edit(path, f"changed {path}\n")
+                self.assertEqual(self.changes(), [f"service {name}" for name in sources.SERVICES])
+                self.git("checkout", "--", path)
 
     def test_workspace_image_pin_feeds_no_service(self) -> None:
         self.edit("crates/codewire-workspace-image/src/lib.rs")

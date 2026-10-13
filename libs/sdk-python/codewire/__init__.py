@@ -11,7 +11,8 @@ from codewire.files import Files
 from codewire.cw_runtime import CwRuntime, CwRuntimeOutcomeUnknownError
 from codewire.platform_agents import PlatformAgents, PlatformAgentOutcomeUnknownError
 from codewire.credentials import (
-    Credentials, Credential, GithubRepository, GithubRepositoryPage, SshPublicKey, CodexDeviceChallenge, CodexEnrollmentEvent,
+    Credentials, Credential, GithubPendingPermissions, GithubRepository, GithubRepositoryPage, SshPublicKey,
+    CodexDeviceChallenge, CodexEnrollmentEvent,
     EnrollmentOutcomeUnknownError,
 )
 from codewire.access_profiles import (
@@ -50,6 +51,7 @@ __all__ = [
     "PlatformAgentOutcomeUnknownError",
     "Credentials",
     "Credential",
+    "GithubPendingPermissions",
     "GithubRepository",
     "GithubRepositoryPage",
     "SshPublicKey",

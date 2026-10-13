@@ -62,6 +62,7 @@ impl Fixture {
                 environment_id: id,
                 agent: AgentKind::Codex,
                 program: PathBuf::from("/usr/bin/false"),
+                program_fallback: None,
                 model: "synthetic".into(),
                 effort: Some("high".into()),
                 working_dir: temp.path().to_string_lossy().into_owned(),
@@ -143,6 +144,7 @@ impl Fixture {
                 capabilities: AgentCapabilities {
                     steer: true,
                     interrupt: true,
+                    resume: false,
                     note: "synthetic".into(),
                 },
                 policy: CODEX_POLICY.into(),
@@ -707,6 +709,7 @@ fn platform_peer_arguments_are_exactly_the_drivers_for_its_route() {
         capabilities: AgentCapabilities {
             steer: false,
             interrupt: false,
+            resume: false,
             note: "synthetic".into(),
         },
         policy: String::new(),

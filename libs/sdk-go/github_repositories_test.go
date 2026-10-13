@@ -62,3 +62,34 @@ func TestGithubRepositoriesExactCredentialAndAllowlistedMetadata(t *testing.T) {
 		t.Fatal("invalid selection called the provider or advanced the profile")
 	}
 }
+
+func (f *githubRepositoryFixture) ListGithubPendingPermissions(_ context.Context, _ *connect.Request[codewirev1.ListGithubPendingPermissionsRequest]) (*connect.Response[codewirev1.ListGithubPendingPermissionsResponse], error) {
+	return connect.NewResponse(&codewirev1.ListGithubPendingPermissionsResponse{PendingPermissions: []*codewirev1.GithubAppPendingPermissions{
+		{Account: "octo-org", InstallationId: 43, AccountKind: codewirev1.GithubAppAccountKind_GITHUB_APP_ACCOUNT_KIND_ORGANIZATION},
+		{Account: "octo-ent", InstallationId: 1<<64 - 1, AccountKind: codewirev1.GithubAppAccountKind_GITHUB_APP_ACCOUNT_KIND_ENTERPRISE},
+		{Account: "unknown", InstallationId: 1},
+	}}), nil
+}
+
+func TestGithubPendingPermissionsKeepLoginIDAndKindOnly(t *testing.T) {
+	path, handler := codewirev1connect.NewGithubRepositoryServiceHandler(&githubRepositoryFixture{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer synthetic-opaque-oauth" || r.URL.Path != path+"ListGithubPendingPermissions" {
+			t.Error("wrong exact generated service path or account authorization")
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	client := codewire.New("synthetic-opaque-oauth", codewire.WithBaseURL(server.URL))
+	pending, err := client.Credentials.ListGithubPendingPermissions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []codewire.GithubPendingPermissions{
+		{Account: "octo-org", InstallationID: 43, AccountKind: "organization"},
+		{Account: "octo-ent", InstallationID: 1<<64 - 1, AccountKind: "enterprise"},
+	}
+	if !reflect.DeepEqual(pending, want) {
+		t.Fatalf("wrong pending installations: %#v", pending)
+	}
+}

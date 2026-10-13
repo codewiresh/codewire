@@ -50,6 +50,21 @@ class GithubRepositoryPage(TypedDict):
     next_page_token: str
 
 
+class GithubPendingPermissions(TypedDict):
+    """An installation that has not yet granted what Codewire needs."""
+
+    account: str
+    installation_id: int
+    account_kind: Literal["user", "organization", "enterprise"]
+
+
+_GITHUB_ACCOUNT_KINDS: dict[int, Literal["user", "organization", "enterprise"]] = {
+    pb.GITHUB_APP_ACCOUNT_KIND_USER: "user",
+    pb.GITHUB_APP_ACCOUNT_KIND_ORGANIZATION: "organization",
+    pb.GITHUB_APP_ACCOUNT_KIND_ENTERPRISE: "enterprise",
+}
+
+
 class CodexDeviceChallenge(TypedDict):
     """The one-time code is for the requesting user, never routine logs."""
 
@@ -156,6 +171,15 @@ class Credentials:
             "default_branch": value.default_branch, "clone_url": value.clone_url,
             "is_private": value.is_private, "archived": value.archived, "disabled": value.disabled,
         } for value in response.repositories], "next_page_token": response.next_page_token}
+
+    def list_github_pending_permissions(self) -> list[GithubPendingPermissions]:
+        """Installations of the owner's GitHub App connection still short of what
+        Codewire needs, checked live. Login, installation ID and kind only."""
+        response = self._context.unary(self._repositories.list_github_pending_permissions,
+            pb.ListGithubPendingPermissionsRequest())
+        return [{"account": value.account, "installation_id": value.installation_id,
+                 "account_kind": _GITHUB_ACCOUNT_KINDS[value.account_kind]}
+                for value in response.pending_permissions if value.account_kind in _GITHUB_ACCOUNT_KINDS]
 
     def list(self) -> list[Credential]:
         result: list[Credential] = []

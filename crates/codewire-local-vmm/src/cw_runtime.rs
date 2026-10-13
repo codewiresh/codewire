@@ -1570,7 +1570,9 @@ mod tests {
             store.publication_guard(),
             Err(CwRuntimeError::PublicationBusy)
         ));
-        drop(first);
+        // Recovery below runs under this same guard. Releasing and retaking it
+        // could meet a concurrent test's forked child holding a copy (#2678).
+        let _publication = first;
         let name = format!("catalog-{}", Uuid::new_v4());
         let directory =
             PrivateRoot::open(&store.staging.create_dir(Path::new(&name), 0o700).unwrap()).unwrap();
@@ -1584,7 +1586,6 @@ mod tests {
             .unwrap();
         let ingest = format!(".ingest-{}", Uuid::new_v4());
         write_private(&store.assets, Path::new(&ingest), b"partial").unwrap();
-        let _publication = store.publication_guard().unwrap();
         store
             .recover_abandoned(Instant::now() + Duration::from_secs(1))
             .unwrap();

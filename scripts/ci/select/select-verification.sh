@@ -1072,6 +1072,15 @@ if [ "$event_selected" = false ]; then
         select_token transport_pkg_codewire_vmm_guest_probe
         recognized=true
         ;;
+      scripts/dev/test-cli-local-vm-macos.py|scripts/dev/test-cli-local-vm-docker-macos.py|\
+      scripts/dev/test-cli-local-vm-inputs-macos.py|\
+      scripts/dev/test-local-vm-hostile-guest-macos.py|scripts/dev/hostile-guest-probe.py|\
+      scripts/dev/test-local-vm-hostile-guest.py)
+        # Developer-only local VM journeys and the hostile-guest battery: they
+        # run against real local VMs and never in CI.
+        select_token policy
+        recognized=true
+        ;;
       scripts/dev/macos-vz-console-pair.py|scripts/dev/test-macos-vz-console-pair.py|\
       scripts/dev/macos-vz-product-network.py|scripts/dev/test-macos-vz-product-network.py)
         # Exact developer-only two-VM harness; exercise its feature-gated
@@ -1727,6 +1736,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/local_runtime_parts.py|scripts/ci/release/local_runtime_sources.py|\
       scripts/ci/release/local-runtime-sources.json|scripts/ci/release/build-runtime-kernel.sh|\
       scripts/ci/release/build-local-runtime.sh|\
+      scripts/ci/release/fetch-pinned.sh|scripts/ci/tests/test-fetch-pinned.sh|\
       scripts/ci/release/build-runtime-guest-root.sh|scripts/ci/release/runtime-container.sh|\
       scripts/ci/tests/test-local-runtime-parts.py|\
       scripts/ci/release/dry-run-superseded.sh|scripts/ci/tests/test-dry-run-superseded.sh|\

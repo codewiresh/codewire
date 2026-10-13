@@ -1621,7 +1621,12 @@ jobs:
     name: Kind workspace build
     runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}
     enable-openid-connect: true
-    timeout-minutes: 55
+    # Sized for a fully cold build, as measured in run 13275 (e45c39c40):
+    # workspace-image verification took 51 minutes with no layer cache, and
+    # the 8.9 GB artifact upload took about 15 more, about 68 minutes in all.
+    # The Heavy runner and dispatcher stop a task at 90 minutes, which leaves
+    # 10 minutes for cancellation and cleanup.
+    timeout-minutes: 80
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
     outputs:

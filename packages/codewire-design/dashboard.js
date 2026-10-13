@@ -181,7 +181,10 @@ const app = document.querySelector("[data-dashboard-app]");
     || records.some((record) => owner.contains(record.target)
       && [...record.addedNodes, ...record.removedNodes].some((node) => node instanceof Element
         && (node.matches(draftNodes) || node.querySelector(draftNodes))));
-  const guardClose = (owner, perform, preserveDraft = false, incompleteDraft = false) => {
+  // keepDraft is null for an ordinary form. A dirty Create whose draft is saved
+  // in this tab passes { incomplete, detour }: leaving can keep that draft or
+  // discard it. A Settings detour carries the draft handle, so it only keeps.
+  const guardClose = (owner, perform, keepDraft = null) => {
     if (!isDirty(owner)) { perform(); return; }
     if (pendingDiscard) return;
     if (!discardPrompt) {
@@ -207,6 +210,11 @@ const app = document.querySelector("[data-dashboard-app]");
       discard.type = "button";
       discard.className = "cw-button cw-danger-button";
       discard.textContent = "Discard changes";
+      const save = document.createElement("button");
+      save.type = "button";
+      save.className = "cw-button";
+      save.dataset.saveDraft = "";
+      save.hidden = true;
       const keepEditing = cancelDiscard;
       keep.addEventListener("click", keepEditing);
       discardPrompt.addEventListener("cancel", (event) => { event.preventDefault(); keepEditing(); });
@@ -221,7 +229,7 @@ const app = document.querySelector("[data-dashboard-app]");
         if (backdropPress && outside(event)) keepEditing();
         backdropPress = false;
       });
-      discard.addEventListener("click", () => {
+      const leave = (preserveDraft) => {
         const pending = pendingDiscard;
         // HTMX may replace the form or its controls while confirmation is
         // open. Never apply an old dismissal decision to that new draft.
@@ -234,30 +242,42 @@ const app = document.querySelector("[data-dashboard-app]");
         pending.observer.disconnect();
         discardPrompt.close();
         if (pending?.owner.isConnected && (pending.owner.open || pending.owner.matches("[data-drawer]:not([hidden])"))) {
-          discardEdits(pending.owner, pending.preserveDraft);
+          discardEdits(pending.owner, preserveDraft);
           pending.perform();
         }
-      });
-      actions.append(keep, discard);
+      };
+      discard.addEventListener("click", () => leave(false));
+      save.addEventListener("click", () => leave(true));
+      actions.append(keep, discard, save);
       discardPrompt.append(header, description, actions);
       document.body.append(discardPrompt);
     }
     const title = discardPrompt.querySelector(".cw-dialog-header h2");
     const description = discardPrompt.querySelector(".cw-dialog-body");
-    const confirm = discardPrompt.querySelector(".cw-danger-button");
-    const heading = preserveDraft ? "Leave Create Sandbox?" : "Discard changes?";
+    const discard = discardPrompt.querySelector(".cw-danger-button");
+    const save = discardPrompt.querySelector("[data-save-draft]");
+    const heading = keepDraft ? "Leave Create Sandbox?" : "Discard changes?";
     discardPrompt.setAttribute("aria-label", heading);
     if (title) title.textContent = heading;
-    if (description) description.textContent = preserveDraft
-      ? (incompleteDraft
+    if (description) description.textContent = !keepDraft
+      ? "Your changes will be discarded. Keep editing to return to the form."
+      : keepDraft.incomplete
         ? "Your draft is saved in this tab, except a repository URL that may contain credentials. You will need to re-enter that URL when you return."
-        : "Your draft is saved in this tab. Return here to restore it after managing settings.")
-      : "Your changes will be discarded. Keep editing to return to the form.";
-    if (confirm) confirm.textContent = preserveDraft ? (incompleteDraft ? "Leave without repository URL" : "Save draft and leave") : "Discard changes";
+        : keepDraft.detour
+          ? "Your draft is saved in this tab. Return here to restore it after managing settings."
+          : "Your draft is saved in this tab and comes back when you open Create Sandbox again.";
+    if (discard) {
+      discard.hidden = !!keepDraft?.detour;
+      discard.textContent = keepDraft ? "Discard draft" : "Discard changes";
+    }
+    if (save) {
+      save.hidden = !keepDraft;
+      save.textContent = keepDraft?.incomplete ? "Leave without repository URL" : "Save draft and leave";
+    }
     const observer = new MutationObserver((records) => {
       if (pendingDiscard?.owner === owner && replacesDraft(owner, records)) cancelDiscard();
     });
-    pendingDiscard = { owner, perform, preserveDraft, focus: document.activeElement, observer };
+    pendingDiscard = { owner, perform, focus: document.activeElement, observer };
     observer.observe(document.body, { childList: true, subtree: true });
     discardPrompt.showModal();
   };
@@ -281,11 +301,14 @@ const app = document.querySelector("[data-dashboard-app]");
     const owner = event.detail?.owner || navigationOwner();
     if (navigationEligible(owner) && isDirty(owner)) {
       event.preventDefault();
+      // Create saves its draft in this tab as it changes, so every way out of
+      // a dirty Create (Close, Escape, Back, a link) can keep that draft.
+      const detour = !!event.detail?.preserveCreateDraft;
       const save = { saved: false };
-      if (event.detail?.preserveCreateDraft && owner.querySelector("[data-environment-form]"))
+      if (owner.querySelector("[data-environment-form]"))
         owner.dispatchEvent(new CustomEvent("codewire:save-create-draft", { bubbles: true, detail: save }));
-      if (event.detail?.preserveCreateDraft && !save.saved) return;
-      guardClose(owner, event.detail.perform, save.saved, save.incomplete);
+      if (detour && !save.saved) return;
+      guardClose(owner, event.detail.perform, save.saved ? { incomplete: !!save.incomplete, detour } : null);
     }
   });
   document.addEventListener("submit", (event) => {

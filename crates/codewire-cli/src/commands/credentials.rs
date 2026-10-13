@@ -160,7 +160,110 @@ async fn connect_github(
         record.metadata.display_name, record.metadata.id
     );
     eprintln!("{}", github_reach_summary(&reach));
+    report_github_pending(reach.iter().filter_map(|installation| {
+        let pending = installation.pending_permissions.as_ref()?;
+        Some((
+            installation.account.as_str(),
+            pending.installation_id,
+            pending.account_kind,
+        ))
+    }));
     Ok(())
+}
+
+/// After a GitHub connect, name each installation that has not yet granted
+/// what Codewire needs and, at a terminal, open the first one's settings page
+/// to accept it, the way `cw login` opens its page (#2712). Elsewhere the
+/// printed link is the way there.
+pub(crate) fn report_github_pending<'a>(
+    pending: impl IntoIterator<Item = (&'a str, u64, codewire_credential_broker::GitHubAccountKind)>,
+) {
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let (notices, open) = github_pending_follow_up(pending, interactive);
+    for notice in notices {
+        eprintln!("{notice}");
+    }
+    if let Some(url) = open {
+        eprintln!("Opening GitHub to accept the updated permissions...");
+        let _ = super::platform_commands::open_browser(&url);
+    }
+}
+
+/// The notice for each installation, as `cw credentials --platform list`
+/// shows it.
+pub(crate) fn github_pending_notices<'a>(
+    pending: impl IntoIterator<Item = (&'a str, u64, codewire_credential_broker::GitHubAccountKind)>,
+) -> Vec<String> {
+    github_pending_follow_up(pending, false).0
+}
+
+/// The notices to print, and the settings page to open when `interactive`:
+/// the first one there is. An enterprise has none.
+fn github_pending_follow_up<'a>(
+    pending: impl IntoIterator<Item = (&'a str, u64, codewire_credential_broker::GitHubAccountKind)>,
+    interactive: bool,
+) -> (Vec<String>, Option<String>) {
+    let mut notices = Vec::new();
+    let mut open = None;
+    for (account, installation_id, kind) in pending {
+        let Some(notice) = github_pending_notice(account, installation_id, kind) else {
+            continue;
+        };
+        notices.push(notice);
+        if interactive && open.is_none() {
+            open = github_settings_page(account, installation_id, kind);
+        }
+    }
+    (notices, open)
+}
+
+/// Said once when GitHub is connected: an installation that has not yet
+/// granted what Codewire needs keeps reads working, but pushes and pull
+/// requests fail until its owner accepts the updated permissions (#2712).
+/// The link is built from the validated login and installation ID; an
+/// enterprise accepts in its own settings, so it gets no link.
+fn github_pending_notice(
+    account: &str,
+    installation_id: u64,
+    kind: codewire_credential_broker::GitHubAccountKind,
+) -> Option<String> {
+    if !valid_github_installation(account, installation_id) {
+        return None;
+    }
+    let waiting =
+        format!("GitHub is waiting for you to accept Codewire's updated permissions on {account}.");
+    Some(match github_settings_page(account, installation_id, kind) {
+        Some(url) => format!("{waiting} Review on GitHub: {url}"),
+        None => waiting,
+    })
+}
+
+/// The installation's GitHub settings page, built only from a validated login
+/// and numeric ID. An enterprise has none.
+fn github_settings_page(
+    account: &str,
+    installation_id: u64,
+    kind: codewire_credential_broker::GitHubAccountKind,
+) -> Option<String> {
+    if !valid_github_installation(account, installation_id) {
+        return None;
+    }
+    codewire_credential_broker::GitHubAppPendingPermissions {
+        installation_id,
+        account_kind: kind,
+    }
+    .settings_url(account)
+}
+
+fn valid_github_installation(account: &str, installation_id: u64) -> bool {
+    (1..=39).contains(&account.len())
+        && !account.starts_with('-')
+        && !account.ends_with('-')
+        && !account.contains("--")
+        && account
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && installation_id > 0
 }
 
 /// What the Codewire GitHub App can reach for this login, and where to change
@@ -180,15 +283,15 @@ fn github_reach_summary(
         })
         .collect::<Vec<_>>();
     let reach = if accounts.is_empty() {
-        "Codewire can read repositories where the Codewire GitHub App is installed.".to_owned()
+        "Codewire can read, push to and open pull requests in repositories where the Codewire GitHub App is installed.".to_owned()
     } else {
         format!(
-            "Codewire can read repositories in: {}.",
+            "Codewire can read, push to and open pull requests in repositories of: {}.",
             accounts.join(", ")
         )
     };
     format!(
-        "{reach}\nTo add an account or organization, or choose repositories: {}",
+        "{reach}\nTo add an account or organization, or choose repositories, open {} and choose \"Only select repositories\".",
         codewire_credential_broker::provider_oauth::github::codewire_github_app_install_url()
     )
 }
@@ -1923,26 +2026,82 @@ mod tests {
     }
 
     #[test]
+    fn github_pending_notice_names_the_installation_and_its_settings_page() {
+        use codewire_credential_broker::GitHubAccountKind;
+        assert_eq!(
+            github_pending_notice("noeljackson", 12345, GitHubAccountKind::User).unwrap(),
+            "GitHub is waiting for you to accept Codewire's updated permissions on noeljackson. \
+             Review on GitHub: https://github.com/settings/installations/12345"
+        );
+        assert_eq!(
+            github_pending_notice("octo-org", 678, GitHubAccountKind::Organization).unwrap(),
+            "GitHub is waiting for you to accept Codewire's updated permissions on octo-org. \
+             Review on GitHub: https://github.com/organizations/octo-org/settings/installations/678"
+        );
+        assert_eq!(
+            github_pending_notice("octo-ent", 9, GitHubAccountKind::Enterprise).unwrap(),
+            "GitHub is waiting for you to accept Codewire's updated permissions on octo-ent."
+        );
+        for (account, id) in [("", 1), ("-octo", 1), ("octo/evil", 1), ("octo", 0)] {
+            assert!(
+                github_pending_notice(account, id, GitHubAccountKind::User).is_none(),
+                "{account}"
+            );
+            assert!(github_settings_page(account, id, GitHubAccountKind::User).is_none());
+        }
+    }
+
+    #[test]
+    fn a_github_connect_at_a_terminal_opens_the_first_page_to_accept() {
+        use codewire_credential_broker::GitHubAccountKind::{Enterprise, Organization, User};
+        let pending = [
+            ("octo-ent", 9, Enterprise),
+            ("octo-org", 678, Organization),
+            ("noeljackson", 12345, User),
+        ];
+        let (notices, open) = github_pending_follow_up(pending, true);
+        assert_eq!(notices.len(), 3);
+        assert_eq!(
+            open.as_deref(),
+            Some("https://github.com/organizations/octo-org/settings/installations/678")
+        );
+        // Not at a terminal: the same notices, nothing opened.
+        let (printed, open) = github_pending_follow_up(pending, false);
+        assert_eq!(printed, notices);
+        assert_eq!(open, None);
+        // An enterprise has no page to open.
+        let (notices, open) = github_pending_follow_up([("octo-ent", 9, Enterprise)], true);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(open, None);
+        // An invalid entry is neither printed nor opened.
+        let (notices, open) = github_pending_follow_up([("octo/evil", 1, User)], true);
+        assert!(notices.is_empty());
+        assert_eq!(open, None);
+    }
+
+    #[test]
     fn github_reach_names_each_installation_and_the_install_page() {
         use codewire_credential_broker::GitHubAppInstallationReach;
         let summary = github_reach_summary(&[
             GitHubAppInstallationReach {
                 account: "codewiresh".into(),
                 all_repositories: true,
+                pending_permissions: None,
             },
             GitHubAppInstallationReach {
                 account: "noeljackson".into(),
                 all_repositories: false,
+                pending_permissions: None,
             },
         ]);
         assert_eq!(
             summary,
-            "Codewire can read repositories in: codewiresh (all repositories), noeljackson (selected repositories).\n\
-             To add an account or organization, or choose repositories: \
-             https://github.com/apps/codewire-sh/installations/new"
+            "Codewire can read, push to and open pull requests in repositories of: codewiresh (all repositories), noeljackson (selected repositories).\n\
+             To add an account or organization, or choose repositories, open \
+             https://github.com/apps/codewire-sh/installations/new and choose \"Only select repositories\"."
         );
         assert!(github_reach_summary(&[]).starts_with(
-            "Codewire can read repositories where the Codewire GitHub App is installed."
+            "Codewire can read, push to and open pull requests in repositories where the Codewire GitHub App is installed."
         ));
     }
 }

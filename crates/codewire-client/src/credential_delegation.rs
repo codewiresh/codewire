@@ -34,6 +34,14 @@ pub type CredentialDelegationStream = connectrpc::client::BidiStream<
     DelegateCredentialsResponseView<'static>,
 >;
 
+/// An admitted stream and what its server said it accepts.
+pub struct AdmittedCredentialDelegation {
+    pub stream: CredentialDelegationStream,
+    /// The server answers request keepalives. Only then may the owner send
+    /// one: an older server ends a stream that carries one.
+    pub accepts_keepalive: bool,
+}
+
 impl CodewireClient {
     /// Open an explicit source selection with one current bearer from the
     /// shared token provider. The server authenticates original personal OAuth
@@ -50,13 +58,18 @@ impl CodewireClient {
     pub async fn delegate_credentials(
         &self,
         open: CredentialDelegationOpen,
-    ) -> Result<CredentialDelegationStream, ClientError> {
+    ) -> Result<AdmittedCredentialDelegation, ClientError> {
         let deadline = Instant::now() + SETUP_TIMEOUT;
         let client = CredentialDelegationServiceClient::new(
             ReqwestConnectTransport(self.http.clone()),
             self.config.environment_session_connect_config()?,
         );
-        setup(client, self.auth_options(), open, deadline).await
+        let (stream, accepts_keepalive) =
+            setup(client, self.auth_options(), open, deadline).await?;
+        Ok(AdmittedCredentialDelegation {
+            stream,
+            accepts_keepalive,
+        })
     }
 }
 
@@ -69,11 +82,14 @@ async fn setup<T: ClientTransport>(
     open: CredentialDelegationOpen,
     deadline: Instant,
 ) -> Result<
-    BidiStream<
-        T::ResponseBody,
-        DelegateCredentialsRequest,
-        DelegateCredentialsResponseView<'static>,
-    >,
+    (
+        BidiStream<
+            T::ResponseBody,
+            DelegateCredentialsRequest,
+            DelegateCredentialsResponseView<'static>,
+        >,
+        bool,
+    ),
     ClientError,
 >
 where
@@ -133,6 +149,7 @@ where
             .map_err(ClientError::from)?
             .ok_or_else(invalid_admission)?
             .to_owned_message();
+        let accepts_keepalive = response.accepts_keepalive;
         match response.output {
             Some(delegate_credentials_response::Output::Admitted(accepted))
                 if *accepted == open => {}
@@ -142,7 +159,7 @@ where
         if Instant::now() >= deadline {
             return Err(expired());
         }
-        Ok(stream)
+        Ok((stream, accepts_keepalive))
     })
     .await
     .map_err(|_| expired())?

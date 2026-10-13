@@ -310,7 +310,7 @@ class GuestRootBuilderTest(unittest.TestCase):
         # The same protoc zip the release workflows install on the runner.
         workflow = (ROOT / ".gitea/workflows/cli-release.yaml").read_text()
         self.assertIn(pins["protoc"]["url"], workflow)
-        self.assertIn(f'echo "{pins["protoc"]["sha256"]}  /tmp/protoc.zip"', workflow)
+        self.assertIn(f'{pins["protoc"]["sha256"]} /tmp/protoc.zip', workflow)
 
     def run_with_fake_docker(self, job_mounts, *paths):
         fake = fx.scratch("runtime-docker.")

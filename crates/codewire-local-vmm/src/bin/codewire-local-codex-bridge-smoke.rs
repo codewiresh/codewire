@@ -91,6 +91,12 @@ mod linux {
     const MANAGED_PROFILE_REVISION: u64 = 4;
     const MAX_AUDIT_EVENTS: usize = 32;
     const GUEST_CALLER_BEARER: &str = "guest-supplied-bearer-must-not-pass";
+    /// A path on the managed HTTP ingress outside every provider base: the
+    /// Codex client's `/v1`, `/_codewire/openai/v1` and `/_codewire/anthropic`.
+    const OUTSIDE_MANAGED_BASES_PATH: &str = "/v2/responses";
+    /// What the synthetic upstream answers for a request on a provider base
+    /// that it does not serve (`SyntheticOpenAiSmokeTransport::not_found`).
+    const SYNTHETIC_UNSERVED_REPLY: &str = "Synthetic provider route not served";
     const EXEC_TIMEOUT: Duration = Duration::from_secs(90);
     const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
     const MAX_PROC_CMDLINE: usize = 64 * 1024;
@@ -182,6 +188,9 @@ socket.on('error',()=>{const code=phase==='post-handshake'?75:timedOut?74:phase=
         request_id: Option<String>,
         content_type: Option<String>,
         opaque_header_present: bool,
+        /// Whether that header names `[REDACTED]` and holds no synthetic
+        /// credential; `None` when it is absent.
+        opaque_header_redacted: Option<bool>,
         body: String,
     }
 
@@ -195,21 +204,21 @@ url=new URL(process.env.OPENAI_BASE_URL+'/responses');
 headers={'content-type':'application/json','authorization':'Bearer '+process.env.OPENAI_API_KEY};
 input={model:'codewire-synthetic',input:'Return the synthetic marker.',stream:true};
 }else if(mode==='count-tokens'){
-if(process.env.ANTHROPIC_BASE_URL!=='http://127.0.0.1:38081/_codewire/anthropic'||process.env.ANTHROPIC_AUTH_TOKEN!=='codewire-managed'||process.env.ANTHROPIC_API_KEY!==''||process.env.CLAUDE_CODE_OAUTH_TOKEN!=='')process.exit(82);
+if(process.env.ANTHROPIC_BASE_URL!=='http://127.0.0.1:38081/_codewire/anthropic'||process.env.ANTHROPIC_AUTH_TOKEN!=='codewire-managed'||'ANTHROPIC_API_KEY' in process.env||'CLAUDE_CODE_OAUTH_TOKEN' in process.env)process.exit(82);
 url=new URL(process.env.ANTHROPIC_BASE_URL+'/v1/messages/count_tokens');
 headers={'content-type':'application/json','anthropic-version':'2023-06-01','authorization':'Bearer '+process.env.ANTHROPIC_AUTH_TOKEN};
 input={model:'claude-sonnet-4-6',messages:[{role:'user',content:'Return the synthetic marker.'}]};
 }else process.exit(83);
 const body=JSON.stringify(input);headers['content-length']=Buffer.byteLength(body);
-const request=http.request(url,{method:'POST',headers},response=>{const chunks=[];let size=0;response.on('data',chunk=>{size+=chunk.length;if(size>262144){request.destroy();process.exit(84);}chunks.push(chunk);});response.on('error',()=>process.exit(85));response.on('end',()=>process.stdout.write(JSON.stringify({status:response.statusCode,request_id:response.headers[mode==='openai'?'x-request-id':'request-id']??null,content_type:response.headers['content-type']??null,opaque_header_present:response.headers['x-error-json']!==undefined,body:Buffer.concat(chunks).toString('utf8')})));});
+const request=http.request(url,{method:'POST',headers},response=>{const chunks=[];let size=0;response.on('data',chunk=>{size+=chunk.length;if(size>262144){request.destroy();process.exit(84);}chunks.push(chunk);});response.on('error',()=>process.exit(85));response.on('end',()=>process.stdout.write(JSON.stringify({status:response.statusCode,request_id:response.headers[mode==='openai'?'x-request-id':'request-id']??null,content_type:response.headers['content-type']??null,opaque_header_present:response.headers['x-error-json']!==undefined,opaque_header_redacted:response.headers['x-error-json']===undefined?null:(String(response.headers['x-error-json']).includes('[REDACTED]')&&!String(response.headers['x-error-json']).includes('cwlocal')),body:Buffer.concat(chunks).toString('utf8')})));});
 request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.exit(86));request.end(body);"#;
 
     const CLAUDE_RESOLVER_SCRIPT: &str = "PATH=/opt/codewire/agents/npm/bin:/home/codewire/.npm-global/bin:/usr/bin:/bin; export PATH; command -v claude";
     const CLAUDE_ENV_EXEC_SCRIPT: &str = concat!(
         "test \"${ANTHROPIC_BASE_URL-}\" = 'http://127.0.0.1:38081/_codewire/anthropic' && ",
         "test \"${ANTHROPIC_AUTH_TOKEN-}\" = codewire-managed && ",
-        "test \"${ANTHROPIC_API_KEY+x}\" = x && test -z \"$ANTHROPIC_API_KEY\" && ",
-        "test \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" = x && test -z \"$CLAUDE_CODE_OAUTH_TOKEN\" && ",
+        "test -z \"${ANTHROPIC_API_KEY+x}\" && ",
+        "test -z \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" && ",
         "exec \"$@\"",
     );
 
@@ -398,14 +407,22 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         .await?;
 
         stage("managed-policy-denial");
+        // The provider routes are transparent (#2536): any method, path and
+        // query under a provider base reaches that provider. What the ingress
+        // still refuses is a request outside every base. It must answer that
+        // itself, with a client error that does not reflect the guest's bearer
+        // and before any lease. Every upstream request is leased first, so
+        // the unchanged exact audit shows the synthetic upstream never got it,
+        // and the reply is not that upstream's answer to an unserved route.
         let denied = run_http_probe(
             daemon,
             &environment.working_directory,
-            "/v1/responses?exfiltrate=true",
+            OUTSIDE_MANAGED_BASES_PATH,
         )
         .await?;
-        require(denied.status == 403)?;
+        require((400..500).contains(&denied.status))?;
         require(!denied.body.contains(GUEST_CALLER_BEARER))?;
+        require(!denied.body.contains(SYNTHETIC_UNSERVED_REPLY))?;
         require_audit(
             &mut credentials,
             environment,
@@ -762,9 +779,11 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
                     &selected.anthropic,
                     BrokerLeaseAuditDecision::Admitted,
                 ),
+                // Each transparent route has one leased operation (#2536):
+                // a count_tokens request is leased as `messages`.
                 ExpectedAudit::AnthropicCountTokens => (
                     "anthropic",
-                    "count-tokens",
+                    "messages",
                     "anthropic-api",
                     &selected.anthropic,
                     BrokerLeaseAuditDecision::Admitted,
@@ -1325,6 +1344,10 @@ function generalEgress(){
         serde_json::from_slice(&output.stdout).map_err(Into::into)
     }
 
+    /// The transparent routes (#2536) return every upstream header, each
+    /// redacted. The synthetic upstream reflects the injected credential in
+    /// its request id and in a diagnostic `x-error-json` header; both must
+    /// arrive, and neither may hold the credential.
     fn require_selected_response_headers(
         response: &SelectedHttpProbeOutput,
         content_type: &str,
@@ -1333,7 +1356,8 @@ function generalEgress(){
             response.status == 200
                 && response.request_id.as_deref() == Some("[REDACTED]")
                 && response.content_type.as_deref() == Some(content_type)
-                && !response.opaque_header_present,
+                && response.opaque_header_present
+                && response.opaque_header_redacted == Some(true),
         )
     }
 
@@ -2573,13 +2597,14 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                 status: 200,
                 request_id: Some("[REDACTED]".into()),
                 content_type: Some(content_type.into()),
-                opaque_header_present: false,
+                opaque_header_present: true,
+                opaque_header_redacted: Some(true),
                 body,
             }
         }
 
         #[test]
-        fn selected_responses_require_exact_markers_framing_and_filtered_headers() {
+        fn selected_responses_require_exact_markers_framing_and_redacted_headers() {
             let body = String::from_utf8(SYNTHETIC_RESPONSE.to_vec())
                 .unwrap()
                 .replace(CODEX_MARKER, MANAGED_OPENAI_MARKER);
@@ -2623,13 +2648,17 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                     .is_err()
                 );
             }
-            for mode in 0..4 {
+            for mode in 0..5 {
                 let mut response = selected_response("application/json", count.clone());
                 match mode {
                     0 => response.request_id = Some("synthetic-unredacted".into()),
-                    1 => response.opaque_header_present = true,
-                    2 => response.content_type = Some("text/event-stream".into()),
-                    3 => response.status = 403,
+                    1 => {
+                        response.opaque_header_present = false;
+                        response.opaque_header_redacted = None;
+                    }
+                    2 => response.opaque_header_redacted = Some(false),
+                    3 => response.content_type = Some("text/event-stream".into()),
+                    4 => response.status = 403,
                     _ => unreachable!(),
                 }
                 assert!(validate_count_tokens_response(&response).is_err());
@@ -3125,8 +3154,6 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                     "http://127.0.0.1:38081/_codewire/anthropic",
                 )
                 .env("ANTHROPIC_AUTH_TOKEN", "codewire-managed")
-                .env("ANTHROPIC_API_KEY", "")
-                .env("CLAUDE_CODE_OAUTH_TOKEN", "")
                 .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
                 .env("CLAUDE_CODE_MAX_RETRIES", "0")
                 .current_dir(home)
@@ -3384,7 +3411,7 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                 ),
                 (
                     "anthropic",
-                    "count-tokens",
+                    "messages",
                     "anthropic-api",
                     &selected.anthropic,
                 ),
@@ -3555,8 +3582,8 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
         }
 
         const SELECTED_HTTP_FIXTURE: &str = r#"const vm=require('vm');
-const env={OPENAI_BASE_URL:'http://127.0.0.1:38081/_codewire/openai/v1',OPENAI_API_KEY:'codewire-managed',ANTHROPIC_BASE_URL:'http://127.0.0.1:38081/_codewire/anthropic',ANTHROPIC_AUTH_TOKEN:'codewire-managed',ANTHROPIC_API_KEY:'',CLAUDE_CODE_OAUTH_TOKEN:''};
-const mode=process.argv[2];const change=process.argv[3];if(change==='missing-api')delete env.ANTHROPIC_API_KEY;else if(change==='oauth')env.CLAUDE_CODE_OAUTH_TOKEN='synthetic-competing';else if(change==='base')env.OPENAI_BASE_URL='https://unselected.invalid/v1';else if(change==='key')env.OPENAI_API_KEY='synthetic-competing';
+const env={OPENAI_BASE_URL:'http://127.0.0.1:38081/_codewire/openai/v1',OPENAI_API_KEY:'codewire-managed',ANTHROPIC_BASE_URL:'http://127.0.0.1:38081/_codewire/anthropic',ANTHROPIC_AUTH_TOKEN:'codewire-managed'};
+const mode=process.argv[2];const change=process.argv[3];if(change==='blank-api')env.ANTHROPIC_API_KEY='';else if(change==='oauth')env.CLAUDE_CODE_OAUTH_TOKEN='synthetic-competing';else if(change==='base')env.OPENAI_BASE_URL='https://unselected.invalid/v1';else if(change==='key')env.OPENAI_API_KEY='synthetic-competing';
 let calls=0;let exitCode=0;let captured=null;let output='';let timeoutMs=0;const handlers=new Map();
 const response={statusCode:200,headers:{'content-type':mode==='openai'?'text/event-stream':'application/json','x-request-id':'[REDACTED]','request-id':'[REDACTED]'},on:(name,callback)=>{handlers.set(name,callback);return response;}};
 const request={setTimeout:(ms)=>{timeoutMs=ms;return request;},on:()=>request,destroy:()=>{},end:(body)=>{captured.body=JSON.parse(body);}};
@@ -3630,6 +3657,7 @@ process.stdout.write(JSON.stringify({calls,exit_code:exitCode,captured,output,ti
                 let response: SelectedHttpProbeOutput =
                     serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
                 assert!(!response.opaque_header_present);
+                assert_eq!(response.opaque_header_redacted, None);
                 assert_eq!(response.request_id.as_deref(), Some("[REDACTED]"));
             }
         }
@@ -3672,7 +3700,7 @@ process.stdout.write(JSON.stringify({calls,exit_code:exitCode,captured,output,ti
             for (mode, change) in [
                 ("openai", "base"),
                 ("openai", "key"),
-                ("count-tokens", "missing-api"),
+                ("count-tokens", "blank-api"),
                 ("count-tokens", "oauth"),
                 ("other", "unchanged"),
             ] {

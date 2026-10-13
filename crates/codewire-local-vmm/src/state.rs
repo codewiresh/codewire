@@ -993,7 +993,9 @@ mod tests {
         assert!(matches!(paths.lock(), Err(StateError::AlreadyLocked)));
 
         drop(first);
-        paths.lock().unwrap();
+        // A concurrent test's forked child can hold an inherited copy of the
+        // released lock until it execs (#2678); a holder past the bound fails.
+        crate::host_port::tests::once_released(|| paths.lock());
     }
 
     #[test]

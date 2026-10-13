@@ -47,6 +47,9 @@ const (
 	// GithubRepositoryServiceListGithubRepositoriesProcedure is the fully-qualified name of the
 	// GithubRepositoryService's ListGithubRepositories RPC.
 	GithubRepositoryServiceListGithubRepositoriesProcedure = "/codewire.v1.GithubRepositoryService/ListGithubRepositories"
+	// GithubRepositoryServiceListGithubPendingPermissionsProcedure is the fully-qualified name of the
+	// GithubRepositoryService's ListGithubPendingPermissions RPC.
+	GithubRepositoryServiceListGithubPendingPermissionsProcedure = "/codewire.v1.GithubRepositoryService/ListGithubPendingPermissions"
 	// CredentialMutationServiceEnrollCodexProcedure is the fully-qualified name of the
 	// CredentialMutationService's EnrollCodex RPC.
 	CredentialMutationServiceEnrollCodexProcedure = "/codewire.v1.CredentialMutationService/EnrollCodex"
@@ -185,6 +188,12 @@ func (UnimplementedCredentialServiceHandler) GetCredential(context.Context, *con
 // GithubRepositoryServiceClient is a client for the codewire.v1.GithubRepositoryService service.
 type GithubRepositoryServiceClient interface {
 	ListGithubRepositories(context.Context, *connect.Request[v1.ListGithubRepositoriesRequest]) (*connect.Response[v1.ListGithubRepositoriesResponse], error)
+	// The installations of the Codewire GitHub App that have not yet granted
+	// what Codewire needs, checked live with the same authenticated owner's
+	// own active GitHub connection, under the same authority as
+	// ListGithubRepositories. Like discovery, it may renew an expiring App
+	// token first. Answers login, installation ID and account kind only.
+	ListGithubPendingPermissions(context.Context, *connect.Request[v1.ListGithubPendingPermissionsRequest]) (*connect.Response[v1.ListGithubPendingPermissionsResponse], error)
 }
 
 // NewGithubRepositoryServiceClient constructs a client for the codewire.v1.GithubRepositoryService
@@ -205,12 +214,20 @@ func NewGithubRepositoryServiceClient(httpClient connect.HTTPClient, baseURL str
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
+		listGithubPendingPermissions: connect.NewClient[v1.ListGithubPendingPermissionsRequest, v1.ListGithubPendingPermissionsResponse](
+			httpClient,
+			baseURL+GithubRepositoryServiceListGithubPendingPermissionsProcedure,
+			connect.WithSchema(githubRepositoryServiceMethods.ByName("ListGithubPendingPermissions")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // githubRepositoryServiceClient implements GithubRepositoryServiceClient.
 type githubRepositoryServiceClient struct {
-	listGithubRepositories *connect.Client[v1.ListGithubRepositoriesRequest, v1.ListGithubRepositoriesResponse]
+	listGithubRepositories       *connect.Client[v1.ListGithubRepositoriesRequest, v1.ListGithubRepositoriesResponse]
+	listGithubPendingPermissions *connect.Client[v1.ListGithubPendingPermissionsRequest, v1.ListGithubPendingPermissionsResponse]
 }
 
 // ListGithubRepositories calls codewire.v1.GithubRepositoryService.ListGithubRepositories.
@@ -218,10 +235,22 @@ func (c *githubRepositoryServiceClient) ListGithubRepositories(ctx context.Conte
 	return c.listGithubRepositories.CallUnary(ctx, req)
 }
 
+// ListGithubPendingPermissions calls
+// codewire.v1.GithubRepositoryService.ListGithubPendingPermissions.
+func (c *githubRepositoryServiceClient) ListGithubPendingPermissions(ctx context.Context, req *connect.Request[v1.ListGithubPendingPermissionsRequest]) (*connect.Response[v1.ListGithubPendingPermissionsResponse], error) {
+	return c.listGithubPendingPermissions.CallUnary(ctx, req)
+}
+
 // GithubRepositoryServiceHandler is an implementation of the codewire.v1.GithubRepositoryService
 // service.
 type GithubRepositoryServiceHandler interface {
 	ListGithubRepositories(context.Context, *connect.Request[v1.ListGithubRepositoriesRequest]) (*connect.Response[v1.ListGithubRepositoriesResponse], error)
+	// The installations of the Codewire GitHub App that have not yet granted
+	// what Codewire needs, checked live with the same authenticated owner's
+	// own active GitHub connection, under the same authority as
+	// ListGithubRepositories. Like discovery, it may renew an expiring App
+	// token first. Answers login, installation ID and account kind only.
+	ListGithubPendingPermissions(context.Context, *connect.Request[v1.ListGithubPendingPermissionsRequest]) (*connect.Response[v1.ListGithubPendingPermissionsResponse], error)
 }
 
 // NewGithubRepositoryServiceHandler builds an HTTP handler from the service implementation. It
@@ -238,10 +267,19 @@ func NewGithubRepositoryServiceHandler(svc GithubRepositoryServiceHandler, opts 
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
+	githubRepositoryServiceListGithubPendingPermissionsHandler := connect.NewUnaryHandler(
+		GithubRepositoryServiceListGithubPendingPermissionsProcedure,
+		svc.ListGithubPendingPermissions,
+		connect.WithSchema(githubRepositoryServiceMethods.ByName("ListGithubPendingPermissions")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.v1.GithubRepositoryService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case GithubRepositoryServiceListGithubRepositoriesProcedure:
 			githubRepositoryServiceListGithubRepositoriesHandler.ServeHTTP(w, r)
+		case GithubRepositoryServiceListGithubPendingPermissionsProcedure:
+			githubRepositoryServiceListGithubPendingPermissionsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -253,6 +291,10 @@ type UnimplementedGithubRepositoryServiceHandler struct{}
 
 func (UnimplementedGithubRepositoryServiceHandler) ListGithubRepositories(context.Context, *connect.Request[v1.ListGithubRepositoriesRequest]) (*connect.Response[v1.ListGithubRepositoriesResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.GithubRepositoryService.ListGithubRepositories is not implemented"))
+}
+
+func (UnimplementedGithubRepositoryServiceHandler) ListGithubPendingPermissions(context.Context, *connect.Request[v1.ListGithubPendingPermissionsRequest]) (*connect.Response[v1.ListGithubPendingPermissionsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.GithubRepositoryService.ListGithubPendingPermissions is not implemented"))
 }
 
 // CredentialMutationServiceClient is a client for the codewire.v1.CredentialMutationService
