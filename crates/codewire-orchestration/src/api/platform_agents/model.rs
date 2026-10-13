@@ -586,3 +586,33 @@ mod decimal_u64 {
         Ok(n)
     }
 }
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+
+    /// A launch request row as the release before Resume stored it, and the
+    /// admission fingerprint computed independently over its canonical JSON
+    /// (sorted keys, compact, trailing newline). Resume adds only an optional
+    /// field that is omitted when absent, so such rows decode and verify
+    /// unchanged (#2705).
+    const MUTATION: &str = r#"{"request_id":"0f9f6d2a-3c4b-4d5e-8f6a-7b8c9d0e1f2a","organization_id":"fixture-org","environment_id":"550e8400-e29b-41d4-a716-446655440000","pod_uid":"7e7b20f6-0bd2-4f11-8b16-9c239851eb52","binding_generation":3,"projection_selection_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","action":"launch","cleanup_of_request_id":null,"agent":"codex","session_id":"session-0f9f6d2a-3c4b-4d5e-8f6a-7b8c9d0e1f2a","driver_id":"0f9f6d2a-3c4b-4d5e-8f6a-7b8c9d0e1f2a","message_id":null,"expected_launch_generation":"1","parent_session_id":null,"expected_parent_launch_generation":"0","support_image_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","support_image_size":4,"private_fingerprint":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}"#;
+    const BINDING: &str = r#"{"organization_id":"fixture-org","organization_deletion_state":"active","organization_deletion_generation":0,"environment_id":"550e8400-e29b-41d4-a716-446655440000","environment_state":"running","desired_state":"started","environment_type":"sandbox","isolation_tier":"standard","environment_generation":9,"deletion_requested_at":null,"backend_namespace":"runtime-sandboxes","backend_pod_name":"sandbox-550e8400-e29b-41d4-a716-446655440000","backend_pod_ip":"10.12.3.4","backend_pod_uid":"7e7b20f6-0bd2-4f11-8b16-9c239851eb52","backend_claim_uid":"c0ffee00-e29b-41d4-a716-446655440000","backend_pvc_uid":"9d8c7b6a-2222-4f5e-8d4c-3b2a1f0e9d8c","backend_bound_at":"2026-10-01T12:00:00Z","setup_complete":true,"setup_owner_status":null,"pod_uid":"7e7b20f6-0bd2-4f11-8b16-9c239851eb52","namespace":"runtime-sandboxes","pod_name":"sandbox-550e8400-e29b-41d4-a716-446655440000","claim_uid":"c0ffee00-e29b-41d4-a716-446655440000","sandbox_uid":"5a4db0c5-e29b-41d4-a716-446655440000","workspace_pvc_uid":"9d8c7b6a-2222-4f5e-8d4c-3b2a1f0e9d8c","binding_generation":3,"projection_selection_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","managed_credential_clients":"","credential_scope":"pod","binding_bound_at":"2026-10-01T12:00:00Z"}"#;
+    const FINGERPRINT: &str = "5f2603d9ec35631bc2588bd9a62dacdc82548d48a357d2bf9f58c22ec2e83066";
+
+    #[test]
+    fn a_request_admitted_before_resume_decodes_and_keeps_its_fingerprint() {
+        let mutation: ManagedMutation = serde_json::from_str(MUTATION).unwrap();
+        let binding: CapturedBindingFacts = serde_json::from_str(BINDING).unwrap();
+        assert!(mutation.predecessor_pod_uid.is_none());
+        // Nothing is added or dropped on the way back out.
+        assert_eq!(
+            serde_json::to_value(&mutation).unwrap(),
+            serde_json::from_str::<serde_json::Value>(MUTATION).unwrap()
+        );
+        assert_eq!(
+            fingerprint("fixture-actor", false, None, &mutation, &binding).unwrap(),
+            FINGERPRINT
+        );
+    }
+}
