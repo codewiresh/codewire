@@ -748,14 +748,7 @@ fn already_exists(error: &PathError) -> bool {
 /// The trusted e2fsprogs that build and inspect a catalog disk: the system
 /// tools on Linux, the admitted runtime's pinned build on Darwin.
 fn filesystem_tool(name: &str) -> Result<PathBuf, CwRuntimeError> {
-    #[cfg(target_os = "linux")]
-    {
-        Ok(Path::new("/usr/sbin").join(name))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        crate::host::e2fsprogs(name).ok_or(CwRuntimeError::E2fsprogsUnavailable)
-    }
+    crate::host::e2fsprogs(name).ok_or(CwRuntimeError::E2fsprogsUnavailable)
 }
 // Closing the final reference releases flock. Explicit LOCK_UN would also
 // release an orphan leaf tool's reference to this same open file description.
@@ -1241,9 +1234,17 @@ pub enum CwRuntimeError {
     DiskChanged,
     #[error("cw runtime disk production or inode verification failed")]
     ToolFailed,
-    #[cfg(target_os = "macos")]
-    #[error(
-        "the local VM runtime's debugfs or mkfs.ext4 is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+    #[cfg_attr(
+        target_os = "linux",
+        error(
+            "debugfs or mkfs.ext4 is unavailable; install your distribution's e2fsprogs package (cw looks in /usr/sbin and /usr/bin)"
+        )
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "the local VM runtime's debugfs or mkfs.ext4 is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
     )]
     E2fsprogsUnavailable,
     #[error(transparent)]

@@ -11,7 +11,7 @@ lead can invoke cw itself and a Claude worker's result starts a parent turn.
 Inherited CW_ENVIRONMENT and CW_SESSION_ID are dropped: a journey run by a
 managed agent never hands its own conversation identity to the host it starts.
 The real-noel option runs only the noel journey, with that binary as noel and
-its faux/echo and faux/script models; noel gets a private HOME and pi agent
+its faux/echo and faux/script models; noel gets a private HOME and noel
 directory, offline. Both noel journeys kill noel and its driver mid-turn with
 SIGKILL and prove noel resumes the run once. Both also take the environment
 down mid-turn and prove that the message is paused, not ended, and that
@@ -1174,6 +1174,17 @@ class Journey:
         assert len(answers) == 1 and answers[0]["cancelled"] is True and answers[0]["id"], answers
         self.check("noel-dialog-declined")
 
+        # A notification, such as an account failover switch, is shown in the
+        # session log and needs no answer.
+        notified = self.call("msg", env, "noel-lead", "NOTIFY", "--output", "json", data=True)
+        assert self.wait_message(notified["id"])["result"] == "[faux/echo] NOTIFY"
+        assert [r for r in self.received("noel-lead") if r["type"] == "extension_ui_response"] == answers
+        logs = self.call("logs", env, "noel-lead").stdout
+        assert ("noel warning: fixture account first is rate limited until 14:05 UTC; "
+                "switched to second") in logs, logs[-2000:]
+        assert "declined noel notify dialog" not in logs
+        self.check("noel-notify-logged-unanswered")
+
         # A worker's result wakes the lead exactly once. An explicit stop
         # mid-run interrupts noel's run first: noel is sent the abort and
         # settles the run before the stop signals it, the message ends
@@ -1483,10 +1494,10 @@ class Journey:
         self.environment = env = created["id"]
         self.preserved = "noel-proof.txt"
         (self.workspace / self.preserved).write_text("workspace\n")
-        home, agent = self.root / "noel-home", self.root / "pi-agent"
+        home, agent = self.root / "noel-home", self.root / "noel-agent"
         home.mkdir(mode=0o700)
         agent.mkdir(mode=0o700)
-        private = [f"HOME={home}", f"PI_CODING_AGENT_DIR={agent}", "PI_OFFLINE=1"]
+        private = [f"HOME={home}", f"NOEL_DIR={agent}", "NOEL_OFFLINE=1"]
         self.check("create-host-environment")
 
         lead = self.launch("noel-lead", agent="noel", model="faux/echo", prompt="Hello", env=private)
@@ -1527,7 +1538,7 @@ class Journey:
         assert len(wakes) == 1, said("user")
         self.check("real-noel-worker-wakes-lead-exactly-once")
 
-        slow = private + ["PI_FAUX_STREAM_DELAY_MS=200", "PI_FAUX_STREAM_CHARS=1"]
+        slow = private + ["NOEL_FAUX_STREAM_DELAY_MS=200", "NOEL_FAUX_STREAM_CHARS=1"]
         self.launch("noel-slow", agent="noel", model="faux/echo", parent="noel-lead", env=slow)
         self.until(lambda: self.inbox("noel-slow"), lambda v: v["driver"] and v["driver"]["phase"] == "idle")
         story_text = "Write a long story about a lighthouse keeper and the sea."
@@ -1647,7 +1658,7 @@ class Journey:
         lead = "resume-lead"
         self.launch(lead, agent="noel", model="faux/echo", env=private)
         self.idle(lead)
-        lead_journal = self.root / "pi-agent" / "sessions" / f"{self.noel_session(lead)}.jsonl"
+        lead_journal = self.root / "noel-agent" / "sessions" / f"{self.noel_session(lead)}.jsonl"
 
         def lead_said():
             entries = [json.loads(line) for line in lead_journal.read_text().splitlines()]
@@ -1660,7 +1671,7 @@ class Journey:
             script, log = self.root / f"{name}-script.json", self.root / f"{name}-requests.jsonl"
             script.write_text(json.dumps(responses))
             self.launch(name, agent="noel", model="faux/script", parent=lead,
-                        env=private + [f"PI_FAUX_SCRIPT={script}", f"PI_FAUX_SCRIPT_LOG={log}", "SHELL=/bin/sh"])
+                        env=private + [f"NOEL_FAUX_SCRIPT={script}", f"NOEL_FAUX_SCRIPT_LOG={log}", "SHELL=/bin/sh"])
             self.idle(name)
             return log
 
@@ -1769,7 +1780,7 @@ class Journey:
                                       [{"wait_for_file": "never-stop"}, {"text": "never sent"}]]))
         daemon = dict(self.env)
         daemon.update(value.split("=", 1) for value in private + [
-            f"PI_FAUX_SCRIPT={script}", f"PI_FAUX_SCRIPT_LOG={log}", "SHELL=/bin/sh"])
+            f"NOEL_FAUX_SCRIPT={script}", f"NOEL_FAUX_SCRIPT_LOG={log}", "SHELL=/bin/sh"])
         created = self.call("env", "create", "--local", "--type", "host", "--name", "paused",
                             "--path", str(self.workspace), "--output", "json", data=True, env=daemon)
         self.environment = env = created["id"]
@@ -1795,8 +1806,8 @@ class Journey:
             self.until(requests, lambda sent: len(sent) >= 1)
             waiter = self.waiting(message["id"], env=daemon)
             session = self.noel_session("pause-worker")
-            journal = self.root / "pi-agent" / "sessions" / f"{session}.jsonl"
-            lead_journal = self.root / "pi-agent" / "sessions" / f"{self.noel_session(lead)}.jsonl"
+            journal = self.root / "noel-agent" / "sessions" / f"{session}.jsonl"
+            lead_journal = self.root / "noel-agent" / "sessions" / f"{self.noel_session(lead)}.jsonl"
 
             self.call("env", "stop", "--local", env)
             record = self.record_file("pause-worker", message["id"])
@@ -1887,8 +1898,8 @@ class Journey:
         script.write_text("[]")
         daemon = dict(self.env)
         daemon.update(value.split("=", 1) for value in private + [
-            f"PI_FAUX_SCRIPT={script}", f"PI_FAUX_SCRIPT_LOG={log}", "SHELL=/bin/sh",
-            "PI_FAUX_STREAM_DELAY_MS=100", "PI_FAUX_STREAM_CHARS=1"])
+            f"NOEL_FAUX_SCRIPT={script}", f"NOEL_FAUX_SCRIPT_LOG={log}", "SHELL=/bin/sh",
+            "NOEL_FAUX_STREAM_DELAY_MS=100", "NOEL_FAUX_STREAM_CHARS=1"])
         created = self.call("env", "create", "--local", "--type", "host", "--name", "delegating",
                             "--path", str(self.workspace), "--output", "json", data=True, env=daemon)
         self.environment = env = created["id"]
@@ -2074,7 +2085,7 @@ class Journey:
     def real_resumed(self, name, message, run, resumes=1):
         """noel's journal for NAME holds MESSAGE's prompt once and its RUN
         completed; the inbox and the session log say noel resumed it."""
-        journal = self.root / "pi-agent" / "sessions" / f"{self.noel_session(name)}.jsonl"
+        journal = self.root / "noel-agent" / "sessions" / f"{self.noel_session(name)}.jsonl"
         entries = [json.loads(line) for line in journal.read_text().splitlines()]
         prompts = [e["message"]["content"] for e in entries
                    if e.get("type") == "message" and e["message"]["role"] == "user"]
