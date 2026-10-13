@@ -5992,12 +5992,24 @@ mod tests {
             HostPortBinding::new(blocked_port, 3_001).unwrap(),
         ];
 
-        assert!(matches!(
-            reserve_host_ports(&bindings),
-            Err(RunnerError::HostPortUnavailable(port)) if port == blocked_port
-        ));
-        let rebound = StdTcpListener::bind((Ipv4Addr::LOCALHOST, first_port))
-            .expect("an atomic reservation failure must release earlier listeners");
+        // Each port just released may stay busy while a concurrent test's
+        // forked child holds an inherited copy until it execs (#2678). Only
+        // `first_port` may be busy for that reason, and only briefly: the
+        // reservation must still fail at `blocked_port`.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match reserve_host_ports(&bindings) {
+                Err(RunnerError::HostPortUnavailable(port)) if port == blocked_port => break,
+                Err(RunnerError::HostPortUnavailable(port))
+                    if port == first_port && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(_) => panic!("a reservation including a held port succeeded"),
+                Err(error) => panic!("the reservation did not fail at the held port: {error:?}"),
+            }
+        }
+        let rebound = once_released(|| StdTcpListener::bind((Ipv4Addr::LOCALHOST, first_port)));
         assert_eq!(
             rebound.local_addr().unwrap(),
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, first_port).into()
@@ -6006,7 +6018,7 @@ mod tests {
         drop(rebound);
         drop(blocker);
 
-        let listeners = reserve_host_ports(&bindings).unwrap();
+        let listeners = once_released(|| reserve_host_ports(&bindings));
         assert_eq!(listeners.len(), bindings.len());
         for (listener, binding) in listeners.iter().zip(bindings) {
             assert_eq!(listener.binding, binding);
