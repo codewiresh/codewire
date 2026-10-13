@@ -9,6 +9,10 @@ use tokio_stream::{StreamExt, wrappers::UnixListenerStream};
 const HOST_DATA_DIR_ENV: &str = "CW_HOST_DATA_DIR";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(25);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// A session stop or restart may first spend up to 10 s interrupting an
+/// agent's active run; its request deadline covers that and the stop.
+const SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn ensure_host_supported() -> anyhow::Result<()> {
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
@@ -447,6 +451,7 @@ fn check_socket_path(path: &std::path::Path) -> anyhow::Result<()> {
 
 async fn connect_host_channel(
     environment: &HostEnvironment,
+    request_timeout: Duration,
 ) -> anyhow::Result<(tonic::transport::Channel, String)> {
     let root = environment.root();
     existing_private_directory(&root)?;
@@ -481,7 +486,7 @@ async fn connect_host_channel(
     });
     let channel = tonic::transport::Endpoint::from_static("http://codewire-host")
         .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(5))
+        .timeout(request_timeout)
         .connect_with_connector(connector)
         .await?;
     let token: String = read_private(&root.join("daemon-token.json"))?;
@@ -490,8 +495,9 @@ async fn connect_host_channel(
 
 async fn connect_host(
     environment: &HostEnvironment,
+    request_timeout: Duration,
 ) -> anyhow::Result<codewire_daemon::client::SessionClient> {
-    let (channel, token) = connect_host_channel(environment).await?;
+    let (channel, token) = connect_host_channel(environment, request_timeout).await?;
     let client = codewire_daemon::client::SessionClient::from_channel(channel, token)?;
     client.require_ready().await?;
     Ok(client)
@@ -509,7 +515,7 @@ pub(crate) async fn host_control_client(
     if current.id != environment.id || current.state != "running" {
         anyhow::bail!("host control environment identity changed");
     }
-    let (channel, token) = connect_host_channel(&current).await?;
+    let (channel, token) = connect_host_channel(&current, REQUEST_TIMEOUT).await?;
     let client =
         codewire_daemon::client::HostControlClient::from_channel(channel, token, current.id)?;
     client.require_ready().await?;
@@ -519,13 +525,32 @@ pub(crate) async fn host_control_client(
 pub(crate) async fn host_session_client(
     environment: &HostEnvironment,
 ) -> anyhow::Result<codewire_daemon::client::SessionClient> {
-    tokio::time::timeout(START_TIMEOUT, connect_or_start_host(environment))
-        .await
-        .context("host readiness deadline exceeded; runtime retained for diagnosis")?
+    host_session_client_within(environment, REQUEST_TIMEOUT).await
+}
+
+/// For StopSession and RestartSession, whose daemon may first interrupt an
+/// agent's active run.
+pub(crate) async fn host_stop_client(
+    environment: &HostEnvironment,
+) -> anyhow::Result<codewire_daemon::client::SessionClient> {
+    host_session_client_within(environment, SESSION_STOP_TIMEOUT).await
+}
+
+async fn host_session_client_within(
+    environment: &HostEnvironment,
+    request_timeout: Duration,
+) -> anyhow::Result<codewire_daemon::client::SessionClient> {
+    tokio::time::timeout(
+        START_TIMEOUT,
+        connect_or_start_host(environment, request_timeout),
+    )
+    .await
+    .context("host readiness deadline exceeded; runtime retained for diagnosis")?
 }
 
 async fn connect_or_start_host(
     environment: &HostEnvironment,
+    request_timeout: Duration,
 ) -> anyhow::Result<codewire_daemon::client::SessionClient> {
     if environment.state != "running" {
         anyhow::bail!(
@@ -533,7 +558,7 @@ async fn connect_or_start_host(
             environment.name
         );
     }
-    if let Ok(client) = connect_host(environment).await {
+    if let Ok(client) = connect_host(environment, request_timeout).await {
         return Ok(client);
     }
     let root = environment.root();
@@ -543,7 +568,7 @@ async fn connect_or_start_host(
     if current.state != "running" {
         anyhow::bail!("host environment was stopped during connection");
     }
-    if let Ok(client) = connect_host(environment).await {
+    if let Ok(client) = connect_host(environment, request_timeout).await {
         return Ok(client);
     }
     let mut launched = None;
@@ -580,7 +605,7 @@ async fn connect_or_start_host(
     }
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        if let Ok(client) = connect_host(environment).await {
+        if let Ok(client) = connect_host(environment, request_timeout).await {
             return Ok(client);
         }
         if let Some(child) = launched.as_mut()
@@ -705,6 +730,16 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
     });
     let token: String = read_private(&root.join("daemon-token.json"))?;
     let config = host_daemon_config(&environment, token)?;
+    // daemon.log gets the daemon's value-blind warnings, and each interrupt
+    // a stop or restart sends an agent's active run before it signals it.
+    // It has no rotation, so an inherited RUST_LOG never widens it.
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "warn,codewire_daemon=info",
+        ))
+        .try_init();
     let shutdown_root = root.clone();
     let shutdown = async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -765,7 +800,7 @@ pub(crate) async fn host_daemon_health(environment: &HostEnvironment) -> String 
     if environment.state != "running" {
         return "stopped".into();
     }
-    if connect_host(environment).await.is_ok() {
+    if connect_host(environment, REQUEST_TIMEOUT).await.is_ok() {
         "ready".into()
     } else {
         "unavailable".into()

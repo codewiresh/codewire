@@ -714,6 +714,7 @@ mod tests {
             pending: HashMap::new(),
             control_pending: HashMap::new(),
             settled: HashSet::new(),
+            stopping: false,
         };
         Harness {
             _temporary: temporary,
@@ -1147,6 +1148,71 @@ mod tests {
             .await;
         assert_eq!(h.load(&main.id).state, MessageState::Interrupted);
         assert_eq!(h.load(&interrupt.id).state, MessageState::Completed);
+    }
+
+    /// A busy noel conversation with `next` waiting in the Codewire queue, and
+    /// an interrupt of its run: the stop's when `stop`, else `cw interrupt`'s.
+    async fn interrupted_with_a_queued_message(
+        stop: bool,
+    ) -> (Harness, Peer, MessageRecord, MessageRecord, MessageRecord) {
+        let mut h = harness();
+        let main = h.running("task", Some(RUN));
+        let mut peer = script_peer("cat");
+        let queued = h.message(MessageAction::Message, "next");
+        h.driver.accept(&mut peer, &queued.id).await.unwrap();
+        assert_eq!(h.driver.queue, std::slice::from_ref(&queued.id));
+        let mut interrupt = MessageRecord::new(
+            &h.driver.config.driver_id,
+            &h.driver.binding.session_id,
+            MessageAction::Interrupt,
+            String::new(),
+        );
+        if stop {
+            interrupt.id = stop_interrupt_id(&main.id);
+        }
+        interrupt.expected_active_message_id = Some(main.id.clone());
+        interrupt.expected_turn_id = Some(RUN.into());
+        assert!(create_message(&h.driver.dir, &interrupt).unwrap());
+        h.driver.accept(&mut peer, &interrupt.id).await.unwrap();
+        assert_eq!(
+            next_line(&mut peer).await,
+            json!({"id": 1, "type": "abort", "expectedRunId": RUN})
+        );
+        h.record(json!({"type": "agent_settled", "aborted": true, "runId": RUN}))
+            .await;
+        assert_eq!(h.load(&main.id).state, MessageState::Interrupted);
+        assert_eq!(h.load(&interrupt.id).state, MessageState::Completed);
+        (h, peer, main, queued, interrupt)
+    }
+
+    #[tokio::test]
+    async fn a_stop_interrupt_ends_the_run_and_starts_nothing_before_the_stop() {
+        let (mut h, mut peer, _, queued, _) = interrupted_with_a_queued_message(true).await;
+        // The host daemon signals the session next: the queued message stays
+        // accepted for the next start instead of starting and being cut off.
+        h.driver.start_next(&mut peer).await.unwrap();
+        assert!(h.driver.active.is_none());
+        assert_eq!(h.load(&queued.id).state, MessageState::Accepted);
+        assert_eq!(h.driver.queue, std::slice::from_ref(&queued.id));
+        assert_eq!(h.driver.state.phase, DriverPhase::Idle);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), peer.events.recv())
+                .await
+                .is_err(),
+            "noel was sent another command"
+        );
+    }
+
+    #[tokio::test]
+    async fn cw_interrupt_still_starts_the_next_queued_message() {
+        let (mut h, mut peer, _, queued, _) = interrupted_with_a_queued_message(false).await;
+        h.driver.start_next(&mut peer).await.unwrap();
+        assert_eq!(h.load(&queued.id).state, MessageState::Running);
+        assert_eq!(next_line(&mut peer).await, json!({"type": "clear_queue"}));
+        assert_eq!(
+            next_line(&mut peer).await,
+            json!({"id": 2, "type": "prompt", "message": "next", "requestId": queued.id})
+        );
     }
 
     #[tokio::test]

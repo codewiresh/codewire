@@ -15,6 +15,10 @@ pub(crate) const MAX_CHUNK: usize = 256 * 1024;
 // including a 4 KiB working directory, fits in the remaining 128 KiB.
 const MAX_REQUEST: usize = 512 * 1024;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
+/// The whole interrupt before an explicit stop or restart: recording it,
+/// writing its control line, and the helper's wait of at most 10 s for the
+/// interrupted message to end and its parent notification to be written.
+pub(crate) const STOP_INTERRUPT_BOUND: Duration = Duration::from_secs(12);
 
 pub(crate) fn is_managed(value: i32) -> bool {
     matches!(
@@ -262,6 +266,17 @@ pub(crate) async fn helper(
     environment: &str,
     request: Value,
 ) -> Result<Value, Error> {
+    helper_within(config, environment, request, HELPER_TIMEOUT).await
+}
+
+/// [`helper`] for an operation that itself waits, such as the bounded wait
+/// for an interrupted run; `timeout` covers that wait and the exchange.
+pub(crate) async fn helper_within(
+    config: &crate::Config,
+    environment: &str,
+    request: Value,
+    timeout: Duration,
+) -> Result<Value, Error> {
     let host = config.host.as_ref().ok_or(Error::Denied)?;
     if host.state_root.file_name().and_then(|p| p.to_str()) != Some(environment) {
         return Err(Error::Denied);
@@ -280,7 +295,7 @@ pub(crate) async fn helper(
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| Error::Unavailable)?;
-    exchange_record_pipe(&mut child, &request).await
+    exchange_record_pipe_within(&mut child, &request, timeout).await
 }
 
 // The production caller supplies only its admitted retained-image child. Keep
@@ -290,9 +305,17 @@ pub(crate) async fn exchange_record_pipe(
     child: &mut tokio::process::Child,
     request: &[u8],
 ) -> Result<Value, Error> {
+    exchange_record_pipe_within(child, request, HELPER_TIMEOUT).await
+}
+
+async fn exchange_record_pipe_within(
+    child: &mut tokio::process::Child,
+    request: &[u8],
+    timeout: Duration,
+) -> Result<Value, Error> {
     let mut input = child.stdin.take().ok_or(Error::Unavailable)?;
     let output = child.stdout.take().ok_or(Error::Unavailable)?;
-    let result = tokio::time::timeout(HELPER_TIMEOUT, async {
+    let result = tokio::time::timeout(timeout, async {
         let write = async {
             input.write_all(request).await?;
             input.shutdown().await?;
@@ -331,19 +354,60 @@ pub(crate) async fn exchange_record_pipe(
 pub(crate) fn scoped(op: &str, scope: &Scope, driver: &str, session: &str) -> Value {
     json!({"op":op,"scope":scope,"driver_id":driver,"session_id":session})
 }
-pub(crate) fn prepare(origin: &Origin, launch: &v1::HostControlManagedLaunch) -> Value {
-    json!({"op":"prepare","origin":origin,"agent":if launch.agent==v1::HostManagedAgent::Codex as i32 {"codex"}else{"claude"},
+/// The agent a member launch names, as the helper spells it. Any other value
+/// is refused rather than launched as an agent it does not name.
+pub(crate) fn managed_agent(value: i32) -> Result<&'static str, Error> {
+    match v1::HostManagedAgent::try_from(value) {
+        Ok(v1::HostManagedAgent::Codex) => Ok("codex"),
+        Ok(v1::HostManagedAgent::Claude) => Ok("claude"),
+        _ => Err(Error::Invalid),
+    }
+}
+/// The record a queued member control creates, as the helper spells its
+/// action. Stop, restart and unknown values are refused, never queued.
+pub(crate) fn managed_action(value: i32) -> Result<&'static str, Error> {
+    match v1::HostManagedAction::try_from(value) {
+        Ok(v1::HostManagedAction::Message) => Ok("message"),
+        Ok(v1::HostManagedAction::Steer) => Ok("steer"),
+        Ok(v1::HostManagedAction::Interrupt) => Ok("interrupt"),
+        _ => Err(Error::Invalid),
+    }
+}
+pub(crate) fn prepare(
+    origin: &Origin,
+    launch: &v1::HostControlManagedLaunch,
+) -> Result<Value, Error> {
+    Ok(
+        json!({"op":"prepare","origin":origin,"agent":managed_agent(launch.agent)?,
         "model":launch.model,"effort":launch.effort,"working_dir":launch.working_dir,"name":launch.name,
         "prompt":launch.prompt,"parent_session_id":launch.parent_session_id,
-        "expected_parent_launch_generation":launch.expected_parent_launch_generation})
+        "expected_parent_launch_generation":launch.expected_parent_launch_generation}),
+    )
 }
-pub(crate) fn queue(origin: &Origin, control: &v1::HostControlManagedControl) -> Value {
-    json!({"op":"queue","origin":origin,"driver_id":control.driver_id,"session_id":control.session_id,
-        "action":match v1::HostManagedAction::try_from(control.action) {
-            Ok(v1::HostManagedAction::Message)=>"message",Ok(v1::HostManagedAction::Steer)=>"steer",_=>"interrupt"},
+pub(crate) fn queue(
+    origin: &Origin,
+    control: &v1::HostControlManagedControl,
+) -> Result<Value, Error> {
+    Ok(
+        json!({"op":"queue","origin":origin,"driver_id":control.driver_id,"session_id":control.session_id,
+        "action":managed_action(control.action)?,
         "text":control.text,"reply_to":control.reply_to,"expected_turn_id":control.expected_turn_id,
         "expected_active_message_id":control.expected_active_message_id,
-        "launch_generation":control.expected_launch_generation})
+        "launch_generation":control.expected_launch_generation}),
+    )
+}
+/// Records the fenced interrupt an explicit stop or restart sends first, when
+/// the conversation's agent takes one and has an active run. The helper
+/// decides from the conversation's own config; for other agents it records
+/// nothing and answers at once.
+pub(crate) fn interrupt_before_stop(driver: &str, session: &str) -> Value {
+    json!({"op":"interrupt_before_stop","driver_id":driver,"session_id":session})
+}
+/// Waits, in the helper, at most 10 s for that interrupt's message to end and
+/// for its parent notification to be written.
+pub(crate) fn await_interrupt_before_stop(driver: &str, session: &str, message: &str) -> Value {
+    json!({"op":"await_interrupt_before_stop","driver_id":driver,"session_id":session,
+        "message_id":message})
 }
 pub(crate) fn line(driver: &str, message: &str, shutdown: bool) -> Result<Vec<u8>, Error> {
     let mut bytes = serde_json::to_vec(&json!({"v":1,"op":if shutdown{"shutdown"}else{"deliver"},
@@ -407,7 +471,7 @@ mod tests {
         let mut control = control(v1::HostManagedAction::Message);
         control.text = "\u{1}".repeat(64 * 1024);
         validate_control(&control).unwrap();
-        let request = encode_request(&queue(&origin, &control)).unwrap();
+        let request = encode_request(&queue(&origin, &control).unwrap()).unwrap();
         let mut child = pipe_child(
             "raw = sys.stdin.buffer.read(524289)\nvalue = json.loads(raw)\nassert value['op'] == 'queue'\nassert value['text'] == '\\x01' * 65536\nos.write(1, json.dumps({'bytes': len(raw), 'complete': True}).encode())",
         )
@@ -541,7 +605,10 @@ mod tests {
         control.expected_launch_generation = u64::MAX;
         validate_launch(&launch).unwrap();
         validate_control(&control).unwrap();
-        for request in [prepare(&origin, &launch), queue(&origin, &control)] {
+        for request in [
+            prepare(&origin, &launch).unwrap(),
+            queue(&origin, &control).unwrap(),
+        ] {
             let encoded = encode_request(&request).unwrap();
             assert!(encoded.len() > 256 * 1024);
             assert_eq!(serde_json::from_slice::<Value>(&encoded).unwrap(), request);
@@ -552,7 +619,7 @@ mod tests {
         assert!(validate_control(&control).is_err());
         control.text = "x".repeat(MAX_REQUEST);
         assert!(matches!(
-            encode_request(&queue(&origin, &control)),
+            encode_request(&queue(&origin, &control).unwrap()),
             Err(Error::Capacity)
         ));
     }
@@ -605,7 +672,7 @@ mod tests {
             expected_parent_launch_generation: 4,
             ..Default::default()
         };
-        let prepared = prepare(&request.origin(), &launch);
+        let prepared = prepare(&request.origin(), &launch).unwrap();
         assert_eq!(prepared["expected_parent_launch_generation"], 4);
         for key in ["program", "registry_root", "env", "provider_endpoint"] {
             assert!(prepared.get(key).is_none());
@@ -615,10 +682,84 @@ mod tests {
         let mut value = control(v1::HostManagedAction::Message);
         value.text = "message".into();
         value.expected_launch_generation = 9;
-        assert_eq!(queue(&request.origin(), &value)["launch_generation"], 9);
+        assert_eq!(
+            queue(&request.origin(), &value).unwrap()["launch_generation"],
+            9
+        );
         assert!(
             retained_executable().is_err(),
             "a standalone lib test image is never a cw-bearing daemon"
+        );
+    }
+
+    #[test]
+    fn member_requests_name_codex_and_claude_exactly_and_refuse_any_other_agent() {
+        let origin =
+            crate::host_control::tests::launch(3, &crate::host_control::tests::scope(), "exit 0")
+                .origin();
+        let mut launch = v1::HostControlManagedLaunch {
+            model: "synthetic".into(),
+            effort: Some("max".into()),
+            ..Default::default()
+        };
+        for (agent, name) in [
+            (v1::HostManagedAgent::Codex, "codex"),
+            (v1::HostManagedAgent::Claude, "claude"),
+        ] {
+            assert_eq!(managed_agent(agent as i32).unwrap(), name);
+            launch.agent = agent as i32;
+            assert_eq!(prepare(&origin, &launch).unwrap()["agent"], name);
+        }
+        // Unspecified, and noel or any other value the proto does not name,
+        // used to launch Claude. Member launches of noel stay refused.
+        for agent in [0, 3, 7, -1, i32::MAX] {
+            assert!(matches!(managed_agent(agent), Err(Error::Invalid)));
+            launch.agent = agent;
+            assert!(matches!(prepare(&origin, &launch), Err(Error::Invalid)));
+        }
+    }
+
+    #[test]
+    fn member_queue_names_its_action_exactly_and_never_queues_stop_restart_or_unknown() {
+        let origin =
+            crate::host_control::tests::launch(3, &crate::host_control::tests::scope(), "exit 0")
+                .origin();
+        for (action, name) in [
+            (v1::HostManagedAction::Message, "message"),
+            (v1::HostManagedAction::Steer, "steer"),
+            (v1::HostManagedAction::Interrupt, "interrupt"),
+        ] {
+            assert_eq!(managed_action(action as i32).unwrap(), name);
+            assert_eq!(queue(&origin, &control(action)).unwrap()["action"], name);
+        }
+        // Each of these used to be queued as an interrupt.
+        for action in [
+            v1::HostManagedAction::Unspecified as i32,
+            v1::HostManagedAction::Stop as i32,
+            v1::HostManagedAction::Restart as i32,
+            6,
+            -1,
+        ] {
+            assert!(matches!(managed_action(action), Err(Error::Invalid)));
+            let mut value = control(v1::HostManagedAction::Message);
+            value.action = action;
+            assert!(matches!(queue(&origin, &value), Err(Error::Invalid)));
+        }
+    }
+
+    #[test]
+    fn stop_interrupt_requests_carry_only_the_conversation_identity() {
+        let driver = uuid::Uuid::new_v4().to_string();
+        let session = format!("session-{}", uuid::Uuid::new_v4());
+        let message = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            interrupt_before_stop(&driver, &session),
+            json!({"op": "interrupt_before_stop", "driver_id": driver, "session_id": session})
+        );
+        assert_eq!(
+            await_interrupt_before_stop(&driver, &session, &message),
+            json!({"op": "await_interrupt_before_stop", "driver_id": driver,
+                   "session_id": session, "message_id": message})
         );
     }
 }

@@ -690,6 +690,117 @@ async fn host_control_preserves_legacy_local_stop_prelock_projection_cancellatio
     engine.shutdown().await.unwrap();
 }
 
+/// A host owner's engine, whose state root is named by its environment ID.
+#[cfg(target_os = "linux")]
+fn environment_engine(root: &Path) -> (SessionEngine, String) {
+    let environment = uuid::Uuid::from_u128(41).to_string();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let mut config = tests::test_engine(root).inner.config.clone();
+    config.host = Some(crate::HostConfig {
+        state_root: root.join("hosts").join(&environment),
+    });
+    (
+        SessionEngine::new(&config, CredentialBridge::new(None)),
+        environment,
+    )
+}
+
+/// A running session with a managed driver's command line. `sh` reads the
+/// driver argument as a script in its working directory: a synthetic sleep.
+#[cfg(target_os = "linux")]
+async fn driver_shaped_session(engine: &SessionEngine, root: &Path, environment: &str) -> String {
+    let directory = root.join("driver");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("_agent-driver"), "exec sleep 60\n").unwrap();
+    let record = engine
+        .launch(v1::LaunchSessionRequest {
+            command: vec![
+                "/bin/sh".into(),
+                "_agent-driver".into(),
+                "--environment".into(),
+                environment.into(),
+                "--driver-id".into(),
+                uuid::Uuid::from_u128(42).to_string(),
+                "--registry-root".into(),
+                root.join("hosts").display().to_string(),
+            ],
+            working_dir: directory.display().to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(record.state, v1::SessionLifecycleState::Running as i32);
+    record.session_id
+}
+
+#[cfg(target_os = "linux")]
+fn stop_interrupt_checks(engine: &SessionEngine) -> usize {
+    engine
+        .inner
+        .stop_interrupt_checks
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn explicit_stop_and_restart_check_for_a_run_to_interrupt_and_shutdown_never_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let (engine, environment) = environment_engine(temp.path());
+    let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
+    let ordinary = engine.launch(request("sleep 60", false)).await.unwrap();
+    let stopped_state = v1::SessionLifecycleState::Stopped as i32;
+
+    // Only a running managed driver is checked.
+    assert_eq!(
+        engine.stop(&ordinary.session_id).await.unwrap().state,
+        stopped_state
+    );
+    assert_eq!(stop_interrupt_checks(&engine), 0);
+
+    // This test image is no cw-bearing host daemon, so the record helper is
+    // refused: the explicit stop still checks once and then stops at once.
+    let started = Instant::now();
+    let stopped = engine.stop(&driver).await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(stopped.state, stopped_state);
+    assert!(!stopped.cleanup_unknown);
+    assert_eq!(stop_interrupt_checks(&engine), 1);
+    engine.stop(&driver).await.unwrap();
+    assert_eq!(stop_interrupt_checks(&engine), 1);
+
+    // Restarting a stopped conversation has no run to interrupt; restarting
+    // a running one checks before it stops the old incarnation.
+    engine.restart(&driver).await.unwrap();
+    assert_eq!(stop_interrupt_checks(&engine), 1);
+    let restarted = engine.restart(&driver).await.unwrap();
+    assert_eq!(restarted.launch_generation, 3);
+    assert_eq!(stop_interrupt_checks(&engine), 2);
+
+    // Daemon shutdown stops the running conversation without checking: a
+    // shutdown, like a crash or reboot, leaves the run resumable.
+    engine.shutdown().await.unwrap();
+    assert_eq!(stop_interrupt_checks(&engine), 2);
+    let after = engine.get(&driver).await.unwrap();
+    assert_eq!(after.state, stopped_state);
+    assert!(!after.cleanup_unknown);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sessions_outside_a_host_owner_never_check_for_a_run_to_interrupt() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = tests::test_engine(temp.path());
+    std::fs::create_dir_all(temp.path().join("home")).unwrap();
+    let environment = uuid::Uuid::from_u128(41).to_string();
+    let driver = driver_shaped_session(&engine, temp.path(), &environment).await;
+    engine.stop(&driver).await.unwrap();
+    engine.restart(&driver).await.unwrap();
+    engine.restart(&driver).await.unwrap();
+    engine.shutdown().await.unwrap();
+    engine.stop(&driver).await.unwrap();
+    assert_eq!(stop_interrupt_checks(&engine), 0);
+}
+
 #[tokio::test]
 async fn refused_session_store_is_admitted_once_corrected() {
     let temp = tempfile::tempdir().unwrap();
