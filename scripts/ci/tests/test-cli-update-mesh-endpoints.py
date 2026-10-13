@@ -226,6 +226,7 @@ class ReleaseStoreCleanupTests(unittest.TestCase):
         self.journey.workspace.mkdir(mode=0o700)
         (self.journey.workspace / "child.pid").write_text("synthetic\n")
         self.journey.environment = "synthetic-environment"
+        self.journey.extra_environments = []
         self.journey.mesh_started = False
         self.journey.processes = []
         self.journey.mesh_processes = []
