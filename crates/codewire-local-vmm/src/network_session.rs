@@ -864,6 +864,144 @@ mod tests {
         assert!(reply.ends_with(&TEST_DNS_ANSWER.octets()));
     }
 
+    /// Admits every TCP flow and dials each in `dial` before handing back an
+    /// upstream that is already closed; lookups answer at once.
+    struct BurstBroker {
+        dial: Duration,
+        dialled: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl EgressBroker for BurstBroker {
+        async fn authorize_tcp(&self, _flow: TcpFlow) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn connect_tcp(&self, _flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
+            tokio::time::sleep(self.dial).await;
+            self.dialled.fetch_add(1, Ordering::AcqRel);
+            let (upstream, _) = duplex(1024);
+            Ok(Box::pin(upstream))
+        }
+
+        async fn resolve_dns(&self, _question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
+            Ok(BrokerDnsAnswer {
+                answer: DnsAnswer::Ipv4(TEST_DNS_ANSWER),
+                ttl_seconds: 30,
+            })
+        }
+    }
+
+    fn tcp_packet(
+        source_port: u16,
+        destination: SocketAddrV4,
+        seq: u32,
+        ack: u32,
+        flags: u8,
+    ) -> Vec<u8> {
+        let mut tcp = vec![0_u8; 20];
+        tcp[..2].copy_from_slice(&source_port.to_be_bytes());
+        tcp[2..4].copy_from_slice(&destination.port().to_be_bytes());
+        tcp[4..8].copy_from_slice(&seq.to_be_bytes());
+        tcp[8..12].copy_from_slice(&ack.to_be_bytes());
+        tcp[12] = 5 << 4;
+        tcp[13] = flags;
+        tcp[14..16].copy_from_slice(&64_240_u16.to_be_bytes());
+        let checksum = transport_checksum(GUEST_IP, *destination.ip(), 6, &tcp);
+        tcp[16..18].copy_from_slice(&checksum.to_be_bytes());
+        ipv4_packet(GUEST_IP, *destination.ip(), 6, &tcp)
+    }
+
+    /// Every packet the worker sends within `quiet` of the last one.
+    async fn drain(
+        stream: &mut DuplexStream,
+        session: &mut NetworkSession,
+        quiet: Duration,
+    ) -> Vec<Vec<u8>> {
+        let mut packets = Vec::new();
+        while let Ok(packet) = tokio::time::timeout(quiet, read_guest_packet(stream, session)).await
+        {
+            packets.push(packet.unwrap());
+        }
+        packets
+    }
+
+    /// #2714: the guest completes many handshakes to one destination and
+    /// closes them; a lookup made right after is answered without waiting for
+    /// the dials those connections caused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connect_burst_to_one_destination_does_not_hold_up_dns() {
+        const CONNECTIONS: u16 = 300;
+        let broker = Arc::new(BurstBroker {
+            dial: Duration::from_millis(160),
+            dialled: AtomicUsize::new(0),
+        });
+        let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
+        let destination = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 80), 443);
+        let mut syn_acks = std::collections::BTreeMap::new();
+        let note = |packets: Vec<Vec<u8>>, syn_acks: &mut std::collections::BTreeMap<u16, u32>| {
+            for packet in packets {
+                if packet[9] == 6 && tcp_flags(&packet) == 0x12 {
+                    let port = u16::from_be_bytes([packet[22], packet[23]]);
+                    let seq = u32::from_be_bytes([packet[24], packet[25], packet[26], packet[27]]);
+                    syn_acks.insert(port, seq);
+                }
+            }
+        };
+        for index in 0..CONNECTIONS {
+            let syn = tcp_packet(30_000 + index, destination, 1, 0, 0x02);
+            write_guest_packet(&mut guest, &mut session, &syn)
+                .await
+                .unwrap();
+            let packets = drain(&mut guest, &mut session, Duration::from_millis(5)).await;
+            note(packets, &mut syn_acks);
+        }
+        let packets = drain(&mut guest, &mut session, Duration::from_millis(200)).await;
+        note(packets, &mut syn_acks);
+        for (port, seq) in &syn_acks {
+            let ack = tcp_packet(*port, destination, 2, seq.wrapping_add(1), 0x10);
+            write_guest_packet(&mut guest, &mut session, &ack)
+                .await
+                .unwrap();
+            drain(&mut guest, &mut session, Duration::from_millis(2)).await;
+        }
+        for (port, seq) in &syn_acks {
+            let fin = tcp_packet(*port, destination, 2, seq.wrapping_add(1), 0x11);
+            write_guest_packet(&mut guest, &mut session, &fin)
+                .await
+                .unwrap();
+            drain(&mut guest, &mut session, Duration::from_millis(2)).await;
+        }
+        let established = syn_acks.len();
+
+        let started = tokio::time::Instant::now();
+        let query = dns_query_packet(WORKER_IP, 53, TEST_DNS_NAME);
+        write_guest_packet(&mut guest, &mut session, &query)
+            .await
+            .unwrap();
+        let answered = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let packet = read_guest_packet(&mut guest, &mut session).await.unwrap();
+                if packet[9] == 17 && u16::from_be_bytes([packet[20], packet[21]]) == 53 {
+                    return packet;
+                }
+            }
+        })
+        .await;
+        let elapsed = started.elapsed();
+        eprintln!(
+            "#2714: {established} handshakes completed, {} dialled before the lookup, \
+             lookup answered after {elapsed:?}",
+            broker.dialled.load(Ordering::Acquire)
+        );
+        let answer = answered.expect("the lookup was answered within 30 s");
+        assert!(answer.ends_with(&TEST_DNS_ANSWER.octets()));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the lookup waited {elapsed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_question_beyond_the_in_flight_bound_is_answered_servfail_at_once() {
         let broker = SlowLookupBroker::new();
