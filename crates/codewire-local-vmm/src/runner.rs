@@ -905,27 +905,25 @@ fn same_disk_object_ignoring_size(
 }
 
 /// `program leading_args... disk`. e2fsck and resize2fs parse a filesystem
-/// the guest wrote, so on macOS they run confined to that one disk
-/// ([`crate::darwin::disk_tool`]).
+/// the guest wrote, so they run confined to that one disk
+/// ([`crate::darwin::disk_tool`] on macOS, [`crate::linux::disk_tool`] on
+/// Linux). The caller sets the environment and standard streams.
 fn disk_tool_command(
     program: &Path,
     leading_args: &[&str],
     disk: &Path,
 ) -> std::io::Result<tokio::process::Command> {
-    #[cfg(target_os = "macos")]
-    return crate::darwin::disk_tool::command(program, leading_args, disk);
-    #[cfg(not(target_os = "macos"))]
-    {
-        let mut command = tokio::process::Command::new(program);
-        command.args(leading_args).arg(disk);
-        Ok(command)
-    }
+    crate::host::disk_tool::command(program, leading_args, disk)
 }
 
 async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
     let program = crate::host::e2fsprogs("e2fsck").ok_or(RunnerError::E2fsckUnavailable)?;
+    let confinement = |source| RunnerError::DiskToolConfinement {
+        program: "e2fsck",
+        source,
+    };
     let status = disk_tool_command(&program, &["-p", "-f"], disk)
-        .map_err(|_| RunnerError::E2fsckUnavailable)?
+        .map_err(confinement)?
         .env_clear()
         .env("LC_ALL", "C")
         .env("E2FSCK_CONFIG", "/dev/null")
@@ -934,7 +932,7 @@ async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
         .stderr(Stdio::null())
         .status()
         .await
-        .map_err(|_| RunnerError::E2fsckUnavailable)?;
+        .map_err(confinement)?;
     if !matches!(status.code(), Some(0) | Some(1)) {
         return Err(RunnerError::E2fsckFailed(status.code()));
     }
@@ -943,8 +941,12 @@ async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
 
 async fn run_resize2fs(disk: &Path) -> Result<(), RunnerError> {
     let program = crate::host::e2fsprogs("resize2fs").ok_or(RunnerError::Resize2fsUnavailable)?;
+    let confinement = |source| RunnerError::DiskToolConfinement {
+        program: "resize2fs",
+        source,
+    };
     let status = disk_tool_command(&program, &[], disk)
-        .map_err(|_| RunnerError::Resize2fsUnavailable)?
+        .map_err(confinement)?
         .env_clear()
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
@@ -952,7 +954,7 @@ async fn run_resize2fs(disk: &Path) -> Result<(), RunnerError> {
         .stderr(Stdio::null())
         .status()
         .await
-        .map_err(|_| RunnerError::Resize2fsUnavailable)?;
+        .map_err(confinement)?;
     if !status.success() {
         return Err(RunnerError::Resize2fsFailed(status.code()));
     }
@@ -5314,6 +5316,12 @@ pub enum RunnerError {
     Resize2fsUnavailable,
     #[error("resize2fs failed with status {0:?}")]
     Resize2fsFailed(Option<i32>),
+    #[error("could not run {program} confined to the state disk: {source}")]
+    DiskToolConfinement {
+        program: &'static str,
+        #[source]
+        source: io::Error,
+    },
     #[error(
         "VM generation must advance beyond persisted generation {previous} (requested {requested})"
     )]
@@ -5450,6 +5458,7 @@ impl RunnerError {
             Self::E2fsckFailed(_) => "e2fsck_failed",
             Self::Resize2fsUnavailable => "resize2fs_unavailable",
             Self::Resize2fsFailed(_) => "resize2fs_failed",
+            Self::DiskToolConfinement { .. } => "disk_tool_confinement",
             Self::GenerationNotAdvanced { .. } => "generation_not_advanced",
             Self::Spawn => "spawn",
             Self::ExitedDuringStart => "exited_during_start",
