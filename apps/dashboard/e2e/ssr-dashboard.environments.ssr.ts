@@ -171,7 +171,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     // closing asks first, and Keep editing keeps the drawer and its query.
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue("draft-name-restored");
     await page.locator("[data-drawer-panel]").getByRole("link", { name: "Close Create Sandbox" }).click();
-    const discardRestored = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+    const discardRestored = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
     await expect(discardRestored.getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
     await discardRestored.getByRole("button", { name: "Keep editing", exact: true }).click();
     await expect(discardRestored).toBeHidden();
@@ -533,11 +533,11 @@ test.describe.serial("server-rendered environments", () => {
     // Restore brings back authored fields, which stay until Create or an
     // explicit Discard: Escape must ask, not silently close the drawer.
     await page.keyboard.press("Escape");
-    const discard = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+    const discard = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
     await expect(discard.getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
     await expect(page.locator("[data-drawer]")).toBeVisible();
     await expect(page.locator("#environment-name")).toHaveValue("draft-name-restored");
-    await discard.getByRole("button", { name: "Discard changes", exact: true }).click();
+    await discard.getByRole("button", { name: "Discard draft", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/${slug}/$`));
     await expect(page.locator("[data-drawer]")).toBeHidden();
   });
