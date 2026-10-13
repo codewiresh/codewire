@@ -25,6 +25,7 @@ pub(super) mod host_control;
 #[cfg(target_os = "linux")]
 mod native;
 mod native_host;
+mod noel;
 #[cfg(target_os = "linux")]
 mod platform_control;
 pub(crate) mod platform_host;
@@ -100,6 +101,9 @@ fn agent_policy(sandbox: bool, agent: AgentKind) -> &'static str {
         (false, AgentKind::Claude) => CLAUDE_POLICY,
         (true, AgentKind::Codex) => CODEX_SANDBOX_POLICY,
         (true, AgentKind::Claude) => CLAUDE_SANDBOX_POLICY,
+        (false, AgentKind::Noel) => NOEL_POLICY,
+        // No launch path admits noel in a Sandbox.
+        (true, AgentKind::Noel) => NOEL_HOST_ONLY,
     }
 }
 
@@ -143,6 +147,8 @@ const CLAUDE_SANDBOX_POLICY: &str = "Sandbox execution: installed Claude CLI in 
 /// provider can refuse it for an account or a model. A trusted host passes no
 /// mode: there the user's own rules decide, on their own machine.
 const CLAUDE_SANDBOX_PERMISSION_MODE: [&str; 2] = ["--permission-mode", "auto"];
+const NOEL_POLICY: &str = "trusted host execution: installed noel with the user's ordinary pi settings, login and project trust; its tools run without approval prompts, and extension dialogs are declined";
+const NOEL_HOST_ONLY: &str = "noel managed conversations are qualified only on trusted Linux hosts (`cw env create --local --type host`)";
 const NOT_QUALIFIED: &str = "managed agent conversations are qualified only on trusted host environments (`cw env create --local --type host`); sandbox and platform placements are not qualified yet";
 
 // ---------------------------------------------------------------------------
@@ -154,20 +160,25 @@ const NOT_QUALIFIED: &str = "managed agent conversations are qualified only on t
 enum AgentKind {
     Codex,
     Claude,
+    Noel,
 }
 
 impl AgentKind {
+    /// Also the program looked up on PATH: `noel`, never an installed `pi`.
     fn name(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Noel => "noel",
         }
     }
 
-    fn default_model(self) -> &'static str {
+    /// noel has no default: the launch names its `PROVIDER/ID`.
+    fn default_model(self) -> Option<&'static str> {
         match self {
-            Self::Codex => CODEX_DEFAULT_MODEL,
-            Self::Claude => CLAUDE_DEFAULT_MODEL,
+            Self::Codex => Some(CODEX_DEFAULT_MODEL),
+            Self::Claude => Some(CLAUDE_DEFAULT_MODEL),
+            Self::Noel => None,
         }
     }
 }
@@ -175,7 +186,7 @@ impl AgentKind {
 fn agent_effort(agent: AgentKind, requested: Option<&str>) -> anyhow::Result<Option<String>> {
     let effort = match agent {
         AgentKind::Codex => Some(requested.unwrap_or(CODEX_DEFAULT_EFFORT)),
-        AgentKind::Claude => requested,
+        AgentKind::Claude | AgentKind::Noel => requested,
     };
     if let Some(effort) = effort {
         validate_token("effort", effort)?;
@@ -183,6 +194,12 @@ fn agent_effort(agent: AgentKind, requested: Option<&str>) -> anyhow::Result<Opt
             && !matches!(effort, "low" | "medium" | "high" | "xhigh" | "max")
         {
             anyhow::bail!("Claude --effort supports low, medium, high, xhigh or max");
+        }
+        // noel takes the level as `--thinking`; it has no ultra.
+        if agent == AgentKind::Noel
+            && !matches!(effort, "low" | "medium" | "high" | "xhigh" | "max")
+        {
+            anyhow::bail!("noel --effort supports low, medium, high, xhigh or max");
         }
     }
     Ok(effort.map(str::to_owned))
@@ -1222,12 +1239,16 @@ pub(super) async fn handle_agent_run_command(
     let agent = match args.agent.as_deref() {
         Some("codex") => AgentKind::Codex,
         Some("claude") => AgentKind::Claude,
+        Some("noel") => AgentKind::Noel,
         Some("kimi") => anyhow::bail!(
             "Kimi managed conversations are not qualified yet: its ACP adapter has not passed Codewire qualification. Use --agent codex or --agent claude"
         ),
         Some(other) => anyhow::bail!("unsupported managed agent {other:?}"),
         None => anyhow::bail!("--agent is required for a managed conversation"),
     };
+    if agent == AgentKind::Noel && !cfg!(target_os = "linux") {
+        anyhow::bail!("{NOEL_HOST_ONLY}");
+    }
     if args.tty {
         anyhow::bail!(
             "managed conversations use a structured protocol without a terminal; omit --tty"
@@ -1236,11 +1257,18 @@ pub(super) async fn handle_agent_run_command(
     if !args.command.is_empty() {
         anyhow::bail!("managed conversations launch the selected agent; omit COMMAND");
     }
-    let model = args
-        .model
-        .clone()
-        .unwrap_or_else(|| agent.default_model().into());
+    let model = match (&args.model, agent.default_model()) {
+        (Some(model), _) => model.clone(),
+        (None, Some(model)) => model.into(),
+        (None, None) => anyhow::bail!(
+            "{} needs --model PROVIDER/ID; it has no Codewire default",
+            agent.name()
+        ),
+    };
     validate_token("model", &model)?;
+    if agent == AgentKind::Noel && !model.contains('/') {
+        anyhow::bail!("noel --model must name PROVIDER/ID, such as faux/echo");
+    }
     let effort = agent_effort(agent, args.effort.as_deref())?;
     if let Some(prompt) = &args.prompt {
         validate_text(prompt)?;
@@ -2656,6 +2684,8 @@ struct ActiveTurn {
     interrupts: Vec<String>,
     usage: Option<Value>,
     acknowledged: bool,
+    /// noel only: why the run's latest assistant message failed.
+    failure: Option<String>,
 }
 
 fn control_targets_turn(record: &MessageRecord, active: &ActiveTurn) -> bool {
@@ -2988,6 +3018,7 @@ impl Driver {
                 "codex",
             ),
             AgentKind::Claude => self.spawn_claude(),
+            AgentKind::Noel => self.spawn_noel(),
         }
     }
 
@@ -2995,6 +3026,7 @@ impl Driver {
         match self.config.agent {
             AgentKind::Codex => self.initialize_codex(peer).await,
             AgentKind::Claude => self.initialize_claude(peer).await,
+            AgentKind::Noel => self.initialize_noel(peer).await,
         }
     }
 
@@ -3270,6 +3302,7 @@ impl Driver {
                 interrupts: Vec::new(),
                 usage: None,
                 acknowledged: false,
+                failure: None,
             });
             self.state.phase = DriverPhase::Busy;
             self.state.active_message_id = Some(record.id.clone());
@@ -3296,6 +3329,7 @@ impl Driver {
                     }))
                     .await?;
                 }
+                AgentKind::Noel => self.start_noel_turn(peer, &record.id, &text).await?,
             }
             log(format!("message {} running: {}", record.id, preview(&text)));
         }
@@ -3421,7 +3455,7 @@ impl Driver {
                             "the targeted turn already ended; nothing was interrupted",
                         );
                     }
-                    Some((_, None)) if agent == AgentKind::Codex => {
+                    Some((_, None)) if matches!(agent, AgentKind::Codex | AgentKind::Noel) => {
                         r.fail(
                             MessageState::Error,
                             "the current turn has not reported its native ID yet; nothing was interrupted",
@@ -3460,18 +3494,21 @@ impl Driver {
                 self.queue.push_back(record.id);
                 self.persist_state()?;
             }
-            Decision::Steer(expected) => {
-                let thread = self.thread_id()?;
-                self.pending
-                    .insert(peer.next_id, Pending::Steer(record.id.clone()));
-                let request = peer
-                    .request(
-                        "turn/steer",
-                        json!({"threadId": thread, "input": text_input(&turn_text(&record)), "expectedTurnId": expected}),
-                    )
-                    .await?;
-                debug_assert!(self.pending.contains_key(&request));
-            }
+            Decision::Steer(expected) => match agent {
+                AgentKind::Codex | AgentKind::Claude => {
+                    let thread = self.thread_id()?;
+                    self.pending
+                        .insert(peer.next_id, Pending::Steer(record.id.clone()));
+                    let request = peer
+                        .request(
+                            "turn/steer",
+                            json!({"threadId": thread, "input": text_input(&turn_text(&record)), "expectedTurnId": expected}),
+                        )
+                        .await?;
+                    debug_assert!(self.pending.contains_key(&request));
+                }
+                AgentKind::Noel => self.steer_noel(peer, &record, &expected).await?,
+            },
             Decision::Interrupt(turn) => match agent {
                 AgentKind::Codex => {
                     let thread = self.thread_id()?;
@@ -3492,6 +3529,7 @@ impl Driver {
                     peer.send(&json!({"type": "control_request", "request_id": request_id, "request": {"subtype": "interrupt"}}))
                         .await?;
                 }
+                AgentKind::Noel => self.interrupt_noel(peer, &record, turn).await?,
             },
         }
         Ok(())
@@ -3501,6 +3539,7 @@ impl Driver {
         match self.config.agent {
             AgentKind::Codex => self.on_codex(peer, value).await,
             AgentKind::Claude => self.on_claude(peer, value).await,
+            AgentKind::Noel => self.on_noel(peer, value).await,
         }
     }
 
@@ -4449,6 +4488,7 @@ mod tests {
             interrupts: Vec::new(),
             usage: None,
             acknowledged: true,
+            failure: None,
         };
         assert!(control_targets_turn(&record, &active));
         active.message_id = "next-message".into();
