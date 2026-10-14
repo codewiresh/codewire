@@ -305,6 +305,12 @@ class DeveloperProfileTests(unittest.TestCase):
                     "PREFLIGHT_BASE_SHA": "f" * 40, "FAKE_RECORDS": current_records()}
         for name, offset in (("dev-a", 0), ("dev-b", 20)):
             self.create_profile(name, offset)
+        # The daemon's cw names the worktree's commit as its source revision.
+        git = ["git", "-C", str(self.tree), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+        subprocess.run([*git, "init", "-q"], env=self.env, check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "fixture"], env=self.env, check=True)
+        self.revision = subprocess.run([*git, "rev-parse", "HEAD"], env=self.env, check=True,
+                                       text=True, capture_output=True).stdout.strip()
 
     def certificate(self, path: Path, name: str) -> None:
         subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
@@ -719,6 +725,43 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertTrue([call for call in kube if "SANDBOX_DAEMON_IMAGE=" + output in call["args"] and "deployment/codewire-orchestration" in call["args"]])
         self.assertTrue([call for call in kube if "wait" in call["args"]])
 
+    def test_daemon_cw_is_the_static_musl_build_with_provenance(self) -> None:
+        # The orchestration admits only a static musl cw with a source
+        # provenance as a CW runtime identity; managed agents need it.
+        for service, base, target, revision in (
+                ("daemon", "codewire-cw-toolchain", "x86_64-unknown-linux-musl", self.revision),
+                ("idp", "codewire-rust-base", "", "")):
+            with self.subTest(service=service):
+                self.calls_path.write_text("")
+                result = self.run_script("deploy-service.sh", service)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                bake, = [call["args"] for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
+                self.assertEqual(self.bake_arg(bake, "KIND_DEV_BASE"), base)
+                self.assertEqual(self.bake_arg(bake, "KIND_DEV_TARGET"), target)
+                self.assertEqual(self.bake_arg(bake, "KIND_DEV_SOURCE_REVISION"), revision)
+        dockerfile = (ROOT / "deployments/docker/kind-dev-binary.Dockerfile").read_text()
+        self.assertIn("ARG KIND_DEV_BASE=codewire-rust-base\nFROM ${KIND_DEV_BASE} AS builder\n", dockerfile)
+        for line in (
+            '      command=zigbuild && \\',
+            '      set -- "$@" --target "$KIND_DEV_TARGET" && \\',
+            '      out_dir="$CARGO_TARGET_DIR/$KIND_DEV_TARGET/kind-dev"; \\',
+            "      printf '%s\\n' \"$KIND_DEV_SOURCE_REVISION\" | grep -Eqx '[0-9a-f]{40}' && \\",
+            '        CODEWIRE_SOURCE_TREE_SHA256="$(sha256sum /tmp/kind-dev-sources.sha256 | cut -c1-64)" && \\',
+        ):
+            self.assertIn(line + "\n", dockerfile)
+        bake = (ROOT / "docker-bake.hcl").read_text()
+        toolchain = bake.split('target "cw-toolchain" {', 1)[1].split("}", 1)[0]
+        self.assertIn('dockerfile = "images/cw-runtime/Dockerfile"', toolchain)
+        self.assertIn('target     = "cw-toolchain"', toolchain)
+        self.assertIn('codewire-cw-toolchain = "target:cw-toolchain"', bake)
+
+    def test_daemon_deploy_needs_a_commit_to_name(self) -> None:
+        shutil.rmtree(self.tree / ".git")
+        result = self.run_script("deploy-service.sh", "daemon", GIT_CEILING_DIRECTORIES=str(self.directory))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the worktree has no commit to name as the source revision", result.stderr)
+        self.assertFalse([call for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]])
+
     def test_old_pod_cleanup_failure_is_not_success(self) -> None:
         result = self.run_script("deploy-service.sh", "idp", FAKE_KUBE_FAIL="wait")
         self.assertEqual(result.returncode, 29, result.stderr)
@@ -881,10 +924,11 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertEqual(packages, {"*": {"opt-level": 3, "codegen-units": 16}})
         dockerfile = (ROOT / "deployments/docker/kind-dev-binary.Dockerfile").read_text()
         builder = dockerfile[:dockerfile.index("FROM scratch")]
-        self.assertEqual(re.findall(r"cargo (?:build|test) --locked (--config \S+ --profile \S+)", builder),
+        self.assertEqual(re.findall(r"cargo (?:\"\$command\"|test) --locked (--config \S+ --profile \S+)", builder),
                          ["--config scripts/dev/kind/cargo-profile.toml --profile kind-dev"] * 3)
         self.assertNotIn("$CARGO_TARGET_DIR/ci/", builder)
-        self.assertEqual(builder.count("$CARGO_TARGET_DIR/kind-dev/"), 2)
+        self.assertIn('    out_dir="$CARGO_TARGET_DIR/kind-dev" && \\\n', builder)
+        self.assertEqual(builder.count('"$out_dir/'), 2)
 
     def test_every_copied_input_is_content_hashed(self) -> None:
         # Cargo judges freshness by modification time; the target's content
