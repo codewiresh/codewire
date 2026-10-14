@@ -93,6 +93,21 @@ assert_output "$edge_output" edge_kind false
 kind_workspace_output="$(emit '|valid:v3|kind|complete|' fallback false false true)"
 assert_output "$kind_workspace_output" edge_kind true
 assert_output "$kind_workspace_output" workspace_image false
+kind_workspace_output="$(KIND_WORKSPACE_SOURCE=source emit '|valid:v3|kind|complete|' fallback false false true)"
+assert_output "$kind_workspace_output" workspace_image false
+# When Kind runs the published pin instead, the selected exact-source
+# workspace still gets its Container contract verification.
+kind_pinned_output="$(KIND_WORKSPACE_SOURCE=pinned emit '|valid:v3|kind|complete|' fallback false false true)"
+assert_output "$kind_pinned_output" edge_kind true
+assert_output "$kind_pinned_output" workspace_image true
+kind_pinned_output="$(KIND_WORKSPACE_SOURCE=pinned emit '|valid:v3|kind|complete|' fallback false false false)"
+assert_output "$kind_pinned_output" workspace_image false
+if KIND_WORKSPACE_SOURCE=cached VERIFICATION_SELECTION='|valid:v3|kind|complete|' \
+    VERIFICATION_TESTED_TREE_RECEIPT=fallback CW_PACKAGE_SELECTED=false DESKTOP_PACKAGE_SELECTED=false \
+    WORKSPACE_IMAGE_SELECTED=true GITHUB_OUTPUT="$TMP/unknown-source" "$CHECK" >/dev/null 2>&1; then
+  echo 'an unknown Kind workspace source was accepted' >&2
+  exit 1
+fi
 
 # A hosted pull request's quick selection dispatches only what it names: the
 # policy core, ShellCheck in tooling, compiling every Rust target, and Kind
