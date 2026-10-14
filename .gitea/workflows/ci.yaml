@@ -86,9 +86,10 @@ jobs:
       policy_expected: ${{ steps.dispatch.outputs.policy_expected }}
       standard_expected: ${{ steps.dispatch.outputs.standard_expected }}
       tooling_expected: ${{ steps.dispatch.outputs.tooling_expected }}
-      # A trusted base that predates the separate compile decision compiles
-      # with the Rust group.
-      rust_compile_expected: ${{ steps.dispatch.outputs.rust_compile_expected || steps.dispatch.outputs.rust_transport_expected }}
+      rust_compile_expected: ${{ steps.dispatch.outputs.rust_compile_expected }}
+      # A trusted base that predates the separate shard decision runs the
+      # shards with the Rust group.
+      rust_shards_expected: ${{ steps.dispatch.outputs.rust_shards_expected || steps.dispatch.outputs.rust_transport_expected }}
       rust_transport_expected: ${{ steps.dispatch.outputs.rust_transport_expected }}
       database_expected: ${{ steps.dispatch.outputs.database_expected }}
       services_control_expected: ${{ steps.dispatch.outputs.services_control_expected }}
@@ -254,7 +255,7 @@ jobs:
               # Conservative bootstrap for a base predating dynamic dispatch:
               # run every group so candidate code cannot omit required work.
               for group in \
-                  policy standard tooling rust_compile rust_transport database \
+                  policy standard tooling rust_compile rust_shards rust_transport database \
                   services_control services_runtime edge_kind \
                   cw_release_assets workspace_image; do
                 echo "${group}_expected=true" >> "$GITHUB_OUTPUT"
@@ -766,6 +767,12 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-product-verification.sh security
 
+      # Static edge checks need no cluster, so they run here rather than in a
+      # Kind shard, and an edge-only selection starts no Kind leg.
+      - name: Run Edge static verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|edge_kind|') }}
+        run: scripts/ci/verify/run-product-verification.sh edge
+
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run
         # instead of letting slower groups (Rust, Kind) run on. Best effort;
@@ -886,7 +893,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.rust_transport_expected == 'true' }}
+    if: ${{ needs.verification-selection.outputs.rust_shards_expected == 'true' }}
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
@@ -973,7 +980,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.rust_transport_expected == 'true' }}
+    if: ${{ needs.verification-selection.outputs.rust_shards_expected == 'true' }}
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
@@ -1935,10 +1942,6 @@ jobs:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
-      - name: Run Edge static verification
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|edge_kind|') && matrix.shard.slug == 'edge' }}
-        run: scripts/ci/verify/run-product-verification.sh edge
-
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
@@ -2242,6 +2245,7 @@ jobs:
           VERIFICATION_RUST_TRANSPORT_RESULT: ${{ needs.rust-transport.result }}
           VERIFICATION_RUST_COMPILE_EXPECTED: ${{ needs.verification-selection.outputs.rust_compile_expected }}
           VERIFICATION_RUST_COMPILE_RESULT: ${{ needs.rust-compile.result }}
+          VERIFICATION_RUST_SHARDS_EXPECTED: ${{ needs.verification-selection.outputs.rust_shards_expected }}
           VERIFICATION_RUST_PACKAGES_RESULT: ${{ needs.rust-packages.result }}
           VERIFICATION_RUST_FEATURES_RESULT: ${{ needs.rust-features.result }}
           VERIFICATION_DATABASE_EXPECTED: ${{ needs.verification-selection.outputs.database_expected }}

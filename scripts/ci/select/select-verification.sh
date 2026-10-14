@@ -1965,8 +1965,8 @@ if [ "$event" = pull_request ] && [ "$pr_scope" = quick ] \
     && [ "$pr_ci_full" != true ] && [ "$classification" != unclassified ]; then
   declare -A quick=([policy]=1 [policy_shell]=1 [policy_shell_omittable]=1
     [edge_kind]=1 [kind]=1)
-  # The fast-compile token set: the selections whose rust_transport group
-  # includes the rust-compile job on main (see emit-verification-matrices.sh).
+  # The fast-compile token set: the selections that run the rust-compile job
+  # on main (see emit-verification-matrices.sh).
   for token in rust rust_curated_locks transport transport_derp_contract; do
     if token_selected "$token"; then
       select_token rust_compile

@@ -2033,8 +2033,8 @@ policy|Policy verification|heavy|policy
 standard|Standard verification|heavy|standard
 tooling|Tooling / delivery contract verification|heavy|tooling
 rust-compile|Compile every Rust target|heavy|rust_compile
-rust-packages|Rust / transport packages|heavy|rust_transport
-rust-features|Rust / transport feature graphs|heavy|rust_transport
+rust-packages|Rust / transport packages|heavy|rust_shards
+rust-features|Rust / transport feature graphs|heavy|rust_shards
 rust-transport|Rust / transport verification|heavy|rust_transport
 database|Database verification|heavy|database
 services-control|Service control-plane verification|heavy|services_control
@@ -2069,17 +2069,17 @@ grep -qF "trusted_dispatch_selector='.trusted-ci-policy/scripts/ci/select/emit-v
   "$selection_block"
 grep -qF 'run every group so candidate code cannot omit required work' \
   "$selection_block"
-grep -qF 'policy standard tooling rust_compile rust_transport database' "$selection_block" || {
-  echo 'the dispatch bootstrap does not run the compile group' >&2
+grep -qF 'policy standard tooling rust_compile rust_shards rust_transport database' "$selection_block" || {
+  echo 'the dispatch bootstrap does not run the compile and shard groups' >&2
   exit 1
 }
 # shellcheck disable=SC2016 # Match the literal Actions expression.
-grep -qxF '      rust_compile_expected: ${{ steps.dispatch.outputs.rust_compile_expected || steps.dispatch.outputs.rust_transport_expected }}' \
+grep -qxF '      rust_shards_expected: ${{ steps.dispatch.outputs.rust_shards_expected || steps.dispatch.outputs.rust_transport_expected }}' \
   "$selection_block" || {
-  echo 'rust_compile_expected must fall back to the Rust group for an older trusted base' >&2
+  echo 'rust_shards_expected must fall back to the Rust group for an older trusted base' >&2
   exit 1
 }
-for expectation_name in policy standard tooling rust_transport database \
+for expectation_name in policy standard tooling rust_compile rust_transport database \
     services_control services_runtime edge_kind cw_release_assets workspace_image; do
   grep -qF "${expectation_name}_expected: \${{ steps.dispatch.outputs.${expectation_name}_expected }}" \
     "$selection_block"
@@ -2197,9 +2197,8 @@ for job_id in policy standard tooling rust-compile rust-packages rust-features r
   fi
 done
 
-# rust_transport_expected also covers curated locks and the desktop artifact.
-# Each shard runs only for a rust or transport selection, like rust-transport,
-# and otherwise succeeds without work so the aggregator still sees success.
+# The shards are dispatched by rust_shards_expected, exactly the rust or
+# transport selection their run step requires.
 for job_id in rust-packages rust-features; do
   block="$TMP/${job_id}.yaml"
   run_guard="$(awk '/^      - name: Run the Rust .* shard$/ { getline; print; exit }' "$block")"
@@ -2952,7 +2951,12 @@ if rg -n 'run-integration-verification\.sh services([^_-]|$)|"\$INTEGRATION_RUNN
 fi
 
 edge_kind_block="$TMP/edge-kind.yaml"
-grep -qF 'run: scripts/ci/verify/run-product-verification.sh edge' "$edge_kind_block"
+# Static edge checks run in tooling, so an edge-only selection starts no Kind leg.
+grep -qF 'run: scripts/ci/verify/run-product-verification.sh edge' "$TMP/tooling.yaml"
+if grep -qF 'run-product-verification.sh edge' "$edge_kind_block"; then
+  echo 'edge-kind: static edge checks moved back into a Kind shard' >&2
+  exit 1
+fi
 grep -qF 'scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"' "$edge_kind_block"
 edge_fixture_runner="$TMP/edge-fixture-runner.sh"
 awk '
@@ -3044,7 +3048,7 @@ for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT
 done
 for expected in VERIFICATION_POLICY_EXPECTED VERIFICATION_STANDARD_EXPECTED \
     VERIFICATION_TOOLING_EXPECTED VERIFICATION_RUST_COMPILE_EXPECTED \
-    VERIFICATION_RUST_TRANSPORT_EXPECTED \
+    VERIFICATION_RUST_SHARDS_EXPECTED VERIFICATION_RUST_TRANSPORT_EXPECTED \
     VERIFICATION_DATABASE_EXPECTED VERIFICATION_SERVICES_CONTROL_EXPECTED \
     VERIFICATION_SERVICES_RUNTIME_EXPECTED VERIFICATION_EDGE_KIND_EXPECTED \
     VERIFICATION_CW_RELEASE_ASSETS_EXPECTED VERIFICATION_WORKSPACE_IMAGE_EXPECTED; do
@@ -3121,10 +3125,65 @@ policy_steps() {
   echo 'a policy core part has no steps' >&2
   exit 1
 }
-[ "$(policy_function run_policy_core | sed '1d;$d')" = $'  run_policy_core_one\n  run_policy_core_two' ] || {
+[ "$(policy_function run_policy_core | grep -Eo 'run_policy_core_(one|two)' | LC_ALL=C sort | paste -sd' ')" \
+    = 'run_policy_core_one run_policy_core_two' ] || {
   echo 'policy core is not exactly its two parts' >&2
   exit 1
 }
+# CI's policy core runs both parts side by side and fails when either fails,
+# including a failure in the middle of a part. Part one here passes only if
+# part two starts while it runs, so a serial aggregate fails this fixture.
+policy_core_fixture() {
+  local dir="$1" one="$2" two="$3"
+  bash -c '
+    set -euo pipefail
+    dir="$1" one_mode="$3" two_mode="$4"
+    eval "$2"
+    run_policy_core_one() { (
+      for _ in $(seq 1 100); do
+        [ -e "$dir/two-started" ] && break
+        sleep 0.05
+      done
+      [ -e "$dir/two-started" ]
+      [ "$one_mode" = pass ] || false
+      echo one-finished
+    ) }
+    run_policy_core_two() { (
+      touch "$dir/two-started"
+      [ "$two_mode" = pass ] || false
+      echo two-finished
+    ) }
+    run_policy_core
+  ' policy-core-fixture "$dir" "$(policy_function run_policy_core)" "$one" "$two"
+}
+for policy_core_case in pass:pass:0 fail:pass:1 pass:fail:1 fail:fail:1; do
+  IFS=: read -r policy_one policy_two policy_expected <<<"$policy_core_case"
+  policy_core_dir="$(mktemp -d "$TMP/policy-core.XXXXXX")"
+  policy_core_status=0
+  policy_core_output="$(policy_core_fixture "$policy_core_dir" "$policy_one" "$policy_two" 2>&1)" \
+    || policy_core_status=$?
+  if [ "$policy_expected" = 0 ]; then
+    [ "$policy_core_status" -eq 0 ] \
+      && grep -qx one-finished <<<"$policy_core_output" \
+      && grep -qx two-finished <<<"$policy_core_output" || {
+      echo "policy core did not run its parts side by side: $policy_core_output" >&2
+      exit 1
+    }
+  else
+    [ "$policy_core_status" -ne 0 ] || {
+      echo "policy core passed with part one $policy_one and part two $policy_two" >&2
+      exit 1
+    }
+    if [ "$policy_one" = fail ] && grep -qx one-finished <<<"$policy_core_output"; then
+      echo 'a failed policy core part kept running past its failing step' >&2
+      exit 1
+    fi
+    if [ "$policy_two" = fail ] && grep -qx two-finished <<<"$policy_core_output"; then
+      echo 'a failed policy core part kept running past its failing step' >&2
+      exit 1
+    fi
+  fi
+done
 grep -qxF '  for part in $(policy_parts); do' <(policy_function run_policy) \
   && grep -qxF '    run_policy_part "$part"' <(policy_function run_policy) || {
   echo 'the policy family does not run the listed policy parts' >&2
@@ -3903,8 +3962,8 @@ quick_dispatch_and_require() {
     group="${group%_expected}"
     results+=("VERIFICATION_${group^^}_EXPECTED=$value")
     jobs=("${group^^}")
-    if [ "$group" = rust_transport ]; then
-      jobs=(RUST_TRANSPORT RUST_PACKAGES RUST_FEATURES)
+    if [ "$group" = rust_shards ]; then
+      jobs=(RUST_PACKAGES RUST_FEATURES)
     fi
     for job in "${jobs[@]}"; do
       if [ "$value" = true ] && [ "$job" != "$missing" ]; then
@@ -3976,6 +4035,323 @@ grep -qF 'environment.pop("VERIFICATION_PR_SCOPE", None)' "$ROOT/scripts/ci/rece
   echo 'the local receipt can inherit the hosted quick scope' >&2
   exit 1
 }
+
+# A dispatched heavy job always has work, and selected work is always
+# dispatched: the emitter's decisions are evaluated against the workflow's own
+# step conditions, for realistic selections and for every token alone, with
+# policy, Kind, Edge or the quick marker, under every artifact fact.
+job_work_selections="$TMP/job-work-selections.txt"
+: > "$job_work_selections"
+for scope_case in docs rust_cli broker_database transport dashboard_kind browser_spec \
+    release_shell selector_policy mixed; do
+  for scope_event_name in push pull_request; do
+    if [ "$scope_event_name" = push ]; then
+      scope_output="$(scope_select push '' '' "$TMP/scope-${scope_case}.paths")"
+    else
+      scope_output="$(scope_select pull_request quick "$no_labels" "$TMP/scope-${scope_case}.paths")"
+    fi
+    selection_value "$scope_output" >> "$job_work_selections"
+  done
+done
+selection_value "$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
+  VERIFICATION_REQUEST=all "$SELECTOR")" >> "$job_work_selections"
+python3 -B - "$WORKFLOW" "$ROOT/scripts/ci/select/emit-verification-matrices.sh" \
+    "$job_work_selections" <<'PY'
+import itertools
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+import yaml
+
+workflow_path, emitter, realistic_path = sys.argv[1:4]
+workflow = yaml.safe_load(open(workflow_path, encoding="utf-8"))
+jobs = workflow["jobs"]
+
+# The steps that verify something. Every other step of a checked job must be
+# a named support step (setup, guard or cleanup), so a new step is classified
+# before this fixture accepts it.
+WORK = {
+    "cw-release-assets": {"Compile the macOS cw for both Mac targets", "Package Linux dry-run assets"},
+    "workspace-image": {
+        "Build and inspect without publication",
+        "Build and inspect the standalone dashboard image",
+        "Run iOS package tests in the pinned Swift image",
+    },
+    "policy": {"Run Policy"},
+    "standard": {
+        "Run Contracts", "Run Go support", "Run Web", "Run SDK Go",
+        "Run SDK TypeScript typecheck and unit suite", "Run SDK Python",
+    },
+    "tooling": {
+        "Run Shell policy", "Run API key smoke tooling", "Run Confidential runtime tooling",
+        "Run Dev smoke tooling", "Run Release provenance", "Run Deploy", "Run Security",
+        "Run Edge static verification",
+    },
+    "rust-compile": {"Compile every Rust target"},
+    "rust-packages": {"Run the Rust packages shard"},
+    "rust-features": {"Run the Rust features shard"},
+    "rust-transport": {
+        "Verify curated Rust image workspace locks", "Run selected Rust and transport",
+        "Run artifact-selected desktop package",
+    },
+    "database": {"Run Database"},
+    "services-control": {"Run Service integration"},
+    "services-runtime": {"Run Service integration"},
+    "kind-workspace": {"Build and verify exact source workspace"},
+    "kind-product": {"Build exact CI-profile product images"},
+    "kind-smokes": {"Build all host smoke and contract binaries"},
+    "edge-kind": {"Run the shard Kind gate"},
+}
+SUPPORT = {
+    "Reuse exact PR-head content verification", "Cancel the run after this failure",
+    "CW release assets not selected", "Container contracts not selected",
+    "Service control-plane integration not selected", "Service runtime-plane integration not selected",
+    "Resolve container contract scope", "Resolve service control-plane scope",
+    "Resolve service runtime-plane scope",
+    "Verify sealed Rust toolchain", "Verify sealed policy tools", "Verify sealed delivery-contract tools",
+    "Verify sealed producer tools", "Verify sealed producer tools and isolated Buildx load",
+    "Verify Rust cache capacity", "Verify Rust protobuf compiler", "Verify GPUI and Wry build prerequisites",
+    "Verify Kind runner tools", "Select best-effort shared Rust cache", "Select existing compiler cache",
+    "Select independent workspace caches", "Install pinned protobuf compiler",
+    "Install pinned protoc for Rust builds", "Install pinned protoc for Rust-backed standard checks",
+    "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",
+    "Install locked dashboard browser-test dependencies", "Set up pinned cross-build tools",
+    "Set up Go 1.26.9", "Set up Go 1.26.9 for security checks", "Set up Go 1.26.9 for DERP interop",
+    "Set up pinned Darwin C cross-check tools", "Prove isolated Buildx load contract",
+    "Prove labeled R2 backend compatibility", "Prepare selected workspace cache seed",
+    "Finalize selected workspace cache seed", "Clean workspace cache credentials",
+    "Clean compiler cache credentials", "Report and clean Rust cache", "Start integration Postgres",
+    "Wait for integration Postgres", "Stop integration Postgres",
+    "Require fresh artifact download directories outside the checkout",
+    "Download exact workspace producer output", "Download exact product producer output",
+    "Download exact smoke producer output", "Upload dashboard browser test results on failure",
+    "Delete the shard Kind cluster", "Export verified workspace", "Upload successful workspace output",
+    "Export non-promotable product images", "Upload successful product output",
+    "Export only completed smoke executables", "Upload successful smoke output",
+}
+
+TOKEN_RE = re.compile(r"\s*(&&|\|\||==|!=|!|\(|\)|,|'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.-]*)")
+
+
+def tokenize(text):
+    tokens, position = [], 0
+    while position < len(text):
+        match = TOKEN_RE.match(text, position)
+        if not match:
+            if text[position:].strip() == "":
+                break
+            raise SystemExit(f"unsupported expression syntax at {text[position:]!r}")
+        tokens.append(match.group(1))
+        position = match.end()
+    return tokens
+
+
+def evaluate(expression, context):
+    text = expression.strip()
+    if text.startswith("${{") and text.endswith("}}"):
+        text = text[3:-2]
+    tokens = tokenize(text)
+    position = 0
+
+    def peek():
+        return tokens[position] if position < len(tokens) else None
+
+    def take(expected=None):
+        nonlocal position
+        token = peek()
+        if expected is not None and token != expected:
+            raise SystemExit(f"expected {expected!r}, found {token!r} in {expression!r}")
+        position += 1
+        return token
+
+    def truthy(value):
+        return value not in ("", False, None)
+
+    def primary():
+        token = take()
+        if token == "(":
+            value = disjunction()
+            take(")")
+            return value
+        if token == "!":
+            return not truthy(primary())
+        if token.startswith("'"):
+            return token[1:-1].replace("''", "'")
+        if peek() == "(":
+            take("(")
+            arguments = []
+            while peek() != ")":
+                arguments.append(disjunction())
+                if peek() == ",":
+                    take(",")
+            take(")")
+            if token == "contains":
+                return str(arguments[1]) in str(arguments[0])
+            if token in ("always", "success"):
+                return True
+            if token in ("failure", "cancelled"):
+                return False
+            raise SystemExit(f"unsupported function {token}")
+        return context.get(token, "")
+
+    def comparison():
+        left = primary()
+        while peek() in ("==", "!="):
+            operator = take()
+            right = primary()
+            left = (str(left) == str(right)) if operator == "==" else (str(left) != str(right))
+        return left
+
+    def conjunction():
+        value = comparison()
+        while peek() == "&&":
+            take()
+            right = comparison()
+            value = truthy(value) and truthy(right)
+        return value
+
+    def disjunction():
+        value = conjunction()
+        while peek() == "||":
+            take()
+            right = conjunction()
+            value = truthy(value) or truthy(right)
+        return value
+
+    result = disjunction()
+    if position != len(tokens):
+        raise SystemExit(f"trailing tokens in {expression!r}")
+    return truthy(result)
+
+
+def dispatch(selection, cw, desktop, workspace):
+    with tempfile.NamedTemporaryFile("r") as output:
+        environment = dict(
+            os.environ, VERIFICATION_SELECTION=selection, VERIFICATION_TESTED_TREE_RECEIPT="fallback",
+            CW_PACKAGE_SELECTED=cw, DESKTOP_PACKAGE_SELECTED=desktop,
+            WORKSPACE_IMAGE_SELECTED=workspace, VERIFICATION_SUPERSEDED="false",
+            GITHUB_OUTPUT=output.name,
+        )
+        subprocess.run([emitter], env=environment, check=True, stderr=subprocess.DEVNULL)
+        return dict(line.strip().split("=", 1) for line in open(output.name) if line.strip())
+
+
+scope_cache = {}
+
+
+def run_scope_step(step, context):
+    environment = {key: (str(value) if "${{" not in str(value) else context.get(
+        str(value).strip()[3:-2].strip(), "")) for key, value in step.get("env", {}).items()}
+    key = (step["run"], tuple(sorted(environment.items())))
+    if key not in scope_cache:
+        with tempfile.NamedTemporaryFile("r") as output:
+            subprocess.run(["bash", "-c", step["run"]], check=True,
+                           env=dict(PATH=os.environ["PATH"], GITHUB_OUTPUT=output.name, **environment))
+            scope_cache[key] = dict(line.strip().split("=", 1) for line in open(output.name) if line.strip())
+    return scope_cache[key]
+
+
+def legs(job):
+    matrix = job.get("strategy", {}).get("matrix")
+    if not matrix:
+        return [{}]
+    return [{"matrix.shard.slug": shard["slug"]} for shard in matrix["shard"]]
+
+
+def job_work(job_id, base_context):
+    """Per leg, the work steps that would run."""
+    job = jobs[job_id]
+    # Only scope steps whose outputs a later step condition reads are run.
+    read_ids = set(re.findall(r"steps\.([A-Za-z0-9_-]+)\.outputs\.",
+                              " ".join(str(step.get("if", "")) for step in job["steps"])))
+    result = []
+    for leg in legs(job):
+        context = dict(base_context, **leg)
+        ran = []
+        for step in job["steps"]:
+            name = step.get("name") or step.get("uses", "")
+            if "if" not in step or evaluate(step["if"], context):
+                if step.get("id") in read_ids and "run" in step:
+                    for key, value in run_scope_step(step, context).items():
+                        context[f"steps.{step['id']}.outputs.{key}"] = value
+                if name in WORK[job_id]:
+                    ran.append(name)
+        result.append(ran)
+    return result
+
+
+# Every step of a checked job is classified as work or support.
+for job_id, work in WORK.items():
+    names = {step.get("name") for step in jobs[job_id]["steps"] if "name" in step}
+    if not work <= names:
+        raise SystemExit(f"{job_id}: work steps no longer exist: {sorted(work - names)}")
+    unclassified = names - work - SUPPORT
+    if unclassified:
+        raise SystemExit(f"{job_id}: classify these steps as work or support: {sorted(unclassified)}")
+# Jobs whose work steps carry their own selection conditions must also not
+# leave selected work undispatched. The others (Kind builders, the compile)
+# run unconditionally once their job is dispatched.
+SELECTION_GATED = {
+    job_id for job_id, work in WORK.items()
+    if all(re.search(r"outputs\.selection|_selected|steps\.",
+                     str(step.get("if", "")))
+           for step in jobs[job_id]["steps"] if step.get("name") in work)
+}
+capability_jobs = {job_id for job_id, job in jobs.items()
+                   if re.search(r"outputs\.[a-z_]+_expected == 'true'", job.get("if", ""))}
+if capability_jobs - set(WORK):
+    raise SystemExit(f"capability jobs without work classification: {sorted(capability_jobs - set(WORK))}")
+
+realistic = [line.strip() for line in open(realistic_path) if line.strip()]
+universe = sorted({token for selection in realistic for token in selection.strip("|").split("|")}
+                  - {"valid:v3", "complete"} | {"ios", "pr_quick", "rust_compile", "rust_pkg_codewire_desktop",
+                                                "transport_derp_contract", "contracts_proto", "go_tailnet",
+                                                "security_go", "go_consumer_interop"})
+synthetic = set()
+for token in universe:
+    for extra in ((), ("policy", "policy_shell_omittable"), ("kind",), ("edge_kind",), ("pr_quick",)):
+        synthetic.add("|valid:v3|" + "|".join(sorted({token, *extra})) + "|complete|")
+synthetic.add("|valid:v3|complete|")
+checked = 0
+for selection in sorted(set(realistic) | synthetic):
+    quick = "|pr_quick|" in selection
+    for cw, desktop, workspace in itertools.product(("true", "false"), repeat=3):
+        expected = dispatch(selection, cw, desktop, workspace)
+        # A quick selection deliberately ignores artifact facts; its steps
+        # see what dispatch saw.
+        facts = ("false", "false", "false") if quick else (cw, desktop, workspace)
+        context = {
+            "needs.verification-selection.result": "success",
+            "needs.kind-workspace.result": "success",
+            "needs.kind-product.result": "success",
+            "needs.kind-smokes.result": "success",
+            "needs.verification-selection.outputs.selection": selection,
+            "needs.verification-selection.outputs.tested_tree_receipt": "fallback",
+            "needs.verification-selection.outputs.superseded": "false",
+            "needs.verification-selection.outputs.workspace_cache_experiment": "false",
+            "needs.verification-selection.outputs.cw_package_selected": facts[0],
+            "needs.verification-selection.outputs.desktop_package_selected": facts[1],
+            "needs.verification-selection.outputs.workspace_image_selected": facts[2],
+        }
+        for name, value in expected.items():
+            context[f"needs.verification-selection.outputs.{name}"] = value
+        for job_id in WORK:
+            dispatched = evaluate(jobs[job_id]["if"], context)
+            work = job_work(job_id, context)
+            if dispatched and not all(work):
+                raise SystemExit(
+                    f"{job_id} would start with no work for {selection} "
+                    f"(cw={cw} desktop={desktop} workspace={workspace}): legs={work}")
+            if not dispatched and any(work) and job_id in SELECTION_GATED:
+                raise SystemExit(
+                    f"{job_id} has selected work but is not dispatched for {selection} "
+                    f"(cw={cw} desktop={desktop} workspace={workspace}): {work}")
+        checked += 1
+print(f"dispatched jobs always have work: {checked} selection and artifact combinations")
+PY
 
 echo 'select-verification fixtures: OK'
 
