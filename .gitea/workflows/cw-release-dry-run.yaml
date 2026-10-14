@@ -207,6 +207,8 @@ jobs:
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
       runtime: ${{ steps.runtime.outputs.present }}
+      # The one local runtime document every cw embeds (#2733).
+      document_sha256: ${{ steps.runtime.outputs.document_sha256 }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -246,7 +248,9 @@ jobs:
             --source-sha "$GITHUB_SHA" --output "$work/macos" || status=$?
           case "$status" in
             0) echo "CW_RELEASE_LOCAL_RUNTIME_DIR=$work/macos/runtime" >> "$GITHUB_ENV"
-               echo 'present=true' >> "$GITHUB_OUTPUT" ;;
+               echo 'present=true' >> "$GITHUB_OUTPUT"
+               printf 'document_sha256=%s\n' \
+                 "$(shasum -a 256 "$work/macos/runtime/local-runtime.json" | cut -c1-64)" >> "$GITHUB_OUTPUT" ;;
             4) echo '::warning::A slow runtime part is not cached; the next release builds it. This dry run embeds no runtime.' ;;
             *) exit "$status" ;;
           esac
@@ -323,15 +327,24 @@ jobs:
       - name: Verify the received macOS pair is the built pair
         env:
           DARWIN_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}
+          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}
         run: |
           set -euo pipefail
           [[ "$DARWIN_SUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]
           (cd dist-darwin && sha256sum --check SHA256SUMS)
+          # The runtime the Linux cws embed is exactly the one the macOS job packed.
+          if [ -n "$DOCUMENT_SHA256" ]; then
+            [[ "$DOCUMENT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [ "$(sha256sum dist-darwin/local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]
+          else
+            [ ! -e dist-darwin/local-runtime ]
+          fi
 
       - name: Package and verify the unsigned delivery
         env:
           RUNTIME: ${{ needs.build-darwin.outputs.runtime }}
+          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}
         run: |
           set -euo pipefail
           CW_RELEASE_BUILD_CMD='cargo zigbuild' \
@@ -343,9 +356,9 @@ jobs:
           [ "$(find dist/cw-release/delivery/identities -name '*.json' | wc -l)" -eq 4 ]
           verified="$(python3 scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned)"
           grep -Fx "cw-release: verified targets=4 version=$DRY_RUN_VERSION runtime_equal=true signed=false" <<<"$verified"
-          # The macOS arm64 cw embeds the runtime exactly when one was built.
+          # Every cw embeds the one runtime exactly when one was built.
           if [ "$RUNTIME" = true ]; then
-            grep -q '^cw-release: local runtime document_sha256=' <<<"$verified"
+            grep -q "^cw-release: local runtime document_sha256=$DOCUMENT_SHA256 " <<<"$verified"
           else
             [ ! -e dist/cw-release/delivery/local-runtime ]
           fi

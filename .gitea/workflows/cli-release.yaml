@@ -109,17 +109,21 @@ jobs:
           printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"
 
   build-runtime-linux:
-    # The Linux side of the local VM runtime the macOS arm64 cw embeds
-    # (#2539): the arm64 guest root, the arm64 kernel (from the release parts
+    # The Linux side of the local VM runtime every release cw embeds (#2539,
+    # #2733): the arm64 guest root, the arm64 kernel (from the release parts
     # cache, or built in its pinned container), the aarch64 cw runtime and
-    # the Linux-side GPL sources; and the Linux x86_64 target (#2733) as the
-    # linux fragment, not embedded yet. Each comes from the release source's
-    # own scripts and pins. A source that predates the runtime embeds none.
-    # Compilation and pinned downloads only: no OIDC, signing, mirror or R2
-    # write capability exists in this job.
+    # the Linux-side GPL sources; and the Linux x86_64 target as the linux
+    # fragment, which build-darwin merges into the one document. Each comes
+    # from the release source's own scripts and pins. A source that predates
+    # the runtime embeds none. Compilation and pinned downloads only: no
+    # OIDC, signing, mirror or R2 write capability exists in this job.
     name: Build the local runtime's Linux side
     needs: [release-selection]
     runs-on: ci-protected
+    # Both kernels (about 25 min each when not cached), both guest roots and
+    # both cw runtimes (about 15 min each): bounded well below the pool's
+    # limit, so a wedged build cannot hold a release for hours.
+    timeout-minutes: 165
     outputs:
       present: ${{ steps.build.outputs.present }}
       linux_sha256: ${{ steps.build.outputs.linux_sha256 }}
@@ -197,6 +201,9 @@ jobs:
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
       records_sha256: ${{ steps.runtime.outputs.records_sha256 }}
+      # The one local runtime document every release cw embeds; build-release
+      # requires the runtime it imports to be exactly this one.
+      document_sha256: ${{ steps.runtime.outputs.document_sha256 }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
@@ -230,8 +237,9 @@ jobs:
           name: cw-release-runtime-linux-${{ github.run_id }}
           path: .local-runtime-linux
 
-      # The arm64 cw embeds the runtime this step packs; the parts it built
-      # (cache misses) go to the publishing job as cache records.
+      # Every release cw embeds the runtime this step packs: the macOS target
+      # merged with the Linux job's linux-x86_64 fragment. The parts either
+      # job built (cache misses) go to the publishing job as cache records.
       - name: Build the local VM runtime
         id: runtime
         if: needs.build-runtime-linux.outputs.present == 'true'
@@ -253,6 +261,8 @@ jobs:
           tar -C "$work/macos/built" -cf ../.runtime-records/runtime-records.tar .
           printf 'records_sha256=%s\n' \
             "$(shasum -a 256 ../.runtime-records/runtime-records.tar | cut -c1-64)" >> "$GITHUB_OUTPUT"
+          printf 'document_sha256=%s\n' \
+            "$(shasum -a 256 "$work/macos/runtime/local-runtime.json" | cut -c1-64)" >> "$GITHUB_OUTPUT"
 
       - name: Hand the runtime part records to publication
         if: steps.runtime.outputs.records_sha256 != ''
@@ -347,11 +357,20 @@ jobs:
         working-directory: .release-source
         env:
           DARWIN_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}
+          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}
         run: |
           set -euo pipefail
           [[ "$DARWIN_SUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]
           (cd dist-darwin && sha256sum --check SHA256SUMS)
+          # The runtime the Linux cws embed is exactly the one the macOS job
+          # packed and its cws embed; its blobs are bound by that document.
+          if [ -n "$DOCUMENT_SHA256" ]; then
+            [[ "$DOCUMENT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [ "$(sha256sum dist-darwin/local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]
+          else
+            [ ! -e dist-darwin/local-runtime ]
+          fi
 
       - name: Package unsigned release delivery
         id: prepare
@@ -360,15 +379,21 @@ jobs:
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}
         run: |
           set -euo pipefail
           # The macOS pair comes from build-darwin; preparation admits each
-          # by its build record exactly as a local build.
+          # by its build record exactly as a local build. The Linux cws embed
+          # the imported runtime, and every cw must embed exactly it.
           CW_RELEASE_BUILD_CMD='cargo zigbuild' \
             CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu' \
             CW_RELEASE_IMPORT_DIR=dist-darwin \
             ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"
-          python3 ../scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned
+          verified="$(python3 ../scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned)"
+          printf '%s\n' "$verified"
+          if [ -n "$DOCUMENT_SHA256" ]; then
+            grep -q "^cw-release: local runtime document_sha256=$DOCUMENT_SHA256 " <<<"$verified"
+          fi
           (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
           printf 'delivery_sha256=%s\n' \
             "$(python3 ../scripts/ci/release/cw_release.py digest --dist dist/cw-release)" >> "$GITHUB_OUTPUT"

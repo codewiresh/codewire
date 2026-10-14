@@ -102,34 +102,75 @@ def macos_helper(libraries=HELPER_LIBRARIES, runtime=True, entitlements=None, cp
     return body + b"\0" * (dataoff - len(body)) + (superblob if signed else b"")
 
 
-def local_runtime(revision):
-    """A synthetic macOS local runtime: its canonical document and blob bytes."""
+def x86_bzimage(tag=b"kernel"):
+    """Header-correct synthetic x86 boot image: boot sector signature and HdrS."""
+    data = bytearray(4096)
+    data[510:512] = b"\x55\xaa"
+    data[0x202:0x206] = b"HdrS"
+    data[2048:2048 + len(tag)] = tag
+    return bytes(data)
+
+
+def cw_runtime(target, revision, version=VERSION, payload=None, image_index="c" * 64):
+    """A sealed cw runtime: its lock and pack bytes, framed as cw-runtime-image.py packs them."""
+    if payload is None:
+        payload = executable(target, version, tag=b"guest cw", revision=revision)
+    provenance = release.canonical({"image_index_sha256": image_index, "payload": {
+        "target": target, "source_revision": revision, "sha256": digest(payload), "size": len(payload)}})
+    pack = release.CW_RUNTIME_PACK_MAGIC + struct.pack("<QQ", len(provenance), len(payload)) + provenance + payload
+    lock = release.canonical({"schema_version": 1, "image_index_sha256": image_index,
+                              "pack": {"path": "runtime.pack", "size": len(pack), "sha256": digest(pack)}})
+    return lock, pack
+
+
+def local_runtime(revision, version=VERSION):
+    """A synthetic release local runtime (#2733): one document with the
+    macos-aarch64 and linux-x86_64 targets, each with a sealed cw runtime, and
+    its blob bytes."""
     files = {}
 
-    def ref(name):
-        data = f"synthetic {name}\n".encode()
+    def put(data):
         files[digest(data)] = data
         return {"sha256": digest(data), "size": len(data)}
 
-    def spec(path):
-        return {"path": path, "architecture": "aarch64", **ref(path)}
+    def ref(name):
+        return put(f"synthetic {name}\n".encode())
+
+    def spec(path, architecture="aarch64", data=None, version=None):
+        blob = put(data) if data is not None else ref(f"{architecture} {path}")
+        return {"path": path, "architecture": architecture, **blob, **({"version": version} if version else {})}
+
+    def sealed(target):
+        lock, pack = cw_runtime(target, revision, version)
+        return {"lock": put(lock), "pack": put(pack)}
 
     helper = macos_helper()
-    files[digest(helper)] = helper
-    lock = {"schema_version": 1,
-            "vz_runner": {"path": "codewire-vz-runner", "architecture": "aarch64", "sha256": digest(helper),
-                          "size": len(helper)},
-            "kernel": spec("kernel"),
-            "initramfs": spec("initramfs"),
-            "e2fsprogs": {name: spec(path) for name, path in (
-                ("mkfs_ext4", "mkfs.ext4"), ("e2fsck", "e2fsck"), ("resize2fs", "resize2fs"),
-                ("debugfs", "debugfs"), ("mke2fs_conf", "mke2fs.conf"))},
-            "git": {"git": spec("git"), "git_remote_https": spec("git-remote-https")}}
+    macos_lock = {"schema_version": 1,
+                  "vz_runner": spec("codewire-vz-runner", data=helper),
+                  "kernel": spec("kernel"),
+                  "initramfs": spec("initramfs"),
+                  "e2fsprogs": {name: spec(path) for name, path in (
+                      ("mkfs_ext4", "mkfs.ext4"), ("e2fsck", "e2fsck"), ("resize2fs", "resize2fs"),
+                      ("debugfs", "debugfs"), ("mke2fs_conf", "mke2fs.conf"))},
+                  "git": {"git": spec("git"), "git_remote_https": spec("git-remote-https")}}
+    linux_lock = {"schema_version": 1,
+                  "cloud_hypervisor": spec("cloud-hypervisor", "x86_64", executable(
+                      "x86_64-unknown-linux-musl", tag=b"cloud-hypervisor"), "v53.0"),
+                  "virtiofsd": spec("virtiofsd", "x86_64", executable(
+                      "x86_64-unknown-linux-musl", tag=b"virtiofsd"), "v1.14.0"),
+                  "kernel": spec("kernel", "x86_64", x86_bzimage()),
+                  "initramfs": spec("initramfs", "x86_64")}
     components = [{"name": "e2fsprogs", "version": "1.47.4", "license": "GPL-2.0-only",
                    "source": ref("e2fsprogs-1.47.4.tar.gz")},
                   {"name": "git", "version": "2.56.0", "license": "GPL-2.0-only", "source": ref("git-2.56.0.tar.gz")}]
+    linux_components = [{"name": "cloud-hypervisor", "version": "53.0", "license": "Apache-2.0 AND BSD-3-Clause",
+                         "source": ref("cloud-hypervisor-v53.0.tar.xz")}]
     document = release.canonical({"schema": release.LOCAL_RUNTIME_SCHEMA, "source_revision": revision,
-                                  "targets": {"macos-aarch64": {"lock": lock, "components": components}}})
+                                  "targets": {
+                                      "macos-aarch64": {"lock": macos_lock, "components": components,
+                                                        "cw_runtime": sealed("aarch64-unknown-linux-musl")},
+                                      "linux-x86_64": {"lock": linux_lock, "components": linux_components,
+                                                       "cw_runtime": sealed("x86_64-unknown-linux-musl")}}})
     return document, files
 
 
@@ -210,13 +251,12 @@ class Signer:
 
 
 def package(base, source, source_sha, version=VERSION, tag=b"", embedded=b""):
-    """The package script's outputs: four raw assets plus SHA256SUMS. The
-    macOS arm64 cw embeds `embedded`, as build.rs embeds a local runtime."""
+    """The package script's outputs: four raw assets plus SHA256SUMS. Every
+    cw embeds `embedded`, as build.rs embeds a local runtime (#2733)."""
     dist = base / "dist"
     dist.mkdir()
     tree = release.source_tree_sha256(source)
-    executables = {target: executable(target, version, tag, revision=source_sha, tree=tree,
-                                      embedded=embedded if target == release.LOCAL_RUNTIME_TARGET else b"")
+    executables = {target: executable(target, version, tag, revision=source_sha, tree=tree, embedded=embedded)
                    for target in release.RELEASE_TARGETS}
     for target, data in executables.items():
         (dist / release.asset_name(version, target)).write_bytes(data)
