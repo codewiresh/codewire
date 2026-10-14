@@ -256,6 +256,11 @@ stopped is not replayed; the agent may see an interrupted step and redo it.
 `cw wait --message` for a message sent before the Stop says that it ended with
 the environment.
 
+If the environment refuses the resumed agent's launch before it starts,
+for example because a selected secret source was removed, nothing ran:
+`cw msg` says so, and sending the message again resumes the conversation
+once the cause is fixed.
+
 A conversation waits, and `cw msg` says to try again shortly, while:
 
 - the sandbox's previous Pod is still stopping;
