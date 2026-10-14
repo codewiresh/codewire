@@ -575,7 +575,9 @@ socket_dir_of() {
 }
 SOCKET_DIR="$(socket_dir_of "$STATE_ROOT")" || die 'native socket directory is unavailable'
 ENGINE_SOCKET_DIR="$(socket_dir_of "$STATE_ROOT/engine")" || die 'native socket directory is unavailable'
-readonly SOCKET_DIR ENGINE_SOCKET_DIR
+# The credential authority listens in its root's socket directory (#2745).
+CREDENTIAL_SOCKET_DIR="$(socket_dir_of "$CREDENTIAL_ROOT")" || die 'native socket directory is unavailable'
+readonly SOCKET_DIR ENGINE_SOCKET_DIR CREDENTIAL_SOCKET_DIR
 (( ${#ENGINE_SOCKET_DIR} + ${#LONGEST_SOCKET_SUFFIX} < LINUX_SUN_PATH_BYTES )) ||
   die 'native VMM Unix socket directory is too long'
 
@@ -2468,7 +2470,7 @@ find_exact_credential_authority_pid() {
 shutdown_credential_authority() {
   local pid
   if ! pid="$(find_exact_credential_authority_pid)"; then
-    [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+    [[ ! -e "$CREDENTIAL_SOCKET_DIR/authority.sock" ]]
     return
   fi
   if ! cw_isolated __local-credential-authority-probe \
@@ -2476,7 +2478,7 @@ shutdown_credential_authority() {
     return 1
   fi
   wait_for_pid_death "$pid" || return 1
-  [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+  [[ ! -e "$CREDENTIAL_SOCKET_DIR/authority.sock" ]]
 }
 
 terminate_exact_credential_authority() {
@@ -2489,7 +2491,7 @@ terminate_exact_credential_authority() {
     kill -KILL -- "$pid" 2>/dev/null || return 1
     wait_for_pid_death "$pid" || return 1
   fi
-  [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+  [[ ! -e "$CREDENTIAL_SOCKET_DIR/authority.sock" ]]
 }
 
 scan_for_credential_canary() {
