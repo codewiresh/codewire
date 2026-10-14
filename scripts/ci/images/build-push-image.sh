@@ -496,6 +496,51 @@ join_support_index() {
   done
 }
 
+# A support image build fetches external inputs: github.com release assets
+# through ADD and curl, and Alpine and Debian packages (#2691). A build that
+# fails on a transient network error is retried up to three attempts, after
+# 30 and then 60 seconds, so a later attempt resolves the host again. The
+# builder keeps every finished step, so a retry resumes at the failed fetch.
+# Any other failure ends the build at once.
+readonly BUILD_NETWORK_ATTEMPTS=3
+build_network_retry_delay="${CODEWIRE_BUILD_NETWORK_RETRY_DELAY_SECONDS:-30}"
+[[ "$build_network_retry_delay" =~ ^[0-9]{1,3}$ ]] || {
+  echo 'CODEWIRE_BUILD_NETWORK_RETRY_DELAY_SECONDS must be 0-999' >&2
+  exit 2
+}
+build_attempt_log="$work/build-attempt.log"
+
+# Run one build attempt, keeping its stderr (where the build streams its
+# steps) for diagnosis while it still reaches the job log.
+run_logged_build() {
+  : >"$build_attempt_log"
+  { "$@" 2>&1 1>&3 3>&- | tee -a "$build_attempt_log" >&2 3>&-; } 3>&1
+}
+
+build_network_failure() {
+  grep -Eqi \
+    '(tls handshake timeout|connection reset by peer|connection timed out|dial (tcp|udp)[^[:cntrl:]]*(i/o timeout|connection refused|network is unreachable)|temporary failure in name resolution|no such host|curl: \((5|6|7|16|18|28|35|52|55|56|92)\)|failed to connect to [^[:space:]]+ port [0-9]+)' \
+    "$build_attempt_log"
+}
+
+# retry_network_build ATTEMPT STATUS: returns 0 after logging and waiting when
+# the failed attempt may be retried.
+retry_network_build() {
+  local attempt="$1" status="$2" wait_seconds
+  if ! build_network_failure; then
+    return 1
+  fi
+  if [ "$attempt" -ge "$BUILD_NETWORK_ATTEMPTS" ]; then
+    printf '[build-network] class=transient-exhausted image=%s status=%s attempts=%s\n' \
+      "$image_name" "$status" "$BUILD_NETWORK_ATTEMPTS" >&2
+    return 1
+  fi
+  wait_seconds=$((build_network_retry_delay * attempt))
+  printf '[build-network] transient network failure image=%s status=%s; retrying in %ss (attempt %s/%s)\n' \
+    "$image_name" "$status" "$wait_seconds" "$((attempt + 1))" "$BUILD_NETWORK_ATTEMPTS" >&2
+  sleep "$wait_seconds"
+}
+
 # The CW producer and the consumer's solve write their logs to files and print
 # them only when that step ends. Follow them while they grow, so a slow or
 # killed build still shows which step it was in and how long each one took.
@@ -888,13 +933,24 @@ else
       }
       mkdir -p -- "$cw_image_work"
       follow_owned_logs "$cw_image_work"
-      env DOCKER_CONFIG="$docker_config" \
-        bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
-        "${image_command[@]}"
-      stop_owned_logs
-    else
-      env DOCKER_CONFIG="$docker_config" "${image_command[@]}"
     fi
+    build_attempt=1
+    while :; do
+      build_status=0
+      if [ "$image_name:$dockerfile_from_context" = workspace:images/workspace/Dockerfile ]; then
+        # A retry reuses an admitted CW producer result and gets a fresh
+        # consumer task (cw-image-consumer.sh).
+        run_logged_build env DOCKER_CONFIG="$docker_config" \
+          bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
+          "${image_command[@]}" || build_status=$?
+      else
+        run_logged_build env DOCKER_CONFIG="$docker_config" "${image_command[@]}" || build_status=$?
+      fi
+      [ "$build_status" -ne 0 ] || break
+      retry_network_build "$build_attempt" "$build_status" || exit "$build_status"
+      build_attempt=$((build_attempt + 1))
+    done
+    stop_owned_logs
   fi
   if ! source_digest="$(jq -er '."containerimage.digest" | select(type == "string")' "$build_metadata")" \
     || [[ ! "$source_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then

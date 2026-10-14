@@ -604,7 +604,12 @@ fn admit_physical_endpoint(
     let live = recorded(&runner.process)
         .map_err(|_| Status::failed_precondition("runtime runner birth unavailable"))?;
     let vm_root = core.config.engine_root().join("vms").join(id.to_string());
-    let socket = vm_root.join("vsock").join(crate::state::VSOCK_SOCKET_NAME);
+    // The VM's sockets live in the engine's short socket directory (#2735).
+    let socket = crate::socket_dir::predicted(&core.config.engine_root())
+        .join("vms")
+        .join(id.to_string())
+        .join("vsock")
+        .join(crate::state::VSOCK_SOCKET_NAME);
     if Path::new(&access.hybrid_socket) != socket || access.guest_port != DAEMON_VSOCK_PORT {
         return Err(Status::failed_precondition(
             "runtime transport is not the authoritative VM endpoint",

@@ -113,7 +113,7 @@ pub(crate) async fn run_agent_control(args: AgentControlArgs) -> anyhow::Result<
 fn agent_control(args: &AgentControlArgs) -> anyhow::Result<()> {
     let environment = guest_environment(args)?;
     let request = parse_request(&read_request(std::io::stdin().lock())?)?;
-    let response = handle(&environment, request, &|agent| find_program(agent.name()))?;
+    let response = handle(&environment, request, &resolve_guest_program)?;
     let response = encode_response(&response)?;
     let mut stdout = std::io::stdout().lock();
     stdout
@@ -190,7 +190,58 @@ fn sanitize_error(text: &str) -> String {
     }
 }
 
-type ResolveProgram<'a> = &'a dyn Fn(AgentKind) -> anyhow::Result<PathBuf>;
+/// The client a managed conversation runs, and why it is not the image's
+/// pinned client when it is not.
+pub(super) struct ResolvedProgram {
+    pub(super) path: PathBuf,
+    pub(super) fallback: Option<String>,
+}
+
+impl From<PathBuf> for ResolvedProgram {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            path,
+            fallback: None,
+        }
+    }
+}
+
+type ResolveProgram<'a> = &'a dyn Fn(AgentKind) -> anyhow::Result<ResolvedProgram>;
+
+/// A local VM runs the image's pinned client, admitted by the same code as a
+/// hosted Sandbox, so a newer client the user installed earlier on PATH never
+/// replaces it. An image without an admitted pinned client, such as a custom
+/// image, runs the client on PATH, and the conversation records why.
+fn resolve_guest_program(agent: AgentKind) -> anyhow::Result<ResolvedProgram> {
+    // No image pins noel and no guest runs it; `validate_launch` refuses it
+    // before any program is resolved.
+    if agent == AgentKind::Noel {
+        anyhow::bail!("{NOEL_HOST_ONLY}");
+    }
+    let pinned = codewire_daemon::platform_managed::ProviderPin::admit_image_client(
+        super::platform_control::agent(agent),
+    )
+    .map(|pin| pin.path().to_owned());
+    choose_program(agent, pinned, || find_program(agent.name()))
+}
+
+fn choose_program(
+    agent: AgentKind,
+    pinned: Result<PathBuf, codewire_daemon::platform_managed::PinRefusal>,
+    on_path: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<ResolvedProgram> {
+    match pinned {
+        Ok(path) => Ok(path.into()),
+        Err(refusal) => {
+            let reason = refusal.reason(super::platform_control::agent(agent));
+            let path = on_path().map_err(|error| anyhow::anyhow!("{reason}, and {error:#}"))?;
+            Ok(ResolvedProgram {
+                path,
+                fallback: Some(reason),
+            })
+        }
+    }
+}
 
 pub(super) fn handle(
     environment: &DriverEnvironment,
@@ -562,7 +613,10 @@ fn create_or_reuse(
 // ---------------------------------------------------------------------------
 
 pub(super) fn validate_launch(config: &AgentConfig) -> anyhow::Result<()> {
-    if !config.program.as_os_str().is_empty() {
+    if config.agent == AgentKind::Noel {
+        anyhow::bail!("{NOEL_HOST_ONLY}");
+    }
+    if !config.program.as_os_str().is_empty() || config.program_fallback.is_some() {
         anyhow::bail!(
             "the agent program is resolved inside the guest; prepare with an empty program"
         );
@@ -602,6 +656,7 @@ pub(super) fn validate_launch(config: &AgentConfig) -> anyhow::Result<()> {
 fn launch_identity(config: &AgentConfig) -> anyhow::Result<Value> {
     let mut identity = serde_json::to_value(config)?;
     identity["program"] = Value::Null;
+    identity["program_fallback"] = Value::Null;
     identity["created_at"] = Value::Null;
     Ok(identity)
 }
@@ -652,10 +707,12 @@ fn prepare(
             saved
         }
         None => {
-            config.program = match program {
+            let resolved = match program {
                 Some(program) => program,
                 None => resolve(config.agent)?,
             };
+            config.program = resolved.path;
+            config.program_fallback = resolved.fallback;
             write_private_json(&path, &config)?;
             config
         }
@@ -1036,7 +1093,8 @@ mod tests {
             environment_id: environment.id().into(),
             agent,
             program: PathBuf::new(),
-            model: agent.default_model().into(),
+            program_fallback: None,
+            model: agent.default_model().unwrap_or("faux/echo").into(),
             effort: agent_effort(agent, None).unwrap(),
             working_dir: "/workspace".into(),
             name: "worker".into(),
@@ -1046,8 +1104,8 @@ mod tests {
         }
     }
 
-    fn resolve_in_guest(agent: AgentKind) -> anyhow::Result<PathBuf> {
-        Ok(PathBuf::from(format!("/guest/bin/{}", agent.name())))
+    fn resolve_in_guest(agent: AgentKind) -> anyhow::Result<ResolvedProgram> {
+        Ok(PathBuf::from(format!("/guest/bin/{}", agent.name())).into())
     }
 
     /// Requests cross the same JSON boundary the host uses.
@@ -1139,6 +1197,7 @@ mod tests {
                 capabilities: AgentCapabilities {
                     steer: capable,
                     interrupt: capable,
+                    resume: false,
                     note: "reported by the test driver".into(),
                 },
                 policy: CODEX_POLICY.into(),
@@ -1549,6 +1608,88 @@ mod tests {
             parse_request(&serde_json::to_vec(&prepare_request(&missing)).unwrap()).unwrap();
         assert!(handle(environment, request, &|_| anyhow::bail!("not installed")).is_err());
         assert!(!agents_root(environment).join(&missing.driver_id).exists());
+    }
+
+    /// A user who updated Claude Code puts a newer `claude` first on PATH; a
+    /// managed conversation still runs the image's pinned client.
+    #[test]
+    fn an_admitted_image_pin_wins_over_a_newer_client_on_path() {
+        use codewire_daemon::platform_managed::PinRefusal;
+        let pinned = PathBuf::from(
+            "/opt/codewire/agents/npm/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        );
+        let resolved = choose_program(AgentKind::Claude, Ok(pinned.clone()), || {
+            panic!("an admitted pin never looks on PATH")
+        })
+        .unwrap();
+        assert_eq!(resolved.path, pinned);
+        assert_eq!(resolved.fallback, None);
+
+        // Without an admitted pin, PATH serves and the reason is kept.
+        let user = PathBuf::from("/home/codewire/.npm-global/bin/claude");
+        for (refusal, reason) in [
+            (PinRefusal::Missing, "the image has no pinned Claude Code"),
+            (
+                PinRefusal::Version,
+                "the image's pinned Claude Code is not version 2.1.288",
+            ),
+        ] {
+            let resolved =
+                choose_program(AgentKind::Claude, Err(refusal), || Ok(user.clone())).unwrap();
+            assert_eq!(resolved.path, user);
+            assert_eq!(resolved.fallback.as_deref(), Some(reason));
+        }
+        let error = choose_program(AgentKind::Codex, Err(PinRefusal::Missing), || {
+            anyhow::bail!("the installed codex CLI was not found on PATH")
+        })
+        .err()
+        .unwrap()
+        .to_string();
+        assert_eq!(
+            error,
+            "the image has no pinned Codex, and the installed codex CLI was not found on PATH"
+        );
+    }
+
+    #[test]
+    fn a_conversation_from_path_records_why_and_a_retry_keeps_it() {
+        let guest = guest();
+        let environment = &guest.environment;
+        let mut config = launch(environment, AgentKind::Claude, false);
+        let resolve = |_: AgentKind| {
+            choose_program(
+                AgentKind::Claude,
+                Err(codewire_daemon::platform_managed::PinRefusal::Ownership),
+                || Ok(PathBuf::from("/usr/local/bin/claude")),
+            )
+        };
+        let prepare = |config: &AgentConfig| {
+            let request = parse_request(&serde_json::to_vec(&prepare_request(config)).unwrap())?;
+            handle(environment, request, &resolve)
+        };
+        let first = prepare(&config).unwrap();
+        assert_eq!(first["config"]["program"], "/usr/local/bin/claude");
+        let reason =
+            "the image's pinned Claude Code or a parent directory is not root-owned and read-only";
+        assert_eq!(first["config"]["program_fallback"], reason);
+        let dir = agents_root(environment).join(&config.driver_id);
+        let saved = read_optional::<AgentConfig>(&dir.join("config.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.program_fallback.as_deref(), Some(reason));
+        config.created_at = now();
+        assert_eq!(prepare(&config).unwrap(), first);
+
+        // A pinned conversation's record carries no fallback field at all.
+        let pinned = launch(environment, AgentKind::Codex, false);
+        let response = run(environment, prepare_request(&pinned)).unwrap();
+        assert!(response["config"].get("program_fallback").is_none());
+
+        // The host never names a fallback; the guest decides it.
+        let mut claimed = launch(environment, AgentKind::Claude, false);
+        claimed.program_fallback = Some("host-chosen".into());
+        assert!(prepare(&claimed).is_err());
+        assert!(!agents_root(environment).join(&claimed.driver_id).exists());
     }
 
     #[test]

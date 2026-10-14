@@ -1524,3 +1524,69 @@ database_case!(
         ensure!(effects == 1 && unresolved == 0);
     }
 );
+database_case!(
+    db_launch_denied_before_run_is_refused_and_releases_its_lease,
+    f,
+    {
+        // #2705: the daemon refused an issued launch's projection before its
+        // agent ran and confirmed cleanup. That is a definite refusal: the
+        // conversation has no active request and the deletion lease is
+        // released, not left resolution_required.
+        let m = launch(Uuid::new_v4());
+        let issued = f.issue(m.clone()).await?;
+        let mut denied = receipt(&m, &f.facts, ManagedLifecycle::Failed);
+        denied.phase = ManagedPhase::Rejected;
+        denied.reason_code = "denied-before-run".into();
+        denied.exit_code = None;
+        let saved = f.journal.settle(issued, denied).await?;
+        ensure!(saved.phase == ManagedPhase::Rejected);
+        ensure!(f.observe(m.request_id).await? == saved);
+        let (active, clean): (Option<Uuid>, bool) = sqlx::query_as(
+            "SELECT active_request_id,known_clean FROM environment_platform_agent_conversations WHERE session_id=$1",
+        )
+        .bind(&m.session_id)
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(active.is_none() && clean);
+        let reason: String = sqlx::query_scalar(
+            "SELECT reason_code FROM environment_platform_agent_requests WHERE request_id=$1",
+        )
+        .bind(m.request_id)
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(reason == "platform-agent-command-refused");
+        let unresolved: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM organization_mutation_leases WHERE state='resolution_required'",
+        )
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(unresolved == 0);
+        // Only a launch may be denied before it ran, and only as Failed with
+        // confirmed cleanup; anything else stays unknown.
+        for case in 0..3 {
+            let launched = f.launch().await?;
+            let (mutation, lifecycle) = match case {
+                0 => (
+                    control(&launched, ManagedAction::Stop),
+                    ManagedLifecycle::Failed,
+                ),
+                _ => (launch(Uuid::new_v4()), ManagedLifecycle::Interrupted),
+            };
+            let issued = f.issue(mutation.clone()).await?;
+            let mut bad = receipt(&mutation, &f.facts, lifecycle);
+            bad.phase = ManagedPhase::Rejected;
+            bad.reason_code = "denied-before-run".into();
+            bad.exit_code = None;
+            bad.pipe_acknowledged = false;
+            bad.native_acknowledged = false;
+            bad.cleanup_unknown = case == 2;
+            if case == 2 {
+                bad.lifecycle = ManagedLifecycle::Failed;
+            }
+            ensure!(
+                f.journal.settle(issued, bad).await?.phase == ManagedPhase::Unknown,
+                "invalid denial case {case} was settled"
+            );
+        }
+    }
+);

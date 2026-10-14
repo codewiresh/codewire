@@ -75,6 +75,12 @@ The native supervisor owns the VM lifecycle and the guest daemon owns its
 sessions. Launch the lead and workers through the host CLI. Their parent must
 be a running managed session in this same VM.
 
+As in a platform sandbox, a managed agent runs the workspace image's pinned
+Codex or Claude Code, even after you update that CLI inside the VM; your
+updated version is what your own terminal runs. On an image without the pinned
+clients, such as a custom image, the managed agent runs the CLI on the VM's
+PATH, and `cw run --agent` prints one line naming it and the reason.
+
 In a VM or a platform sandbox, managed Claude starts in auto mode
 (`--permission-mode auto`), so it can run tools such as Bash without a prompt.
 It keeps the Sandbox user's Claude settings and permission rules; setting
@@ -86,7 +92,10 @@ Sign in and select your organization, then use your repository URL and an
 existing platform credential profile with a credential for each agent. Codex
 uses the profile's Codex credential (your ChatGPT sign-in or an API key), or
 its OpenAI API key when it has no Codex credential. Claude uses its Anthropic
-credential. Codewire adds the credential outside the Sandbox. A managed Codex
+credential: an API key or a Claude subscription token. With a subscription
+token from `claude setup-token`, managed and interactive turns work, but
+Claude Code shows "Claude API" in place of your plan and `/usage` is not
+available. Codewire adds the credential outside the Sandbox. A managed Codex
 agent's own Codex home holds only the local route; a managed Claude agent uses
 the Sandbox's own Claude settings and the same local route as your terminal:
 
@@ -238,6 +247,15 @@ cw stop "$ENV" implement --cleanup-request-id "$ORIGINAL_REQUEST_ID" --output js
 
 Confirm that cleanup completed before restarting. Retain the original task's
 unknown result; cleanup does not authorize replaying it.
+
+A managed conversation in a platform sandbox ends when the sandbox stops.
+After Start, `cw list` still shows it, but `cw msg`, `cw restart` and
+`cw wait --message` for it say that it ended with the environment; start a new
+conversation with `cw run "$ENV" --agent ...`.
+
+A launch that the platform refuses, for example because a selected secret
+source was removed, reports that it was refused: nothing was started or
+changed, and it can be run again once the cause is fixed.
 
 ## Control an enrolled trusted member
 

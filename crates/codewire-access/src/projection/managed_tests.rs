@@ -4,15 +4,60 @@ fn clients(slots: &[&str]) -> ManagedCredentialClients {
     ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap()
 }
 
-/// Every name a selection projects: its reserved names, and for GitHub the
-/// two `gh` names, which are projected without being reserved.
+/// Every name a selection projects: its reserved names, except the Anthropic
+/// form it did not select; for GitHub the two `gh` names; and one Git
+/// configuration entry per rewritten GitHub URL form (see
+/// [`git_rewrite_entries`]). All but the first Git entry, and the `gh` names,
+/// are projected without being reserved.
 fn projected_names(selected: ManagedCredentialClients) -> BTreeSet<&'static str> {
+    const KEYS: [&str; 4] = [
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_KEY_1",
+        "GIT_CONFIG_KEY_2",
+        "GIT_CONFIG_KEY_3",
+    ];
+    const VALUES: [&str; 4] = [
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_VALUE_1",
+        "GIT_CONFIG_VALUE_2",
+        "GIT_CONFIG_VALUE_3",
+    ];
     let mut names = selected.reserved_environment_keys();
+    if selected.contains(ManagedCredentialClient::Anthropic) {
+        names.remove("ANTHROPIC_API_KEY");
+        names.remove(if selected.anthropic_subscription_token() {
+            "ANTHROPIC_AUTH_TOKEN"
+        } else {
+            "CLAUDE_CODE_OAUTH_TOKEN"
+        });
+    }
     if selected.contains(ManagedCredentialClient::GitHub) {
         names.extend(["GH_CONFIG_DIR", "GH_TOKEN"]);
     }
+    let entries = git_rewrite_entries(selected);
+    if entries > 0 {
+        names.insert("GIT_CONFIG_COUNT");
+        names.extend(&KEYS[..entries]);
+        names.extend(&VALUES[..entries]);
+    }
     names
 }
+
+/// The number of GitHub URL forms a selection rewrites (issue #2720).
+fn git_rewrite_entries(selected: ManagedCredentialClients) -> usize {
+    match (
+        selected.contains(ManagedCredentialClient::GitHub),
+        selected.contains(ManagedCredentialClient::Ssh),
+    ) {
+        (true, false) => 4,
+        (true, true) => 2,
+        (false, true) => 1,
+        (false, false) => 0,
+    }
+}
+
+/// The managed GitHub route as an `insteadOf` key.
+const MANAGED_GIT_KEY: &str = "url.http://127.0.0.1:38081/_codewire/github/.insteadOf";
 
 #[test]
 fn managed_clients_validate_exact_slots_without_discarding_github() {
@@ -263,19 +308,22 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
         };
         assert_eq!(
             github.environment,
-            BTreeMap::from([
-                ("GH_CONFIG_DIR".to_owned(), gh_directory.to_owned()),
-                ("GH_TOKEN".to_owned(), "codewire-managed".to_owned()),
-                ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()),
-                (
-                    "GIT_CONFIG_KEY_0".to_owned(),
-                    "url.http://127.0.0.1:38081/_codewire/github/.insteadOf".to_owned()
-                ),
-                (
-                    "GIT_CONFIG_VALUE_0".to_owned(),
-                    "https://github.com/".to_owned()
-                ),
-            ])
+            BTreeMap::from(
+                [
+                    ("GH_CONFIG_DIR", gh_directory),
+                    ("GH_TOKEN", "codewire-managed"),
+                    ("GIT_CONFIG_COUNT", "4"),
+                    ("GIT_CONFIG_KEY_0", MANAGED_GIT_KEY),
+                    ("GIT_CONFIG_VALUE_0", "https://github.com/"),
+                    ("GIT_CONFIG_KEY_1", MANAGED_GIT_KEY),
+                    ("GIT_CONFIG_VALUE_1", "git://github.com/"),
+                    ("GIT_CONFIG_KEY_2", MANAGED_GIT_KEY),
+                    ("GIT_CONFIG_VALUE_2", "git@github.com:"),
+                    ("GIT_CONFIG_KEY_3", MANAGED_GIT_KEY),
+                    ("GIT_CONFIG_VALUE_3", "ssh://git@github.com/"),
+                ]
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            )
         );
         assert_eq!(
             github.gh.as_ref().unwrap().config_yml(),
@@ -329,8 +377,6 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
                     "http://127.0.0.1:38081/_codewire/anthropic".into()
                 ),
                 ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
-                ("ANTHROPIC_API_KEY".into(), String::new()),
-                ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
             ])
         );
         let ssh = clients(&["ssh"]).for_placement(placement);
@@ -341,7 +387,15 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
         };
         assert_eq!(
             ssh.environment,
-            BTreeMap::from([("SSH_AUTH_SOCK".into(), expected_socket.into())])
+            BTreeMap::from(
+                [
+                    ("SSH_AUTH_SOCK", expected_socket),
+                    ("GIT_CONFIG_COUNT", "1"),
+                    ("GIT_CONFIG_KEY_0", "url.git@github.com:.insteadOf"),
+                    ("GIT_CONFIG_VALUE_0", "git://github.com/"),
+                ]
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            )
         );
     }
     assert_eq!(MANAGED_HTTP_PORT, 38_081);
@@ -537,11 +591,9 @@ fn anthropic_subscription_projection_is_the_exact_claude_code_oauth_placeholder(
                     "http://127.0.0.1:38081/_codewire/anthropic".into()
                 ),
                 ("CLAUDE_CODE_OAUTH_TOKEN".into(), "codewire-managed".into()),
-                ("ANTHROPIC_AUTH_TOKEN".into(), String::new()),
-                ("ANTHROPIC_API_KEY".into(), String::new()),
             ])
         );
-        // The API-key form keeps its exact projection.
+        // The API-key form projects only its own variable too.
         assert_eq!(
             clients(&["anthropic"]).for_placement(placement).environment,
             BTreeMap::from([
@@ -550,35 +602,266 @@ fn anthropic_subscription_projection_is_the_exact_claude_code_oauth_placeholder(
                     "http://127.0.0.1:38081/_codewire/anthropic".into()
                 ),
                 ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
-                ("ANTHROPIC_API_KEY".into(), String::new()),
-                ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
             ])
         );
     }
 }
 
+/// Each Anthropic form projects only its own variable, never the other
+/// form's and never `ANTHROPIC_API_KEY`, while all four names stay reserved,
+/// so a declared value of any of them is still refused.
 #[test]
-fn github_git_configuration_is_only_the_loopback_route() {
+fn each_anthropic_form_projects_only_its_own_variable_and_reserves_all_four() {
+    let api_key = clients(&["anthropic"]);
+    let subscription = api_key.with_anthropic_subscription_token().unwrap();
     for placement in [
         ManagedCredentialClientPlacement::Native,
         ManagedCredentialClientPlacement::Platform,
     ] {
-        let projection = clients(&["github"]).for_placement(placement);
-        for (name, value) in &projection.environment {
-            if !name.starts_with("GIT_CONFIG_") {
-                continue;
+        for (selected, own, others) in [
+            (
+                subscription,
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            ),
+            (
+                api_key,
+                "ANTHROPIC_AUTH_TOKEN",
+                ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            ),
+        ] {
+            let environment = selected.for_placement(placement).environment;
+            assert_eq!(environment[own], "codewire-managed");
+            for other in others {
+                assert!(!environment.contains_key(other), "{other}");
             }
-            // An endpoint only: no credential, token, placeholder or userinfo.
-            for forbidden in ["@", "token", "codewire-managed", "Bearer", "Basic", "gh"] {
-                assert!(
-                    !value.contains(forbidden) || value == "https://github.com/",
-                    "{name}={value} carries {forbidden:?}"
+            // No projected value is empty: nothing is cleared by an empty
+            // string, which a client could read as set.
+            assert!(environment.values().all(|value| !value.is_empty()));
+            for name in [
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ] {
+                assert!(selected.reserved_environment_keys().contains(name));
+                assert_eq!(
+                    selected.check_collisions([name]),
+                    Err(ProjectionError::ManagedEnvironmentCollision),
+                    "{name}"
                 );
             }
         }
-        let key = &projection.environment["GIT_CONFIG_KEY_0"];
-        assert!(key.starts_with("url.http://127.0.0.1:38081/_codewire/github/"));
-        assert!(key.ends_with(".insteadOf"));
+    }
+}
+
+#[test]
+fn github_git_configuration_is_only_the_loopback_route_or_githubs_own_url_forms() {
+    let forms = [
+        GITHUB_HTTPS_URL,
+        GITHUB_GIT_URL,
+        GITHUB_SCP_URL,
+        GITHUB_SSH_URL,
+    ];
+    assert_eq!(
+        forms,
+        [
+            "https://github.com/",
+            "git://github.com/",
+            "git@github.com:",
+            "ssh://git@github.com/"
+        ]
+    );
+    for slots in [&["github"][..], &["ssh"], &["github", "ssh"]] {
+        for placement in [
+            ManagedCredentialClientPlacement::Native,
+            ManagedCredentialClientPlacement::Platform,
+        ] {
+            let projection = clients(slots).for_placement(placement);
+            for (name, value) in &projection.environment {
+                if name.starts_with("GIT_CONFIG_VALUE_") {
+                    // A value is only a GitHub URL form, matched as a prefix.
+                    assert!(forms.contains(&value.as_str()), "{name}={value}");
+                } else if name.starts_with("GIT_CONFIG_KEY_") {
+                    // A destination only: the loopback route, or GitHub's own
+                    // SSH form for the selected key. Never a credential,
+                    // token, placeholder, userinfo or other Git setting.
+                    assert!(
+                        value == MANAGED_GIT_KEY || value == "url.git@github.com:.insteadOf",
+                        "{name}={value}"
+                    );
+                    for forbidden in ["token", "codewire-managed", "Bearer", "Basic", "gh"] {
+                        assert!(!value.contains(forbidden), "{name}={value}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Issue #2720: which GitHub URL forms Git in the workspace rewrites, and to
+/// where, for each selection and placement.
+///
+/// | Selected | Rewritten |
+/// |---|---|
+/// | GitHub connection only | every form to the managed GitHub route |
+/// | SSH key only | `git://` to `git@github.com:`; HTTPS stays anonymous |
+/// | both | HTTPS and `git://` to the managed route; SSH forms keep the key |
+/// | neither | nothing |
+#[test]
+fn each_selection_rewrites_exactly_its_github_url_forms() {
+    let managed = "url.http://127.0.0.1:38081/_codewire/github/.insteadOf";
+    let ssh = "url.git@github.com:.insteadOf";
+    let http_forms = ["https://github.com/", "git://github.com/"];
+    let git_protocol = ["git://github.com/"];
+    let all_forms = [
+        "https://github.com/",
+        "git://github.com/",
+        "git@github.com:",
+        "ssh://git@github.com/",
+    ];
+    for (slots, key, values) in [
+        (&["github"][..], Some(managed), &all_forms[..]),
+        (&["ssh"], Some(ssh), &git_protocol[..]),
+        (&["github", "ssh"], Some(managed), &http_forms[..]),
+        (&[], None, &[][..]),
+        (&["codex", "openai", "anthropic"], None, &[][..]),
+    ] {
+        for extra in [&[][..], &["codex", "anthropic"]] {
+            let slots: Vec<_> = slots.iter().chain(extra).copied().collect();
+            let mut deduplicated = slots.clone();
+            deduplicated.sort_unstable();
+            deduplicated.dedup();
+            if deduplicated.len() != slots.len() {
+                continue;
+            }
+            for placement in [
+                ManagedCredentialClientPlacement::Native,
+                ManagedCredentialClientPlacement::Platform,
+            ] {
+                let environment = clients(&slots).for_placement(placement).environment;
+                let git: BTreeMap<_, _> = environment
+                    .iter()
+                    .filter(|(name, _)| name.starts_with("GIT_"))
+                    .collect();
+                let Some(key) = key else {
+                    assert!(git.is_empty(), "{slots:?}");
+                    continue;
+                };
+                assert_eq!(
+                    environment["GIT_CONFIG_COUNT"],
+                    values.len().to_string(),
+                    "{slots:?}"
+                );
+                assert_eq!(git.len(), 1 + 2 * values.len(), "{slots:?}");
+                for (index, value) in values.iter().enumerate() {
+                    assert_eq!(environment[&format!("GIT_CONFIG_KEY_{index}")], key);
+                    assert_eq!(environment[&format!("GIT_CONFIG_VALUE_{index}")], *value);
+                }
+            }
+        }
+    }
+}
+
+/// Stock Git, given exactly the projected environment, rewrites each GitHub
+/// URL form to the table's destination and leaves every other host as
+/// written. `git ls-remote --get-url` applies `insteadOf` without contacting
+/// any remote.
+#[cfg(unix)]
+#[test]
+fn stock_git_resolves_every_github_url_form_as_the_table_says() {
+    let route = "http://127.0.0.1:38081/_codewire/github/";
+    let untouched = [
+        "https://gitlab.com/org/app.git",
+        "git@gitlab.com:org/app.git",
+        "ssh://git@gitlab.com/org/app.git",
+        "git://gitlab.com/org/app.git",
+        "https://github.example.com/org/app.git",
+        "git@github.example.com:org/app.git",
+        "https://gist.github.com/org/app.git",
+        "ssh://git@github.com:2222/org/app.git",
+        "https://user@github.com/org/app.git",
+    ];
+    for (slots, expected) in [
+        (
+            &["github"][..],
+            [
+                format!("{route}org/app.git"),
+                format!("{route}org/app.git"),
+                format!("{route}org/app.git"),
+                format!("{route}org/app.git"),
+            ],
+        ),
+        // A key GitHub may not accept never breaks a public HTTPS fetch.
+        (
+            &["ssh"],
+            [
+                "https://github.com/org/app.git".to_owned(),
+                "git@github.com:org/app.git".to_owned(),
+                "git@github.com:org/app.git".to_owned(),
+                "ssh://git@github.com/org/app.git".to_owned(),
+            ],
+        ),
+        (
+            &["github", "ssh"],
+            [
+                format!("{route}org/app.git"),
+                format!("{route}org/app.git"),
+                "git@github.com:org/app.git".to_owned(),
+                "ssh://git@github.com/org/app.git".to_owned(),
+            ],
+        ),
+        (
+            &[],
+            [
+                "https://github.com/org/app.git".to_owned(),
+                "git://github.com/org/app.git".to_owned(),
+                "git@github.com:org/app.git".to_owned(),
+                "ssh://git@github.com/org/app.git".to_owned(),
+            ],
+        ),
+    ] {
+        for placement in [
+            ManagedCredentialClientPlacement::Native,
+            ManagedCredentialClientPlacement::Platform,
+        ] {
+            let environment = clients(slots).for_placement(placement).environment;
+            let resolve = |url: &str| {
+                let output = std::process::Command::new("git")
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("HOME", "/nonexistent")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .envs(&environment)
+                    .args(["-C", "/", "ls-remote", "--get-url", "--", url])
+                    .output()
+                    .expect("stock git is installed");
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .trim_end()
+                    .to_owned()
+            };
+            for (url, expected) in [
+                "https://github.com/org/app.git",
+                "git://github.com/org/app.git",
+                "git@github.com:org/app.git",
+                "ssh://git@github.com/org/app.git",
+            ]
+            .into_iter()
+            .zip(&expected)
+            {
+                assert_eq!(&resolve(url), expected, "{slots:?} {url}");
+            }
+            for url in untouched {
+                assert_eq!(resolve(url), url, "{slots:?}");
+            }
+        }
     }
 }
 
@@ -593,9 +876,22 @@ fn a_declared_git_configuration_is_refused_while_github_is_selected() {
         );
         assert_eq!(clients(&["codex"]).check_collisions([name]), Ok(()));
     }
-    // Other git settings stay the workload's own.
+    // The further rewrite entries are projected without being reserved, so
+    // a declared one is not refused (the projected value wins instead), and
+    // other Git settings stay the workload's own. An SSH-only selection
+    // reserves none of Git's names, though it projects its rewrite.
+    for slots in [&["github"][..], &["ssh"], &["github", "ssh"]] {
+        assert_eq!(
+            clients(slots).check_collisions([
+                "GIT_CONFIG_KEY_1",
+                "GIT_CONFIG_VALUE_3",
+                "GIT_AUTHOR_NAME"
+            ]),
+            Ok(())
+        );
+    }
     assert_eq!(
-        github.check_collisions(["GIT_CONFIG_KEY_1", "GIT_AUTHOR_NAME"]),
+        clients(&["ssh"]).check_collisions(["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0"]),
         Ok(())
     );
 }

@@ -380,6 +380,11 @@ run_paths_case release pull_request refs/pull/3/head false \
   install.sh
 # Presence matters: an unlisted existing script selects unknown/full, while
 # deleted scripts deliberately remain policy-only. Prove each new owner path.
+run_present_paths_case bounded_external_downloads \
+  pull_request refs/pull/2691/head false \
+  'go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
+  scripts/ci/release/fetch-pinned.sh \
+  scripts/ci/tests/test-fetch-pinned.sh
 run_present_paths_case public_installer_test \
   pull_request refs/pull/952/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
@@ -1140,6 +1145,9 @@ run_paths_case cli_native_managed_journey pull_request refs/pull/2255/head false
 run_paths_case cli_native_update_journey pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/test-cli-native-update.py
+run_paths_case cli_native_socket_dir_helper pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/native_socket_dir.py
 run_paths_case cli_native_update_entrypoint_regression pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/ci/tests/test-native-managed-update-entrypoint.py
@@ -1167,7 +1175,7 @@ run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false 
   scripts/ci/release/build-runtime-kernel.sh scripts/ci/tests/test-local-runtime-parts.py \
   scripts/ci/release/build-local-runtime.sh scripts/ci/release/build-runtime-guest-root.sh \
   scripts/ci/release/runtime-container.sh scripts/ci/release/dry-run-superseded.sh \
-  scripts/ci/tests/test-dry-run-superseded.sh
+  scripts/ci/tests/test-dry-run-superseded.sh scripts/ci/release/build-runtime-cw.sh
 # The published workspace pin selects every consumer that compiles it; its
 # tool and post-publish proposal select the release proofs that run them.
 run_paths_case workspace_image_pin pull_request refs/pull/2255/head false \
@@ -1328,6 +1336,8 @@ run_present_paths_case macos_git_developer_tool pull_request refs/pull/2064/head
   "$policy security security_js" scripts/dev/macos-git-tool.py scripts/dev/test-macos-git-tool.py
 run_present_paths_case macos_local_runtime_installer pull_request refs/pull/2064/head false \
   "$policy security security_js" Makefile scripts/dev/macos-local-runtime.py scripts/dev/test-macos-local-runtime.py
+run_present_paths_case linux_local_runtime_packer pull_request refs/pull/2733/head false \
+  "$policy security security_js" scripts/dev/linux-local-runtime.py scripts/dev/test-linux-local-runtime.py
 run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pull/2064/head false \
   'policy security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs
@@ -1354,7 +1364,9 @@ run_present_paths_case mesh_ingress_protocol_unknown pull_request refs/pull/1902
 run_present_paths_case macos_local_vm_journeys pull_request refs/pull/20660/head false \
   'policy security security_js' \
   scripts/dev/test-cli-local-vm-macos.py scripts/dev/test-cli-local-vm-docker-macos.py \
-  scripts/dev/test-local-vm-hostile-guest-macos.py scripts/dev/hostile-guest-probe.py
+  scripts/dev/test-cli-local-vm-inputs-macos.py \
+  scripts/dev/test-local-vm-hostile-guest-macos.py scripts/dev/hostile-guest-probe.py \
+  scripts/dev/test-local-vm-hostile-guest.py
 run_present_paths_case macos_local_vm_journey_unknown pull_request refs/pull/20661/head false \
   "$all_product_pr" scripts/dev/test-local-vm-future-macos.py
 run_present_paths_case macos_console_pair pull_request refs/pull/20641/head false \
@@ -1881,9 +1893,9 @@ grep -qF 'if selected transport_pkg_codewire_local_vmm; then' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 [[ "$(grep -cFx '    scripts/ci/verify/check-darwin-cross.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh")" == 1 ]]
-grep -qF 'exec "$zigbuild_bin" check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
+grep -qF 'exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
   "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
-grep -qF -- '--target aarch64-apple-darwin' \
+grep -qF -- '--target aarch64-apple-darwin -- -D warnings' \
   "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
 grep -qF 'scripts/ci/verify/build-local-vmm-initramfs.sh --verify' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"

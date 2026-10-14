@@ -62,6 +62,7 @@ impl Fixture {
                 environment_id: id,
                 agent: AgentKind::Codex,
                 program: PathBuf::from("/usr/bin/false"),
+                program_fallback: None,
                 model: "synthetic".into(),
                 effort: Some("high".into()),
                 working_dir: temp.path().to_string_lossy().into_owned(),
@@ -143,6 +144,7 @@ impl Fixture {
                 capabilities: AgentCapabilities {
                     steer: true,
                     interrupt: true,
+                    resume: false,
                     note: "synthetic".into(),
                 },
                 policy: CODEX_POLICY.into(),
@@ -409,7 +411,18 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
         NO_PROXY_NAMES, SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK,
     };
     use codewire_daemon::CredentialBridgeTransport;
-    const GIT: [&str; 3] = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"];
+    // Git's GitHub URL rewrite: at most four `insteadOf` entries.
+    const GIT: [&str; 9] = [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_KEY_1",
+        "GIT_CONFIG_VALUE_1",
+        "GIT_CONFIG_KEY_2",
+        "GIT_CONFIG_VALUE_2",
+        "GIT_CONFIG_KEY_3",
+        "GIT_CONFIG_VALUE_3",
+    ];
     const GH_TOKEN: &str = "GH_TOKEN";
     const GH_CONFIG_DIR: &str = "GH_CONFIG_DIR";
     const SSH: &str = "SSH_AUTH_SOCK";
@@ -519,8 +532,14 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
 
             let github = selected.contains(ManagedCredentialClient::GitHub);
             let ssh = selected.contains(ManagedCredentialClient::Ssh);
+            // Either Git credential rewrites GitHub's URL forms (#2720).
+            assert_eq!(
+                shell.contains_key(GIT[0]),
+                github || ssh,
+                "{context} {}",
+                GIT[0]
+            );
             for name in GIT {
-                assert_eq!(shell.contains_key(name), github, "{context} {name}");
                 assert_eq!(shell.get(name), projected.get(name), "{context} {name}");
                 assert_eq!(local.get(name), shell.get(name), "{context} {name}");
             }
@@ -707,6 +726,7 @@ fn platform_peer_arguments_are_exactly_the_drivers_for_its_route() {
         capabilities: AgentCapabilities {
             steer: false,
             interrupt: false,
+            resume: false,
             note: "synthetic".into(),
         },
         policy: String::new(),

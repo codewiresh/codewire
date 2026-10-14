@@ -25,7 +25,7 @@ const MAX_REQUEST: usize = 512 * 1024;
 mod files;
 pub(crate) use files::{Tree, leaf_refusal, publish_session, tree_refusal};
 mod payload;
-pub use payload::{ProviderIdentity, ProviderPin};
+pub use payload::{PinRefusal, ProviderIdentity, ProviderPin};
 mod service;
 pub(crate) use service::{CleanupLink, Owner, RestartAdvance, Service};
 
@@ -208,11 +208,7 @@ impl Origin {
 
     /// Whether this record's provider is the one this release runs.
     pub(crate) fn current_provider(&self) -> bool {
-        self.provider.version
-            == match self.agent {
-                Agent::Codex => "0.160.0",
-                Agent::Claude => "2.1.288",
-            }
+        self.provider.version == payload::pinned_version(self.agent)
     }
 
     pub(crate) fn command(&self) -> Vec<String> {
@@ -237,6 +233,11 @@ pub enum Error {
     /// any effect. It names only the product.
     #[error("this managed agent was started with an earlier {}; start a new conversation", .0.product())]
     EarlierProvider(Agent),
+    /// An issued launch whose environment projection was refused before the
+    /// agent's program ran, with the launcher's cleanup confirmed: nothing
+    /// started and nothing remains, so the request is refused, not unknown.
+    #[error("the environment launch was denied before the managed agent started")]
+    DeniedBeforeRun,
 }
 
 fn canonical_uuid(value: &str) -> Result<(), Error> {

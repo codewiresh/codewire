@@ -432,6 +432,7 @@ if [ "$event_selected" = false ]; then
       scripts/dev/macos-ext4-tool.py|scripts/dev/test-macos-ext4-tool.py|\
       scripts/dev/macos-git-tool.py|scripts/dev/test-macos-git-tool.py|\
       scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
+      scripts/dev/linux-local-runtime.py|scripts/dev/test-linux-local-runtime.py|\
       scripts/dev/macos-app-sandbox-canary.py|scripts/dev/test-macos-app-sandbox-canary.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/dev/pre-push.sh|scripts/dev/preflight-push.sh|\
@@ -908,7 +909,7 @@ if [ "$event_selected" = false ]; then
         select_token rust_pkg_codewire_cli_bin
         recognized=true
         ;;
-      scripts/dev/test-cli-native-managed.py|scripts/dev/test-cli-native-update.py|scripts/ci/tests/test-native-managed-update-entrypoint.py|scripts/dev/build-native-managed-agent.py)
+      scripts/dev/test-cli-native-managed.py|scripts/dev/test-cli-native-update.py|scripts/ci/tests/test-native-managed-update-entrypoint.py|scripts/dev/build-native-managed-agent.py|scripts/dev/native_socket_dir.py)
         select_token rust
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_cli_bin
@@ -1073,9 +1074,11 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/dev/test-cli-local-vm-macos.py|scripts/dev/test-cli-local-vm-docker-macos.py|\
-      scripts/dev/test-local-vm-hostile-guest-macos.py|scripts/dev/hostile-guest-probe.py)
-        # Developer-only Apple silicon journeys and the hostile-guest battery:
-        # they start real local VMs on a Mac and never run in CI.
+      scripts/dev/test-cli-local-vm-inputs-macos.py|\
+      scripts/dev/test-local-vm-hostile-guest-macos.py|scripts/dev/hostile-guest-probe.py|\
+      scripts/dev/test-local-vm-hostile-guest.py)
+        # Developer-only local VM journeys and the hostile-guest battery: they
+        # run against real local VMs and never in CI.
         select_token policy
         recognized=true
         ;;
@@ -1734,7 +1737,9 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/local_runtime_parts.py|scripts/ci/release/local_runtime_sources.py|\
       scripts/ci/release/local-runtime-sources.json|scripts/ci/release/build-runtime-kernel.sh|\
       scripts/ci/release/build-local-runtime.sh|\
+      scripts/ci/release/fetch-pinned.sh|scripts/ci/tests/test-fetch-pinned.sh|\
       scripts/ci/release/build-runtime-guest-root.sh|scripts/ci/release/runtime-container.sh|\
+      scripts/ci/release/build-runtime-cw.sh|\
       scripts/ci/tests/test-local-runtime-parts.py|\
       scripts/ci/release/dry-run-superseded.sh|scripts/ci/tests/test-dry-run-superseded.sh|\
       scripts/ci/tests/test-cw-install.py|\

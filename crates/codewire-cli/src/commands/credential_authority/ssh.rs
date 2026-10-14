@@ -3,7 +3,7 @@
 //!
 //! Linux stages each signature's agent on the allowlisted XDG_RUNTIME_DIR
 //! tmpfs. macOS has no per-user tmpfs; it stages in `signer` inside the
-//! credential root, where each agent's directory holds only its socket and
+//! authority's short socket directory, where each agent's directory holds only its socket and
 //! the passphrase FIFO (the key reaches ssh-add on stdin), and supplies the
 //! Darwin child preparation and FIFO primitives the signer cannot implement.
 
@@ -25,15 +25,23 @@ use tokio::time::Instant;
 
 pub(super) struct LocalSshAgentAdapter {
     authority_root: PathBuf,
+    /// The authority's short socket directory, where macOS stages each
+    /// agent (#2745).
+    #[cfg(target_os = "macos")]
+    socket_dir: PathBuf,
     #[cfg(target_os = "linux")]
     runtime: Option<PathBuf>,
     owner: OnceCell<Arc<SshAgentOwner>>,
 }
 
 impl LocalSshAgentAdapter {
-    pub(super) fn new(authority_root: PathBuf) -> Self {
+    pub(super) fn new(authority_root: PathBuf, socket_dir: PathBuf) -> Self {
+        #[cfg(not(target_os = "macos"))]
+        let _ = socket_dir;
         Self {
             authority_root,
+            #[cfg(target_os = "macos")]
+            socket_dir,
             // This is the already-allowlisted host runtime path, not provider
             // authentication or a workload-controlled environment override.
             #[cfg(target_os = "linux")]
@@ -48,6 +56,8 @@ impl LocalSshAgentAdapter {
                 let root = self.authority_root.clone();
                 #[cfg(target_os = "linux")]
                 let runtime = self.runtime.clone().ok_or(LocalSshSignError::Unavailable)?;
+                #[cfg(target_os = "macos")]
+                let socket_dir = self.socket_dir.clone();
                 // Retained by the authority's operation task through this join;
                 // dropping its RPC waiter never abandons helper initialization.
                 let config = tokio::task::spawn_blocking(move || {
@@ -61,7 +71,7 @@ impl LocalSshAgentAdapter {
                     );
                     #[cfg(target_os = "macos")]
                     let config = SshAgentConfig::new(
-                        darwin::signer_runtime(&root)?,
+                        darwin::signer_runtime(&socket_dir)?,
                         "/usr/bin/ssh-agent".into(),
                         "/usr/bin/ssh-add".into(),
                         helper,
@@ -171,9 +181,10 @@ mod darwin {
     use codewire_credential_broker::provider_enrollment::validate_private_directory;
     use codewire_local_credentials::LocalSshSignError;
 
-    /// The signer's private staging root inside the credential root.
-    pub(super) fn signer_runtime(authority_root: &Path) -> Result<PathBuf, LocalSshSignError> {
-        let runtime = authority_root.join("signer");
+    /// The signer's private staging root inside the authority's short socket
+    /// directory, so each agent socket fits Darwin's bound for any HOME.
+    pub(super) fn signer_runtime(socket_dir: &Path) -> Result<PathBuf, LocalSshSignError> {
+        let runtime = socket_dir.join("signer");
         match std::fs::DirBuilder::new().mode(0o700).create(&runtime) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -265,6 +276,8 @@ mod tests {
         let root = root();
         let adapter = LocalSshAgentAdapter {
             authority_root: root.path().into(),
+            #[cfg(target_os = "macos")]
+            socket_dir: root.path().into(),
             #[cfg(target_os = "linux")]
             runtime: None,
             owner: OnceCell::new(),
@@ -319,14 +332,22 @@ mod tests {
     async fn darwin_composed_signer_signs_once_and_leaves_no_staging() {
         use codewire_protected_store::ssh_material::{decode_protected_material, generate_ed25519};
 
-        // A short root keeps the agent socket under Darwin's 104-byte bound.
-        let root = tempfile::Builder::new()
-            .prefix("cw-signer-")
-            .tempdir_in("/private/tmp")
-            .unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        // The agent stages in the authority's short socket directory (#2745),
+        // here a short private directory beside the credential root.
+        let private = |prefix: &str| {
+            let directory = tempfile::Builder::new()
+                .prefix(prefix)
+                .tempdir_in("/private/tmp")
+                .unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            directory
+        };
+        let root = private("cw-signer-");
+        let sockets = private("cw-sockets-");
         let authority_root = std::fs::canonicalize(root.path()).unwrap();
-        let adapter = LocalSshAgentAdapter::new(authority_root.clone());
+        let socket_dir = std::fs::canonicalize(sockets.path()).unwrap();
+        let adapter = LocalSshAgentAdapter::new(authority_root.clone(), socket_dir.clone());
         let (_, protected) = generate_ed25519().unwrap().into_parts();
         let material = decode_protected_material(protected).unwrap();
         let blob = material.public_key().key_blob().to_vec();
@@ -346,7 +367,8 @@ mod tests {
             .unwrap();
         assert!(!signature.is_empty());
         adapter.shutdown().await.unwrap();
-        let signer = authority_root.join("signer");
+        assert!(!authority_root.join("signer").exists());
+        let signer = socket_dir.join("signer");
         assert_eq!(
             std::fs::symlink_metadata(&signer).unwrap().mode() & 0o7777,
             0o700

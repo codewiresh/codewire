@@ -845,6 +845,18 @@ mod tests {
         assert!(validate_repository_trust(&repository).is_err());
         repository.known_hosts.clear();
         assert!(validate_repository_trust(&repository).is_ok());
+
+        // A github.com SSH source's canonical trust is GitHub's published
+        // keys (#2720); an empty list is not canonical for it.
+        repository.source = "git@github.com:org/app.git".to_owned();
+        assert!(matches!(
+            validate_repository_trust(&repository),
+            Err(WorkspacePlanError::InvalidRepositoryHostTrust)
+        ));
+        repository.known_hosts = codewire_project::GITHUB_SSH_KNOWN_HOSTS
+            .map(str::to_owned)
+            .to_vec();
+        assert!(validate_repository_trust(&repository).is_ok());
     }
 
     #[test]

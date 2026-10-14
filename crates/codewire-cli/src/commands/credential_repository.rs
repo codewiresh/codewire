@@ -2,8 +2,6 @@
 use std::ffi::OsStr;
 use std::io;
 use std::os::fd::{FromRawFd as _, OwnedFd};
-#[cfg(target_os = "macos")]
-use std::path::Path;
 
 use anyhow::Context as _;
 #[cfg(target_os = "linux")]
@@ -192,14 +190,15 @@ pub(crate) async fn run_local_git_repository_executor(
                 .map(std::path::PathBuf::from)
                 .context("repository executor requires XDG_RUNTIME_DIR")?;
             // Darwin has no per-user runtime directory. The one-use credential
-            // socket's private directory goes in the authority root beside this
+            // socket's private directory goes in the authority's short socket
+            // directory (#2745), found from the authority root that holds this
             // executor's staging; the next authority removes one a killed
             // executor left behind.
             #[cfg(target_os = "macos")]
             let credential_runtime_directory = config
                 .staging_directory
                 .parent()
-                .map(Path::to_path_buf)
+                .map(codewire_local_vmm::socket_dir::predicted)
                 .context("invalid repository staging directory")?;
             if config.platform_delegated {
                 return run_platform_repository_executor(

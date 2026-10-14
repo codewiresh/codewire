@@ -345,7 +345,7 @@ pub(crate) mod tests {
             match bind() {
                 Ok(value) => return value,
                 Err(error) if std::time::Instant::now() >= deadline => {
-                    panic!("loopback port was not released: {error:?}")
+                    panic!("released resource was not available again within 2 s: {error:?}")
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
             }

@@ -501,7 +501,8 @@ def worker(root, run):
                 if action in ("clippy", "verify"):
                     command(["cargo", "clippy", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin",
                              "--all-targets", "--", "-D", "warnings"])
-                    command(["cargo", "clippy", *native, "-p", "codewire-local-vmm", "--lib",
+                    # --tests lints macOS-only test code, which no Linux lint compiles.
+                    command(["cargo", "clippy", *native, "-p", "codewire-local-vmm", "--lib", "--tests",
                              "--", "-D", "warnings"])
                     command(["cargo", "clippy", *native, *CREDENTIAL_CRATES, "--all-targets",
                              "--", "-D", "warnings"])

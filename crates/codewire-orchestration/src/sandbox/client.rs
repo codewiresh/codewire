@@ -342,19 +342,42 @@ fn workspace_owned_environment_keys() -> BTreeSet<String> {
         .into_iter()
         .map(str::to_owned)
         .collect();
-    keys.extend(
-        codewire_access::ManagedCredentialClients::from_profile_slots([
-            "codex",
-            "openai",
-            "anthropic",
-            "ssh",
-            "github",
-        ])
-        .expect("closed slots")
-        .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
-        .environment
-        .into_keys(),
-    );
+    const SLOTS: [&str; 5] = ["codex", "openai", "anthropic", "ssh", "github"];
+    // Every name any selection projects in either Anthropic form, and every
+    // name a selected client reserves: an Anthropic name of the form that
+    // is not selected is owned too, and never rendered. Some names depend on
+    // the combination (the GitHub client alone rewrites more Git URL forms
+    // than with an SSH key), so every subset of the closed slots is listed.
+    let selections = (0..1_u8 << SLOTS.len()).flat_map(|bits| {
+        let selection = codewire_access::ManagedCredentialClients::from_profile_slots(
+            SLOTS
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| bits & (1 << index) != 0)
+                .map(|(_, slot)| *slot),
+        )
+        .expect("closed slots");
+        [
+            Some(selection),
+            selection.with_anthropic_subscription_token().ok(),
+        ]
+        .into_iter()
+        .flatten()
+    });
+    for selection in selections {
+        keys.extend(
+            selection
+                .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
+                .environment
+                .into_keys(),
+        );
+        keys.extend(
+            selection
+                .reserved_environment_keys()
+                .into_iter()
+                .map(str::to_owned),
+        );
+    }
     // Public roots previously rendered by this same owned workspace bootstrap.
     // They must not persist when the stock client uses the loopback route.
     keys.insert("CODEX_CA_CERTIFICATE".into());
@@ -432,6 +455,17 @@ fn bootstrap_environment_matches(env: &[Value], expected: &BTreeMap<String, Stri
         let Some(name) = entry.get("name").and_then(Value::as_str) else {
             return false;
         };
+        // An earlier bootstrap rendered blank placeholders for the Anthropic
+        // form that was not selected; the Pod API stores them as names with
+        // no value. A blank owned name the current bootstrap does not render
+        // is inert, so a Pod rendered before it was dropped still matches.
+        if owned.contains(name)
+            && !expected.contains_key(name)
+            && entry.get("valueFrom").is_none_or(Value::is_null)
+            && environment_value(entry) == Some("")
+        {
+            continue;
+        }
         if owned.contains(name)
             && (!seen.insert(name)
                 || !entry.get("valueFrom").is_none_or(Value::is_null)
@@ -444,8 +478,8 @@ fn bootstrap_environment_matches(env: &[Value], expected: &BTreeMap<String, Stri
     seen.len() == expected.len()
 }
 
-/// The Pod API omits an empty `value`, so a stored Pod never repeats the
-/// blank placeholders a selected client renders (for example
+/// The Pod API omits an empty `value`, so a stored Pod never repeats a blank
+/// placeholder an earlier bootstrap rendered (for example
 /// `ANTHROPIC_API_KEY`). An absent value is the empty string.
 fn environment_value(entry: &Value) -> Option<&str> {
     match entry.get("value") {

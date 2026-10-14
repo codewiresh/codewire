@@ -37,18 +37,28 @@ class CredentialDelegationOpen(_message.Message):
     reserved_environment_keys: _containers.RepeatedScalarFieldContainer[str]
     def __init__(self, runtime: _Optional[_Union[_bridge_pb2.CredentialBridgeOpen, _Mapping]] = ..., org_id: _Optional[str] = ..., selection_sha256: _Optional[bytes] = ..., project_id: _Optional[str] = ..., user_secrets: _Optional[bool] = ..., organization_secrets: _Optional[bool] = ..., profile: _Optional[_Union[CredentialDelegationProfile, _Mapping]] = ..., ordinary_environment_keys: _Optional[_Iterable[str]] = ..., reserved_environment_keys: _Optional[_Iterable[str]] = ...) -> None: ...
 
+class CredentialDelegationKeepalive(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
 class DelegateCredentialsRequest(_message.Message):
-    __slots__ = ("open", "frame")
+    __slots__ = ("open", "frame", "keepalive")
     OPEN_FIELD_NUMBER: _ClassVar[int]
     FRAME_FIELD_NUMBER: _ClassVar[int]
+    KEEPALIVE_FIELD_NUMBER: _ClassVar[int]
     open: CredentialDelegationOpen
     frame: _bridge_pb2.CredentialBridgeGuestMessage
-    def __init__(self, open: _Optional[_Union[CredentialDelegationOpen, _Mapping]] = ..., frame: _Optional[_Union[_bridge_pb2.CredentialBridgeGuestMessage, _Mapping]] = ...) -> None: ...
+    keepalive: CredentialDelegationKeepalive
+    def __init__(self, open: _Optional[_Union[CredentialDelegationOpen, _Mapping]] = ..., frame: _Optional[_Union[_bridge_pb2.CredentialBridgeGuestMessage, _Mapping]] = ..., keepalive: _Optional[_Union[CredentialDelegationKeepalive, _Mapping]] = ...) -> None: ...
 
 class DelegateCredentialsResponse(_message.Message):
-    __slots__ = ("frame", "admitted")
+    __slots__ = ("frame", "admitted", "keepalive", "accepts_keepalive")
     FRAME_FIELD_NUMBER: _ClassVar[int]
     ADMITTED_FIELD_NUMBER: _ClassVar[int]
+    KEEPALIVE_FIELD_NUMBER: _ClassVar[int]
+    ACCEPTS_KEEPALIVE_FIELD_NUMBER: _ClassVar[int]
     frame: _bridge_pb2.CredentialBridgeHostMessage
     admitted: CredentialDelegationOpen
-    def __init__(self, frame: _Optional[_Union[_bridge_pb2.CredentialBridgeHostMessage, _Mapping]] = ..., admitted: _Optional[_Union[CredentialDelegationOpen, _Mapping]] = ...) -> None: ...
+    keepalive: CredentialDelegationKeepalive
+    accepts_keepalive: bool
+    def __init__(self, frame: _Optional[_Union[_bridge_pb2.CredentialBridgeHostMessage, _Mapping]] = ..., admitted: _Optional[_Union[CredentialDelegationOpen, _Mapping]] = ..., keepalive: _Optional[_Union[CredentialDelegationKeepalive, _Mapping]] = ..., accepts_keepalive: _Optional[bool] = ...) -> None: ...

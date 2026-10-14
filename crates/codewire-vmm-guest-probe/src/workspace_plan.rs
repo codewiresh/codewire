@@ -253,6 +253,12 @@ impl WorkspacePlan {
                     .ok_or(WorkspacePlanError::Plan)
             })
             .collect::<Result<_, _>>()?;
+        // An image value of a selected client's name is removed, whether or
+        // not that name is projected (the Anthropic form that was not
+        // selected is reserved but absent), as the daemon does for the
+        // sessions it starts.
+        let reserved = clients.reserved_environment_keys();
+        environment.retain(|name, _| !reserved.contains(name.as_str()));
         environment.extend(projection.environment);
         // Every managed HTTP route is the workspace's loopback ingress. A
         // proxy the image or the project declares must never receive those
@@ -1196,6 +1202,164 @@ mod tests {
         let environment = values(&unselected);
         assert_eq!(environment["GH_CONFIG_DIR"], "/home/codewire/.config/gh");
         assert_eq!(environment["GH_TOKEN"], "declared");
+    }
+
+    /// Issue #2720: a local VM's Git rewrites GitHub's URL forms for the
+    /// selected Git credential, as a hosted Sandbox's does. The entries the
+    /// selection does not reserve replace a declared value of the same name.
+    #[test]
+    fn the_github_url_rewrite_replaces_declared_git_entries_in_a_local_vm() {
+        use codewire_access::ManagedCredentialClients;
+        const MANAGED: &str = "url.http://127.0.0.1:38081/_codewire/github/.insteadOf";
+        const SSH: &str = "url.git@github.com:.insteadOf";
+        let root = root();
+        let config = config(json!({}));
+        let header = setup(&config);
+        let mut declared =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        for (name, value) in [
+            ("GIT_CONFIG_KEY_1", "core.editor"),
+            ("GIT_CONFIG_VALUE_1", "vi"),
+        ] {
+            declared.environment.push(format!("{name}={value}"));
+            declared.explicit_environment_keys.push(name.into());
+        }
+        declared.environment.sort();
+        declared.explicit_environment_keys.sort();
+        let git = |plan: &WorkspacePlan| -> BTreeMap<String, String> {
+            plan.environment
+                .iter()
+                .filter(|entry| entry.starts_with("GIT_CONFIG_"))
+                .map(|entry| {
+                    let (name, value) = entry.split_once('=').unwrap();
+                    (name.to_owned(), value.to_owned())
+                })
+                .collect()
+        };
+        for (slots, expected) in [
+            (
+                &["github"][..],
+                &[
+                    ("GIT_CONFIG_COUNT", "4"),
+                    ("GIT_CONFIG_KEY_0", MANAGED),
+                    ("GIT_CONFIG_VALUE_0", "https://github.com/"),
+                    ("GIT_CONFIG_KEY_1", MANAGED),
+                    ("GIT_CONFIG_VALUE_1", "git://github.com/"),
+                    ("GIT_CONFIG_KEY_2", MANAGED),
+                    ("GIT_CONFIG_VALUE_2", "git@github.com:"),
+                    ("GIT_CONFIG_KEY_3", MANAGED),
+                    ("GIT_CONFIG_VALUE_3", "ssh://git@github.com/"),
+                ][..],
+            ),
+            // The key alone rewrites only `git://`; the declared entry 1 is
+            // beyond the projected count, so Git never reads it.
+            (
+                &["ssh"],
+                &[
+                    ("GIT_CONFIG_COUNT", "1"),
+                    ("GIT_CONFIG_KEY_0", SSH),
+                    ("GIT_CONFIG_VALUE_0", "git://github.com/"),
+                    ("GIT_CONFIG_KEY_1", "core.editor"),
+                    ("GIT_CONFIG_VALUE_1", "vi"),
+                ],
+            ),
+            (
+                &["github", "ssh"],
+                &[
+                    ("GIT_CONFIG_COUNT", "2"),
+                    ("GIT_CONFIG_KEY_0", MANAGED),
+                    ("GIT_CONFIG_VALUE_0", "https://github.com/"),
+                    ("GIT_CONFIG_KEY_1", MANAGED),
+                    ("GIT_CONFIG_VALUE_1", "git://github.com/"),
+                ],
+            ),
+            // Neither Git credential: the declared entries are the workload's.
+            (
+                &["codex"],
+                &[
+                    ("GIT_CONFIG_KEY_1", "core.editor"),
+                    ("GIT_CONFIG_VALUE_1", "vi"),
+                ],
+            ),
+        ] {
+            let selected = declared
+                .clone()
+                .with_managed_credential_clients(
+                    ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                git(&selected),
+                expected
+                    .iter()
+                    .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                    .collect::<BTreeMap<_, _>>(),
+                "{slots:?}"
+            );
+        }
+    }
+
+    /// An image value of an Anthropic name never reaches the workspace while
+    /// the Anthropic client is selected: each form projects only its own
+    /// variable, and the other names are removed, not emptied.
+    #[test]
+    fn an_image_value_of_the_unselected_anthropic_form_is_removed() {
+        use codewire_access::ManagedCredentialClients;
+        let root = root();
+        let config = config(json!({}));
+        let header = setup(&config);
+        let mut plan =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ] {
+            plan.environment.push(format!("{name}=image-value"));
+        }
+        plan.environment.sort();
+        let names = |plan: &WorkspacePlan| -> BTreeMap<String, String> {
+            plan.environment
+                .iter()
+                .map(|entry| {
+                    let (name, value) = entry.split_once('=').unwrap();
+                    (name.to_owned(), value.to_owned())
+                })
+                .collect()
+        };
+        let api_key = ManagedCredentialClients::from_profile_slots(["anthropic"]).unwrap();
+        for (clients, own, others) in [
+            (
+                api_key,
+                "ANTHROPIC_AUTH_TOKEN",
+                ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+            ),
+            (
+                api_key.with_anthropic_subscription_token().unwrap(),
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+            ),
+        ] {
+            let environment = names(
+                &plan
+                    .clone()
+                    .with_managed_credential_clients(clients)
+                    .unwrap(),
+            );
+            assert_eq!(environment[own], "codewire-managed");
+            for other in others {
+                assert!(!environment.contains_key(other), "{other}");
+            }
+        }
+        // Without the Anthropic client the image's values are the workload's.
+        let environment = names(
+            &plan
+                .with_managed_credential_clients(
+                    ManagedCredentialClients::from_profile_slots(["codex"]).unwrap(),
+                )
+                .unwrap(),
+        );
+        assert_eq!(environment["ANTHROPIC_API_KEY"], "image-value");
     }
 
     #[test]

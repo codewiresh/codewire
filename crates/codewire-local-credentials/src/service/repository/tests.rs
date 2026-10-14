@@ -194,6 +194,7 @@ impl Fixture {
             manager: Arc::new(RepositoryProcessManager::new(
                 authority,
                 Some(spawner),
+                root.clone(),
                 root,
                 crate::broker_channel::LocalSshOperationRuntime::new(None),
                 None,

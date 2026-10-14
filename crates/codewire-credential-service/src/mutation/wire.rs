@@ -114,7 +114,7 @@ impl CredentialMutationService for Service {
         let authority = authority(&ctx)?;
         let mut request = request.to_owned_message();
         let code = zeroize::Zeroizing::new(std::mem::take(&mut request.code));
-        let metadata = self
+        let (metadata, pending_permissions) = self
             .owner
             .complete_github_app_authorization(
                 authority,
@@ -126,6 +126,7 @@ impl CredentialMutationService for Service {
             .map_err(error)?;
         connectrpc::Response::ok(proto::CompleteGithubAppAuthorizationResponse {
             credential: Some(credential(metadata)).into(),
+            pending_permissions,
             ..Default::default()
         })
     }
