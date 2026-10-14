@@ -25,9 +25,12 @@ linux   x86_64 Linux with Docker, from a checkout whose HEAD is SHA. Takes
         the cache records of its parts built in this run, which name only
         blobs of that target.
 macos   An Apple silicon Mac. Takes e2fsprogs and git from the parts cache or
-        builds them, fetches the Mac-side sources, and packs DIR/runtime from
-        the Linux job's DIR with the VZ helper built here. DIR/built gets this
-        job's and the Linux job's cache records.
+        builds them, fetches the Mac-side sources, and packs the macOS target
+        from the Linux job's DIR (with its aarch64 cw runtime) and the VZ
+        helper built here. DIR/runtime is the one local runtime every release
+        cw embeds: the macOS target merged with the Linux job's linux-x86_64
+        fragment. DIR/built gets this job's and the Linux job's cache records,
+        all of which now name only blobs the release publishes.
 
 Only a release's publishing job writes cache records; nothing here holds a
 credential. Set LOCAL_RUNTIME_NO_BUILD=1 to refuse a cache miss instead of
@@ -315,13 +318,24 @@ for name in parts.PARTS[sys.argv[2]]["outputs"]:
     record "$part" "$recipe" "$output/$part"
   done
   python3 "$release_dir/local_runtime_sources.py" fetch --side macos --output "$output/sources"
+  # The macOS target, with the aarch64 cw runtime the Linux job built.
+  local cw_runtime=()
+  [ ! -d "$linux_dir/cw-runtime-aarch64" ] || cw_runtime=(--cw-runtime "$linux_dir/cw-runtime-aarch64")
   python3 "$root/scripts/dev/macos-local-runtime.py" \
     --kernel "$linux_dir/kernel/Image-$(pin sources linux version)-codewire2" \
     --initramfs "$linux_dir/initramfs.cpio" \
     --e2fsprogs "$output/e2fsprogs-macos" --git "$output/git-macos" \
     --components "$linux_dir/sources" --components "$output/sources" \
-    --pack "$output/runtime" --source-revision "$source_sha"
+    ${cw_runtime[@]+"${cw_runtime[@]}"} \
+    --pack "$work/runtime-macos" --source-revision "$source_sha"
+  # The one document every release cw embeds: the macOS target and, from a
+  # source that builds it, the Linux job's linux-x86_64 fragment (#2733).
+  local fragments=(--dir "$work/runtime-macos")
+  [ ! -d "$linux_dir/linux-x86_64" ] || fragments+=(--dir "$linux_dir/linux-x86_64")
+  python3 "$release_dir/cw_release.py" merge-local-runtime --output "$output/runtime" "${fragments[@]}"
   cp "$linux_dir"/built/*.json "$output/built/" 2>/dev/null || true
+  # The fragment's records name its blobs, which the merged runtime publishes.
+  [ ! -d "$linux_dir/linux-x86_64" ] || cp "$linux_dir"/linux-x86_64-built/*.json "$output/built/" 2>/dev/null || true
 }
 
 if [ -n "$check" ]; then

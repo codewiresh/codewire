@@ -71,6 +71,7 @@ use crate::{
 };
 
 mod bootstrap;
+mod shutdown;
 use bootstrap::{BootstrapChild, BootstrapParent};
 use codewire_daemon::execution::BootstrapPhase;
 
@@ -5730,8 +5731,11 @@ fn supervise_guest(
     loop {
         validate_runc_log()?;
         if POWEROFF_REQUESTED.load(Ordering::Acquire) || container_poweroff_requested(&poweroff)? {
+            // The workload, sessions included, gets SIGTERM and its grace
+            // before the daemon stops: a session's processes end with it.
+            terminate_workspace_workload(&mut workspace);
             stop_daemon(&mut daemon);
-            stop_workspace_container(&mut workspace);
+            kill_workspace_container(&mut workspace);
             if let Some(docker) = docker.as_mut() {
                 stop_docker_daemon(docker);
             }
@@ -5863,7 +5867,26 @@ fn stop_daemon(daemon: &mut std::process::Child) {
     let _ = daemon.wait();
 }
 
+/// SIGTERM the running workspace's processes and wait up to their grace
+/// (#2760); nothing when the container already exited.
+fn terminate_workspace_workload(workspace: &mut std::process::Child) {
+    if workspace.try_wait().ok().flatten().is_none()
+        && let Some(init) = shutdown::container_init_pid()
+    {
+        shutdown::terminate_workload(init, shutdown::WORKLOAD_STOP_GRACE);
+    }
+}
+
 fn stop_workspace_container(workspace: &mut std::process::Child) {
+    // The workload gets SIGTERM and a bounded grace before the container is
+    // killed (#2760).
+    terminate_workspace_workload(workspace);
+    kill_workspace_container(workspace);
+}
+
+/// Kill the workspace container and wait for it, with no grace: the caller
+/// already gave one, or the container must stop now.
+fn kill_workspace_container(workspace: &mut std::process::Child) {
     let kill_completed = run_runc_control(&[
         "--root",
         RUNC_STATE_PATH,
@@ -5964,6 +5987,18 @@ async fn shutdown_signal() {
 }
 
 fn power_off() -> Result<()> {
+    unsafe {
+        libc::sync();
+    }
+    // Every guest-written disk is unmounted, or remounted read-only, so its
+    // journal is clean at the next mount and host e2fsck (#2760).
+    let released = shutdown::release_filesystems();
+    if !released.failed.is_empty() {
+        eprintln!(
+            "guest poweroff: {} unmounted, {} read-only, still writable: {:?}",
+            released.unmounted, released.read_only, released.failed
+        );
+    }
     unsafe {
         libc::sync();
     }
