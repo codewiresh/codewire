@@ -24,16 +24,19 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use codewire_client::{
     BearerToken, COORDINATOR_SETUP_TIMEOUT, CoordinatorError, CoordinatorHandlers,
-    CoordinatorPeerSession, PrimaryCoordinateIdentity, derp_target_from_map, resolve_stun_servers,
-    stun_servers_from_map,
+    CoordinatorPeerSession, PrimaryCoordinateIdentity, StunServer, derp_target_from_map,
+    resolve_stun_servers, stun_servers_from_map,
 };
 use codewire_daemon::access::WorkspaceAccessGrant;
 use codewire_daemon::app_ports::AppPorts;
 use codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_FILE;
 use codewire_tailnet::conn::{Conn, Options};
-use codewire_tailnet::derp_transport::{DerpTarget, DerpTransport, connect_derp_transport};
+use codewire_tailnet::derp_transport::{
+    DerpTarget, DerpTransport, connect_derp_transport_absolute,
+};
 use codewire_tailnet::direct_udp;
 use codewire_tailnet::disco::{DiscoPrivate, UDPRelayEndpoint};
+use codewire_tailnet::dns::{absolute_dns_name, absolute_host_port};
 use codewire_tailnet::netstack::{TcpListener as TailnetListener, TcpStream as TailnetStream};
 use codewire_tailnet::node::{DiscoPublic, Node, NodePublic};
 use codewire_tailnet::wg::{PublicKey, StaticSecret};
@@ -153,7 +156,8 @@ pub trait CoordinatorDialer: Send + Sync + 'static {
 /// The public coordinator named by the grant, through the public gRPC edge.
 /// It trusts the WebPKI roots plus, only when a bundle is mounted at its
 /// extra-roots path, that bundle; a present but unusable bundle refuses
-/// every dial rather than falling back.
+/// every dial rather than falling back. Like every endpoint the daemon dials,
+/// its host is looked up as an absolute DNS name (#2701).
 pub struct PublicCoordinator {
     extra_roots_file: PathBuf,
 }
@@ -184,32 +188,18 @@ impl CoordinatorDialer for PublicCoordinator {
         grant: &WorkspaceAccessGrant,
         environment_id: Uuid,
     ) -> Result<CoordinatorPeerSession, CoordinatorError> {
-        let identity = PrimaryCoordinateIdentity::sidecar(environment_id);
-        let token = grant.peer_token().expose_secret();
-        match codewire_tls::read_optional_roots(&self.extra_roots_file)
+        let extra_roots = codewire_tls::read_optional_roots(&self.extra_roots_file)
             .await
             .map_err(|_| CoordinatorError::Trust)?
-        {
-            None => {
-                CoordinatorPeerSession::connect_public_edge_grpc_with_setup_timeout(
-                    grant.coordinator_url(),
-                    token,
-                    identity,
-                    COORDINATOR_SETUP_TIMEOUT,
-                )
-                .await
-            }
-            Some(extra_roots) => {
-                CoordinatorPeerSession::connect_public_edge_grpc_with_extra_roots(
-                    grant.coordinator_url(),
-                    token,
-                    identity,
-                    extra_roots,
-                    COORDINATOR_SETUP_TIMEOUT,
-                )
-                .await
-            }
-        }
+            .unwrap_or_default();
+        CoordinatorPeerSession::connect_public_edge_grpc_absolute(
+            grant.coordinator_url(),
+            grant.peer_token().expose_secret(),
+            PrimaryCoordinateIdentity::sidecar(environment_id),
+            extra_roots,
+            COORDINATOR_SETUP_TIMEOUT,
+        )
+        .await
     }
 }
 
@@ -535,7 +525,10 @@ pub struct DaemonTailnetConfig {
 }
 
 /// Build the tailnet connection from the coordinator's DERP map (falling
-/// back to DERP on the coordinator origin) and the current grant.
+/// back to DERP on the coordinator origin) and the current grant. The DERP
+/// host, the direct UDP endpoints and the STUN servers are looked up as
+/// absolute DNS names: the Pod's resolver tries its search domains first, and
+/// a static musl `cw` abandons a lookup when one of them fails (#2701).
 pub async fn connect_daemon_tailnet(
     config: &DaemonTailnetConfig,
     derp_map: Option<&serde_json::Value>,
@@ -552,7 +545,7 @@ pub async fn connect_daemon_tailnet(
         "workspace tailnet connecting DERP relay"
     );
     let secret = StaticSecret::random_from_rng(OsRng);
-    let fallback = connect_derp_transport(&target, &secret)
+    let fallback = connect_derp_transport_absolute(&target, &secret)
         .await
         .context("connect DERP relay")?;
     let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
@@ -566,7 +559,14 @@ pub async fn connect_daemon_tailnet(
     // outbound NAT mapping, which admits replies from that STUN server and
     // nothing else, so STUN runs only for a daemon with no published endpoint.
     let stun = if advertised.is_empty() {
-        resolve_stun_servers(stun_servers_from_map(derp_map))
+        let servers = stun_servers_from_map(derp_map)
+            .into_iter()
+            .map(|server| StunServer {
+                host: absolute_dns_name(&server.host).into_owned(),
+                port: server.port,
+            })
+            .collect();
+        resolve_stun_servers(servers)
             .await
             .context("resolve DERP map STUN servers")?
     } else {
@@ -650,7 +650,7 @@ fn derp_target_from_origin(origin: &str) -> Result<DerpTarget> {
 async fn resolve_endpoints(endpoints: &[String]) -> Result<Vec<SocketAddr>> {
     let mut resolved = Vec::new();
     for endpoint in endpoints {
-        for addr in lookup_host(endpoint.as_str())
+        for addr in lookup_host(absolute_host_port(endpoint).as_ref())
             .await
             .with_context(|| format!("resolve {endpoint}"))?
         {
