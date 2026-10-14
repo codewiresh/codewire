@@ -47,6 +47,11 @@ PRODUCER_IF = (
     "&& needs.verification-selection.outputs.superseded != 'true' "
     "&& contains(needs.verification-selection.outputs.selection, '|kind|') }}"
 )
+# A pinned workspace has no producer job: each shard writes its pin record.
+PINNED = "needs.verification-selection.outputs.kind_workspace_source == 'pinned'"
+WORKSPACE_PRODUCER_IF = PRODUCER_IF.removesuffix(" }}") + (
+    " && needs.verification-selection.outputs.kind_workspace_source != 'pinned' }}"
+)
 KIND_STEP_IF = (
     "${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' "
     "&& contains(needs.verification-selection.outputs.selection, '|kind|') }}"
@@ -85,7 +90,8 @@ class WorkflowContractTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 job = self.jobs[job_name]
                 self.assertEqual(job["needs"], ["verification-selection"])
-                self.assertEqual(job["if"], PRODUCER_IF)
+                self.assertEqual(
+                    job["if"], WORKSPACE_PRODUCER_IF if job_name == "kind-workspace" else PRODUCER_IF)
                 expected_outputs = {
                     "artifact_name": "${{ steps.export.outputs.artifact_name }}",
                     "manifest_sha256": "${{ steps.export.outputs.manifest_sha256 }}",
@@ -190,30 +196,39 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertEqual(result.stdout.splitlines(),
                                  ["--head", "head", "--base", expected, "--github-output"])
 
+        # A pinned workspace dispatches no producer job; the job that runs
+        # always builds the exact source, with no per-step source condition.
         job = self.jobs["kind-workspace"]
-        self.assertEqual(
-            job["env"]["CODEWIRE_KIND_WORKSPACE_SOURCE"],
-            "${{ needs.verification-selection.outputs.kind_workspace_source == 'pinned' "
-            "&& 'pinned' || 'source' }}",
-        )
-        pinned = "env.CODEWIRE_KIND_WORKSPACE_SOURCE == 'pinned'"
-        source = "env.CODEWIRE_KIND_WORKSPACE_SOURCE == 'source'"
-        # The pinned path only checks out, proves the runner image and exports
-        # the pin record; every build, cache and credential step is source-only.
+        self.assertEqual(job["if"], WORKSPACE_PRODUCER_IF)
+        self.assertNotIn("CODEWIRE_KIND_WORKSPACE_SOURCE", job.get("env", {}))
         for step in job["steps"]:
-            name = step.get("name", step.get("uses", ""))
-            with self.subTest(step=name):
-                if "actions-checkout@" in step.get("uses", "") or step.get("id") == "export" \
-                        or "actions-upload-artifact@" in step.get("uses", "") \
-                        or name == "Cancel the run after this failure":
-                    self.assertNotIn("CODEWIRE_KIND_WORKSPACE_SOURCE", step.get("if", ""))
-                elif name == "Verify sealed producer tools":
-                    self.assertEqual(step["if"], "${{ " + pinned + " }}")
-                    self.assertEqual(step["run"], "scripts/ci/setup/assert-ci-runner-image.sh")
-                else:
-                    self.assertIn(source, step["if"])
+            self.assertNotIn("CODEWIRE_KIND_WORKSPACE_SOURCE", step.get("if", ""))
         build = named_step(job, "Build and verify exact source workspace")
         self.assertEqual(build["run"], "scripts/ci/verify/verify-workspace-image.sh")
+        self.assertEqual(named_step(job, "Export verified workspace")["run"],
+                         'python3 -B scripts/ci/verify/kind-build-artifacts.py produce workspace '
+                         '"$RUNNER_TEMP/kind-workspace-out"')
+
+        # Each shard writes the pin record with the same producer, into the
+        # same private input directory a download would fill, and binds its
+        # own manifest digest; it downloads no workspace when pinned.
+        edge = self.jobs["edge-kind"]
+        record = named_step(edge, "Write the pinned workspace record")
+        self.assertEqual(record["id"], "pinned-workspace")
+        self.assertEqual(record["if"], KIND_STEP_IF.removesuffix(" }}") + " && " + PINNED + " }}")
+        self.assertEqual(record["env"], {"CODEWIRE_KIND_WORKSPACE_SOURCE": "pinned"})
+        self.assertEqual(record["run"],
+                         'python3 -B scripts/ci/verify/kind-build-artifacts.py produce workspace '
+                         '"$CODEWIRE_KIND_ARTIFACT_ROOT/workspace"')
+        guard = named_step(edge, "Require fresh artifact download directories outside the checkout")
+        gate = named_step(edge, "Run the shard Kind gate")
+        self.assertLess(edge["steps"].index(guard), edge["steps"].index(record))
+        self.assertLess(edge["steps"].index(record), edge["steps"].index(gate))
+        self.assertEqual(
+            gate["env"]["CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256"],
+            "${{ " + PINNED + " && steps.pinned-workspace.outputs.manifest_sha256 "
+            "|| needs.kind-workspace.outputs.manifest_sha256 }}",
+        )
 
         # When Kind takes the pin, Container contract verification keeps the
         # selected exact-source workspace build; it defers only to a Kind
@@ -253,7 +268,9 @@ class WorkflowContractTests(unittest.TestCase):
             "needs.verification-selection.outputs.edge_kind_expected == 'true' && "
             "(needs.verification-selection.outputs.tested_tree_receipt == 'accepted' || "
             "!contains(needs.verification-selection.outputs.selection, '|kind|') || "
-            "(needs.kind-workspace.result == 'success' && "
+            "((needs.kind-workspace.result == 'success' || "
+            "(needs.verification-selection.outputs.kind_workspace_source == 'pinned' && "
+            "needs.kind-workspace.result == 'skipped')) && "
             "needs.kind-product.result == 'success' && "
             "needs.kind-daemon.result == 'success' && "
             "needs.kind-smokes.result == 'success')) }}"
@@ -261,10 +278,13 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(" ".join(edge["if"].split()), " ".join(expected_if.split()))
 
         def admitted(*, selection_ok: bool = True, expected: bool = True,
-                     receipt: bool = False, kind: bool = True,
+                     receipt: bool = False, kind: bool = True, pinned: bool = False,
                      producer_results: tuple[str, ...] = ("success",) * 4) -> bool:
+            workspace, *others = producer_results
+            workspace_ok = workspace == "success" or (pinned and workspace == "skipped")
             return (selection_ok and expected
-                    and (receipt or not kind or all(item == "success" for item in producer_results)))
+                    and (receipt or not kind
+                         or (workspace_ok and all(item == "success" for item in others))))
 
         self.assertTrue(admitted(kind=False, producer_results=("skipped",) * 4))
         self.assertTrue(admitted(kind=True, producer_results=("success",) * 4))
@@ -272,6 +292,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertFalse(admitted(kind=True, producer_results=("success", "success", "skipped", "success")))
         self.assertTrue(admitted(receipt=True, producer_results=("skipped",) * 4))
         self.assertFalse(admitted(selection_ok=False, kind=False, producer_results=("skipped",) * 4))
+        self.assertTrue(admitted(pinned=True, producer_results=("skipped",) + ("success",) * 3))
+        self.assertFalse(admitted(pinned=False, producer_results=("skipped",) + ("success",) * 3))
+        self.assertFalse(admitted(pinned=True, producer_results=("failure",) + ("success",) * 3))
 
     def test_kind_consumer_selects_a_private_saved_profile(self) -> None:
         edge = self.jobs["edge-kind"]
@@ -283,6 +306,9 @@ class WorkflowContractTests(unittest.TestCase):
             "CODEWIRE_KIND_PROFILE_ROOT": "${{ runner.temp }}/kind-profiles",
             "KIND_SHARD_SUITES": "${{ matrix.shard.suites }}",
             "CODEWIRE_KIND_DASHBOARD_WORKERS": "${{ matrix.shard.playwright_workers }}",
+            "CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256": (
+                "${{ " + PINNED + " && steps.pinned-workspace.outputs.manifest_sha256 "
+                "|| needs.kind-workspace.outputs.manifest_sha256 }}"),
         })
         self.assertNotIn("CLUSTER", edge["env"],
                          "static fixtures must not inherit an uncreated profile")
@@ -293,6 +319,10 @@ class WorkflowContractTests(unittest.TestCase):
         # Forgejo resolves job-level env before the runner context exists.
         self.assertNotIn("CODEWIRE_KIND_ARTIFACT_ROOT", edge["env"])
         for job_name, group in PRODUCERS.items():
+            if group == "workspace":
+                # Bound by the gate step, from the shard's pin record when pinned.
+                self.assertNotIn("CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256", edge["env"])
+                continue
             self.assertEqual(
                 edge["env"][f"CODEWIRE_KIND_{group.upper()}_MANIFEST_SHA256"],
                 f"${{{{ needs.{job_name}.outputs.manifest_sha256 }}}}",
@@ -326,7 +356,11 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertEqual(len(matches), 1)
                 download = matches[0]
                 self.assertGreater(edge["steps"].index(download), guard_index)
-                self.assertEqual(download["if"], KIND_STEP_IF)
+                self.assertEqual(
+                    download["if"],
+                    KIND_STEP_IF.removesuffix(" }}")
+                    + " && needs.verification-selection.outputs.kind_workspace_source != 'pinned' }}"
+                    if group == "workspace" else KIND_STEP_IF)
                 self.assertEqual(
                     download["with"]["name"],
                     f"${{{{ needs.{job_name}.outputs.artifact_name }}}}",

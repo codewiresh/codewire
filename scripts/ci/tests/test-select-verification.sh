@@ -3844,7 +3844,10 @@ dispatch_line="$(grep -n -m1 'name: Emit trusted capability dispatch decisions' 
   exit 1
 }
 producer_gate="    if: \${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}"
-[[ "$(grep -cxF -- "$producer_gate" "$WORKFLOW")" -eq 4 ]] || {
+# The workspace producer adds one clause: a pinned workspace has no producer.
+workspace_producer_gate="${producer_gate% \}\}} && needs.verification-selection.outputs.kind_workspace_source != 'pinned' }}"
+[[ "$(grep -cxF -- "$producer_gate" "$WORKFLOW")" -eq 3 &&
+  "$(grep -cxF -- "$workspace_producer_gate" "$WORKFLOW")" -eq 1 ]] || {
   echo 'a superseded main run still builds a Kind producer' >&2
   exit 1
 }
@@ -4189,7 +4192,8 @@ WORK = {
     "services-control": {"Run Service integration"},
     "services-runtime": {"Run Service integration"},
     "kind-workspace": {"Build and verify exact source workspace"},
-    "kind-product": {"Build exact CI-profile product images"},
+    "kind-product": {"Build exact CI-profile service images"},
+    "kind-daemon": {"Build exact CI-profile daemon image"},
     "kind-smokes": {"Build all host smoke and contract binaries"},
     "edge-kind": {"Run the shard Kind gate"},
 }
@@ -4215,9 +4219,12 @@ SUPPORT = {
     "Wait for integration Postgres", "Stop integration Postgres",
     "Require fresh artifact download directories outside the checkout",
     "Download exact workspace producer output", "Download exact product producer output",
-    "Download exact smoke producer output", "Upload dashboard browser test results on failure",
+    "Download exact smoke producer output", "Download exact daemon producer output",
+    "Write the pinned workspace record",
+    "Upload dashboard browser test results on failure",
     "Delete the shard Kind cluster", "Export verified workspace", "Upload successful workspace output",
     "Export non-promotable product images", "Upload successful product output",
+    "Export non-promotable daemon image", "Upload successful daemon output",
     "Export only completed smoke executables", "Upload successful smoke output",
 }
 
@@ -4315,12 +4322,13 @@ def evaluate(expression, context):
     return truthy(result)
 
 
-def dispatch(selection, cw, desktop, workspace):
+def dispatch(selection, cw, desktop, workspace, kind_workspace="source"):
     with tempfile.NamedTemporaryFile("r") as output:
         environment = dict(
             os.environ, VERIFICATION_SELECTION=selection, VERIFICATION_TESTED_TREE_RECEIPT="fallback",
             CW_PACKAGE_SELECTED=cw, DESKTOP_PACKAGE_SELECTED=desktop,
             WORKSPACE_IMAGE_SELECTED=workspace, VERIFICATION_SUPERSEDED="false",
+            KIND_WORKSPACE_SOURCE=kind_workspace,
             GITHUB_OUTPUT=output.name,
         )
         subprocess.run([emitter], env=environment, check=True, stderr=subprocess.DEVNULL)
@@ -4406,15 +4414,19 @@ synthetic.add("|valid:v3|complete|")
 checked = 0
 for selection in sorted(set(realistic) | synthetic):
     quick = "|pr_quick|" in selection
-    for cw, desktop, workspace in itertools.product(("true", "false"), repeat=3):
-        expected = dispatch(selection, cw, desktop, workspace)
+    for cw, desktop, workspace, kind_workspace in itertools.product(
+            ("true", "false"), ("true", "false"), ("true", "false"), ("source", "pinned")):
+        expected = dispatch(selection, cw, desktop, workspace, kind_workspace)
         # A quick selection deliberately ignores artifact facts; its steps
         # see what dispatch saw.
         facts = ("false", "false", "false") if quick else (cw, desktop, workspace)
         context = {
             "needs.verification-selection.result": "success",
-            "needs.kind-workspace.result": "success",
+            # A pinned workspace dispatches no Kind workspace job.
+            "needs.kind-workspace.result": "skipped" if kind_workspace == "pinned" else "success",
+            "needs.verification-selection.outputs.kind_workspace_source": kind_workspace,
             "needs.kind-product.result": "success",
+            "needs.kind-daemon.result": "success",
             "needs.kind-smokes.result": "success",
             "needs.verification-selection.outputs.selection": selection,
             "needs.verification-selection.outputs.tested_tree_receipt": "fallback",

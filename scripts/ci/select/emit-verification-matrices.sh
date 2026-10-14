@@ -9,6 +9,9 @@ workspace_image_selected="${WORKSPACE_IMAGE_SELECTED:-}"
 # A main push that main has moved past dispatches nothing: the newer commit's
 # run, queued behind it, verifies the cumulative change.
 superseded="${VERIFICATION_SUPERSEDED:-false}"
+# Whether Kind builds the exact-source workspace (source) or runs the
+# published pin (pinned). Callers that predate the choice mean source.
+kind_workspace_source="${KIND_WORKSPACE_SOURCE:-source}"
 
 fail() {
   echo "::error::$*" >&2
@@ -29,6 +32,10 @@ for value in "$cw_package_selected" "$desktop_package_selected" \
     *) fail "artifact selection has invalid result ${value:-missing}" ;;
   esac
 done
+case "$kind_workspace_source" in
+  source|pinned) ;;
+  *) fail "Kind workspace source is invalid: $kind_workspace_source" ;;
+esac
 
 selected() {
   [[ "$selection" == *"|$1|"* ]]
@@ -113,9 +120,11 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   if [ "$artifact_groups" = true ] && [ "$cw_package_selected" = true ]; then
     expected[cw_release_assets]=true
   fi
-  # Selected Kind builds and proves the workspace and dashboard images itself.
+  # Selected Kind builds and proves the workspace and dashboard images itself,
+  # unless it runs the published workspace pin; then the selected exact-source
+  # workspace still needs Container contract verification.
   if { [ "$artifact_groups" = true ] && [ "$workspace_image_selected" = true ] \
-        && ! selected kind; } \
+        && { ! selected kind || [ "$kind_workspace_source" = pinned ]; }; } \
       || selected ios \
       || { selected web && ! selected kind; }; then
     expected[workspace_image]=true

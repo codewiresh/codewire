@@ -236,36 +236,6 @@ jobs:
             echo "$message" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Emit trusted capability dispatch decisions
-        id: dispatch
-        env:
-          VERIFICATION_SUPERSEDED: ${{ steps.superseded.outputs.superseded }}
-          VERIFICATION_SELECTION: ${{ steps.select.outputs.selection }}
-          VERIFICATION_TESTED_TREE_RECEIPT: ${{ steps.receipt.outputs.tested_tree_receipt }}
-          CW_PACKAGE_SELECTED: ${{ steps.select.outputs.cw_package_selected }}
-          DESKTOP_PACKAGE_SELECTED: ${{ steps.select.outputs.desktop_package_selected }}
-          WORKSPACE_IMAGE_SELECTED: ${{ steps.select.outputs.workspace_image_selected }}
-        run: |
-          set -euo pipefail
-          dispatch_selector='scripts/ci/select/emit-verification-matrices.sh'
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            trusted_dispatch_selector='.trusted-ci-policy/scripts/ci/select/emit-verification-matrices.sh'
-            if [ -x "$trusted_dispatch_selector" ]; then
-              dispatch_selector="$trusted_dispatch_selector"
-            else
-              # Conservative bootstrap for a base predating dynamic dispatch:
-              # run every group so candidate code cannot omit required work.
-              for group in \
-                  policy standard tooling rust_compile rust_shards rust_transport database \
-                  services_control services_runtime edge_kind \
-                  cw_release_assets workspace_image; do
-                echo "${group}_expected=true" >> "$GITHUB_OUTPUT"
-              done
-              exit 0
-            fi
-          fi
-          "$dispatch_selector"
-
       # Kind runs the published, digest-pinned workspace image unless this
       # change alters the image definition (images/base, images/workspace).
       # The sandbox daemon `cw` comes from the exact-source daemon image, so the
@@ -286,6 +256,37 @@ jobs:
           esac
           python3 -B scripts/ci/verify/kind-build-artifacts.py workspace-source \
             --head "$GITHUB_SHA" --base "$base" --github-output
+
+      - name: Emit trusted capability dispatch decisions
+        id: dispatch
+        env:
+          VERIFICATION_SUPERSEDED: ${{ steps.superseded.outputs.superseded }}
+          VERIFICATION_SELECTION: ${{ steps.select.outputs.selection }}
+          VERIFICATION_TESTED_TREE_RECEIPT: ${{ steps.receipt.outputs.tested_tree_receipt }}
+          CW_PACKAGE_SELECTED: ${{ steps.select.outputs.cw_package_selected }}
+          DESKTOP_PACKAGE_SELECTED: ${{ steps.select.outputs.desktop_package_selected }}
+          WORKSPACE_IMAGE_SELECTED: ${{ steps.select.outputs.workspace_image_selected }}
+          KIND_WORKSPACE_SOURCE: ${{ steps.kind-workspace.outputs.kind_workspace_source }}
+        run: |
+          set -euo pipefail
+          dispatch_selector='scripts/ci/select/emit-verification-matrices.sh'
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            trusted_dispatch_selector='.trusted-ci-policy/scripts/ci/select/emit-verification-matrices.sh'
+            if [ -x "$trusted_dispatch_selector" ]; then
+              dispatch_selector="$trusted_dispatch_selector"
+            else
+              # Conservative bootstrap for a base predating dynamic dispatch:
+              # run every group so candidate code cannot omit required work.
+              for group in \
+                  policy standard tooling rust_compile rust_shards rust_transport database \
+                  services_control services_runtime edge_kind \
+                  cw_release_assets workspace_image; do
+                echo "${group}_expected=true" >> "$GITHUB_OUTPUT"
+              done
+              exit 0
+            fi
+          fi
+          "$dispatch_selector"
 
       - name: Select opt-in workspace cache experiment
         id: cache-experiment
@@ -1654,7 +1655,9 @@ jobs:
     # 10 minutes for cancellation and cleanup.
     timeout-minutes: 80
     needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+    # With the pinned workspace (its definition unchanged), no job builds it:
+    # each Kind shard writes the pin record itself and pulls that digest.
+    if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') && needs.verification-selection.outputs.kind_workspace_source != 'pinned' }}
     outputs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
@@ -1662,9 +1665,6 @@ jobs:
     env:
       CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
-      # pinned: export only the published pin record; each Kind shard pulls
-      # that digest. source: build and verify the exact-source workspace.
-      CODEWIRE_KIND_WORKSPACE_SOURCE: ${{ needs.verification-selection.outputs.kind_workspace_source == 'pinned' && 'pinned' || 'source' }}
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
       CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
     steps:
@@ -1673,25 +1673,19 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Verify sealed producer tools
-        if: ${{ env.CODEWIRE_KIND_WORKSPACE_SOURCE == 'pinned' }}
-        run: scripts/ci/setup/assert-ci-runner-image.sh
-
       - name: Verify sealed producer tools and isolated Buildx load
-        if: ${{ env.CODEWIRE_KIND_WORKSPACE_SOURCE == 'source' }}
         run: |
           scripts/ci/setup/assert-ci-runner-image.sh
           scripts/ci/verify/rehearse-build-local-image.sh
 
       - name: Select independent workspace caches
-        if: ${{ env.CODEWIRE_KIND_WORKSPACE_SOURCE == 'source' }}
         env:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
           CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ github.event.inputs.layer_cache }}
         run: scripts/ci/setup/select-untrusted-workspace-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Prove labeled R2 backend compatibility
-        if: ${{ env.CODEWIRE_KIND_WORKSPACE_SOURCE == 'source' && env.CODEWIRE_WORKSPACE_CACHE_CANARY == 'true' }}
+        if: ${{ env.CODEWIRE_WORKSPACE_CACHE_CANARY == 'true' }}
         run: |
           set -euo pipefail
           [[ "$CODEWIRE_BUILDKIT_CACHE_MODE" == r2 ]] || { echo 'Labeled R2 canary could not obtain its existing cache identity' >&2; exit 1; }
@@ -1699,23 +1693,22 @@ jobs:
             "$CODEWIRE_SCCACHE_CREDENTIALS_FILE" "$RUNNER_TEMP/workspace-r2-cache-canary"
 
       - name: Prepare selected workspace cache seed
-        if: ${{ env.CODEWIRE_KIND_WORKSPACE_SOURCE == 'source' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' }}
+        if: ${{ needs.verification-selection.outputs.workspace_cache_experiment == 'true' }}
         run: scripts/ci/setup/prepare-workspace-cache-measurement.sh seed
 
       - name: Build and verify exact source workspace
-        if: ${{ env.CODEWIRE_KIND_WORKSPACE_SOURCE == 'source' }}
         run: scripts/ci/verify/verify-workspace-image.sh
 
       - name: Clean workspace cache credentials
-        if: ${{ always() && env.CODEWIRE_KIND_WORKSPACE_SOURCE == 'source' }}
+        if: ${{ always() }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Finalize selected workspace cache seed
         id: cache-seed-report
-        if: ${{ success() && env.CODEWIRE_KIND_WORKSPACE_SOURCE == 'source' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' }}
+        if: ${{ success() && needs.verification-selection.outputs.workspace_cache_experiment == 'true' }}
         run: python3 scripts/ci/verify/workspace-cache-report.py finalize "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR" "$GITHUB_WORKSPACE/.tmp/codewire-workspace-image-verification.json"
 
-      - name: Export verified or pinned workspace
+      - name: Export verified workspace
         id: export
         run: python3 -B scripts/ci/verify/kind-build-artifacts.py produce workspace "$RUNNER_TEMP/kind-workspace-out"
 
@@ -2009,7 +2002,7 @@ jobs:
     # job, so every shard must be green.
     timeout-minutes: 45
     needs: [verification-selection, kind-workspace, kind-product, kind-daemon, kind-smokes]
-    if: ${{ always() && needs.verification-selection.result == 'success' && needs.verification-selection.outputs.edge_kind_expected == 'true' && (needs.verification-selection.outputs.tested_tree_receipt == 'accepted' || !contains(needs.verification-selection.outputs.selection, '|kind|') || (needs.kind-workspace.result == 'success' && needs.kind-product.result == 'success' && needs.kind-daemon.result == 'success' && needs.kind-smokes.result == 'success')) }}
+    if: ${{ always() && needs.verification-selection.result == 'success' && needs.verification-selection.outputs.edge_kind_expected == 'true' && (needs.verification-selection.outputs.tested_tree_receipt == 'accepted' || !contains(needs.verification-selection.outputs.selection, '|kind|') || ((needs.kind-workspace.result == 'success' || (needs.verification-selection.outputs.kind_workspace_source == 'pinned' && needs.kind-workspace.result == 'skipped')) && needs.kind-product.result == 'success' && needs.kind-daemon.result == 'success' && needs.kind-smokes.result == 'success')) }}
     strategy:
       fail-fast: true
       matrix:
@@ -2047,7 +2040,6 @@ jobs:
       KIND_DIND_IMAGE: registry.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
       CODEWIRE_KIND_PRODUCT_IMAGE_MODE: prebuilt-ci
-      CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256: ${{ needs.kind-workspace.outputs.manifest_sha256 }}
       CODEWIRE_KIND_PRODUCT_MANIFEST_SHA256: ${{ needs.kind-product.outputs.manifest_sha256 }}
       CODEWIRE_KIND_DAEMON_MANIFEST_SHA256: ${{ needs.kind-daemon.outputs.manifest_sha256 }}
       CODEWIRE_KIND_SMOKES_MANIFEST_SHA256: ${{ needs.kind-smokes.outputs.manifest_sha256 }}
@@ -2108,11 +2100,20 @@ jobs:
           printf 'CODEWIRE_KIND_ARTIFACT_ROOT=%s\n' "$CODEWIRE_KIND_ARTIFACT_ROOT" >> "$GITHUB_ENV"
 
       - name: Download exact workspace producer output
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') && needs.verification-selection.outputs.kind_workspace_source != 'pinned' }}
         uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: ${{ needs.kind-workspace.outputs.artifact_name }}
           path: ${{ runner.temp }}/kind-inputs/workspace
+
+      # The same producer the Kind workspace job runs, for the pinned workspace:
+      # it writes only the pin record (no Docker), and the gate pulls that digest.
+      - name: Write the pinned workspace record
+        id: pinned-workspace
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') && needs.verification-selection.outputs.kind_workspace_source == 'pinned' }}
+        env:
+          CODEWIRE_KIND_WORKSPACE_SOURCE: pinned
+        run: python3 -B scripts/ci/verify/kind-build-artifacts.py produce workspace "$CODEWIRE_KIND_ARTIFACT_ROOT/workspace"
 
       - name: Download exact product producer output
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
@@ -2146,6 +2147,9 @@ jobs:
           CODEWIRE_KIND_PROFILE_ROOT: ${{ runner.temp }}/kind-profiles
           KIND_SHARD_SUITES: ${{ matrix.shard.suites }}
           CODEWIRE_KIND_DASHBOARD_WORKERS: ${{ matrix.shard.playwright_workers }}
+          # The workspace manifest comes from this shard's own pin record when
+          # the workspace is pinned, and from the workspace job otherwise.
+          CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256: ${{ needs.verification-selection.outputs.kind_workspace_source == 'pinned' && steps.pinned-workspace.outputs.manifest_sha256 || needs.kind-workspace.outputs.manifest_sha256 }}
         run: |
           set -euo pipefail
           read -r -a suites <<<"$KIND_SHARD_SUITES"
