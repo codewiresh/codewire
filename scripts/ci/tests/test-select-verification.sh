@@ -2165,8 +2165,8 @@ awk '
   capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  workspace-image:" { exit }
   capture { print }
 ' "$WORKFLOW" > "$workspace_block"
-grep -qF '    timeout-minutes: 55' "$workspace_block" || {
-  echo 'workspace-image: cold-build ceiling must remain 55 minutes' >&2
+grep -qF '    timeout-minutes: 80' "$workspace_block" || {
+  echo 'workspace-image: cold-build ceiling must remain 80 minutes' >&2
   exit 1
 }
 
@@ -2238,7 +2238,7 @@ cancelling = {
     "cw-release-assets", "workspace-image", "policy", "standard", "tooling",
     "rust-compile", "rust-packages", "rust-features", "rust-transport",
     "database", "services-control", "services-runtime", "kind-workspace",
-    "kind-product", "kind-smokes", "edge-kind",
+    "kind-product", "kind-daemon", "kind-smokes", "edge-kind",
 }
 exempt = {
     "verification-selection", "required-verification",
@@ -2440,8 +2440,8 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fxc "    runs-on: ${HEAVY_RUNS_ON}" "$WORKFLOW")" -eq 18 ]] || {
-  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe, each selecting the main-first Heavy label' >&2
+[[ "$(grep -Fxc "    runs-on: ${HEAVY_RUNS_ON}" "$WORKFLOW")" -eq 19 ]] || {
+  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), four parallel Kind producers, one opted-in measurement matrix and its post-measurement probe, each selecting the main-first Heavy label' >&2
   exit 1
 }
 if grep -Eq '^ *runs-on: ci-heavy(-main)?$' "$WORKFLOW"; then
@@ -2461,6 +2461,7 @@ for output in selector_version classification selection required_local_mode \
     cw_package_state cw_package_selected desktop_package_state \
     desktop_package_selected workspace_image_state workspace_image_selected \
     workspace_cache_experiment workspace_cache_measurement_matrix \
+    kind_workspace_source \
     tested_tree_receipt tested_tree_reason \
     tested_tree_pr tested_tree_head tested_tree_run; do
   grep -qF "      ${output}:" "$selection_block" || {
@@ -2531,8 +2532,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 20 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, three Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
+if [ "$top_level_jobs" != 21 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, four Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -2994,12 +2995,99 @@ awk '
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$edge_fixture_runner"
 for edge_fixture_command in \
     '  scripts/ci/tests/test-kind-e2e-suites.sh' \
-    '  python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py'; do
+    '  run_kind_cw_runtime_probe_fixture'; do
   [ "$(grep -cFx "$edge_fixture_command" "$edge_fixture_runner")" -eq 1 ] || {
     echo "shared edge route must invoke the owning fixture once: $edge_fixture_command" >&2
     exit 1
   }
 done
+# The probe fixture runs as the workspace user: directly for a developer, and
+# through a privilege drop where the hosted job is root. Execute the checked-in
+# helper against a stub tree for both identities.
+probe_fixture_runner="$TMP/probe-fixture-runner.sh"
+awk '
+  /^run_kind_cw_runtime_probe_fixture\(\) \{/ { capture = 1 }
+  capture { print }
+  capture && $0 == "}" { exit }
+' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$probe_fixture_runner"
+[ "$(grep -cF 'python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py' "$probe_fixture_runner")" -eq 2 ] || {
+  echo 'probe fixture helper must run the owning fixture on both identity paths' >&2
+  exit 1
+}
+# Hosted, the copy sits in a fresh directory under the filesystem root: the
+# probe refuses any group- or world-writable ancestor, such as /tmp.
+grep -Fxq '  local parent="${1:-/}"' "$probe_fixture_runner" || {
+  echo 'hosted probe fixture must copy the tree directly under the filesystem root' >&2
+  exit 1
+}
+probe_fixture_tree="$TMP/probe-fixture-tree"
+mkdir -p "$probe_fixture_tree/bin" "$probe_fixture_tree/scripts/ci/tests"
+git -C "$probe_fixture_tree" init -q
+printf 'fixture\n' > "$probe_fixture_tree/scripts/ci/tests/test-kind-cw-runtime-probe.py"
+git -C "$probe_fixture_tree" add -A
+git -C "$probe_fixture_tree" -c user.name=fixture -c user.email=fixture@example.invalid \
+  commit -q -m fixture
+for probe_tool in id python3 chown setpriv; do
+  cat > "$probe_fixture_tree/bin/$probe_tool" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+tool="$(basename "$0")"
+case "$tool" in
+  id) printf '%s\n' "$PROBE_FIXTURE_UID"; exit 0 ;;
+  python3)
+    printf 'python3 cwd=%s uid=%s args=%s\n' "$PWD" "${PROBE_FIXTURE_DROPPED:-direct}" "$*" >> "$PROBE_FIXTURE_CALLS"
+    [ -d .tmp ] || [ "${PROBE_FIXTURE_DROPPED:-direct}" = direct ]
+    exit "${PROBE_FIXTURE_STATUS:-0}" ;;
+  chown) printf 'chown %s\n' "$*" >> "$PROBE_FIXTURE_CALLS"; exit 0 ;;
+  setpriv)
+    printf 'setpriv %s %s %s\n' "$1" "$2" "$3" >> "$PROBE_FIXTURE_CALLS"
+    shift 3
+    PROBE_FIXTURE_DROPPED=1000 exec "$@" ;;
+esac
+SH
+  chmod +x "$probe_fixture_tree/bin/$probe_tool"
+done
+run_probe_fixture_case() {
+  local uid="$1" status="$2"
+  : > "$TMP/probe-fixture-calls"
+  (
+    cd "$probe_fixture_tree"
+    env PATH="$probe_fixture_tree/bin:$PATH" PROBE_FIXTURE_UID="$uid" PROBE_FIXTURE_STATUS="$status" \
+      PROBE_FIXTURE_CALLS="$TMP/probe-fixture-calls" \
+      bash -euo pipefail -c 'source "$1"; run_kind_cw_runtime_probe_fixture "$2"' _ "$probe_fixture_runner" "$TMP"
+  )
+}
+run_probe_fixture_case 1000 0
+[ "$(cat "$TMP/probe-fixture-calls")" = "python3 cwd=$probe_fixture_tree uid=direct args=-B scripts/ci/tests/test-kind-cw-runtime-probe.py" ] || {
+  echo 'workspace-user probe fixture must run directly in the checkout' >&2
+  exit 1
+}
+run_probe_fixture_case 0 0
+grep -Eq '^chown -R 1000:1000 .*/codewire-cw-probe-fixture\.[A-Za-z0-9]+/tree$' "$TMP/probe-fixture-calls" || {
+  echo 'root probe fixture must own a private copy as the workspace user' >&2
+  exit 1
+}
+grep -Fxq 'setpriv --reuid=1000 --regid=1000 --clear-groups' "$TMP/probe-fixture-calls" || {
+  echo 'root probe fixture must drop to the workspace user' >&2
+  exit 1
+}
+grep -Eq '^python3 cwd=.*/codewire-cw-probe-fixture\.[A-Za-z0-9]+/tree uid=1000 args=-B scripts/ci/tests/test-kind-cw-runtime-probe.py$' \
+  "$TMP/probe-fixture-calls" || {
+  echo 'root probe fixture must run the committed copy as the workspace user' >&2
+  exit 1
+}
+if run_probe_fixture_case 0 7; then
+  echo 'root probe fixture accepted a failed fixture' >&2
+  exit 1
+fi
+if run_probe_fixture_case 1000 7; then
+  echo 'workspace-user probe fixture accepted a failed fixture' >&2
+  exit 1
+fi
+[ -z "$(find "$TMP" -maxdepth 1 -name 'codewire-cw-probe-fixture.*' -print -quit)" ] || {
+  echo 'root probe fixture left its private copy behind' >&2
+  exit 1
+}
 
 if grep -qF '    name: Manual diagnostics' "$WORKFLOW" \
   || grep -qF '  diagnostics:' "$WORKFLOW" \
@@ -3784,7 +3872,10 @@ dispatch_line="$(grep -n -m1 'name: Emit trusted capability dispatch decisions' 
   exit 1
 }
 producer_gate="    if: \${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}"
-[[ "$(grep -cxF -- "$producer_gate" "$WORKFLOW")" -eq 3 ]] || {
+# The workspace producer adds one clause: a pinned workspace has no producer.
+workspace_producer_gate="${producer_gate% \}\}} && needs.verification-selection.outputs.kind_workspace_source != 'pinned' }}"
+[[ "$(grep -cxF -- "$producer_gate" "$WORKFLOW")" -eq 3 &&
+  "$(grep -cxF -- "$workspace_producer_gate" "$WORKFLOW")" -eq 1 ]] || {
   echo 'a superseded main run still builds a Kind producer' >&2
   exit 1
 }
@@ -4129,7 +4220,8 @@ WORK = {
     "services-control": {"Run Service integration"},
     "services-runtime": {"Run Service integration"},
     "kind-workspace": {"Build and verify exact source workspace"},
-    "kind-product": {"Build exact CI-profile product images"},
+    "kind-product": {"Build exact CI-profile service images"},
+    "kind-daemon": {"Build exact CI-profile daemon image"},
     "kind-smokes": {"Build all host smoke and contract binaries"},
     "edge-kind": {"Run the shard Kind gate"},
 }
@@ -4155,9 +4247,12 @@ SUPPORT = {
     "Wait for integration Postgres", "Stop integration Postgres",
     "Require fresh artifact download directories outside the checkout",
     "Download exact workspace producer output", "Download exact product producer output",
-    "Download exact smoke producer output", "Upload dashboard browser test results on failure",
+    "Download exact smoke producer output", "Download exact daemon producer output",
+    "Write the pinned workspace record",
+    "Upload dashboard browser test results on failure",
     "Delete the shard Kind cluster", "Export verified workspace", "Upload successful workspace output",
     "Export non-promotable product images", "Upload successful product output",
+    "Export non-promotable daemon image", "Upload successful daemon output",
     "Export only completed smoke executables", "Upload successful smoke output",
 }
 
@@ -4255,12 +4350,13 @@ def evaluate(expression, context):
     return truthy(result)
 
 
-def dispatch(selection, cw, desktop, workspace):
+def dispatch(selection, cw, desktop, workspace, kind_workspace="source"):
     with tempfile.NamedTemporaryFile("r") as output:
         environment = dict(
             os.environ, VERIFICATION_SELECTION=selection, VERIFICATION_TESTED_TREE_RECEIPT="fallback",
             CW_PACKAGE_SELECTED=cw, DESKTOP_PACKAGE_SELECTED=desktop,
             WORKSPACE_IMAGE_SELECTED=workspace, VERIFICATION_SUPERSEDED="false",
+            KIND_WORKSPACE_SOURCE=kind_workspace,
             GITHUB_OUTPUT=output.name,
         )
         subprocess.run([emitter], env=environment, check=True, stderr=subprocess.DEVNULL)
@@ -4346,15 +4442,19 @@ synthetic.add("|valid:v3|complete|")
 checked = 0
 for selection in sorted(set(realistic) | synthetic):
     quick = "|pr_quick|" in selection
-    for cw, desktop, workspace in itertools.product(("true", "false"), repeat=3):
-        expected = dispatch(selection, cw, desktop, workspace)
+    for cw, desktop, workspace, kind_workspace in itertools.product(
+            ("true", "false"), ("true", "false"), ("true", "false"), ("source", "pinned")):
+        expected = dispatch(selection, cw, desktop, workspace, kind_workspace)
         # A quick selection deliberately ignores artifact facts; its steps
         # see what dispatch saw.
         facts = ("false", "false", "false") if quick else (cw, desktop, workspace)
         context = {
             "needs.verification-selection.result": "success",
-            "needs.kind-workspace.result": "success",
+            # A pinned workspace dispatches no Kind workspace job.
+            "needs.kind-workspace.result": "skipped" if kind_workspace == "pinned" else "success",
+            "needs.verification-selection.outputs.kind_workspace_source": kind_workspace,
             "needs.kind-product.result": "success",
+            "needs.kind-daemon.result": "success",
             "needs.kind-smokes.result": "success",
             "needs.verification-selection.outputs.selection": selection,
             "needs.verification-selection.outputs.tested_tree_receipt": "fallback",
