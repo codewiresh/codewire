@@ -11,6 +11,7 @@
 //! own that material-bearing authority.
 
 mod broker_channel;
+mod broker_log;
 mod broker_process;
 mod client;
 mod control;
