@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::conn::{Transport, WgDatagram};
 use crate::derp::{self, BoxedStream, NodePrivate, ReceivedMessage};
+use crate::dns::absolute_dns_name;
 use crate::wg::StaticSecret;
 
 const DERP_RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -35,9 +36,25 @@ pub enum DerpTransport {
     Tls { skip_verify: bool },
 }
 
-impl DerpTarget {
-    fn addr(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+/// What each connect and reconnect dials.
+#[derive(Clone)]
+enum Dial {
+    /// `target.host`, looked up on every connect; `absolute` looks it up as
+    /// an absolute DNS name.
+    Name { absolute: bool },
+    /// Exactly these addresses; nothing is looked up.
+    Resolved(Arc<[SocketAddr]>),
+}
+
+impl Dial {
+    /// The `host:port` a named connect looks up. TLS verification and the
+    /// HTTP authority use `target.host` whatever this returns.
+    fn named_address(target: &DerpTarget, absolute: bool) -> String {
+        if absolute {
+            format!("{}:{}", absolute_dns_name(&target.host), target.port)
+        } else {
+            format!("{}:{}", target.host, target.port)
+        }
     }
 }
 
@@ -45,7 +62,18 @@ pub async fn connect_derp_transport(
     target: &DerpTarget,
     secret: &StaticSecret,
 ) -> Result<Transport, derp::Error> {
-    connect_derp_transport_inner(target, None, secret).await
+    connect_derp_transport_inner(target, Dial::Name { absolute: false }, secret).await
+}
+
+/// Connect and reconnect like [`connect_derp_transport`], but look up
+/// `target.host` as an absolute DNS name every time, so no resolver search
+/// domain is ever tried (#2701, see [`crate::dns`]). TLS verification and the
+/// HTTP authority keep `target.host`.
+pub async fn connect_derp_transport_absolute(
+    target: &DerpTarget,
+    secret: &StaticSecret,
+) -> Result<Transport, derp::Error> {
+    connect_derp_transport_inner(target, Dial::Name { absolute: true }, secret).await
 }
 
 /// Connect and reconnect using only an already-resolved address set while
@@ -58,16 +86,16 @@ pub async fn connect_derp_transport_resolved(
     secret: &StaticSecret,
 ) -> Result<Transport, derp::Error> {
     let addresses = validate_resolved_addresses(target, addresses)?;
-    connect_derp_transport_inner(target, Some(addresses), secret).await
+    connect_derp_transport_inner(target, Dial::Resolved(addresses), secret).await
 }
 
 async fn connect_derp_transport_inner(
     target: &DerpTarget,
-    addresses: Option<Arc<[SocketAddr]>>,
+    dial: Dial,
     secret: &StaticSecret,
 ) -> Result<Transport, derp::Error> {
     let secret_bytes = secret.to_bytes();
-    let initial = connect_derp_client(target, addresses.as_deref(), secret_bytes).await?;
+    let initial = connect_derp_client(target, &dial, secret_bytes).await?;
 
     let (to_transport, mut to_transport_rx) = mpsc::unbounded_channel::<WgDatagram>();
     let (from_transport_tx, from_transport) = mpsc::unbounded_channel::<WgDatagram>();
@@ -82,7 +110,7 @@ async fn connect_derp_transport_inner(
             let mut client = match next_client.take() {
                 Some(client) => client,
                 None => loop {
-                    match connect_derp_client(&target, addresses.as_deref(), secret_bytes).await {
+                    match connect_derp_client(&target, &dial, secret_bytes).await {
                         Ok(client) => break client,
                         Err(err) => {
                             tracing::warn!(
@@ -176,19 +204,20 @@ async fn connect_derp_transport_inner(
 
 async fn connect_derp_client(
     target: &DerpTarget,
-    addresses: Option<&[SocketAddr]>,
+    dial: &Dial,
     secret_bytes: [u8; 32],
 ) -> Result<derp::Client<BoxedStream>, derp::Error> {
     let private = NodePrivate::from_raw(secret_bytes);
-    let candidates = addresses
-        .map(|addresses| {
-            addresses
-                .iter()
-                .copied()
-                .map(ConnectAddress::Resolved)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| vec![ConnectAddress::Named(target.addr())]);
+    let candidates = match dial {
+        Dial::Resolved(addresses) => addresses
+            .iter()
+            .copied()
+            .map(ConnectAddress::Resolved)
+            .collect::<Vec<_>>(),
+        Dial::Name { absolute } => vec![ConnectAddress::Named(Dial::named_address(
+            target, *absolute,
+        ))],
+    };
     let mut last_error = None;
     for address in candidates {
         let mut rng = OsRng;
@@ -312,5 +341,22 @@ mod tests {
             validate_resolved_addresses(&target(), vec!["0.0.0.0:443".parse().unwrap()]).is_err()
         );
         assert!(validate_resolved_addresses(&target(), Vec::new()).is_err());
+    }
+
+    #[test]
+    fn an_absolute_dial_looks_up_the_absolute_name_and_keeps_the_target_host() {
+        let target = DerpTarget {
+            host: "ingress-nginx-controller.ingress-nginx.svc.cluster.local".to_owned(),
+            port: 443,
+            transport: DerpTransport::Tls { skip_verify: false },
+        };
+        assert_eq!(
+            Dial::named_address(&target, true),
+            "ingress-nginx-controller.ingress-nginx.svc.cluster.local.:443"
+        );
+        assert_eq!(
+            Dial::named_address(&target, false),
+            "ingress-nginx-controller.ingress-nginx.svc.cluster.local:443"
+        );
     }
 }

@@ -376,6 +376,7 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         let mut credentials = LocalCredentialClient::connect(&AuthorityRuntimeConfig {
             root: credential_root.clone(),
             executable: args.cw_bin.clone(),
+            socket_dir: codewire_local_vmm::socket_dir::predicted(credential_root),
         })
         .await?;
         let ssh = credentials.get_credential(&selected.ssh).await?;
@@ -1926,7 +1927,7 @@ function generalEgress(){
             "--environment-name".into(),
             environment.name.clone().into(),
             "--runner-socket".into(),
-            args.state_root
+            codewire_local_vmm::socket_dir::predicted(&args.state_root)
                 .join("runners")
                 .join(format!("{}.sock", environment.id))
                 .into_os_string(),
@@ -4354,7 +4355,17 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
             ]
             .into_iter()
             .map(OsString::from)
-            .collect();
+            .collect::<Vec<_>>();
+            // Runner sockets live in the state root's short per-user socket
+            // directory (#2735): `<dir>/runners/<environment id>.sock`.
+            let mut actual = actual;
+            for argument in &mut actual {
+                if argument == "/state/runners/00000000-0000-4000-8000-000000000001.sock" {
+                    *argument = codewire_local_vmm::socket_dir::predicted(Path::new("/state"))
+                        .join("runners/00000000-0000-4000-8000-000000000001.sock")
+                        .into_os_string();
+                }
+            }
             (args, environment, actual)
         }
 

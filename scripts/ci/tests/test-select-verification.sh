@@ -1145,6 +1145,9 @@ run_paths_case cli_native_managed_journey pull_request refs/pull/2255/head false
 run_paths_case cli_native_update_journey pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/test-cli-native-update.py
+run_paths_case cli_native_socket_dir_helper pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/native_socket_dir.py
 run_paths_case cli_native_update_entrypoint_regression pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/ci/tests/test-native-managed-update-entrypoint.py
@@ -1890,9 +1893,9 @@ grep -qF 'if selected transport_pkg_codewire_local_vmm; then' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 [[ "$(grep -cFx '    scripts/ci/verify/check-darwin-cross.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh")" == 1 ]]
-grep -qF 'exec "$zigbuild_bin" check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
+grep -qF 'exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
   "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
-grep -qF -- '--target aarch64-apple-darwin' \
+grep -qF -- '--target aarch64-apple-darwin -- -D warnings' \
   "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
 grep -qF 'scripts/ci/verify/build-local-vmm-initramfs.sh --verify' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"

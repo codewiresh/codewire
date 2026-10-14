@@ -342,22 +342,29 @@ fn workspace_owned_environment_keys() -> BTreeSet<String> {
         .into_iter()
         .map(str::to_owned)
         .collect();
-    let all = codewire_access::ManagedCredentialClients::from_profile_slots([
-        "codex",
-        "openai",
-        "anthropic",
-        "ssh",
-        "github",
-    ])
-    .expect("closed slots");
-    // Every name any client projects in either Anthropic form, and every
+    const SLOTS: [&str; 5] = ["codex", "openai", "anthropic", "ssh", "github"];
+    // Every name any selection projects in either Anthropic form, and every
     // name a selected client reserves: an Anthropic name of the form that
-    // is not selected is owned too, and never rendered.
-    for selection in [
-        all,
-        all.with_anthropic_subscription_token()
-            .expect("the Anthropic client is selected"),
-    ] {
+    // is not selected is owned too, and never rendered. Some names depend on
+    // the combination (the GitHub client alone rewrites more Git URL forms
+    // than with an SSH key), so every subset of the closed slots is listed.
+    let selections = (0..1_u8 << SLOTS.len()).flat_map(|bits| {
+        let selection = codewire_access::ManagedCredentialClients::from_profile_slots(
+            SLOTS
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| bits & (1 << index) != 0)
+                .map(|(_, slot)| *slot),
+        )
+        .expect("closed slots");
+        [
+            Some(selection),
+            selection.with_anthropic_subscription_token().ok(),
+        ]
+        .into_iter()
+        .flatten()
+    });
+    for selection in selections {
         keys.extend(
             selection
                 .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)

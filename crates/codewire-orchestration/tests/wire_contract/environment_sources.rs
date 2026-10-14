@@ -261,7 +261,7 @@ async fn assert_ssh_profile_admission_precedes_writes(harness: &Harness) {
         StatusCode::BAD_REQUEST,
         "invalid_argument",
         "SSH repository checkout needs an SSH key in the selected credential profile; \
-         add one, or use an https://github.com URL with a GitHub connection",
+         add one, or use a github.com repository with a GitHub connection",
     );
     assert!(!error.to_string().contains("private-admission"));
     assert_eq!(

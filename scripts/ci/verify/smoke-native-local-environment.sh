@@ -5,7 +5,7 @@
 set -euo pipefail
 
 readonly LINUX_SUN_PATH_BYTES=108
-readonly LONGEST_SOCKET_SUFFIX='/engine/vms/00000000-0000-4000-8000-000000000000/vsock/vsock.sock'
+readonly LONGEST_SOCKET_SUFFIX='/vms/00000000-0000-4000-8000-000000000000/vsock/vsock.sock'
 # PrivateProviderHome plus the selected SSH agent's fixed socket name.
 readonly SSH_AGENT_SOCKET_SUFFIX='/.codewire-provider-login-00000000-0000-4000-8000-000000000000/a'
 SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -568,8 +568,18 @@ fi
 touch "$TRANSCRIPT"
 chmod 0600 "$TRANSCRIPT"
 
-(( ${#STATE_ROOT} + ${#LONGEST_SOCKET_SUFFIX} < LINUX_SUN_PATH_BYTES )) ||
-  die 'scratch parent is too long for native VMM Unix sockets'
+# Sockets live in short per-user directories, not under the state root
+# (#2735); see scripts/dev/native_socket_dir.py.
+socket_dir_of() {
+  python3 -I "$SOURCE_ROOT/scripts/dev/native_socket_dir.py" "$1"
+}
+SOCKET_DIR="$(socket_dir_of "$STATE_ROOT")" || die 'native socket directory is unavailable'
+ENGINE_SOCKET_DIR="$(socket_dir_of "$STATE_ROOT/engine")" || die 'native socket directory is unavailable'
+# The credential authority listens in its root's socket directory (#2745).
+CREDENTIAL_SOCKET_DIR="$(socket_dir_of "$CREDENTIAL_ROOT")" || die 'native socket directory is unavailable'
+readonly SOCKET_DIR ENGINE_SOCKET_DIR CREDENTIAL_SOCKET_DIR
+(( ${#ENGINE_SOCKET_DIR} + ${#LONGEST_SOCKET_SUFFIX} < LINUX_SUN_PATH_BYTES )) ||
+  die 'native VMM Unix socket directory is too long'
 
 printf 'this is deliberately invalid platform JSON\n' >"$PLATFORM_CONFIG/config.json"
 chmod 0600 "$PLATFORM_CONFIG/config.json"
@@ -2243,7 +2253,7 @@ run_native_managed_agent_smoke() {
       --sha256-a "$MANAGED_AGENT_UPDATE_A_SHA256" --runtime-b "$MANAGED_AGENT_UPDATE_RUNTIME_LOCK"
       --image-b "$MANAGED_AGENT_UPDATE_IMAGE_RECEIPT" --sha256-b "$MANAGED_AGENT_UPDATE_SHA256"
       --vm-state "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json"
-      --runner-socket "$STATE_ROOT/runners/$ENVIRONMENT_ID.sock")
+      --runner-socket "$SOCKET_DIR/runners/$ENVIRONMENT_ID.sock")
   else
     journey_args+=(--cw-image-receipt "$MANAGED_AGENT_CW_IMAGE_RECEIPT")
   fi
@@ -2460,7 +2470,7 @@ find_exact_credential_authority_pid() {
 shutdown_credential_authority() {
   local pid
   if ! pid="$(find_exact_credential_authority_pid)"; then
-    [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+    [[ ! -e "$CREDENTIAL_SOCKET_DIR/authority.sock" ]]
     return
   fi
   if ! cw_isolated __local-credential-authority-probe \
@@ -2468,7 +2478,7 @@ shutdown_credential_authority() {
     return 1
   fi
   wait_for_pid_death "$pid" || return 1
-  [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+  [[ ! -e "$CREDENTIAL_SOCKET_DIR/authority.sock" ]]
 }
 
 terminate_exact_credential_authority() {
@@ -2481,7 +2491,7 @@ terminate_exact_credential_authority() {
     kill -KILL -- "$pid" 2>/dev/null || return 1
     wait_for_pid_death "$pid" || return 1
   fi
-  [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+  [[ ! -e "$CREDENTIAL_SOCKET_DIR/authority.sock" ]]
 }
 
 scan_for_credential_canary() {
@@ -2812,7 +2822,7 @@ assert_direct_share_processes() {
     else
       source="$DIRECT_RW_SOURCE"
     fi
-    socket="$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/fs/$index.sock"
+    socket="$ENGINE_SOCKET_DIR/vms/$ENVIRONMENT_ID/fs/$index.sock"
     pid_file="$socket.pid"
     [[ -S "$socket" && "$(stat -c '%a' "$socket")" == 600 ]] ||
       die "direct-share socket $index is absent or not private"
@@ -2855,7 +2865,7 @@ assert_previous_direct_share_processes_gone() {
 
 assert_direct_share_processes_stopped() {
   assert_previous_direct_share_processes_gone
-  [[ -z "$(find "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/fs" -mindepth 1 -print -quit)" ]] ||
+  [[ -z "$(find "$ENGINE_SOCKET_DIR/vms/$ENVIRONMENT_ID/fs" -mindepth 1 -print -quit)" ]] ||
     die 'direct-share runtime endpoints remained after VM stop'
 }
 
@@ -3185,11 +3195,11 @@ fi
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   log 'creating a broker-bound 2-vCPU, 16-GiB native environment'
   CREATE_DOCKER_ARGS=(--no-docker)
-  EXPECTED_OWNED_OBJECT_COUNT=6
+  EXPECTED_OWNED_OBJECT_COUNT=3
 else
   log 'creating account-free 2-vCPU, 16-GiB native environment'
   CREATE_DOCKER_ARGS=(--docker-disk 1Gi)
-  EXPECTED_OWNED_OBJECT_COUNT=7
+  EXPECTED_OWNED_OBJECT_COUNT=4
 fi
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
@@ -4147,8 +4157,11 @@ DELETED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
   die 'per-user supervisor did not survive final environment deletion'
 [[ "$(owned_processes)" == "$DELETED_SUPERVISOR_PID" ]] ||
   die 'a runner or VMM process remained after delete'
-[[ "$(find "$STATE_ROOT" -type s -print)" == "$STATE_ROOT/supervisor.sock" ]] ||
+[[ -z "$(find "$STATE_ROOT" -type s -print)" && -S "$SOCKET_DIR/supervisor.sock" &&
+   "$(find "$SOCKET_DIR" -type s -print)" == "$SOCKET_DIR/supervisor.sock" ]] ||
   die 'final deletion did not retain exactly the per-user supervisor socket'
+[[ -z "$(find "$ENGINE_SOCKET_DIR" -type s -print)" ]] ||
+  die 'a VM socket remained after delete'
 [[ -z "$(find "$STATE_ROOT/engine/vms" -mindepth 1 -print -quit)" ]] || die 'owned VM disk or state remained after delete'
 [[ -z "$(find "$STATE_ROOT/engine/trash" -mindepth 1 -print -quit)" ]] ||
   die 'owned VM trash generation remained after delete'

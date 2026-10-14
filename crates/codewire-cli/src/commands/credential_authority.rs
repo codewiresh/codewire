@@ -73,7 +73,9 @@ pub(crate) async fn run_local_credential_authority(
     #[cfg(target_os = "macos")]
     rustix::process::umask(rustix::fs::Mode::RWXG | rustix::fs::Mode::RWXO);
     let store = authority_store_from_args(&args)?;
-    let config = authority_config(args.root)?;
+    let mut config = authority_config(args.root)?;
+    config.socket_dir = codewire_local_vmm::socket_dir::prepare(&config.root)
+        .context("prepare the local credential authority socket directory")?;
     #[cfg(target_os = "linux")]
     let spawner = Arc::new(CwLocalCredentialProcessSpawner {
         executable: config.executable.clone(),
@@ -86,7 +88,10 @@ pub(crate) async fn run_local_credential_authority(
         store: store.clone(),
         runtime: args.runtime_artifact_root.zip(args.runtime_artifact_lock),
     });
-    let signer = Arc::new(ssh::LocalSshAgentAdapter::new(config.root.clone()));
+    let signer = Arc::new(ssh::LocalSshAgentAdapter::new(
+        config.root.clone(),
+        config.socket_dir.clone(),
+    ));
     let result = serve_os_local_credential_authority_with_process_spawners(
         config,
         store,
@@ -187,7 +192,10 @@ async fn connect_configured_authority(
         .await
         .context("stop local credential authority")?;
     let deadline = tokio::time::Instant::now() + AUTHORITY_STOP_TIMEOUT;
-    while config.socket().exists() {
+    // Either endpoint: the client may have reached an authority that a cw
+    // before #2745 started in the credential root.
+    let accepting = |path: PathBuf| std::os::unix::net::UnixStream::connect(path).is_ok();
+    while accepting(config.socket()) || accepting(config.legacy_socket()) {
         anyhow::ensure!(
             tokio::time::Instant::now() < deadline,
             "local credential authority did not stop"
@@ -282,8 +290,11 @@ fn resolve_local_credential_store(value: Option<&str>) -> anyhow::Result<Protect
     super::resolve_local_credential_store(value)
 }
 
+/// Clients reach the authority at its root's short socket directory (#2745);
+/// the authority itself prepares that directory before it binds.
 fn authority_config(root: PathBuf) -> anyhow::Result<AuthorityRuntimeConfig> {
     Ok(AuthorityRuntimeConfig {
+        socket_dir: codewire_local_vmm::socket_dir::predicted(&root),
         root,
         executable: canonical_current_executable()?,
     })
@@ -657,7 +668,36 @@ mod tests {
         AuthorityRuntimeConfig {
             root: "/synthetic/home/.codewire/credentials-v1".into(),
             executable: "/synthetic/bin/cw".into(),
+            socket_dir: "/tmp/cw-1000/0123456789abcdef".into(),
         }
+    }
+
+    /// #2745: with an 80-byte HOME every authority socket still fits, because
+    /// they live in the root's short socket directory, not under HOME.
+    #[test]
+    fn the_authority_sockets_fit_for_a_long_home() {
+        let home = format!("/home/{}", "h".repeat(74));
+        assert_eq!(home.len(), 80);
+        let root = PathBuf::from(&home).join(".codewire/credentials-v1");
+        let config = authority_config(root.clone()).unwrap();
+        assert_eq!(
+            config.socket_dir,
+            codewire_local_vmm::socket_dir::predicted(&root)
+        );
+        assert!(!config.socket_dir.starts_with(&home));
+        let id = uuid::Uuid::new_v4();
+        for socket in [
+            config.socket(),
+            config.socket_dir.join(format!("ssh-{id}/agent")),
+            config
+                .socket_dir
+                .join(format!("signer/.cw-{}/a", id.simple())),
+            config.socket_dir.join(format!("cwgr-{id}/c")),
+        ] {
+            codewire_local_credentials::check_socket_path(&socket).unwrap();
+        }
+        // Where the authority listened before #2745 does not fit.
+        assert!(codewire_local_credentials::check_socket_path(&config.legacy_socket()).is_err());
     }
 
     #[test]

@@ -34,6 +34,9 @@ const OUTPUT_FRAME_HEADER_SIZE: usize = 17;
 const DEFAULT_OUTPUT_READ_LIMIT: u64 = 256 * 1024;
 const MAX_OUTPUT_READ_LIMIT: u64 = 4 * 1024 * 1024;
 const LAUNCH_OPERATION_TIMEOUT: Duration = Duration::from_secs(40);
+/// The status of a launch whose environment projection was refused, expired or
+/// cancelled before the program was started: the launcher never executed it.
+pub(crate) const LAUNCH_PROJECTION_DENIED: &str = "environment launch denied or expired";
 const LAUNCH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const LAUNCH_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 // Compact at twice the retained byte/frame budget, amortizing disk rewrites.
@@ -2503,11 +2506,7 @@ impl SessionEngine {
             )
             .await;
             return self
-                .record_launch_cleanup(
-                    handle,
-                    confirmed,
-                    "environment launch denied or expired".into(),
-                )
+                .record_launch_cleanup(handle, confirmed, LAUNCH_PROJECTION_DENIED.into())
                 .await;
         }
         let Some(stdin) = child.stdin.take() else {
@@ -2731,11 +2730,7 @@ impl SessionEngine {
             )
             .await;
             return self
-                .record_launch_cleanup(
-                    handle,
-                    confirmed,
-                    "environment launch denied or expired".into(),
-                )
+                .record_launch_cleanup(handle, confirmed, LAUNCH_PROJECTION_DENIED.into())
                 .await;
         }
 
