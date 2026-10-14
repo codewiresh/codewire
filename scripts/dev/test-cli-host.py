@@ -1509,10 +1509,14 @@ class Journey:
         journal = agent / "sessions" / f"{session}.jsonl"
 
         def said(role, journal=journal):
-            """What noel saved in its session journal for ROLE."""
+            """What noel saved in its session journal for ROLE. A reply an
+            abort cut off answered nothing, so it is left out: noel from
+            noeljackson/noel#95 keeps it in the journal marked aborted (noel
+            spec section 4.2), and earlier builds did not save it at all."""
             entries = [json.loads(line) for line in journal.read_text().splitlines()]
             return [e["message"]["content"] for e in entries
-                    if e.get("type") == "message" and e["message"]["role"] == role]
+                    if e.get("type") == "message" and e["message"]["role"] == role
+                    and not e["message"].get("aborted")]
 
         print(f"cli-host: noel inbox: {inbox.splitlines()[-1]}", flush=True)
         self.check("real-noel-first-turn/inbox-shows-reply")
@@ -1583,8 +1587,9 @@ class Journey:
         short = self.call("msg", env, "noel-slow", "Short.", "--output", "json", data=True)
         assert self.wait_message(short["id"])["result"] == "[faux/echo] Short."
         assert self.inbox("noel-slow")["driver"]["native_thread_id"] == slow_session
-        # noel saved both stories' prompts and neither reply: it never saves
-        # an aborted reply, and nothing resumed the stopped run. The steer the
+        # noel saved both stories' prompts and no reply but the last: an
+        # aborted reply is not saved, or is saved marked aborted, and nothing
+        # resumed the stopped run. The steer the
         # interrupt left queued was cleared before that prompt, not joined.
         slow_journal = agent / "sessions" / f"{slow_session}.jsonl"
         assert said("user", slow_journal) == [story_text, second_text, "Short."], said("user", slow_journal)
@@ -1719,7 +1724,15 @@ class Journey:
         sent = requests(log, 2)
         assert len(sent) == 2, sent
         results = [(m["tool_name"], m["content"]) for m in sent[1]["messages"] if m["role"] == "tool"]
-        assert results == [("bash", "tool call bash did not complete before the session continued")], sent
+        # The interrupted call is not run again. Its result says so: the
+        # output saved before the kill (none: it printed to a file) and
+        # Durable's interrupted block, from noeljackson/noel#95 on, or the
+        # earlier placeholder.
+        interrupted = (
+            "<harness>\n[error] Tool bash was interrupted and may have partially run\n</harness>",
+            "tool call bash did not complete before the session continued",
+        )
+        assert len(results) == 1 and results[0][0] == "bash" and results[0][1] in interrupted, sent
         assert "bash is reported interrupted, not run again" in self.call("logs", env, "noel-tool").stdout
         self.real_resumed("noel-tool", message, run)
         self.heard_once(lead, message, lead_said)

@@ -24,15 +24,20 @@ export class OwnedUxSandbox {
   constructor(private readonly userId: string, private readonly orgId: string,
     private readonly command: Command) {}
 
+  // Every read is bounded by what this run owns, never by the organization's
+  // history: `list` without `--all` returns only live rows (the server omits
+  // destroying and destroyed ones), and the terminal read names one exact ID.
   private async lookup(deadline: number, retryBound = true): Promise<OwnedEnvironment | undefined> {
-    const result = await this.command(["env", "--platform", "list", "--all", "--output", "json"], deadline);
+    const result = await this.command(["env", "--platform", "list", "--output", "json"], deadline);
     if (!Array.isArray(result) || result.some((row) => !row || typeof row !== "object")) {
       throw new DevUxError("ux-owned-resource-list");
     }
     const rows = result.filter((row) => row.name === this.name);
     if (rows.length > 1) throw new DevUxError("ux-owned-resource-ambiguous");
     const row = rows[0];
-    if (!row) return undefined;
+    // Unbound absence is uncertainty. A bound ID that left the live list is
+    // read by that exact ID for its terminal state.
+    if (!row) return this.id ? this.terminal(deadline, retryBound) : undefined;
     if (row.placement !== "platform" || typeof row.id !== "string" || !UUID.test(row.id)
       || typeof row.state !== "string" || (this.id && row.id !== this.id)) {
       throw new DevUxError("ux-owned-resource-mismatch");
@@ -60,6 +65,27 @@ export class OwnedUxSandbox {
     }
     this.id = row.id;
     return { id: row.id, state: detail.state };
+  }
+
+  // `cw env report` resolves an exact ID with GetEnvironment, which, unlike
+  // info's name resolution, includes destroying and destroyed environments.
+  // It takes no placement flag. Only states the live list omits are accepted:
+  // anything else moved between the two reads, so read once more.
+  private async terminal(deadline: number, retryBound: boolean): Promise<OwnedEnvironment | undefined> {
+    const value = await this.command(["env", "report", this.id, "--output", "json"], deadline);
+    const environment = value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>).environment as Record<string, unknown> | null | undefined
+      : undefined;
+    if (!environment || typeof environment !== "object" || Array.isArray(environment)
+      || environment.id !== this.id || environment.org_id !== this.orgId
+      || typeof environment.state !== "string") {
+      throw new DevUxError("ux-owned-resource-mismatch");
+    }
+    if (!["destroying", "destroyed"].includes(environment.state)) {
+      if (retryBound) return this.lookup(deadline, false);
+      throw new DevUxError("ux-owned-resource-mismatch");
+    }
+    return { id: this.id, state: environment.state };
   }
 
   async admit(deadline: number): Promise<void> {

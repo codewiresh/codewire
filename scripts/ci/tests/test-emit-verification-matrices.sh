@@ -31,7 +31,7 @@ assert_output() {
 
 docs_output="$(emit '|valid:v3|policy|policy_shell_omittable|complete|' fallback false false false)"
 assert_output "$docs_output" policy true
-for group in standard tooling rust_compile rust_transport database \
+for group in standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind cw_release_assets workspace_image; do
   assert_output "$docs_output" "$group" false
 done
@@ -45,7 +45,7 @@ assert_output "$legacy_policy_output" policy true
 assert_output "$legacy_policy_output" tooling true
 
 receipt_output="$(emit '|valid:v3|policy|rust|kind|complete|' accepted true true true)"
-for group in policy standard tooling rust_compile rust_transport database \
+for group in policy standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind cw_release_assets workspace_image; do
   assert_output "$receipt_output" "$group" false
 done
@@ -53,23 +53,61 @@ done
 selected_output="$(emit \
   '|valid:v3|policy|contracts|security|rust|database|service_idp|service_nats|kind|web|complete|' \
   fallback true false true)"
-for group in policy standard tooling rust_compile rust_transport database \
-    services_control services_runtime edge_kind cw_release_assets workspace_image; do
+for group in policy standard tooling rust_compile rust_shards rust_transport database \
+    services_control services_runtime edge_kind cw_release_assets; do
   assert_output "$selected_output" "$group" true
 done
+# Selected Kind builds and proves the workspace image itself.
+assert_output "$selected_output" workspace_image false
 
 desktop_output="$(emit '|valid:v3|complete|' fallback false true false)"
 assert_output "$desktop_output" rust_transport true
 assert_output "$desktop_output" rust_compile true
+assert_output "$desktop_output" rust_shards false
 
-# Main and full pull-request selections compile with the Rust group, exactly
-# as before the compile decision was separate.
-for rust_selection in '|valid:v3|rust|complete|' '|valid:v3|rust_curated_locks|complete|' \
-    '|valid:v3|transport|complete|' '|valid:v3|transport_derp_contract|complete|'; do
-  rust_output="$(emit "$rust_selection" fallback false false false)"
+# Every fast-compile selection compiles. Each other Rust job is expected only
+# when its own steps have work: the shards for rust or transport, Rust /
+# transport verification also for the curated locks.
+for rust_case in 'rust:true:true' 'transport:true:true' 'rust_curated_locks:false:true' \
+    'transport_derp_contract:false:false'; do
+  IFS=: read -r rust_token shards_expected transport_expected <<<"$rust_case"
+  rust_output="$(emit "|valid:v3|${rust_token}|complete|" fallback false false false)"
   assert_output "$rust_output" rust_compile true
-  assert_output "$rust_output" rust_transport true
+  assert_output "$rust_output" rust_shards "$shards_expected"
+  assert_output "$rust_output" rust_transport "$transport_expected"
 done
+
+# Tokens that only shape a running step dispatch no job alone.
+for shaping_token in contracts_proto go_tailnet go_consumer_interop security_go; do
+  shaping_output="$(emit "|valid:v3|${shaping_token}|complete|" fallback false false false)"
+  for group in standard tooling rust_compile rust_shards rust_transport; do
+    assert_output "$shaping_output" "$group" false
+  done
+done
+
+# Static edge checks run in tooling; only Kind starts the Kind shards.
+edge_output="$(emit '|valid:v3|edge_kind|complete|' fallback false false false)"
+assert_output "$edge_output" tooling true
+assert_output "$edge_output" edge_kind false
+# An artifact-selected workspace image is Kind's to build when Kind runs.
+kind_workspace_output="$(emit '|valid:v3|kind|complete|' fallback false false true)"
+assert_output "$kind_workspace_output" edge_kind true
+assert_output "$kind_workspace_output" workspace_image false
+kind_workspace_output="$(KIND_WORKSPACE_SOURCE=source emit '|valid:v3|kind|complete|' fallback false false true)"
+assert_output "$kind_workspace_output" workspace_image false
+# When Kind runs the published pin instead, the selected exact-source
+# workspace still gets its Container contract verification.
+kind_pinned_output="$(KIND_WORKSPACE_SOURCE=pinned emit '|valid:v3|kind|complete|' fallback false false true)"
+assert_output "$kind_pinned_output" edge_kind true
+assert_output "$kind_pinned_output" workspace_image true
+kind_pinned_output="$(KIND_WORKSPACE_SOURCE=pinned emit '|valid:v3|kind|complete|' fallback false false false)"
+assert_output "$kind_pinned_output" workspace_image false
+if KIND_WORKSPACE_SOURCE=cached VERIFICATION_SELECTION='|valid:v3|kind|complete|' \
+    VERIFICATION_TESTED_TREE_RECEIPT=fallback CW_PACKAGE_SELECTED=false DESKTOP_PACKAGE_SELECTED=false \
+    WORKSPACE_IMAGE_SELECTED=true GITHUB_OUTPUT="$TMP/unknown-source" "$CHECK" >/dev/null 2>&1; then
+  echo 'an unknown Kind workspace source was accepted' >&2
+  exit 1
+fi
 
 # A hosted pull request's quick selection dispatches only what it names: the
 # policy core, ShellCheck in tooling, compiling every Rust target, and Kind
@@ -80,7 +118,7 @@ quick_output="$(emit \
   fallback true true true)"
 assert_output "$quick_output" policy true
 assert_output "$quick_output" rust_compile true
-for group in standard tooling rust_transport database services_control \
+for group in standard tooling rust_shards rust_transport database services_control \
     services_runtime edge_kind cw_release_assets workspace_image; do
   assert_output "$quick_output" "$group" false
 done
@@ -89,17 +127,17 @@ quick_shell_output="$(emit \
   fallback true true true)"
 assert_output "$quick_shell_output" policy true
 assert_output "$quick_shell_output" tooling true
-for group in standard rust_compile rust_transport database services_control \
+for group in standard rust_compile rust_shards rust_transport database services_control \
     services_runtime edge_kind cw_release_assets workspace_image; do
   assert_output "$quick_shell_output" "$group" false
 done
 quick_kind_output="$(emit \
   '|valid:v3|edge_kind|kind|policy|policy_shell_omittable|pr_quick|rust_compile|complete|' \
   fallback false false true)"
-for group in policy rust_compile edge_kind; do
+for group in policy tooling rust_compile edge_kind; do
   assert_output "$quick_kind_output" "$group" true
 done
-for group in standard tooling rust_transport database services_control \
+for group in standard rust_shards rust_transport database services_control \
     services_runtime cw_release_assets workspace_image; do
   assert_output "$quick_kind_output" "$group" false
 done
@@ -135,7 +173,7 @@ assert_output "$apikey_output" services_control false
 assert_output "$apikey_output" services_runtime false
 
 unknown_output="$(emit '|valid:v3|future_capability|complete|' fallback false false false)"
-for group in policy standard tooling rust_compile rust_transport database \
+for group in policy standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind cw_release_assets workspace_image; do
   assert_output "$unknown_output" "$group" true
 done
@@ -153,7 +191,7 @@ fi
 
 # A superseded main commit dispatches nothing, whatever it selected; the same
 # selection on main's tip (or with the input unset) dispatches as before.
-all_groups=(policy standard tooling rust_compile rust_transport database
+all_groups=(policy standard tooling rust_compile rust_shards rust_transport database
   services_control services_runtime edge_kind cw_release_assets workspace_image)
 everything='|valid:v3|future_capability|complete|'
 superseded_emit() {
