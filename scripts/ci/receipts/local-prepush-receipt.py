@@ -253,6 +253,9 @@ def invoke_selector(root: Path, paths: Sequence[str], full: bool = False) -> dic
     environment = os.environ.copy()
     environment.pop("GITHUB_OUTPUT", None)
     environment.pop("GITHUB_EVENT_PATH", None)
+    # Local qualification binds the complete selection, never hosted CI's
+    # quick pull-request scope.
+    environment.pop("VERIFICATION_PR_SCOPE", None)
     if full:
         environment.update(GITHUB_EVENT_NAME="workflow_dispatch", VERIFICATION_REQUEST="all")
         command = [os.fspath(selector)]
