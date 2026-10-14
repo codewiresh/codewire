@@ -5731,6 +5731,9 @@ fn supervise_guest(
     loop {
         validate_runc_log()?;
         if POWEROFF_REQUESTED.load(Ordering::Acquire) || container_poweroff_requested(&poweroff)? {
+            // The workload, sessions included, gets SIGTERM and its grace
+            // before the daemon stops: a session's processes end with it.
+            terminate_workspace_workload(&mut workspace);
             stop_daemon(&mut daemon);
             stop_workspace_container(&mut workspace);
             if let Some(docker) = docker.as_mut() {
@@ -5864,14 +5867,20 @@ fn stop_daemon(daemon: &mut std::process::Child) {
     let _ = daemon.wait();
 }
 
-fn stop_workspace_container(workspace: &mut std::process::Child) {
-    // The workload gets SIGTERM and a bounded grace before the container is
-    // killed (#2760).
+/// SIGTERM the running workspace's processes and wait up to their grace
+/// (#2760); nothing when the container already exited.
+fn terminate_workspace_workload(workspace: &mut std::process::Child) {
     if workspace.try_wait().ok().flatten().is_none()
         && let Some(init) = shutdown::container_init_pid()
     {
         shutdown::terminate_workload(init, shutdown::WORKLOAD_STOP_GRACE);
     }
+}
+
+fn stop_workspace_container(workspace: &mut std::process::Child) {
+    // The workload gets SIGTERM and a bounded grace before the container is
+    // killed (#2760).
+    terminate_workspace_workload(workspace);
     let kill_completed = run_runc_control(&[
         "--root",
         RUNC_STATE_PATH,

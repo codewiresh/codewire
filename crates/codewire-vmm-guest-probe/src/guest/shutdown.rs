@@ -72,11 +72,14 @@ pub(super) fn terminate_workload(container_init: i32, grace: Duration) -> usize 
     if std::fs::read_link("/proc/self/ns/pid").ok().as_deref() == Some(namespace.as_path()) {
         return 0;
     }
+    // A zombie has already exited and holds nothing; it is gone once the
+    // container's init reaps it or the container ends.
     let members = |namespace: &Path| -> Vec<i32> {
         processes()
             .into_iter()
             .filter(|pid| *pid != container_init)
             .filter(|pid| pid_namespace(*pid).as_deref() == Some(namespace))
+            .filter(|pid| !exited(*pid))
             .collect()
     };
     let signalled = members(&namespace);
@@ -100,6 +103,20 @@ fn processes() -> Vec<i32> {
         .flatten()
         .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
         .collect()
+}
+
+/// Whether `pid` has exited (a zombie, or already gone).
+fn exited(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| process_state(&stat))
+        .is_none_or(|state| matches!(state, 'Z' | 'X' | 'x'))
+}
+
+/// The state letter of a /proc/PID/stat line, which follows the command
+/// name's closing parenthesis (the name itself may contain any byte).
+fn process_state(stat: &str) -> Option<char> {
+    stat.rsplit_once(") ")?.1.chars().next()
 }
 
 fn pid_namespace(pid: i32) -> Option<PathBuf> {
@@ -238,6 +255,15 @@ mod tests {
                 PathBuf::from("/generation"),
             ]
         );
+    }
+
+    #[test]
+    fn the_state_follows_the_last_parenthesis() {
+        assert_eq!(process_state("42 (sh) S 1 42 42 0"), Some('S'));
+        assert_eq!(process_state("43 (we (ird) )) Z 1 43"), Some('Z'));
+        assert_eq!(process_state("garbage"), None);
+        assert!(exited(i32::MAX));
+        assert!(!exited(std::process::id() as i32));
     }
 
     #[test]
