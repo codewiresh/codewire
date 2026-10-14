@@ -274,7 +274,7 @@ impl ClaudeSignIn {
         code: &Secret,
         handle: &Handle,
     ) -> Result<TokenResponse, ClaudeSignInError> {
-        let mut body = Zeroizing::new(
+        let body = Zeroizing::new(
             serde_json::to_vec(&CodeExchange {
                 grant_type: "authorization_code",
                 code: code.expose(),
@@ -290,7 +290,7 @@ impl ClaudeSignIn {
             Method::POST,
             CLAUDE_TOKEN_URL,
             json_headers(),
-            std::mem::take(&mut *body),
+            body,
         )
         .await
         .map_err(transport_error)?;
@@ -302,8 +302,11 @@ impl ClaudeSignIn {
     }
 
     async fn profile(&self, access_token: &str) -> Result<ClaudeProfile, ClaudeSignInError> {
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {access_token}"))
-            .map_err(|_| ClaudeSignInError::InvalidResponse)?;
+        let mut bearer = Zeroizing::new(String::with_capacity(7 + access_token.len()));
+        bearer.push_str("Bearer ");
+        bearer.push_str(access_token);
+        let mut authorization =
+            HeaderValue::from_str(&bearer).map_err(|_| ClaudeSignInError::InvalidResponse)?;
         authorization.set_sensitive(true);
         let mut headers = json_headers();
         headers.insert(header::AUTHORIZATION, authorization);
@@ -312,7 +315,7 @@ impl ClaudeSignIn {
             Method::GET,
             CLAUDE_PROFILE_URL,
             headers,
-            Vec::new(),
+            Zeroizing::new(Vec::new()),
         )
         .await
         .map_err(transport_error)?;
