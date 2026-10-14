@@ -25,21 +25,43 @@ const AUTHORITY_SOCKET_FILE: &str = "authority.sock";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The longest Unix socket path the kernel accepts, excluding the NUL.
+#[cfg(target_os = "macos")]
+pub const MAXIMUM_SOCKET_PATH_BYTES: usize = 103;
+#[cfg(not(target_os = "macos"))]
+pub const MAXIMUM_SOCKET_PATH_BYTES: usize = 107;
+
 #[derive(Clone, Debug)]
 pub struct AuthorityRuntimeConfig {
+    /// The credential root: the authority's private state under HOME.
     pub root: PathBuf,
     pub executable: PathBuf,
+    /// The short private directory that holds the authority's sockets (its
+    /// endpoint and each repository SSH runtime), outside HOME so their paths
+    /// fit the kernel's bound for any HOME (#2745). The caller prepares it.
+    pub socket_dir: PathBuf,
 }
 
 impl AuthorityRuntimeConfig {
     pub fn socket(&self) -> PathBuf {
+        self.socket_dir.join(AUTHORITY_SOCKET_FILE)
+    }
+
+    /// Where an authority from a cw before #2745 listens, inside the
+    /// credential root. A client still uses a compatible one that is running
+    /// there; a new authority removes the dead endpoint.
+    pub fn legacy_socket(&self) -> PathBuf {
         self.root.join(AUTHORITY_SOCKET_FILE)
     }
 
     pub fn validate(&self) -> Result<(), AuthorityRuntimeError> {
-        if !self.root.is_absolute() || !self.executable.is_absolute() {
+        if !self.root.is_absolute()
+            || !self.executable.is_absolute()
+            || !self.socket_dir.is_absolute()
+        {
             return Err(AuthorityRuntimeError::InvalidConfiguration);
         }
+        check_socket_path(&self.socket())?;
         let executable = fs::canonicalize(&self.executable)
             .map_err(|_| AuthorityRuntimeError::InvalidConfiguration)?;
         if executable != self.executable {
@@ -73,6 +95,37 @@ impl AuthorityRuntimeConfig {
         }
         ensure_private_root(&self.root).map_err(AuthorityRuntimeError::Credential)
     }
+}
+
+/// Refuses a socket path the kernel cannot bind, naming it, its length and
+/// the limit.
+pub fn check_socket_path(path: &Path) -> Result<(), AuthorityRuntimeError> {
+    let length = path.as_os_str().len();
+    if length > MAXIMUM_SOCKET_PATH_BYTES {
+        return Err(AuthorityRuntimeError::SocketPathTooLong {
+            path: path.to_owned(),
+            length,
+            limit: MAXIMUM_SOCKET_PATH_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// The socket directory must be this user's private directory: a real
+/// directory, mode 0700, at its canonical path.
+#[cfg(unix)]
+pub(crate) fn validate_socket_dir(directory: &Path) -> Result<(), AuthorityRuntimeError> {
+    let metadata =
+        fs::symlink_metadata(directory).map_err(|_| AuthorityRuntimeError::InvalidPrivatePath)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != current_uid()
+        || metadata.mode() & 0o7777 != 0o700
+        || fs::canonicalize(directory).map_err(|_| AuthorityRuntimeError::InvalidPrivatePath)?
+            != directory
+    {
+        return Err(AuthorityRuntimeError::InvalidPrivatePath);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,17 +195,25 @@ pub(crate) fn bind_owner_only_for_uid(
     AuthorityRuntimeError,
 > {
     config.prepare_root()?;
+    validate_socket_dir(&config.socket_dir)?;
     let socket = config.socket();
-    match fs::symlink_metadata(&socket) {
-        Ok(_) => {
-            SocketIdentity::capture(&socket)?;
-            fs::remove_file(&socket).map_err(|_| AuthorityRuntimeError::InvalidPrivateSocket)?;
+    // The caller holds the singleton lock, so no authority is live at either
+    // endpoint: replace a dead one here and remove one an earlier cw left in
+    // the credential root.
+    for stale in [socket.clone(), config.legacy_socket()] {
+        match fs::symlink_metadata(&stale) {
+            Ok(_) => {
+                SocketIdentity::capture(&stale)?;
+                fs::remove_file(&stale).map_err(|_| AuthorityRuntimeError::InvalidPrivateSocket)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(AuthorityRuntimeError::InvalidPrivateSocket),
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return Err(AuthorityRuntimeError::InvalidPrivateSocket),
     }
-    let listener =
-        UnixListener::bind(&socket).map_err(|_| AuthorityRuntimeError::InvalidPrivateSocket)?;
+    let listener = UnixListener::bind(&socket).map_err(|source| AuthorityRuntimeError::Bind {
+        path: socket.clone(),
+        source,
+    })?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
         .map_err(|_| AuthorityRuntimeError::InvalidPrivateSocket)?;
     let identity = SocketIdentity::capture(&socket)?;
@@ -302,6 +363,17 @@ pub enum AuthorityRuntimeError {
     InvalidPrivatePath,
     #[error("local credential authority private socket is invalid")]
     InvalidPrivateSocket,
+    #[error(
+        "the local credential authority socket path {} is {length} bytes; the limit is {limit}",
+        path.display()
+    )]
+    SocketPathTooLong {
+        path: PathBuf,
+        length: usize,
+        limit: usize,
+    },
+    #[error("could not bind the local credential authority socket {}: {source}", path.display())]
+    Bind { path: PathBuf, source: io::Error },
     #[error("local credential authority is unsupported on this platform")]
     UnsupportedPlatform,
     #[error("connect to local credential authority failed")]

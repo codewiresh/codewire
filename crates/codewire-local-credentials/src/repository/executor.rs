@@ -1015,14 +1015,15 @@ pub(crate) fn cleanup_repository_staging(
 }
 
 /// macOS executors put their one-use credential socket directory in the
-/// authority root (Darwin has no per-user runtime directory). A killed
-/// executor can leave that directory behind with at most its socket, never
-/// material; the next authority removes it before serving.
+/// authority's socket directory (Darwin has no per-user runtime directory; a
+/// cw before #2745 used the credential root). A killed executor can leave
+/// that directory behind with at most its socket, never material; the next
+/// authority removes it from `directory` before serving.
 #[cfg(target_os = "macos")]
 pub(crate) fn cleanup_repository_credential_sockets(
-    authority_root: &Path,
+    directory: &Path,
 ) -> Result<(), RepositoryExecutorError> {
-    for entry in fs::read_dir(authority_root).map_err(|_| RepositoryExecutorError::Filesystem)? {
+    for entry in fs::read_dir(directory).map_err(|_| RepositoryExecutorError::Filesystem)? {
         let entry = entry.map_err(|_| RepositoryExecutorError::Filesystem)?;
         let name = entry.file_name();
         let Some(id) = name.to_str().and_then(|name| name.strip_prefix("cwgr-")) else {

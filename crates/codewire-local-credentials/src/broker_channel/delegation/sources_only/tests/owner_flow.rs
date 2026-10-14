@@ -98,6 +98,7 @@ async fn owner_client_requires_exact_local_profile_and_delivers_both_application
     let config = AuthorityRuntimeConfig {
         root: temp.path().join("authority"),
         executable: std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
+        socket_dir: temp.path().join("authority"),
     };
     let recipient = ProjectionRecipient::new();
     let context = ProjectionContext {

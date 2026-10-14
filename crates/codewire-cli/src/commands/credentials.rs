@@ -1275,6 +1275,7 @@ mod tests {
         let config = codewire_local_credentials::AuthorityRuntimeConfig {
             root: temp.path().join("authority"),
             executable: std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
+            socket_dir: temp.path().join("authority"),
         };
         let server = tokio::spawn(
             codewire_local_credentials::serve_local_credential_authority(

@@ -376,6 +376,7 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         let mut credentials = LocalCredentialClient::connect(&AuthorityRuntimeConfig {
             root: credential_root.clone(),
             executable: args.cw_bin.clone(),
+            socket_dir: codewire_local_vmm::socket_dir::predicted(credential_root),
         })
         .await?;
         let ssh = credentials.get_credential(&selected.ssh).await?;
