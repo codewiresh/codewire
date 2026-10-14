@@ -28,7 +28,7 @@ fn projection(bytes: usize) -> v1::CredentialBridgeGuestMessage {
 }
 
 /// Admit one epoch and return its daemon and broker ends after the Open.
-async fn admitted(fixture: &mut Fixture) -> (DaemonCall, BrokerCall) {
+pub(super) async fn admitted(fixture: &mut Fixture) -> (DaemonCall, BrokerCall) {
     let daemon = bounded(fixture.daemon_calls.recv()).await.unwrap();
     let mut broker = bounded(fixture.broker_calls.recv()).await.unwrap();
     let accept = std::mem::replace(&mut broker.accept, oneshot::channel().0);

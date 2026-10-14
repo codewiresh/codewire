@@ -2,6 +2,7 @@
 //! claim Kubernetes authentication, provider success, or protected-store proof.
 mod budgets;
 mod relay;
+mod ssh_deadlines;
 
 use super::*;
 use crate::worker::credential_relay::budget::Limits;
