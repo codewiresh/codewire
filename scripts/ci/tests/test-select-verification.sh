@@ -3125,10 +3125,65 @@ policy_steps() {
   echo 'a policy core part has no steps' >&2
   exit 1
 }
-[ "$(policy_function run_policy_core | sed '1d;$d')" = $'  run_policy_core_one\n  run_policy_core_two' ] || {
+[ "$(policy_function run_policy_core | grep -Eo 'run_policy_core_(one|two)' | LC_ALL=C sort | paste -sd' ')" \
+    = 'run_policy_core_one run_policy_core_two' ] || {
   echo 'policy core is not exactly its two parts' >&2
   exit 1
 }
+# CI's policy core runs both parts side by side and fails when either fails,
+# including a failure in the middle of a part. Part one here passes only if
+# part two starts while it runs, so a serial aggregate fails this fixture.
+policy_core_fixture() {
+  local dir="$1" one="$2" two="$3"
+  bash -c '
+    set -euo pipefail
+    dir="$1" one_mode="$3" two_mode="$4"
+    eval "$2"
+    run_policy_core_one() { (
+      for _ in $(seq 1 100); do
+        [ -e "$dir/two-started" ] && break
+        sleep 0.05
+      done
+      [ -e "$dir/two-started" ]
+      [ "$one_mode" = pass ] || false
+      echo one-finished
+    ) }
+    run_policy_core_two() { (
+      touch "$dir/two-started"
+      [ "$two_mode" = pass ] || false
+      echo two-finished
+    ) }
+    run_policy_core
+  ' policy-core-fixture "$dir" "$(policy_function run_policy_core)" "$one" "$two"
+}
+for policy_core_case in pass:pass:0 fail:pass:1 pass:fail:1 fail:fail:1; do
+  IFS=: read -r policy_one policy_two policy_expected <<<"$policy_core_case"
+  policy_core_dir="$(mktemp -d "$TMP/policy-core.XXXXXX")"
+  policy_core_status=0
+  policy_core_output="$(policy_core_fixture "$policy_core_dir" "$policy_one" "$policy_two" 2>&1)" \
+    || policy_core_status=$?
+  if [ "$policy_expected" = 0 ]; then
+    [ "$policy_core_status" -eq 0 ] \
+      && grep -qx one-finished <<<"$policy_core_output" \
+      && grep -qx two-finished <<<"$policy_core_output" || {
+      echo "policy core did not run its parts side by side: $policy_core_output" >&2
+      exit 1
+    }
+  else
+    [ "$policy_core_status" -ne 0 ] || {
+      echo "policy core passed with part one $policy_one and part two $policy_two" >&2
+      exit 1
+    }
+    if [ "$policy_one" = fail ] && grep -qx one-finished <<<"$policy_core_output"; then
+      echo 'a failed policy core part kept running past its failing step' >&2
+      exit 1
+    fi
+    if [ "$policy_two" = fail ] && grep -qx two-finished <<<"$policy_core_output"; then
+      echo 'a failed policy core part kept running past its failing step' >&2
+      exit 1
+    fi
+  fi
+done
 grep -qxF '  for part in $(policy_parts); do' <(policy_function run_policy) \
   && grep -qxF '    run_policy_part "$part"' <(policy_function run_policy) || {
   echo 'the policy family does not run the listed policy parts' >&2
