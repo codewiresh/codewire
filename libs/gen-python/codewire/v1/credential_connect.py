@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, ListGithubPendingPermissionsRequest, ListGithubPendingPermissionsResponse, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse
+from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, CompleteClaudeSignInRequest, CompleteClaudeSignInResponse, CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, ListGithubPendingPermissionsRequest, ListGithubPendingPermissionsResponse, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse, StartClaudeSignInRequest, StartClaudeSignInResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -534,6 +534,12 @@ class CredentialMutationService(Protocol):
     async def add_claude_subscription_token_credential(self, request: AddClaudeSubscriptionTokenCredentialRequest, ctx: RequestContext[AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse]) -> AddClaudeSubscriptionTokenCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    async def start_claude_sign_in(self, request: StartClaudeSignInRequest, ctx: RequestContext[StartClaudeSignInRequest, StartClaudeSignInResponse]) -> StartClaudeSignInResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def complete_claude_sign_in(self, request: CompleteClaudeSignInRequest, ctx: RequestContext[CompleteClaudeSignInRequest, CompleteClaudeSignInResponse]) -> CompleteClaudeSignInResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     async def rename_credential(self, request: RenameCredentialRequest, ctx: RequestContext[RenameCredentialRequest, RenameCredentialResponse]) -> RenameCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -615,6 +621,26 @@ class CredentialMutationServiceASGIApplication(ConnectASGIApplication[Credential
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.add_claude_subscription_token_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/StartClaudeSignIn": Endpoint.unary(
+                    method=MethodInfo(
+                        name="StartClaudeSignIn",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=StartClaudeSignInRequest,
+                        output=StartClaudeSignInResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.start_claude_sign_in,
+                ),
+                "/codewire.v1.CredentialMutationService/CompleteClaudeSignIn": Endpoint.unary(
+                    method=MethodInfo(
+                        name="CompleteClaudeSignIn",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=CompleteClaudeSignInRequest,
+                        output=CompleteClaudeSignInResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.complete_claude_sign_in,
                 ),
                 "/codewire.v1.CredentialMutationService/RenameCredential": Endpoint.unary(
                     method=MethodInfo(
@@ -814,6 +840,46 @@ class CredentialMutationServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def start_claude_sign_in(
+        self,
+        request: StartClaudeSignInRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> StartClaudeSignInResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="StartClaudeSignIn",
+                service_name="codewire.v1.CredentialMutationService",
+                input=StartClaudeSignInRequest,
+                output=StartClaudeSignInResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def complete_claude_sign_in(
+        self,
+        request: CompleteClaudeSignInRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> CompleteClaudeSignInResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="CompleteClaudeSignIn",
+                service_name="codewire.v1.CredentialMutationService",
+                input=CompleteClaudeSignInRequest,
+                output=CompleteClaudeSignInResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def rename_credential(
         self,
         request: RenameCredentialRequest,
@@ -950,6 +1016,12 @@ class CredentialMutationServiceSync(Protocol):
     def add_claude_subscription_token_credential(self, request: AddClaudeSubscriptionTokenCredentialRequest, ctx: RequestContext[AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse]) -> AddClaudeSubscriptionTokenCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def start_claude_sign_in(self, request: StartClaudeSignInRequest, ctx: RequestContext[StartClaudeSignInRequest, StartClaudeSignInResponse]) -> StartClaudeSignInResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def complete_claude_sign_in(self, request: CompleteClaudeSignInRequest, ctx: RequestContext[CompleteClaudeSignInRequest, CompleteClaudeSignInResponse]) -> CompleteClaudeSignInResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def rename_credential(self, request: RenameCredentialRequest, ctx: RequestContext[RenameCredentialRequest, RenameCredentialResponse]) -> RenameCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -1029,6 +1101,26 @@ class CredentialMutationServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.add_claude_subscription_token_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/StartClaudeSignIn": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="StartClaudeSignIn",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=StartClaudeSignInRequest,
+                        output=StartClaudeSignInResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.start_claude_sign_in,
+                ),
+                "/codewire.v1.CredentialMutationService/CompleteClaudeSignIn": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="CompleteClaudeSignIn",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=CompleteClaudeSignInRequest,
+                        output=CompleteClaudeSignInResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.complete_claude_sign_in,
                 ),
                 "/codewire.v1.CredentialMutationService/RenameCredential": EndpointSync.unary(
                     method=MethodInfo(
@@ -1218,6 +1310,44 @@ class CredentialMutationServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.CredentialMutationService",
                 input=AddClaudeSubscriptionTokenCredentialRequest,
                 output=AddClaudeSubscriptionTokenCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def start_claude_sign_in(
+        self,
+        request: StartClaudeSignInRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> StartClaudeSignInResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="StartClaudeSignIn",
+                service_name="codewire.v1.CredentialMutationService",
+                input=StartClaudeSignInRequest,
+                output=StartClaudeSignInResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def complete_claude_sign_in(
+        self,
+        request: CompleteClaudeSignInRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> CompleteClaudeSignInResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="CompleteClaudeSignIn",
+                service_name="codewire.v1.CredentialMutationService",
+                input=CompleteClaudeSignInRequest,
+                output=CompleteClaudeSignInResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

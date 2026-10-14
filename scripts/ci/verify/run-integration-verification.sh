@@ -270,7 +270,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib mutation::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "public credential mutation matrix" "$logfile" 27
+  assert_passed_count "public credential mutation matrix" "$logfile" 28
 
   logfile="$RUN_DIR/isolated-credential-runtime.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

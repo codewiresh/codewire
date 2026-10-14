@@ -20,6 +20,9 @@ and the expected outcome:
     refused   Claude Code reports the provider's 401 and exits non-zero. The
               fixture refuses a well-formed synthetic subscription token this
               way, as a real provider refuses an expired or revoked one.
+    withheld  Claude Code reports the broker's 403 and exits non-zero: the
+              selected credential was revoked, so the broker withholds the
+              capability and nothing reaches the provider.
 
 Pinned to Claude Code 2.1.288, whose probe showed that `claude -p` sends only
 POST /v1/messages?beta=true to the base URL, that CLAUDE_CODE_OAUTH_TOKEN
@@ -64,7 +67,7 @@ PROJECTIONS = {
         "CLAUDE_CODE_OAUTH_TOKEN": PLACEHOLDER,
     },
 }
-OUTCOMES = ("success", "refused")
+OUTCOMES = ("success", "refused", "withheld")
 # What the daemon sets in the workspace user's own Claude Code configuration
 # while the Anthropic client is selected (codewire-daemon claude_home.rs).
 CLAUDE_CONFIG = ".claude.json"
@@ -80,8 +83,10 @@ CREDENTIAL_MARKERS = (
     "CW_KIND_SYNTHETIC_ANTHROPIC_KEY",
     "CW_KIND_SYNTHETIC_CLAUDE_TOKEN",
     "CW_KIND_SYNTHETIC_REFUSED_TOKEN",
+    "CW_KIND_SYNTHETIC_SIGN_IN",
 )
 REFUSAL = b"401"
+WITHHELD = b"403"
 SESSION_TIMEOUT = 120.0
 VERSION_TIMEOUT = 30.0
 MAX_OUTPUT = 256 * 1024
@@ -243,7 +248,7 @@ def session(form, outcome, environ):
     else:
         if status == 0 or marker:
             raise Failure("refusal_not_reported")
-        if REFUSAL not in stdout + stderr:
+        if (REFUSAL if outcome == "refused" else WITHHELD) not in stdout + stderr:
             raise Failure("refusal_status_missing")
     emit("claude_session", form=form, outcome=outcome, client_version=version)
 

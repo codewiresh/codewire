@@ -1479,7 +1479,7 @@ kind_credential_claude_run() {
   local launched session attempt state output
   [[ "$driver" =~ ^/tmp/codewire-kind-claude-session-[0-9]{1,12}\.py$ ]] || return 1
   case "$form" in api_key | subscription_token) ;; *) return 1 ;; esac
-  case "$outcome" in success | refused) ;; *) return 1 ;; esac
+  case "$outcome" in success | refused | withheld) ;; *) return 1 ;; esac
   launched="$(kind_credential_launch "$environment" --no-tty --detach --output json -- \
     python3 -B -u "$driver" "$form" "$outcome")" || return $?
   session="$(jq -er '.session_id | select(type == "string" and test("^[A-Za-z0-9_-]{1,128}$"))' \
@@ -1522,7 +1522,7 @@ kind_credential_claude_run() {
 assert_kind_credential_anthropic_events() {
   local baseline="$1" form="$2" status="$3"
   [[ "$baseline" =~ ^[0-9]+$ ]] || return 1
-  case "$form" in api_key | subscription_token) ;; *) return 1 ;; esac
+  case "$form" in api_key | subscription_token | sign_in) ;; *) return 1 ;; esac
   case "$status" in 200 | 401) ;; *) return 1 ;; esac
   kind_credential_fixture_events | jq -er --argjson baseline "$baseline" --arg kind "$form" \
     --argjson status "$status" '
@@ -1663,4 +1663,179 @@ kind_credential_claude_session() (
   done
   stage_credentials=""
   log "stock Claude Code in daemon sessions passed with an Anthropic API key and a Claude subscription token, through a provider refusal and its replacement; none reached the Sandbox"
+)
+
+# Fixed, public synthetic code the fixture's Claude token endpoint redeems for
+# a Claude sign-in (credential-service runtime/kind/provider.rs). It is pasted
+# on the CLI's stdin after `#` and the state of the authorize URL the CLI
+# prints, exactly as a person pastes what Claude shows after signing in.
+KIND_CLAUDE_SIGN_IN_CODE='kind-synthetic-claude-sign-in-code'
+# Bound on the CLI printing Claude's authorize URL.
+KIND_CLAUDE_SIGN_IN_SECONDS=60
+
+# `cw credentials --platform connect claude` as a person runs it. The CLI
+# prints Claude's authorize URL; the code is pasted on its stdin, never argv,
+# after `#` and that URL's own state (`match`) or another one (`mismatch`).
+# The CLI's stdout is printed and its status returned.
+kind_credential_claude_connect() {
+  local name="$1" paste="$2" scratch fifo pid writer url state status=0 attempt
+  case "$paste" in match | mismatch) ;; *) return 1 ;; esac
+  scratch="$(mktemp -d "$KIND_CREDENTIAL_CLI_HOME/connect.XXXXXX")" || return $?
+  fifo="$scratch/stdin"
+  mkfifo -m 600 "$fifo" || return $?
+  kind_credential_cli credentials --platform connect claude --name "$name" \
+    <"$fifo" >"$scratch/stdout" 2>"$scratch/stderr" &
+  pid=$!
+  exec {writer}>"$fifo"
+  url=""
+  for ((attempt = 0; attempt < KIND_CLAUDE_SIGN_IN_SECONDS * 2; attempt++)); do
+    url="$(sed -n 's#^Open \(https://claude\.com/cai/oauth/authorize?[^ ]*\)$#\1#p' \
+      "$scratch/stderr")"
+    [ -z "$url" ] && kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  state="$(jq -nr --arg url "$url" \
+    '$url | capture("[?&]state=(?<state>[A-Za-z0-9_-]{43})(&|$)").state // empty')" || state=""
+  if [ -z "$state" ]; then
+    exec {writer}>&-
+    wait "$pid" || true
+    cat -- "$scratch/stderr" >&2
+    rm -rf -- "$scratch"
+    echo "::error::cw did not print Claude's authorize URL with a state" >&2
+    return 1
+  fi
+  # Another sign-in's state: the same shape, never this one.
+  [ "$paste" = match ] || state="$(printf '%s' "$state" | tr 'A-Za-z' 'N-ZA-Mn-za-m')"
+  printf '%s#%s\n' "$KIND_CLAUDE_SIGN_IN_CODE" "$state" >&"$writer"
+  exec {writer}>&-
+  wait "$pid" || status=$?
+  cat -- "$scratch/stderr" >&2
+  cat -- "$scratch/stdout"
+  rm -rf -- "$scratch"
+  return "$status"
+}
+
+# The sign-in's metadata: the anthropic provider's Claude sign-in kind, Active,
+# with the profile's email as its hint and no hard expiry. Prints its revision,
+# which every refresh advances; at least `minimum`.
+assert_kind_credential_claude_sign_in() {
+  local name="$1" minimum="$2"
+  [[ "$minimum" =~ ^[1-9][0-9]*$ ]] || return 1
+  kind_credential_cli credentials --platform get "$name" --output json | jq -er \
+    --arg name "$name" --argjson minimum "$minimum" '.[0] as $c
+      | (($c.revocationGeneration // $c.revocation_generation) | tonumber) as $revision
+      | if length == 1 and $c.name == $name and $c.provider == "anthropic"
+          and $c.status == "CREDENTIAL_STATUS_ACTIVE"
+          and ($c.authenticationKind // $c.authentication_kind) == "CREDENTIAL_AUTHENTICATION_KIND_CLAUDE_SIGN_IN"
+          and ($c.accountHint // $c.account_hint) == "kind-claude@example.test"
+          and ($c.expiresAtUnix // $c.expires_at_unix) == null
+          and $revision >= $minimum
+        then $revision else error("unexpected Claude sign-in metadata") end' || {
+    echo "::error::Claude sign-in ${name} is not an Active sign-in at revision ${minimum} or later" >&2
+    return 1
+  }
+}
+
+# A Claude sign-in through the public CLI and stock Claude Code in a daemon
+# session. A code pasted from another sign-in is refused and nothing is
+# stored; the real one stores the anthropic provider's Claude sign-in. The
+# fixture's first access token is about to expire, so the session's first
+# request makes the broker refresh it through the durable journal, and the
+# provider sees only the rotated token. Revoking the sign-in withholds the
+# capability at the next request: Claude Code reports the broker's 403 and
+# nothing reaches the provider. No token reaches the Sandbox.
+kind_credential_claude_sign_in() (
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
+    log "release-image gate: synthetic Claude sign-in composition is not selected"
+    return 0
+  fi
+  log "running a Claude sign-in through the public CLI with stock Claude Code"
+  local KIND_CREDENTIAL_CLI_HOME suffix name profile environment workspace_image update
+  local generation pod pod_uid clients driver baseline tokens revision
+  local stage_environment="" stage_profiles="" stage_credentials=""
+  set -E
+  trap 'echo "::error::Claude sign-in acceptance failed: command=${BASH_COMMAND} status=$?" >&2' ERR
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
+  KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-claude-sign-in.XXXXXX)"
+  trap 'cleanup_kind_credential_stage "$stage_environment" "$stage_profiles" "$stage_credentials"; rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
+  [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
+  suffix="${RANDOM}-${RANDOM}"
+  name="kind-claude-sign-in-$suffix"
+  profile="kind-claude-sign-in-$suffix"
+  prepare_kind_credential_cli
+  kind_credential_cli org set org_contract_1
+  stage_credentials="$name"
+
+  # A code from another sign-in is refused before Claude is contacted.
+  if kind_credential_claude_connect "$name" mismatch >/dev/null \
+      2>"$RUN_DIR/credential-claude-sign-in-mismatch.err"; then
+    echo "::error::a Claude code from another sign-in was accepted" >&2
+    return 1
+  fi
+  grep -Fq 'not from this Claude sign-in' "$RUN_DIR/credential-claude-sign-in-mismatch.err"
+  if kind_credential_cli credentials --platform get "$name" --output json >/dev/null 2>&1; then
+    echo "::error::a refused Claude sign-in stored a credential" >&2
+    return 1
+  fi
+  tokens="$(kind_credential_fixture_events | jq -er \
+    '[.[] | select(.event == "claude_sign_in_token")] | length')"
+  kind_credential_claude_connect "$name" match >/dev/null
+  assert_kind_credential_claude_sign_in "$name" 1 >/dev/null
+
+  stage_profiles="$profile"
+  kind_credential_cli credentials --platform --profile "$profile" set anthropic "$name"
+  environment="$(kind_credential_cli env --platform create --name "$profile" \
+    --image "$workspace_image" \
+    --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
+  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+  stage_environment="$environment"
+  wait_kind_credential_environment "$environment" running
+  wait_kind_credential_setup_complete "$environment"
+  update="$(kind_credential_cli env --platform update "$environment" \
+    --profile "platform:$profile" --yes --output json)"
+  generation="$(jq -er '.operation_generation |
+    if type == "number" and . > 0 and . == floor then .
+    else error("expected a positive operation generation") end' <<<"$update")"
+  wait_kind_credential_environment "$environment" running
+  pod="$(wait_kind_credential_restarted_workspace "$environment" "$generation")"
+  pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
+  clients="$(kind_credential_managed_clients "$environment" "$pod_uid")"
+  # The sign-in uses Claude Code's subscription form behind the broker.
+  assert_kind_credential_claude_selection subscription_token "$clients"
+  baseline="$(kind_credential_fixture_events | jq -er \
+    '[.[] | select(.event == "anthropic_response" or .event == "anthropic_rejected")] | length')"
+  driver="$(kind_credential_claude_stage "$pod")"
+  kind_credential_claude_run "$environment" "$driver" subscription_token success
+  baseline="$(assert_kind_credential_anthropic_events "$baseline" sign_in 200)"
+  # The code exchange, then at least one refresh that the first request
+  # forced, each issuing the next generation in order.
+  kind_credential_fixture_events | jq -e --argjson tokens "$tokens" '
+    [.[] | select(.event == "claude_sign_in_token")][$tokens:] as $issued
+    | ($issued | length) >= 2
+      and $issued[0].grant == "authorization_code"
+      and all($issued[1:][]; .grant == "refresh_token")
+      and ([$issued[].generation] | . == (sort | unique))' >/dev/null || {
+    echo "::error::the fixture did not see the sign-in exchanged and then refreshed" >&2
+    return 1
+  }
+  revision="$(assert_kind_credential_claude_sign_in "$name" 2)"
+
+  # Revocation withholds the capability at the next request.
+  kind_credential_cli credentials --platform revoke "$name" --output json >/dev/null
+  kind_credential_claude_run "$environment" "$driver" subscription_token withheld
+  kind_credential_fixture_events | jq -e --argjson baseline "$baseline" \
+    '[.[] | select(.event == "anthropic_response" or .event == "anthropic_rejected")]
+      | length == $baseline' >/dev/null || {
+    echo "::error::a revoked Claude sign-in still reached the provider" >&2
+    return 1
+  }
+
+  kind_credential_cli env --platform rm "$environment" --yes --output json
+  wait_kind_credential_environment "$environment" destroyed
+  stage_environment=""
+  kind_credential_cli credentials --platform --profile "$profile" delete --yes
+  stage_profiles=""
+  kind_credential_cli credentials --platform delete "$name" --yes
+  stage_credentials=""
+  log "a Claude sign-in through the public CLI served stock Claude Code, refreshed on demand at revision ${revision}, and was withheld once revoked; no token reached the Sandbox"
 )

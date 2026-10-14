@@ -509,6 +509,8 @@ pub(crate) enum CredentialConnectProviderArg {
     #[value(help = credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE)]
     Codex,
     Github,
+    #[value(help = credential_input::CLAUDE_SIGN_IN_GUIDANCE)]
+    Claude,
 }
 
 #[derive(Debug, Args)]

@@ -4158,6 +4158,7 @@ deploy_agent_sandbox_and_smoke() {
   deploy_agent_sandbox
   kind_credential_native_smoke
   kind_credential_claude_session
+  kind_credential_claude_sign_in
   workspace_service_smokes
   temporal_workflow_smoke
   mark_retained_cluster_prepared

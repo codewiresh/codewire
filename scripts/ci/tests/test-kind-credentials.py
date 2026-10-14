@@ -2567,6 +2567,9 @@ if mode == "ok":
 elif mode == "refused":
     print("Failed to authenticate. API Error: 401 private-claude-output-canary")
     sys.exit(1)
+elif mode == "withheld":
+    print("API Error: 403 Anthropic needs Reconnect private-claude-output-canary")
+    sys.exit(1)
 elif mode == "refused-silent":
     sys.exit(1)
 elif mode == "refused-exit-zero":
@@ -2725,11 +2728,26 @@ class ClaudeSessionDriver(unittest.TestCase):
         status, events, _ = self.main(["subscription_token", "success"], self.environ("refused"))
         self.assertEqual(events[-1]["reason"], "claude_exit")
 
+    def test_a_withheld_capability_must_be_reported_as_the_brokers_403(self):
+        status, events, output = self.main(["subscription_token", "withheld"],
+                                           self.environ("withheld"))
+        self.assertEqual(status, 0, output)
+        self.assertEqual(events[-1], {"event": "complete", "form": "subscription_token",
+                                      "outcome": "withheld"})
+        self.assertNotIn("canary", output)
+        # A provider 401 or a silent failure is not the broker withholding it.
+        for mode in ("refused", "refused-silent", "ok"):
+            with self.subTest(mode=mode):
+                status, events, _ = self.main(["subscription_token", "withheld"],
+                                              self.environ(mode))
+                self.assertEqual(status, 1)
+
     def test_a_synthetic_credential_anywhere_in_the_session_fails_before_claude(self):
         for name, value in (
                 ("UNRELATED", "prefix-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-suffix"),
                 ("UNRELATED", "sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123"),
                 ("UNRELATED", "sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123"),
+                ("UNRELATED", "sk-ant-oat01-CW_KIND_SYNTHETIC_SIGN_IN_ACCESS-000001"),
                 ("CW_KIND_SYNTHETIC_CLAUDE_TOKEN", "name")):
             with self.subTest(name=name, value=value):
                 status, events, output = self.main(["subscription_token", "success"],
@@ -3170,6 +3188,45 @@ kind_credential_codex_request_count
             "deploy_agent_sandbox_and_smoke() {", 1)[1].split("\n}", 1)[0]
         self.assertLess(gate.index("kind_credential_native_smoke"),
                         gate.index("kind_credential_claude_session"))
+
+    def test_claude_sign_in_journey_pastes_on_stdin_refreshes_and_withholds_once_revoked(self):
+        flow = HELPERS.read_text().split("kind_credential_claude_sign_in() (", 1)[1]
+        connect = HELPERS.read_text().split("kind_credential_claude_connect() {", 1)[1].split(
+            "\n}\n", 1)[0]
+        # The code is pasted on the CLI's stdin, after the printed URL's own
+        # state; it is never an argument.
+        self.assertIn('<"$fifo"', connect)
+        self.assertIn("connect claude --name \"$name\"", connect)
+        self.assertNotIn("KIND_CLAUDE_SIGN_IN_CODE\"\n", connect.split("connect claude", 1)[1]
+                         .split("\n", 1)[0])
+        self.assertIn("printf '%s#%s\\n' \"$KIND_CLAUDE_SIGN_IN_CODE\" \"$state\" >&\"$writer\"",
+                      connect)
+        ordered = [
+            'kind_credential_claude_connect "$name" mismatch',
+            "grep -Fq 'not from this Claude sign-in'",
+            'kind_credential_claude_connect "$name" match',
+            'assert_kind_credential_claude_sign_in "$name" 1',
+            'kind_credential_cli credentials --platform --profile "$profile" set anthropic "$name"',
+            'assert_kind_credential_claude_selection subscription_token "$clients"',
+            'kind_credential_claude_run "$environment" "$driver" subscription_token success',
+            'baseline="$(assert_kind_credential_anthropic_events "$baseline" sign_in 200)"',
+            'revision="$(assert_kind_credential_claude_sign_in "$name" 2)"',
+            'kind_credential_cli credentials --platform revoke "$name"',
+            'kind_credential_claude_run "$environment" "$driver" subscription_token withheld',
+            'kind_credential_cli env --platform rm "$environment"',
+            'kind_credential_cli credentials --platform --profile "$profile" delete --yes',
+            'kind_credential_cli credentials --platform delete "$name" --yes',
+        ]
+        positions = [flow.index(step) for step in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("prebuilt-release", flow.split("log ", 1)[0])
+        suite = (ROOT / "scripts/ci/verify/kind/suites/credential-journey.sh").read_text()
+        self.assertLess(suite.index("\n  kind_credential_claude_session\n"),
+                        suite.index("\n  kind_credential_claude_sign_in\n"))
+        gate = (ROOT / "scripts/ci/verify/kind/common.sh").read_text().split(
+            "deploy_agent_sandbox_and_smoke() {", 1)[1].split("\n}", 1)[0]
+        self.assertLess(gate.index("kind_credential_claude_session"),
+                        gate.index("kind_credential_claude_sign_in"))
 
 
 if __name__ == "__main__":

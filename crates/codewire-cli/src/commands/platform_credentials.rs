@@ -4,9 +4,10 @@ use anyhow::Context as _;
 use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::{
-    CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE, CODEX_DEVICE_AUTHORIZATION_GUIDANCE,
-    ParsedCredentialSelector, parse_credential_selector, prompt_credential_material,
-    prompt_named_material, read_ssh_import, validate_ssh_generation, validate_ssh_import,
+    CLAUDE_SIGN_IN_GUIDANCE, CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE,
+    CODEX_DEVICE_AUTHORIZATION_GUIDANCE, ParsedCredentialSelector, parse_credential_selector,
+    prompt_credential_material, prompt_named_material, read_ssh_import, validate_ssh_generation,
+    validate_ssh_import,
 };
 use super::*;
 
@@ -33,13 +34,22 @@ pub(super) async fn handle(
             )
         }
         CredentialsCommand::Connect(args) => {
-            let (provider, label) = match args.provider {
-                CredentialConnectProviderArg::Codex => ("openai", "Codex"),
-                CredentialConnectProviderArg::Github => ("github", "GitHub"),
+            let (provider, kind, label) = match args.provider {
+                CredentialConnectProviderArg::Codex => {
+                    ("openai", rpc::CredentialAuthenticationKind::Oauth, "Codex")
+                }
+                CredentialConnectProviderArg::Github => {
+                    ("github", rpc::CredentialAuthenticationKind::Oauth, "GitHub")
+                }
+                CredentialConnectProviderArg::Claude => (
+                    "anthropic",
+                    rpc::CredentialAuthenticationKind::ClaudeSignIn,
+                    "Claude",
+                ),
             };
             let name = trimmed_required(&args.name, "credential name")?.to_owned();
             let current = find_named(client, &name).await?;
-            let request = oauth_connection_request(provider, &name, current.as_ref())?;
+            let request = oauth_connection_request(provider, kind, &name, current.as_ref())?;
             if let Some(current) = &current {
                 anyhow::ensure!(
                     args.yes || (std::io::stdin().is_terminal() && std::io::stderr().is_terminal()),
@@ -56,8 +66,37 @@ pub(super) async fn handle(
                     return Ok(());
                 }
             }
+            // The Claude sign-in is started and its code read before the
+            // cancellable exchange, so Ctrl-C at the prompt simply exits.
+            let claude = match args.provider {
+                CredentialConnectProviderArg::Claude => Some(start_claude_sign_in(client).await?),
+                _ => None,
+            };
             let enrollment = async {
                 match args.provider {
+                    CredentialConnectProviderArg::Claude => {
+                        let (sign_in, pasted) = claude.expect("started above");
+                        client
+                            .complete_claude_sign_in(rpc::CompleteClaudeSignInRequest {
+                                name: request.name,
+                                sign_in,
+                                authorization_code: pasted.expose_secret().to_vec(),
+                                credential_id: request.credential_id,
+                                expected_revocation_generation: request
+                                    .expected_revocation_generation,
+                                ..Default::default()
+                            })
+                            .await
+                            .and_then(|response| {
+                                response.credential.into_option().ok_or_else(|| {
+                                    rpc::ClientError::new(
+                                        rpc::ErrorCode::Internal,
+                                        "platform omitted Claude sign-in metadata",
+                                    )
+                                })
+                            })
+                            .map(|credential| (credential, Vec::new()))
+                    }
                     CredentialConnectProviderArg::Codex => {
                         eprintln!("{}", CODEX_DEVICE_AUTHORIZATION_GUIDANCE);
                         client
@@ -314,6 +353,11 @@ fn is_subscription_token(credential: &rpc::Credential) -> bool {
         && credential.authentication_kind == rpc::CredentialAuthenticationKind::Oauth
 }
 
+fn is_claude_sign_in(credential: &rpc::Credential) -> bool {
+    credential.provider == "anthropic"
+        && credential.authentication_kind == rpc::CredentialAuthenticationKind::ClaudeSignIn
+}
+
 fn validate_subscription_token_arguments(args: &CredentialAddArgs) -> anyhow::Result<String> {
     anyhow::ensure!(
         args.key_file.is_none(),
@@ -452,6 +496,33 @@ fn display_challenge(provider: &str, url: &str, code: &str) -> bool {
     true
 }
 
+/// Start a Claude sign-in, show where to sign in, and read the pasted
+/// `code#state` from a no-echo prompt or stdin, never argv. The returned
+/// handle stays in this process.
+async fn start_claude_sign_in(
+    client: &CodewireClient,
+) -> anyhow::Result<(String, codewire_protected_store::ProtectedValue)> {
+    let started = client
+        .start_claude_sign_in(rpc::StartClaudeSignInRequest::default())
+        .await
+        .context("start the Claude sign-in")?;
+    anyhow::ensure!(
+        started
+            .authorize_url
+            .starts_with("https://claude.com/cai/oauth/authorize?")
+            && !started.sign_in.is_empty(),
+        "platform returned an invalid Claude sign-in"
+    );
+    eprintln!("{CLAUDE_SIGN_IN_GUIDANCE}");
+    eprintln!("Open {}", started.authorize_url);
+    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        // Best effort: the link above works when no browser opens.
+        let _ = super::platform_commands::open_browser(&started.authorize_url);
+    }
+    let pasted = prompt_named_material("Code from Claude (code#state)")?;
+    Ok((started.sign_in, pasted))
+}
+
 struct OAuthConnectionRequest {
     name: String,
     credential_id: Option<String>,
@@ -460,6 +531,7 @@ struct OAuthConnectionRequest {
 
 fn oauth_connection_request(
     provider: &str,
+    kind: rpc::CredentialAuthenticationKind,
     name: &str,
     existing: Option<&rpc::Credential>,
 ) -> anyhow::Result<OAuthConnectionRequest> {
@@ -471,7 +543,7 @@ fn oauth_connection_request(
     if let Some(existing) = existing {
         anyhow::ensure!(
             existing.provider == provider
-                && existing.authentication_kind == rpc::CredentialAuthenticationKind::Oauth
+                && existing.authentication_kind == kind
                 && existing.name.eq_ignore_ascii_case(name)
                 && !existing.id.is_empty()
                 && existing.revocation_generation > 0,
@@ -609,6 +681,8 @@ fn print(credentials: &[rpc::Credential], output: OutputFormat) -> anyhow::Resul
                 let status = text_status(credential, now)?;
                 let provider = if is_subscription_token(credential) {
                     "anthropic (Claude subscription token)"
+                } else if is_claude_sign_in(credential) {
+                    "anthropic (Claude sign-in)"
                 } else {
                     credential.provider.as_str()
                 };
@@ -1115,28 +1189,42 @@ mod tests {
 
     #[test]
     fn reconnect_pins_canonical_identity_and_never_guesses_authentication_kind() {
-        let created = oauth_connection_request("openai", "Work", None).unwrap();
+        const OAUTH: rpc::CredentialAuthenticationKind = rpc::CredentialAuthenticationKind::Oauth;
+        const SIGN_IN: rpc::CredentialAuthenticationKind =
+            rpc::CredentialAuthenticationKind::ClaudeSignIn;
+        let created = oauth_connection_request("openai", OAUTH, "Work", None).unwrap();
         assert!(created.credential_id.is_none());
         assert!(created.expected_revocation_generation.is_none());
         let mut current = metadata(rpc::CredentialStatus::Revoked);
         current.name = "Work".into();
-        current.authentication_kind = rpc::CredentialAuthenticationKind::Oauth.into();
-        let reconnect = oauth_connection_request("openai", "work", Some(&current)).unwrap();
+        current.authentication_kind = OAUTH.into();
+        let reconnect = oauth_connection_request("openai", OAUTH, "work", Some(&current)).unwrap();
         assert_eq!(reconnect.name, "Work");
         assert_eq!(reconnect.credential_id.as_deref(), Some(ID));
         assert_eq!(reconnect.expected_revocation_generation, Some(REVISION));
-        assert!(oauth_connection_request("openai", "other", Some(&current)).is_err());
-        assert!(oauth_connection_request("github", "work", Some(&current)).is_err());
+        assert!(oauth_connection_request("openai", OAUTH, "other", Some(&current)).is_err());
+        assert!(oauth_connection_request("github", OAUTH, "work", Some(&current)).is_err());
         current.provider = "github".into();
-        let github = oauth_connection_request("github", "work", Some(&current)).unwrap();
+        let github = oauth_connection_request("github", OAUTH, "work", Some(&current)).unwrap();
         assert_eq!(github.credential_id.as_deref(), Some(ID));
         assert_eq!(github.expected_revocation_generation, Some(REVISION));
         current.provider = "openai".into();
         current.authentication_kind = rpc::CredentialAuthenticationKind::ApiKey.into();
-        assert!(oauth_connection_request("openai", "work", Some(&current)).is_err());
-        current.authentication_kind = rpc::CredentialAuthenticationKind::Oauth.into();
+        assert!(oauth_connection_request("openai", OAUTH, "work", Some(&current)).is_err());
+        current.authentication_kind = OAUTH.into();
         current.revocation_generation = 0;
-        assert!(oauth_connection_request("openai", "work", Some(&current)).is_err());
+        assert!(oauth_connection_request("openai", OAUTH, "work", Some(&current)).is_err());
+        // A Claude sign-in reconnects only a sign-in: never a subscription
+        // token, which is the provider's OAuth kind, nor an API key.
+        current.revocation_generation = REVISION;
+        current.provider = "anthropic".into();
+        assert!(oauth_connection_request("anthropic", SIGN_IN, "work", Some(&current)).is_err());
+        current.authentication_kind = rpc::CredentialAuthenticationKind::ApiKey.into();
+        assert!(oauth_connection_request("anthropic", SIGN_IN, "work", Some(&current)).is_err());
+        current.authentication_kind = SIGN_IN.into();
+        let claude =
+            oauth_connection_request("anthropic", SIGN_IN, "work", Some(&current)).unwrap();
+        assert_eq!(claude.credential_id.as_deref(), Some(ID));
     }
 
     #[tokio::test]
