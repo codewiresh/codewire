@@ -245,8 +245,9 @@ cw_runtime_managed_resume_continues() {
   local listed sent message waited resumed
   launched="$(kind_credential_cli run "$environment" --name resume-check --agent codex \
     --detach --output json --prompt 'Return the synthetic reply before Stop/Start.')"
-  session="$(jq -er '.session_id | select(test("^session-[0-9a-f-]{36}$"))' <<<"$launched")"
-  first="$(jq -er '(.message_id // .messageId)' <<<"$launched")"
+  session="$(jq -er '(.sessionId // .session_id)
+    | select(type == "string" and test("^session-[0-9a-f-]{36}$"))' <<<"$launched")"
+  first="$(jq -er '(.messageId // .message_id)' <<<"$launched")"
   waited="$(kind_credential_cli wait --message "$first" --timeout 5m --output json)"
   jq -e '.state == "completed" and ((.result // "") | contains("CWOPENAI"))' <<<"$waited" \
     >/dev/null || {
