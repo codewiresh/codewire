@@ -2559,6 +2559,22 @@ if grep -qF 'apple-darwin' <(grep -F 'CW_RELEASE_TARGETS=' "$cw_block"); then
   exit 1
 fi
 grep -qF 'scripts/ci/release/package-cw-release.sh v0.0.0-ci' "$cw_block"
+# The Linux pair builds side by side in one Cargo invocation with the build
+# environment package-cw-release.sh uses, so packaging finds both fresh. A
+# change to that environment must update the CI build too.
+grep -qF -- '--target x86_64-unknown-linux-musl --target aarch64-unknown-linux-gnu' "$cw_block"
+for cw_build_env in 'env -u CODEWIRE_LOCAL_RUNTIME' 'CODEWIRE_VERSION=' \
+    'CODEWIRE_SOURCE_REVISION=' 'CODEWIRE_SOURCE_TREE_SHA256='; do
+  grep -qF -- "$cw_build_env" "$cw_block" \
+    && grep -qF -- "$cw_build_env" "$ROOT/scripts/ci/release/package-cw-release.sh" || {
+    echo "CI's Linux pair build and package-cw-release.sh differ in $cw_build_env" >&2
+    exit 1
+  }
+done
+[ "$(grep -c '^    CODEWIRE_[A-Z0-9_]*=' "$ROOT/scripts/ci/release/package-cw-release.sh")" -eq 3 ] || {
+  echo 'package-cw-release.sh builds with a different environment; update the CI Linux pair build' >&2
+  exit 1
+}
 jq -e '
   .artifacts.cw_cli_release_assets.release_targets == [
     "x86_64-unknown-linux-musl",

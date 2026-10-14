@@ -343,10 +343,24 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
         run: |
           set -euo pipefail
+          # Build both Linux targets in one Cargo invocation, side by side and
+          # sharing their host build scripts, with the environment
+          # package-cw-release.sh builds with. Packaging then finds each target
+          # fresh, and only admits and packages it.
+          source_digest="$(python3 scripts/ci/release/cw_release.py source-digest --source-root .)"
+          env -u CODEWIRE_LOCAL_RUNTIME \
+            CODEWIRE_VERSION=v0.0.0-ci \
+            CODEWIRE_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            CODEWIRE_SOURCE_TREE_SHA256="$source_digest" \
+            cargo zigbuild --locked --profile ci -p codewire-cli-bin --bin cw \
+              --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-gnu
           CW_RELEASE_PROFILE=ci \
             CW_RELEASE_BUILD_CMD='cargo zigbuild' \
             CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu' \
-            scripts/ci/release/package-cw-release.sh v0.0.0-ci
+            scripts/ci/release/package-cw-release.sh v0.0.0-ci 2>&1 | tee "$RUNNER_TEMP/package-cw-release.log"
+          if grep -q 'Compiling codewire-cli-bin' "$RUNNER_TEMP/package-cw-release.log"; then
+            echo '::warning::packaging rebuilt cw: the side-by-side build no longer matches package-cw-release.sh'
+          fi
           "dist/cw-release/cw-v0.0.0-ci-x86_64-unknown-linux-musl" --version | grep -F 'v0.0.0-ci'
           [ "$(wc -l < dist/cw-release/SHA256SUMS)" -eq 2 ]
           (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)

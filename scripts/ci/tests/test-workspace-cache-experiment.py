@@ -594,7 +594,7 @@ class ProducerReportTests(unittest.TestCase):
         work.mkdir(mode=0o700)
         (work / "cw-producer-owned").mkdir(mode=0o700)
         producer = self.consumer.producer
-        with producer.prepare_plan(self.repo, self.revision, "release", self.components.fixture.VERSION,
+        with producer.prepare_plan(self.repo, self.revision, "ci", self.components.fixture.VERSION,
                                    work / "cw-producer-owned" / "build") as prepared:
             capsule = prepared.capsule
             binary, depinfo, target, cargo, result = self.source_fixture.build_bytes(capsule)
@@ -658,7 +658,7 @@ class ProducerReportTests(unittest.TestCase):
         self.assertNotEqual(workspace["build_ref"], compiled["build_ref"])
         self.assertTrue(compiled["compiler_layer_cached"])
         self.assertFalse(compiled["compiler_executed"])
-        self.assertEqual(compiled["profile"], "release")
+        self.assertEqual(compiled["profile"], "ci")
         self.assertEqual(compiled["source"]["revision"], self.revision)
         self.assertEqual(compiled["payload"]["source_revision"], self.revision)
         self.assertEqual(compiled["current_source"]["git_tree"], self.tree)
@@ -713,7 +713,7 @@ class ProducerReportTests(unittest.TestCase):
         invalid = [b"", b" " + original, b"[]\n", original[:-1],
                    original.replace(b'"status":', b'"status":"x","status":', 1)]
         for changes in ({"extra": True}, {"reused": True}, {"cache_qualified": 0},
-                        {"image_qualified": True}, {"profile": "ci"}, {"version": "v9.9.9"},
+                        {"image_qualified": True}, {"profile": "release"}, {"version": "v9.9.9"},
                         {"receipt": pointer["receipt"] | {"sha256": "0" * 64}},
                         {"payload": pointer["payload"] | {"sha256": "0" * 64}},
                         {"source": pointer["source"] | {"revision": "0" * 40}}):
