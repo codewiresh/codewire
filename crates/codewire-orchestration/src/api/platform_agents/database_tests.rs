@@ -1722,6 +1722,9 @@ database_case!(
         let mut refusal = receipt(&rejected, &facts2, ManagedLifecycle::Stopped);
         refusal.phase = ManagedPhase::Rejected;
         refusal.reason_code = "refused-before-issue".into();
+        // A refusal advances nothing: the daemon reports the predecessor's
+        // generation, not the one a completed Resume would reach.
+        refusal.launch_generation = rejected.expected_launch_generation;
         ensure!(f.journal.settle(issued, refusal).await?.phase == ManagedPhase::Rejected);
         // The predecessor is still the last Pod a driver ran in.
         ensure!(
