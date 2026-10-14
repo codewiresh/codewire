@@ -46,6 +46,7 @@ declare -A expected=(
   [policy]=false
   [standard]=false
   [tooling]=false
+  [rust_compile]=false
   [rust_transport]=false
   [database]=false
   [services_control]=false
@@ -58,6 +59,14 @@ declare -A expected=(
 if [ "$superseded" = true ]; then
   echo 'superseded main commit: no capability group is dispatched' >&2
 elif [ "$tested_tree_receipt" = fallback ]; then
+  # A hosted pull request's quick selection (pr_quick) runs only the quick
+  # families it names. Artifact facts dispatch nothing there: the CW release
+  # assets, container contract and desktop package run on main, or on a pull
+  # request labelled ci-full.
+  artifact_groups=true
+  if selected pr_quick; then
+    artifact_groups=false
+  fi
   selected policy && expected[policy]=true
   selected_any \
     contracts contracts_proto go_support go_tailnet go_consumer_interop \
@@ -71,8 +80,13 @@ elif [ "$tested_tree_receipt" = fallback ]; then
     expected[tooling]=true
   fi
   if selected_any rust rust_curated_locks transport transport_derp_contract \
-      || [ "$desktop_package_selected" = true ]; then
+      || { [ "$artifact_groups" = true ] && [ "$desktop_package_selected" = true ]; }; then
     expected[rust_transport]=true
+  fi
+  # Compiling every Rust target belongs to the Rust group; a quick selection
+  # asks for it alone with rust_compile.
+  if [ "${expected[rust_transport]}" = true ] || selected rust_compile; then
+    expected[rust_compile]=true
   fi
   selected database && expected[database]=true
   selected_any \
@@ -81,8 +95,11 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   selected_any service_orchestration service_nats \
     && expected[services_runtime]=true
   selected_any edge_kind kind && expected[edge_kind]=true
-  [ "$cw_package_selected" = true ] && expected[cw_release_assets]=true
-  if [ "$workspace_image_selected" = true ] || selected ios \
+  if [ "$artifact_groups" = true ] && [ "$cw_package_selected" = true ]; then
+    expected[cw_release_assets]=true
+  fi
+  if { [ "$artifact_groups" = true ] && [ "$workspace_image_selected" = true ]; } \
+      || selected ios \
       || { selected web && ! selected kind; }; then
     expected[workspace_image]=true
   fi
@@ -95,7 +112,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   for token in "${selection_tokens[@]}"; do
     case "$token" in
       ''|valid:v3|complete|\
-      policy|policy_shell|policy_shell_omittable|\
+      policy|policy_shell|policy_shell_omittable|pr_quick|rust_compile|\
       contracts|contracts_proto|go_support|go_tailnet|go_consumer_interop|\
       sdk_go|sdk_ts|sdk_python|web|ios|\
       deploy|release|runtime_confidential|runtime_dev_smoke|\
@@ -121,8 +138,9 @@ elif [ "$tested_tree_receipt" = fallback ]; then
 fi
 
 for group in \
-    policy standard tooling rust_transport database services_control \
-    services_runtime edge_kind cw_release_assets workspace_image; do
+    policy standard tooling rust_compile rust_transport database \
+    services_control services_runtime edge_kind cw_release_assets \
+    workspace_image; do
   value="${expected[$group]}"
   printf '%s_expected=%s\n' "$group" "$value"
 done >> "${GITHUB_OUTPUT:-/dev/stdout}"
