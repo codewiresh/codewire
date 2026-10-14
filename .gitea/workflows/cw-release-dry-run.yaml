@@ -15,7 +15,10 @@ name: cw four-target dry run
 # slow parts, and the delivery embeds it. The Linux side also builds the
 # Linux x86_64 target (#2733), the linux fragment, which the delivery does not
 # embed yet. Otherwise each side only checks its slow parts are cached. A
-# missing part is a warning: the next release builds it.
+# missing part is a warning: the next release builds it. The Developer
+# ID-signed VZ helper (#1905) is one of them: a helper whose recipe no release
+# signed yet is built and passed through the release's helper signing job with
+# the stand-in, and never packed.
 
 on:
   push:
@@ -204,9 +207,100 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-helper-darwin:
+    # The release's helper build (cli-release.yaml): the VZ helper's recipe
+    # and, when no release has signed it yet, the helper built unsigned for
+    # the stand-in signer.
+    name: Build the VZ helper for signing
+    needs: [protected-main, superseded]
+    if: needs.superseded.outputs.superseded == 'false'
+    runs-on: macos-arm64
+    timeout-minutes: 30
+    outputs:
+      unsigned_sha256: ${{ steps.build.outputs.unsigned_sha256 }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Build the helper unless its recipe is signed
+        id: build
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP:?}/codewire-vz-runner"
+          scripts/ci/release/build-local-runtime.sh helper --output "$work"
+          if [ -f "$work/codewire-vz-runner" ]; then
+            echo '::warning::No release has signed the VZ helper for this recipe; the next release signs it.'
+            mkdir -m 0700 .vz-runner-unsigned
+            cp "$work/codewire-vz-runner" .vz-runner-unsigned/codewire-vz-runner
+            printf 'unsigned_sha256=%s\n' \
+              "$(shasum -a 256 .vz-runner-unsigned/codewire-vz-runner | cut -c1-64)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Hand the unsigned helper to signing
+        if: steps.build.outputs.unsigned_sha256 != ''
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-dry-run-vz-runner-unsigned-${{ github.run_id }}
+          path: .vz-runner-unsigned/codewire-vz-runner
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-helper:
+    # The release's helper signing job with the recording rcodesign stand-in
+    # and synthetic keys. It signs nothing, holds no credential and reaches no
+    # Apple service, and nothing packs what it hands back: the macOS build
+    # packs only a helper a release signed.
+    name: Sign the VZ helper with the rcodesign stand-in (never signs)
+    needs: [protected-main, build-helper-darwin]
+    runs-on: ci-protected
+    timeout-minutes: 20
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Receive the unsigned helper
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-dry-run-vz-runner-unsigned-${{ github.run_id }}
+          path: vz-runner-unsigned
+
+      - name: Verify the received helper is the built helper
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        env:
+          UNSIGNED_SHA256: ${{ needs.build-helper-darwin.outputs.unsigned_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$UNSIGNED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(sha256sum vz-runner-unsigned/codewire-vz-runner | cut -c1-64)" = "$UNSIGNED_SHA256" ]
+
+      - name: Install rcodesign (pinned)
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        run: |
+          set -euo pipefail
+          archive="apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl"
+          scripts/ci/release/fetch-pinned.sh \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${archive}.tar.gz" \
+            "$RCODESIGN_X86_64_LINUX_SHA256" rcodesign.tar.gz
+          mkdir -m 0700 .rcodesign
+          tar -xzf rcodesign.tar.gz -C .rcodesign --strip-components=1 "${archive}/rcodesign"
+          .rcodesign/rcodesign --version
+
+      - name: Sign the helper with the rcodesign stand-in
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        run: |
+          set -euo pipefail
+          stand_in="$(mktemp -d "${RUNNER_TEMP:?}/codewire-rcodesign-stand-in.XXXXXX")"
+          scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$stand_in"
+          scripts/ci/release/sign-macos-helper.sh "$stand_in/bin/rcodesign" "$stand_in/keys" \
+            vz-runner-unsigned/codewire-vz-runner \
+            crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist vz-runner-signed
+          # One signature, verified and read, then one notarization.
+          [ "$(cut -d' ' -f1 "$stand_in/calls" | tr '\n' ' ')" = \
+            'sign verify print-signature-info encode-app-store-connect-api-key notary-submit ' ]
+
   build-darwin:
     name: Build the macOS cw natively
-    needs: [protected-main, superseded, build-runtime-linux]
+    needs: [protected-main, superseded, build-runtime-linux, build-helper-darwin, sign-helper]
     if: needs.superseded.outputs.superseded == 'false'
     runs-on: macos-arm64
     timeout-minutes: 60

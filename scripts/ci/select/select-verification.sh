@@ -1730,6 +1730,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/package-cw-release.sh|scripts/ci/release/publish-cw-release.sh|\
       scripts/ci/release/cw_release.py|scripts/ci/release/cw_release_r2.py|\
       scripts/ci/release/sign-cw-release.sh|scripts/ci/release/sign-macos-cw.sh|\
+      scripts/ci/release/sign-macos-helper.sh|scripts/ci/release/macos-signing.sh|\
       scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/setup/fetch-openbao-release-signing-key.sh|\
       scripts/ci/setup/fetch-openbao-macos-signing.sh|\
@@ -1748,6 +1749,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-release-signing-key.sh|\
       scripts/ci/tests/test-fetch-openbao-macos-signing.sh|scripts/ci/tests/test-sign-macos-cw.sh|\
+      scripts/ci/tests/test-sign-macos-helper.sh|\
       scripts/ci/tests/fixtures/rcodesign-stand-in.sh|\
       scripts/ci/tests/test-copy-image-to-ghcr.sh|\
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\

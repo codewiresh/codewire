@@ -2,8 +2,10 @@
 """Pack the macOS local VM runtime and install it with `cw setup --local`.
 
 Developer tooling for an Apple Silicon Mac; it runs on the system Python 3.9.
-It builds the Virtualization.framework helper in release mode, signs it ad hoc
-with the hardened runtime and exactly developer-entitlements.plist, checks the
+It builds the Virtualization.framework helper in release mode and signs it ad
+hoc with the hardened runtime and exactly developer-entitlements.plist, or,
+with --helper, takes one a release signed with its Developer ID (#1905) and
+refuses it unless it satisfies DEVELOPER_ID_REQUIREMENT. It checks the
 supplied arm64 kernel Image, Codewire guest root and pinned e2fsprogs bundle (from
 macos-ext4-tool.py) the way artifact admission does, and writes a
 release directory (blobs/sha256/<digest> and local-runtime.json, the format a
@@ -33,6 +35,16 @@ import tempfile
 PACKAGE = Path(__file__).resolve().parents[2] / "crates/codewire-local-vmm/macos-vz-runner"
 ENTITLEMENTS = PACKAGE / "developer-entitlements.plist"
 PRODUCT = "codewire-vz-runner"
+# The helper's signing identity (#1905): the identifier every signature names,
+# and the one requirement a release's helper must satisfy, Apple's Developer
+# ID chain for Codewire's team. It is a constant: nothing selects another, and
+# the development loop's ad hoc helper never satisfies it.
+HELPER_IDENTIFIER = "sh.codewire.vz-runner"
+HELPER_TEAM = "PXQZM3GLP5"
+DEVELOPER_ID_REQUIREMENT = (
+    'anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] '
+    'and certificate leaf[field.1.2.840.113635.100.6.1.13] '
+    'and certificate leaf[subject.OU] = "%s" and identifier "%s"' % (HELPER_TEAM, HELPER_IDENTIFIER))
 SWIFT = "swift"
 CODESIGN = "/usr/bin/codesign"
 OTOOL = "/usr/bin/otool"
@@ -365,15 +377,28 @@ def thin_arm64_macho(path: Path) -> None:
         raise InstallError("%s is not a thin arm64 Mach-O executable" % path)
 
 
-def check_helper(path: Path) -> None:
-    """A thin arm64 Mach-O executable signed with the hardened runtime and
-    exactly the developer entitlements."""
+def check_helper(path: Path, developer_id: bool = False) -> None:
+    """A thin arm64 Mach-O executable signed as HELPER_IDENTIFIER with the
+    hardened runtime and exactly the developer entitlements. A release's helper
+    (`developer_id`) also carries a secure timestamp and satisfies
+    DEVELOPER_ID_REQUIREMENT."""
     thin_arm64_macho(path)
-    # codesign reports the CodeDirectory flags on stderr.
-    shown = run([CODESIGN, "-d", "--verbose=2", str(path)], capture=True, merge_stderr=True)
+    # codesign reports the signature on stderr.
+    shown = run([CODESIGN, "-d", "--verbose=4", str(path)], capture=True, merge_stderr=True)
     flags = re.search(rb"^CodeDirectory .*flags=0x[0-9a-f]+\(([a-z,-]*)\)", shown, re.MULTILINE)
     if flags is None or b"runtime" not in flags.group(1).split(b","):
         raise InstallError("the signed helper does not have the hardened runtime")
+    identifier = re.search(rb"^Identifier=(.*)$", shown, re.MULTILINE)
+    if identifier is None or identifier.group(1) != HELPER_IDENTIFIER.encode():
+        raise InstallError("the signed helper's identifier is not %s" % HELPER_IDENTIFIER)
+    if developer_id:
+        if b"adhoc" in flags.group(1).split(b",") or not re.search(rb"^Timestamp=", shown, re.MULTILINE):
+            raise InstallError("the release helper has no Developer ID signature with a secure timestamp")
+        try:
+            run([CODESIGN, "--verify", "--strict", "-R=" + DEVELOPER_ID_REQUIREMENT, str(path)])
+        except InstallError:
+            raise InstallError("the release helper does not satisfy the Developer ID requirement: "
+                               + DEVELOPER_ID_REQUIREMENT) from None
     shown = run([CODESIGN, "-d", "--entitlements", "-", "--xml", str(path)], capture=True)
     start = shown.find(b"<?xml")
     try:
@@ -511,8 +536,11 @@ def read_components(directories) -> list:
 
 
 def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, git: Path, release: Path, cw_runtime=None,
-         revision: str = "", components=()) -> Path:
-    """Write the release directory for this Mac's runtime into `release`."""
+         revision: str = "", components=(), signed_helper=None) -> Path:
+    """Write the release directory for this Mac's runtime into `release`.
+
+    `signed_helper` is a release's Developer ID-signed helper, packed as is;
+    without it the helper is built here and signed ad hoc."""
     require_host()
     components = read_components(components)
     check_kernel(kernel)
@@ -525,15 +553,16 @@ def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, git: Path, release: Pat
     if release.exists():
         raise InstallError("%s already exists; pack into a new directory" % release)
     revision = source_revision(revision)
-    helper = build_helper()
+    helper = signed_helper if signed_helper is not None else build_helper()
     private_directory(release)
     signed = release / ("." + PRODUCT)
     stage_copy(helper, signed)
-    # A fixed identifier keeps the signed bytes independent of the staging
-    # name, so an unchanged rebuild pins the same digest.
-    run([CODESIGN, "--force", "--sign", "-", "--options", "runtime", "--identifier", PRODUCT,
-         "--entitlements", str(ENTITLEMENTS), str(signed)])
-    check_helper(signed)
+    if signed_helper is None:
+        # A fixed identifier keeps the signed bytes independent of the staging
+        # name, so an unchanged rebuild pins the same digest.
+        run([CODESIGN, "--force", "--sign", "-", "--options", "runtime", "--identifier", HELPER_IDENTIFIER,
+             "--entitlements", str(ENTITLEMENTS), str(signed)])
+    check_helper(signed, developer_id=signed_helper is not None)
     sources = {"vz_runner": signed, "kernel": kernel, "initramfs": initramfs}
     lock = {"schema_version": 1}
 
@@ -574,9 +603,10 @@ def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, git: Path, release: Pat
 
 
 def install(kernel: Path, initramfs: Path, e2fsprogs: Path, git: Path, replace: bool, cw: str,
-            cw_runtime=None, revision: str = "") -> int:
+            cw_runtime=None, revision: str = "", signed_helper=None) -> int:
     with tempfile.TemporaryDirectory(prefix="cw-local-runtime-") as scratch:
-        release = pack(kernel, initramfs, e2fsprogs, git, Path(scratch) / "release", cw_runtime, revision)
+        release = pack(kernel, initramfs, e2fsprogs, git, Path(scratch) / "release", cw_runtime, revision,
+                       signed_helper=signed_helper)
         run([cw, "setup", "--local", "--from", str(release)] + (["--replace"] if replace else []))
     return 0
 
@@ -598,6 +628,9 @@ def main(argv=None) -> int:
                         help="absolute directory from local_runtime_sources.py fetch; repeatable")
     parser.add_argument("--source-revision", default="",
                         help="the source commit, for a tree without Git metadata (default: git rev-parse HEAD)")
+    parser.add_argument("--helper", default="",
+                        help="absolute path to a release's Developer ID-signed VZ helper (sign-macos-helper.sh); "
+                             "without it the helper is built here and signed ad hoc")
     args = parser.parse_args(argv)
     try:
         kernel = input_file(args.kernel, "KERNEL")
@@ -613,15 +646,16 @@ def main(argv=None) -> int:
             cw_runtime = Path(args.cw_runtime)
             if not cw_runtime.is_absolute() or not cw_runtime.is_dir():
                 raise InstallError("CW_RUNTIME must be an absolute directory: %s" % args.cw_runtime)
+        signed_helper = input_file(args.helper, "HELPER") if args.helper else None
         if args.pack:
             release = Path(args.pack)
             if not release.is_absolute():
                 raise InstallError("--pack must be an absolute path: %s" % args.pack)
             pack(kernel, initramfs, e2fsprogs, git, release, cw_runtime, args.source_revision,
-                 [Path(directory) for directory in args.components])
+                 [Path(directory) for directory in args.components], signed_helper)
             return 0
         return install(kernel, initramfs, e2fsprogs, git, args.replace, args.cw, cw_runtime,
-                       args.source_revision)
+                       args.source_revision, signed_helper)
     except (InstallError, OSError) as error:
         print("macos-local-runtime: ERROR: %s" % error, file=sys.stderr)
         return 1

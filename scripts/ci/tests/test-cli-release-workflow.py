@@ -2,9 +2,10 @@
 """Structural proof of the cw release workflow's capability boundaries.
 
 Compilation runs in a job with no OIDC, signing, mirror or R2 capability; the
-macOS pair is Developer ID-signed and notarized by a job that compiles nothing
-and holds only the Apple keys; the signing/publishing job needs a successful
-build; R2 publication is opt-in and
+macOS pair and the VZ helper are Developer ID-signed and notarized by jobs
+that compile nothing and hold only the Apple keys, the helper before the
+runtime is packed and only when no release signed its recipe; the
+signing/publishing job needs a successful build; R2 publication is opt-in and
 inactive or unknown route values refuse before acquiring a credential; promotion
 defaults to none. Each property rejects a mutated workflow. The exact route guard
 is also exercised with a private fake credential reader, without credentials.
@@ -28,8 +29,12 @@ LINUX_TARGETS = "x86_64-unknown-linux-musl aarch64-unknown-linux-gnu"
 GPG = ("CW_RELEASE_GPG_PRIVATE_KEY", "CW_RELEASE_GPG_PASSPHRASE", "CW_RELEASE_GPG_KEY_ID")
 CAPABILITIES = ("enable-openid-connect", "secrets.", "fetch-openbao-", "sign-cw-release", "cw_release_r2",
                 "mint-github-app-token", "publish-cw-release", "GH_MIRROR_TOKEN_FILE")
-# macOS signing runs only in its own job (the dry run's runs a stand-in).
-MACOS_SIGNING = ("sign-macos-cw", "rcodesign")
+# macOS signing runs only in its own jobs (the dry run's run a stand-in).
+MACOS_SIGNING = ("sign-macos-cw", "sign-macos-helper", "rcodesign")
+# Where the release signs the VZ helper (#1905): exactly the release source's
+# entitlements.
+RELEASE_ENTITLEMENTS = ".release-source/crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist"
+HELPER_IF = "        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''\n"
 # What the macOS signing job must never hold: release OpenPGP, mirror and R2.
 NOT_IN_MACOS_SIGNING = ("secrets.", "fetch-openbao-release-signing-key", "fetch-openbao-releases-r2",
                         "fetch-openbao-github-mirror", "sign-cw-release", "cw_release_r2", "mint-github-app-token",
@@ -126,10 +131,11 @@ def check(text, ci_text):
          "channel promotion does not default to none")
     need("tags:" not in header, "tag-owned workflow code may release")
     blocks = jobs(text)
-    need(list(blocks) == ["release-selection", "build-runtime-linux", "build-darwin", "sign-darwin",
-                          "build-release", "package-release"], "unexpected job set")
+    need(list(blocks) == ["release-selection", "build-runtime-linux", "build-helper-darwin", "sign-helper",
+                          "build-darwin", "sign-darwin", "build-release", "package-release"], "unexpected job set")
     runtime, darwin = blocks.get("build-runtime-linux", ""), blocks.get("build-darwin", "")
     macos_signing = blocks.get("sign-darwin", "")
+    helper_build, helper_signing = blocks.get("build-helper-darwin", ""), blocks.get("sign-helper", "")
     build, package = blocks.get("build-release", ""), blocks.get("package-release", "")
 
     # The local VM runtime every release cw embeds (#2539, #2733): built from the release
@@ -162,8 +168,8 @@ def check(text, ci_text):
                         ("Hand the runtime part records to publication", darwin)):
         need("          include-hidden-files: true\n" in dict(steps(job)).get(upload, ""),
              f"{upload!r} skips its hidden path")
-    need("    needs: [release-selection, build-runtime-linux]" in darwin,
-         "the macOS build does not depend on release selection and the runtime's Linux side")
+    need("    needs: [release-selection, build-runtime-linux, build-helper-darwin, sign-helper]\n" in darwin,
+         "the macOS build does not depend on release selection, the runtime's Linux side and the signed helper")
     mac_runtime = dict(steps(darwin)).get("Build the local VM runtime", "")
     need('[ "$(shasum -a 256 ../.local-runtime-linux/runtime-linux.tar | cut -c1-64)" = "$LINUX_SHA256" ]'
          in mac_runtime and "scripts/ci/release/build-local-runtime.sh macos" in mac_runtime
@@ -187,15 +193,83 @@ def check(text, ci_text):
     need("darwin_sums_sha256" in darwin and "name: cw-release-darwin-${{ github.run_id }}" in darwin,
          "the macOS build does not hand over and bind its pair")
 
+    # The VZ helper (#1905): built on the Mac from the release source with no
+    # capability, Developer ID-signed by a job that holds only the Apple keys,
+    # and packed by the macOS build only as the exact signed bytes, with the
+    # recipe and provenance of this run; or taken from the parts cache.
+    need("    needs: [release-selection]\n    runs-on: macos-arm64\n" in helper_build
+         and not re.search(r"^    if:", helper_build, re.M),
+         "the helper build does not follow release selection on the protected Mac runner")
+    for capability in CAPABILITIES + MACOS_SIGNING:
+        need(capability not in helper_build, f"helper build job holds capability {capability}")
+    helper_step = dict(steps(helper_build)).get("Build the helper unless its recipe is signed", "")
+    need("        working-directory: .release-source\n" in helper_step
+         and 'scripts/ci/release/build-local-runtime.sh helper --output "$work"' in helper_step
+         and "if ! grep -q '\"vz-runner-macos\"' scripts/ci/release/local_runtime_parts.py; then" in helper_step,
+         "the helper is not built by the release source's own scripts")
+    need("unsigned_sha256" in helper_step and "name: cw-release-vz-runner-unsigned-${{ github.run_id }}" in helper_build
+         and "          include-hidden-files: true\n" in dict(steps(helper_build)).get(
+             "Hand the unsigned helper to signing", ""),
+         "the helper build does not hand over and bind the unsigned helper")
+    need("    needs: [release-selection, build-helper-darwin]\n    runs-on: ci-protected\n"
+         "    enable-openid-connect: true\n" in helper_signing and not re.search(r"^    if:", helper_signing, re.M),
+         "helper signing does not follow the helper build on a protected runner with its OIDC exchange")
+    need(all(HELPER_IF in step for name, step in steps(helper_signing)
+             if name != "https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+             or "path: .release-source" in step),
+         "helper signing acts without an unsigned helper to sign")
+    need("name: cw-release-vz-runner-unsigned-${{ github.run_id }}" in helper_signing
+         and "UNSIGNED_SHA256: ${{ needs.build-helper-darwin.outputs.unsigned_sha256 }}" in helper_signing
+         and '[ "$(sha256sum vz-runner-unsigned/codewire-vz-runner | cut -c1-64)" = "$UNSIGNED_SHA256" ]'
+         in helper_signing, "helper signing does not bind the received helper to the built helper")
+    helper_sign = dict(steps(helper_signing)).get("Sign and notarize the helper", "")
+    need(f"            vz-runner-unsigned/codewire-vz-runner \\\n            {RELEASE_ENTITLEMENTS} vz-runner-signed"
+         in helper_sign, "the helper is not signed with exactly the release source's entitlements")
+    need("signed_sha256" in helper_sign and "name: cw-release-vz-runner-signed-${{ github.run_id }}" in helper_signing,
+         "helper signing does not hand over and bind the signed helper")
+    need("swift " not in helper_signing, "the helper signing job compiles")
+    mac_receive = dict(steps(darwin)).get("Receive the signed VZ helper", "")
+    need("        if: needs.sign-helper.outputs.signed_sha256 != ''\n" in mac_receive
+         and "name: cw-release-vz-runner-signed-${{ github.run_id }}" in mac_receive
+         and "cw-release-vz-runner-unsigned" not in darwin,
+         "the macOS build may pack a helper other than the signed one")
+    need("          SIGNED_HELPER_SHA256: ${{ needs.sign-helper.outputs.signed_sha256 }}\n" in mac_runtime
+         and '[ "$(shasum -a 256 ../.vz-runner-signed/codewire-vz-runner | cut -c1-64)" = "$SIGNED_HELPER_SHA256" ]'
+         in mac_runtime, "the macOS build does not bind the received helper to the signed helper")
+    need("          HELPER_RECIPE: ${{ needs.build-helper-darwin.outputs.recipe }}\n" in mac_runtime
+         and '--set "source_sha=$SOURCE_SHA"' in mac_runtime
+         and 'helper=(--helper "$work/vz-runner-signed")' in mac_runtime
+         and '${helper[@]+"${helper[@]}"} --output "$work/macos"' in mac_runtime,
+         "the macOS build does not pack the signed helper with its recipe and this run's provenance")
+
     # Developer ID signing and notarization (#2064): after the macOS build,
     # before any identity binds the bytes, holding only the Apple keys.
     need("    needs: [release-selection, build-darwin]\n    runs-on: ci-protected\n"
          "    enable-openid-connect: true\n" in macos_signing and not re.search(r"^    if:", macos_signing, re.M),
          "macOS signing does not follow the macOS build on a protected runner with its OIDC exchange")
-    for capability in NOT_IN_MACOS_SIGNING:
-        need(capability not in macos_signing, f"macOS signing job holds capability {capability}")
-    for name in GPG:
-        need(name not in macos_signing, f"macOS signing job holds {name}")
+    for job, block, step, signer in (
+            ("macOS", macos_signing, "Sign and notarize the macOS pair",
+             "sign-macos-cw.sh .rcodesign/rcodesign \"$macos_work/keys\""),
+            ("helper", helper_signing, "Sign and notarize the helper",
+             "sign-macos-helper.sh .rcodesign/rcodesign \"$macos_work/keys\"")):
+        for capability in NOT_IN_MACOS_SIGNING:
+            need(capability not in block, f"{job} signing job holds capability {capability}")
+        for name in GPG:
+            need(name not in block, f"{job} signing job holds {name}")
+        install = dict(steps(block)).get("Install rcodesign (pinned)", "")
+        need('"$RCODESIGN_X86_64_LINUX_SHA256" rcodesign.tar.gz' in install
+             and "scripts/ci/release/fetch-pinned.sh" in install,
+             f"{job} signing does not check rcodesign against its pinned digest")
+        signing = dict(steps(block)).get(step, "")
+        need([name for name, body in steps(block) if "fetch-openbao-macos-signing.sh" in body] == [step],
+             f"the Apple keys are read outside the {job} signing step")
+        marks = [signing.find(mark) for mark in ("          trap cleanup_macos_keys EXIT\n",
+                                                'fetch-openbao-macos-signing.sh "$macos_work/keys"', signer,
+                                                "          cleanup_macos_keys\n")]
+        need(-1 not in marks and marks == sorted(marks),
+             f"the {job} signing job's Apple keys are not trapped, read, used and shredded in that order")
+        need('find "$macos_work" -type f -exec shred -u {} +' in signing,
+             f"the {job} signing job's Apple keys are not shredded")
     need("name: cw-release-darwin-${{ github.run_id }}" in macos_signing
          and "UNSIGNED_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}" in macos_signing
          and '[ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$UNSIGNED_SUMS_SHA256" ]' in macos_signing,
@@ -206,16 +280,8 @@ def check(text, ci_text):
          and "scripts/ci/release/fetch-pinned.sh" in install,
          "rcodesign is not checked against its pinned digest")
     signing = dict(steps(macos_signing)).get("Sign and notarize the macOS pair", "")
-    need([job for job, body in blocks.items() if "fetch-openbao-macos-signing.sh" in body] == ["sign-darwin"]
-         and [step for step, body in steps(macos_signing) if "fetch-openbao-macos-signing.sh" in body]
-         == ["Sign and notarize the macOS pair"], "the Apple keys are read outside the macOS signing step")
-    marks = [signing.find(mark) for mark in ("          trap cleanup_macos_keys EXIT\n",
-                                            'fetch-openbao-macos-signing.sh "$macos_work/keys"',
-                                            "sign-macos-cw.sh .rcodesign/rcodesign \"$macos_work/keys\"",
-                                            "          cleanup_macos_keys\n")]
-    need(-1 not in marks and marks == sorted(marks),
-         "the Apple keys are not trapped, read, used and shredded in that order")
-    need('find "$macos_work" -type f -exec shred -u {} +' in signing, "the Apple keys are not shredded")
+    need([job for job, body in blocks.items() if "fetch-openbao-macos-signing.sh" in body]
+         == ["sign-helper", "sign-darwin"], "the Apple keys are read outside the macOS signing jobs")
     need("darwin_sums_sha256" in signing and "name: cw-release-darwin-signed-${{ github.run_id }}" in macos_signing,
          "macOS signing does not hand over and bind the signed pair")
     need("rcodesign-stand-in" not in text, "the release signs with the rcodesign stand-in")
@@ -407,6 +473,57 @@ MUTATIONS = {
     "signed pair not handed over": lambda t: t.replace(
         "          name: cw-release-darwin-signed-${{ github.run_id }}\n          path: dist-darwin-signed/\n",
         "          name: cw-release-darwin-${{ github.run_id }}\n          path: dist-darwin-signed/\n", 1),
+    "helper signing without the helper build": lambda t: t.replace(
+        "    needs: [release-selection, build-helper-darwin]\n", "    needs: [release-selection]\n", 1),
+    "helper signing after failure": lambda t: t.replace(
+        "    name: Sign and notarize the VZ helper\n    needs: [release-selection, build-helper-darwin]\n",
+        "    name: Sign and notarize the VZ helper\n    needs: [release-selection, build-helper-darwin]\n"
+        "    if: always()\n", 1),
+    "helper signing without a helper": lambda t: t.replace(
+        "      - name: Sign and notarize the helper\n        id: sign\n"
+        "        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''\n",
+        "      - name: Sign and notarize the helper\n        id: sign\n", 1),
+    "unbound unsigned helper": lambda t: t.replace(
+        '[ "$(sha256sum vz-runner-unsigned/codewire-vz-runner | cut -c1-64)" = "$UNSIGNED_SHA256" ]', "true", 1),
+    "helper signed with the workflow's entitlements": lambda t: t.replace(
+        "            .release-source/crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist",
+        "            crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist", 1),
+    "OIDC in helper build": lambda t: t.replace(
+        "    needs: [release-selection]\n    runs-on: macos-arm64\n",
+        "    needs: [release-selection]\n    runs-on: macos-arm64\n    enable-openid-connect: true\n", 1),
+    "Apple keys in the helper build": lambda t: t.replace(
+        '          scripts/ci/release/build-local-runtime.sh helper --output "$work"\n',
+        '          scripts/ci/release/build-local-runtime.sh helper --output "$work"\n'
+        '          scripts/ci/setup/fetch-openbao-macos-signing.sh "$work/keys"\n', 1),
+    "helper built from the workflow's scripts": lambda t: t.replace(
+        "      - name: Build the helper unless its recipe is signed\n        id: build\n"
+        "        working-directory: .release-source\n",
+        "      - name: Build the helper unless its recipe is signed\n        id: build\n", 1),
+    "helper signing compiles": lambda t: t.replace(
+        "          scripts/ci/release/sign-macos-helper.sh .rcodesign/rcodesign",
+        "          swift build -c release --package-path .release-source/crates/codewire-local-vmm/macos-vz-runner\n"
+        "          scripts/ci/release/sign-macos-helper.sh .rcodesign/rcodesign", 1),
+    "macOS build without the signed helper": lambda t: t.replace(
+        "    needs: [release-selection, build-runtime-linux, build-helper-darwin, sign-helper]\n",
+        "    needs: [release-selection, build-runtime-linux, build-helper-darwin]\n", 1),
+    "macOS build packs the unsigned helper": lambda t: t.replace(
+        "          name: cw-release-vz-runner-signed-${{ github.run_id }}\n          path: .vz-runner-signed\n",
+        "          name: cw-release-vz-runner-unsigned-${{ github.run_id }}\n          path: .vz-runner-signed\n", 1),
+    "unbound signed helper": lambda t: t.replace(
+        '[ "$(shasum -a 256 ../.vz-runner-signed/codewire-vz-runner | cut -c1-64)" = "$SIGNED_HELPER_SHA256" ]',
+        "true", 1),
+    "helper provenance from the workflow commit": lambda t: t.replace(
+        '--set "source_sha=$SOURCE_SHA"', '--set "source_sha=$GITHUB_SHA"', 1),
+    "signed helper not packed": lambda t: t.replace(
+        '            helper=(--helper "$work/vz-runner-signed")\n', "", 1),
+    "cw Apple keys not shredded": lambda t: nth_replace(t, "          trap cleanup_macos_keys EXIT\n", "", 2),
+    "cw Apple keys outlive signing": lambda t: nth_replace(
+        t, "          cleanup_macos_keys\n          trap - EXIT\n", "          trap - EXIT\n", 2),
+    "unpinned cw rcodesign": lambda t: nth_replace(
+        t, '"$RCODESIGN_X86_64_LINUX_SHA256" rcodesign.tar.gz', '"" rcodesign.tar.gz', 2),
+    "cw signing compiles": lambda t: nth_replace(
+        t, "          .rcodesign/rcodesign --version\n",
+        "          .rcodesign/rcodesign --version\n          cargo install --locked apple-codesign\n", 2),
     "secret in build": lambda t: t.replace("          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}\n"
                                            "          CW_RELEASE_SOURCE_SHA",
                                            "          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}\n"
@@ -444,7 +561,8 @@ MUTATIONS = {
         "      - name: Build the Linux side\n        id: build\n        working-directory: .release-source\n",
         "      - name: Build the Linux side\n        id: build\n", 1),
     "macOS build without the Linux side": lambda t: t.replace(
-        "    needs: [release-selection, build-runtime-linux]", "    needs: [release-selection]", 1),
+        "    needs: [release-selection, build-runtime-linux, build-helper-darwin, sign-helper]",
+        "    needs: [release-selection, build-helper-darwin, sign-helper]", 1),
     "unbound Linux side": lambda t: t.replace(
         '[ "$(shasum -a 256 ../.local-runtime-linux/runtime-linux.tar | cut -c1-64)" = "$LINUX_SHA256" ]',
         "true", 1),
@@ -514,6 +632,16 @@ MUTATIONS = {
 }
 
 
+def nth_replace(text, old, new, n):
+    """Replace only the Nth occurrence of `old` (1-based)."""
+    start = -1
+    for _ in range(n):
+        start = text.find(old, start + 1)
+        if start < 0:
+            return text
+    return text[:start] + new + text[start + len(old):]
+
+
 def move_step(text, name, before):
     """Move step `name` (and its body) to just before step `before`."""
     start = text.index(f"      - name: {name}\n")
@@ -580,12 +708,12 @@ def check_dry_run(text, release):
 
     errors.extend(external_download_errors(text))
     blocks = jobs(text)
-    need(list(blocks) == ["protected-main", "superseded", "build-runtime-linux", "build-darwin", "sign-darwin",
-                          "assemble"], "unexpected dry-run job set")
+    need(list(blocks) == ["protected-main", "superseded", "build-runtime-linux", "build-helper-darwin",
+                          "sign-helper", "build-darwin", "sign-darwin", "assemble"], "unexpected dry-run job set")
     # A wedged step must fail within its job's limit instead of holding the
     # one-at-a-time dry-run queue until the runner's 330-minute limit.
-    for job, limit in (("build-runtime-linux", 75), ("build-darwin", 60), ("sign-darwin", 20),
-                       ("assemble", 90)):
+    for job, limit in (("build-runtime-linux", 75), ("build-helper-darwin", 30), ("sign-helper", 20),
+                       ("build-darwin", 60), ("sign-darwin", 20), ("assemble", 90)):
         found = re.findall(r"^    timeout-minutes: ([0-9]+)$", blocks.get(job, ""), re.M)
         need(found == [str(limit)], f"dry-run job {job} lacks its {limit}-minute limit")
     # Forgejo cancels the older push run of a workflow with no `concurrency`
@@ -596,19 +724,23 @@ def check_dry_run(text, release):
     guard, runtime = blocks.get("protected-main", ""), blocks.get("build-runtime-linux", "")
     superseded = blocks.get("superseded", "")
     darwin, assemble = blocks.get("build-darwin", ""), blocks.get("assemble", "")
+    helper_build, helper_sign = blocks.get("build-helper-darwin", ""), blocks.get("sign-helper", "")
     need("    runs-on: ci-lite\n" in guard and "actions-checkout" not in guard
          and "[ \"$GITHUB_REF\" = 'refs/heads/main' ]" in guard
          and "[ \"$GITHUB_REF_NAME\" = 'main' ]" in guard and not re.search(r"^\s+if:", guard, re.M),
          "the dry run does not refuse every ref but main before the protected builders")
-    need("    needs: [protected-main, superseded, build-runtime-linux]\n" in darwin,
-         "the macOS build does not wait for the main-only guard and the runtime's Linux side")
+    need("    needs: [protected-main, superseded, build-runtime-linux, build-helper-darwin, sign-helper]\n"
+         in darwin, "the macOS build does not wait for the main-only guard, the runtime's Linux side and the helper")
+    need("    needs: [protected-main, superseded]\n    if: needs.superseded.outputs.superseded == 'false'\n"
+         "    runs-on: macos-arm64\n" in helper_build,
+         "the helper build does not wait for the main-only guard on the protected Mac runner")
     need("    needs: [protected-main, superseded]\n" in runtime and "    runs-on: ci-protected\n" in runtime,
          "the runtime's Linux side does not wait for the main-only guard on a protected runner")
     # Forgejo keeps every queued run. Only the newest queued commit needs the
     # protected builders and the Mac; the checked-in rule says when an older
     # one may skip without losing a check (test-dry-run-superseded.sh).
     skip_unless_newest = "    if: needs.superseded.outputs.superseded == 'false'\n"
-    need(skip_unless_newest in runtime and skip_unless_newest in darwin,
+    need(skip_unless_newest in runtime and skip_unless_newest in darwin and skip_unless_newest in helper_build,
          "a superseded dry run still reaches the protected builders or the Mac")
     need("    needs: [protected-main]\n    runs-on: ci-lite\n" in superseded
          and not re.search(r"^\s+if:", superseded, re.M)
@@ -647,8 +779,28 @@ def check_dry_run(text, release):
     # The release's macOS signing job, with the rcodesign stand-in in place of
     # Apple: the same pinned install and signer, never a key or a signature.
     sign = blocks.get("sign-darwin", "")
-    need([job for job, body in blocks.items() if any(token in body for token in MACOS_SIGNING)] == ["sign-darwin"],
-         "the dry run signs outside its macOS signing job")
+    need([job for job, body in blocks.items() if any(token in body for token in MACOS_SIGNING)]
+         == ["sign-helper", "sign-darwin"], "the dry run signs outside its macOS signing jobs")
+    # The release's helper jobs with the stand-in. The macOS build packs only
+    # a helper a release signed: never the dry run's own (#1905).
+    need('scripts/ci/release/build-local-runtime.sh helper --output "$work"' in helper_build
+         and "name: cw-dry-run-vz-runner-unsigned-${{ github.run_id }}" in helper_build
+         and "unsigned_sha256" in helper_build,
+         "the dry run does not build and hand over the helper as a release does")
+    need("    needs: [protected-main, build-helper-darwin]\n    runs-on: ci-protected\n" in helper_sign
+         and "enable-openid-connect" not in helper_sign,
+         "the dry-run helper signing does not follow the helper build on a protected runner without OIDC")
+    need("UNSIGNED_SHA256: ${{ needs.build-helper-darwin.outputs.unsigned_sha256 }}" in helper_sign
+         and '[ "$(sha256sum vz-runner-unsigned/codewire-vz-runner | cut -c1-64)" = "$UNSIGNED_SHA256" ]'
+         in helper_sign, "the dry-run helper signing does not bind the built helper")
+    helper_stand_in = dict(steps(helper_sign)).get("Sign the helper with the rcodesign stand-in", "")
+    need('scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$stand_in"' in helper_stand_in
+         and 'scripts/ci/release/sign-macos-helper.sh "$stand_in/bin/rcodesign" "$stand_in/keys"' in helper_stand_in
+         and ".rcodesign/rcodesign \"" not in helper_stand_in
+         and "'sign verify print-signature-info encode-app-store-connect-api-key notary-submit ' ]"
+         in helper_stand_in, "the dry run does not run the helper signer against the stand-in and check its calls")
+    need("vz-runner-signed" not in darwin and "--helper" not in darwin and "vz-runner" not in assemble,
+         "the dry run packs a helper no release signed")
     release_jobs = jobs(release)
     release_header, header = release.split("\njobs:\n", 1)[0], text.split("\njobs:\n", 1)[0]
     pins = [re.findall(r"^  (RCODESIGN_[A-Z0-9_]+: \S+)$", part, re.M) for part in (release_header, header)]
@@ -656,7 +808,9 @@ def check_dry_run(text, release):
     need("    needs: [protected-main, build-darwin]\n    runs-on: ci-protected\n" in sign,
          "the dry-run macOS signing does not follow the macOS build on a protected runner")
     need(dict(steps(sign)).get("Install rcodesign (pinned)")
-         == dict(steps(release_jobs.get("sign-darwin", ""))).get("Install rcodesign (pinned)", ""),
+         == dict(steps(release_jobs.get("sign-darwin", ""))).get("Install rcodesign (pinned)", "")
+         and dict(steps(helper_sign)).get("Install rcodesign (pinned)")
+         == dict(steps(release_jobs.get("sign-helper", ""))).get("Install rcodesign (pinned)", ""),
          "the dry run does not install rcodesign exactly as the release does")
     stand_in = dict(steps(sign)).get("Sign the macOS pair with the rcodesign stand-in", "")
     need('scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$stand_in"' in stand_in
@@ -714,8 +868,35 @@ DRY_RUN_MUTATIONS = {
                                          "    name: Refuse anything but protected main\n    runs-on: ci-lite\n"
                                          "    if: github.event_name == 'push'\n", 1),
     "Mac build without the guard": lambda t: t.replace(
-        "    needs: [protected-main, superseded, build-runtime-linux]\n",
-        "    needs: [superseded, build-runtime-linux]\n", 1),
+        "    needs: [protected-main, superseded, build-runtime-linux, build-helper-darwin, sign-helper]\n",
+        "    needs: [superseded, build-runtime-linux, build-helper-darwin, sign-helper]\n", 1),
+    "Mac build without the helper jobs": lambda t: t.replace(
+        "    needs: [protected-main, superseded, build-runtime-linux, build-helper-darwin, sign-helper]\n",
+        "    needs: [protected-main, superseded, build-runtime-linux]\n", 1),
+    "helper build without the guard": lambda t: t.replace(
+        "    name: Build the VZ helper for signing\n    needs: [protected-main, superseded]\n",
+        "    name: Build the VZ helper for signing\n    needs: [superseded]\n", 1),
+    "Mac build of a superseded commit": lambda t: nth_replace(
+        t, "    if: needs.superseded.outputs.superseded == 'false'\n    runs-on: macos-arm64\n",
+        "    runs-on: macos-arm64\n", 2),
+    "dry run packs its stand-in-signed helper": lambda t: t.replace(
+        "          LOCAL_RUNTIME_NO_BUILD=1 scripts/ci/release/build-local-runtime.sh macos --linux \"$work/linux\" \\\n",
+        "          LOCAL_RUNTIME_NO_BUILD=1 scripts/ci/release/build-local-runtime.sh macos --linux \"$work/linux\" \\\n"
+        "            --helper \"$PWD/vz-runner-signed\" \\\n", 1),
+    "dry-run helper signing with the real rcodesign": lambda t: t.replace(
+        'scripts/ci/release/sign-macos-helper.sh "$stand_in/bin/rcodesign" "$stand_in/keys"',
+        'scripts/ci/release/sign-macos-helper.sh .rcodesign/rcodesign "$stand_in/keys"', 1),
+    "dry-run helper signing with OIDC": lambda t: t.replace(
+        "    needs: [protected-main, build-helper-darwin]\n    runs-on: ci-protected\n",
+        "    needs: [protected-main, build-helper-darwin]\n    runs-on: ci-protected\n    enable-openid-connect: true\n",
+        1),
+    "unbound dry-run unsigned helper": lambda t: t.replace(
+        '[ "$(sha256sum vz-runner-unsigned/codewire-vz-runner | cut -c1-64)" = "$UNSIGNED_SHA256" ]', "true", 1),
+    "dry-run cw stand-in calls unchecked": lambda t: re.sub(
+        r"          # Two signatures, each verified and read, then one notarization\.\n.*?\n.*?\n", "", t, count=1,
+        flags=re.S),
+    "dry-run cw rcodesign installed differently": lambda t: nth_replace(
+        t, "          .rcodesign/rcodesign --version\n", "", 2),
     "runtime build without the guard": lambda t: t.replace(
         "    needs: [protected-main, superseded]\n", "    needs: [superseded]\n", 1),
     "Mac builds a superseded commit": lambda t: t.replace(

@@ -27,7 +27,7 @@ env:
   ZIG_VERSION: 0.15.2
   ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
   CARGO_ZIGBUILD_VERSION: 0.23.0
-  # Signs and notarizes the macOS pair on Linux (#2064).
+  # Signs and notarizes the macOS pair and the VZ helper on Linux (#2064, #1905).
   RCODESIGN_VERSION: 0.29.0
   RCODESIGN_X86_64_LINUX_SHA256: dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002
   # Cargo fetches git dependencies (noeljackson/av, tauri-apps/wry and
@@ -192,6 +192,165 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-helper-darwin:
+    # The local runtime's Virtualization.framework helper (#1905). Every
+    # release cw's runtime document pins its digest, so sign-helper signs it
+    # with the Developer ID before build-darwin packs the runtime, and only
+    # once per recipe: this job reports the recipe and, when the parts cache
+    # has no signed helper for it, builds the helper unsigned. A source that
+    # predates this signs its helper ad hoc in build-darwin. Compilation
+    # only: no OIDC, signing, mirror or R2 capability exists in this job.
+    name: Build the VZ helper for signing
+    needs: [release-selection]
+    runs-on: macos-arm64
+    timeout-minutes: 30
+    outputs:
+      present: ${{ steps.build.outputs.present }}
+      recipe: ${{ steps.build.outputs.recipe }}
+      unsigned_sha256: ${{ steps.build.outputs.unsigned_sha256 }}
+      build_runner: ${{ steps.build.outputs.build_runner }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+          fetch-depth: 0
+
+      - name: Confirm selected release checkout
+        env:
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+
+      - name: Build the helper unless its recipe is signed
+        id: build
+        working-directory: .release-source
+        run: |
+          set -euo pipefail
+          # A source that predates the signed helper packs one signed ad hoc.
+          if ! grep -q '"vz-runner-macos"' scripts/ci/release/local_runtime_parts.py; then
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          work="${RUNNER_TEMP:?}/codewire-vz-runner"
+          scripts/ci/release/build-local-runtime.sh helper --output "$work"
+          printf 'present=true\nrecipe=%s\nbuild_runner=%s\n' "$(cat "$work/recipe")" "${RUNNER_NAME:?}" \
+            >> "$GITHUB_OUTPUT"
+          if [ -f "$work/codewire-vz-runner" ]; then
+            mkdir -m 0700 ../.vz-runner-unsigned
+            cp "$work/codewire-vz-runner" ../.vz-runner-unsigned/codewire-vz-runner
+            printf 'unsigned_sha256=%s\n' \
+              "$(shasum -a 256 ../.vz-runner-unsigned/codewire-vz-runner | cut -c1-64)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Hand the unsigned helper to signing
+        if: steps.build.outputs.unsigned_sha256 != ''
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-release-vz-runner-unsigned-${{ github.run_id }}
+          path: .vz-runner-unsigned/codewire-vz-runner
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-helper:
+    # Developer ID signing and Apple notarization of the VZ helper (#1905),
+    # only when build-helper-darwin built one; otherwise build-darwin takes
+    # the helper signed for the same recipe from the parts cache. Only this
+    # job and sign-darwin read the Apple keys; it compiles nothing and holds
+    # no OpenPGP, mirror or R2 capability.
+    name: Sign and notarize the VZ helper
+    needs: [release-selection, build-helper-darwin]
+    runs-on: ci-protected
+    enable-openid-connect: true
+    timeout-minutes: 45
+    outputs:
+      signed_sha256: ${{ steps.sign.outputs.signed_sha256 }}
+      notary_submission_id: ${{ steps.sign.outputs.notary_submission_id }}
+      sign_runner: ${{ steps.sign.outputs.sign_runner }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      - name: Confirm selected release checkout
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        env:
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+
+      - name: Receive the unsigned helper
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-release-vz-runner-unsigned-${{ github.run_id }}
+          path: vz-runner-unsigned
+
+      - name: Verify the received helper is the built helper
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        env:
+          UNSIGNED_SHA256: ${{ needs.build-helper-darwin.outputs.unsigned_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$UNSIGNED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(sha256sum vz-runner-unsigned/codewire-vz-runner | cut -c1-64)" = "$UNSIGNED_SHA256" ]
+
+      - name: Install rcodesign (pinned)
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        run: |
+          set -euo pipefail
+          archive="apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl"
+          scripts/ci/release/fetch-pinned.sh \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${archive}.tar.gz" \
+            "$RCODESIGN_X86_64_LINUX_SHA256" rcodesign.tar.gz
+          mkdir -m 0700 .rcodesign
+          tar -xzf rcodesign.tar.gz -C .rcodesign --strip-components=1 "${archive}/rcodesign"
+          .rcodesign/rcodesign --version
+
+      - name: Sign and notarize the helper
+        id: sign
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        run: |
+          set -euo pipefail
+          umask 077
+          # The Developer ID and notary API keys exist only in OpenBao. They
+          # are read here, used only by the signer, and shredded before anything else.
+          macos_work="$(mktemp -d "${RUNNER_TEMP:?}/codewire-macos-keys.XXXXXX")"
+          cleanup_macos_keys() {
+            find "$macos_work" -type f -exec shred -u {} + 2>/dev/null || true
+            rm -rf "$macos_work"
+          }
+          trap cleanup_macos_keys EXIT
+          scripts/ci/setup/fetch-openbao-macos-signing.sh "$macos_work/keys"
+          scripts/ci/release/sign-macos-helper.sh .rcodesign/rcodesign "$macos_work/keys" \
+            vz-runner-unsigned/codewire-vz-runner \
+            .release-source/crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist vz-runner-signed
+          cleanup_macos_keys
+          trap - EXIT
+          printf 'signed_sha256=%s\nsign_runner=%s\n' \
+            "$(sha256sum vz-runner-signed/codewire-vz-runner | cut -c1-64)" "${RUNNER_NAME:?}" >> "$GITHUB_OUTPUT"
+          if [ -f vz-runner-signed/notary-submission-id ]; then
+            printf 'notary_submission_id=%s\n' "$(cat vz-runner-signed/notary-submission-id)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Hand the signed helper to the macOS build
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-release-vz-runner-signed-${{ github.run_id }}
+          path: vz-runner-signed/codewire-vz-runner
+          if-no-files-found: error
+          retention-days: 1
+
   build-darwin:
     # The macOS cw links Apple frameworks (Security, SystemConfiguration), so
     # it is built natively on the protected mac-runner runner: one ephemeral
@@ -199,7 +358,7 @@ jobs:
     # docs/runbooks/macos-arm64-runner.md). Compilation only: no OIDC,
     # signing, mirror or R2 capability exists in this job.
     name: Build the macOS cw natively
-    needs: [release-selection, build-runtime-linux]
+    needs: [release-selection, build-runtime-linux, build-helper-darwin, sign-helper]
     runs-on: macos-arm64
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
@@ -240,9 +399,18 @@ jobs:
           name: cw-release-runtime-linux-${{ github.run_id }}
           path: .local-runtime-linux
 
+      - name: Receive the signed VZ helper
+        if: needs.sign-helper.outputs.signed_sha256 != ''
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-release-vz-runner-signed-${{ github.run_id }}
+          path: .vz-runner-signed
+
       # Every release cw embeds the runtime this step packs: the macOS target
-      # merged with the Linux job's linux-x86_64 fragment. The parts either
-      # job built (cache misses) go to the publishing job as cache records.
+      # merged with the Linux job's linux-x86_64 fragment, with the helper
+      # sign-helper signed in this run or one the parts cache holds for the
+      # same recipe. The parts either side built (cache misses) and a helper
+      # signed here go to the publishing job as cache records.
       - name: Build the local VM runtime
         id: runtime
         if: needs.build-runtime-linux.outputs.present == 'true'
@@ -250,6 +418,12 @@ jobs:
         env:
           LINUX_SHA256: ${{ needs.build-runtime-linux.outputs.linux_sha256 }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          HELPER_RECIPE: ${{ needs.build-helper-darwin.outputs.recipe }}
+          HELPER_BUILD_RUNNER: ${{ needs.build-helper-darwin.outputs.build_runner }}
+          SIGNED_HELPER_SHA256: ${{ needs.sign-helper.outputs.signed_sha256 }}
+          HELPER_SIGN_RUNNER: ${{ needs.sign-helper.outputs.sign_runner }}
+          HELPER_NOTARY_SUBMISSION_ID: ${{ needs.sign-helper.outputs.notary_submission_id }}
         run: |
           set -euo pipefail
           [[ "$LINUX_SHA256" =~ ^[0-9a-f]{64}$ ]]
@@ -257,8 +431,23 @@ jobs:
           work="${RUNNER_TEMP:?}/codewire-local-runtime"
           mkdir -m 0700 "$work"
           tar -xf ../.local-runtime-linux/runtime-linux.tar -C "$work"
+          helper=()
+          if [ -n "$SIGNED_HELPER_SHA256" ]; then
+            [[ "$SIGNED_HELPER_SHA256" =~ ^[0-9a-f]{64}$ ]] && [[ "$HELPER_RECIPE" =~ ^[0-9a-f]{64}$ ]]
+            [ "$(shasum -a 256 ../.vz-runner-signed/codewire-vz-runner | cut -c1-64)" = "$SIGNED_HELPER_SHA256" ]
+            mkdir -m 0700 "$work/vz-runner-signed"
+            install -m 0755 ../.vz-runner-signed/codewire-vz-runner "$work/vz-runner-signed/codewire-vz-runner"
+            printf '%s\n' "$HELPER_RECIPE" > "$work/vz-runner-signed/recipe"
+            provenance=(--set "source_sha=$SOURCE_SHA" --set "version=$RELEASE_TAG" --set "run_id=$GITHUB_RUN_ID"
+                        --set "build_runner=$HELPER_BUILD_RUNNER" --set "sign_runner=$HELPER_SIGN_RUNNER")
+            [ -z "$HELPER_NOTARY_SUBMISSION_ID" ] ||
+              provenance+=(--set "notary_submission_id=$HELPER_NOTARY_SUBMISSION_ID")
+            python3 scripts/ci/release/local_runtime_parts.py provenance \
+              --file "$work/vz-runner-signed/provenance.json" "${provenance[@]}"
+            helper=(--helper "$work/vz-runner-signed")
+          fi
           scripts/ci/release/build-local-runtime.sh macos --linux "$work/linux" \
-            --source-sha "$SOURCE_SHA" --output "$work/macos"
+            --source-sha "$SOURCE_SHA" ${helper[@]+"${helper[@]}"} --output "$work/macos"
           echo "CW_RELEASE_LOCAL_RUNTIME_DIR=$work/macos/runtime" >> "$GITHUB_ENV"
           mkdir -m 0700 ../.runtime-records
           tar -C "$work/macos/built" -cf ../.runtime-records/runtime-records.tar .

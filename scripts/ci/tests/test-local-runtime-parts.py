@@ -46,6 +46,8 @@ class RecipeTest(unittest.TestCase):
             for relative in shape["files"]:
                 (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / relative, self.root / relative)
+            for tree in shape.get("trees", ()):
+                shutil.copytree(ROOT / tree, self.root / tree)
         self.pins = self.root / "scripts/ci/release/local-runtime-sources.json"
         self.pins.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(parts.PINS, self.pins)
@@ -82,7 +84,7 @@ class RecipeTest(unittest.TestCase):
         for name in ("e2fsprogs-macos", "git-macos"):
             self.assertNotIn("arch", parts.PARTS[name])
         self.assertEqual(parts.SIDE_PARTS, {"linux": ("kernel-arm64", "kernel-x86_64"),
-                                            "macos": ("e2fsprogs-macos", "git-macos")})
+                                            "macos": ("e2fsprogs-macos", "git-macos", "vz-runner-macos")})
         script = (ROOT / "scripts/ci/release/build-local-runtime.sh").read_text()
         for side, names in parts.SIDE_PARTS.items():
             self.assertIn(" ".join(names), script, side)
@@ -97,6 +99,53 @@ class RecipeTest(unittest.TestCase):
         self.assertEqual(after["kernel-arm64"], before["kernel-arm64"])
         self.assertEqual(after["kernel-x86_64"], before["kernel-x86_64"])
         self.assertEqual(after["e2fsprogs-macos"], before["e2fsprogs-macos"])
+
+    def test_the_signed_helper_is_keyed_by_its_sources_and_signing_identity(self):
+        # #1905: the helper is signed once per recipe, so its recipe is what
+        # the executable is built from and how it is signed, and nothing else.
+        package = self.root / "crates/codewire-local-vmm/macos-vz-runner"
+        before = self.recipe("vz-runner-macos", HOST)
+        others = {name: self.recipe(name, HOST if shape["host"] else None)
+                  for name, shape in parts.PARTS.items() if name != "vz-runner-macos"}
+        for relative in ("Tests/CodewireVZRunnerTests/New.swift", "README.md", ".build/release/codewire-vz-runner"):
+            (package / relative).parent.mkdir(parents=True, exist_ok=True)
+            (package / relative).write_text("not an input of the executable\n")
+        self.assertEqual(self.recipe("vz-runner-macos", HOST), before)
+        changed = {}
+        for relative in ("Sources/CodewireVZRunner/main.swift", "Package.swift", "developer-entitlements.plist"):
+            original = (package / relative).read_bytes()
+            (package / relative).write_bytes(original + b"\n")
+            changed[relative] = self.recipe("vz-runner-macos", HOST)
+            (package / relative).write_bytes(original)
+        (package / "Sources/CodewireVZRunner/New.swift").write_text("// new\n")
+        changed["a new source"] = self.recipe("vz-runner-macos", HOST)
+        (package / "Sources/CodewireVZRunner/New.swift").unlink()
+        shape = parts.PARTS["vz-runner-macos"]
+        with unittest.mock.patch.dict(parts.PARTS, {"vz-runner-macos": {
+                **shape, "signing": {**shape["signing"], "identifier": "codewire-vz-runner"}}}):
+            changed["another identifier"] = self.recipe("vz-runner-macos", HOST)
+        changed["another SDK"] = self.recipe("vz-runner-macos", {**HOST, "sdk": "26.1"})
+        for reason, recipe in changed.items():
+            with self.subTest(reason=reason):
+                self.assertNotEqual(recipe, before)
+        self.assertEqual(len(set(changed.values())), len(changed))
+        self.assertEqual(self.recipe("vz-runner-macos", HOST), before)
+        self.assertEqual({name: self.recipe(name, HOST if shape["host"] else None)
+                          for name, shape in parts.PARTS.items() if name != "vz-runner-macos"}, others)
+        (package / "Sources/CodewireVZRunner/link.swift").symlink_to("main.swift")
+        with self.assertRaisesRegex(parts.PartsError, "not a regular file"):
+            self.recipe("vz-runner-macos", HOST)
+
+    def test_the_helper_signing_identity_is_one_identity(self):
+        signing = parts.PARTS["vz-runner-macos"]["signing"]
+        self.assertEqual(signing, {"identifier": "sh.codewire.vz-runner", "team": "PXQZM3GLP5"})
+        pack = load_tool("macos-local-runtime")
+        self.assertEqual((pack.HELPER_IDENTIFIER, pack.HELPER_TEAM), (signing["identifier"], signing["team"]))
+        self.assertIn(f"readonly identifier='{signing['identifier']}'",
+                      (ROOT / "scripts/ci/release/sign-macos-helper.sh").read_text())
+        self.assertIn(f"readonly macos_team_id='{signing['team']}'",
+                      (ROOT / "scripts/ci/release/macos-signing.sh").read_text())
+        self.assertEqual(parts.PARTS["vz-runner-macos"]["outputs"], (pack.PRODUCT,))
 
     def test_mac_native_parts_are_keyed_by_their_host(self):
         with self.assertRaises(parts.PartsError):
@@ -184,6 +233,41 @@ class CacheTest(unittest.TestCase):
         value["files"]["extra"] = value["files"]["git"]
         with self.assertRaises(parts.PartsError):
             parts.parse_record(release.canonical(value), "git-macos", self.recipe)
+
+    def test_a_record_may_carry_the_provenance_of_its_run(self):
+        provenance = {"source_sha": "f" * 40, "version": "v0.3.390", "run_id": "14001",
+                      "build_runner": "mac-runner-20261015-101500", "sign_runner": "ci-protected-3",
+                      "notary_submission_id": "0b7e5f2a-1c3d-4e5f-8a9b-0c1d2e3f4a5b"}
+        record = parts.record("git-macos", self.recipe, self.built, provenance)
+        self.assertEqual(json.loads(record)["provenance"], provenance)
+        self.assertEqual(parts.parse_record(record, "git-macos", self.recipe),
+                         json.loads(parts.record("git-macos", self.recipe, self.built))["files"])
+        for bad in ({}, {"builder": "x"}, {"source_sha": "f" * 39}, {"version": "v1 2"}, {"run_id": 14001},
+                    {"version": "x" * 201}):
+            with self.subTest(provenance=bad), self.assertRaises(parts.PartsError):
+                parts.record("git-macos", self.recipe, self.built, bad)
+        value = json.loads(record)
+        value["provenance"]["sign_runner"] = "a runner; rm -rf"
+        with self.assertRaises(parts.PartsError):
+            parts.parse_record(release.canonical(value), "git-macos", self.recipe)
+
+    def test_provenance_is_assembled_field_by_field(self):
+        path = self.base / "provenance.json"
+        tool = [sys.executable, str(ROOT / "scripts/ci/release/local_runtime_parts.py"), "provenance",
+                "--file", str(path)]
+        subprocess.run([*tool, "--set", "source_sha=" + "a" * 40, "--set", "version=v0.3.390"], check=True)
+        subprocess.run([*tool, "--set", "run_id=7"], check=True)
+        self.assertEqual(release.parse_canonical(path.read_bytes()),
+                         {"source_sha": "a" * 40, "version": "v0.3.390", "run_id": "7"})
+        for args in (("--set", "run_id=8"), ("--set", "colour=blue"), ("--set", "version")):
+            with self.subTest(args=args):
+                result = subprocess.run([*tool, *args], capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("runtime-part: REJECT", result.stderr)
+        record = subprocess.run([sys.executable, str(ROOT / "scripts/ci/release/local_runtime_parts.py"), "record",
+                                 "--part", "git-macos", "--recipe", self.recipe, "--dir", str(self.built),
+                                 "--provenance", str(path)], capture_output=True, check=True).stdout
+        self.assertEqual(json.loads(record)["provenance"]["run_id"], "7")
 
 
 class PublishTest(unittest.TestCase):
@@ -274,7 +358,7 @@ class RuntimeModeTest(unittest.TestCase):
 
     def test_runtime_inputs_cover_every_part_and_trigger_the_dry_run(self):
         for name, shape in parts.PARTS.items():
-            for path in shape["files"]:
+            for path in (*shape["files"], *(tree + "Main.swift" for tree in shape.get("trees", ()))):
                 with self.subTest(part=name, path=path):
                     self.assertEqual(parts.runtime_mode([path]), "full")
         workflow = (ROOT / ".gitea/workflows/cw-release-dry-run.yaml").read_text()
@@ -309,7 +393,10 @@ class BuildScriptTest(unittest.TestCase):
         release_args = ("--source-sha", head, "--version", "v1.2.3")
         self.assertEqual(self.run_script().returncode, 2)
         for args, message in (
-            (("windows", "--output", str(output)), "mode must be linux or macos"),
+            (("windows", "--output", str(output)), "mode must be linux, helper or macos"),
+            (("helper", "--output", str(output)), "the helper is built on an Apple silicon Mac"),
+            (("linux", "--helper", str(base), *release_args, "--output", str(output)),
+             "--helper is for the macos side"),
             (("macos", "--linux", str(base), "--source-sha", "a" * 40, "--output", str(output)),
              "Apple silicon Mac"),
             (("linux", *release_args, "--output", "relative"), "absolute path"),
@@ -330,6 +417,20 @@ class BuildScriptTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1, args)
             self.assertIn(message, result.stderr)
         self.assertFalse(output.exists())
+
+
+    def test_the_macos_side_packs_only_a_signed_helper(self):
+        # #1905: the release's macOS side never builds or signs the helper. It
+        # packs one signed in this run or cached, and the pack holds it to the
+        # Developer ID requirement (macos-local-runtime.py --helper).
+        script = (ROOT / "scripts/ci/release/build-local-runtime.sh").read_text()
+        macos = script.split("\nmacos() {\n", 1)[1].split("\n}\n", 1)[0]
+        signed = script.split("\nsigned_helper() {\n", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('  signed_helper "$output/vz-runner-macos"\n', macos)
+        self.assertIn('    --helper "$output/vz-runner-macos/codewire-vz-runner" \\\n', macos)
+        self.assertNotIn("codesign", script)
+        self.assertNotIn("swift", macos + signed)
+        self.assertIn('die "the signed VZ helper (recipe $recipe) is not cached', signed)
 
 
 class GuestRootBuilderTest(unittest.TestCase):
