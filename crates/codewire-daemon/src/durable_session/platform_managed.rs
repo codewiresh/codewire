@@ -464,6 +464,33 @@ impl SessionEngine {
         c: &v1::PlatformManagedControl,
         generation: u64,
     ) -> Result<(v1::SessionRecord, bool, bool), Error> {
+        self.revert_resume_with(handle, previous, origin, c, generation, || async {
+            image
+                .helper(
+                    origin,
+                    &c.session_id,
+                    generation,
+                    json!({"op":"revert","previous":previous}),
+                )
+                .await
+        })
+        .await
+    }
+    /// [`Self::revert_resume`] with its helper call supplied: production
+    /// passes the support image's helper; tests pass its answer.
+    pub(super) async fn revert_resume_with<F, Fut>(
+        &self,
+        handle: &Arc<SessionHandle>,
+        previous: &Origin,
+        origin: &Origin,
+        c: &v1::PlatformManagedControl,
+        generation: u64,
+        revert: F,
+    ) -> Result<(v1::SessionRecord, bool, bool), Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Value, Error>>,
+    {
         // The caller holds the session's operation lock throughout.
         if lock(&self.inner.active).contains_key(&c.session_id) {
             return Err(Error::Unknown);
@@ -477,15 +504,7 @@ impl SessionEngine {
                 return Err(Error::Unknown);
             }
         }
-        let reverted = image
-            .helper(
-                origin,
-                &c.session_id,
-                generation,
-                json!({"op":"revert","previous":previous}),
-            )
-            .await
-            .map_err(|_| Error::Unknown)?;
+        let reverted = revert().await.map_err(|_| Error::Unknown)?;
         if reverted["launch_generation"].as_u64() != Some(c.expected_launch_generation) {
             return Err(Error::Unknown);
         }
@@ -496,11 +515,13 @@ impl SessionEngine {
         {
             return Err(Error::Unknown);
         }
-        metadata.platform_managed_origin = Some(previous.clone());
-        metadata.launch_generation = c.expected_launch_generation;
-        persist_metadata(&self.inner.root, &metadata)
+        let mut reverted_metadata = metadata.clone();
+        reverted_metadata.platform_managed_origin = Some(previous.clone());
+        reverted_metadata.launch_generation = c.expected_launch_generation;
+        persist_metadata(&self.inner.root, &reverted_metadata)
             .await
             .map_err(|_| Error::Unknown)?;
+        *metadata = reverted_metadata;
         Err(Error::DeniedBeforeRun)
     }
     async fn platform_control(

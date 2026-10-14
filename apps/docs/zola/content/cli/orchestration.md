@@ -257,9 +257,11 @@ stopped is not replayed; the agent may see an interrupted step and redo it.
 the environment.
 
 If the environment refuses the resumed agent's launch before it starts,
-for example because a selected secret source was removed, nothing ran:
-`cw msg` says so, and sending the message again resumes the conversation
-once the cause is fixed.
+for example because the launch's window expired or the secret service was
+briefly unavailable, nothing ran: `cw msg` says so, and sending the message
+again resumes the conversation. A change to the environment's selected
+credentials or secret sources is different: it ends the conversation, as
+below.
 
 A conversation waits, and `cw msg` says to try again shortly, while:
 
