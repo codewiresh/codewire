@@ -1198,6 +1198,11 @@ Run those tests with `TEST_DATABASE_URL` against a dedicated throwaway database
 and record the executed test count. Wire them into
 `scripts/ci/verify/run-integration-verification.sh database`, then run that mode
 locally. CI confirms the result; it is not the first integration environment.
+That mode runs its suites in four lanes (`core`, `credential-service`,
+`credential-broker`, `orchestration`), each in order against its own
+PostgreSQL. Add a suite to the lane of the crate it tests, and its harness to
+`build_database_suites`. Against one explicit database the lanes run one after
+another.
 
 ### Network deletion
 
