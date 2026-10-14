@@ -242,7 +242,7 @@ class PublisherTest(unittest.TestCase):
         counts, _ = self.publish("runtime")
         version, _, objects, blobs = r2.immutable_objects(dist)
         _, pinned = release.load_local_runtime(dist)
-        self.assertEqual(len(pinned), 12)
+        self.assertEqual(len(pinned), 21)
         self.assertEqual(counts, {"created": len(objects), "identical": 0})
         self.assertEqual(blobs, len(r2.immutable_objects(self.deliveries["new"])[2]) - len(SIGNED_SEQUENCE)
                          + len(pinned))
