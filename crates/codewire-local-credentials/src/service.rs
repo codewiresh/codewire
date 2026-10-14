@@ -32,6 +32,7 @@ use crate::broker_channel::{
     LocalSshOperationRuntime, LocalSshSigner, MAX_BROKER_LEASE_AUDIT_LIST_LIMIT,
     serve_broker_lease_channel_with_ready,
 };
+use crate::broker_log::{BrokerLog, StderrTail, exit_status};
 use crate::control::v1::local_credential_authority_service_server::{
     LocalCredentialAuthorityService, LocalCredentialAuthorityServiceServer,
 };
@@ -399,6 +400,7 @@ where
         Arc::clone(&broker_audit),
         Arc::clone(&ssh_runtime),
         platform_connector.clone(),
+        Arc::new(BrokerLog::in_root(&authority_root)),
     ));
     let repositories = Arc::new(RepositoryProcessManager::new(
         Arc::clone(&authority),
@@ -520,6 +522,7 @@ struct BrokerProcessManager<S: ProtectedStore> {
     entries: Mutex<HashMap<EnvironmentId, BrokerProcessEntry>>,
     ssh_runtime: Arc<LocalSshOperationRuntime>,
     platform_connector: Option<Arc<dyn crate::PlatformCredentialConnector>>,
+    log: Arc<BrokerLog>,
 }
 
 impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
@@ -529,6 +532,7 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
         audit: Arc<BrokerLeaseAuditLog>,
         ssh_runtime: Arc<LocalSshOperationRuntime>,
         platform_connector: Option<Arc<dyn crate::PlatformCredentialConnector>>,
+        log: Arc<BrokerLog>,
     ) -> Self {
         Self {
             authority,
@@ -537,6 +541,7 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
             entries: Mutex::new(HashMap::new()),
             ssh_runtime,
             platform_connector,
+            log,
         }
     }
 
@@ -697,6 +702,7 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
                 platform,
                 local_profile: request.local_profile.clone(),
                 renewal: BrokerRenewal::PRODUCTION,
+                log: Arc::clone(&self.log),
             }),
             shutdown_rx,
             state_tx,
@@ -798,6 +804,7 @@ struct BrokerLaunch<S: ProtectedStore> {
     platform: Option<PlatformBrokerBinding>,
     local_profile: Option<EnvironmentAccessBinding>,
     renewal: BrokerRenewal,
+    log: Arc<BrokerLog>,
 }
 
 type StartingBroker<S> =
@@ -872,39 +879,54 @@ async fn run_broker_lifecycle<S: ProtectedStore + 'static>(
                             .saturating_mul(2)
                             .min(BROKER_RESTART_MAX_DELAY);
                         fresh_at = now + restart_delay;
+                        launch.log.record(
+                            "broker_restart_scheduled",
+                            &[
+                                ("environment", &launch.config.environment_id),
+                                ("generation", &launch.config.environment_generation),
+                                ("in_ms", &restart_delay.as_millis()),
+                            ],
+                        );
                     }
                 }
             }
             event = child_event(&mut current) => {
-                let Some(child) = current.take() else {
+                let Some(mut child) = current.take() else {
                     continue;
                 };
                 let running_for = serving_since
                     .take()
                     .map_or(Duration::ZERO, |since: tokio::time::Instant| since.elapsed());
+                let (reason, delay) = match event {
+                    // No successor ran in time: fail closed and start a fresh
+                    // child at once, unless a successor is still starting.
+                    ChildEvent::LifetimeEnded => ("lifetime_ended", BROKER_RESTART_MIN_DELAY),
+                    ChildEvent::Ended => ("ended", next_restart_delay(restart_delay, running_for)),
+                };
+                record_broker_end(
+                    &launch.log,
+                    "broker_ended",
+                    reason,
+                    &mut child,
+                    &launch.config.environment_id,
+                    launch.config.environment_generation,
+                    running_for,
+                    Some(match event {
+                        ChildEvent::LifetimeEnded => Duration::ZERO,
+                        ChildEvent::Ended => delay,
+                    }),
+                )
+                .await;
                 child.stop().await;
                 let _ = state.send(BrokerProcessState::Starting);
                 successor_at = None;
                 successor_failures = 0;
-                restart_delay = match event {
-                    // No successor ran in time: fail closed and start a fresh
-                    // child at once, unless a successor is still starting.
-                    ChildEvent::LifetimeEnded => {
-                        fresh_at = tokio::time::Instant::now();
-                        BROKER_RESTART_MIN_DELAY
-                    }
-                    ChildEvent::Ended => {
-                        let delay = if running_for >= BROKER_STABLE_RUNTIME {
-                            BROKER_RESTART_MIN_DELAY
-                        } else {
-                            restart_delay
-                                .saturating_mul(2)
-                                .min(BROKER_RESTART_MAX_DELAY)
-                        };
-                        fresh_at = tokio::time::Instant::now() + delay;
-                        delay
-                    }
-                };
+                restart_delay = delay;
+                fresh_at = tokio::time::Instant::now()
+                    + match event {
+                        ChildEvent::LifetimeEnded => Duration::ZERO,
+                        ChildEvent::Ended => delay,
+                    };
             }
             _ = child_event(&mut retiring) => {
                 if let Some(predecessor) = retiring.take() {
@@ -946,6 +968,10 @@ struct BrokerChild<S: ProtectedStore> {
     lease_task: tokio::task::JoinHandle<Result<(), crate::BrokerLeaseChannelError>>,
     /// The lease task already returned and must not be polled again.
     channel_ended: bool,
+    /// How the lease task ended, once it has (for the broker log).
+    lease_outcome: Option<&'static str>,
+    pid: Option<u32>,
+    stderr: Option<StderrTail>,
     lifetime: Arc<BrokerChannelRefreshLifetime<S>>,
     /// Its spawn plus the renewal lifetime.
     ends_at: tokio::time::Instant,
@@ -956,8 +982,25 @@ impl<S: ProtectedStore> BrokerChild<S> {
     async fn ended(&mut self) {
         tokio::select! {
             _ = self.child.wait() => {}
-            _ = &mut self.lease_task, if !self.channel_ended => self.channel_ended = true,
+            result = &mut self.lease_task, if !self.channel_ended => {
+                self.channel_ended = true;
+                self.lease_outcome = Some(lease_outcome(&result));
+            }
         }
+    }
+
+    /// The child's exit status and the lease channel's outcome so far, for
+    /// the broker log. Call before [`Self::stop`], which kills the child.
+    fn outcome(&mut self) -> (String, &'static str) {
+        let status = exit_status(self.child.try_wait().ok().flatten());
+        let lease = if self.channel_ended {
+            self.lease_outcome.unwrap_or("ended")
+        } else if self.lease_task.is_finished() {
+            "finished"
+        } else {
+            "open"
+        };
+        (status, lease)
     }
 
     async fn stop(mut self) {
@@ -969,6 +1012,24 @@ impl<S: ProtectedStore> BrokerChild<S> {
         // A panicked lease task drops its close guard but cannot await workers.
         // Its manager holds this independent observer until the same drain ends.
         self.lifetime.close_and_wait().await;
+    }
+}
+
+/// The lease task's typed outcome; no request or credential data.
+fn lease_outcome(
+    result: &Result<Result<(), crate::BrokerLeaseChannelError>, tokio::task::JoinError>,
+) -> &'static str {
+    use crate::BrokerLeaseChannelError as E;
+    match result {
+        Ok(Ok(())) => "closed",
+        Ok(Err(E::InvalidRequest)) => "invalid_request",
+        Ok(Err(E::Denied)) => "denied",
+        Ok(Err(E::Unavailable)) => "unavailable",
+        Ok(Err(E::InvalidResponse)) => "invalid_response",
+        Ok(Err(E::RefreshInProgress)) => "refresh_in_progress",
+        Ok(Err(E::StaleRefresh)) => "stale_refresh",
+        Err(error) if error.is_panic() => "panicked",
+        Err(_) => "cancelled",
     }
 }
 
@@ -1002,6 +1063,19 @@ async fn sleep_until_some(at: Option<tokio::time::Instant>) {
 async fn stop_some<S: ProtectedStore>(child: Option<BrokerChild<S>>) {
     if let Some(child) = child {
         child.stop().await;
+    }
+}
+
+/// The delay before restarting a child that ended by itself after serving for
+/// `running_for`: it doubles from the previous delay up to the maximum while
+/// children keep failing young, and starts over once one has served for the
+/// stable runtime, so a bad period does not leave a healthy environment on
+/// the maximum delay.
+fn next_restart_delay(previous: Duration, running_for: Duration) -> Duration {
+    if running_for >= BROKER_STABLE_RUNTIME {
+        BROKER_RESTART_MIN_DELAY
+    } else {
+        previous.saturating_mul(2).min(BROKER_RESTART_MAX_DELAY)
     }
 }
 
@@ -1042,9 +1116,30 @@ async fn start_broker<S: ProtectedStore + 'static>(
     let Ok(authority_stream) = UnixStream::from_std(authority_stream) else {
         return Err(BrokerAttempt::Failed);
     };
+    let log = &launch.log;
+    let environment = &launch.config.environment_id;
+    let generation = launch.config.environment_generation;
     let Ok(child) = launch.spawner.spawn(&launch.config, broker_stream) else {
+        log.record(
+            "broker_spawn_failed",
+            &[("environment", environment), ("generation", &generation)],
+        );
         return Err(BrokerAttempt::Failed);
     };
+    let mut child = child;
+    let pid = child.id();
+    let stderr = child.stderr.take().map(StderrTail::spawn);
+    log.record(
+        "broker_spawned",
+        &[
+            ("environment", environment),
+            ("generation", &generation),
+            (
+                "pid",
+                &pid.map_or_else(|| "none".to_owned(), |pid| pid.to_string()),
+            ),
+        ],
+    );
     let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
     let (lease_shutdown, lease_stopped) = watch::channel(false);
     let lifetime = BrokerChannelRefreshLifetime::new_with_ssh_runtime(
@@ -1071,39 +1166,120 @@ async fn start_broker<S: ProtectedStore + 'static>(
         lease_shutdown,
         lease_task,
         channel_ended: false,
+        lease_outcome: None,
+        pid,
+        stderr,
         lifetime,
         ends_at: spawned_at + launch.renewal.lifetime,
     };
     let mut start_timeout = Box::pin(tokio::time::sleep_until(start_deadline));
-    let ready = tokio::select! {
-        ready = &mut ready_rx => ready.is_ok(),
-        () = broker.ended() => false,
+    let not_ready = tokio::select! {
+        ready = &mut ready_rx => ready.is_err().then_some("lease_closed_before_ready"),
+        () = broker.ended() => Some("ended_before_ready"),
         _ = shutdown.changed() => {
             broker.stop().await;
             return Err(BrokerAttempt::Stopped);
         }
-        _ = &mut start_timeout => false,
+        _ = &mut start_timeout => Some("start_timeout"),
     };
-    if !ready {
+    if let Some(reason) = not_ready {
+        record_broker_end(
+            log,
+            "broker_not_ready",
+            reason,
+            &mut broker,
+            environment,
+            generation,
+            spawned_at.elapsed(),
+            None,
+        )
+        .await;
         broker.stop().await;
         return Err(BrokerAttempt::Failed);
     }
+    log.record(
+        "broker_ready",
+        &[
+            ("environment", environment),
+            ("generation", &generation),
+            (
+                "pid",
+                &pid.map_or_else(|| "none".to_owned(), |pid| pid.to_string()),
+            ),
+            ("elapsed_ms", &spawned_at.elapsed().as_millis()),
+        ],
+    );
 
     let stability = tokio::time::sleep(BROKER_READY_STABILITY);
-    let stable = tokio::select! {
-        _ = stability => tokio::time::Instant::now() < start_deadline,
-        _ = &mut start_timeout => false,
-        () = broker.ended() => false,
+    let unstable = tokio::select! {
+        _ = stability => (tokio::time::Instant::now() >= start_deadline).then_some("start_timeout"),
+        _ = &mut start_timeout => Some("start_timeout"),
+        () = broker.ended() => Some("ended_while_settling"),
         _ = shutdown.changed() => {
             broker.stop().await;
             return Err(BrokerAttempt::Stopped);
         }
     };
-    if !stable {
+    if let Some(reason) = unstable {
+        record_broker_end(
+            log,
+            "broker_not_ready",
+            reason,
+            &mut broker,
+            environment,
+            generation,
+            spawned_at.elapsed(),
+            None,
+        )
+        .await;
         broker.stop().await;
         return Err(BrokerAttempt::Failed);
     }
     Ok(broker)
+}
+
+/// One line for a child that ended or never became ready: its exit status and
+/// lease outcome are read before the authority stops it.
+#[allow(clippy::too_many_arguments)]
+async fn record_broker_end<S: ProtectedStore>(
+    log: &BrokerLog,
+    event: &str,
+    reason: &str,
+    broker: &mut BrokerChild<S>,
+    environment: &EnvironmentId,
+    generation: u64,
+    ran: Duration,
+    restart_in: Option<Duration>,
+) {
+    let (status, lease) = broker.outcome();
+    let exited = status != "running";
+    let error = match &mut broker.stderr {
+        Some(tail) => tail.exit_line(exited).await,
+        None => String::new(),
+    };
+    let error = if error.is_empty() {
+        "-".to_owned()
+    } else {
+        error
+    };
+    let pid = broker
+        .pid
+        .map_or_else(|| "none".to_owned(), |pid| pid.to_string());
+    let restart = restart_in.map_or_else(|| "-".to_owned(), |delay| delay.as_millis().to_string());
+    log.record(
+        event,
+        &[
+            ("environment", environment),
+            ("generation", &generation),
+            ("pid", &pid),
+            ("reason", &reason),
+            ("status", &status),
+            ("lease", &lease),
+            ("ran_ms", &ran.as_millis()),
+            ("restart_in_ms", &restart),
+            ("error", &error),
+        ],
+    );
 }
 
 async fn stop_broker_entry(
@@ -2355,6 +2531,35 @@ mod status_tests {
 }
 
 #[cfg(test)]
+mod restart_delay_tests {
+    use super::*;
+
+    /// Children that fail young back off up to the maximum; one that served
+    /// for the stable runtime starts the next restart from the minimum.
+    #[test]
+    fn restart_delay_doubles_to_the_maximum_and_resets_after_a_healthy_run() {
+        let young = Duration::from_millis(500);
+        let mut delay = BROKER_RESTART_MIN_DELAY;
+        let mut seen = Vec::new();
+        for _ in 0..12 {
+            delay = next_restart_delay(delay, young);
+            seen.push(delay);
+        }
+        assert_eq!(seen[0], BROKER_RESTART_MIN_DELAY * 2);
+        assert!(seen.windows(2).all(|pair| pair[1] >= pair[0]));
+        assert_eq!(*seen.last().unwrap(), BROKER_RESTART_MAX_DELAY);
+        assert_eq!(
+            next_restart_delay(BROKER_RESTART_MAX_DELAY, BROKER_STABLE_RUNTIME),
+            BROKER_RESTART_MIN_DELAY
+        );
+        assert_eq!(
+            next_restart_delay(BROKER_RESTART_MAX_DELAY, BROKER_STABLE_RUNTIME - young),
+            BROKER_RESTART_MAX_DELAY
+        );
+    }
+}
+
+#[cfg(test)]
 mod drain_tests {
     use super::*;
     use codewire_access::builtin_provider_catalog;
@@ -2383,6 +2588,7 @@ mod drain_tests {
             Arc::new(BrokerLeaseAuditLog::default()),
             LocalSshOperationRuntime::new(None),
             None,
+            Arc::new(BrokerLog::disabled()),
         );
         let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
         let config = LocalBrokerProcessConfig {

@@ -185,13 +185,16 @@ async fn authority_failure_after_cancellation_still_ends_epoch_and_observes_drai
 
 #[tokio::test]
 async fn invalid_sign_shapes_and_expired_deadlines_do_not_reach_executor() {
-    for change in 0..4 {
+    for change in 0..5 {
         let (executor, mut started) = executor(signature());
         let mut request = ssh_request(Uuid::new_v4());
         match change {
             0 => request.deadline_unix_ms = 1,
             1 => request.deadline_unix_ms = u64::MAX,
-            2 => request.operation = None,
+            // A guest clock ahead of the host's past the 30 s window (#2763):
+            // refused here alone; the bridge receives it and serves on.
+            2 => request.deadline_unix_ms += 2_000,
+            3 => request.operation = None,
             _ => {
                 let Some(v1::credential_ssh_request::Operation::Sign(sign)) =
                     request.operation.as_mut()
