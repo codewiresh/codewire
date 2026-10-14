@@ -431,7 +431,8 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
             .current_dir(&self.authority_root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // The authority keeps the tail of this pipe for its broker log.
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         for provider in &config.http_providers {
             command.arg("--http-provider").arg(provider.as_str());
