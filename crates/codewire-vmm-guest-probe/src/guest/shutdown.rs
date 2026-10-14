@@ -60,10 +60,11 @@ pub(super) fn container_init_pid() -> Option<i32> {
 }
 
 /// SIGTERM every process of the workspace container except its init and the
-/// init's credential forwarder, and wait until they are gone or the grace
-/// ends. Either of those ending ends the container, and every process in it
-/// with SIGKILL, at once. The container's own init cannot do this: it holds
-/// no `CAP_KILL`, and the workload runs as another user.
+/// init's credential forwarder, wait until they are gone or the grace ends,
+/// then SIGKILL what is left. Either of those two ending ends the container,
+/// and every process in it with SIGKILL, at once. The container's own init
+/// cannot do this: it holds no `CAP_KILL`, and the workload runs as another
+/// user.
 pub(super) fn terminate_workload(container_init: i32, grace: Duration) -> usize {
     let Some(namespace) = pid_namespace(container_init) else {
         return 0;
@@ -93,6 +94,13 @@ pub(super) fn terminate_workload(container_init: i32, grace: Duration) -> usize 
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline && !members(&namespace).is_empty() {
         thread::sleep(POLL_INTERVAL);
+    }
+    // The grace is over; what still runs ignored SIGTERM. Kill it now, so
+    // the daemon's session teardown does not wait out its own timeout on it.
+    for pid in members(&namespace) {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
     }
     signalled.len()
 }
