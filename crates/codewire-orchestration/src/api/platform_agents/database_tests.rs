@@ -1888,6 +1888,14 @@ database_case!(
                 .phase
                 == ManagedPhase::Unknown
         );
+        // An unknown Resume ended its conversation; a plain Stop never
+        // becomes its cleanup (#2782).
+        ensure!(
+            f.journal
+                .unknown_active_request(&facts2, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
         resume_refusal(
             f.journal
                 .resume_predecessor(&facts2, &m.session_id, m.driver_id)
@@ -2000,9 +2008,23 @@ database_case!(
             }
         };
         let m = f.launch().await?;
+        // Nothing unsettled: a plain Stop links nothing.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
         let first = control(&m, ManagedAction::Message);
         let (_, owner) = f.admit(first.clone()).await?;
         let id = first.request_id.to_string();
+        // Still in progress: a plain Stop does not take it over.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
         blocked(
             f.journal
                 .admit(
@@ -2028,19 +2050,31 @@ database_case!(
                     .await,
                 &[
                     &format!("message {id}'s outcome is unknown"),
-                    &format!("cw stop {ENV} {} --cleanup-request-id {id}", m.session_id),
+                    &format!("run `cw stop {ENV} {}`", m.session_id),
+                    &format!("then `cw restart {ENV} {}`", m.session_id),
                 ],
             )?;
         }
-        // Its own cleanup is still admitted.
+        // A plain Stop is that request's cleanup: orchestration links it, and
+        // the linked Stop is admitted. Its repeat keeps the first link.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                == Some(first.request_id)
+        );
+        let stop = cleanup(&first, first.expected_launch_generation);
         own(f
             .journal
-            .admit(
-                f.facts.clone(),
-                &f.user,
-                cleanup(&first, first.expected_launch_generation),
-            )
+            .admit(f.facts.clone(), &f.user, stop.clone())
             .await?)?;
+        ensure!(
+            f.journal
+                .saved_mutation(&f.facts, &f.user, stop.request_id)
+                .await?
+                .and_then(|saved| saved.cleanup_of_request_id)
+                == Some(first.request_id)
+        );
     }
 );
 database_case!(db_resume_repeat_is_answered_from_its_first_admission, f, {

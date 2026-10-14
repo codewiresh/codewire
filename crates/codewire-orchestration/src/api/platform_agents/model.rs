@@ -552,7 +552,7 @@ pub(super) fn request_blocked(
     action: ManagedAction,
     request_id: Uuid,
     unknown: bool,
-    environment_id: &str,
+    environment: &str,
     session_id: &str,
 ) -> AppError {
     let name = match action {
@@ -571,9 +571,8 @@ pub(super) fn request_blocked(
              start a new conversation"
         ),
         (true, _) => format!(
-            "{name} {request_id}'s outcome is unknown; clean it up with \
-             `cw stop {environment_id} {session_id} --cleanup-request-id {request_id}`, \
-             then restart the conversation"
+            "{name} {request_id}'s outcome is unknown; run `cw stop {environment} {session_id}`, \
+             then `cw restart {environment} {session_id}`"
         ),
     };
     AppError::Coded {
