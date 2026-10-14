@@ -133,6 +133,10 @@ for the workspace image (`ghcr.io/codewiresh/workspace`).
 release with the install script, or pass `--from DIR` with a runtime directory
 built from the same source.
 
+**`Local VMs aren't available on Linux arm64 yet`**: this `cw` release has no
+local VM runtime for your host. Local VMs run on x86_64 Linux and on Macs with
+Apple silicon. Elsewhere, use hosted Sandboxes with `cw env create --platform`.
+
 **`this local VM runtime was built from X, but this cw from Y`**: the directory
 given to `--from` belongs to another build. Use the runtime from the same
 release or source as your `cw`.
