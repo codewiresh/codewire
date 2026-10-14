@@ -28,6 +28,8 @@ mod private_files;
 pub mod server;
 pub mod service;
 pub mod session;
+#[cfg(target_os = "linux")]
+pub mod ssh_known_hosts;
 pub mod stop_evidence;
 
 pub use codewire_daemon_proto::{DaemonAuthToken, HOSTED_EXEC_AMBIGUOUS_EXIT_CODE};
