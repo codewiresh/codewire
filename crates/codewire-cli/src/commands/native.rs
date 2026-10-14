@@ -1766,7 +1766,11 @@ pub(crate) async fn setup_local_runtime(
         artifact_lock: config.artifact_lock,
     };
     let Some(from) = from else {
-        let Some(document) = crate::local_runtime_pin::embedded()? else {
+        // A release pins one runtime document; a host it has no target for
+        // (such as Linux arm64) gets the same answer as a cw with none.
+        let Some(document) = crate::local_runtime_pin::embedded()?
+            .filter(|document| runtime_install::host_runtime(document).is_ok())
+        else {
             anyhow::bail!(no_pinned_runtime(
                 &crate::build_record::embedded()?,
                 &runtime_install::host_target()
@@ -1794,8 +1798,10 @@ pub(crate) async fn setup_local_runtime(
     Ok(())
 }
 
-/// Why `cw setup --local` has nothing to install (#2733): a published release
-/// that pins no runtime is not a development build.
+/// Why `cw setup --local` has nothing to install (#2733). A published release
+/// with no runtime for this host is not a development build, and no release
+/// for this host may exist yet, so it points to hosted Sandboxes rather than
+/// to `cw update` or `--from`.
 fn no_pinned_runtime(
     record: &codewire_cw_release::build_record::BuildRecord,
     host: &str,
@@ -1804,12 +1810,27 @@ fn no_pinned_runtime(
         && codewire_cw_release::release::valid_release_tag(&record.package_version)
     {
         format!(
-            "cw {} ships no local VM runtime for {host}; update to a release that does with `cw update`, or pass --from DIR with a runtime directory built from the same source",
-            record.package_version
+            "Local VMs aren't available on {} yet; hosted Sandboxes work (`cw env create --platform`).",
+            host_name(host)
         )
     } else {
         "this cw is a development build with no pinned local VM runtime; pass --from DIR with a runtime directory built from the same source".to_owned()
     }
+}
+
+/// A runtime target as people name the host: `linux-aarch64` is Linux arm64.
+fn host_name(host: &str) -> String {
+    let (system, machine) = host.split_once('-').unwrap_or((host, ""));
+    let system = match system {
+        "linux" => "Linux",
+        "macos" => "macOS",
+        other => other,
+    };
+    let machine = match machine {
+        "aarch64" => "arm64",
+        other => other,
+    };
+    format!("{system} {machine}").trim_end().to_owned()
 }
 
 /// Installs this cw's pinned runtime (#2539), for `cw setup --local` and
@@ -3499,12 +3520,20 @@ working_directory: /workspace/github
             }
         };
         let revision = "a".repeat(40);
+        let release = no_pinned_runtime(&record("v0.3.389", Some(&revision)), "linux-aarch64");
+        assert_eq!(
+            release,
+            "Local VMs aren't available on Linux arm64 yet; hosted Sandboxes work (`cw env create --platform`)."
+        );
         let release = no_pinned_runtime(&record("v0.3.389", Some(&revision)), "linux-x86_64");
         assert!(
-            release.starts_with("cw v0.3.389 ships no local VM runtime for linux-x86_64;"),
+            release.starts_with("Local VMs aren't available on Linux x86_64 yet;"),
             "{release}"
         );
-        assert!(!release.contains("development build"), "{release}");
+        for misleading in ["development build", "cw update", "--from"] {
+            assert!(!release.contains(misleading), "{release}");
+        }
+        assert_eq!(host_name("macos-aarch64"), "macOS arm64");
         for (version, revision) in [
             ("0.0.0-rca", Some(revision.as_str())),
             ("0.3.389", Some(revision.as_str())),
