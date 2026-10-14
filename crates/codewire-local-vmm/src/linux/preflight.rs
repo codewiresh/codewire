@@ -108,6 +108,8 @@ pub(crate) struct HostFacts {
     /// `None` when the kernel has no Landlock or it is disabled.
     pub landlock_abi: Option<i32>,
     pub missing_e2fsprogs: Vec<&'static str>,
+    /// e2fsprogs that a user other than root could change.
+    pub untrusted_e2fsprogs: Vec<std::path::PathBuf>,
     pub git: bool,
 }
 
@@ -136,15 +138,22 @@ pub fn host_prerequisites() -> Vec<HostProblem> {
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => DeviceState::Denied,
         Err(_) => DeviceState::Unusable,
     };
+    let mut missing_e2fsprogs = Vec::new();
+    let mut untrusted_e2fsprogs = Vec::new();
+    for tool in ["mkfs.ext4", "e2fsck", "resize2fs", "debugfs"] {
+        match super::locate_e2fsprogs(tool) {
+            Ok(_) => {}
+            Err(super::E2fsprogsProblem::Missing) => missing_e2fsprogs.push(tool),
+            Err(super::E2fsprogsProblem::Untrusted(path)) => untrusted_e2fsprogs.push(path),
+        }
+    }
     host_problems(&HostFacts {
         root: current_uid() == 0,
         kvm: device("/dev/kvm"),
         vhost_vsock: device("/dev/vhost-vsock"),
         landlock_abi: landlock_abi().ok(),
-        missing_e2fsprogs: ["mkfs.ext4", "e2fsck", "resize2fs", "debugfs"]
-            .into_iter()
-            .filter(|tool| super::e2fsprogs(tool).is_none())
-            .collect(),
+        missing_e2fsprogs,
+        untrusted_e2fsprogs,
         git: super::git().is_some_and(|git| git.program.is_file()),
     })
 }
@@ -213,6 +222,20 @@ pub(crate) fn host_problems(facts: &HostFacts) -> Vec<HostProblem> {
                 facts.missing_e2fsprogs.join(", ")
             ),
             "install your distribution's e2fsprogs package",
+        );
+    }
+    if !facts.untrusted_e2fsprogs.is_empty() {
+        required(
+            format!(
+                "cw runs e2fsprogs only when only root can change them, and {} or a directory above it is not owned by root or is writable by its group or others",
+                facts
+                    .untrusted_e2fsprogs
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "reinstall your distribution's e2fsprogs package, or make those files and directories owned by root and writable only by root",
         );
     }
     if !facts.git {
@@ -314,6 +337,7 @@ mod tests {
             vhost_vsock: DeviceState::Usable,
             landlock_abi: Some(MINIMUM_LANDLOCK_ABI),
             missing_e2fsprogs: Vec::new(),
+            untrusted_e2fsprogs: Vec::new(),
             git: true,
         }
     }
@@ -332,12 +356,13 @@ mod tests {
             vhost_vsock: DeviceState::Missing,
             landlock_abi: Some(1),
             missing_e2fsprogs: vec!["e2fsck", "resize2fs"],
+            untrusted_e2fsprogs: vec!["/usr/local/sbin/mke2fs".into()],
             git: false,
         };
         let problems = host_problems(&facts);
         assert_eq!(
             problems.iter().filter(|problem| problem.required).count(),
-            5
+            6
         );
         let report = host_problem_report(&problems).unwrap();
         for expected in [
@@ -347,6 +372,7 @@ mod tests {
             "Landlock ABI is 1; local VMs need 3 (Linux 6.2 or later)",
             "Debian 12 and Ubuntu 22.04 GA kernels are too old",
             "e2fsck, resize2fs not found in /usr/sbin or /usr/bin",
+            "/usr/local/sbin/mke2fs or a directory above it is not owned by root or is writable by its group or others. Fix: reinstall your distribution's e2fsprogs package",
         ] {
             assert!(report.contains(expected), "{expected}\n{report}");
         }
