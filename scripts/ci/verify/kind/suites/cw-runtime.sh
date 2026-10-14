@@ -138,8 +138,12 @@ cw_runtime_managed_after_restart() {
   # next generation, and is delivered to its driver here. Nothing from the
   # first Pod is replayed.
   local earlier generation sent message resumed waited
+  # `cw list` shows a top-level conversation's parent as "".
   earlier="$(jq -er '[.[] | select(.command[1] == "__platform-agent-driver"
-    and (.parent_session_id // null) == null)][0]' <<<"$listed")"
+    and (.parent_session_id // "") == "")][0]' <<<"$listed")" || {
+    echo '::error::no top-level managed conversation from the first Pod listed after Stop/Start' >&2
+    return 1
+  }
   generation="$(jq -er '.launch_generation' <<<"$earlier")"
   sent="$(kind_credential_cli msg "$environment" "$(jq -er .session_id <<<"$earlier")" \
     'Return the synthetic reply after Stop/Start.' --output json)" || {
