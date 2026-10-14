@@ -1175,7 +1175,7 @@ run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false 
   scripts/ci/release/build-runtime-kernel.sh scripts/ci/tests/test-local-runtime-parts.py \
   scripts/ci/release/build-local-runtime.sh scripts/ci/release/build-runtime-guest-root.sh \
   scripts/ci/release/runtime-container.sh scripts/ci/release/dry-run-superseded.sh \
-  scripts/ci/tests/test-dry-run-superseded.sh
+  scripts/ci/tests/test-dry-run-superseded.sh scripts/ci/release/build-runtime-cw.sh
 # The published workspace pin selects every consumer that compiles it; its
 # tool and post-publish proposal select the release proofs that run them.
 run_paths_case workspace_image_pin pull_request refs/pull/2255/head false \
@@ -1336,6 +1336,8 @@ run_present_paths_case macos_git_developer_tool pull_request refs/pull/2064/head
   "$policy security security_js" scripts/dev/macos-git-tool.py scripts/dev/test-macos-git-tool.py
 run_present_paths_case macos_local_runtime_installer pull_request refs/pull/2064/head false \
   "$policy security security_js" Makefile scripts/dev/macos-local-runtime.py scripts/dev/test-macos-local-runtime.py
+run_present_paths_case linux_local_runtime_packer pull_request refs/pull/2733/head false \
+  "$policy security security_js" scripts/dev/linux-local-runtime.py scripts/dev/test-linux-local-runtime.py
 run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pull/2064/head false \
   'policy security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs

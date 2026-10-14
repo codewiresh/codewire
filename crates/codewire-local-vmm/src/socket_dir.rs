@@ -351,7 +351,20 @@ mod test_cleanup {
     fn remove_where_root_is_gone(prepared: Vec<(PathBuf, PathBuf)>) {
         for (directory, state_root) in prepared {
             if !state_root.exists() {
-                let _ = std::fs::remove_dir_all(directory);
+                remove_racing_recreation(&directory);
+            }
+        }
+    }
+
+    /// A supervisor thread a test left running can recreate `runners/` while
+    /// the directory is being removed, which leaves it behind without its
+    /// marker; removing again wins once that thread stops.
+    fn remove_racing_recreation(directory: &Path) {
+        for _ in 0..8 {
+            match std::fs::remove_dir_all(directory) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
             }
         }
     }

@@ -8,11 +8,12 @@ by URL and SHA-256; Alpine's BusyBox build files are pinned one by one and
 assembled into a deterministic tar. The kernel's source is the exact archive
 its build made (build-runtime-kernel.sh), not a download.
 
-`fetch --side linux` writes the sources of the parts the Linux build job
-makes (BusyBox, its Alpine build files, runc and what it links, and the
-kernel's archive); `--side macos` writes those of the Mac-native parts
-(e2fsprogs, git). Each writes components.json, which the runtime packer turns
-into the document's components.
+`fetch --side linux` writes the sources of the guest parts the Linux build
+job makes for every target (BusyBox, its Alpine build files, runc and what it
+links, and the kernel's archive); `--side linux-host` those of the Linux
+target's host programs (Cloud Hypervisor, virtiofsd); `--side macos` those of
+the Mac-native parts (e2fsprogs, git). Each writes components.json, which the
+runtime packer turns into the document's components.
 """
 
 import argparse
@@ -33,8 +34,16 @@ PINS = ROOT / "scripts/ci/release/local-runtime-sources.json"
 SCHEMA = "codewire.local-runtime-sources/v1"
 SIDES = {
     "linux": ("busybox", "busybox-alpine-build", "runc", "libseccomp", "libpathrs", "linux"),
+    "linux-host": ("cloud-hypervisor", "virtiofsd"),
     "macos": ("e2fsprogs", "git"),
 }
+PIN_SECTIONS = {"schema", "kernel_builder", "kernel_bc", "guest_root_builder", "initramfs_inputs",
+                "linux_runtime", "cw_runtime_builder", "sources"}
+# The guest root's static inputs for each Rust target it is built for.
+GUEST_TARGETS = ("aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl")
+# The Linux target's host programs: lock key -> the release artifact
+# admission requires (crates/codewire-local-vmm/src/artifact.rs).
+LINUX_RUNTIME = {"cloud_hypervisor": "v53.0", "virtiofsd": "v1.14.0"}
 TIMEOUT = 120
 
 
@@ -49,18 +58,37 @@ def require(condition, reason):
 
 def load_pins(path=PINS):
     pins = json.loads(Path(path).read_bytes())
-    require(isinstance(pins, dict) and pins.get("schema") == SCHEMA
-            and set(pins) == {"schema", "kernel_builder", "kernel_bc", "guest_root_builder", "initramfs_inputs",
-                          "sources"},
+    require(isinstance(pins, dict) and pins.get("schema") == SCHEMA and set(pins) == PIN_SECTIONS,
             "local runtime source pins are not the expected shape")
+    inputs = pins["initramfs_inputs"]
+    require(isinstance(inputs, dict) and set(inputs) == set(GUEST_TARGETS), "guest root inputs are not per target")
+    for target, entry in inputs.items():
+        require(isinstance(entry, dict) and set(entry) == {"busybox", "runc"}
+                and https_pin(entry["busybox"]) and https_pin(entry["runc"])
+                and isinstance(entry["busybox"].get("member"), str)
+                and release.is_hex(entry["busybox"].get("member_sha256"), 64),
+                f"guest root inputs for {target} must pin HTTPS URLs and SHA-256s")
+    executables = pins["linux_runtime"]
+    require(isinstance(executables, dict) and set(executables) == set(LINUX_RUNTIME),
+            "Linux runtime executables are not the pinned set")
+    for name, entry in executables.items():
+        require(https_pin(entry) and entry.get("version") == LINUX_RUNTIME[name]
+                and str(entry.get("release", "")).startswith("https://"), f"Linux runtime {name} pin is invalid")
+        if "member" in entry:
+            require(isinstance(entry["member"], str) and release.is_hex(entry.get("member_sha256"), 64)
+                    and bounded(entry.get("member_size")), f"Linux runtime {name} archive member pin is invalid")
+        else:
+            require(bounded(entry.get("size")), f"Linux runtime {name} pin has no size")
+    builder = pins["cw_runtime_builder"]
+    require(isinstance(builder, dict) and https_pin(builder.get("zig", {}))
+            and release._runtime_text(builder.get("cargo_zigbuild"), "."), "cw runtime builder pins are invalid")
     sources = pins["sources"]
     require(set(sources) == {name for names in SIDES.values() for name in names}, "pinned sources are not the set")
     for name, source in sources.items():
         require(release._runtime_text(name, "-_.") and release._runtime_text(source.get("version"), "-_.+")
                 and release._runtime_text(source.get("license"), "-_.+ ()"), f"source {name} identity is invalid")
         if "url" in source:
-            require(source["url"].startswith("https://") and release.is_hex(source.get("sha256"), 64),
-                    f"source {name} must pin an HTTPS URL and its SHA-256")
+            require(https_pin(source), f"source {name} must pin an HTTPS URL and its SHA-256")
         elif "aports" in source:
             aports = source["aports"]
             require(release.is_hex(aports.get("commit"), 40) and aports.get("files")
@@ -69,6 +97,15 @@ def load_pins(path=PINS):
         else:
             require(source.get("from") == "kernel-build", f"source {name} has no origin")
     return pins
+
+
+def https_pin(entry):
+    return (isinstance(entry, dict) and str(entry.get("url", "")).startswith("https://")
+            and release.is_hex(entry.get("sha256"), 64))
+
+
+def bounded(size):
+    return type(size) is int and 0 < size <= release.MAX_OBJECT
 
 
 def file_name(name, source):

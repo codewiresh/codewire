@@ -375,13 +375,19 @@ where
         platform_connector,
     } = adapters;
     let authority_root = config.root.clone();
+    let socket_dir = config.socket_dir.clone();
     let authority = Arc::new(authority);
+    crate::transport::validate_socket_dir(&socket_dir)?;
     cleanup_repository_staging(&authority_root)
         .map_err(|_| AuthorityRuntimeError::InvalidPrivatePath)?;
-    #[cfg(target_os = "macos")]
-    crate::repository::cleanup_repository_credential_sockets(&authority_root)
-        .map_err(|_| AuthorityRuntimeError::InvalidPrivatePath)?;
-    cleanup_repository_ssh_runtimes(&authority_root)?;
+    // Runtimes live in the socket directory; a cw before #2745 left them in
+    // the credential root.
+    for directory in [&socket_dir, &authority_root] {
+        #[cfg(target_os = "macos")]
+        crate::repository::cleanup_repository_credential_sockets(directory)
+            .map_err(|_| AuthorityRuntimeError::InvalidPrivatePath)?;
+        cleanup_repository_ssh_runtimes(directory)?;
+    }
     // The persistence singleton lock is held before a stale endpoint is ever
     // removed, so a losing process cannot unlink the live authority socket.
     let (incoming, socket_identity) = bind_owner_only(&config)?;
@@ -400,6 +406,7 @@ where
         Arc::clone(&authority),
         repository_spawner,
         authority_root,
+        socket_dir,
         ssh_runtime,
         platform_connector,
     ));

@@ -17,6 +17,37 @@ fn managed_admitted(root: &Path) -> Store {
     store.put_grant(request).unwrap();
     store
 }
+/// Reopen the store under `state_root` after its previous owner was dropped.
+/// A child that a concurrent test forks while that owner's `owner.lock`
+/// descriptor is open holds a copy of it, and so the lock, until the child
+/// execs. The reopen waits that out, bounded, and only while another process
+/// really holds the lock: any other refusal still fails at once.
+fn reopen(state_root: &Path) -> Store {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match Store::open(state_root, &scope().environment_id) {
+            Ok(store) => return store,
+            Err(Error::Storage)
+                if std::time::Instant::now() < deadline
+                    && lock_held_elsewhere(&state_root.join(DIRECTORY).join("owner.lock")) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("reopening the store failed: {error:?}"),
+        }
+    }
+}
+
+/// Whether another open description holds the store's lock right now.
+fn lock_held_elsewhere(lock: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(lock) else {
+        return false;
+    };
+    // SAFETY: flock operates on this owned descriptor only; closing it
+    // releases this probe's own lock.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
+}
+
 fn managed_launch(id: u128) -> Mutation {
     Mutation::from_wire(v1::HostControlMutationRequest {
         request_id: Uuid::from_u128(id).to_string(),
@@ -46,8 +77,7 @@ fn member_managed_store_preserves_reserved_ids_and_never_reissues_pending_or_iss
             store.issue(&request).unwrap();
         }
         drop(store);
-        let mut recovered =
-            Store::open(&temp.path().join("state"), &scope().environment_id).unwrap();
+        let mut recovered = reopen(&temp.path().join("state"));
         let observed = recovered.find(&request.request_id).unwrap().unwrap();
         assert_eq!(observed.phase, v1::HostControlRequestPhase::Unknown as i32);
         assert_eq!(observed.driver_id, request.request_id);
@@ -116,8 +146,7 @@ fn host_control_store_recovery_never_upgrades_pending_or_issued_to_permission_to
         }
         let book_generation = store.book.generation;
         drop(store);
-        let mut recovered =
-            Store::open(&temp.path().join("state"), &scope().environment_id).unwrap();
+        let mut recovered = reopen(&temp.path().join("state"));
         let receipt = recovered.find(&request.request_id).unwrap().unwrap();
         assert_eq!(receipt.phase, v1::HostControlRequestPhase::Unknown as i32);
         assert_eq!(receipt.reason, "recovered_unknown");
@@ -144,7 +173,7 @@ fn host_control_store_revoke_is_durable_cas_and_retains_original_receipt_identit
     assert!(matches!(store.revoke_grant(revoke), Err(Error::Conflict)));
     store.finish(&request, Err(Error::Denied)).unwrap();
     drop(store);
-    let mut recovered = Store::open(&temp.path().join("state"), &scope().environment_id).unwrap();
+    let mut recovered = reopen(&temp.path().join("state"));
     assert!(recovered.grants().unwrap().grants[0].revoked);
     let receipt = recovered.find(&request.request_id).unwrap().unwrap();
     assert_eq!(receipt.origin, request.origin());
@@ -280,7 +309,7 @@ fn host_control_store_capacity_preserves_request_and_grant_tombstones() {
     ));
     assert_eq!(store.book.grants.len(), MAX_GRANTS);
     drop(store);
-    let recovered = Store::open(&temp.path().join("state"), &scope().environment_id).unwrap();
+    let recovered = reopen(&temp.path().join("state"));
     assert_eq!(recovered.book.requests.len(), MAX_REQUESTS);
     assert_eq!(recovered.book.grants.len(), MAX_GRANTS);
 }
@@ -315,7 +344,7 @@ fn host_control_store_three_complete_snapshots_after_crash_are_admitted_and_prun
     std::fs::write(&restored, saved).unwrap();
     std::fs::set_permissions(&restored, std::fs::Permissions::from_mode(0o600)).unwrap();
     drop(store);
-    let recovered = Store::open(&temp.path().join("state"), &scope().environment_id).unwrap();
+    let recovered = reopen(&temp.path().join("state"));
     assert_eq!(recovered.snapshots.len(), 2);
     assert!(!restored.exists());
 }
@@ -421,7 +450,7 @@ async fn host_control_store_owner_regrant_current_cas_preserves_observe_and_no_r
         original_bytes
     );
     drop(store);
-    let mut recovered = Store::open(&temp.path().join("state"), &scope().environment_id).unwrap();
+    let mut recovered = reopen(&temp.path().join("state"));
     let grants = recovered.grants().unwrap();
     assert_eq!(grants.book_revision, 3);
     assert_eq!(grants.grants[0].revision, 3);
