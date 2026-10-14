@@ -53,13 +53,35 @@ control_head="$(git -C "$repo" rev-parse HEAD)"
 control_tree="$(git -C "$repo" rev-parse 'HEAD^{tree}')"
 control_merge="$(printf 'control squash\n' | git -C "$repo" commit-tree "$control_tree" -p "$base_sha")"
 
+# The receipt emitter decides which pull-request runs vouch for main, so a
+# change to it is receipt control too.
+git -C "$repo" checkout -q --detach "$base_sha"
+mkdir -p "$repo/scripts/ci/receipts"
+printf 'changed\n' > "$repo/scripts/ci/receipts/emit-verification-receipt.py"
+git -C "$repo" add scripts/ci/receipts/emit-verification-receipt.py
+git -C "$repo" commit -q -m 'emitter control'
+emitter_head="$(git -C "$repo" rev-parse HEAD)"
+emitter_tree="$(git -C "$repo" rev-parse 'HEAD^{tree}')"
+emitter_merge="$(printf 'emitter squash\n' | git -C "$repo" commit-tree "$emitter_tree" -p "$base_sha")"
+
+# A quick pull-request run's Required verification log: the real emitter's
+# output for a quick selection, which carries no receipt.
+withheld_log="$(env -i PATH="$PATH" GITHUB_EVENT_NAME=pull_request \
+  VERIFICATION_SELECTION='|valid:v3|policy|policy_shell_omittable|pr_quick|rust_compile|complete|' \
+  python3 -I -B "$ROOT/scripts/ci/receipts/emit-verification-receipt.py")"
+[[ "$withheld_log" == 'verification receipt: withheld;'* ]] || {
+  echo 'quick pull-request run did not withhold its receipt' >&2
+  exit 1
+}
+
 git init -q --bare "$remote"
 git -C "$remote" config maintenance.autoDetach false
 git -C "$remote" config gc.autoDetach false
 git -C "$repo" remote add origin "$remote"
 git -C "$repo" push -q origin \
   "${tested_head}:refs/pull/42/head" \
-  "${control_head}:refs/pull/43/head"
+  "${control_head}:refs/pull/43/head" \
+  "${emitter_head}:refs/pull/44/head"
 
 cat > "$mock_bin/curl" <<'MOCK'
 #!/usr/bin/env bash
@@ -175,6 +197,9 @@ case "$url" in
       missing_receipt)
         body='required verification completed without a receipt'
         ;;
+      quick_withheld)
+        body="2026-01-01T00:00:00Z ${FIXTURE_WITHHELD_LOG}"
+        ;;
       duplicate_receipt)
         body="CODEWIRE_CI_VERIFICATION_RECEIPT=${FIXTURE_RECEIPT_B64}
 CODEWIRE_CI_VERIFICATION_RECEIPT=${FIXTURE_RECEIPT_B64}"
@@ -228,6 +253,7 @@ run_case() {
       FIXTURE_BASE_SHA="$base_sha" \
       FIXTURE_PR_NUMBER="$pr" \
       FIXTURE_RECEIPT_B64="$receipt_b64" \
+      FIXTURE_WITHHELD_LOG="$withheld_log" \
       GITEA_TOKEN=fixture-token \
       GITHUB_EVENT_NAME=push \
       GITHUB_REF=refs/heads/main \
@@ -275,8 +301,21 @@ run_case missing_required fallback "$good_merge" 42 "$tested_head" missing_requi
 run_case required_failed fallback "$good_merge" 42 "$tested_head" required_failed
 run_case required_skipped fallback "$good_merge" 42 "$tested_head" required_skipped
 run_case missing_receipt fallback "$good_merge" 42 "$tested_head" missing_receipt
+# A green quick pull-request run never lets main skip its own verification.
+run_case quick_run_withheld fallback "$good_merge" 42 "$tested_head" quick_withheld
+grep -Fq 'full main verification required (verification-receipt-count-invalid)' \
+  "$TMP/quick_run_withheld.log" || {
+  echo 'quick pull-request run fell back for the wrong reason' >&2
+  exit 1
+}
 run_case duplicate_receipt fallback "$good_merge" 42 "$tested_head" duplicate_receipt
 run_case receipt_mismatch fallback "$good_merge" 42 "$tested_head" receipt_mismatch
 run_case control_self_certification fallback "$control_merge" 43 "$control_head" success
+run_case emitter_self_certification fallback "$emitter_merge" 44 "$emitter_head" success
+grep -Fq 'full main verification required (receipt-control-change)' \
+  "$TMP/emitter_self_certification.log" || {
+  echo 'a receipt emitter change was not treated as receipt control' >&2
+  exit 1
+}
 
 echo 'tested-tree receipt fixtures: green'

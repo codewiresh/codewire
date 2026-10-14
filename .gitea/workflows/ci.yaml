@@ -4,8 +4,11 @@ name: CI
 on:
   push:
     branches: [main]
+  # Adding or removing a label (ci-full, kind-e2e) starts a fresh run with the
+  # new labels; the concurrency group below cancels the superseded one.
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
     inputs:
       verification:
@@ -49,6 +52,10 @@ env:
 # A canonical squash whose tree exactly matches a fully green PR head emits
 # empty matrices. Receipt-control changes always take the full path, and every
 # rejected receipt falls back to the ordinary selected suite.
+# A pull request runs only the quick families (policy, ShellCheck and
+# compiling every Rust target, plus Kind when opted in) unless it carries the
+# ci-full label, which runs what a push to main would. A quick run emits no
+# receipt, so main verifies that change in full after merge.
 # Forgejo hands jobs to runners first in, first out. A main push's Heavy jobs
 # select ci-heavy-main, which three Heavy runners take exclusively and the
 # others also take, so main never waits behind queued pull requests; every
@@ -79,6 +86,10 @@ jobs:
       policy_expected: ${{ steps.dispatch.outputs.policy_expected }}
       standard_expected: ${{ steps.dispatch.outputs.standard_expected }}
       tooling_expected: ${{ steps.dispatch.outputs.tooling_expected }}
+      rust_compile_expected: ${{ steps.dispatch.outputs.rust_compile_expected }}
+      # A trusted base that predates the separate shard decision runs the
+      # shards with the Rust group.
+      rust_shards_expected: ${{ steps.dispatch.outputs.rust_shards_expected || steps.dispatch.outputs.rust_transport_expected }}
       rust_transport_expected: ${{ steps.dispatch.outputs.rust_transport_expected }}
       database_expected: ${{ steps.dispatch.outputs.database_expected }}
       services_control_expected: ${{ steps.dispatch.outputs.services_control_expected }}
@@ -126,6 +137,10 @@ jobs:
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           PUSH_AFTER_SHA: ${{ github.sha }}
           VERIFICATION_REQUEST: ${{ github.event.inputs.verification }}
+          # Hosted pull-request CI selects the quick families unless the pull
+          # request carries ci-full. Pushes and dispatches ignore it, and local
+          # merge qualification leaves it unset.
+          VERIFICATION_PR_SCOPE: quick
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
@@ -240,7 +255,7 @@ jobs:
               # Conservative bootstrap for a base predating dynamic dispatch:
               # run every group so candidate code cannot omit required work.
               for group in \
-                  policy standard tooling rust_transport database \
+                  policy standard tooling rust_compile rust_shards rust_transport database \
                   services_control services_runtime edge_kind \
                   cw_release_assets workspace_image; do
                 echo "${group}_expected=true" >> "$GITHUB_OUTPUT"
@@ -750,6 +765,12 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-product-verification.sh security
 
+      # Static edge checks need no cluster, so they run here rather than in a
+      # Kind shard, and an edge-only selection starts no Kind leg.
+      - name: Run Edge static verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|edge_kind|') }}
+        run: scripts/ci/verify/run-product-verification.sh edge
+
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run
         # instead of letting slower groups (Rust, Kind) run on. Best effort;
@@ -786,7 +807,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.rust_transport_expected == 'true' }}
+    if: ${{ needs.verification-selection.outputs.rust_compile_expected == 'true' }}
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
@@ -870,7 +891,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.rust_transport_expected == 'true' }}
+    if: ${{ needs.verification-selection.outputs.rust_shards_expected == 'true' }}
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
@@ -957,7 +978,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.rust_transport_expected == 'true' }}
+    if: ${{ needs.verification-selection.outputs.rust_shards_expected == 'true' }}
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
@@ -1917,10 +1938,6 @@ jobs:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
-      - name: Run Edge static verification
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|edge_kind|') && matrix.shard.slug == 'edge' }}
-        run: scripts/ci/verify/run-product-verification.sh edge
-
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
@@ -2218,7 +2235,9 @@ jobs:
           VERIFICATION_TOOLING_RESULT: ${{ needs.tooling.result }}
           VERIFICATION_RUST_TRANSPORT_EXPECTED: ${{ needs.verification-selection.outputs.rust_transport_expected }}
           VERIFICATION_RUST_TRANSPORT_RESULT: ${{ needs.rust-transport.result }}
+          VERIFICATION_RUST_COMPILE_EXPECTED: ${{ needs.verification-selection.outputs.rust_compile_expected }}
           VERIFICATION_RUST_COMPILE_RESULT: ${{ needs.rust-compile.result }}
+          VERIFICATION_RUST_SHARDS_EXPECTED: ${{ needs.verification-selection.outputs.rust_shards_expected }}
           VERIFICATION_RUST_PACKAGES_RESULT: ${{ needs.rust-packages.result }}
           VERIFICATION_RUST_FEATURES_RESULT: ${{ needs.rust-features.result }}
           VERIFICATION_DATABASE_EXPECTED: ${{ needs.verification-selection.outputs.database_expected }}
@@ -2242,4 +2261,5 @@ jobs:
           CODEWIRE_BASE_COMMIT: ${{ github.event.pull_request.base.sha }}
           CODEWIRE_HEAD_COMMIT: ${{ needs.verification-selection.outputs.ci_head_commit }}
           CODEWIRE_HEAD_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/receipts/emit-verification-receipt.py
