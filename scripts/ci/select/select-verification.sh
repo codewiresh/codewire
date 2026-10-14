@@ -17,6 +17,13 @@ Pull requests run Kind for a Kind-relevant path with explicit opt-in. Changes
 to direct in-cluster fixture owners select their mandatory Kind proof directly.
 Set VERIFICATION_REQUEST for product workflow_dispatch to a family token or
 all. The separate Manual diagnostics workflow uses rust-stack or go-tailnet.
+
+VERIFICATION_PR_SCOPE=quick (hosted pull-request CI only) reduces a classified
+pull request to the quick families: policy, its shell domain, and compiling
+every Rust target, plus Kind when opted in. The ci-full label keeps the
+selection a push to main would make for the same paths, Kind included.
+Unset or full keeps the complete pull-request selection that local merge
+qualification runs.
 EOF
 }
 
@@ -285,8 +292,25 @@ truthy() {
   esac
 }
 
+pr_scope="${VERIFICATION_PR_SCOPE:-full}"
+case "$pr_scope" in
+  quick|full) ;;
+  *)
+    echo "selector: unsupported pull-request scope '${pr_scope}'" >&2
+    exit 2
+    ;;
+esac
+
+# The ci-full label asks a pull request for the verification a push to main
+# would run for the same paths, Kind included.
+pr_ci_full=false
+if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ] \
+    && grep -Eq '"name"[[:space:]]*:[[:space:]]*"ci-full"' "$GITHUB_EVENT_PATH"; then
+  pr_ci_full=true
+fi
+
 pr_kind_opt_in=false
-if truthy "${KIND_E2E_OPT_IN:-}"; then
+if truthy "${KIND_E2E_OPT_IN:-}" || [ "$pr_ci_full" = true ]; then
   pr_kind_opt_in=true
 elif [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then
   if grep -Eiq '(\[kind-e2e\]|\[run-kind-e2e\]|"name"[[:space:]]*:[[:space:]]*"kind-e2e")' \
@@ -1911,10 +1935,50 @@ if token_selected policy; then
 fi
 
 # Kind takes over an hour. A pull request runs it only when opted in
-# ([kind-e2e] in its title or body, or the kind-e2e label); pushes to main and
-# dispatched runs keep it as the post-merge gate.
+# ([kind-e2e] in its title or body, or the kind-e2e or ci-full label); pushes
+# to main and dispatched runs keep it as the post-merge gate.
 if [ "$event" = pull_request ] && [ "$pr_kind_opt_in" != true ]; then
   unset 'selected[kind]' 'selected[edge_kind]'
+fi
+
+# The local mode describes what merge qualification needs for this change, so
+# it comes from the complete selection, before any hosted quick reduction.
+required_local_mode=default
+if [ "$classification" = unclassified ] \
+  || [ "$classification" = release ] \
+  || { [ "$classification" = requested ] && [ "${VERIFICATION_REQUEST:-policy}" = all ]; }; then
+  required_local_mode=full
+elif [ "$kind_relevant" = true ] || token_selected kind; then
+  required_local_mode=kind
+elif token_selected database || token_selected service_integration; then
+  required_local_mode=integration
+fi
+
+# Hosted pull-request CI runs only the quick families by default: every pull
+# request already ran its complete selection in local merge qualification, and
+# a push to main runs it again after merge. Policy, its shell domain and
+# compiling every Rust target stay; Kind stays when opted in. pr_quick marks
+# the reduced selection so dispatch ignores artifact facts and the run emits no
+# exact-tree receipt main could reuse. The ci-full label keeps the complete
+# selection. An unclassified path keeps it too: the selector cannot tell what
+# such a change affects, so it fails closed as it does everywhere else.
+if [ "$event" = pull_request ] && [ "$pr_scope" = quick ] \
+    && [ "$pr_ci_full" != true ] && [ "$classification" != unclassified ]; then
+  declare -A quick=([policy]=1 [policy_shell]=1 [policy_shell_omittable]=1
+    [edge_kind]=1 [kind]=1)
+  # The fast-compile token set: the selections whose rust_transport group
+  # includes the rust-compile job on main (see emit-verification-matrices.sh).
+  for token in rust rust_curated_locks transport transport_derp_contract; do
+    if token_selected "$token"; then
+      select_token rust_compile
+      quick[rust_compile]=1
+      break
+    fi
+  done
+  for token in "${!selected[@]}"; do
+    [ "${quick[$token]:-}" = 1 ] || unset "selected[$token]"
+  done
+  select_token pr_quick
 fi
 
 for token in "${!selected[@]}"; do
@@ -1927,17 +1991,6 @@ while IFS= read -r token; do
   selection="${selection}${token}|"
 done < "$tokens_tmp"
 selection="${selection}complete|"
-
-required_local_mode=default
-if [ "$classification" = unclassified ] \
-  || [ "$classification" = release ] \
-  || { [ "$classification" = requested ] && [ "${VERIFICATION_REQUEST:-policy}" = all ]; }; then
-  required_local_mode=full
-elif [ "$kind_relevant" = true ] || token_selected kind; then
-  required_local_mode=kind
-elif token_selected database || token_selected service_integration; then
-  required_local_mode=integration
-fi
 
 emit_outputs() {
   printf 'selector_version=%s\n' "$selector_version"
