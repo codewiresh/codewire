@@ -337,11 +337,15 @@ class WorkflowContractTests(unittest.TestCase):
             edge["steps"].index(named_step(edge, "Delete the shard Kind cluster")),
         )
 
-        # Edge static verification runs once, in the edge leg; the locked
-        # browser host dependencies belong only to the dashboard leg.
+        # Edge static verification needs no cluster: it runs once, in tooling,
+        # so an edge-only selection starts no Kind leg. The locked browser
+        # host dependencies belong only to the dashboard leg.
+        self.assertNotIn(
+            "Run Edge static verification", [step.get("name") for step in edge["steps"]],
+        )
         self.assertIn(
-            "matrix.shard.slug == 'edge'",
-            named_step(edge, "Run Edge static verification")["if"],
+            "contains(needs.verification-selection.outputs.selection, '|edge_kind|')",
+            named_step(self.jobs["tooling"], "Run Edge static verification")["if"],
         )
         for step_name in ("Install locked dashboard browser-test dependencies",):
             self.assertIn(
