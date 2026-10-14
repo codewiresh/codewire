@@ -660,9 +660,13 @@ class WorkflowContract(unittest.TestCase):
             "always() && needs.verification-selection.result == 'success' && "
             "needs.verification-selection.outputs.workspace_cache_experiment == 'true' && "
             "needs.workspace-cache-measurement.result == 'success' && "
-            "((contains(needs.verification-selection.outputs.selection, '|kind|') && "
+            # Kind owns the exact-source seed only when it builds it, not when
+            # it runs the published workspace pin.
+            "(((contains(needs.verification-selection.outputs.selection, '|kind|') && "
+            "needs.verification-selection.outputs.kind_workspace_source != 'pinned') && "
             "needs.kind-workspace.result == 'success' && needs.kind-workspace.outputs.workspace_cache_seed != '') || "
-            "(!contains(needs.verification-selection.outputs.selection, '|kind|') && "
+            "(!(contains(needs.verification-selection.outputs.selection, '|kind|') && "
+            "needs.verification-selection.outputs.kind_workspace_source != 'pinned') && "
             "needs.workspace-image.result == 'success' && needs.workspace-image.outputs.workspace_cache_seed != ''))")
         self.assertEqual([line for line in body.splitlines() if line.startswith("    if: ")],
                          ["    if: " + chr(36) + "{{ " + request + " }}"])

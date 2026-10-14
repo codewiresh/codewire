@@ -100,7 +100,7 @@ grep -qF '    name: Container contract verification' <<<"$workspace_job" ||
 # shellcheck disable=SC2016 # The workflow expression is literal text.
 grep -qxF '    runs-on: ${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-heavy-main'"'"' || '"'"'ci-heavy'"'"' }}' <<<"$workspace_job" ||
   fail 'Docker-backed workspace verification is not assigned to the heavy capability profile'
-grep -qF '    timeout-minutes: 55' <<<"$workspace_job" ||
+grep -qF '    timeout-minutes: 80' <<<"$workspace_job" ||
   fail 'workspace cold-build ceiling does not preserve the runner cleanup margin'
 grep -qF '    needs: [verification-selection]' <<<"$workspace_job" ||
   fail 'workspace job does not consume the canonical verification plan'
@@ -310,18 +310,25 @@ awk '
   run { exit }
 ' "$WORKFLOW" >"$work/container-scope.sh"
 [[ -s "$work/container-scope.sh" ]] || fail 'container scope script was not extracted'
+# Selected Kind owns the exact-source workspace only when it builds it; when
+# it runs the published pin, this job keeps the selected workspace build.
 for fixture in \
-  'true|kind|false' 'false|kind|false' 'true|policy|true' 'false|policy|false' \
-  'false|web|true' 'false|kind,web|false' 'true|kind,web|false' \
-  'false|ios|true' 'true|kind,ios|true'; do
-  IFS='|' read -r workspace_selected selection expected <<<"$fixture"
+  'true|kind||false' 'true|kind|source|false' 'true|kind|pinned|true' \
+  'false|kind|pinned|false' 'false|kind||false' 'true|policy||true' 'true|policy|pinned|true' \
+  'false|policy||false' 'false|web||true' 'false|kind,web||false' 'false|kind,web|pinned|false' \
+  'true|kind,web||false' 'true|kind,web|pinned|true' 'false|ios||true' 'true|kind,ios||true'; do
+  IFS='|' read -r workspace_selected selection kind_source expected <<<"$fixture"
   selection="|${selection//,/|}|"
   : >"$work/scope-output"
   env WORKSPACE_IMAGE_SELECTED="$workspace_selected" VERIFICATION_SELECTION="$selection" \
+    KIND_WORKSPACE_SOURCE="$kind_source" \
     GITHUB_OUTPUT="$work/scope-output" bash "$work/container-scope.sh"
   grep -Fxq "selected=$expected" "$work/scope-output" ||
-    fail "container ownership differs for workspace=$workspace_selected selection=$selection"
+    fail "container ownership differs for workspace=$workspace_selected selection=$selection kind=$kind_source"
 done
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -qF "needs.verification-selection.outputs.kind_workspace_source == 'pinned'" <<<"$workspace_job" ||
+  fail 'container workspace build does not take over from a pinned Kind workspace'
 # Both workflow owners execute the same fail-closed canary entrypoint. Execute
 # that checked-in shell in an isolated mock tree; unavailable identity must fail
 # before the harness, and a failed harness must stop the selected job.
