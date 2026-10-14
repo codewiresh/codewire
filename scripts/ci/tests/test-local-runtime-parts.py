@@ -403,6 +403,18 @@ class GuestRootBuilderTest(unittest.TestCase):
             "--mount", "type=bind,source=/in/a,target=/in/a,readonly",
             "--mount", "type=bind,source=/out,target=/out"])
 
+    def test_the_rust_std_check_keeps_the_guest_root_s_own_target(self):
+        # The loop over every pinned rust-std target once reused `target`, so
+        # an aarch64 guest root's BusyBox and runc were checked against the
+        # x86_64 pins after it and the macOS target's root never built (#2733).
+        script = ROOT / "scripts/ci/release/build-runtime-guest-root.sh"
+        text = script.read_text()
+        self.assertNotRegex(text, r"\bfor target in\b")
+        self.assertRegex(text, r'busybox_sha256="\$\(pin initramfs_inputs "\$target" busybox member_sha256\)"')
+        for name in ("build-runtime-cw.sh", "build-runtime-kernel.sh"):
+            with self.subTest(script=name):
+                self.assertNotRegex((ROOT / "scripts/ci/release" / name).read_text(), r"\bfor target in\b")
+
     def test_bad_invocations_are_refused_before_docker(self):
         base = fx.scratch("runtime-guest-root.")
         self.addCleanup(shutil.rmtree, base)
