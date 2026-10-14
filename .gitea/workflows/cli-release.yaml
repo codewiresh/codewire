@@ -27,6 +27,9 @@ env:
   ZIG_VERSION: 0.15.2
   ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
   CARGO_ZIGBUILD_VERSION: 0.23.0
+  # Signs and notarizes the macOS pair on Linux (#2064).
+  RCODESIGN_VERSION: 0.29.0
+  RCODESIGN_X86_64_LINUX_SHA256: dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002
   # Cargo fetches git dependencies (noeljackson/av, tauri-apps/wry and
   # others) from github.com. Without a bound, a stalled connection holds
   # the job until its deadline (#2691). This bound fails a stalled connect,
@@ -109,17 +112,21 @@ jobs:
           printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"
 
   build-runtime-linux:
-    # The Linux side of the local VM runtime the macOS arm64 cw embeds
-    # (#2539): the arm64 guest root, the arm64 kernel (from the release parts
+    # The Linux side of the local VM runtime every release cw embeds (#2539,
+    # #2733): the arm64 guest root, the arm64 kernel (from the release parts
     # cache, or built in its pinned container), the aarch64 cw runtime and
-    # the Linux-side GPL sources; and the Linux x86_64 target (#2733) as the
-    # linux fragment, not embedded yet. Each comes from the release source's
-    # own scripts and pins. A source that predates the runtime embeds none.
-    # Compilation and pinned downloads only: no OIDC, signing, mirror or R2
-    # write capability exists in this job.
+    # the Linux-side GPL sources; and the Linux x86_64 target as the linux
+    # fragment, which build-darwin merges into the one document. Each comes
+    # from the release source's own scripts and pins. A source that predates
+    # the runtime embeds none. Compilation and pinned downloads only: no
+    # OIDC, signing, mirror or R2 write capability exists in this job.
     name: Build the local runtime's Linux side
     needs: [release-selection]
     runs-on: ci-protected
+    # Both kernels (about 25 min each when not cached), both guest roots and
+    # both cw runtimes (about 15 min each): bounded well below the pool's
+    # limit, so a wedged build cannot hold a release for hours.
+    timeout-minutes: 165
     outputs:
       present: ${{ steps.build.outputs.present }}
       linux_sha256: ${{ steps.build.outputs.linux_sha256 }}
@@ -197,6 +204,9 @@ jobs:
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
       records_sha256: ${{ steps.runtime.outputs.records_sha256 }}
+      # The one local runtime document every release cw embeds; build-release
+      # requires the runtime it imports to be exactly this one.
+      document_sha256: ${{ steps.runtime.outputs.document_sha256 }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
@@ -230,8 +240,9 @@ jobs:
           name: cw-release-runtime-linux-${{ github.run_id }}
           path: .local-runtime-linux
 
-      # The arm64 cw embeds the runtime this step packs; the parts it built
-      # (cache misses) go to the publishing job as cache records.
+      # Every release cw embeds the runtime this step packs: the macOS target
+      # merged with the Linux job's linux-x86_64 fragment. The parts either
+      # job built (cache misses) go to the publishing job as cache records.
       - name: Build the local VM runtime
         id: runtime
         if: needs.build-runtime-linux.outputs.present == 'true'
@@ -253,6 +264,8 @@ jobs:
           tar -C "$work/macos/built" -cf ../.runtime-records/runtime-records.tar .
           printf 'records_sha256=%s\n' \
             "$(shasum -a 256 ../.runtime-records/runtime-records.tar | cut -c1-64)" >> "$GITHUB_OUTPUT"
+          printf 'document_sha256=%s\n' \
+            "$(shasum -a 256 "$work/macos/runtime/local-runtime.json" | cut -c1-64)" >> "$GITHUB_OUTPUT"
 
       - name: Hand the runtime part records to publication
         if: steps.runtime.outputs.records_sha256 != ''
@@ -287,11 +300,83 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  sign-darwin:
+    # Developer ID signing and Apple notarization of the macOS pair (#2064).
+    # Each target's identity binds its final bytes, so the pair is signed
+    # before the delivery is prepared. Only this job reads the Apple keys; it
+    # compiles nothing and holds no OpenPGP, mirror or R2 capability.
+    name: Sign and notarize the macOS cw pair
+    needs: [release-selection, build-darwin]
+    runs-on: ci-protected
+    enable-openid-connect: true
+    outputs:
+      darwin_sums_sha256: ${{ steps.sign.outputs.darwin_sums_sha256 }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Receive the macOS pair
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-release-darwin-${{ github.run_id }}
+          path: dist-darwin
+
+      - name: Verify the received macOS pair is the built pair
+        env:
+          UNSIGNED_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$UNSIGNED_SUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$UNSIGNED_SUMS_SHA256" ]
+          (cd dist-darwin && sha256sum --check SHA256SUMS)
+
+      - name: Install rcodesign (pinned)
+        run: |
+          set -euo pipefail
+          archive="apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl"
+          scripts/ci/release/fetch-pinned.sh \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${archive}.tar.gz" \
+            "$RCODESIGN_X86_64_LINUX_SHA256" rcodesign.tar.gz
+          mkdir -m 0700 .rcodesign
+          tar -xzf rcodesign.tar.gz -C .rcodesign --strip-components=1 "${archive}/rcodesign"
+          .rcodesign/rcodesign --version
+
+      - name: Sign and notarize the macOS pair
+        id: sign
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          umask 077
+          # The Developer ID and notary API keys exist only in OpenBao. They
+          # are read here, used only by the signer, and shredded before anything else.
+          macos_work="$(mktemp -d "${RUNNER_TEMP:?}/codewire-macos-keys.XXXXXX")"
+          cleanup_macos_keys() {
+            find "$macos_work" -type f -exec shred -u {} + 2>/dev/null || true
+            rm -rf "$macos_work"
+          }
+          trap cleanup_macos_keys EXIT
+          scripts/ci/setup/fetch-openbao-macos-signing.sh "$macos_work/keys"
+          scripts/ci/release/sign-macos-cw.sh .rcodesign/rcodesign "$macos_work/keys" \
+            dist-darwin dist-darwin-signed "$RELEASE_TAG"
+          cleanup_macos_keys
+          trap - EXIT
+          (cd dist-darwin-signed && sha256sum --check SHA256SUMS)
+          printf 'darwin_sums_sha256=%s\n' \
+            "$(sha256sum dist-darwin-signed/SHA256SUMS | cut -c1-64)" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the signed macOS pair to packaging
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-release-darwin-signed-${{ github.run_id }}
+          path: dist-darwin-signed/
+          if-no-files-found: error
+          retention-days: 1
+
   build-release:
     # Compilation and packaging only: no OIDC, signing, mirror or R2
     # capability exists in this job.
     name: Build four-target cw release delivery
-    needs: [release-selection, build-darwin]
+    needs: [release-selection, build-darwin, sign-darwin]
     runs-on: ci-protected
     outputs:
       delivery_sha256: ${{ steps.prepare.outputs.delivery_sha256 }}
@@ -337,21 +422,30 @@ jobs:
 
           cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
 
-      - name: Receive the macOS pair
+      - name: Receive the signed macOS pair
         uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
-          name: cw-release-darwin-${{ github.run_id }}
+          name: cw-release-darwin-signed-${{ github.run_id }}
           path: .release-source/dist-darwin
 
-      - name: Verify the received macOS pair is the built pair
+      - name: Verify the received macOS pair is the signed pair
         working-directory: .release-source
         env:
-          DARWIN_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}
+          DARWIN_SUMS_SHA256: ${{ needs.sign-darwin.outputs.darwin_sums_sha256 }}
+          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}
         run: |
           set -euo pipefail
           [[ "$DARWIN_SUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]
           (cd dist-darwin && sha256sum --check SHA256SUMS)
+          # The runtime the Linux cws embed is exactly the one the macOS job
+          # packed and its cws embed; its blobs are bound by that document.
+          if [ -n "$DOCUMENT_SHA256" ]; then
+            [[ "$DOCUMENT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [ "$(sha256sum dist-darwin/local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]
+          else
+            [ ! -e dist-darwin/local-runtime ]
+          fi
 
       - name: Package unsigned release delivery
         id: prepare
@@ -360,15 +454,22 @@ jobs:
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}
         run: |
           set -euo pipefail
-          # The macOS pair comes from build-darwin; preparation admits each
-          # by its build record exactly as a local build.
+          # The macOS pair comes from build-darwin, signed by sign-darwin;
+          # preparation admits each by its build record exactly as a local
+          # build, and signing leaves that record unchanged. The Linux cws
+          # embed the imported runtime, and every cw must embed exactly it.
           CW_RELEASE_BUILD_CMD='cargo zigbuild' \
             CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu' \
             CW_RELEASE_IMPORT_DIR=dist-darwin \
             ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"
-          python3 ../scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned
+          verified="$(python3 ../scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned)"
+          printf '%s\n' "$verified"
+          if [ -n "$DOCUMENT_SHA256" ]; then
+            grep -q "^cw-release: local runtime document_sha256=$DOCUMENT_SHA256 " <<<"$verified"
+          fi
           (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
           printf 'delivery_sha256=%s\n' \
             "$(python3 ../scripts/ci/release/cw_release.py digest --dist dist/cw-release)" >> "$GITHUB_OUTPUT"

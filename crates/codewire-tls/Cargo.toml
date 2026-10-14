@@ -20,7 +20,7 @@ hyper-rustls = { version = "=0.27.9", default-features = false, features = ["htt
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 rcgen = { version = "0.13", optional = true }
 tempfile = { workspace = true, optional = true }
-rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }

@@ -12,6 +12,11 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 const WAIT: Duration = Duration::from_secs(90);
+/// The most MESSAGEs one back-to-back run sends.
+const BACK_TO_BACK_MAX: u32 = 100;
+/// What one back-to-back MESSAGE adds to the journey's bound.
+pub(super) const BACK_TO_BACK_ALLOWANCE: Duration = Duration::from_secs(15);
+const DISPATCH_UNKNOWN: &str = "platform-agent-dispatch-unknown";
 const OPENAI_KEY: &str = "cwlocalopenai0123456789abcdef0123456789abcdef";
 const ANTHROPIC_KEY: &str = "cwlocalanthropic0123456789abcdef0123456789abcdef";
 
@@ -708,6 +713,73 @@ impl Journey {
         Ok(())
     }
 
+    /// Sends `count` MESSAGEs to one conversation, each the moment the one
+    /// before it is final. Every one must be delivered and complete; none may
+    /// end unknown. Afterwards the journal must still hold each request as
+    /// completed, never `platform-agent-dispatch-unknown` (#2782). A failed
+    /// MESSAGE ends the run; nothing is sent again.
+    pub(super) async fn back_to_back(
+        &mut self,
+        client: &CodewireClient,
+        index: usize,
+        count: u32,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            (1..=BACK_TO_BACK_MAX).contains(&count),
+            "back-to-back MESSAGE count is outside 1..={BACK_TO_BACK_MAX}"
+        );
+        let session = &self.sessions[index];
+        ensure!(
+            !session.stopped && !session.revoked,
+            "back-to-back MESSAGEs need a running conversation with its provider"
+        );
+        let kind = session.kind;
+        let mut sent = Vec::new();
+        for round in 1..=count {
+            let text = format!("Return the synthetic reply, message {round} of {count}.");
+            let control = self.control(index, rpc::EnvironmentAgentAction::Message, &text);
+            let op = self.action(client, control, "back-to-back-message").await?;
+            ensure!(
+                op.reason_code != DISPATCH_UNKNOWN,
+                "back-to-back message {round} of {count} was recorded {DISPATCH_UNKNOWN}"
+            );
+            ensure!(
+                op.phase.as_known() == Some(rpc::EnvironmentAgentPhase::Completed)
+                    && op.pipe_acknowledged,
+                "back-to-back message {round} of {count} was not delivered"
+            );
+            let record = self.terminal(client, index, &op.message_id).await?;
+            ensure!(
+                record["state"] != "unknown",
+                "back-to-back message {round} of {count} ended unknown"
+            );
+            successful(&record, kind)
+                .with_context(|| format!("back-to-back message {round} of {count}"))?;
+            sent.push(op);
+        }
+        for (round, op) in (1..).zip(&sent) {
+            let journal = self
+                .observe(client, &op.request_id)
+                .await?
+                .with_context(|| format!("the journal lost back-to-back message {round}"))?;
+            ensure!(
+                journal.reason_code != DISPATCH_UNKNOWN,
+                "the journal records back-to-back message {round} as {DISPATCH_UNKNOWN}"
+            );
+            ensure!(
+                journal == *op,
+                "the journal changed back-to-back message {round} after it completed"
+            );
+        }
+        println!(
+            "{}",
+            json!({"event":"managed-back-to-back", "session_id":self.sessions[index].session,
+            "count":count, "request_ids":sent.iter().map(|op| &op.request_id).collect::<Vec<_>>(),
+            "outcome":"every-message-completed"})
+        );
+        Ok(())
+    }
+
     pub(super) async fn revoked(
         &mut self,
         client: &CodewireClient,
@@ -721,9 +793,15 @@ impl Journey {
             )
             .await?;
         let denied = self.terminal(client, index, &id).await?;
+        // A denied turn carries no reply. Claude reports its failure text as
+        // the turn's result too, so any result must be that failure.
+        let result = denied["result"].as_str().unwrap_or_default();
         ensure!(
             matches!(denied["state"].as_str(), Some("error" | "unknown"))
-                && denied["result"].as_str().is_none_or(str::is_empty),
+                && (result.is_empty()
+                    || denied["error"]
+                        .as_str()
+                        .is_some_and(|error| error.contains(result))),
             "revoked selected provider fell back to a successful native reply"
         );
         let before = denied.clone();
@@ -1281,6 +1359,26 @@ fn validate_restart_peer(
     Ok(())
 }
 
+/// `SMOKE_CW_MANAGED_BACK_TO_BACK`: how many MESSAGEs `Journey::back_to_back`
+/// sends, or `None` when the run is not selected.
+pub(super) fn back_to_back_count() -> anyhow::Result<Option<u32>> {
+    match std::env::var("SMOKE_CW_MANAGED_BACK_TO_BACK") {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Ok(value) => parse_back_to_back(&value).map(Some),
+        Err(_) => anyhow::bail!("back-to-back MESSAGE count must be a number"),
+    }
+}
+
+fn parse_back_to_back(value: &str) -> anyhow::Result<u32> {
+    value
+        .parse()
+        .ok()
+        .filter(|count| {
+            value.bytes().all(|b| b.is_ascii_digit()) && (1..=BACK_TO_BACK_MAX).contains(count)
+        })
+        .with_context(|| format!("back-to-back MESSAGE count must be 1 to {BACK_TO_BACK_MAX}"))
+}
+
 fn known_stop(op: &rpc::EnvironmentAgentOperation) -> bool {
     op.phase.as_known() == Some(rpc::EnvironmentAgentPhase::Completed)
         && !op.cleanup_unknown
@@ -1325,6 +1423,7 @@ mod tests {
     const MESSAGE: &str = "dff2f8e1-1788-454e-94a9-f4dc6d4b057e";
     const MUTATE: &str = "/codewire.v1.EnvironmentAgentService/MutateEnvironmentAgent";
     const OBSERVE: &str = "/codewire.v1.EnvironmentAgentService/ObserveEnvironmentAgent";
+    const READ: &str = "/codewire.v1.EnvironmentAgentService/ReadEnvironmentAgent";
 
     fn journey() -> Journey {
         let peer = json!({"identity":{"environment_id":"env", "session_id":format!("session-{DRIVER}"),
@@ -1727,6 +1826,228 @@ mod tests {
                     .all(|r| r.url.path() == OBSERVE)
             );
         }
+    }
+
+    #[test]
+    fn back_to_back_count_is_a_plain_number_from_one_to_the_cap() {
+        for (value, count) in [("1", 1), ("20", 20), ("100", 100)] {
+            assert_eq!(parse_back_to_back(value).unwrap(), count);
+        }
+        for value in [
+            "",
+            "0",
+            "101",
+            "+5",
+            "-1",
+            " 20",
+            "20 ",
+            "2O",
+            "99999999999",
+        ] {
+            assert!(parse_back_to_back(value).is_err(), "{value:?}");
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Fault {
+        None,
+        Dispatch(usize),
+        Record(usize),
+        Journal(usize),
+    }
+
+    fn saved(id: &str, unknown: bool) -> rpc::EnvironmentAgentOperation {
+        let phase = if unknown {
+            rpc::EnvironmentAgentPhase::Unknown
+        } else {
+            rpc::EnvironmentAgentPhase::Completed
+        };
+        let mut op = operation(&journey(), id, phase);
+        op.pipe_acknowledged = !unknown;
+        if unknown {
+            op.reason_code = DISPATCH_UNKNOWN.into();
+        }
+        op
+    }
+
+    /// Every MESSAGE is delivered and completes, except the round `fault`
+    /// names: its dispatch ends unknown, its record ends unknown, or the
+    /// journal later holds it as dispatch-unknown.
+    async fn back_to_back_server(fault: Fault) -> MockServer {
+        use std::sync::{Arc, Mutex};
+        let server = MockServer::start().await;
+        let sent = Arc::new(Mutex::new(Vec::<String>::new()));
+        let round = |sent: &Mutex<Vec<String>>, id: &str| {
+            sent.lock().unwrap().iter().position(|s| s == id).unwrap() + 1
+        };
+        let mutations = sent.clone();
+        Mock::given(method("POST"))
+            .and(path(MUTATE))
+            .respond_with(move |request: &wiremock::Request| {
+                let id = rpc::MutateEnvironmentAgentRequest::decode_from_slice(&request.body)
+                    .unwrap()
+                    .request_id;
+                let mut sent = mutations.lock().unwrap();
+                sent.push(id.clone());
+                let unknown = fault == Fault::Dispatch(sent.len());
+                response(&rpc::MutateEnvironmentAgentResponse {
+                    operation: Some(saved(&id, unknown)).into(),
+                    ..Default::default()
+                })
+            })
+            .mount(&server)
+            .await;
+        let (journal, reads) = (sent.clone(), Mutex::new(std::collections::HashMap::new()));
+        Mock::given(method("POST"))
+            .and(path(OBSERVE))
+            .respond_with(move |request: &wiremock::Request| {
+                let id = rpc::ObserveEnvironmentAgentRequest::decode_from_slice(&request.body)
+                    .unwrap()
+                    .request_id;
+                let n = round(&journal, &id);
+                let mut reads = reads.lock().unwrap();
+                let read = reads.entry(id.clone()).or_insert(0);
+                *read += 1;
+                // `mutate` reads each outcome back twice; the run's own
+                // journal read is the third.
+                let unknown =
+                    fault == Fault::Dispatch(n) || (fault == Fault::Journal(n) && *read > 2);
+                response(&rpc::ObserveEnvironmentAgentResponse {
+                    operation: Some(saved(&id, unknown)).into(),
+                    ..Default::default()
+                })
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(READ))
+            .respond_with(move |request: &wiremock::Request| {
+                let id = rpc::ReadEnvironmentAgentRequest::decode_from_slice(&request.body)
+                    .unwrap()
+                    .message_id;
+                let state = if fault == Fault::Record(round(&sent, &id)) {
+                    "unknown"
+                } else {
+                    "completed"
+                };
+                let j = journey();
+                let s = &j.sessions[0];
+                let data = serde_json::to_vec(&json!({"record":{"id":id,"driver_id":s.driver,
+                    "target_session_id":s.session,"platform_launch_generation":s.generation,
+                    "state":state,"native_acknowledged":true,"error":null,
+                    "result":"CWOPENAI broker [REDACTED]"}}))
+                .unwrap();
+                response(&rpc::ReadEnvironmentAgentResponse {
+                    scope: Some(j.scope.clone()).into(),
+                    session_id: s.session.clone(),
+                    driver_id: DRIVER.into(),
+                    launch_generation: s.generation,
+                    kind: rpc::EnvironmentAgentRecordKind::Message.into(),
+                    message_id: id,
+                    record_sha256: Sha256::digest(&data).to_vec(),
+                    record_json: data,
+                    ..Default::default()
+                })
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn back_to_back_sends_each_message_once_after_the_last_and_refuses_any_unknown() {
+        for (fault, sends, refusal) in [
+            (Fault::None, 3, None),
+            (
+                Fault::Dispatch(2),
+                2,
+                Some("back-to-back message 2 of 3 was recorded platform-agent-dispatch-unknown"),
+            ),
+            (
+                Fault::Record(2),
+                2,
+                Some("back-to-back message 2 of 3 ended unknown"),
+            ),
+            (
+                Fault::Journal(3),
+                3,
+                Some(
+                    "the journal records back-to-back message 3 as platform-agent-dispatch-unknown",
+                ),
+            ),
+        ] {
+            let server = back_to_back_server(fault).await;
+            let mut j = journey();
+            j.sessions[0].revoked = false;
+            let result = j.back_to_back(&client(&server), 0, 3).await;
+            assert_eq!(
+                result.err().map(|e| e.to_string()).as_deref(),
+                refusal,
+                "{fault:?}"
+            );
+            let requests = server.received_requests().await.unwrap();
+            let mutations: Vec<_> = requests
+                .iter()
+                .filter(|r| r.url.path() == MUTATE)
+                .map(|r| rpc::MutateEnvironmentAgentRequest::decode_from_slice(&r.body).unwrap())
+                .collect();
+            assert_eq!(mutations.len(), sends, "{fault:?}");
+            assert_eq!(
+                j.requests,
+                mutations
+                    .iter()
+                    .map(|m| m.request_id.clone())
+                    .collect::<Vec<_>>()
+            );
+            for (round, mutation) in (1..).zip(&mutations) {
+                let Some(rpc::mutate_environment_agent_request::Operation::Control(control)) =
+                    &mutation.operation
+                else {
+                    panic!("a back-to-back request is not a control");
+                };
+                assert_eq!(
+                    (control.action.as_known(), control.text.as_str()),
+                    (
+                        Some(rpc::EnvironmentAgentAction::Message),
+                        format!("Return the synthetic reply, message {round} of 3.").as_str()
+                    )
+                );
+            }
+            // Each MESSAGE goes only once the one before it was read as final.
+            let mut unread: Option<String> = None;
+            for request in &requests {
+                if request.url.path() == MUTATE {
+                    assert!(unread.is_none(), "a MESSAGE went before the last was final");
+                    unread = Some(
+                        rpc::MutateEnvironmentAgentRequest::decode_from_slice(&request.body)
+                            .unwrap()
+                            .request_id,
+                    );
+                } else if request.url.path() == READ
+                    && unread.as_deref()
+                        == Some(
+                            rpc::ReadEnvironmentAgentRequest::decode_from_slice(&request.body)
+                                .unwrap()
+                                .message_id
+                                .as_str(),
+                        )
+                {
+                    unread = None;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn back_to_back_refuses_a_bad_count_or_conversation_before_any_request() {
+        let server = MockServer::start().await;
+        for (count, revoked) in [(0, false), (101, false), (1, true)] {
+            let mut j = journey();
+            j.sessions[0].revoked = revoked;
+            assert!(j.back_to_back(&client(&server), 0, count).await.is_err());
+            assert!(j.requests.is_empty());
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

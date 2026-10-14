@@ -29,7 +29,11 @@ runtime_container='' cancel_pid=''
 source_backup="$work/cw-main.original"
 cleanup() {
   local status=$? cleanup_status=0
-  trap - EXIT INT TERM
+  # GNU timeout delivers a signal it receives twice, to this child and then
+  # to its process group. A second TERM or INT must not cut erasure short;
+  # the outer timeout's kill-after still bounds this cleanup.
+  trap - EXIT
+  trap '' INT TERM
   if [[ -n "$cancel_pid" ]]; then
     kill -TERM "$cancel_pid" 2>/dev/null || true
     wait "$cancel_pid" 2>/dev/null || true
@@ -250,7 +254,9 @@ python3 "$probe_tool" check "$report" tools
 cancel_child() {
   child_cleanup() {
     local status=$? cleanup_status=0
-    trap - EXIT INT TERM
+    # As in cleanup: a repeated TERM or INT must not cut erasure short.
+    trap - EXIT
+    trap '' INT TERM
     workspace_cache_cleanup_builder || cleanup_status=$?
     [[ "$cleanup_status" == 0 ]] || status="$cleanup_status"
     printf '%s\n' "$status" >"$report/cancel/status" || status=$?
