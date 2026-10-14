@@ -721,9 +721,15 @@ impl Journey {
             )
             .await?;
         let denied = self.terminal(client, index, &id).await?;
+        // A denied turn carries no reply. Claude reports its failure text as
+        // the turn's result too, so any result must be that failure.
+        let result = denied["result"].as_str().unwrap_or_default();
         ensure!(
             matches!(denied["state"].as_str(), Some("error" | "unknown"))
-                && denied["result"].as_str().is_none_or(str::is_empty),
+                && (result.is_empty()
+                    || denied["error"]
+                        .as_str()
+                        .is_some_and(|error| error.contains(result))),
             "revoked selected provider fell back to a successful native reply"
         );
         let before = denied.clone();
