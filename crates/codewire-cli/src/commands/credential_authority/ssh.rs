@@ -276,6 +276,8 @@ mod tests {
         let root = root();
         let adapter = LocalSshAgentAdapter {
             authority_root: root.path().into(),
+            #[cfg(target_os = "macos")]
+            socket_dir: root.path().into(),
             #[cfg(target_os = "linux")]
             runtime: None,
             owner: OnceCell::new(),
@@ -330,14 +332,22 @@ mod tests {
     async fn darwin_composed_signer_signs_once_and_leaves_no_staging() {
         use codewire_protected_store::ssh_material::{decode_protected_material, generate_ed25519};
 
-        // A short root keeps the agent socket under Darwin's 104-byte bound.
-        let root = tempfile::Builder::new()
-            .prefix("cw-signer-")
-            .tempdir_in("/private/tmp")
-            .unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        // The agent stages in the authority's short socket directory (#2745),
+        // here a short private directory beside the credential root.
+        let private = |prefix: &str| {
+            let directory = tempfile::Builder::new()
+                .prefix(prefix)
+                .tempdir_in("/private/tmp")
+                .unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            directory
+        };
+        let root = private("cw-signer-");
+        let sockets = private("cw-sockets-");
         let authority_root = std::fs::canonicalize(root.path()).unwrap();
-        let adapter = LocalSshAgentAdapter::new(authority_root.clone());
+        let socket_dir = std::fs::canonicalize(sockets.path()).unwrap();
+        let adapter = LocalSshAgentAdapter::new(authority_root.clone(), socket_dir.clone());
         let (_, protected) = generate_ed25519().unwrap().into_parts();
         let material = decode_protected_material(protected).unwrap();
         let blob = material.public_key().key_blob().to_vec();
@@ -357,7 +367,8 @@ mod tests {
             .unwrap();
         assert!(!signature.is_empty());
         adapter.shutdown().await.unwrap();
-        let signer = authority_root.join("signer");
+        assert!(!authority_root.join("signer").exists());
+        let signer = socket_dir.join("signer");
         assert_eq!(
             std::fs::symlink_metadata(&signer).unwrap().mode() & 0o7777,
             0o700
