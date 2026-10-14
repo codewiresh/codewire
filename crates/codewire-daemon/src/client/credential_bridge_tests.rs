@@ -43,7 +43,7 @@ fn sign_request() -> v1::CredentialSshRequest {
 }
 
 #[test]
-fn ssh_guest_validation_preserves_exact_request_and_rejects_deadline_and_bounds() {
+fn ssh_guest_validation_preserves_exact_request_and_rejects_bounds_not_deadlines() {
     for request in [identities_request(), sign_request()] {
         let message = v1::CredentialBridgeGuestMessage {
             payload: Some(v1::credential_bridge_guest_message::Payload::Ssh(request)),
@@ -53,15 +53,18 @@ fn ssh_guest_validation_preserves_exact_request_and_rejects_deadline_and_bounds(
         assert_eq!(message, exact);
     }
 
-    let mut expired = sign_request();
-    expired.deadline_unix_ms = 1;
-    let expired = v1::CredentialBridgeGuestMessage {
-        payload: Some(v1::credential_bridge_guest_message::Payload::Ssh(expired)),
-    };
-    assert!(matches!(
-        validate_credential_bridge_guest_message(&expired),
-        Err(SessionClientError::Status(status)) if status.code() == tonic::Code::InvalidArgument
-    ));
+    // #2763: a deadline outside the host's window (an expired one, or one a
+    // guest clock ahead of the host's put past the maximum) is the request's
+    // own failure. The handler refuses it; receipt must not end the epoch.
+    for deadline_unix_ms in [1, future_deadline() + 27_000] {
+        let mut skewed = sign_request();
+        skewed.deadline_unix_ms = deadline_unix_ms;
+        assert!(ssh::validate_request(&skewed).is_err());
+        let skewed = v1::CredentialBridgeGuestMessage {
+            payload: Some(v1::credential_bridge_guest_message::Payload::Ssh(skewed)),
+        };
+        validate_credential_bridge_guest_message(&skewed).unwrap();
+    }
 
     let mut oversized = sign_request();
     let Some(v1::credential_ssh_request::Operation::Sign(sign)) = oversized.operation.as_mut()
@@ -76,6 +79,13 @@ fn ssh_guest_validation_preserves_exact_request_and_rejects_deadline_and_bounds(
         validate_credential_bridge_guest_message(&oversized),
         Err(SessionClientError::Status(status)) if status.code() == tonic::Code::InvalidArgument
     ));
+
+    let mut unnamed = identities_request();
+    unnamed.request_id = "not-a-request-id".into();
+    let unnamed = v1::CredentialBridgeGuestMessage {
+        payload: Some(v1::credential_bridge_guest_message::Payload::Ssh(unnamed)),
+    };
+    assert!(validate_credential_bridge_guest_message(&unnamed).is_err());
 }
 
 #[test]
