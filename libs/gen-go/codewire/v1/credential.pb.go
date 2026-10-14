@@ -1484,13 +1484,14 @@ type StartClaudeSignInResponse struct {
 	// Always Claude's claude.ai authorize page with this sign-in's PKCE
 	// challenge and state, never a caller-selected URL.
 	AuthorizeUrl string `protobuf:"bytes,1,opt,name=authorize_url,json=authorizeUrl,proto3" json:"authorize_url,omitempty"`
-	// Opaque. It carries this sign-in's PKCE verifier and state, which the
-	// client that started the sign-in keeps private (never in a URL, log or
-	// page) and returns unchanged to CompleteClaudeSignIn. The two replicas of
-	// the credential service share no memory, and the verifier redeems nothing
-	// without the code Claude issues to the person who signed in.
+	// Opaque. It carries this sign-in's PKCE verifier and state, sealed by the
+	// credential service and bound to the person who started it and its issue
+	// time, so either replica can complete it and no other person's Complete,
+	// altered handle or expired handle opens it. The client that started the
+	// sign-in keeps it private (never in a URL, log or page) and returns it
+	// unchanged to CompleteClaudeSignIn.
 	SignIn string `protobuf:"bytes,2,opt,name=sign_in,json=signIn,proto3" json:"sign_in,omitempty"`
-	// The handle is refused at Complete after this time.
+	// The handle is refused at Complete from this time.
 	ExpiresAtUnix uint64 `protobuf:"varint,3,opt,name=expires_at_unix,json=expiresAtUnix,proto3" json:"expires_at_unix,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

@@ -261,17 +261,15 @@ impl CredentialMutationService for Service {
         ctx: RequestContext,
         _request: ServiceRequest<'_, proto::StartClaudeSignInRequest>,
     ) -> ServiceResult<proto::StartClaudeSignInResponse> {
-        let started = self
+        let mut started = self
             .owner
             .start_claude_sign_in(authority(&ctx)?)
+            .await
             .map_err(error)?;
-        let authorize_url = started.authorize_url().to_owned();
-        let expires_at_unix = started.expires_at_unix();
-        let mut handle = started.into_handle();
         connectrpc::Response::ok(proto::StartClaudeSignInResponse {
-            authorize_url,
-            sign_in: std::mem::take(&mut *handle),
-            expires_at_unix,
+            authorize_url: started.authorize_url,
+            sign_in: std::mem::take(&mut *started.handle),
+            expires_at_unix: started.expires_at_unix,
             ..Default::default()
         })
     }

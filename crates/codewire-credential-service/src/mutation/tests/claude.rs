@@ -19,10 +19,32 @@ async fn start(h: &Harness, auth: Auth) -> Result<(String, String)> {
         .map(|(_, value)| value.into_owned())
         .context("state")?;
     let handle = response["signIn"].as_str().context("handle")?.to_owned();
-    // The handle is opaque but carries this state; the URL never carries the
-    // verifier.
-    ensure!(handle.contains(&state) && !url.as_str().contains(handle.split('.').nth(2).unwrap()));
+    // The handle is sealed: it carries neither the state nor the verifier in
+    // the clear, only its version and issue time.
+    let issued_at: u64 = handle
+        .strip_prefix("cwcs2.")
+        .and_then(|rest| rest.split('.').next())
+        .context("handle version")?
+        .parse()?;
+    ensure!(
+        !handle.contains(&state)
+            && response["expiresAtUnix"].as_str() == Some(&(issued_at + 900).to_string())
+    );
     Ok((handle, state))
+}
+
+/// `handle` with its issue time replaced by `issued_at`, its seal unchanged.
+fn restamped(handle: &str, issued_at: u64) -> String {
+    let mut parts = handle.splitn(3, '.');
+    let (version, _, sealed) = (parts.next().unwrap(), parts.next(), parts.next().unwrap());
+    format!("{version}.{issued_at}.{sealed}")
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -46,9 +68,51 @@ async fn generated_claude_sign_in_is_personal_write_only_and_reconnects_exactly(
         }
 
         // A code from another sign-in, or a malformed paste or handle, is
-        // refused before Claude is contacted, and nothing is stored.
+        // refused before Claude is contacted, and nothing is stored. So is a
+        // handle that is altered, restamped, expired, from the future, of the
+        // former unsealed form, or another person's.
         let (handle, state) = start(&h, Auth::Alice).await?;
         let (_, other_state) = start(&h, Auth::Alice).await?;
+        let mut altered = handle.clone();
+        let last = altered.pop().unwrap();
+        altered.push(if last == '0' { '1' } else { '0' });
+        let issued_at: u64 = handle.split('.').nth(1).unwrap().parse()?;
+        for (signed_in, code) in [
+            (altered, "invalid_argument"),
+            (restamped(&handle, issued_at + 1), "invalid_argument"),
+            (restamped(&handle, now_unix() - 901), "failed_precondition"),
+            (restamped(&handle, now_unix() + 3_600), "invalid_argument"),
+            (format!("cwcs1.{state}.verifier.{issued_at}"), "invalid_argument"),
+        ] {
+            let (status, response) = h
+                .rpc
+                .complete_claude_sign_in(
+                    Auth::Alice,
+                    json!({"name":"Claude","signIn":signed_in}),
+                    &format!("{CLAUDE_CODE}#{state}"),
+                )
+                .await?;
+            ensure!(!status.is_success() && response["code"] == code, "{response}");
+        }
+        let (status, response) = h
+            .rpc
+            .complete_claude_sign_in(
+                Auth::Bob,
+                json!({"name":"Claude","signIn":handle}),
+                &format!("{CLAUDE_CODE}#{state}"),
+            )
+            .await?;
+        // Another person's handle opens nothing. Here the authenticated
+        // associated data refuses it; OpenBao refuses even to unwrap its data
+        // key under another person's context, which reads as unavailable.
+        ensure!(
+            !status.is_success()
+                && matches!(
+                    response["code"].as_str(),
+                    Some("invalid_argument" | "unavailable")
+                ),
+            "{response}"
+        );
         for (body, pasted, code) in [
             (
                 json!({"name":"Claude","signIn":handle}),

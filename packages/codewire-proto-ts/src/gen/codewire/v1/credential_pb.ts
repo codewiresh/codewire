@@ -615,18 +615,19 @@ export type StartClaudeSignInResponse = Message<"codewire.v1.StartClaudeSignInRe
   authorizeUrl: string;
 
   /**
-   * Opaque. It carries this sign-in's PKCE verifier and state, which the
-   * client that started the sign-in keeps private (never in a URL, log or
-   * page) and returns unchanged to CompleteClaudeSignIn. The two replicas of
-   * the credential service share no memory, and the verifier redeems nothing
-   * without the code Claude issues to the person who signed in.
+   * Opaque. It carries this sign-in's PKCE verifier and state, sealed by the
+   * credential service and bound to the person who started it and its issue
+   * time, so either replica can complete it and no other person's Complete,
+   * altered handle or expired handle opens it. The client that started the
+   * sign-in keeps it private (never in a URL, log or page) and returns it
+   * unchanged to CompleteClaudeSignIn.
    *
    * @generated from field: string sign_in = 2;
    */
   signIn: string;
 
   /**
-   * The handle is refused at Complete after this time.
+   * The handle is refused at Complete from this time.
    *
    * @generated from field: uint64 expires_at_unix = 3;
    */
