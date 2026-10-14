@@ -2632,15 +2632,21 @@ pub(crate) fn collect_env_create_repos(
     Ok(inputs
         .into_iter()
         .zip(destinations)
-        .map(
-            |((source, branch, _), destination)| codewire_project::RepositorySpec {
+        .map(|((source, branch, _), destination)| {
+            // A github.com SSH source gets GitHub's published host keys;
+            // any other SSH source still needs pins from a project file,
+            // and validation says so.
+            let known_hosts =
+                codewire_project::canonical_repository_known_hosts(&source, Vec::new())
+                    .unwrap_or_default();
+            codewire_project::RepositorySpec {
                 source,
                 branch,
                 destination,
                 revision: String::new(),
-                known_hosts: Vec::new(),
-            },
-        )
+                known_hosts,
+            }
+        })
         .collect())
 }
 
@@ -2656,7 +2662,13 @@ pub(crate) fn parse_env_create_repo_spec(spec: &str) -> anyhow::Result<(String, 
         return Ok((repo_spec.to_string(), String::new(), mount_path));
     };
     let (url, branch_with_at) = repo_spec.split_at(idx);
-    if !url.contains('/') {
+    // The `@` of `git@host:` or of `ssh://git@host/` names the SSH user, not
+    // a branch: a branch follows a repository path.
+    let has_path = match url.split_once("://") {
+        Some((_, authority_and_path)) => authority_and_path.contains('/'),
+        None => url.contains('/'),
+    };
+    if !has_path {
         return Ok((repo_spec.to_string(), String::new(), mount_path));
     }
     let branch = &branch_with_at[1..];

@@ -76,6 +76,62 @@ fn missing_or_unselected_ssh_never_returns_launch_commands() {
     }
 }
 
+/// Without a key, a github.com source in SSH form is the GitHub connection's
+/// when that is selected; with a key, SSH goes first and never falls back.
+/// Other SSH hosts and spellings still need the key.
+#[test]
+fn a_github_ssh_source_uses_the_key_first_then_the_github_connection() {
+    let github = Some(ManagedCredentialClients::from_profile_slots(["github"]).unwrap());
+    let both = Some(ManagedCredentialClients::from_profile_slots(["github", "ssh"]).unwrap());
+    for source in [
+        "git@github.com:org/app.git",
+        "ssh://git@github.com/org/app.git",
+    ] {
+        let repo = Repo {
+            known_hosts: codewire_project::GITHUB_SSH_KNOWN_HOSTS
+                .map(str::to_owned)
+                .to_vec(),
+            ..https(source)
+        };
+        assert_eq!(only(&repo, github), None, "{source}");
+        for clients in [selected(), both] {
+            let command = only(&repo, clients).unwrap();
+            assert!(!command.https_fallback, "{source}");
+            assert_eq!(&command.argv[4..6], &[source, "/workspace/app"]);
+        }
+        for clients in [None, Some(Default::default())] {
+            let error = commands(std::slice::from_ref(&repo), clients).unwrap_err();
+            assert!(error.to_string().contains("needs an SSH key"), "{error}");
+        }
+        // GitHub's published keys are this source's canonical trust: an
+        // empty list was never canonicalized, whatever is selected.
+        for clients in [github, selected(), both] {
+            let error = commands(&[https(source)], clients).unwrap_err();
+            assert!(error.to_string().contains("canonical"), "{error}");
+        }
+    }
+    for source in [
+        "git@example.com:org/app.git",
+        "ssh://git@github.com:2222/org/app.git",
+        "deploy@github.com:org/app.git",
+    ] {
+        let error = commands(&[repository(source)], github).unwrap_err();
+        assert!(error.to_string().contains("needs an SSH key"), "{source}");
+    }
+}
+
+/// `git://github.com/` is served like HTTPS: over SSH with the key, falling
+/// back to the source itself.
+#[test]
+fn a_selected_ssh_key_clones_a_github_git_protocol_source_over_ssh() {
+    let command = only(&https("git://github.com/org/app.git"), selected()).unwrap();
+    assert!(command.https_fallback);
+    assert_eq!(
+        &command.argv[4..6],
+        &["git@github.com:org/app.git", "/workspace/app"]
+    );
+}
+
 #[test]
 fn all_trust_is_checked_before_any_commands_are_returned() {
     let valid = repository("git@example.com:org/app.git");

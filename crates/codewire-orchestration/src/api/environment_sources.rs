@@ -199,14 +199,14 @@ pub async fn admit_create_sources_in(
     };
     let (selection, profile) =
         resolve_selection_in(tx, profiles, user, organization, &selection, None).await?;
-    require_ssh_key_for_ssh_repositories(&body.project_spec, profile.as_ref())?;
+    let github = github_connection_in(tx, profile.as_ref()).await?;
+    require_ssh_key_for_ssh_repositories(&body.project_spec, profile.as_ref(), github.is_some())?;
     confirm_sources(
         user,
         &selection,
         body.confirm_personal_secrets,
         body.confirm_personal_credentials,
     )?;
-    let github = github_connection_in(tx, profile.as_ref()).await?;
     let context = context(user, organization, environment, 0, profile.as_ref(), github)?;
     if let Some(profile) = profile {
         profiles
@@ -524,12 +524,15 @@ fn confirm_sources(
     Ok(())
 }
 
-/// An SSH repository source can only be checked out with the profile's SSH key.
-/// Refusing it here, inside the create transaction, records nothing. The
-/// detail never echoes repository data.
+/// An SSH repository source can only be checked out with the profile's SSH key,
+/// or, for a github.com source (`git@github.com:` or `ssh://git@github.com/`),
+/// with the GitHub connection the profile includes (`github_connected`), as
+/// setup clones it. Refusing it here, inside the create transaction, records
+/// nothing. The detail never echoes repository data.
 fn require_ssh_key_for_ssh_repositories(
     spec: &ProjectSpec,
     profile: Option<&AccessProfile>,
+    github_connected: bool,
 ) -> AppResult<()> {
     let ssh_key = profile.is_some_and(|profile| {
         profile
@@ -537,16 +540,18 @@ fn require_ssh_key_for_ssh_repositories(
             .keys()
             .any(|slot| slot.as_str() == SSH_CAPABILITY_SLOT)
     });
-    let ssh_source = spec.repositories.iter().any(|repository| {
+    let needs_key = spec.repositories.iter().any(|repository| {
         codewire_project::parse_repository_ssh_host(&repository.source)
             .is_ok_and(|host| host.is_some())
+            && !(github_connected
+                && codewire_project::github_repository_path(&repository.source).is_some())
     });
-    if ssh_source && !ssh_key {
+    if needs_key && !ssh_key {
         return Err(super::environments::coded(
             axum::http::StatusCode::BAD_REQUEST,
             "repository_credentials_required",
             "SSH repository checkout needs an SSH key in the selected credential profile; \
-             add one, or use an https://github.com URL with a GitHub connection",
+             add one, or use a github.com repository with a GitHub connection",
         ));
     }
     Ok(())
@@ -784,7 +789,7 @@ mod tests {
         .spec;
         let without_ssh = profile_with(&["anthropic"]);
         for profile in [None, Some(&without_ssh)] {
-            let error = require_ssh_key_for_ssh_repositories(&spec, profile).unwrap_err();
+            let error = require_ssh_key_for_ssh_repositories(&spec, profile, false).unwrap_err();
             let detail = format!("{error:?}");
             assert!(
                 detail.contains("repository_credentials_required"),
@@ -793,15 +798,59 @@ mod tests {
             assert!(detail.contains("needs an SSH key"), "{detail}");
             assert!(!detail.contains("private-canary"), "{detail}");
         }
-        require_ssh_key_for_ssh_repositories(&spec, Some(&profile_with(&["ssh"]))).unwrap();
+        for github_connected in [false, true] {
+            require_ssh_key_for_ssh_repositories(
+                &spec,
+                Some(&profile_with(&["ssh"])),
+                github_connected,
+            )
+            .unwrap();
+        }
         // HTTPS sources need no key: SSH is preferred, never required.
         let https = codewire_project::parse_project_yaml(
             "repositories: [{source: https://github.com/org/app.git}]\n",
         )
         .unwrap()
         .spec;
-        require_ssh_key_for_ssh_repositories(&https, None).unwrap();
-        require_ssh_key_for_ssh_repositories(&https, Some(&without_ssh)).unwrap();
+        require_ssh_key_for_ssh_repositories(&https, None, false).unwrap();
+        require_ssh_key_for_ssh_repositories(&https, Some(&without_ssh), false).unwrap();
+    }
+
+    /// A github.com source in either SSH form clones through the profile's
+    /// GitHub connection when it has no key. Any other SSH source still
+    /// needs the key, whatever else the profile holds.
+    #[test]
+    fn a_github_ssh_repository_needs_the_key_or_the_github_connection() {
+        let project = |source: &str| {
+            codewire_project::parse_project_yaml(&format!(
+                "repositories: [{{source: '{source}'}}]\n"
+            ))
+            .unwrap()
+            .spec
+        };
+        let without_ssh = profile_with(&["anthropic"]);
+        for source in [
+            "git@github.com:private-canary/app.git",
+            "ssh://git@github.com/private-canary/app.git",
+        ] {
+            let spec = project(source);
+            require_ssh_key_for_ssh_repositories(&spec, Some(&without_ssh), true).unwrap();
+            let error =
+                require_ssh_key_for_ssh_repositories(&spec, Some(&without_ssh), false).unwrap_err();
+            assert!(format!("{error:?}").contains("needs an SSH key"));
+        }
+        let spec = codewire_project::parse_project_yaml(&format!(
+            "repositories:\n  - source: git@example.com:private-canary/app.git\n    known_hosts: ['example.com {}']\n",
+            codewire_project::GITHUB_SSH_KNOWN_HOSTS[1]
+                .split_once(' ')
+                .unwrap()
+                .1
+        ))
+        .unwrap()
+        .spec;
+        let error =
+            require_ssh_key_for_ssh_repositories(&spec, Some(&without_ssh), true).unwrap_err();
+        assert!(format!("{error:?}").contains("needs an SSH key"));
     }
 
     #[test]

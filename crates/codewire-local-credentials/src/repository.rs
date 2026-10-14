@@ -1501,6 +1501,43 @@ mod tests {
         }
     }
 
+    /// A github.com SSH source's canonical trust is GitHub's published keys
+    /// (#2720): the lease admits exactly those, and still refuses an empty
+    /// list, which is not canonical, or any other host's empty list.
+    #[test]
+    fn a_github_ssh_lease_requires_githubs_published_keys_as_its_canonical_trust() {
+        let request = |source: &str, known_hosts: Vec<String>| RepositoryCredentialLeaseRequest {
+            request_id: Uuid::new_v4(),
+            profile_id: AccessProfileId::parse("4646bcca-54bb-4881-9109-2f9c43da021a").unwrap(),
+            profile_revision: 1,
+            source: source.into(),
+            branch: String::new(),
+            revision: String::new(),
+            known_hosts,
+        };
+        let published = codewire_project::GITHUB_SSH_KNOWN_HOSTS
+            .map(str::to_owned)
+            .to_vec();
+        for source in [
+            "git@github.com:org/app.git",
+            "ssh://git@github.com/org/app.git",
+        ] {
+            assert_eq!(
+                validate_repository_lease_request(&request(source, published.clone())),
+                Ok(LocalRepositoryTransport::Ssh),
+                "{source}"
+            );
+            assert!(
+                validate_repository_lease_request(&request(source, Vec::new())).is_err(),
+                "{source}"
+            );
+        }
+        assert!(
+            validate_repository_lease_request(&request("git@example.com:org/app.git", Vec::new()))
+                .is_err()
+        );
+    }
+
     #[test]
     fn credential_helper_releases_one_token_only_to_github_https() {
         let (temp, socket, server) = credential_socket_fixture(b"synthetic-github-token");

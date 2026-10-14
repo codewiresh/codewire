@@ -440,7 +440,8 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
         .filter(|name| ordinary_environment.get(*name) != managed_environment.get(*name))
         .collect();
     assert!(differing.is_empty(), "{differing:?}");
-    assert!(managed_environment["GIT_CONFIG_COUNT"] == "1");
+    // GitHub with the SSH key rewrites GitHub's HTTPS and `git://` forms.
+    assert!(managed_environment["GIT_CONFIG_COUNT"] == "2");
     assert!(managed_environment["SSH_AUTH_SOCK"] == codewire_access::SSH_PLATFORM_AUTH_SOCK);
     assert!(managed_environment["IMAGE_VALUE"] == "visible");
     // The daemon's internal configuration reaches neither launch: not as a

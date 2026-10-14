@@ -3041,6 +3041,52 @@ mod tests {
         assert_eq!(plan.https_fallback, None);
     }
 
+    /// A github.com source in SSH form: the key when selected (never falling
+    /// back), otherwise the GitHub connection's bridge, the origin as written.
+    #[test]
+    fn a_github_ssh_source_uses_the_key_first_then_the_github_connection() {
+        for source in [
+            "git@github.com:org/app.git",
+            "ssh://git@github.com/org/app.git",
+        ] {
+            let repo = Repo {
+                url: source.into(),
+                mount_path: "/workspace/app".into(),
+                known_hosts: codewire_project::GITHUB_SSH_KNOWN_HOSTS
+                    .map(str::to_owned)
+                    .to_vec(),
+                ..Default::default()
+            };
+            for slots in [&["ssh"][..], &["github", "ssh"]] {
+                let plan = plan_for(repo.clone(), slots);
+                assert_eq!(plan.transport, CloneTransport::Ssh { refused: false });
+                assert_eq!(plan.clone[4], source);
+                assert_eq!(plan.https_fallback, None);
+            }
+            let plan = plan_for(repo, &["github"]);
+            assert_eq!(plan.transport, CloneTransport::GitHub);
+            assert!(bridge(&plan.clone));
+            assert!(plan.clone.contains(&format!(
+                "url.http://127.0.0.1:38081/_codewire/github/org/app.git.insteadOf={source}"
+            )));
+            assert_eq!(
+                &plan.clone[plan.clone.len() - 2..],
+                &[source, "/workspace/app"]
+            );
+            assert_eq!(plan.https_fallback, None);
+        }
+        // `git://` is served like HTTPS.
+        let plan = plan_for(https_repo("git://github.com/org/app.git"), &["github"]);
+        assert_eq!(plan.transport, CloneTransport::GitHub);
+        assert!(bridge(&plan.clone));
+        let plan = plan_for(
+            https_repo("git://github.com/org/app.git"),
+            &["github", "ssh"],
+        );
+        assert_eq!(plan.clone[4], "git@github.com:org/app.git");
+        assert!(bridge(&plan.https_fallback.unwrap().0));
+    }
+
     #[test]
     fn ssh_and_other_https_sources_never_fall_back() {
         let source = "git@example.com:org/app.git";
