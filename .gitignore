@@ -53,6 +53,10 @@ apps/worker/worker
 apps/worker/tmp/
 .tmp/
 
+# The local VM runtime's build directory in a CI checkout
+# (scripts/ci/release/build-local-runtime.sh): never a cw source input.
+/.local-runtime/
+
 # CLI build artifacts (from D.4 merge)
 apps/cli/cwshell/build/
 apps/cli/bin/

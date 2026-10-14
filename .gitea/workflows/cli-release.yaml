@@ -111,10 +111,12 @@ jobs:
   build-runtime-linux:
     # The Linux side of the local VM runtime the macOS arm64 cw embeds
     # (#2539): the arm64 guest root, the arm64 kernel (from the release parts
-    # cache, or built in its pinned container) and the Linux-side GPL
-    # sources, each from the release source's own scripts and pins. A source
-    # that predates the runtime embeds none. Compilation and pinned downloads
-    # only: no OIDC, signing, mirror or R2 write capability exists in this job.
+    # cache, or built in its pinned container), the aarch64 cw runtime and
+    # the Linux-side GPL sources; and the Linux x86_64 target (#2733) as the
+    # linux fragment, not embedded yet. Each comes from the release source's
+    # own scripts and pins. A source that predates the runtime embeds none.
+    # Compilation and pinned downloads only: no OIDC, signing, mirror or R2
+    # write capability exists in this job.
     name: Build the local runtime's Linux side
     needs: [release-selection]
     runs-on: ci-protected
@@ -153,6 +155,9 @@ jobs:
       - name: Build the Linux side
         id: build
         working-directory: .release-source
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
         run: |
           set -euo pipefail
           if [ ! -f scripts/ci/release/build-local-runtime.sh ]; then
@@ -163,7 +168,8 @@ jobs:
           work="$GITHUB_WORKSPACE/.local-runtime"
           mkdir -m 0700 "$work" "$work/tmp"
           TMPDIR="$work/tmp" LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}" \
-            scripts/ci/release/build-local-runtime.sh linux --output "$work/linux"
+            scripts/ci/release/build-local-runtime.sh linux --source-sha "$SOURCE_SHA" \
+            --version "$RELEASE_TAG" --output "$work/linux"
           tar -C "$work" -cf "$work/runtime-linux.tar" linux
           printf 'present=true\nlinux_sha256=%s\n' \
             "$(sha256sum "$work/runtime-linux.tar" | cut -c1-64)" >> "$GITHUB_OUTPUT"

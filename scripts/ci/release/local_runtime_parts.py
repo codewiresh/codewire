@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Recipe-keyed cache of the local VM runtime's slow parts (#2539).
 
-The arm64 kernel and the macOS e2fsprogs and git builds change only when their
-recipe changes, so a release reuses the bytes an earlier release published:
-the same digests, so users download nothing new for them. A part's recipe is
-the SHA-256 of its exact inputs: the producer files, their pins in
-local-runtime-sources.json and, for Mac-native parts, the host facts the build
-depends on. Its record, cw/v1/runtime-parts/<recipe>.json, names each output
-file as a content-addressed blob in cw/v1/blobs/sha256/.
+The arm64 and x86_64 kernels and the macOS e2fsprogs and git builds change
+only when their recipe changes, so a release reuses the bytes an earlier
+release published: the same digests, so users download nothing new for them.
+A part's recipe is the SHA-256 of its exact inputs: the producer files, their
+pins in local-runtime-sources.json, a kernel's architecture and, for
+Mac-native parts, the host facts the build depends on. Its record,
+cw/v1/runtime-parts/<recipe>.json, names each output file as a
+content-addressed blob in cw/v1/blobs/sha256/.
 
 Build jobs read records and blobs anonymously from the public release origin
 and check every digest; a miss means the part is built. Only the publishing
@@ -30,16 +31,32 @@ ROOT = Path(__file__).resolve().parents[3]
 PINS = ROOT / "scripts/ci/release/local-runtime-sources.json"
 RECORD_SCHEMA = "codewire.cw.runtime-part/v1"
 HOST_FACTS = {"macos", "sdk", "clang"}
-# Each part's producer files, and the pins (paths into the pins file) it uses.
+KERNEL_FILES = ("scripts/ci/release/build-runtime-kernel.sh", "scripts/ci/release/runtime-container.sh",
+                "scripts/ci/verify/build-linux-vmm-kernel.py",
+                "scripts/ci/verify/linux-vmm-kernel/dax.patch",
+                "scripts/ci/verify/linux-vmm-kernel/provenance.json")
+KERNEL_PINS = (("kernel_builder",), ("kernel_bc",), ("sources", "linux"))
+# Each part's producer files, the pins (paths into the pins file) it uses, the
+# files it outputs and which of them are executables. A kernel part also names
+# its architecture (build-linux-vmm-kernel.py --arch), part of its recipe.
 PARTS = {
     "kernel-arm64": {
-        "files": ("scripts/ci/release/build-runtime-kernel.sh", "scripts/ci/release/runtime-container.sh",
-                  "scripts/ci/verify/build-linux-vmm-kernel.py",
-                  "scripts/ci/verify/linux-vmm-kernel/arm64.config",
-                  "scripts/ci/verify/linux-vmm-kernel/dax.patch",
-                  "scripts/ci/verify/linux-vmm-kernel/provenance.json"),
-        "pins": (("kernel_builder",), ("kernel_bc",), ("sources", "linux")),
+        "files": KERNEL_FILES + ("scripts/ci/verify/linux-vmm-kernel/arm64.config",),
+        "pins": KERNEL_PINS,
+        "arch": "arm64",
         "outputs": ("Image-6.18.48-codewire2", "linux-source.tar.xz"),
+        "executables": (),
+        "host": False,
+    },
+    "kernel-x86_64": {
+        "files": KERNEL_FILES + ("scripts/ci/verify/linux-vmm-kernel/x86_64.config",),
+        "pins": KERNEL_PINS,
+        "arch": "x86_64",
+        # The kernel's GPL source is the arm64 part's archive of the same
+        # pinned commit, which every target lists; a record names only blobs
+        # a release publishes.
+        "outputs": ("vmlinuz-6.18.48-codewire2",),
+        "executables": (),
         "host": False,
     },
     "e2fsprogs-macos": {
@@ -48,19 +65,24 @@ PARTS = {
         # Exactly the files the runtime lock pins, so a record names only
         # blobs a release has published.
         "outputs": ("mke2fs", "e2fsck", "resize2fs", "debugfs", "mke2fs.conf"),
+        "executables": ("mke2fs", "e2fsck", "resize2fs", "debugfs"),
         "host": True,
     },
     "git-macos": {
         "files": ("scripts/dev/macos-git-tool.py",),
         "pins": (("sources", "git"),),
         "outputs": ("git", "git-remote-https"),
+        "executables": ("git", "git-remote-https"),
         "host": True,
     },
 }
+# The slow parts each side of build-local-runtime.sh takes from the cache.
+SIDE_PARTS = {"linux": ("kernel-arm64", "kernel-x86_64"), "macos": ("e2fsprogs-macos", "git-macos")}
 # Every input of the runtime a release builds: the slow parts' producers, the
-# guest root's probe, the VZ helper and the scripts that assemble and check
-# them. The four-target dry run builds the runtime when one changes, and
-# otherwise only checks the slow parts are cached. A trailing / names a tree.
+# guest root's probe, the VZ helper, the cw runtime producers and the scripts
+# that assemble and check them. The four-target dry run builds the runtime
+# when one changes, and otherwise only checks the slow parts are cached. A
+# trailing / names a tree.
 RUNTIME_INPUTS = (
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -72,6 +94,9 @@ RUNTIME_INPUTS = (
     "scripts/ci/release/",
     "scripts/ci/select/",
     "scripts/dev/macos-local-runtime.py",
+    "scripts/dev/linux-local-runtime.py",
+    "scripts/dev/build-native-managed-agent.py",
+    "scripts/dev/cw-runtime-image.py",
     "scripts/dev/macos-ext4-tool.py",
     "scripts/dev/macos-git-tool.py",
     "scripts/dev/macos-cli.py",
@@ -113,7 +138,10 @@ def recipe(name, root=ROOT, pins_path=None, host=None):
     files = {}
     for relative in shape["files"]:
         files[relative] = hashlib.sha256((Path(root) / relative).read_bytes()).hexdigest()
-    return release.sha256(release.canonical({"part": name, "files": files, "pins": selected, "host": host}))
+    inputs = {"part": name, "files": files, "pins": selected, "host": host}
+    if "arch" in shape:
+        inputs["arch"] = shape["arch"]
+    return release.sha256(release.canonical(inputs))
 
 
 def record(name, recipe_sha256, directory):
@@ -168,9 +196,8 @@ def fetch(origin, name, recipe_sha256, output):
     output = Path(output)
     output.mkdir(mode=0o700)
     for output_name, data in blobs.items():
-        release.write_new(output / output_name, data, 0o755 if output_name in ("git", "git-remote-https", "mke2fs",
-                                                                              "e2fsck", "resize2fs", "debugfs")
-                          else 0o644)
+        release.write_new(output / output_name, data,
+                          0o755 if output_name in part(name)["executables"] else 0o644)
     return True
 
 
