@@ -380,7 +380,8 @@ pub(crate) fn codex_login_refused(reason: &'static str) {
     );
 }
 
-/// [`codex_login_refused`] for the Claude login, with the same closed reasons.
+/// [`codex_login_refused`] for the Claude login, with the same closed reasons
+/// and `scopes_outside_sign_in`.
 pub(crate) fn claude_login_refused(reason: &'static str) {
     tracing::info!(
         target: TARGET,
@@ -593,6 +594,7 @@ pub(crate) mod tests {
         "deadline_passed",
         "deadline_too_far",
         "deadline_passed_before_seal",
+        "scopes_outside_sign_in",
         "hit",
         "miss",
         "bypass",

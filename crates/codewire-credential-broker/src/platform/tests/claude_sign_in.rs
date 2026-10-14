@@ -98,6 +98,17 @@ pub(super) fn sign_in_material(
     age: u64,
     refresh_token_lifetime: Option<u64>,
 ) -> ProtectedValue {
+    sign_in_material_with_scopes(label, remaining, age, refresh_token_lifetime, SCOPES)
+}
+
+/// [`sign_in_material`] granting `scopes`.
+fn sign_in_material_with_scopes(
+    label: &str,
+    remaining: u64,
+    age: u64,
+    refresh_token_lifetime: Option<u64>,
+    scopes: &str,
+) -> ProtectedValue {
     let now = unix_now().unwrap();
     let (bundle, _) = import_tokens_at(
         ClaudeIssuedTokens {
@@ -105,7 +116,7 @@ pub(super) fn sign_in_material(
             refresh_token: Some(Zeroizing::new(format!("synthetic-refresh-{label}"))),
             expires_in: age + remaining,
             refresh_token_expires_in: refresh_token_lifetime,
-            scope: Some(SCOPES.into()),
+            scope: Some(scopes.into()),
         },
         ClaudeProfile {
             email: Some("person@example.test".into()),
@@ -398,11 +409,27 @@ async fn the_claude_login_delivers_only_the_creators_own_active_sign_in() -> Res
         "setup token",
         "api key",
         "reconnect needed",
+        "revoked",
+        "another user's credential",
+        "organization profile",
         "not confirmed by the creator",
+        "scopes outside the sign-in",
     ] {
         let f = Fixture::create_for_bridge().await?;
         let result = async {
-            let sign_in = bind_sign_in(&f, &sign_in_material("fresh", 7_200, 60, None)).await?;
+            let material = if case == "scopes outside the sign-in" {
+                // A scope Claude might add on a later refresh.
+                sign_in_material_with_scopes(
+                    "widened",
+                    7_200,
+                    60,
+                    None,
+                    &format!("{SCOPES} user:billing"),
+                )
+            } else {
+                sign_in_material("fresh", 7_200, 60, None)
+            };
+            let sign_in = bind_sign_in(&f, &material).await?;
             let outcome = match case {
                 "deliver" => {
                     let provider = SyntheticClaude::default();
@@ -516,6 +543,34 @@ async fn the_claude_login_delivers_only_the_creators_own_active_sign_in() -> Res
                     let (_pool, adapter) = hosted(&f).await?;
                     adapter.lease_claude_login(Uuid::new_v4()).await
                 }
+                "revoked" => {
+                    f.store
+                        .revoke(&f.owner, &sign_in.metadata.id, sign_in.version)
+                        .await?;
+                    let (_pool, adapter) = hosted(&f).await?;
+                    adapter.lease_claude_login(Uuid::new_v4()).await
+                }
+                "another user's credential" => {
+                    f.db.user("synthetic-other-user").await?;
+                    sqlx::query("UPDATE platform_credentials SET user_id=$2 WHERE id=$1")
+                        .bind(sign_in.metadata.id.as_str())
+                        .bind("synthetic-other-user")
+                        .execute(&f.db.pool)
+                        .await?;
+                    let (_pool, adapter) = hosted(&f).await?;
+                    adapter.lease_claude_login(Uuid::new_v4()).await
+                }
+                // An organization's profile: never the creator's own login.
+                "organization profile" => {
+                    f.authority.change(|session| {
+                        session.credential_owner =
+                            Owner::Organization(OwnerId::parse("synthetic-org").unwrap());
+                    });
+                    match hosted(&f).await {
+                        Ok((_pool, adapter)) => adapter.lease_claude_login(Uuid::new_v4()).await,
+                        Err(_) => Err(BrokerLeaseError::Denied),
+                    }
+                }
                 "not confirmed by the creator" => {
                     f.authority.change(|session| {
                         session.context.allow_personal_credentials = false;
@@ -524,6 +579,18 @@ async fn the_claude_login_delivers_only_the_creators_own_active_sign_in() -> Res
                         Ok((_pool, adapter)) => adapter.lease_claude_login(Uuid::new_v4()).await,
                         Err(_) => Err(BrokerLeaseError::Denied),
                     }
+                }
+                // The lease admits it, but the broker never seals a login
+                // whose scopes go beyond the sign-in's six.
+                "scopes outside the sign-in" => {
+                    let (pool, adapter) = hosted(&f).await?;
+                    let broker = OpenAiBroker::new(adapter, SyntheticClaude::default())?;
+                    let recipient = codewire_workload_secrets::ProjectionRecipient::new();
+                    let refused = broker.claude_login(claude_login_request(&recipient)?).await;
+                    drop(broker);
+                    pool.close().await;
+                    ensure!(matches!(refused, Err(crate::BrokerRequestError::Denied)));
+                    return Ok(());
                 }
                 _ => unreachable!(),
             };

@@ -589,6 +589,36 @@ fn rfc3339_utc(unix: u64) -> String {
     )
 }
 
+/// The most leftover temporaries one start removes.
+const MAX_LEFTOVERS: usize = 64;
+
+impl CodexLoginWriter {
+    /// Remove what an interrupted write or removal left beside `auth.json`,
+    /// so no stray copy of a token outlives a crash or a revocation: every
+    /// `.auth.json.codewire.*` temporary that is a write in progress (`.new`)
+    /// or holds Codewire's login. A file set aside because it was the user's
+    /// stays. Returns how many were removed.
+    pub fn remove_leftovers(&self) -> io::Result<usize> {
+        let Some(home) = self.home.open_for_login(false)? else {
+            return Ok(0);
+        };
+        let prefix = format!(".{CODEX_AUTH_FILE_NAME}.codewire.");
+        let mut removed = 0;
+        for name in home.names_with_prefix(&prefix, MAX_LEFTOVERS)? {
+            let codewire = name.ends_with(".new")
+                || matches!(classify(&home, &name)?, AuthFile::Codewire { .. });
+            if codewire {
+                home.unlink(&name)?;
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            home.sync()?;
+        }
+        Ok(removed)
+    }
+}
+
 /// The login writer of a hosted daemon serving `config` in `home`, or `None`:
 /// only on a hosted bridge, and only while Codex is selected.
 pub(crate) fn hosted_writer(config: &crate::Config, home: CodexHome) -> Option<CodexLoginWriter> {
@@ -601,13 +631,17 @@ pub(crate) fn hosted_writer(config: &crate::Config, home: CodexHome) -> Option<C
         .for_placement(ManagedCredentialClientPlacement::Platform)
         .codex?
         .into_config_toml();
-    Some(CodexLoginWriter::new(
+    let writer = CodexLoginWriter::new(
         home,
         proxy_config,
         CODEX_LOGIN_STATE_DIRECTORY,
         bridge.environment_generation,
         unix_now(),
-    ))
+    );
+    if let Err(error) = writer.remove_leftovers() {
+        tracing::warn!(error_kind = ?error.kind(), "hosted Codex login leftovers could not be removed");
+    }
+    Some(writer)
 }
 
 /// Where the writer gets a login: the shared bridge, or a test double.

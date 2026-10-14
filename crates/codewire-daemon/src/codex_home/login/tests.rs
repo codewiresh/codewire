@@ -999,3 +999,45 @@ async fn the_task_checks_at_start_changes_nothing_without_the_capability_and_sto
         "the restored proxy config carries the ownership header"
     );
 }
+
+/// A start removes what a crash or a revocation left beside `auth.json`: a
+/// write in progress and a set-aside copy of Codewire's login. A set-aside
+/// file of the user's own stays, and so does Codex's own state.
+#[test]
+fn a_start_removes_leftover_temporaries_that_could_hold_a_token() {
+    let fixture = Fixture::new();
+    let mut writer = fixture.writer();
+    assert_eq!(
+        writer
+            .apply(delivery("cred-a", 1, T0 + 86_400), T0)
+            .unwrap(),
+        CodexLoginSync::Written
+    );
+    let delivered = fs::read(fixture.auth()).unwrap();
+    let sibling = |name: &str| fixture.home().root().join(name);
+    let leftover_new = format!(".auth.json.codewire.{}.new", "a".repeat(32));
+    let leftover_aside = format!(".auth.json.codewire.{}.aside", "b".repeat(32));
+    let users_aside = format!(".auth.json.codewire.{}.aside", "c".repeat(32));
+    for (name, bytes) in [
+        (&leftover_new, b"{\"partial".to_vec()),
+        (&leftover_aside, delivered.clone()),
+        (
+            &users_aside,
+            serde_json::to_vec(&json!({
+                "auth_mode": "chatgpt",
+                "tokens": {"refresh_token": "users-own-refresh"}
+            }))
+            .unwrap(),
+        ),
+    ] {
+        fs::write(sibling(name), bytes).unwrap();
+        fs::set_permissions(sibling(name), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert_eq!(fixture.writer().remove_leftovers().unwrap(), 2);
+    assert!(!sibling(&leftover_new).exists());
+    assert!(!sibling(&leftover_aside).exists());
+    assert!(sibling(&users_aside).exists());
+    assert!(sibling("history.jsonl").exists());
+    assert_eq!(fs::read(fixture.auth()).unwrap(), delivered);
+    assert_eq!(fixture.writer().remove_leftovers().unwrap(), 0);
+}

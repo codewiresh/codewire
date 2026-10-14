@@ -82,6 +82,8 @@ const CREDENTIALS_MODE: u32 = PRIVATE_FILE_MODE;
 const MAX_CREDENTIALS_BYTES: u64 = 1024 * 1024;
 /// The hexadecimal nonce after [`CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX`].
 const NONCE_LENGTH: usize = 32;
+/// The most leftover temporaries one start removes.
+const MAX_LEFTOVERS: usize = 64;
 
 /// What one check did. It names no token, file content or path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +165,37 @@ impl ClaudeLoginWriter {
             state: LoginState::load(state_directory.into(), generation, "claude"),
             failing_since: Some(now_unix),
         }
+    }
+
+    /// Remove what an interrupted write or removal left beside the store, so
+    /// no stray copy of a token outlives a crash or a revocation: every
+    /// `.credentials.json.codewire.*` temporary that is a write in progress
+    /// (`.new`) or holds Codewire's login. A store set aside because it was
+    /// the user's stays. Returns how many were removed.
+    pub fn remove_leftovers(&self) -> io::Result<usize> {
+        let Some(config) = open_config(&self.home, false)? else {
+            return Ok(0);
+        };
+        let prefix = format!("{CLAUDE_CREDENTIALS_FILE_NAME}.codewire.");
+        let mut removed = 0;
+        for name in config.names_with_prefix(&prefix, MAX_LEFTOVERS)? {
+            let codewire = name.ends_with(".new")
+                || matches!(
+                    classify(&config, &name)?,
+                    Credentials::Owned {
+                        login: OwnLogin::Codewire | OwnLogin::Cleared,
+                        ..
+                    }
+                );
+            if codewire {
+                config.unlink(&name)?;
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            config.sync()?;
+        }
+        Ok(removed)
     }
 
     /// Apply one bridge answer at `now_unix` (Unix seconds).
@@ -348,6 +381,13 @@ enum Credentials {
 }
 
 /// Classify `name` in `~/.claude` without following a symlink.
+///
+/// A login whose refresh token is empty beside the marker counts as
+/// Codewire's cleared copy. That is also what a member's own `claude /login`
+/// looks like if Claude Code later cleared it after its own refresh was
+/// refused while a marker from an earlier delivery remained; such a dead login
+/// is replaced by the next delivery, which is the outcome the member gets from
+/// signing in again anyway.
 fn classify(config: &PrivateDirectory, name: &str) -> io::Result<Credentials> {
     let entry = match config.read(name, MAX_CREDENTIALS_BYTES)? {
         Entry::Absent => return Ok(Credentials::Absent),
@@ -623,12 +663,16 @@ pub(crate) fn hosted_writer(config: &crate::Config) -> Option<ClaudeLoginWriter>
     if !config.managed_credential_clients.anthropic_sign_in() {
         return None;
     }
-    Some(ClaudeLoginWriter::new(
+    let writer = ClaudeLoginWriter::new(
         &config.home_root,
         CLAUDE_LOGIN_STATE_DIRECTORY,
         bridge.environment_generation,
         unix_now(),
-    ))
+    );
+    if let Err(error) = writer.remove_leftovers() {
+        tracing::warn!(error_kind = ?error.kind(), "hosted Claude login leftovers could not be removed");
+    }
+    Some(writer)
 }
 
 /// Where the writer gets a login: the shared bridge, or a test double.

@@ -376,6 +376,15 @@ fn refresh_token_expiry(
         .transpose()
 }
 
+/// Whether every granted scope is one Codewire's sign-in asks for (the six
+/// the owner accepted for delivery on 2026-10-14). A refresh may replace the
+/// stored set, so a scope Claude adds later is never delivered silently.
+pub(crate) fn within_sign_in_scopes(scopes: &[String]) -> bool {
+    scopes
+        .iter()
+        .all(|scope| crate::provider_oauth::claude::CLAUDE_SIGN_IN_SCOPES.contains(&scope.as_str()))
+}
+
 /// The granted scopes, in the provider's order, without duplicates. Every
 /// required scope must be present.
 pub(crate) fn parse_scopes(value: &str) -> Result<Vec<String>, ClaudeOAuthMaterialError> {
@@ -440,6 +449,31 @@ fn valid_account_hint(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_sign_in_scopes_are_deliverable() {
+        let scopes = |list: &[&str]| {
+            list.iter()
+                .map(|scope| (*scope).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(super::within_sign_in_scopes(&scopes(
+            &crate::provider_oauth::claude::CLAUDE_SIGN_IN_SCOPES
+        )));
+        assert!(super::within_sign_in_scopes(&scopes(&[
+            "user:inference",
+            "user:profile"
+        ])));
+        for widened in [
+            &["user:inference", "user:profile", "user:billing"][..],
+            &["user:inference", "user:profile", "org:create_api_key"],
+        ] {
+            assert!(
+                !super::within_sign_in_scopes(&scopes(widened)),
+                "{widened:?}"
+            );
+        }
+    }
+
     use super::*;
 
     const NOW: u64 = 1_800_000_000;

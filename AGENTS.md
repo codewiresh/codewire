@@ -327,7 +327,7 @@ weakening of the required local hardware gate.
   secret source authorizes ordinary child-visible environment projection under
   the original names; selecting a credential profile authorizes its typed
   proxy, signer, or executor, never raw provider material except the listed
-  direct delivery exception. Never infer the category from a key name or
+  direct delivery exceptions. Never infer the category from a key name or
   value. Profiles contain provider identities only, not secret mappings or
   exposure policies. Reuse the owning environment operation identity; do not
   create a separate secret generation.
@@ -349,12 +349,17 @@ weakening of the required local hardware gate.
   token, written as Claude Code's `~/.claude/.credentials.json`
   (`claudeAiOauth`), each with a non-empty placeholder refresh token, because
   each agent enables `/usage` and its plan and account features only with its
-  own login. Refresh tokens, API keys, Claude setup tokens, GitHub and SSH
-  material and organization-owned credentials are never delivered. A
-  delivered token is a bearer token for the creator's account, usable from
-  anywhere, and stays valid at the provider until it expires (about 8 hours
-  for Claude); every process in the Sandbox, and anyone who can open the
-  Sandbox's terminal, can read it.
+  own login. The Claude token carries exactly the six scopes Claude Code's
+  own login has (`user:inference`, `user:profile`,
+  `user:sessions:claude_code`, `user:mcp_servers`, `user:file_upload`,
+  `user:plugins`) and never a scope beyond them; the owner accepted that on
+  2026-10-14 so Claude Code in a Sandbox behaves like their own login.
+  Refresh tokens, API keys, Claude setup tokens, GitHub and SSH material and
+  organization-owned credentials are never delivered. A delivered token is a
+  bearer token for the creator's account, usable from anywhere, and stays
+  valid at the provider until it expires (about 8 hours for Claude); every
+  process in the Sandbox, and anyone who can open the Sandbox's terminal, can
+  read it.
 - A hosted platform broker bridge epoch may reuse one authority decision (its
   runtime session and derived grants, never material) for at most 60 seconds,
   and releases nothing under an older one. Only epoch admission creates it, and

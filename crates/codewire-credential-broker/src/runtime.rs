@@ -1728,6 +1728,13 @@ where
             (credential, generation)
         };
 
+        // Deliver only the scopes the sign-in asks for: a refresh may replace
+        // the stored set, and a scope Claude adds later must not widen the
+        // exception.
+        if !crate::claude_oauth::within_sign_in_scopes(credential.scopes()) {
+            timing::claude_login_refused("scopes_outside_sign_in");
+            return Err(BrokerRequestError::Denied);
+        }
         let claude = ClaudeLogin::new(
             Zeroizing::new(credential.access_token().to_owned()),
             credential
