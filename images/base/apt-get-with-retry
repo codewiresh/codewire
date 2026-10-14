@@ -8,21 +8,144 @@ readonly attempts=6
 readonly -a delay_seconds=(30 60 120 240 300)
 readonly transaction_timeout_seconds=300
 
+# CI may name an internal HTTP cache of the dated snapshots through an optional
+# BuildKit secret. A secret is not part of the RUN instruction, so layer cache
+# keys and image history stay identical to local builds. The cache maps the
+# snapshot paths 1:1 and is trusted only for availability: APT still verifies
+# each signed InRelease (Signed-By) and every package hash. The real sources
+# under /etc/apt are never modified; callers remove /var/lib/apt/lists, whose
+# file names carry the cache host, before their layer ends.
+readonly mirror_secret=/run/secrets/codewire-apt-mirror
+readonly mirror_pattern='^http://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:([1-9][0-9]{0,4}))?$'
+readonly -a mirrored_prefixes=(https://snapshot.ubuntu.com/ https://snapshot.debian.org/)
+# Bound the mirror to the first attempts; the rest use the canonical sources.
+readonly mirror_attempts=2
+
+mirror=''
+mirror_dir=''
+source_options=()
+canonical_update_pending=false
+
+remove_mirror_sources() {
+  if [[ -n "$mirror_dir" ]]; then
+    rm -rf -- "$mirror_dir"
+    mirror_dir=''
+  fi
+  source_options=()
+}
+
+render_mirror_source() {
+  local input="$1" output="$2" line prefix
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ ! "$line" =~ ^[[:space:]]*# ]]; then
+      for prefix in "${mirrored_prefixes[@]}"; do
+        if [[ "$line" == *"$prefix"* ]]; then
+          line="${line//"$prefix"/"$mirror/"}"
+          rewritten_lines=$((rewritten_lines + 1))
+        fi
+      done
+    fi
+    printf '%s\n' "$line"
+  done <"$input" >"$output"
+}
+
+# Render a private copy of the configured sources with only the two snapshot
+# prefixes rewritten. Any unusable input keeps the canonical sources.
+configure_mirror() {
+  local value configuration source_list='' source_parts='' list_dir='' file rendered rewritten_lines=0
+  local -a sources=()
+  [[ -s "$mirror_secret" ]] || return 0
+  if ! { value="$(<"$mirror_secret")"; } 2>/dev/null || [[ ! "$value" =~ $mirror_pattern ]] \
+      || ((10#${BASH_REMATCH[3]:-80} > 65535)); then
+    printf 'apt-get-with-retry: warning: ignoring a malformed APT snapshot mirror secret; using canonical sources\n' >&2
+    return 0
+  fi
+  if ! configuration="$(apt-config shell \
+      source_list Dir::Etc::sourcelist/f source_parts Dir::Etc::sourceparts/d list_dir Dir::State::lists/d)"; then
+    printf 'apt-get-with-retry: warning: unable to read the APT source configuration; using canonical sources\n' >&2
+    return 0
+  fi
+  eval "$configuration"
+  [[ "$source_parts" == /*/ && "$list_dir" == /*/ ]] || {
+    printf 'apt-get-with-retry: warning: unexpected APT source directories; using canonical sources\n' >&2
+    return 0
+  }
+  [[ ! -f "$source_list" ]] || sources+=("$source_list")
+  for file in "$source_parts"*.list "$source_parts"*.sources; do
+    [[ ! -f "$file" ]] || sources+=("$file")
+  done
+
+  mirror="$value"
+  trap remove_mirror_sources EXIT
+  if ! mirror_dir="$(mktemp -d "${TMPDIR:-/tmp}/codewire-apt-sources.XXXXXX")"; then
+    mirror_dir=''
+    printf 'apt-get-with-retry: warning: unable to render APT snapshot mirror sources; using canonical sources\n' >&2
+    return 0
+  fi
+  # APT reads the main list before sorted parts; the prefixes keep that order.
+  for file in "${sources[@]}"; do
+    if [[ "$file" == "$source_list" ]]; then
+      rendered="$mirror_dir/0-${file##*/}"
+    else
+      rendered="$mirror_dir/1-${file##*/}"
+    fi
+    render_mirror_source "$file" "$rendered" || {
+      printf 'apt-get-with-retry: warning: unable to render APT snapshot mirror sources; using canonical sources\n' >&2
+      remove_mirror_sources
+      return 0
+    }
+  done
+  if [[ "$rewritten_lines" -eq 0 ]]; then
+    printf 'apt-get-with-retry: no snapshot source is configured; the APT snapshot mirror is unused\n' >&2
+    remove_mirror_sources
+    return 0
+  fi
+  # Lists fetched through the mirror carry its host in their file names. A
+  # command that reads lists fetched from the canonical sources must use them.
+  if [[ "$update_requested" != true ]] && ! compgen -G "${list_dir}${mirror#http://}_*" >/dev/null; then
+    printf 'apt-get-with-retry: package lists were not fetched through the APT snapshot mirror; using canonical sources\n' >&2
+    remove_mirror_sources
+    return 0
+  fi
+  source_options=(-o Dir::Etc::SourceList=/dev/null -o "Dir::Etc::SourceParts=$mirror_dir")
+  printf 'apt-get-with-retry: using APT snapshot mirror %s for up to %d attempts\n' "$mirror" "$mirror_attempts" >&2
+}
+
+bounded_apt_transaction() {
+  # Transport timeouts do not bound a stalled APT acquisition queue. Keep
+  # network acquisition finite so the retry policy can handle that failure.
+  # APT otherwise accepts partial indexes after transient download failures.
+  # Put the policy last so callers cannot restore warning-only updates.
+  # Acquire::Retries retries each failed file inside one attempt, so a
+  # single 502 does not discard an otherwise complete acquisition.
+  timeout --signal=TERM --kill-after=3s "${transaction_timeout_seconds}s" \
+    apt-get "$@" "${source_options[@]}" -o Acquire::Retries=5 -o APT::Update::Error-Mode=any
+}
+
 bounded_apt() {
   local attempt status=1
   local -a command=("$@")
   for ((attempt = 1; attempt <= attempts; attempt++)); do
-    # Transport timeouts do not bound a stalled APT acquisition queue. Keep
-    # network acquisition finite so the retry policy can handle that failure.
-    # APT otherwise accepts partial indexes after transient download failures.
-    # Put the policy last so callers cannot restore warning-only updates.
-    # Acquire::Retries retries each failed file inside one attempt, so a
-    # single 502 does not discard an otherwise complete acquisition.
-    if timeout --signal=TERM --kill-after=3s "${transaction_timeout_seconds}s" \
-      apt-get "${command[@]}" -o Acquire::Retries=5 -o APT::Update::Error-Mode=any; then
-      return 0
-    else
-      status=$?
+    if [[ -n "$mirror_dir" && "$attempt" -gt "$mirror_attempts" ]]; then
+      printf 'apt-get-with-retry: warning: APT snapshot mirror failed %d attempts; using canonical sources for the remaining attempts\n' \
+        "$mirror_attempts" >&2
+      remove_mirror_sources
+      # Mirror-fetched lists are invisible through the canonical sources.
+      [[ "$update_requested" == true ]] || canonical_update_pending=true
+    fi
+    if [[ "$canonical_update_pending" == true ]]; then
+      if bounded_apt_transaction "${update_options[@]}" update; then
+        canonical_update_pending=false
+      else
+        status=$?
+      fi
+    fi
+    if [[ "$canonical_update_pending" != true ]]; then
+      if bounded_apt_transaction "${command[@]}"; then
+        return 0
+      else
+        status=$?
+      fi
     fi
     if [ "$attempt" -ge "$attempts" ]; then
       break
@@ -35,14 +158,27 @@ bounded_apt() {
 }
 
 install_requested=false
-for argument in "$@"; do
+update_requested=false
+# Configuration options carry into a canonical fallback update.
+update_options=()
+arguments=("$@")
+for ((index = 0; index < ${#arguments[@]}; index++)); do
+  argument="${arguments[$index]}"
   case "$argument" in
     install) install_requested=true ;;
+    update) update_requested=true ;;
     -d|--download-only|--no-download)
       printf 'apt-get-with-retry owns install acquisition mode\n' >&2
       exit 2 ;;
+    -o|-c|--option|--config-file)
+      update_options+=("$argument" "${arguments[$((index + 1))]:-}")
+      index=$((index + 1)) ;;
+    -o?*|-c?*|--option=*|--config-file=*|-q|-qq|--quiet|--quiet=*)
+      update_options+=("$argument") ;;
   esac
 done
+
+configure_mirror
 
 if [[ "$install_requested" == true ]]; then
   # A timeout may safely discard a partial package download, but killing dpkg
@@ -51,7 +187,13 @@ if [[ "$install_requested" == true ]]; then
   # bytes once. The enclosing owned BuildKit deadline bounds the apply phase;
   # any failure discards the fresh layer instead of retrying damaged state.
   bounded_apt "$@" --download-only
-  exec apt-get "$@" --no-download -o APT::Update::Error-Mode=any
+  if [[ -z "$mirror_dir" ]]; then
+    exec apt-get "$@" --no-download -o APT::Update::Error-Mode=any
+  fi
+  # The apply reads the mirror-fetched lists; the EXIT trap removes the copy.
+  apply_status=0
+  apt-get "$@" --no-download "${source_options[@]}" -o APT::Update::Error-Mode=any || apply_status=$?
+  exit "$apply_status"
 fi
 
 bounded_apt "$@"

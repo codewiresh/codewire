@@ -20,6 +20,9 @@ MAX_HISTORY = 64 * 1024 * 1024
 PRODUCER_FIELDS = {"status", "receipt", "producer_receipt", "image", "index_sha256", "payload",
                    "source", "profile", "version", "build_ref", "cache_qualified", "image_qualified"}
 _consumer = None
+# The Cargo profile of the measured workspace cw producer; equals
+# WORKSPACE_CW_PROFILE in scripts/ci/images/workspace-cache.sh.
+WORKSPACE_CW_PROFILE = "ci"
 
 
 def consumer_library():
@@ -73,7 +76,7 @@ class ProducerEvidence:
                           "producer result fields or receipt pin refused")
             version = self.consumer.effective_version(ROOT, None)
             self.retained = producer.reopen(pointer["receipt"]["path"], pointer["receipt"]["sha256"],
-                                            ROOT, header["source_sha"], "release", version)
+                                            ROOT, header["source_sha"], WORKSPACE_CW_PROFILE, version)
             summary = self.retained.summary
             asset.require(release.canonical(pointer) == release.canonical(
                 {key: summary[key] for key in PRODUCER_FIELDS}), "producer pointer differs from its original build")

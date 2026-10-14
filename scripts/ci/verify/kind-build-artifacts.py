@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = "codewire.kind-build-artifact/v1"
-GROUPS = {"workspace", "product", "smokes"}
+GROUPS = {"workspace", "product", "daemon", "smokes"}
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 POSITIVE = re.compile(r"[1-9][0-9]{0,19}")
@@ -31,9 +32,25 @@ MANIFEST = "manifest.json"
 WORKSPACE_RECEIPT = "workspace-receipt.json"
 IMAGE_ARCHIVE = "images.tar"
 WORKSPACE_OCI = re.compile(r"workspace-image-[0-9a-f]{64}\.oci\.tar")
-PRODUCT_IMAGES = tuple(f"codewire-{name}:e2e" for name in (
-    "dashboard", "services", "mesh", "daemon"
-))
+# The Kind runtime workspace: the exact-source build, or the published pin
+# when this change leaves the workspace image definition unchanged. The pin is
+# pulled by digest from its public repository on each consumer, so only this
+# small record crosses the artifact boundary.
+WORKSPACE_PIN = "workspace-pin.json"
+WORKSPACE_PIN_SCHEMA = "codewire.kind-workspace-pin/v1"
+WORKSPACE_SOURCES = ("pinned", "source")
+WORKSPACE_SELECTION = ".tmp/codewire-kind-workspace-selection.json"
+WORKSPACE_SELECTION_SCHEMA = "codewire.kind-workspace-selection/v1"
+PINNED_WORKSPACE_ALIAS = "localhost/codewire-ci/workspace:pinned-"
+PIN_TOOL = "scripts/ci/images/workspace-image-pin.py"
+DIGEST_REFERENCE = re.compile(r"[a-z0-9.-]+(?:/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}")
+# The service images and the daemon image build on separate workers: the
+# daemon's static CW producer is independent of the three service compiles.
+GROUP_IMAGES = {
+    "product": tuple(f"codewire-{name}:e2e" for name in ("dashboard", "services", "mesh")),
+    "daemon": ("codewire-daemon:e2e",),
+}
+PRODUCT_IMAGES = GROUP_IMAGES["product"] + GROUP_IMAGES["daemon"]
 SMOKE_FILES = {
     "bin-crd-smoke": "crd-smoke",
     "bin-environment-setup-smoke": "environment-setup-smoke",
@@ -59,6 +76,7 @@ TEST_FILES = {
 BUILD_ENTRYPOINTS = {
     "workspace": "scripts/ci/verify/verify-workspace-image.sh",
     "product": "scripts/ci/images/build-kind-images.sh",
+    "daemon": "scripts/ci/images/build-kind-images.sh",
     "smokes": "scripts/ci/images/build-kind-smokes.sh",
 }
 
@@ -166,10 +184,11 @@ def inspect_image(reference: str) -> dict[str, Any]:
     return value[0]
 
 
-def validate_product_images(expected: dict[str, Any], source: str) -> None:
-    if set(expected) != set(PRODUCT_IMAGES):
-        raise ArtifactError("product image set differs")
-    for reference in PRODUCT_IMAGES:
+def validate_product_images(expected: dict[str, Any], source: str,
+                            group: str = "product") -> None:
+    if set(expected) != set(GROUP_IMAGES[group]):
+        raise ArtifactError(f"{group} image set differs")
+    for reference in GROUP_IMAGES[group]:
         recorded = expected[reference]
         if not isinstance(recorded, dict) or set(recorded) != {"id"}:
             raise ArtifactError("invalid product image identity")
@@ -241,6 +260,180 @@ def receipt_workspace_oci(receipt: Path) -> dict[str, Any]:
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", oci["source_digest"])):
         raise ArtifactError("invalid workspace OCI receipt fields")
     return oci
+
+
+def pin_tool() -> Any:
+    spec = importlib.util.spec_from_file_location("kind_workspace_image_pin", ROOT / PIN_TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def workspace_source(head: str, base: str | None) -> tuple[str, str]:
+    """Choose the Kind workspace: the published pin unless the definition changed.
+
+    The definition is the pin generator's identity of images/base and
+    images/workspace. With a base (the pull request base or the previous main
+    commit), only a change to that definition rebuilds from source; the pin is
+    then the image this tree deploys. Without one, the pin is used only when it
+    was built from exactly this tree's definition.
+    """
+    if not HEX40.fullmatch(head) or (base is not None and not HEX40.fullmatch(base)):
+        raise ArtifactError("workspace source selection needs full commit IDs")
+    tool = pin_tool()
+    try:
+        pin = tool.read_pin(ROOT, head)
+        definition = tool.inputs_sha256(ROOT, head)
+        if base is None:
+            if definition == pin["inputs_sha256"]:
+                return "pinned", "the pin was built from this tree's workspace image definition"
+            return "source", "no base, and the pin was built from another workspace image definition"
+        if tool.inputs_sha256(ROOT, base) == definition:
+            return "pinned", f"the workspace image definition is unchanged from {base[:12]}"
+        return "source", f"the workspace image definition changed from {base[:12]}"
+    except tool.PinError as error:
+        return "source", f"the pin could not be compared ({error})"
+
+
+def workspace_source_mode(environment: dict[str, str] | None = None) -> str:
+    environment = os.environ if environment is None else environment
+    mode = environment.get("CODEWIRE_KIND_WORKSPACE_SOURCE", "") or "source"
+    if mode not in WORKSPACE_SOURCES:
+        raise ArtifactError("CODEWIRE_KIND_WORKSPACE_SOURCE must be pinned or source")
+    return mode
+
+
+def pinned_workspace_record() -> dict[str, Any]:
+    """The checkout's published pin, in the closed form the consumer pulls."""
+    tool = pin_tool()
+    try:
+        pin = tool.read_pin(ROOT, None)
+    except tool.PinError as error:
+        raise ArtifactError(f"workspace pin is invalid: {error}") from error
+    image = tool.field(pin, "public-image")
+    if not isinstance(image, str) or not DIGEST_REFERENCE.fullmatch(image) \
+            or not image.endswith("@" + pin["digest"]):
+        raise ArtifactError("workspace pin does not name one public digest")
+    return {
+        "schema": WORKSPACE_PIN_SCHEMA,
+        "image": image,
+        "digest": pin["digest"],
+        "source_sha": pin["source_sha"],
+        "inputs_sha256": pin["inputs_sha256"],
+    }
+
+
+def read_workspace_pin(path: Path) -> dict[str, Any]:
+    regular_file(path)
+    if path.stat().st_size > 4096:
+        raise ArtifactError("workspace pin record exceeds its bound")
+    value = json.loads(path.read_bytes())
+    if (not isinstance(value, dict)
+            or set(value) != {"schema", "image", "digest", "source_sha", "inputs_sha256"}
+            or value["schema"] != WORKSPACE_PIN_SCHEMA
+            or not isinstance(value["image"], str) or not DIGEST_REFERENCE.fullmatch(value["image"])
+            or not isinstance(value["digest"], str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["digest"])
+            or not value["image"].endswith("@" + value["digest"])
+            or not isinstance(value["source_sha"], str) or not HEX40.fullmatch(value["source_sha"])
+            or not isinstance(value["inputs_sha256"], str)
+            or not HEX64.fullmatch(value["inputs_sha256"])):
+        raise ArtifactError("invalid workspace pin record")
+    return value
+
+
+def pinned_workspace_image(reference: str, source_sha: str, *, alias: str | None = None) -> str:
+    """Prove the local image is the published pin and return its image ID."""
+    value = inspect_image(alias or reference)
+    config = value.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    image_id = value.get("Id")
+    repo_digests = value.get("RepoDigests")
+    if (not isinstance(labels, dict) or not isinstance(image_id, str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+            or not isinstance(repo_digests, list) or reference not in repo_digests
+            or value.get("Os") != "linux" or value.get("Architecture") != "amd64"
+            or labels.get("org.opencontainers.image.revision") != source_sha):
+        raise ArtifactError("pulled workspace is not the published pin")
+    return image_id
+
+
+def write_workspace_selection(value: dict[str, Any]) -> None:
+    path = ROOT / WORKSPACE_SELECTION
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink() or path.is_symlink():
+        raise ArtifactError("workspace selection destination is a symlink")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".kind-workspace-selection-", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump({"schema": WORKSPACE_SELECTION_SCHEMA, **value}, output,
+                      sort_keys=True, separators=(",", ":"))
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def consume_pinned_workspace(directory: Path, value: dict[str, Any]) -> None:
+    if value["files"][WORKSPACE_PIN]["mode"] != 0o600:
+        raise ArtifactError("workspace pin record mode differs")
+    record = read_workspace_pin(directory / WORKSPACE_PIN)
+    if record != pinned_workspace_record():
+        raise ArtifactError("workspace pin record differs from the checkout's pin")
+    reference = record["image"]
+    for attempt in range(1, 4):
+        try:
+            run(docker(), "pull", "--platform", "linux/amd64", reference, capture=False)
+            break
+        except subprocess.CalledProcessError:
+            if attempt == 3:
+                raise
+            print(f"Kind artifact: workspace pull attempt {attempt} failed; retrying",
+                  file=sys.stderr)
+            time.sleep(10 * attempt)
+    image_id = pinned_workspace_image(reference, record["source_sha"])
+    alias = PINNED_WORKSPACE_ALIAS + image_id.removeprefix("sha256:")
+    run(docker(), "image", "tag", image_id, alias)
+    if pinned_workspace_image(reference, record["source_sha"], alias=alias) != image_id:
+        raise ArtifactError("pinned workspace alias names another image")
+    write_workspace_selection({
+        "mode": "pinned", "image": alias, "image_id": image_id, "reference": reference,
+        "source_sha": record["source_sha"],
+    })
+    print(f"Kind artifact: pinned workspace {reference} loaded as {alias}")
+
+
+def workspace_runtime_image() -> str:
+    """The workspace image this checkout's consumed Kind artifact selected."""
+    path = ROOT / WORKSPACE_SELECTION
+    if not path.exists() and not path.is_symlink():
+        return workspace_reuse(ROOT / ".tmp/codewire-workspace-image-verification.json")
+    regular_file(path)
+    if path.stat().st_size > 4096:
+        raise ArtifactError("workspace selection exceeds its bound")
+    value = json.loads(path.read_bytes())
+    if not isinstance(value, dict) or value.get("schema") != WORKSPACE_SELECTION_SCHEMA:
+        raise ArtifactError("invalid workspace selection")
+    if value.get("mode") == "source" and set(value) == {"schema", "mode"}:
+        return workspace_reuse(ROOT / ".tmp/codewire-workspace-image-verification.json")
+    if (value.get("mode") != "pinned"
+            or set(value) != {"schema", "mode", "image", "image_id", "reference", "source_sha"}
+            or not isinstance(value["image_id"], str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["image_id"])
+            or value["image"] != PINNED_WORKSPACE_ALIAS + value["image_id"].removeprefix("sha256:")
+            or not isinstance(value["reference"], str) or not DIGEST_REFERENCE.fullmatch(value["reference"])
+            or not isinstance(value["source_sha"], str) or not HEX40.fullmatch(value["source_sha"])):
+        raise ArtifactError("invalid pinned workspace selection")
+    if value["reference"] != pinned_workspace_record()["image"]:
+        raise ArtifactError("pinned workspace selection differs from the checkout's pin")
+    if pinned_workspace_image(value["reference"], value["source_sha"],
+                              alias=value["image"]) != value["image_id"]:
+        raise ArtifactError("pinned workspace alias names another image")
+    return value["image"]
 
 
 def select_test_artifact(path: Path, target: str, target_kind: list[str]) -> Path:
@@ -316,7 +509,15 @@ def produce(group: str, directory: Path) -> dict[str, str]:
     directory = require_directory(directory, create=True)
     nonce = secrets.token_hex(16)
     extra: dict[str, Any] = {}
-    if group == "workspace":
+    if group == "workspace" and workspace_source_mode() == "pinned":
+        destination = directory / WORKSPACE_PIN
+        with destination.open("x", encoding="utf-8") as output:
+            json.dump(pinned_workspace_record(), output, sort_keys=True, separators=(",", ":"))
+            output.write("\n")
+        destination.chmod(0o600)
+        read_workspace_pin(destination)
+        files = {WORKSPACE_PIN: dict(zip(("sha256", "bytes"), sha256(destination))) | {"mode": 0o600}}
+    elif group == "workspace":
         receipt = ROOT / ".tmp/codewire-workspace-image-verification.json"
         alias = workspace_reuse(receipt)
         native = workspace_native_input(receipt)
@@ -333,11 +534,11 @@ def produce(group: str, directory: Path) -> dict[str, str]:
         }
         files = {name: dict(zip(("sha256", "bytes"), sha256(path))) | {"mode": mode}
                  for name, (path, mode) in sources.items()}
-    elif group == "product":
+    elif group in GROUP_IMAGES:
         images = {reference: {"id": inspect_image(reference).get("Id")}
-                  for reference in PRODUCT_IMAGES}
-        validate_product_images(images, context["head"])
-        run(docker(), "save", "--output", str(directory / IMAGE_ARCHIVE), *PRODUCT_IMAGES)
+                  for reference in GROUP_IMAGES[group]}
+        validate_product_images(images, context["head"], group)
+        run(docker(), "save", "--output", str(directory / IMAGE_ARCHIVE), *GROUP_IMAGES[group])
         digest, size = sha256(directory / IMAGE_ARCHIVE)
         files = {IMAGE_ARCHIVE: {"sha256": digest, "bytes": size, "mode": 0o600}}
         extra["images"] = images
@@ -377,7 +578,7 @@ def read_manifest(directory: Path, group: str, expected_digest: str) -> dict[str
         raise ArtifactError("producer manifest digest mismatch")
     value = json.loads(raw)
     expected_keys = {"schema", "group", "identity", "nonce", "files"}
-    if group == "product":
+    if group in GROUP_IMAGES:
         expected_keys.add("images")
     if not isinstance(value, dict) or set(value) != expected_keys:
         raise ArtifactError("invalid artifact manifest fields")
@@ -529,7 +730,9 @@ def consume(group: str, directory: Path) -> None:
     directory = require_directory(directory, create=False)
     value = read_manifest(directory, group, os.environ.get("EXPECTED_MANIFEST_SHA256", ""))
     validate_files(directory, value)  # No image load or executable copy precedes this.
-    if group == "workspace":
+    if group == "workspace" and set(value["files"]) == {WORKSPACE_PIN}:
+        consume_pinned_workspace(directory, value)
+    elif group == "workspace":
         oci_names = [name for name in value["files"] if WORKSPACE_OCI.fullmatch(name)]
         if (len(oci_names) != 1
                 or set(value["files"]) != {WORKSPACE_RECEIPT, IMAGE_ARCHIVE, oci_names[0]}):
@@ -560,13 +763,14 @@ def consume(group: str, directory: Path) -> None:
             publish_workspace(
                 staged_receipt, staged_archive, value["files"][oci_name],
             )
-    elif group == "product":
+        write_workspace_selection({"mode": "source"})
+    elif group in GROUP_IMAGES:
         if set(value["files"]) != {IMAGE_ARCHIVE} or not isinstance(value.get("images"), dict):
-            raise ArtifactError("product artifact file set differs")
+            raise ArtifactError(f"{group} artifact file set differs")
         if value["files"][IMAGE_ARCHIVE]["mode"] != 0o600:
-            raise ArtifactError("product artifact mode differs")
+            raise ArtifactError(f"{group} artifact mode differs")
         run(docker(), "load", "--input", str(directory / IMAGE_ARCHIVE), capture=False)
-        validate_product_images(value["images"], value["identity"]["head"])
+        validate_product_images(value["images"], value["identity"]["head"], group)
     else:
         expected_files = set(SMOKE_FILES) | set(TEST_FILES)
         if set(value["files"]) != expected_files:
@@ -598,14 +802,32 @@ def consume(group: str, directory: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("produce", "consume"))
-    parser.add_argument("group", choices=sorted(GROUPS))
-    parser.add_argument("directory", type=Path)
+    operations = parser.add_subparsers(dest="operation", required=True)
+    for operation in ("produce", "consume"):
+        transfer = operations.add_parser(operation)
+        transfer.add_argument("group", choices=sorted(GROUPS))
+        transfer.add_argument("directory", type=Path)
+    select = operations.add_parser(
+        "workspace-source", help="choose the pinned or exact-source Kind workspace")
+    select.add_argument("--head", required=True)
+    select.add_argument("--base", default="")
+    select.add_argument("--github-output", action="store_true")
+    operations.add_parser(
+        "workspace-image", help="print the workspace image the consumed artifact selected")
     args = parser.parse_args()
     if args.operation == "produce":
         produce(args.group, args.directory)
-    else:
+    elif args.operation == "consume":
         consume(args.group, args.directory)
+    elif args.operation == "workspace-source":
+        base = args.base if args.base and args.base != "0" * 40 else None
+        source, reason = workspace_source(args.head, base)
+        print(f"Kind workspace: {source} ({reason})")
+        if args.github_output:
+            with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+                output.write(f"kind_workspace_source={source}\n")
+    else:
+        print(workspace_runtime_image())
     return 0
 
 
