@@ -65,6 +65,16 @@ CRATE_INPUTS = {
     # Embedded by the cw runtime smoke example, which build-smokes.sh compiles.
     "codewire-client": ("scripts/ci/verify/kind/cw_runtime_probe.py",),
 }
+# The recipe of one service's build only: the daemon's static cw comes from
+# the gate's CW toolchain stage and the files that stage copies.
+SERVICE_RECIPE_INPUTS = {
+    "daemon": (
+        "images/cw-runtime/Dockerfile",
+        "images/workspace/debian.sources",
+        "images/base/apt-transport.conf",
+        "images/base/apt-get-with-retry",
+    ),
+}
 # Every service compiles the published workspace image pin, but a retained
 # cluster keeps the workspace image it was prepared with, so a pin change is
 # observed on Dev and never redeploys a service here.
@@ -117,7 +127,7 @@ def service_inputs(crates, service: str) -> list[str]:
     if service not in SERVICES:
         raise Failure(f"unknown service: {service}")
     members = closure(crates, SERVICES[service]) - IGNORED_CRATES
-    inputs = set(SHARED_INPUTS)
+    inputs = set(SHARED_INPUTS) | set(SERVICE_RECIPE_INPUTS.get(service, ()))
     for name in members:
         inputs.add(crates[name][0])
         inputs.update(CRATE_INPUTS.get(name, ()))

@@ -144,9 +144,21 @@ variable "KIND_DEV_BIN" {
   default = ""
 }
 
+# The gate's static CW toolchain (Rust, musl target, zig, cargo-zigbuild),
+# reused by the kind-dev daemon build.
+target "cw-toolchain" {
+  context    = "."
+  dockerfile = "images/cw-runtime/Dockerfile"
+  target     = "cw-toolchain"
+}
+
 target "kind-dev-binary" {
   inherits   = ["_rust-product"]
   dockerfile = "deployments/docker/kind-dev-binary.Dockerfile"
+  contexts = {
+    codewire-rust-base    = "target:rust-base"
+    codewire-cw-toolchain = "target:cw-toolchain"
+  }
   labels = {
     "dev.codewire.promotable" = "false"
   }
