@@ -514,7 +514,8 @@ for name in \
   CW_RELEASE_GPG_PRIVATE_KEY \
   CW_RELEASE_GPG_PASSPHRASE \
   CW_RELEASE_GPG_KEY_ID \
-  fetch-openbao-release-signing-key; do
+  fetch-openbao-release-signing-key \
+  fetch-openbao-macos-signing; do
   if grep -Fq "$name" <<<"$build_release"; then
     printf 'CLI compilation receives %s\n' "$name" >&2
     exit 1
@@ -547,6 +548,8 @@ python3 -B "$ROOT/scripts/ci/tests/test-local-runtime-parts.py" >/dev/null 2>&1 
 "$ROOT/scripts/ci/tests/test-dry-run-superseded.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh"
 "$ROOT/scripts/ci/tests/test-fetch-openbao-release-signing-key.sh"
+"$ROOT/scripts/ci/tests/test-fetch-openbao-macos-signing.sh"
+"$ROOT/scripts/ci/tests/test-sign-macos-cw.sh"
 
 compiled_fingerprint="$(
   sed -n 's/^const TRUST_FINGERPRINT: &str = "\([0-9A-F]*\)";$/\1/p' \
