@@ -30,15 +30,18 @@ mock.module("./dev-ux-walkthrough", () => ({
     owned: import("./dev-ux-ownership").OwnedUxSandbox; deadline: number;
   }) => {
     uxInvocations += 1;
+    const history = redirectMode === "ux-large-history" ? LARGE_HISTORY : [];
+    await writeFile(join(uxConfig, "ux-resource.json"), JSON.stringify(history));
     await options.owned.admit(options.deadline);
     options.owned.beforeCreate();
-    await writeFile(join(uxConfig, "ux-resource.json"), JSON.stringify([{
+    await writeFile(join(uxConfig, "ux-resource.json"), JSON.stringify([...history, {
       name: options.owned.name, id: "00000000-0000-4000-8000-000000000009",
       org_id: ORG, created_by: USER, state: "running",
     }]));
+    if (redirectMode === "ux-large-history") await options.owned.createdId(options.deadline);
     if (redirectMode === "ux-signal") process.emit("SIGTERM", "SIGTERM");
     if (redirectMode === "ux-timeout") await new Promise(() => {});
-    if (!["ux-success", "ux-cleanup-failure"].includes(redirectMode)) throw new Error("hostile-ux-private-value-canary");
+    if (!["ux-success", "ux-large-history", "ux-cleanup-failure"].includes(redirectMode)) throw new Error("hostile-ux-private-value-canary");
   },
 }));
 
@@ -185,6 +188,13 @@ const helper = await import("./prepare-dev-smoke-browser-auth");
 
 const USER = "11111111111111111111111111111111";
 const ORG = "22222222222222222222222222222222";
+// The dedicated organization keeps every destroyed Sandbox. Three hundred of
+// them, listed as the CLI lists them, overflow the 64 KiB private output cap.
+const LARGE_HISTORY = Array.from({ length: 300 }, (_, index) => ({
+  name: `dev-ux-${crypto.randomUUID()}`,
+  id: `00000000-0000-4000-8000-${(index + 100).toString().padStart(12, "0")}`,
+  org_id: ORG, created_by: USER, state: "destroyed",
+}));
 const EMAIL = "dedicated-smoke@example.test";
 const SECRET = "JBSWY3DPEHPK3PXP";
 let root = "";
@@ -249,15 +259,19 @@ JSON
   await writeFile(cw, `#!/bin/sh
 set -eu
 test -z "\${OPENAI_API_KEY+x}\${CODEWIRE_API_KEY+x}\${BAO_TOKEN+x}\${DISPLAY+x}\${BROWSER+x}" || exit 91
+# As the server lists them: without --all, destroying and destroyed rows are omitted.
+list_rows='const fs=require("node:fs"); const path=process.env.CW_CONFIG_DIR+"/ux-resource.json"; const rows=fs.existsSync(path)?JSON.parse(fs.readFileSync(path,"utf8")):[]; console.log(JSON.stringify(rows.filter(row=>process.argv[1]==="all"||!["destroying","destroyed"].includes(row.state)).map(({id,name,state})=>({type:"sandbox",name,placement:"platform",selected:false,state,daemon_health:"unavailable",id})),null,2));'
 case " $* " in
   *" login --org "*) ${login} ;;
   *" whoami --output json "*) printf '%s\\n' '${whoami}' ;;
   *" org list --output json "*) printf '%s\\n' '[{"id":"${ORG}","role":"owner","slug":"dedicated-smoke"}]' ;;
   *" org current "*) printf 'ID: ${ORG}\\nRole: owner\\n' ;;
+  *" env --platform list --output json "*) "${process.execPath}" -e "$list_rows" live ;;
   *" env --platform list --all --output json "*)
-    if test -f "$CW_CONFIG_DIR/ux-resource.json"; then
-      "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); console.log(JSON.stringify(rows.map(({id,name,state})=>({id,name,state,placement:"platform",selected:false,daemon_health:"unavailable"}))));'
-    else printf '[]'; fi ;;
+    printf 'list-all\\n' >>"${directory}/audit"
+    "${process.execPath}" -e "$list_rows" all ;;
+  *" env report "*)
+    "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); const row=rows.find(row=>row.id===process.argv[1]); if(!row)process.exit(92); console.log(JSON.stringify({environment:{id:row.id,org_id:row.org_id,type:"sandbox",state:row.state,isolation_tier:"standard"}},null,2));' "$5" ;;
   *" env --platform info "*)
     "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); const row=rows.find(row=>row.id===process.argv[1]); if(!row||["destroying","destroyed"].includes(row.state))process.exit(92); console.log(JSON.stringify(row));' "$6" ;;
   *" env --platform rm --yes "*)
@@ -373,7 +387,7 @@ const UX_TIMEOUT_DEADLINE_MS = 2_000;
 const UX_DEADLINE_MS = 20_000;
 const UX_TEST_TIMEOUT_MS = 30_000;
 
-for (const mode of ["ux-success", "ux-failure", "ux-signal", "ux-timeout", "ux-cleanup-failure"]) {
+for (const mode of ["ux-success", "ux-large-history", "ux-failure", "ux-signal", "ux-timeout", "ux-cleanup-failure"]) {
   test(`${mode}: cleanup is independent of browser and precedes OAuth logout`, async () => {
     const value = await fixture(mode);
     const deadline = mode === "ux-timeout" ? UX_TIMEOUT_DEADLINE_MS : UX_DEADLINE_MS;
@@ -381,7 +395,7 @@ for (const mode of ["ux-success", "ux-failure", "ux-signal", "ux-timeout", "ux-c
       .catch((error) => error);
     expect(uxInvocations).toBe(1);
     const audit = await readFile(join(value.directory, "audit"), "utf8");
-    if (mode === "ux-success") {
+    if (mode === "ux-success" || mode === "ux-large-history") {
       expect(result).toBeUndefined();
       expect(audit).toBe("destroy\n");
     } else {
@@ -398,6 +412,13 @@ for (const mode of ["ux-success", "ux-failure", "ux-signal", "ux-timeout", "ux-c
     }
   }, UX_TEST_TIMEOUT_MS);
 }
+
+test("the large-history fixture would overflow a whole-history list", () => {
+  const listed = LARGE_HISTORY.map(({ id, name, state }) => ({
+    type: "sandbox", name, placement: "platform", selected: false, state, daemon_health: "unavailable", id,
+  }));
+  expect(Buffer.byteLength(`${JSON.stringify(listed, null, 2)}\n`)).toBeGreaterThan(64 * 1024);
+});
 
 test("external redirects are rejected before each credential or device action", async () => {
   for (const [mode, stage, fills] of [

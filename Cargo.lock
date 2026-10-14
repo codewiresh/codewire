@@ -2083,6 +2083,7 @@ dependencies = [
  "hyper-util",
  "k8s-openapi",
  "kube",
+ "libc",
  "prometheus",
  "prost 0.14.4",
  "rand 0.8.6",

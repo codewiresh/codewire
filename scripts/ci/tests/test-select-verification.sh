@@ -640,6 +640,10 @@ run_paths_case rust_toolchain_guard pull_request refs/pull/506/head false \
   .gitea/workflows/rust-latest-canary.yaml \
   scripts/ci/verify/check-rust-toolchain.sh \
   scripts/ci/tests/test-rust-toolchain.sh
+run_paths_case local_rust_cache_helper pull_request refs/pull/2753/head false \
+  'policy security security_js' \
+  scripts/ci/verify/local-rust-cache.sh \
+  scripts/ci/tests/test-local-rust-cache.sh
 run_paths_case application_migration pull_request refs/pull/6/head false \
   'database policy rust rust_pkg_codewire_server_core service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   crates/codewire-server-core/migrations/0001_baseline.sql
@@ -2555,6 +2559,22 @@ if grep -qF 'apple-darwin' <(grep -F 'CW_RELEASE_TARGETS=' "$cw_block"); then
   exit 1
 fi
 grep -qF 'scripts/ci/release/package-cw-release.sh v0.0.0-ci' "$cw_block"
+# The Linux pair builds side by side in one Cargo invocation with the build
+# environment package-cw-release.sh uses, so packaging finds both fresh. A
+# change to that environment must update the CI build too.
+grep -qF -- '--target x86_64-unknown-linux-musl --target aarch64-unknown-linux-gnu' "$cw_block"
+for cw_build_env in 'env -u CODEWIRE_LOCAL_RUNTIME' 'CODEWIRE_VERSION=' \
+    'CODEWIRE_SOURCE_REVISION=' 'CODEWIRE_SOURCE_TREE_SHA256='; do
+  grep -qF -- "$cw_build_env" "$cw_block" \
+    && grep -qF -- "$cw_build_env" "$ROOT/scripts/ci/release/package-cw-release.sh" || {
+    echo "CI's Linux pair build and package-cw-release.sh differ in $cw_build_env" >&2
+    exit 1
+  }
+done
+[ "$(grep -c '^    CODEWIRE_[A-Z0-9_]*=' "$ROOT/scripts/ci/release/package-cw-release.sh")" -eq 3 ] || {
+  echo 'package-cw-release.sh builds with a different environment; update the CI Linux pair build' >&2
+  exit 1
+}
 jq -e '
   .artifacts.cw_cli_release_assets.release_targets == [
     "x86_64-unknown-linux-musl",
