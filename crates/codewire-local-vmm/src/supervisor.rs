@@ -204,10 +204,25 @@ impl NativeRuntimeConfig {
         AuthorityRuntimeConfig {
             root: self.credential_authority_root.clone(),
             executable: self.executable.clone(),
+            socket_dir: crate::socket_dir::predicted(&self.credential_authority_root),
         }
     }
 
     fn direct_share_forbidden_roots(&self) -> Result<Vec<PathBuf>, SupervisorError> {
+        // The per-user directories that hold the supervisor's, runners', VMs'
+        // and credential authority's sockets (#2735, #2745) are never shared.
+        let socket_bases = [
+            &self.root,
+            &self.engine_root(),
+            &self.credential_authority_root,
+        ]
+        .into_iter()
+        .filter_map(|root| {
+            crate::socket_dir::predicted(root)
+                .parent()
+                .map(Path::to_path_buf)
+        })
+        .collect::<Vec<_>>();
         [
             &self.root,
             &self.artifact_root,
@@ -216,6 +231,7 @@ impl NativeRuntimeConfig {
             &self.platform_config_dir,
         ]
         .into_iter()
+        .chain(&socket_bases)
         .map(|path| resolve_forbidden_root(path))
         .collect()
     }
@@ -8473,6 +8489,11 @@ mod tests {
         tokio::task::JoinHandle<Result<(), codewire_local_credentials::AuthorityRuntimeError>>,
     ) {
         let config = core.config.credential_authority_config();
+        // The authority process prepares its socket directory before serving.
+        assert_eq!(
+            crate::socket_dir::prepare(&config.root).unwrap(),
+            config.socket_dir
+        );
         let server_config = config.clone();
         let server = tokio::spawn(async move {
             serve_local_credential_authority(
@@ -15070,6 +15091,23 @@ mod tests {
         fs::create_dir_all(&expected).unwrap();
         let after_creation = core.config.direct_share_forbidden_roots().unwrap();
         assert!(after_creation.contains(&fs::canonicalize(expected).unwrap()));
+    }
+
+    /// The per-user socket directories hold the supervisor's, VMs' and the
+    /// credential authority's sockets; no direct share may expose them.
+    #[test]
+    fn the_socket_directories_are_never_shared() {
+        let (_runtime, core) = test_supervisor_core(project_environment());
+        let sockets = crate::socket_dir::prepare(&core.config.root).unwrap();
+        let base = fs::canonicalize(sockets.parent().unwrap()).unwrap();
+        let forbidden_roots = core.config.direct_share_forbidden_roots().unwrap();
+        assert!(forbidden_roots.contains(&base), "{forbidden_roots:?}");
+        for source in [&base, &sockets] {
+            assert!(matches!(
+                prepare_direct_input(source, "/workspace/private", true, &forbidden_roots),
+                Err(WorkspacePlanError::DirectShareInvalid)
+            ));
+        }
     }
 
     #[tokio::test]

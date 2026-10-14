@@ -432,6 +432,7 @@ if [ "$event_selected" = false ]; then
       scripts/dev/macos-ext4-tool.py|scripts/dev/test-macos-ext4-tool.py|\
       scripts/dev/macos-git-tool.py|scripts/dev/test-macos-git-tool.py|\
       scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
+      scripts/dev/linux-local-runtime.py|scripts/dev/test-linux-local-runtime.py|\
       scripts/dev/macos-app-sandbox-canary.py|scripts/dev/test-macos-app-sandbox-canary.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/dev/pre-push.sh|scripts/dev/preflight-push.sh|\
@@ -1738,6 +1739,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/build-local-runtime.sh|\
       scripts/ci/release/fetch-pinned.sh|scripts/ci/tests/test-fetch-pinned.sh|\
       scripts/ci/release/build-runtime-guest-root.sh|scripts/ci/release/runtime-container.sh|\
+      scripts/ci/release/build-runtime-cw.sh|\
       scripts/ci/tests/test-local-runtime-parts.py|\
       scripts/ci/release/dry-run-superseded.sh|scripts/ci/tests/test-dry-run-superseded.sh|\
       scripts/ci/tests/test-cw-install.py|\

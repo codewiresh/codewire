@@ -18,7 +18,10 @@ check = source / 'scripts/ci/verify/check-darwin-cross.sh'
 expected_check = ['clippy', '--locked', '-p', 'codewire-local-vmm',
                   '-p', 'codewire-vmm-guest-probe', '--target', 'aarch64-apple-darwin',
                   '--', '-D', 'warnings']
-# The macOS cw links Apple frameworks, so Linux only compile-checks it.
+# The macOS cw links Apple frameworks, so Linux only compile-checks it, after
+# the CLI library's macOS-only unit tests.
+expected_cli_tests = ['clippy', '--locked', '-p', 'codewire-cli', '--lib', '--tests',
+                      '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']
 expected_cli = ['clippy', '--locked', '-p', 'codewire-cli-bin', '--bin', 'cw',
                 '--target', 'aarch64-apple-darwin', '--target', 'x86_64-apple-darwin',
                 '--', '-D', 'warnings']
@@ -98,11 +101,14 @@ else:
     assert records == [dict(tool='uname', args=['-s']),
                        dict(tool='zig', args=['version']),
                        dict(tool='cargo-zigbuild', args=['--version']),
+                       dict(tool='cargo-zigbuild', args=expected_cli_tests),
+                       dict(tool='cargo', args=expected_cli_tests),
                        dict(tool='cargo-zigbuild', args=expected_cli),
                        dict(tool='cargo', args=expected_cli)], records
     assert 'macOS cw for aarch64 and x86_64' in result.stdout, result.stdout
+    # A failing test check stops before the cw check and is the exit status.
     records, _ = run(dict(DARWIN_FIXTURE_CHECK_STATUS='46'), status=46, arguments=['--cli'])
-    assert records[-1] == dict(tool='cargo', args=expected_cli)
+    assert records[-1] == dict(tool='cargo', args=expected_cli_tests), records
     run(arguments=['--features', 'synthetic'], status=1)
     run(arguments=['--cli', '--features', 'synthetic'], status=1)
     run(dict(DARWIN_FIXTURE_HOST='Darwin'), status=1, arguments=['--cli'])
