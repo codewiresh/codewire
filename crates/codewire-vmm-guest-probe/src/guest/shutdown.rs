@@ -59,10 +59,11 @@ pub(super) fn container_init_pid() -> Option<i32> {
         .filter(|pid| *pid > 1)
 }
 
-/// SIGTERM every process of the workspace container except its init, which
-/// would end the container at once, and wait until they are gone or the
-/// grace ends. The container's own init cannot do this: it holds no
-/// `CAP_KILL`, and the workload runs as another user.
+/// SIGTERM every process of the workspace container except its init and the
+/// init's credential forwarder, and wait until they are gone or the grace
+/// ends. Either of those ending ends the container, and every process in it
+/// with SIGKILL, at once. The container's own init cannot do this: it holds
+/// no `CAP_KILL`, and the workload runs as another user.
 pub(super) fn terminate_workload(container_init: i32, grace: Duration) -> usize {
     let Some(namespace) = pid_namespace(container_init) else {
         return 0;
@@ -80,6 +81,7 @@ pub(super) fn terminate_workload(container_init: i32, grace: Duration) -> usize 
             .filter(|pid| *pid != container_init)
             .filter(|pid| pid_namespace(*pid).as_deref() == Some(namespace))
             .filter(|pid| !exited(*pid))
+            .filter(|pid| !is_credential_forwarder(*pid, container_init))
             .collect()
     };
     let signalled = members(&namespace);
@@ -103,6 +105,30 @@ fn processes() -> Vec<i32> {
         .flatten()
         .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
         .collect()
+}
+
+/// The container init's credential forwarder: its child running the sealed
+/// forwarder command. A workload process that copies that command only skips
+/// the SIGTERM; the container's SIGKILL still ends it.
+fn is_credential_forwarder(pid: i32, container_init: i32) -> bool {
+    let parent = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| process_parent(&stat));
+    parent == Some(container_init)
+        && std::fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|command| is_forwarder_command(&command))
+}
+
+fn is_forwarder_command(command: &[u8]) -> bool {
+    let mut expected = super::CONTAINER_INIT_PATH.as_bytes().to_vec();
+    expected.push(0);
+    expected.extend_from_slice(b"credential-forwarder\0");
+    command == expected
+}
+
+/// The parent PID of a /proc/PID/stat line, the field after the state.
+fn process_parent(stat: &str) -> Option<i32> {
+    stat.rsplit_once(") ")?.1.split(' ').nth(1)?.parse().ok()
 }
 
 /// Whether `pid` has exited (a zombie, or already gone).
@@ -264,6 +290,23 @@ mod tests {
         assert_eq!(process_state("garbage"), None);
         assert!(exited(i32::MAX));
         assert!(!exited(std::process::id() as i32));
+    }
+
+    #[test]
+    fn only_the_sealed_forwarder_command_is_the_forwarder() {
+        assert!(is_forwarder_command(
+            b"/run/codewire-runtime/init\0credential-forwarder\0"
+        ));
+        assert!(!is_forwarder_command(
+            b"/run/codewire-runtime/init\0workspace-exec\0"
+        ));
+        assert!(!is_forwarder_command(
+            b"/run/codewire-runtime/init\0credential-forwarder\0extra\0"
+        ));
+        assert!(!is_forwarder_command(b"/bin/sh\0-c\0sleep 1\0"));
+        assert_eq!(process_parent("153 (init) S 145 145 145 0"), Some(145));
+        assert_eq!(process_parent("43 (we (ird) )) S 1 43"), Some(1));
+        assert_eq!(process_parent("garbage"), None);
     }
 
     #[test]
