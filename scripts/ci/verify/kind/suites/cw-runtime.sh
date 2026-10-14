@@ -262,6 +262,9 @@ cw_runtime_managed_resume_continues() {
   wait_kind_credential_environment "$environment" stopped
   kind_credential_cli env --platform start "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" running
+  # Start reads running before its setup finishes, and a message is refused
+  # until then ("environment runtime or setup is not ready").
+  wait_kind_credential_setup_complete "$environment"
   sent="$(kind_credential_cli msg "$environment" "$session" \
     'Return the synthetic reply after Stop/Start.' --output json)" || {
     echo '::error::a message after Stop/Start did not resume the conversation' >&2
