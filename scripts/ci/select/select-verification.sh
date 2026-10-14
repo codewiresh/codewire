@@ -429,6 +429,7 @@ if [ "$event_selected" = false ]; then
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
       scripts/dev/dashboard-watch.py|\
       scripts/dev/macos-cli.py|scripts/dev/test-macos-cli.py|\
+      scripts/dev/macos-command-owner.py|\
       scripts/dev/macos-ext4-tool.py|scripts/dev/test-macos-ext4-tool.py|\
       scripts/dev/macos-git-tool.py|scripts/dev/test-macos-git-tool.py|\
       scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\

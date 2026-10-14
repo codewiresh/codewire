@@ -187,7 +187,7 @@ class FormatterContractTests(unittest.TestCase):
 
         with mock.patch.object(tool.platform, "system", return_value="Darwin"), \
                 mock.patch.object(tool.platform, "machine", return_value="arm64"), \
-                mock.patch.object(tool.developer_loop, "run_command", side_effect=command), \
+                mock.patch.object(tool.command_owner, "run_command", side_effect=command), \
                 mock.patch.object(tool, "format_empty", return_value={"synthetic": True}):
             result = tool.run(None, self.root / "probe-only", self.binary, self.checksum)
         self.assertEqual(result["status"], "passed")
@@ -246,7 +246,7 @@ class FormatterContractTests(unittest.TestCase):
                 mock.patch.object(tool.platform, "machine", return_value="arm64"), \
                 mock.patch.object(tool, "SOURCE_SHA256", archive_hash), \
                 mock.patch.object(tool, "extract_source", side_effect=extract), \
-                mock.patch.object(tool.developer_loop, "run_command", side_effect=command), \
+                mock.patch.object(tool.command_owner, "run_command", side_effect=command), \
                 mock.patch.object(tool, "format_empty", return_value={"synthetic": True}):
             result = tool.run(archive, output)
         self.assertEqual(result["mode"], "build-and-probe")
@@ -287,7 +287,7 @@ class FormatterContractTests(unittest.TestCase):
 
         with mock.patch.object(tool.platform, "system", return_value="Darwin"), \
                 mock.patch.object(tool.platform, "machine", return_value="arm64"), \
-                mock.patch.object(tool.developer_loop, "run_command", side_effect=command), \
+                mock.patch.object(tool.command_owner, "run_command", side_effect=command), \
                 mock.patch.object(tool, "format_empty") as format_empty, \
                 self.assertRaisesRegex(ValueError, "artifact changed"):
             tool.run(None, output, self.binary, self.checksum)
@@ -437,7 +437,7 @@ class FormatterContractTests(unittest.TestCase):
         log = self.root / "late.log"
         log.write_text("synthetic child exit zero")
         records = []
-        with mock.patch.object(tool.developer_loop, "run_command", return_value=0), \
+        with mock.patch.object(tool.command_owner, "run_command", return_value=0), \
                 mock.patch.object(tool.time, "monotonic", side_effect=[10, 41]), \
                 self.assertRaises(TimeoutError):
             tool.run_checked(["synthetic"], self.root, {}, log, threading.Event(), 600, records, 30)
@@ -452,7 +452,7 @@ class FormatterContractTests(unittest.TestCase):
             cancel.set()
             return 0
 
-        with mock.patch.object(tool.developer_loop, "run_command", side_effect=completed_child), \
+        with mock.patch.object(tool.command_owner, "run_command", side_effect=completed_child), \
                 self.assertRaisesRegex(RuntimeError, "cancelled"):
             tool.run_checked(["synthetic"], self.root, {}, log, cancel, float("inf"), [], 30)
         result = {"status": "running"}
