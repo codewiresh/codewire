@@ -158,20 +158,28 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
 /// authenticate its actual daemon parent, not accept PID 1 as a substitute.
 /// Kubernetes owns restart policy; this owner forwards shutdown and reaps the
 /// daemon before returning its status.
+///
+/// The traps come before any child, so no shutdown signal can arrive while
+/// they are missing. As container PID 1 the kernel drops a signal with no
+/// handler: a Stop during user setup or the daemon wait would otherwise sit
+/// out the Pod's whole termination grace and kill the daemon. A trap that runs
+/// between a fork and its `$!` assignment takes the child from `$!`.
 pub(super) fn managed_workspace_supervisor_command(
     ensure_user: &str,
     wait_daemon: &str,
     daemon_command: &str,
 ) -> String {
     format!(
-        "{ensure_user} {wait_daemon} \
-         {daemon_command} & daemon_pid=$!; \
+        "daemon_pid=; \
          shutdown() {{ \
+           daemon_pid=\"${{daemon_pid:-$!}}\"; \
            kill -TERM \"$daemon_pid\" 2>/dev/null || true; \
            wait \"$daemon_pid\" 2>/dev/null || true; \
          }}; \
          trap 'shutdown; exit 143' TERM; \
          trap 'shutdown; exit 130' INT; \
+         {ensure_user} {wait_daemon} \
+         {daemon_command} & daemon_pid=$!; \
          wait \"$daemon_pid\"; status=$?; \
          trap - TERM INT; \
          exit \"$status\""
@@ -192,20 +200,26 @@ pub(super) fn custom_workspace_supervisor_command(
     } else {
         format!("(exec {entrypoint})")
     };
+    // Traps first, as for the managed supervisor; a restarted daemon clears
+    // its old pid before the fork so a trap in between takes it from `$!`.
     format!(
-        "{ensure_user} {wait_daemon} \
-         {daemon_command} & daemon_pid=$!; \
-         {workload} & workload_pid=$!; \
+        "daemon_pid=; workload_pid=; \
          shutdown() {{ \
+           daemon_pid=\"${{daemon_pid:-$!}}\"; \
+           workload_pid=\"${{workload_pid:-$!}}\"; \
            kill \"$workload_pid\" \"$daemon_pid\" 2>/dev/null || true; \
            wait \"$workload_pid\" 2>/dev/null || true; \
            wait \"$daemon_pid\" 2>/dev/null || true; \
          }}; \
          trap 'shutdown; exit 0' TERM INT; \
+         {ensure_user} {wait_daemon} \
+         {daemon_command} & daemon_pid=$!; \
+         {workload} & workload_pid=$!; \
          while kill -0 \"$workload_pid\" 2>/dev/null; do \
            if ! kill -0 \"$daemon_pid\" 2>/dev/null; then \
              wait \"$daemon_pid\" 2>/dev/null || true; \
              sleep 1; \
+             daemon_pid=; \
              {daemon_command} & daemon_pid=$!; \
            fi; \
            sleep 1; \
