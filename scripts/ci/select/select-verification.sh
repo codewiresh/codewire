@@ -476,6 +476,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-kind-watch-github-app.sh|\
       scripts/ci/tests/fixtures/cargo-cache-df.sh|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
+      scripts/ci/tests/test-integration-lane.py|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
@@ -542,7 +543,7 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      scripts/ci/verify/run-integration-verification.sh)
+      scripts/ci/verify/run-integration-verification.sh|scripts/ci/verify/integration-lane.py)
         # This file owns database execution and every service's integration
         # harness. Its changes must qualify both executable families.
         select_token policy

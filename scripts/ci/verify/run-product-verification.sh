@@ -250,6 +250,7 @@ run_policy_core_one() {
   scripts/ci/tests/test-local-rust-cache.sh
   scripts/ci/tests/test-retired-local-sdk-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
+  python3 -B scripts/ci/tests/test-integration-lane.py
   scripts/runtime/tests/test-storage-measure.sh
   python3 scripts/dev/test-macos-cli.py
   python3 scripts/dev/test-macos-ext4-tool.py
