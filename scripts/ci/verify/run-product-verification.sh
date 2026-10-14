@@ -197,13 +197,30 @@ isolate_kind_fixture_environment() {
   unset CLUSTER KEEP_KIND_CLUSTER KUBECONFIG KUBE_CONTEXT RUN_DIR CARGO_CI_DIR
 }
 
+# CI runs the two parts side by side, as local merge qualification does. Part
+# one streams; part two's output follows it. Either failure fails policy core,
+# and both parts always finish and report.
 run_policy_core() {
-  run_policy_core_one
-  run_policy_core_two
+  local two_log pid_one pid_two status_one=0 status_two=0
+  two_log="$(mktemp)"
+  run_policy_core_two >"$two_log" 2>&1 &
+  pid_two=$!
+  run_policy_core_one &
+  pid_one=$!
+  wait "$pid_one" || status_one=$?
+  wait "$pid_two" || status_two=$?
+  printf '=== policy-core-2 (ran beside policy-core-1) ===\n'
+  cat "$two_log"
+  rm -f "$two_log"
+  if [ "$status_one" -ne 0 ] || [ "$status_two" -ne 0 ]; then
+    printf 'policy core failed: policy-core-1 exited %s, policy-core-2 exited %s\n' \
+      "$status_one" "$status_two" >&2
+    return 1
+  fi
 }
 
-# Policy core runs as two independent parts so local merge qualification can
-# run them side by side; CI and the policy family run both in order. Every
+# Policy core runs as two independent parts so local merge qualification and
+# CI can run them side by side; the policy family runs them in order. Every
 # step belongs to exactly one part and keeps no state outside its own
 # scratch directory.
 run_policy_core_one() {
