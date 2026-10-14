@@ -14,6 +14,10 @@ fail() {
   exit 1
 }
 
+# The apt snapshot cache is CI job configuration; an ambient value must not
+# change what this contract observes.
+unset CODEWIRE_APT_SNAPSHOT_MIRROR
+
 [[ -f "$WORKFLOW" ]] || fail 'required CI workflow is missing'
 [[ ! -e "$STANDALONE_WORKFLOW" ]] || fail 'standalone workspace-image workflow still exists'
 [[ -x "$VERIFY" ]] || fail 'workspace-image verification script is not executable'
@@ -27,6 +31,64 @@ for generated_python in '**/__pycache__' '**/*.pyc' '**/*.pyo'; do
   [[ "$ignore_line" -gt "$last_context_reinclude" ]] ||
     fail "generated Python exclusion is overridden by a later Docker context re-inclusion: $generated_python"
 done
+# Exactly the jobs that build the base or workspace image set the apt snapshot
+# cache, at job level, on the heavy or protected pools, with one exact value.
+python3 - "$ROOT/.gitea/workflows" <<'PY' || fail 'apt snapshot cache is not scoped to base/workspace image builders'
+import pathlib
+import re
+import sys
+
+import yaml
+
+MIRROR = "http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080"
+NAME = "CODEWIRE_APT_SNAPSHOT_MIRROR"
+BUILDER = re.compile(
+    r"verify-workspace-image\.sh|probe-workspace-r2-cache\.sh|build-push-image\.sh (base|workspace) "
+    r"|build-support-platform\.sh linux/"
+)
+HEAVY = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}"
+# Jobs that call an image builder without the cache: the arm64 support leg
+# builds on the remote ci-arm64-builder node outside the cluster, the support
+# join only assembles the two platform digests, and the production release
+# workflow keeps the canonical snapshots.
+CANONICAL = {
+    "deploy-prod.yaml:publish-support-release-images",
+    "support-images.yaml:build-support-arm64",
+    "support-images.yaml:publish-support-images",
+}
+EXPECTED = {
+    "ci.yaml:kind-workspace",
+    "ci.yaml:workspace-cache-measurement",
+    "ci.yaml:workspace-cache-probes",
+    "ci.yaml:workspace-image",
+    "support-images.yaml:build-support-amd64",
+}
+builders, configured = set(), set()
+for path in sorted(pathlib.Path(sys.argv[1]).glob("*.y*ml")):
+    text = path.read_text()
+    document = yaml.safe_load(text) or {}
+    if NAME in (document.get("env") or {}):
+        raise SystemExit(f"{path.name}: workflow-level env names the apt snapshot cache")
+    file_jobs = 0
+    for name, job in (document.get("jobs") or {}).items():
+        steps = job.get("steps") or []
+        key = f"{path.name}:{name}"
+        if any(NAME in (step.get("env") or {}) for step in steps):
+            raise SystemExit(f"{key}: a step env names the apt snapshot cache")
+        if BUILDER.search("\n".join(str(step.get("run", "")) for step in steps)):
+            builders.add(key)
+        if NAME in (job.get("env") or {}):
+            if job["env"][NAME] != MIRROR:
+                raise SystemExit(f"{key}: unexpected apt snapshot cache value")
+            if job.get("runs-on") not in ("ci-heavy", "ci-protected", HEAVY):
+                raise SystemExit(f"{key}: apt snapshot cache set outside ci-heavy/ci-protected")
+            configured.add(key)
+            file_jobs += 1
+    if text.count(NAME) != file_jobs or text.count("apt-snapshot-cache.") != file_jobs:
+        raise SystemExit(f"{path.name}: the apt snapshot cache appears outside job env")
+if builders != EXPECTED | CANONICAL or configured != EXPECTED:
+    raise SystemExit(f"builders={sorted(builders)} configured={sorted(configured)}")
+PY
 workspace_job="$(awk '
   $0 == "  workspace-image:" { capture = 1 }
   capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  workspace-image:" { exit }
@@ -38,7 +100,7 @@ grep -qF '    name: Container contract verification' <<<"$workspace_job" ||
 # shellcheck disable=SC2016 # The workflow expression is literal text.
 grep -qxF '    runs-on: ${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-heavy-main'"'"' || '"'"'ci-heavy'"'"' }}' <<<"$workspace_job" ||
   fail 'Docker-backed workspace verification is not assigned to the heavy capability profile'
-grep -qF '    timeout-minutes: 55' <<<"$workspace_job" ||
+grep -qF '    timeout-minutes: 80' <<<"$workspace_job" ||
   fail 'workspace cold-build ceiling does not preserve the runner cleanup margin'
 grep -qF '    needs: [verification-selection]' <<<"$workspace_job" ||
   fail 'workspace job does not consume the canonical verification plan'
@@ -248,18 +310,25 @@ awk '
   run { exit }
 ' "$WORKFLOW" >"$work/container-scope.sh"
 [[ -s "$work/container-scope.sh" ]] || fail 'container scope script was not extracted'
+# Selected Kind owns the exact-source workspace only when it builds it; when
+# it runs the published pin, this job keeps the selected workspace build.
 for fixture in \
-  'true|kind|false' 'false|kind|false' 'true|policy|true' 'false|policy|false' \
-  'false|web|true' 'false|kind,web|false' 'true|kind,web|false' \
-  'false|ios|true' 'true|kind,ios|true'; do
-  IFS='|' read -r workspace_selected selection expected <<<"$fixture"
+  'true|kind||false' 'true|kind|source|false' 'true|kind|pinned|true' \
+  'false|kind|pinned|false' 'false|kind||false' 'true|policy||true' 'true|policy|pinned|true' \
+  'false|policy||false' 'false|web||true' 'false|kind,web||false' 'false|kind,web|pinned|false' \
+  'true|kind,web||false' 'true|kind,web|pinned|true' 'false|ios||true' 'true|kind,ios||true'; do
+  IFS='|' read -r workspace_selected selection kind_source expected <<<"$fixture"
   selection="|${selection//,/|}|"
   : >"$work/scope-output"
   env WORKSPACE_IMAGE_SELECTED="$workspace_selected" VERIFICATION_SELECTION="$selection" \
+    KIND_WORKSPACE_SOURCE="$kind_source" \
     GITHUB_OUTPUT="$work/scope-output" bash "$work/container-scope.sh"
   grep -Fxq "selected=$expected" "$work/scope-output" ||
-    fail "container ownership differs for workspace=$workspace_selected selection=$selection"
+    fail "container ownership differs for workspace=$workspace_selected selection=$selection kind=$kind_source"
 done
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -qF "needs.verification-selection.outputs.kind_workspace_source == 'pinned'" <<<"$workspace_job" ||
+  fail 'container workspace build does not take over from a pinned Kind workspace'
 # Both workflow owners execute the same fail-closed canary entrypoint. Execute
 # that checked-in shell in an isolated mock tree; unavailable identity must fail
 # before the harness, and a failed harness must stop the selected job.
@@ -614,6 +683,7 @@ run_mock_verifier() {
     SCCACHE_BUCKET=example-ci-cache-untrusted \
     SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com \
     CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/v1 \
+    CODEWIRE_APT_SNAPSHOT_MIRROR="${MOCK_APT_MIRROR:-}" \
     FAKE_DOCKER_LOG="$work/docker.log" \
     FAKE_BUILDER_SUFFIX="$1" \
     FAKE_METADATA_MODE="${2:-valid}" \
@@ -689,6 +759,8 @@ grep -q -- '--output type=oci\\,dest=.*workspace.oci.tar' "$work/docker.log" ||
   fail 'workspace build did not export the verified image for native use'
 grep -Eq -- '--provenance(=| )false --sbom(=| )false' "$work/docker.log" ||
   fail 'verification-only OCI export unexpectedly contains attestations'
+! grep -q 'codewire-apt-mirror' "$work/docker.log" ||
+  fail 'an empty apt snapshot cache setting reached BuildKit'
 
 : >"$work/docker.log"
 run_mock_verifier reuse >/dev/null
@@ -727,7 +799,7 @@ with closing(module.asset.HeldFile(pointer, module.release.MAX_JSON)) as held:
                     'source': value['source'], 'original_build_ref': value['build_ref']}
     revision = module.producer.source.git(root, ['rev-parse', 'HEAD']).strip().decode()
     with module.producer.reopen(value['receipt']['path'], value['receipt']['sha256'], root,
-                                revision, 'release', module.effective_version(root, None)) as retained:
+                                revision, 'ci', module.effective_version(root, None)) as retained:
         assert value == {key: retained.summary[key] for key in value}
         original = pathlib.Path(value['receipt']['path']).parent
         assert original.is_relative_to(pointer.parent) and stat.S_IMODE(original.stat().st_mode) == 0o700
@@ -873,6 +945,18 @@ run_mock_verifier changed-mode >/dev/null
 : >"$work/docker.log"
 if MOCK_LAYERS=invalid run_mock_verifier invalid-mode >/dev/null 2>&1; then fail 'invalid mode accepted'; fi
 [[ ! -s "$work/docker.log" ]] || fail 'invalid mode reached receipt reuse or Docker'
+
+# The CI apt snapshot cache reaches both image builds only as an optional
+# BuildKit secret read from the environment, never as an argument value.
+: >"$work/docker.log"
+MOCK_REUSE=disabled MOCK_APT_MIRROR=http://apt-cache.invalid:8080 run_mock_verifier apt-mirror >/dev/null
+[[ "$(pair_build_count)" == 2 ]] || fail 'apt snapshot cache changed the build pair'
+[[ "$(grep '^buildx build ' "$work/docker.log" | grep -v -- '--target cw-runtime-export' |
+  grep -v -- '--target cw-builder-arm64' |
+  grep -c -- ' --secret id=codewire-apt-mirror\\,env=CODEWIRE_APT_SNAPSHOT_MIRROR ')" == 2 ]] ||
+  fail 'base and workspace builds did not both receive the apt snapshot secret'
+! grep -q 'apt-cache.invalid' "$work/docker.log" "$fixture_receipt" ||
+  fail 'apt snapshot cache host reached build arguments or the receipt'
 
 umask 077
 printf '%s\n' '[default]' 'aws_access_key_id = synthetic-workspace-access' \
@@ -1172,7 +1256,7 @@ old = old.replace('cw_copy_started=false\n', '')
 assert hashlib.sha256(old.encode()).hexdigest() == '9bb5cdec3c4ddb0d46ea7c19e9ad3fafa86c454e5acca207ddde9c3eaf53aa66'
 Path(sys.argv[2]).write_text(old)
 PY
-  python3 -B "$fixture_helper" producer "$fixture_root" "$work/copy-policy-producer" "$work/copy-policy-result.json"
+  python3 -B "$fixture_helper" producer --profile ci "$fixture_root" "$work/copy-policy-producer" "$work/copy-policy-result.json"
   original_cw_sha="$(sha256sum "$work/copy-policy-producer/assets/cw" | cut -d' ' -f1)"
   fixture_policy() {
     cp "$1" "$fixture_root/scripts/ci/verify/verify-workspace-image.sh"

@@ -81,10 +81,11 @@ sampler_pid=''
 cw_copy_started=false
 
 retained_cw_producer() {
-  python3 -B - "$ROOT" "$source_id" "$build_log_root/cw-image-work/cw-producer-result.json" <<'PY'
+  python3 -B - "$ROOT" "$source_id" "$build_log_root/cw-image-work/cw-producer-result.json" \
+      "$WORKSPACE_CW_PROFILE" <<'PY'
 from contextlib import closing
 import importlib.util, os, pathlib, stat, sys
-root, revision, pointer = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
+root, revision, pointer, profile = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3]), sys.argv[4]
 spec = importlib.util.spec_from_file_location('cw_retained_workspace_producer', root / 'scripts/ci/images/cw-image-consumer.py')
 consumer = importlib.util.module_from_spec(spec); spec.loader.exec_module(consumer)
 producer, asset, release = consumer.producer, consumer.asset, consumer.release
@@ -101,7 +102,7 @@ with closing(asset.HeldFile(pointer, release.MAX_JSON)) as held:
     asset.require(type(value) is dict and set(value) == fields and value['status'] == 'producer-admitted',
                   'retained producer pointer is not complete')
     version = consumer.effective_version(root, os.environ.get('CODEWIRE_VERSION'))
-    with producer.reopen(value['receipt']['path'], value['receipt']['sha256'], root, revision, 'release', version) as admitted:
+    with producer.reopen(value['receipt']['path'], value['receipt']['sha256'], root, revision, profile, version) as admitted:
         summary = admitted.summary
         asset.require(value == {key: summary[key] for key in fields}, 'retained producer reference changed')
         admitted.revalidate(); held.revalidate(content=True)
@@ -278,8 +279,9 @@ chmod 0400 "$workspace_archive"
 
 # The published arm64 leg cross-compiles cw on the build platform. Build only
 # that stage here, without emulation, so a cross-compile break fails before
-# protected publication. The CI profile skips release LTO. Measurements keep
-# their unchanged build set.
+# protected publication. Like the amd64 producer (WORKSPACE_CW_PROFILE), it
+# uses the CI profile and skips release LTO; neither verified cw is the
+# published one. Measurements keep their unchanged build set.
 if [[ "$architecture" == amd64 && -z "$workspace_measurement_case" ]]; then
   # The cw stage never consumes the base image, but a frontend may resolve
   # every stage's base. Name the base recipe's own pinned multi-arch foundation.
