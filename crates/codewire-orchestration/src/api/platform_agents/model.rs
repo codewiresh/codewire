@@ -415,8 +415,19 @@ impl ManagedReceipt {
                 _ => {}
             }
         }
+        // A refusal leaves nothing running: refused before any effect, or an
+        // issued launch whose projection was denied before its agent ran.
+        let refusal = match self.reason_code.as_str() {
+            "refused-before-issue" => true,
+            "denied-before-run" => {
+                m.action == ManagedAction::Launch
+                    && matches!(self.lifecycle, ManagedLifecycle::Failed)
+                    && self.exit_code.is_none()
+            }
+            _ => false,
+        };
         if (self.phase == ManagedPhase::Rejected
-            && (self.reason_code != "refused-before-issue"
+            && (!refusal
                 || self.cleanup_unknown
                 || self.pipe_acknowledged
                 || self.native_acknowledged))
@@ -495,6 +506,7 @@ fn valid_private_reason(s: &str) -> bool {
             | "issued"
             | "settled"
             | "refused-before-issue"
+            | "denied-before-run"
             | "issued-outcome-unknown"
             | "target-owner-lost"
     )
