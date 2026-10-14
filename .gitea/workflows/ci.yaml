@@ -401,6 +401,8 @@ jobs:
     env:
       CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
+      # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
+      CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -1631,6 +1633,8 @@ jobs:
     env:
       CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
+      # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
+      CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -2090,6 +2094,8 @@ jobs:
     env:
       CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
+      # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
+      CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -2151,6 +2157,8 @@ jobs:
     env:
       CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
+      # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
+      CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:

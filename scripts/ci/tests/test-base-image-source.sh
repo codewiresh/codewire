@@ -100,4 +100,70 @@ if grep -qE '(^|[[:space:]])cw[[:space:]]+node([[:space:]]|$)' "$ENTRYPOINT"; th
   fail 'base image still starts the duplicate legacy Codewire node runtime'
 fi
 
+# The optional CI apt snapshot cache reaches BuildKit only as a secret. Every
+# Dockerfile RUN that calls the APT helper mounts it optionally and removes the
+# package lists named after the cache host before its layer ends; no other RUN
+# mounts it.
+mapfile -t tracked_dockerfiles < <(git -C "$ROOT" ls-files -- '*Dockerfile' '*.Dockerfile')
+[[ "${#tracked_dockerfiles[@]}" -gt 0 ]] || fail 'no tracked Dockerfiles found'
+apt_runs="$(cd "$ROOT" && python3 - "${tracked_dockerfiles[@]}" <<'PY'
+import sys
+
+MOUNT = "--mount=type=secret,id=codewire-apt-mirror,required=false"
+CLEANUP = "rm -rf /var/lib/apt/lists/*"
+count = 0
+for path in sys.argv[1:]:
+    instructions, current = [], ""
+    for line in open(path, encoding="utf-8").read().splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        if not current and not line.strip():
+            continue
+        if line.rstrip().endswith("\\"):
+            current += line.rstrip()[:-1] + " "
+            continue
+        instructions.append(current + line.strip())
+        current = ""
+    for instruction in instructions:
+        words = instruction.split()
+        if not words or words[0].upper() != "RUN":
+            continue
+        flags = []
+        for word in words[1:]:
+            if not word.startswith("--"):
+                break
+            flags.append(word)
+        uses_helper = "apt-get-with-retry" in instruction
+        mentions_secret = "codewire-apt-mirror" in instruction
+        if not uses_helper:
+            if mentions_secret:
+                raise SystemExit(f"{path}: RUN mounts the apt snapshot secret without the APT helper")
+            continue
+        count += 1
+        if flags.count(MOUNT) != 1 or instruction.count("codewire-apt-mirror") != 1:
+            raise SystemExit(f"{path}: APT helper RUN lacks exactly one optional apt snapshot secret mount")
+        if CLEANUP not in instruction[instruction.rindex("apt-get-with-retry"):]:
+            raise SystemExit(f"{path}: APT helper RUN keeps package lists named after the cache host")
+print(count)
+PY
+)" || fail 'an APT helper RUN does not keep the apt snapshot cache out of its layer'
+[[ "$apt_runs" == 5 ]] || fail "expected five APT helper RUN steps (base 1, workspace 3, cw-runtime 1), found $apt_runs"
+# The cache host is CI configuration; no image input may name it.
+if git -C "$ROOT" grep -nIE 'apt-snapshot-cache|forgejo-runner-control|svc\.cluster\.local' -- \
+    images scripts/ci/images "${tracked_dockerfiles[@]}" docker-bake.hcl; then
+  fail 'an image input names the CI apt snapshot cache host'
+fi
+# The cache is trusted only for availability: APT signature and hash checks
+# stay mandatory and the canonical sources stay HTTPS.
+mapfile -t apt_inputs < <(find "$ROOT/images/base" "$ROOT/images/workspace" -maxdepth 1 -type f | sort)
+if grep -nE 'trusted=|AllowInsecureRepositories|AllowUnauthenticated|AllowDowngradeToInsecureRepositories|allow-(insecure|unauthenticated)|Signed-By: *$' \
+    "${apt_inputs[@]}"; then
+  fail 'base or workspace APT inputs weaken repository signature verification'
+fi
+if grep -nE '^(URIs:|deb) +http://' "$SOURCES" "$ROOT/images/workspace/debian.sources"; then
+  fail 'canonical APT snapshot sources are not HTTPS'
+fi
+grep -qxF 'readonly mirror_secret=/run/secrets/codewire-apt-mirror' "$APT_RETRY" ||
+  fail 'APT helper does not read the BuildKit apt snapshot secret'
+
 echo 'base image source contract: OK'

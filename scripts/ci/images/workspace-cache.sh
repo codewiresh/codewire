@@ -243,6 +243,16 @@ workspace_cache_compiler_args() {
   fi
 }
 
+# CI may name an internal HTTP cache of the dated apt snapshots. BuildKit
+# receives it only as an optional secret, so layer cache keys and image
+# history stay identical to builds without it.
+workspace_cache_apt_mirror_args() {
+  apt_mirror_args=()
+  if [[ -n "${CODEWIRE_APT_SNAPSHOT_MIRROR:-}" ]]; then
+    apt_mirror_args=(--secret "id=codewire-apt-mirror,env=CODEWIRE_APT_SNAPSHOT_MIRROR")
+  fi
+}
+
 workspace_cache_retryable_read_failure() {
   local status="$1" log="$2" line diagnostic=''
   # Buildx uses 1 for an ordinary build error and distinct statuses for its
@@ -293,7 +303,10 @@ workspace_cache_build() {
   local cw_work="${log%/*}/cw-image-work"
   workspace_cache_layer_args "$target" "$source_tree" "$architecture" || return
   consumer_cache=("${layer_args[@]}")
-  command=("$docker_bin" buildx build --builder "$builder" --progress plain --platform "linux/$architecture" "${consumer_cache[@]}" "$@")
+  apt_mirror_args=()
+  [[ "$target" != base && "$target" != workspace ]] || workspace_cache_apt_mirror_args
+  command=("$docker_bin" buildx build --builder "$builder" --progress plain --platform "linux/$architecture" \
+    "${consumer_cache[@]}" "${apt_mirror_args[@]}" "$@")
   if [[ "$target" == workspace ]]; then
     workspace_cache_layer_args cw-runtime "$source_tree" "$architecture" || return
     producer_cache=("${layer_args[@]}")
@@ -309,7 +322,8 @@ workspace_cache_build() {
     # A broken remote descriptor can remain in the daemon's local metadata.
     # Force computation on retry, preserving fresh floating tools without
     # combining the mutually exclusive no-cache and no-cache-filter flags.
-    command=("$docker_bin" buildx build --builder "$builder" --progress plain --platform "linux/$architecture" --no-cache "$@")
+    command=("$docker_bin" buildx build --builder "$builder" --progress plain --platform "linux/$architecture" --no-cache \
+      "${apt_mirror_args[@]}" "$@")
     if [[ "$target" == workspace ]]; then
       command=(bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" "$WORKSPACE_CW_PROFILE" "$ROOT" "$cw_work" --no-cache -- "${command[@]}")
     fi
