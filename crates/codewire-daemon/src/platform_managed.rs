@@ -26,6 +26,7 @@ mod files;
 pub(crate) use files::{Tree, leaf_refusal, publish_session, tree_refusal};
 mod payload;
 pub use payload::{PinRefusal, ProviderIdentity, ProviderPin};
+pub(crate) use payload::{image_client_version, pinned_version};
 mod service;
 pub(crate) use service::{CleanupLink, Owner, RestartAdvance, Service};
 

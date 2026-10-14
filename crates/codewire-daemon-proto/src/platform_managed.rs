@@ -73,6 +73,81 @@ pub fn provider_version(a: v1::PlatformManagedAgent) -> Option<&'static str> {
         _ => None,
     }
 }
+/// The marker on a daemon's refusal of platform managed info when the
+/// Sandbox's image carries other agent clients than the daemon pins. An older
+/// Sandbox keeps its image while its daemon follows the current release, so
+/// this is a normal state its owner must be told about.
+pub const STALE_IMAGE_MARKER: &str = "platform managed image clients: ";
+
+/// One agent whose image client differs from the daemon's pin: the version the
+/// image carries (`None` when it has none) and the version the daemon pins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleImageClient {
+    pub agent: v1::PlatformManagedAgent,
+    pub installed: Option<String>,
+    pub pinned: String,
+}
+
+fn agent_name(agent: v1::PlatformManagedAgent) -> Option<&'static str> {
+    match agent {
+        v1::PlatformManagedAgent::Codex => Some("codex"),
+        v1::PlatformManagedAgent::Claude => Some("claude"),
+        _ => None,
+    }
+}
+
+/// A version an image or a pin may name: short, and only version characters.
+pub fn valid_client_version(value: &str) -> bool {
+    (1..=32).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
+}
+
+/// The refusal message: the marker, then `agent=installed/pinned` per agent,
+/// with `none` for a client the image lacks. `None` for an invalid entry.
+pub fn stale_image_message(stale: &[StaleImageClient]) -> Option<String> {
+    let mut parts = Vec::with_capacity(stale.len());
+    for client in stale {
+        let name = agent_name(client.agent)?;
+        let installed = client.installed.as_deref().unwrap_or("none");
+        if !valid_client_version(installed) || !valid_client_version(&client.pinned) {
+            return None;
+        }
+        parts.push(format!("{name}={installed}/{}", client.pinned));
+    }
+    (!parts.is_empty()).then(|| format!("{STALE_IMAGE_MARKER}{}", parts.join(" ")))
+}
+
+/// Decodes a daemon's refusal strictly: the marker, then one or two known
+/// agents, each once, each with valid versions. Anything else is `None`, so a
+/// caller never repeats arbitrary daemon text.
+pub fn stale_image_clients(message: &str) -> Option<Vec<StaleImageClient>> {
+    let rest = message.strip_prefix(STALE_IMAGE_MARKER)?;
+    let mut clients: Vec<StaleImageClient> = Vec::new();
+    for part in rest.split(' ') {
+        let (name, versions) = part.split_once('=')?;
+        let (installed, pinned) = versions.split_once('/')?;
+        let agent = match name {
+            "codex" => v1::PlatformManagedAgent::Codex,
+            "claude" => v1::PlatformManagedAgent::Claude,
+            _ => return None,
+        };
+        if clients.iter().any(|client| client.agent == agent)
+            || !valid_client_version(installed)
+            || !valid_client_version(pinned)
+        {
+            return None;
+        }
+        clients.push(StaleImageClient {
+            agent,
+            installed: (installed != "none").then(|| installed.to_owned()),
+            pinned: pinned.to_owned(),
+        });
+    }
+    (!clients.is_empty()).then_some(clients)
+}
+
 pub fn validate_mutation(r: &v1::PlatformManagedMutationRequest) -> Result<(), &'static str> {
     use v1::platform_managed_mutation_request::Operation;
     if !valid_uuid(&r.request_id) || r.encoded_len() > REQUEST_BYTES {
@@ -272,6 +347,44 @@ pub fn validate_receipt(r: &v1::PlatformManagedReceipt) -> Result<(), &'static s
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_image_clients_round_trip_and_refuse_anything_else() {
+        use super::{StaleImageClient, stale_image_clients, stale_image_message};
+        use crate::daemon::v1::PlatformManagedAgent as A;
+        let stale = vec![
+            StaleImageClient {
+                agent: A::Codex,
+                installed: Some("0.157.0".into()),
+                pinned: "0.160.0".into(),
+            },
+            StaleImageClient {
+                agent: A::Claude,
+                installed: None,
+                pinned: "2.1.288".into(),
+            },
+        ];
+        let message = stale_image_message(&stale).unwrap();
+        assert_eq!(
+            message,
+            "platform managed image clients: codex=0.157.0/0.160.0 claude=none/2.1.288"
+        );
+        assert_eq!(stale_image_clients(&message).unwrap(), stale);
+        for refused in [
+            "",
+            "platform managed incarnation or outcome refused",
+            "platform managed image clients: ",
+            "platform managed image clients: codex=0.157.0",
+            "platform managed image clients: codex=0.157.0/0.160.0 codex=1/2",
+            "platform managed image clients: gemini=1/2",
+            "platform managed image clients: codex=0.157.0;rm/0.160.0",
+            "platform managed image clients: codex=0.157.0/0.160.0  claude=1/2",
+            "platform managed image clients: codex=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1",
+        ] {
+            assert_eq!(stale_image_clients(refused), None, "{refused}");
+        }
+        assert_eq!(stale_image_message(&[]), None);
+    }
+
     use super::*;
     fn request() -> v1::PlatformManagedMutationRequest {
         v1::PlatformManagedMutationRequest {
