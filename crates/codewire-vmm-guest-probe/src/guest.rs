@@ -71,6 +71,7 @@ use crate::{
 };
 
 mod bootstrap;
+mod shutdown;
 use bootstrap::{BootstrapChild, BootstrapParent};
 use codewire_daemon::execution::BootstrapPhase;
 
@@ -5864,6 +5865,13 @@ fn stop_daemon(daemon: &mut std::process::Child) {
 }
 
 fn stop_workspace_container(workspace: &mut std::process::Child) {
+    // The workload gets SIGTERM and a bounded grace before the container is
+    // killed (#2760).
+    if workspace.try_wait().ok().flatten().is_none()
+        && let Some(init) = shutdown::container_init_pid()
+    {
+        shutdown::terminate_workload(init, shutdown::WORKLOAD_STOP_GRACE);
+    }
     let kill_completed = run_runc_control(&[
         "--root",
         RUNC_STATE_PATH,
@@ -5964,6 +5972,18 @@ async fn shutdown_signal() {
 }
 
 fn power_off() -> Result<()> {
+    unsafe {
+        libc::sync();
+    }
+    // Every guest-written disk is unmounted, or remounted read-only, so its
+    // journal is clean at the next mount and host e2fsck (#2760).
+    let released = shutdown::release_filesystems();
+    if !released.failed.is_empty() {
+        eprintln!(
+            "guest poweroff: {} unmounted, {} read-only, still writable: {:?}",
+            released.unmounted, released.read_only, released.failed
+        );
+    }
     unsafe {
         libc::sync();
     }
