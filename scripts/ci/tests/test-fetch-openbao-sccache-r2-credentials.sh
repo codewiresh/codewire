@@ -139,6 +139,7 @@ cache_jobs=(
   services-runtime
   kind-workspace
   kind-product
+  kind-daemon
   kind-smokes
   workspace-cache-measurement
   workspace-cache-probes
