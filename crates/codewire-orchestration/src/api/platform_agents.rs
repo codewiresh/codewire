@@ -35,14 +35,28 @@ async fn target_info(
             incarnation
                 .projection_selection_sha256
                 .as_deref()
-                .ok_or_else(unavailable)?,
+                .ok_or_else(|| {
+                    // The answer stays opaque; the log names the unmet precondition.
+                    tracing::warn!(
+                        environment_id = %incarnation.environment_id,
+                        "platform agent unavailable: the live binding records no projection selection"
+                    );
+                    unavailable()
+                })?,
         )?,
     };
     captured
         .daemon()
         .platform_managed_info(request)
         .await
-        .map_err(|_| unavailable())
+        .map_err(|error| {
+            tracing::warn!(
+                environment_id = %incarnation.environment_id,
+                error = %error,
+                "platform agent unavailable: the daemon's managed info call failed"
+            );
+            unavailable()
+        })
 }
 
 pub async fn info(
@@ -58,8 +72,21 @@ pub async fn info(
     // current operator, lifecycle, full binding and actual original Pod gates.
     let row = live_cw_runtime_binding(&state.pool, &request.org_id, &request.environment_id)
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|error| {
+            tracing::warn!(
+                environment_id = %request.environment_id,
+                error = %error,
+                "platform agent unavailable: the live binding could not be read"
+            );
+            unavailable()
+        })?
+        .ok_or_else(|| {
+            tracing::warn!(
+                environment_id = %request.environment_id,
+                "platform agent unavailable: the environment has no live CW runtime binding"
+            );
+            unavailable()
+        })?;
     let facts = super::cw_runtime::model::CapturedBindingFacts::from(&row);
     let captured = capture_platform_cw_runtime(state, user, &facts.incarnation()).await?;
     let info = target_info(&captured).await?;
