@@ -225,12 +225,6 @@ fn main() {
             .unwrap_or(1);
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let exit_code = 1;
-            // A credential broker has no typed exit code; its authority keeps
-            // the tail of this stderr pipe in its broker log (#2763). The chain
-            // holds context and typed errors only, never credential values.
-            if broker {
-                eprintln!("{err:#}");
-            }
             std::process::exit(exit_code);
         }
         eprintln!("{err:#}");

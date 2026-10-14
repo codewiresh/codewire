@@ -1,14 +1,17 @@
 //! The authority's durable record of its credential broker children (#2763).
 //!
-//! Each broker runs with its standard streams on `/dev/null` and may end
-//! without a word, and the authority restarts it on a backoff. This log keeps
-//! one line per lifecycle event under the credential root
-//! (`logs/brokers.log`, 0600) so a failing environment can be diagnosed from
-//! the product: when a child started, whether it became ready, and how it
-//! ended (exit code or signal, the lease channel's typed error, and the
-//! restart delay chosen). Only fixed event names, identifiers, durations and
-//! typed outcomes are written, never request contents, credential values or
-//! child output. Writing is best effort and never affects the broker.
+//! A broker may end without a word, and the authority restarts it on a
+//! backoff. This log keeps one line per lifecycle event under the credential
+//! root (`logs/brokers.log`, 0600) so a failing environment can be diagnosed
+//! from the product: when a child started, whether it became ready, and how
+//! it ended (exit code or signal, the lease channel's typed outcome, the
+//! restart delay chosen, and the broker's own exit line). Only fixed event
+//! names, identifiers, durations and typed outcomes are written. Of a child's
+//! stderr, a pipe the authority drains, only its `CW_BROKER_EXIT stage=…
+//! kind=…` line is kept, both fixed names, and any run of 20 or more token
+//! characters in it is redacted besides; never request contents, error
+//! messages, credential values or other child output. Writing is best effort
+//! and never affects the broker.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -109,8 +112,11 @@ pub(crate) struct StderrTail {
 }
 
 const TAIL_BYTES: usize = 4096;
-/// The broker log keeps this many of the last non-empty lines.
-const TAIL_LINES: usize = 3;
+/// The one line of a broker's stderr the log keeps (see the broker's
+/// `BROKER_EXIT_MARKER`).
+const EXIT_MARKER: &str = "CW_BROKER_EXIT ";
+/// A run of token characters this long is redacted from what is logged.
+const REDACT_RUN: usize = 20;
 /// How long an exited child's pipe may take to reach end of file.
 const EXITED_DRAIN: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -141,9 +147,10 @@ impl StderrTail {
         }
     }
 
-    /// The last few non-empty lines written so far; for an exited child, after
-    /// its pipe reaches end of file (bounded).
-    pub(crate) async fn last_line(&mut self, exited: bool) -> String {
+    /// The fields of the broker's last exit line, if it wrote one; for an
+    /// exited child, after its pipe reaches end of file (bounded). Any other
+    /// output is ignored.
+    pub(crate) async fn exit_line(&mut self, exited: bool) -> String {
         if exited && let Some(reader) = self.reader.take() {
             let _ = tokio::time::timeout(EXITED_DRAIN, reader).await;
         }
@@ -152,16 +159,37 @@ impl StderrTail {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let text = String::from_utf8_lossy(&tail);
-        let mut lines = text
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
+        text.lines()
             .rev()
-            .take(TAIL_LINES)
-            .collect::<Vec<_>>();
-        lines.reverse();
-        lines.join(" | ")
+            .find_map(|line| line.trim().strip_prefix(EXIT_MARKER))
+            .map(redact_long_runs)
+            .unwrap_or_default()
     }
+}
+
+/// Replaces each run of `REDACT_RUN` or more `[A-Za-z0-9_-]` characters, the
+/// alphabet of tokens and keys, so no such value can reach the log.
+fn redact_long_runs(text: &str) -> String {
+    fn flush(run: &mut String, output: &mut String) {
+        if run.chars().count() >= REDACT_RUN {
+            output.push_str("REDACTED");
+        } else {
+            output.push_str(run);
+        }
+        run.clear();
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut run = String::new();
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+            run.push(character);
+        } else {
+            flush(&mut run, &mut output);
+            output.push(character);
+        }
+    }
+    flush(&mut run, &mut output);
+    output
 }
 
 /// How a child process ended, for the log.
@@ -221,9 +249,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keeps_the_last_lines_of_an_exited_childs_stderr() {
+    async fn keeps_only_an_exited_brokers_exit_line_and_redacts_token_runs() {
         let mut child = tokio::process::Command::new("/bin/sh")
-            .args(["-c", "printf 'one\\ntwo\\n\\nthree\\nfour\\n' >&2; exit 1"])
+            .args([
+                "-c",
+                "printf 'Error: secret ghu_0123456789abcdefghij\\n\\nCW_BROKER_EXIT stage=bridge.run kind=bridge.unavailable\\nnoise\\n' >&2; exit 1",
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
@@ -232,6 +263,27 @@ mod tests {
         let mut tail = StderrTail::spawn(child.stderr.take().unwrap());
         let status = child.wait().await.unwrap();
         assert_eq!(exit_status(Some(status)), "exit:1");
-        assert_eq!(tail.last_line(true).await, "two | three | four");
+        assert_eq!(
+            tail.exit_line(true).await,
+            "stage=bridge.run kind=bridge.unavailable"
+        );
+
+        let mut silent = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "echo 'Error: sk-0123456789abcdefghijklmn' >&2"])
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut tail = StderrTail::spawn(silent.stderr.take().unwrap());
+        silent.wait().await.unwrap();
+        assert_eq!(tail.exit_line(true).await, "", "other output is never kept");
+
+        assert_eq!(
+            redact_long_runs("stage=x kind=ghu_0123456789abcdefghij/sk-ABCDEFGHIJKLMNOPQRSTU"),
+            "stage=x kind=REDACTED/REDACTED"
+        );
+        assert_eq!(
+            redact_long_runs("stage=lease.refresh_in_progress kind=status.failed_precondition"),
+            "stage=lease.refresh_in_progress kind=status.failed_precondition"
+        );
     }
 }

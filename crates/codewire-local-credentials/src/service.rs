@@ -1247,7 +1247,7 @@ async fn record_broker_end<S: ProtectedStore>(
     let (status, lease) = broker.outcome();
     let exited = status != "running";
     let error = match &mut broker.stderr {
-        Some(tail) => tail.last_line(exited).await,
+        Some(tail) => tail.exit_line(exited).await,
         None => String::new(),
     };
     let error = if error.is_empty() {
