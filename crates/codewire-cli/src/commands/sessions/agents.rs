@@ -1445,89 +1445,30 @@ pub(super) async fn handle_agent_run_command(
         None => None,
     };
 
-    let driver_id = uuid::Uuid::new_v4().to_string();
-    let root = agents_root(&environment);
-    private_directory(&root)?;
-    let dir = root.join(&driver_id);
-    private_directory(&dir)?;
-    private_directory(&dir.join("messages"))?;
-    let initial_message_id = args
-        .prompt
-        .as_ref()
-        .map(|_| uuid::Uuid::new_v4().to_string());
-    let config = AgentConfig {
-        version: 1,
-        driver_id: driver_id.clone(),
-        environment_id: environment.id.clone(),
+    let launch = HostLaunch {
+        driver_id: uuid::Uuid::new_v4().to_string(),
+        initial_message_id: args
+            .prompt
+            .as_ref()
+            .map(|_| uuid::Uuid::new_v4().to_string()),
         agent,
         program,
-        program_fallback: None,
         model: model.clone(),
         effort: effort.clone(),
-        working_dir: working_dir.clone(),
-        name: name.clone(),
+        name,
+        working_dir,
+        launch_env,
         parent: parent.clone(),
-        initial_message_id: initial_message_id.clone(),
-        created_at: now(),
+        prompt: args.prompt.clone(),
     };
-    write_private_json(&dir.join("config.json"), &config)?;
-    let executable = env::current_exe()
-        .context("locate the installed cw executable")?
-        .into_os_string()
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("the cw executable path is not UTF-8"))?;
-    let command = vec![
-        executable,
-        DRIVER_COMMAND.into(),
-        "--environment".into(),
-        environment.id.clone(),
-        "--driver-id".into(),
-        driver_id.clone(),
-        "--registry-root".into(),
-        environment
-            .root()
-            .parent()
-            .context("host registry parent")?
-            .to_str()
-            .context("host registry path is not UTF-8")?
-            .into(),
-    ];
-    let parent_session_id = parent
-        .as_ref()
-        .map(|p| p.session_id.clone())
-        .unwrap_or_default();
-    let session = target
-        .launch(
-            command,
-            working_dir,
-            launch_env,
-            false,
-            name,
-            parent_session_id,
-        )
-        .await
-        .with_context(|| format!("launch managed {} driver {driver_id}", agent.name()))?;
-    if let (Some(id), Some(prompt)) = (&initial_message_id, &args.prompt) {
-        let mut record = MessageRecord::new(
-            &driver_id,
-            &session.session_id,
-            MessageAction::Prompt,
-            prompt.clone(),
-        );
-        record.id = id.clone();
-        if !create_message(&dir, &record)? {
-            anyhow::bail!("initial message {id} already exists");
-        }
-    }
-    // The driver waits for this binding before it accepts or delivers anything.
-    write_private_json(
-        &dir.join("binding.json"),
-        &AgentBinding {
-            driver_id: driver_id.clone(),
-            session_id: session.session_id.clone(),
-            bound_at: now(),
-        },
-    )?;
+    let client = host_session_client(&environment).await?;
+    let HostLaunched { session, dir } =
+        launch_host_conversation(&client, &environment, launch.clone()).await?;
+    let HostLaunch {
+        driver_id,
+        initial_message_id,
+        ..
+    } = launch;
     if matches!(args.output, OutputFormat::Text) {
         eprintln!(
             "Launched managed {} conversation {} (driver {driver_id})",
@@ -1580,6 +1521,139 @@ pub(super) async fn handle_agent_run_command(
     }
 }
 
+/// A validated host launch and the ids it is created under: fresh ones from
+/// the CLI, or ones a caller derives so that a repeated request finds the
+/// conversation it made.
+#[derive(Clone)]
+struct HostLaunch {
+    driver_id: String,
+    initial_message_id: Option<String>,
+    agent: AgentKind,
+    program: PathBuf,
+    model: String,
+    effort: Option<String>,
+    name: String,
+    working_dir: String,
+    launch_env: BTreeMap<String, String>,
+    parent: Option<ParentLink>,
+    prompt: Option<String>,
+}
+
+/// What a host launch created.
+struct HostLaunched {
+    session: EnvironmentSessionView,
+    dir: PathBuf,
+}
+
+/// Creates the driver's directory and config, launches the driver through
+/// `client`, records the initial message, and writes the binding the driver
+/// waits for before it accepts or delivers anything. It does not wait for the
+/// driver to accept the message.
+async fn launch_host_conversation(
+    client: &codewire_daemon::client::SessionClient,
+    environment: &HostEnvironment,
+    launch: HostLaunch,
+) -> anyhow::Result<HostLaunched> {
+    let HostLaunch {
+        driver_id,
+        initial_message_id,
+        agent,
+        program,
+        model,
+        effort,
+        name,
+        working_dir,
+        launch_env,
+        parent,
+        prompt,
+    } = launch;
+    let root = agents_root(environment);
+    private_directory(&root)?;
+    let dir = root.join(&driver_id);
+    private_directory(&dir)?;
+    private_directory(&dir.join("messages"))?;
+    let config = AgentConfig {
+        version: 1,
+        driver_id: driver_id.clone(),
+        environment_id: environment.id.clone(),
+        agent,
+        program,
+        program_fallback: None,
+        model,
+        effort,
+        working_dir: working_dir.clone(),
+        name: name.clone(),
+        parent: parent.clone(),
+        initial_message_id: initial_message_id.clone(),
+        created_at: now(),
+    };
+    write_private_json(&dir.join("config.json"), &config)?;
+    let executable = env::current_exe()
+        .context("locate the installed cw executable")?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("the cw executable path is not UTF-8"))?;
+    let command = vec![
+        executable,
+        DRIVER_COMMAND.into(),
+        "--environment".into(),
+        environment.id.clone(),
+        "--driver-id".into(),
+        driver_id.clone(),
+        "--registry-root".into(),
+        environment
+            .root()
+            .parent()
+            .context("host registry parent")?
+            .to_str()
+            .context("host registry path is not UTF-8")?
+            .into(),
+    ];
+    let parent_session_id = parent
+        .as_ref()
+        .map(|p| p.session_id.clone())
+        .unwrap_or_default();
+    let session = client
+        .launch(codewire_daemon_proto::daemon::v1::LaunchSessionRequest {
+            command,
+            working_dir,
+            env: launch_env
+                .into_iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect(),
+            pty: false,
+            term: env::var("TERM").unwrap_or_default(),
+            width: 0,
+            height: 0,
+            name,
+            parent_session_id: (!parent_session_id.is_empty()).then_some(parent_session_id),
+        })
+        .await
+        .map(host_environment_session_view)
+        .with_context(|| format!("launch managed {} driver {driver_id}", agent.name()))?;
+    if let (Some(id), Some(prompt)) = (initial_message_id, prompt) {
+        let mut record = MessageRecord::new(
+            &driver_id,
+            &session.session_id,
+            MessageAction::Prompt,
+            prompt,
+        );
+        record.id = id.clone();
+        if !create_message(&dir, &record)? {
+            anyhow::bail!("initial message {id} already exists");
+        }
+    }
+    write_private_json(
+        &dir.join("binding.json"),
+        &AgentBinding {
+            driver_id,
+            session_id: session.session_id.clone(),
+            bound_at: now(),
+        },
+    )?;
+    Ok(HostLaunched { session, dir })
+}
+
 pub(crate) async fn handle_agent_message_command(
     globals: &Globals,
     args: AgentMessageArgs,
@@ -1625,6 +1699,32 @@ pub(crate) async fn handle_agent_message_command(
     }
     let managed = resolve_managed(globals, environment, session).await?;
     ensure_accepting(&managed)?;
+    let record = host_message_record(
+        &managed,
+        uuid::Uuid::new_v4().to_string(),
+        text,
+        reply_to,
+        steer,
+        args.turn_id.clone(),
+    )?;
+    let record = deliver_cli_message(&managed, record).await?;
+    print_message_summary(&record, args.output)?;
+    match message_failure(&record) {
+        Some(failure) => Err(failure),
+        None => Ok(()),
+    }
+}
+
+/// The record a host message, or a steer of the turn `turn_id` names (else
+/// the current one), is delivered as, under `id`.
+fn host_message_record(
+    managed: &ManagedConversation,
+    id: String,
+    text: &str,
+    reply_to: Option<String>,
+    steer: bool,
+    turn_id: Option<String>,
+) -> anyhow::Result<MessageRecord> {
     let mut record = MessageRecord::new(
         &managed.config.driver_id,
         &managed.session.session_id,
@@ -1635,6 +1735,7 @@ pub(crate) async fn handle_agent_message_command(
         },
         text.to_owned(),
     );
+    record.id = id;
     record.reply_to = reply_to;
     if steer {
         let state = read_optional::<DriverState>(&managed.dir.join("state.json"))?
@@ -1646,7 +1747,7 @@ pub(crate) async fn handle_agent_message_command(
                 state.capabilities.note
             );
         }
-        record.expected_turn_id = Some(match args.turn_id.clone() {
+        record.expected_turn_id = Some(match turn_id {
             Some(turn) => turn,
             None => state
                 .current_turn_id
@@ -1654,12 +1755,7 @@ pub(crate) async fn handle_agent_message_command(
                 .context("no active turn to steer; use `cw msg` to queue a message")?,
         });
     }
-    let record = deliver_cli_message(&managed, record).await?;
-    print_message_summary(&record, args.output)?;
-    match message_failure(&record) {
-        Some(failure) => Err(failure),
-        None => Ok(()),
-    }
+    Ok(record)
 }
 
 pub(crate) async fn handle_agent_interrupt_command(
@@ -1869,38 +1965,67 @@ pub(crate) async fn wait_agent_message(
     }
 }
 
+/// Delivers a host message the way the CLI reports it: written to the
+/// driver, then waited for until the driver accepts or refuses it.
 async fn deliver_cli_message(
     managed: &ManagedConversation,
     record: MessageRecord,
 ) -> anyhow::Result<MessageRecord> {
     let client = host_session_client(&managed.environment).await?;
-    if !create_message(&managed.dir, &record)? {
-        anyhow::bail!("message ID {} already exists", record.id);
-    }
     let id = record.id.clone();
-    let line = control_line(&record.driver_id, &id)?;
-    if let Err(error) = client.send_input(&record.target_session_id, line).await {
-        let definitive = send_error_is_definitive(&error);
-        let record = update_message(&managed.dir, &id, |r| {
-            // The receiver's durable acceptance wins over a lost pipe ACK.
-            apply_delivery_failure(r, definitive, &error.to_string());
-        })?;
-        if let Some(failure) = message_failure(&record) {
-            return Err(failure);
-        }
-        if record.state.rank() < MessageState::Accepted.rank() {
-            anyhow::bail!(
+    match write_host_message(&client, &managed.dir, &record).await? {
+        Delivery::Written => await_acceptance(&managed.dir, &id).await,
+        Delivery::Failed(record) => Err(message_failure(&record).unwrap_or_else(|| {
+            anyhow::anyhow!(
                 "message {id} is {}: {}",
                 record.state.name(),
                 record.error.as_deref().unwrap_or("delivery failed")
-            );
-        }
-        return await_acceptance(&managed.dir, &id).await;
+            )
+        })),
     }
-    update_message(&managed.dir, &id, |r| {
+}
+
+/// How far a host message got toward its driver.
+enum Delivery {
+    /// Its control line reached the driver's pipe, or the driver accepted it
+    /// although the write reported a failure: the driver decides it.
+    Written,
+    /// The write failed and the message ended: `error` when the driver cannot
+    /// have read it, `unknown` when it may have. It is never sent again.
+    Failed(Box<MessageRecord>),
+}
+
+/// Records the message once and writes its control line to the driver. It
+/// does not wait for the driver: a driver blocked in its agent can take
+/// longer to accept a message than any caller should wait.
+async fn write_host_message(
+    client: &codewire_daemon::client::SessionClient,
+    dir: &Path,
+    record: &MessageRecord,
+) -> anyhow::Result<Delivery> {
+    if !create_message(dir, record)? {
+        anyhow::bail!("message ID {} already exists", record.id);
+    }
+    let id = &record.id;
+    let line = control_line(&record.driver_id, id)?;
+    if let Err(error) = client.send_input(&record.target_session_id, line).await {
+        let definitive = send_error_is_definitive(&error);
+        let record = update_message(dir, id, |r| {
+            // The receiver's durable acceptance wins over a lost pipe ACK.
+            apply_delivery_failure(r, definitive, &error.to_string());
+        })?;
+        let ended = message_failure(&record).is_some()
+            || record.state.rank() < MessageState::Accepted.rank();
+        return Ok(if ended {
+            Delivery::Failed(Box::new(record))
+        } else {
+            Delivery::Written
+        });
+    }
+    update_message(dir, id, |r| {
         r.transition(MessageState::PipeWritten);
     })?;
-    await_acceptance(&managed.dir, &id).await
+    Ok(Delivery::Written)
 }
 
 async fn await_acceptance(dir: &Path, id: &str) -> anyhow::Result<MessageRecord> {
