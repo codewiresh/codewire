@@ -81,6 +81,9 @@ mod linux {
     const STORE: &str = "/home/codewire/.local/share/codewire/cli";
 
     pub(super) async fn main() -> anyhow::Result<()> {
+        if std::env::var("SMOKE_CW_MANAGED_AGENTS").as_deref() == Ok("only") {
+            return managed_only().await;
+        }
         let inputs = Inputs::open().context("admit all original journey inputs")?;
         let client = inputs
             .client()
@@ -339,14 +342,8 @@ mod linux {
             if let Some(journey) = &mut managed {
                 stage = "managed-controls-and-revocation";
                 journey.controls(&client).await?;
-                for (variable, prefix, worker) in [
-                    ("SMOKE_CW_MANAGED_OPENAI_CREDENTIAL", "kind-cw-openai-", 1),
-                    ("SMOKE_CW_MANAGED_ANTHROPIC_CREDENTIAL", "kind-cw-anthropic-", 2),
-                ] {
-                    let name = env(variable)?;
-                    ensure!(name.starts_with(prefix) && name.len() <= 100
-                        && name[prefix.len()..].bytes().all(|b| b.is_ascii_digit() || b == b'-'),
-                        "managed fixture credential name is outside the owned synthetic namespace");
+                for (variable, prefix, worker) in MANAGED_CREDENTIALS {
+                    let name = managed_credential(variable, prefix)?;
                     inputs.cli_json::<serde_json::Value>(&[
                         "credentials", "--platform", "revoke", &name, "--output", "json",
                     ]).await.context("revoke the exact selected synthetic provider credential")?;
@@ -772,7 +769,8 @@ mod linux {
         release_a: ReleaseInput,
         release_b: ReleaseInput,
     }
-    struct Inputs {
+    /// The synthetic public route, login and pinned CLI every journey uses.
+    struct Access {
         org: String,
         environment: String,
         base: String,
@@ -780,6 +778,12 @@ mod linux {
         token: String,
         cli: Held,
         home: PathBuf,
+        references: Vec<Held>,
+    }
+    /// Access plus the admitted support, A and B producers of the ordinary
+    /// CW update journey.
+    struct Inputs {
+        access: Access,
         support: Payload,
         a: Payload,
         b: Payload,
@@ -787,7 +791,13 @@ mod linux {
         witness_sha256: String,
         references: Vec<Held>,
     }
-    impl Inputs {
+    impl std::ops::Deref for Inputs {
+        type Target = Access;
+        fn deref(&self) -> &Access {
+            &self.access
+        }
+    }
+    impl Access {
         fn open() -> anyhow::Result<Self> {
             let org = env("SMOKE_ORG_ID")?;
             ensure!(
@@ -838,6 +848,32 @@ mod linux {
                             && s.mode & 0o7777 == 0o700),
                 "synthetic CLI config parent is not owner-private"
             );
+            let mut references = vec![probe_file];
+            if let Some(held) = ca_file {
+                references.push(held);
+            }
+            Ok(Self {
+                org,
+                environment,
+                base,
+                ca,
+                token,
+                cli,
+                home,
+                references,
+            })
+        }
+        fn recheck(&self) -> anyhow::Result<()> {
+            self.cli.recheck()?;
+            for held in &self.references {
+                held.recheck()?;
+            }
+            Ok(())
+        }
+    }
+    impl Inputs {
+        fn open() -> anyhow::Result<Self> {
+            let access = Access::open()?;
             let a = Payload::open(
                 PathBuf::from(env("SMOKE_CW_RELEASE_A")?),
                 &env("SMOKE_CW_SHA256_A")?,
@@ -897,18 +933,8 @@ mod linux {
                     references.push(held);
                 }
             }
-            references.push(probe_file);
-            if let Some(held) = ca_file {
-                references.push(held);
-            }
             Ok(Self {
-                org,
-                environment,
-                base,
-                ca,
-                token,
-                cli,
-                home,
+                access,
                 support,
                 a,
                 b,
@@ -918,7 +944,7 @@ mod linux {
             })
         }
         fn recheck(&self) -> anyhow::Result<()> {
-            self.cli.recheck()?;
+            self.access.recheck()?;
             self.support.recheck()?;
             self.a.recheck()?;
             self.b.recheck()?;
@@ -928,6 +954,14 @@ mod linux {
             }
             Ok(())
         }
+        async fn cli_json<T: serde::de::DeserializeOwned>(
+            &self,
+            args: &[&str],
+        ) -> anyhow::Result<T> {
+            self.access.cli_json(args, &|| self.recheck()).await
+        }
+    }
+    impl Access {
         fn client(&self) -> anyhow::Result<CodewireClient> {
             let config = ClientConfig::new(&self.base)?
                 .with_user_agent("codewire-platform-cw-runtime-smoke/1")?;
@@ -941,11 +975,14 @@ mod linux {
                 Ok(CodewireClient::new(config, token)?)
             }
         }
+        /// Run the pinned CLI once; `recheck` admits every held input before
+        /// and after it.
         async fn cli_json<T: serde::de::DeserializeOwned>(
             &self,
             args: &[&str],
+            recheck: &(dyn Fn() -> anyhow::Result<()> + Sync),
         ) -> anyhow::Result<T> {
-            self.recheck()?;
+            recheck()?;
             let mut command = tokio::process::Command::new(&self.cli.path);
             command
                 .args(args)
@@ -978,7 +1015,7 @@ mod linux {
                 );
                 let decoded = serde_json::from_slice(&out)
                     .context("public CLI omitted its typed JSON receipt")?;
-                self.recheck()?;
+                recheck()?;
                 Ok::<_, anyhow::Error>(decoded)
             })
             .await;
@@ -1279,9 +1316,108 @@ mod linux {
         );
         Ok(())
     }
+    /// The synthetic provider credential each managed worker kind selects.
+    const MANAGED_CREDENTIALS: [(&str, &str, usize); 2] = [
+        ("SMOKE_CW_MANAGED_OPENAI_CREDENTIAL", "kind-cw-openai-", 1),
+        (
+            "SMOKE_CW_MANAGED_ANTHROPIC_CREDENTIAL",
+            "kind-cw-anthropic-",
+            2,
+        ),
+    ];
+
+    fn managed_credential(variable: &str, prefix: &str) -> anyhow::Result<String> {
+        let name = env(variable)?;
+        ensure!(
+            name.starts_with(prefix)
+                && name.len() <= 100
+                && name[prefix.len()..]
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || b == b'-'),
+            "managed fixture credential name is outside the owned synthetic namespace"
+        );
+        Ok(name)
+    }
+
+    /// The managed-agent journey without the ordinary CW A/B/A update, for a
+    /// retained Kind cluster (`make kind-test SUITES=cw-managed-agents`). It
+    /// runs against whatever daemon image the environment's Pod reports, so it
+    /// admits no release producers and claims no CW update: launch, steer and
+    /// interrupt, revoked-provider denial, known-clean Stop, explicit Restart.
+    async fn managed_only() -> anyhow::Result<()> {
+        let access = Access::open().context("admit the managed journey inputs")?;
+        let client = access
+            .client()
+            .context("configure the synthetic public client")?;
+        let initial = status(&client, &access).await?;
+        let original = initial
+            .incarnation
+            .as_option()
+            .context("runtime status omitted the Pod incarnation")?
+            .clone();
+        let image = initial
+            .bootstrap_identity
+            .as_option()
+            .context("runtime status omitted the daemon image identity")?
+            .clone();
+        tokio::time::timeout(JOURNEY_BUDGET, async {
+            let mut journey = super::platform_managed::Journey::launch(
+                &client,
+                &access.org,
+                &access.environment,
+                &original,
+                &image,
+            )
+            .await?;
+            journey.validate_scope(&original, &image)?;
+            journey.begin_continuity(&client).await?;
+            journey.checkpoint(&client, "managed-only").await?;
+            journey.controls(&client).await?;
+            for (variable, prefix, worker) in MANAGED_CREDENTIALS {
+                let name = managed_credential(variable, prefix)?;
+                access
+                    .cli_json::<serde_json::Value>(
+                        &[
+                            "credentials",
+                            "--platform",
+                            "revoke",
+                            &name,
+                            "--output",
+                            "json",
+                        ],
+                        &|| access.recheck(),
+                    )
+                    .await
+                    .context("revoke the exact selected synthetic provider credential")?;
+                journey.revoked(&client, worker).await?;
+            }
+            journey.stop(&client).await?;
+            let reconnected = access.client()?;
+            journey.restart(&client, &reconnected).await?;
+            access.recheck()?;
+            ensure!(
+                status(&client, &access).await?.incarnation.as_option() == Some(&original),
+                "the managed journey changed the environment's Pod incarnation"
+            );
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "schema_version": 1, "outcome": "passed", "environment_id": access.environment,
+                    "incarnation": original, "daemon_image": image,
+                    "managed_agents_qualified": true, "managed_only": true,
+                    "not_claimed": ["ordinary_CW_A_B_A", "admitted_release_producers",
+                        "original_kernel_processes", "live_providers"]
+                }))?
+            );
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .context("bounded managed journey expired")?
+    }
+
     async fn status(
         client: &CodewireClient,
-        inputs: &Inputs,
+        inputs: &Access,
     ) -> anyhow::Result<GetEnvironmentCwRuntimeResponse> {
         client
             .get_environment_cw_runtime(GetEnvironmentCwRuntimeRequest {

@@ -1295,6 +1295,39 @@ source "$SANDBOX_SUPPLY_CHAIN"
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$RUNTIME_ACCEPTANCE"
 
+# The retained managed-agent journey runs on the product's pinned workspace
+# image (#2694): a node without it fails, naming make kind-runtime-images.
+pinned_workspace="$(sed -n 's/^pub const HARBOR_IMAGE: &str = "\(.*\)";$/\1/p' \
+  "$ROOT/crates/codewire-workspace-image/src/pin.rs")"
+pinned_output="$(
+  kind() { printf 'fixture-control-plane\n'; }
+  docker() { printf 'other@sha256:%064d\n%s\n' 0 "$pinned_workspace"; }
+  KIND_CLUSTER_NAME=fixture retained_managed_workspace_image
+)"
+[ "$pinned_output" = "$pinned_workspace" ] ||
+  fail "the retained managed journey did not select the pinned workspace image: ${pinned_output}"
+# A node lists far more images than a pipe holds; finding the pin early must
+# not turn the rest of the listing into a failed check.
+pinned_output="$(
+  kind() { printf 'fixture-control-plane\n'; }
+  docker() {
+    printf '%s\n' "$pinned_workspace"
+    printf 'other@sha256:%064d\n' $(seq 1 4000)
+  }
+  KIND_CLUSTER_NAME=fixture retained_managed_workspace_image
+)" || fail 'the retained managed journey refused a node listing the pin before other images'
+[ "$pinned_output" = "$pinned_workspace" ] ||
+  fail "the retained managed journey did not select the pinned workspace image from a long listing: ${pinned_output}"
+if missing_output="$(
+  kind() { printf 'fixture-control-plane\n'; }
+  docker() { printf 'localhost/codewire-ci/workspace:source-fixture\n'; }
+  KIND_CLUSTER_NAME=fixture retained_managed_workspace_image 2>&1
+)"; then
+  fail 'the retained managed journey accepted a node without the pinned workspace image'
+fi
+grep -Fq 'run make kind-runtime-images' <<<"$missing_output" ||
+  fail "a missing pinned workspace image did not name its remedy: ${missing_output}"
+
 # A browser prerequisite failure preserves its status and stops before the
 # temp runtime, host lock, image build or cluster lifecycle begins.
 : >"$CALLS"

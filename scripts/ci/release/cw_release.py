@@ -468,8 +468,8 @@ def check_build_inputs(root, depinfo, allowed_outside, embedded=None):
     output, and the Cargo home for lockfile-checksummed dependency sources) are
     not repository inputs. `embedded` maps an exact canonical file outside the
     repository to the SHA-256 it was verified with: the local VM runtime
-    document the macOS arm64 cw embeds (#2539). Each one must be compiled in
-    and still hold exactly those bytes. Anything else is refused.
+    document every release cw embeds (#2539, #2733). Each one must be compiled
+    in and still hold exactly those bytes. Anything else is refused.
     """
     names = source_inputs(root)
     inventory = source_directory_inventory(root, names)
@@ -516,7 +516,7 @@ def admit_build(root, executable, depinfo, target, version, revision, tree_befor
     """Admit one freshly built cw: unchanged source, digested inputs and its record."""
     require(head_revision(root) == revision and source_tree_sha256(root) == tree_before,
             "source changed during the build; no identity is emitted")
-    require(not embedded or target == LOCAL_RUNTIME_TARGET, "only the macOS arm64 cw embeds a local runtime")
+    require(len(embedded or {}) <= 1, "a cw embeds at most one local runtime document")
     inputs = check_build_inputs(root, depinfo, allowed_outside, embedded)
     data = read_regular(executable, MAX_EXECUTABLE)
     return data, make_identity(data, target, version, revision, tree_before, rustc, targets), inputs
@@ -593,8 +593,17 @@ MAX_OBJECT = MAX_EXECUTABLE + 8 * 1024 * 1024
 MAX_RUNTIME_COMPONENTS = 32
 MAX_RUNTIME_TEXT = 128
 RUNTIME_PLATFORMS = ("linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64")
-# The release target whose cw must embed a delivery's runtime.
+# The release target whose cw recovery reads a published runtime from; every
+# release cw embeds the same document (#2733).
 LOCAL_RUNTIME_TARGET = "aarch64-apple-darwin"
+# The guest cw a target's sealed cw runtime holds (#2733).
+CW_RUNTIME_GUEST_TARGETS = {"linux-x86_64": "x86_64-unknown-linux-musl",
+                            "linux-aarch64": "aarch64-unknown-linux-musl",
+                            "macos-aarch64": "aarch64-unknown-linux-musl"}
+# A sealed cw runtime pack (scripts/ci/release/cw-runtime-image.py pack).
+CW_RUNTIME_PACK_MAGIC = b"CWRPACK1"
+CW_RUNTIME_MAX_PROVENANCE = 16 * 1024
+CW_RUNTIME_MAX_BYTES = 256 * 1024 * 1024
 SPEC_FIELDS = {"path", "size", "sha256", "architecture"}
 
 
@@ -723,6 +732,71 @@ def check_macos_helper(data, entitlements=None):
     require(actual == expected, "helper entitlements are not exactly the virtualization entitlement")
 
 
+def check_cw_runtime_pack(lock_bytes, pack_bytes, target, revision, version=None):
+    """A sealed cw runtime for `target` built from `revision`; returns its cw.
+
+    The lock binds the pack, the pack's provenance binds its image and cw, and
+    the cw is a static ELF of the guest target whose build record names that
+    target, the revision and, when given, the release version. It embeds no
+    local runtime document: a blob the document pins must never hold the cw
+    that embeds the document.
+    """
+    lock = parse_json(lock_bytes)
+    entry = lock.get("pack") if isinstance(lock, dict) else None
+    require(isinstance(lock, dict) and set(lock) == {"schema_version", "image_index_sha256", "pack"}
+            and exact(lock["schema_version"], 1) and is_hex(lock["image_index_sha256"], 64)
+            and isinstance(entry, dict) and set(entry) == {"path", "size", "sha256"}
+            and entry["path"] == "runtime.pack" and type(entry["size"]) is int and is_hex(entry["sha256"], 64),
+            "cw runtime lock is not a schema 1 lock")
+    require(len(pack_bytes) == entry["size"] and sha256(pack_bytes) == entry["sha256"],
+            "cw runtime pack does not match its lock")
+    require(len(pack_bytes) >= 24 and pack_bytes[:8] == CW_RUNTIME_PACK_MAGIC, "cw runtime pack has invalid framing")
+    provenance_size, payload_size = struct.unpack_from("<QQ", pack_bytes, 8)
+    require(1 <= provenance_size <= CW_RUNTIME_MAX_PROVENANCE and 64 <= payload_size <= CW_RUNTIME_MAX_BYTES
+            and 24 + provenance_size + payload_size == len(pack_bytes), "cw runtime pack has invalid framing")
+    payload = pack_bytes[24 + provenance_size:]
+    provenance = parse_json(pack_bytes[24:24 + provenance_size])
+    identity = provenance.get("payload") if isinstance(provenance, dict) else None
+    require(isinstance(identity, dict) and provenance.get("image_index_sha256") == lock["image_index_sha256"]
+            and identity.get("target") == target and identity.get("source_revision") == revision
+            and identity.get("sha256") == sha256(payload) and identity.get("size") == len(payload),
+            f"cw runtime provenance does not bind its image and a {target} cw from {revision}")
+    check_header(target, payload)
+    check_static_elf(payload)
+    record = build_record(payload)
+    require(record["target"] == target and record["source_revision"] == revision,
+            f"cw runtime's cw names {record['target']} from {record['source_revision']}")
+    require(version is None or record["package_version"] == version,
+            f"cw runtime's cw is version {record['package_version']}, not {version}")
+    require(embedded_local_runtime(payload) is None, "cw runtime's cw embeds a local runtime document")
+    return payload
+
+
+def check_linux_runtime_files(platform, lock, blobs):
+    """The Linux counterpart of check_macos_helper: what a Linux host runs.
+
+    Cloud Hypervisor and virtiofsd are static ELF executables of the target's
+    architecture; the kernel is that architecture's boot image.
+    """
+    architecture = platform.rsplit("-", 1)[1]
+    target = f"{architecture}-unknown-linux-musl"
+    for key in ("cloud_hypervisor", "virtiofsd"):
+        if lock.get(key) is None:
+            continue
+        data = read_regular(blobs / lock[key]["sha256"], MAX_OBJECT)
+        try:
+            check_header(target, data)
+            check_static_elf(data)
+        except (ReleaseError, IndexError, struct.error) as error:
+            raise ReleaseError(f"local runtime {key} is not a static {architecture} ELF: {error}") from None
+    kernel = read_regular(blobs / lock["kernel"]["sha256"], MAX_OBJECT)
+    if architecture == "x86_64":
+        require(len(kernel) >= 0x206 and kernel[510:512] == b"\x55\xaa" and kernel[0x202:0x206] == b"HdrS",
+                "local runtime kernel is not an x86 bzImage")
+    else:
+        require(len(kernel) >= 0x40 and kernel[0x38:0x3C] == b"ARM\x64", "local runtime kernel is not an arm64 Image")
+
+
 def local_runtime_blobs(document):
     """Validate a canonical local runtime document; return every blob it pins.
 
@@ -832,11 +906,50 @@ def load_local_runtime_dir(root):
     return document, pinned
 
 
-def check_local_runtime(dist, executables, identities):
-    """A delivery publishes its runtime exactly when its macOS arm64 cw embeds one.
+def merge_local_runtimes(output, directories):
+    """One local runtime directory holding the targets of several (#2733).
 
-    Every executable that embeds a document embeds this one, made from the same
-    source revision, so no released cw names a runtime this release lacks.
+    Each input is a checked local runtime directory of the same source
+    revision with targets no other input has: the macOS runtime and the linux
+    fragment. The output holds the one canonical document every release cw
+    embeds and exactly the blobs it pins, and is checked like any other.
+    """
+    output = Path(output)
+    require(directories, "no local runtime to merge")
+    require(not output.exists() and output.is_absolute(), "merge output must be a new absolute path")
+    loaded = []
+    for directory in directories:
+        local = load_local_runtime_dir(directory)
+        require(local is not None, f"{directory} is not a local runtime directory")
+        loaded.append((Path(directory), json.loads(local[0]), local[1]))
+    revisions = {value["source_revision"] for _, value, _ in loaded}
+    require(len(revisions) == 1, "local runtimes to merge name different source revisions")
+    targets, origin = {}, {}
+    for directory, value, pinned in loaded:
+        for platform, target in value["targets"].items():
+            require(platform not in targets, f"local runtime target {platform} is in more than one input")
+            targets[platform] = target
+        for digest, _size in pinned:
+            origin.setdefault(digest, directory)
+    document = canonical({"schema": LOCAL_RUNTIME_SCHEMA, "source_revision": revisions.pop(), "targets": targets})
+    require(len(document) <= MAX_JSON, "merged local runtime document exceeds its bound")
+    blobs = output / "blobs" / "sha256"
+    blobs.mkdir(mode=0o755, parents=True)
+    for digest, _size in local_runtime_blobs(document):
+        shutil.copyfile(origin[digest] / "blobs" / "sha256" / digest, blobs / digest)
+    write_new(output / LOCAL_RUNTIME_NAME, document)
+    merged = load_local_runtime_dir(output)
+    require(merged is not None and merged[0] == document, "merged local runtime does not verify")
+    return document, merged[1]
+
+
+def check_local_runtime(dist, executables, identities):
+    """A delivery publishes its runtime exactly when its cws embed one (#2733).
+
+    Every release cw embeds exactly this document, made from the same source
+    revision, so no released cw names a runtime this release lacks. What each
+    target runs on its host is checked, and each sealed cw runtime holds a
+    guest cw of this release that is none of the released executables.
     """
     local = load_local_runtime(dist)
     embedded = {target: embedded_local_runtime(data) for target, data in executables.items()}
@@ -845,17 +958,30 @@ def check_local_runtime(dist, executables, identities):
                 "a cw embeds a local runtime the delivery does not carry")
         return None
     document, pinned = local
-    require(embedded.get(LOCAL_RUNTIME_TARGET) == document,
-            f"the {LOCAL_RUNTIME_TARGET} cw does not embed the delivery's local runtime")
-    require(all(found in (None, document) for found in embedded.values()),
-            "a cw embeds a different local runtime")
-    require(json.loads(document)["source_revision"] == identities[LOCAL_RUNTIME_TARGET]["source_revision"],
-            "local runtime source revision differs from the cw that embeds it")
+    missing = sorted(target for target, found in embedded.items() if found != document)
+    require(not missing, f"every release cw must embed the delivery's local runtime; {missing} do not")
+    value = json.loads(document)
+    revision = value["source_revision"]
+    require(all(identity["source_revision"] == revision for identity in identities.values()),
+            "local runtime source revision differs from the cws that embed it")
+    versions = {identity["package_version"] for identity in identities.values()}
+    require(len(versions) == 1, "the cws that embed the local runtime disagree on their version")
+    version = versions.pop()
+    released = {sha256(data) for data in executables.values()}
     blobs = local_runtime_paths(dist)[2]
-    for platform, target in json.loads(document)["targets"].items():
+    for platform, target in value["targets"].items():
         if platform.startswith("macos-"):
             helper = target["lock"]["vz_runner"]["sha256"]
             check_macos_helper(read_regular(blobs / helper, MAX_OBJECT))
+        else:
+            check_linux_runtime_files(platform, target["lock"], blobs)
+        if "cw_runtime" in target:
+            lock = read_regular(blobs / target["cw_runtime"]["lock"]["sha256"], MAX_JSON)
+            pack = read_regular(blobs / target["cw_runtime"]["pack"]["sha256"], MAX_OBJECT)
+            guest = check_cw_runtime_pack(lock, pack, CW_RUNTIME_GUEST_TARGETS[platform], revision, version)
+            # Implied by the guest embedding no document while every released
+            # cw embeds one; kept as the stated invariant.
+            require(sha256(guest) not in released, f"the {platform} cw runtime holds a released cw")
     return document, pinned
 
 
@@ -1281,6 +1407,10 @@ def main(argv=None):
     runtime = sub.add_parser("local-runtime", help="check a local runtime directory before a cw embeds it")
     runtime.add_argument("--dir", type=Path, required=True)
     runtime.add_argument("--source-sha", required=True)
+    merge = sub.add_parser("merge-local-runtime",
+                           help="write one local runtime holding the targets of several (#2733)")
+    merge.add_argument("--output", type=Path, required=True)
+    merge.add_argument("--dir", type=Path, action="append", required=True)
     admit = sub.add_parser("admit")
     admit.add_argument("--source-root", type=Path, required=True)
     admit.add_argument("--executable", type=Path, required=True)
@@ -1292,7 +1422,7 @@ def main(argv=None):
     admit.add_argument("--target-dir", type=Path, required=True)
     admit.add_argument("--cargo-home", type=Path, required=True)
     admit.add_argument("--embedded-runtime", metavar="PATH=SHA256",
-                       help="the verified local runtime document the macOS arm64 cw embeds, with its SHA-256")
+                       help="the verified local runtime document every release cw embeds, with its SHA-256")
     args = parser.parse_args(argv)
     try:
         if args.command == "source-digest":
@@ -1341,6 +1471,10 @@ def main(argv=None):
             require(json.loads(document)["source_revision"] == args.source_sha,
                     "local runtime was built from another source revision")
             print(f"cw-release: local runtime document_sha256={sha256(document)} blobs={len(pinned)}")
+        elif args.command == "merge-local-runtime":
+            document, pinned = merge_local_runtimes(args.output, args.dir)
+            print(f"cw-release: merged local runtime document_sha256={sha256(document)} blobs={len(pinned)} "
+                  f"targets={','.join(sorted(json.loads(document)['targets']))}")
         elif args.command == "admit":
             rustc = toolchain_rustc(args.source_root, subprocess.check_output(
                 ["rustc", "--version"], cwd=args.source_root, text=True))

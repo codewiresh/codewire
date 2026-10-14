@@ -259,10 +259,15 @@ class DeliveryTest(unittest.TestCase):
         data, identity, inputs = release.admit_build(source, executable, depinfo, target, fx.VERSION, revision, tree,
                                                      fx.RUSTC, (base / "target",))
         self.assertEqual((identity["sha256"], identity["source_tree_sha256"], inputs), (fx.digest(data), tree, 1))
-        # Only the macOS arm64 cw may embed a local runtime document.
-        with self.assertRaisesRegex(release.ReleaseError, "only the macOS arm64 cw embeds a local runtime"):
+        # Any release cw may embed the one local runtime document (#2733), and
+        # only as a verified input that was compiled in.
+        with self.assertRaisesRegex(release.ReleaseError, "was not compiled into the executable"):
             release.admit_build(source, executable, depinfo, target, fx.VERSION, revision, tree, fx.RUSTC,
                                 (base / "target",), embedded={(base / "local-runtime.json").resolve(): "0" * 64})
+        with self.assertRaisesRegex(release.ReleaseError, "at most one local runtime document"):
+            release.admit_build(source, executable, depinfo, target, fx.VERSION, revision, tree, fx.RUSTC,
+                                (base / "target",), embedded={(base / "a/local-runtime.json").resolve(): "0" * 64,
+                                                              (base / "b/local-runtime.json").resolve(): "1" * 64})
         (source / "crates/demo/src/lib.rs").write_text("pub fn mutated() {}\n")
         with self.assertRaisesRegex(release.ReleaseError, "source changed during the build"):
             release.admit_build(source, executable, depinfo, target, fx.VERSION, revision, tree, fx.RUSTC,
@@ -717,7 +722,7 @@ class SourceDigestTest(unittest.TestCase):
 
 
 class LocalRuntimeTest(unittest.TestCase):
-    """The local VM runtime a release's macOS cw embeds (#2539)."""
+    """The local VM runtime every release cw embeds (#2539, #2733)."""
 
     FIXTURES = ROOT / "crates/codewire-cw-release/src/local_runtime/fixtures"
 
@@ -750,14 +755,128 @@ class LocalRuntimeTest(unittest.TestCase):
             with self.subTest(fixture=path.name), self.assertRaises(release.ReleaseError):
                 release.local_runtime_blobs(path.read_bytes())
 
-    def test_a_delivery_carries_exactly_the_runtime_its_macos_cw_embeds(self):
+    def test_a_delivery_carries_exactly_the_runtime_every_cw_embeds(self):
         result = release.verify_delivery(self.dist, self.signer.trust)
         document = release.local_runtime_paths(self.dist)[1].read_bytes()
         self.assertTrue(result["signed"])
-        self.assertEqual(result["local_runtime"], {"document_sha256": fx.digest(document), "blobs": 12})
-        darwin = (self.dist / release.asset_name(fx.VERSION, release.LOCAL_RUNTIME_TARGET)).read_bytes()
-        self.assertEqual(release.embedded_local_runtime(darwin), document)
+        self.assertEqual(result["local_runtime"], {"document_sha256": fx.digest(document), "blobs": 21})
+        self.assertEqual(sorted(json.loads(document)["targets"]), ["linux-x86_64", "macos-aarch64"])
+        for target in release.RELEASE_TARGETS:
+            with self.subTest(target=target):
+                data = (self.dist / release.asset_name(fx.VERSION, target)).read_bytes()
+                self.assertEqual(release.embedded_local_runtime(data), document)
         self.assertNotIn("local_runtime", release.verify_delivery(self.plain))
+
+    def check(self, dist, embedded=None):
+        """check_local_runtime over this delivery's identities, with every cw
+        rebuilt to embed `embedded` (by default the delivery's document)."""
+        document = release.local_runtime_paths(dist)[1].read_bytes()
+        identities = {target: json.loads((release.delivery_paths(dist)["identities"] / f"{target}.json").read_bytes())
+                      for target in release.RELEASE_TARGETS}
+        executables = {target: fx.executable(target, revision=identity["source_revision"],
+                                             tree=identity["source_tree_sha256"],
+                                             embedded=(embedded or {}).get(target, document))
+                       for target, identity in identities.items()}
+        return release.check_local_runtime(dist, executables, identities)
+
+    def test_every_release_cw_embeds_the_document(self):
+        self.assertIsNotNone(self.check(self.dist))
+        revision = json.loads(release.local_runtime_paths(self.dist)[1].read_bytes())["source_revision"]
+        for name, other in (("none", b""), ("another", fx.local_runtime(revision, version="v0.4.3")[0])):
+            with self.subTest(embedded=name), self.assertRaisesRegex(
+                    release.ReleaseError, r"every release cw must embed .*'aarch64-unknown-linux-gnu'"):
+                self.check(self.dist, {"aarch64-unknown-linux-gnu": other})
+
+    def runtime_with(self, dist, platform, change):
+        """Rewrite one target of the delivery's runtime; `change` edits it and returns new blobs."""
+        document_path, blobs = release.local_runtime_paths(dist)[1:]
+        document = json.loads(document_path.read_bytes())
+        before = {digest for digest, _ in release.local_runtime_blobs(document_path.read_bytes())}
+        added = change(document["targets"][platform])
+        for data in added:
+            (blobs / fx.digest(data)).write_bytes(data)
+        data = release.canonical(document)
+        after = {digest for digest, _ in release.local_runtime_blobs(data)}
+        for digest in before - after:
+            (blobs / digest).unlink()
+        document_path.write_bytes(data)
+        return data
+
+    def test_the_linux_target_runs_only_static_executables_and_a_bzimage(self):
+        def swap(key, data):
+            def change(target):
+                target["lock"][key].update(sha256=fx.digest(data), size=len(data))
+                return [data]
+            return change
+
+        for name, key, data, reason in (
+            ("dynamic Cloud Hypervisor", "cloud_hypervisor",
+             fx.executable("x86_64-unknown-linux-musl", static=False, tag=b"ch"), "cloud_hypervisor is not a static"),
+            ("arm64 virtiofsd", "virtiofsd", fx.executable("aarch64-unknown-linux-musl", tag=b"fs"),
+             "virtiofsd is not a static x86_64"),
+            ("not a bzImage", "kernel", b"\0" * 4096, "not an x86 bzImage"),
+        ):
+            with self.subTest(case=name):
+                dist = self.copy(self.dist, "-" + name.replace(" ", "-"))
+                self.runtime_with(dist, "linux-x86_64", swap(key, data))
+                with self.assertRaisesRegex(release.ReleaseError, reason):
+                    self.check(dist)
+
+    def test_each_cw_runtime_holds_a_guest_cw_of_this_release(self):
+        revision = json.loads(release.local_runtime_paths(self.dist)[1].read_bytes())["source_revision"]
+        x86 = "x86_64-unknown-linux-musl"
+        # A released cw is never a guest cw: every released cw embeds the
+        # document, and a guest cw that embeds one is refused below.
+        cases = (
+            ("another target", fx.cw_runtime(x86, revision, payload=fx.executable(
+                "aarch64-unknown-linux-musl", revision=revision)), "provenance does not bind|is not a x86_64"),
+            ("another revision", fx.cw_runtime(x86, "e" * 40), "provenance does not bind"),
+            ("another version", fx.cw_runtime(x86, revision, version="v0.4.3"), "is version v0.4.3"),
+            ("dynamic", fx.cw_runtime(x86, revision, payload=fx.executable(x86, static=False, revision=revision)),
+             "dynamic interpreter"),
+            ("embeds a runtime", fx.cw_runtime(x86, revision, payload=fx.executable(
+                x86, revision=revision, embedded=fx.local_runtime(revision)[0])), "embeds a local runtime"),
+        )
+        for name, (lock, pack), reason in cases:
+            def change(target, lock=lock, pack=pack):
+                target["cw_runtime"] = {"lock": {"sha256": fx.digest(lock), "size": len(lock)},
+                                        "pack": {"sha256": fx.digest(pack), "size": len(pack)}}
+                return [lock, pack]
+
+            with self.subTest(case=name):
+                dist = self.copy(self.dist, "-" + name.replace(" ", "-"))
+                self.runtime_with(dist, "linux-x86_64", change)
+                with self.assertRaisesRegex(release.ReleaseError, reason):
+                    self.check(dist)
+
+    def test_runtimes_merge_into_one_document_of_disjoint_targets(self):
+        revision = "a" * 40
+        document, files = fx.local_runtime(revision)
+        value = json.loads(document)
+        parts = []
+        for platform in ("macos-aarch64", "linux-x86_64"):
+            part = release.canonical({"schema": release.LOCAL_RUNTIME_SCHEMA, "source_revision": revision,
+                                      "targets": {platform: value["targets"][platform]}})
+            directory = self.base / f"merge-{self.id().rsplit('.', 1)[-1]}-{platform}"
+            (directory / "blobs/sha256").mkdir(parents=True)
+            (directory / "local-runtime.json").write_bytes(part)
+            for digest, _size in release.local_runtime_blobs(part):
+                (directory / "blobs/sha256" / digest).write_bytes(files[digest])
+            parts.append(directory)
+        output = self.base / "merged-runtime"
+        merged, pinned = release.merge_local_runtimes(output, parts)
+        self.assertEqual(merged, document)
+        self.assertEqual(len(pinned), 21)
+        self.assertEqual(release.load_local_runtime_dir(output)[0], document)
+        with self.assertRaisesRegex(release.ReleaseError, "in more than one input"):
+            release.merge_local_runtimes(self.base / "merged-twice", [parts[0], parts[0]])
+        other = self.base / "merge-other-revision"
+        shutil.copytree(parts[1], other)
+        changed = json.loads((other / "local-runtime.json").read_bytes())
+        changed["source_revision"] = "d" * 40
+        (other / "local-runtime.json").write_bytes(release.canonical(changed))
+        with self.assertRaisesRegex(release.ReleaseError, "different source revisions"):
+            release.merge_local_runtimes(self.base / "merged-revisions", [parts[0], other])
 
     def test_a_cw_that_embeds_a_runtime_is_never_released_without_it(self):
         dist = self.copy(self.dist)
@@ -769,7 +888,7 @@ class LocalRuntimeTest(unittest.TestCase):
         dist = self.copy(self.plain)
         identity = json.loads((release.delivery_paths(dist)["identities"] / "aarch64-apple-darwin.json").read_bytes())
         fx.write_local_runtime(dist, *fx.local_runtime(identity["source_revision"]))
-        with self.assertRaisesRegex(release.ReleaseError, "does not embed"):
+        with self.assertRaisesRegex(release.ReleaseError, "must embed"):
             release.verify_delivery(dist)
 
     def test_runtime_files_are_exactly_the_pinned_blobs(self):

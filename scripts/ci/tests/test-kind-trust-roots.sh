@@ -13,16 +13,30 @@ FIXTURE="$(mktemp -d)"
 trap 'rm -rf "$FIXTURE"' EXIT
 fail() { echo "test-kind-trust-roots: $*" >&2; exit 1; }
 
-# One self-signed certificate per name; an expired one when asked.
+# One self-signed certificate per name; an expired one when asked. `req`
+# takes explicit validity dates only from OpenSSL 3.4, and the CI job image
+# has 3.0, so the expired one is self-signed by `openssl ca`, which has taken
+# -startdate/-enddate throughout.
 certificate() {
   local name="$1" expired="${2:-}"
-  local -a validity=(-days 2)
-  if [ -n "$expired" ]; then
-    validity=(-not_before 20200101000000Z -not_after 20200102000000Z)
+  if [ -z "$expired" ]; then
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -keyout "$FIXTURE/$name.key" -subj "/CN=$name" -days 2 \
+      -out "$FIXTURE/$name.crt" 2>/dev/null
+  else
+    local ca="$FIXTURE/ca-$name"
+    mkdir "$ca"
+    : >"$ca/index.txt"
+    printf '01\n' >"$ca/serial"
+    printf '%s\n' '[ca]' 'default_ca = fixture' '[fixture]' "database = $ca/index.txt" \
+      "serial = $ca/serial" "new_certs_dir = $ca" 'default_md = sha256' 'policy = any' \
+      '[any]' 'commonName = supplied' >"$ca/ca.cnf"
+    openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -keyout "$FIXTURE/$name.key" -subj "/CN=$name" -out "$ca/request.csr" 2>/dev/null
+    openssl ca -batch -config "$ca/ca.cnf" -selfsign -keyfile "$FIXTURE/$name.key" \
+      -in "$ca/request.csr" -startdate 20200101000000Z -enddate 20200102000000Z \
+      -notext -out "$FIXTURE/$name.crt" 2>/dev/null
   fi
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-    -keyout "$FIXTURE/$name.key" -subj "/CN=$name" "${validity[@]}" \
-    -out "$FIXTURE/$name.crt" 2>/dev/null
   cat "$FIXTURE/$name.crt"
 }
 fingerprints() {
@@ -33,7 +47,7 @@ fingerprints() {
   local file
   for file in "$FIXTURE"/fp-*.pem; do
     [ -e "$file" ] || continue
-    openssl x509 -in "$file" -noout -subject | sed 's/^subject=//'
+    openssl x509 -in "$file" -noout -subject -nameopt RFC2253 | sed 's/^subject=//'
     rm -f "$file"
   done
 }
