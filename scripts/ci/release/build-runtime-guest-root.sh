@@ -76,13 +76,14 @@ print(value)' "$pins" "$@"
 # target is given.
 targets="$(python3 -c 'import json, sys; print(" ".join(sorted(json.load(open(sys.argv[1]))["guest_root_builder"]["rust_std"])))' "$pins")"
 members=""
-for target in $targets; do
+# Not `target`: that is the guest root's own target, which the pins below read.
+for pinned in $targets; do
   found=""
   for file in ${rust_std[@]+"${rust_std[@]}"}; do
-    [ "$(sha256sum "$file" | cut -c1-64)" = "$(pin guest_root_builder rust_std "$target" sha256)" ] && found="$file"
+    [ "$(sha256sum "$file" | cut -c1-64)" = "$(pin guest_root_builder rust_std "$pinned" sha256)" ] && found="$file"
   done
-  [ -n "$found" ] || die "no --rust-std is the pinned $target tarball"
-  members="$members $found=rust-std-1.93.0-$target/rust-std-$target/lib/rustlib/$target"
+  [ -n "$found" ] || die "no --rust-std is the pinned $pinned tarball"
+  members="$members $found=rust-std-1.93.0-$pinned/rust-std-$pinned/lib/rustlib/$pinned"
 done
 [ "${#rust_std[@]}" = "$(wc -w <<<"$targets")" ] || die "give exactly one --rust-std per pinned target"
 [ "$(sha256sum "$protoc_zip" | cut -c1-64)" = "$(pin guest_root_builder protoc sha256)" ] ||
