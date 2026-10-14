@@ -188,6 +188,31 @@ cw_runtime_add_managed_credentials() {
   kind_credential_cli credentials --platform --profile "$profile_name" set anthropic "$anthropic_name"
 }
 
+# The product's pinned workspace image, which `make kind-runtime-images` loads
+# into every node by digest. A managed agent runs only on an image whose agent
+# clients match the daemon's pins. The retained cluster's recorded
+# source-built workspace image can be older than main's daemon; managed info
+# then refuses it (#2694), so the journey runs on the pinned image instead.
+retained_managed_workspace_image() {
+  local reference node images
+  reference="$(sed -n 's/^pub const HARBOR_IMAGE: &str = "\(.*\)";$/\1/p' \
+    "$ROOT/crates/codewire-workspace-image/src/pin.rs")"
+  if ! [[ "$reference" =~ ^registry\.example\.invalid/codewire/workspace@sha256:[0-9a-f]{64}$ ]]; then
+    echo '::error::crates/codewire-workspace-image/src/pin.rs names no pinned workspace image' >&2
+    return 1
+  fi
+  for node in $(kind get nodes --name "$KIND_CLUSTER_NAME"); do
+    # Read the whole listing first: grep -q stopping at the pin would end the
+    # listing with SIGPIPE, which pipefail reports as a missing image.
+    if ! images="$(docker exec "$node" ctr -n k8s.io images ls -q)" ||
+      ! grep -qxF "$reference" <<<"$images"; then
+      echo "::error::${node} lacks the pinned workspace image ${reference}; run make kind-runtime-images" >&2
+      return 1
+    fi
+  done
+  printf '%s\n' "$reference"
+}
+
 # The managed-agent journey alone on a retained cluster without a named
 # profile (#2672): the same synthetic providers, profile and no-network
 # environment as the admitted journey, then the smoke in managed-only mode
@@ -209,7 +234,7 @@ run_retained_managed_agents_journey() {
     echo '::error::the Kind smoke set lacks environment-cw-runtime-smoke; rebuild it before this suite' >&2
     return 1
   fi
-  workspace_image="$(kind_workspace_runtime_image)"
+  workspace_image="$(retained_managed_workspace_image)"
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-cw-managed.XXXXXX)"
   [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ]
   [ "$(stat -c '%u:%a' "$KIND_CREDENTIAL_CLI_HOME")" = "$(id -u):700" ]
