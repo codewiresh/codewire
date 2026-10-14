@@ -67,6 +67,11 @@ pub(super) fn terminate_workload(container_init: i32, grace: Duration) -> usize 
     let Some(namespace) = pid_namespace(container_init) else {
         return 0;
     };
+    // Only the container's own namespace: never the guest's services (the
+    // daemon, the network agent, Docker), which share this init's.
+    if std::fs::read_link("/proc/self/ns/pid").ok().as_deref() == Some(namespace.as_path()) {
+        return 0;
+    }
     let members = |namespace: &Path| -> Vec<i32> {
         processes()
             .into_iter()
