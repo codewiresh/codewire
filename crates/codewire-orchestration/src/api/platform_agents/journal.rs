@@ -286,6 +286,61 @@ impl ManagedJournal {
         self.admit_with(binding, user, mutation, Some(checked))
             .await
     }
+    /// The repeat of a Resume already admitted under the same request ID: it
+    /// is answered from that admission, exactly as any repeated request is,
+    /// and never admits anything new (#2705).
+    pub async fn repeat_resume(
+        &self,
+        binding: CapturedBindingFacts,
+        user: &AuthUser,
+        mutation: ManagedMutation,
+    ) -> AppResult<ManagedRequest> {
+        if mutation.action != ManagedAction::Resume {
+            return Err(invalid());
+        }
+        match self.admit_with(binding, user, mutation, None).await? {
+            Admission::Existing(saved) => Ok(*saved),
+            Admission::Owned { .. } => Err(conflict()),
+        }
+    }
+    /// The saved Resume with this request ID in this environment, whose
+    /// control-plane fields a repeat must carry to match its fingerprint.
+    /// `None` when the ID is new; any other saved request conflicts.
+    pub async fn saved_resume(
+        &self,
+        binding: &CapturedBindingFacts,
+        user: &AuthUser,
+        request_id: Uuid,
+    ) -> AppResult<Option<ManagedMutation>> {
+        let (j, b, u) = (self.clone(), binding.clone(), user.clone());
+        owned(async move {
+            let mut tx = j.pool.begin().await.map_err(|_| unavailable())?;
+            lock_cw_runtime_operator_in(
+                &mut tx,
+                &u,
+                &b.organization_id,
+                &b.environment_id,
+                j.flags,
+            )
+            .await?;
+            let saved = load(&mut tx, request_id, false).await?;
+            tx.commit().await.map_err(|_| unavailable())?;
+            let Some(saved) = saved else {
+                return Ok(None);
+            };
+            if saved.organization_id != b.organization_id
+                || saved.environment_id != b.environment_id
+            {
+                return Err(conflict());
+            }
+            let request = saved.decode()?;
+            if request.mutation.action != ManagedAction::Resume {
+                return Err(conflict());
+            }
+            Ok(Some(request.mutation))
+        })
+        .await
+    }
     async fn admit_with(
         &self,
         binding: CapturedBindingFacts,
@@ -293,7 +348,9 @@ impl ManagedJournal {
         mutation: ManagedMutation,
         checked: Option<ResumePredecessor>,
     ) -> AppResult<Admission> {
-        if (mutation.action == ManagedAction::Resume) != checked.is_some() {
+        // A new Resume needs its checked predecessor; without one, admission
+        // only answers a repeat (`admit_in` refuses to admit anything).
+        if mutation.action != ManagedAction::Resume && checked.is_some() {
             return Err(invalid());
         }
         mutation.validate_binding(&binding)?;
@@ -370,7 +427,7 @@ impl ManagedJournal {
                 Some(c) => {
                     c.require(b, m)?;
                     if c.active_request_id.is_some() || c.cleanup_request_id.is_some() {
-                        return Err(conflict());
+                        return Err(resume_refused(RESUME_IN_PROGRESS));
                     }
                     sqlx::query("UPDATE environment_platform_agent_conversations SET active_request_id=$4,updated_at=clock_timestamp() \
                         WHERE environment_id=$1 AND pod_uid=$2 AND session_id=$3")
@@ -758,6 +815,9 @@ impl ManagedJournal {
     }
 }
 
+const RESUME_IN_PROGRESS: &str =
+    "this conversation is already resuming in this environment; try again shortly";
+
 /// The predecessor is the Pod of the session's latest Completed Launch,
 /// Restart or Resume: the last Pod where a driver for it started. Every
 /// earlier such Pod was proven absent by the Resume that left it, and absence
@@ -768,18 +828,26 @@ async fn resume_predecessor_in(
     session_id: &str,
     driver_id: Uuid,
 ) -> AppResult<ResumePredecessor> {
+    // Organization first, so the (organization_id, environment_id,
+    // request_id) index serves these reads.
     const STARTS: &str = "FROM environment_platform_agent_requests \
-        WHERE environment_id=$1 AND mutation_json->>'session_id'=$2 \
+        WHERE organization_id=$1 AND environment_id=$2 AND mutation_json->>'session_id'=$3 \
           AND mutation_json->>'action' IN ('launch','restart','resume')";
-    // A start whose outcome is open or unknown may have run a driver or moved
-    // the generation anywhere; the conversation ends rather than guess.
-    let (open, child): (bool, bool) = sqlx::query_as(&format!(
-        "SELECT EXISTS(SELECT 1 {STARTS} AND phase IN ('issued','unknown')), \
+    // A start issued in this Pod is still in progress: a racing Resume waits
+    // for it. Any other start whose outcome is open or unknown may have run a
+    // driver or moved the generation anywhere, and its Pod is gone; the
+    // conversation ends rather than guess.
+    let (in_progress, open, child): (bool, bool, bool) = sqlx::query_as(&format!(
+        "SELECT EXISTS(SELECT 1 {STARTS} AND phase='issued' AND pod_uid=$4), \
+                EXISTS(SELECT 1 {STARTS} AND phase IN ('issued','unknown') \
+                       AND NOT (phase='issued' AND pod_uid=$4)), \
                 EXISTS(SELECT 1 {STARTS} AND mutation_json->>'action'='launch' \
                        AND mutation_json->>'parent_session_id' IS NOT NULL)"
     ))
+    .bind(&b.organization_id)
     .bind(&b.environment_id)
     .bind(session_id)
+    .bind(uuid(&b.pod_uid)?)
     .fetch_one(&mut **tx)
     .await
     .map_err(|_| unavailable())?;
@@ -788,6 +856,9 @@ async fn resume_predecessor_in(
             "this conversation's last start, restart or resume has an unknown outcome; \
              it has ended. Start a new conversation",
         ));
+    }
+    if in_progress {
+        return Err(resume_refused(RESUME_IN_PROGRESS));
     }
     if child {
         return Err(resume_refused(
@@ -799,6 +870,7 @@ async fn resume_predecessor_in(
         "SELECT pod_uid {STARTS} AND phase='completed' \
           ORDER BY terminal_at DESC, admitted_at DESC, request_id DESC LIMIT 1"
     ))
+    .bind(&b.organization_id)
     .bind(&b.environment_id)
     .bind(session_id)
     .fetch_optional(&mut **tx)
@@ -837,8 +909,8 @@ async fn resume_predecessor_in(
     // credential: an equal digest keeps the agent's credential identity.
     if previous.projection_selection_sha256 != b.projection_selection_sha256 {
         return Err(resume_refused(
-            "the environment's selected credentials changed since this conversation \
-             started; start a new conversation",
+            "the environment's selected credentials or secret sources changed since \
+             this conversation started; start a new conversation",
         ));
     }
     let released: Option<(Option<chrono::DateTime<Utc>>,)> = sqlx::query_as(

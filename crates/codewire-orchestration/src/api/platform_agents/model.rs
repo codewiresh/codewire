@@ -455,8 +455,9 @@ impl ManagedReceipt {
                 _ => {}
             }
         }
-        // A refusal leaves nothing running: refused before any effect, or an
-        // issued launch whose projection was denied before its agent ran.
+        // A refusal leaves nothing running: refused before any effect, a
+        // Resume refused before issue for a plain reason, or an issued launch
+        // whose projection was denied before its agent ran.
         let refusal = match self.reason_code.as_str() {
             "refused-before-issue" => true,
             "denied-before-run" => {
@@ -464,6 +465,7 @@ impl ManagedReceipt {
                     && matches!(self.lifecycle, ManagedLifecycle::Failed)
                     && self.exit_code.is_none()
             }
+            reason if wire::resume_refusal(reason) => m.action == ManagedAction::Resume,
             _ => false,
         };
         if (self.phase == ManagedPhase::Rejected
@@ -521,6 +523,28 @@ pub(super) fn conflict() -> AppError {
 pub(super) fn unavailable() -> AppError {
     AppError::ServiceUnavailable("platform managed journal is unavailable".into())
 }
+/// What the user is told when the target refused a Resume before issue for
+/// a plain reason (#2705). Nothing ran and nothing changed.
+pub(super) fn resume_refusal_text(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "resume-driver-alive" => {
+            "its agent is still running in this environment; try again shortly"
+        }
+        "resume-working-directory-missing" => {
+            "its working directory no longer exists in this environment; \
+             start a new conversation"
+        }
+        "resume-credential-changed" => {
+            "the agent's credential changed since this conversation started; \
+             start a new conversation"
+        }
+        "resume-provider-not-admitted" => {
+            "this environment's agent provider is not admitted for it; \
+             start a new conversation"
+        }
+        _ => return None,
+    })
+}
 /// A Resume refused definitely, before any effect, with why in plain words.
 pub(super) fn resume_refused(detail: &'static str) -> AppError {
     AppError::Coded {
@@ -568,7 +592,7 @@ fn valid_private_reason(s: &str) -> bool {
             | "denied-before-run"
             | "issued-outcome-unknown"
             | "target-owner-lost"
-    )
+    ) || wire::resume_refusal(s)
 }
 mod decimal_u64 {
     use serde::{Deserialize, Deserializer, Serializer};

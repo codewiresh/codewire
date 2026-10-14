@@ -3,7 +3,9 @@
 //! ordinary Launch continues to write None and cannot adopt a managed record.
 use super::*;
 use crate::platform_managed::{CleanupLink, Owner, ProviderPin, RestartAdvance};
-use crate::platform_managed::{Error, ImagePin, Origin, peer_packet};
+use crate::platform_managed::{
+    DRIVER_ALIVE, Error, ImagePin, Origin, PROVIDER_NOT_ADMITTED, peer_packet,
+};
 use codewire_daemon_proto::platform_managed as wire;
 use serde_json::{Value, json};
 
@@ -345,7 +347,7 @@ impl SessionEngine {
             return Err(Error::Refused);
         }
         if lock(&self.inner.active).contains_key(&c.session_id) {
-            return Err(Error::Refused);
+            return Err(Error::ResumeRefused(DRIVER_ALIVE));
         }
         let handle = self.handle(&c.session_id).map_err(|_| Error::Refused)?;
         let metadata = handle.metadata.lock().await;
@@ -370,20 +372,22 @@ impl SessionEngine {
         let handle = self.handle(&c.session_id).map_err(|_| Error::Refused)?;
         let _operation = handle.operation.lock().await;
         if lock(&self.inner.active).contains_key(&c.session_id) {
-            return Err(Error::Refused);
+            return Err(Error::ResumeRefused(DRIVER_ALIVE));
         }
         let previous = resumable_origin(&*handle.metadata.lock().await, &scope, &c)?;
         let origin = owner.resume_origin()?;
         let image = ImagePin::admit(&self.inner.config, &origin)?;
-        let provider = ProviderPin::admit(origin.agent, &origin.provider)?;
+        let provider = ProviderPin::admit(origin.agent, &origin.provider)
+            .map_err(|_| Error::ResumeRefused(PROVIDER_NOT_ADMITTED))?;
         let route = origin
             .agent
             .route(self.inner.config.managed_credential_clients)
             .ok_or(Error::Refused)?;
         // The driver's own markers must still name the predecessor at this
         // generation, its credential route must be unchanged and no driver may
-        // hold its lock. Read only; nothing changes before issue.
-        image
+        // hold its lock. Read only; nothing changes before issue. A plain
+        // refusal names its closed reason, which reaches the user.
+        let checked = image
             .helper(
                 &previous,
                 &c.session_id,
@@ -391,6 +395,9 @@ impl SessionEngine {
                 json!({"op":"adopt","origin":origin,"route":route,"commit":false}),
             )
             .await?;
+        if let Some(reason) = crate::platform_managed::adopt_refusal(&checked)? {
+            return Err(Error::ResumeRefused(reason));
+        }
         owner.issue().await?;
         let generation = c
             .expected_launch_generation

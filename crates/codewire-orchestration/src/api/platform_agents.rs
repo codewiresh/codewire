@@ -2,6 +2,9 @@
 //! transport cancellation never cancels an already admitted durable owner.
 pub mod journal;
 pub mod model;
+#[cfg(test)]
+#[path = "platform_agents/resume_tests.rs"]
+mod resume_tests;
 mod wire;
 
 use buffa::Message as _;
@@ -11,8 +14,10 @@ use codewire_server_core::{AppResult, auth::AuthUser};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use self::journal::{Admission, ManagedJournal};
-use self::model::{ManagedAgent, ManagedMutation, ManagedPhase, ManagedReceipt, ResumePredecessor};
+use self::journal::{Admission, ManagedJournal, ManagedRequest};
+use self::model::{
+    ManagedAction, ManagedAgent, ManagedMutation, ManagedPhase, ManagedReceipt, ResumePredecessor,
+};
 use self::wire::{invalid, unavailable};
 use super::{
     ApiState,
@@ -151,6 +156,12 @@ async fn prepare_resume(
     else {
         return Err(invalid());
     };
+    // The request's own shape first: nothing is read for a malformed one.
+    if !native::valid_uuid(&control.driver_id)
+        || control.session_id != format!("session-{}", control.driver_id)
+    {
+        return Err(invalid());
+    }
     let driver_id = Uuid::parse_str(&control.driver_id).map_err(|_| invalid())?;
     let predecessor = journal(state)
         .resume_predecessor(&captured.binding_facts(), &control.session_id, driver_id)
@@ -161,7 +172,19 @@ async fn prepare_resume(
             "this conversation changed since it was listed; list it again",
         ));
     }
-    let kube = state.kube.as_ref().ok_or_else(unavailable)?;
+    require_predecessor_absent(state.kube.as_ref(), &predecessor).await?;
+    fill_resume(info, request, &predecessor.pod_uid, predecessor.agent)?;
+    Ok(predecessor)
+}
+
+/// The predecessor Pod must be gone: absent, or another Pod under its name.
+/// A present Pod, terminating included, is still stopping; a failed read, or
+/// no Kubernetes client, refuses as unavailable (#2705).
+async fn require_predecessor_absent(
+    kube: Option<&kube::Client>,
+    predecessor: &ResumePredecessor,
+) -> AppResult<()> {
+    let kube = kube.ok_or_else(unavailable)?;
     match crate::worker::workspace_binding::bound_pod_absent(
         kube,
         &predecessor.namespace,
@@ -170,15 +193,28 @@ async fn prepare_resume(
     )
     .await
     {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err(self::model::resume_refused(
-                "the environment's previous Pod is still stopping; try again shortly",
-            ));
-        }
-        Err(_) => return Err(unavailable()),
+        Ok(true) => Ok(()),
+        Ok(false) => Err(self::model::resume_refused(
+            "the environment's previous Pod is still stopping; try again shortly",
+        )),
+        Err(_) => Err(unavailable()),
     }
-    let agent = match predecessor.agent {
+}
+
+/// The control-plane fields of a Resume: its predecessor, its agent, and this
+/// image's pinned provider for that agent.
+fn fill_resume(
+    info: &private::PlatformManagedInfoResponse,
+    request: &mut private::PlatformManagedMutationRequest,
+    predecessor_pod_uid: &str,
+    agent: ManagedAgent,
+) -> AppResult<()> {
+    let Some(private::platform_managed_mutation_request::Operation::Control(control)) =
+        request.operation.as_mut()
+    else {
+        return Err(invalid());
+    };
+    let agent = match agent {
         ManagedAgent::Codex => private::PlatformManagedAgent::Codex,
         ManagedAgent::Claude => private::PlatformManagedAgent::Claude,
     } as i32;
@@ -192,13 +228,21 @@ async fn prepare_resume(
                  start a new conversation",
             )
         })?;
-    control.predecessor_pod_uid = predecessor.pod_uid.clone();
+    control.predecessor_pod_uid = predecessor_pod_uid.to_owned();
     control.agent = agent;
     control.expected_provider_sha256 = support.provider_sha256.clone();
     control.expected_provider_size = support.provider_size;
     control.expected_provider_version = support.provider_version.clone();
-    native::validate_mutation(request).map_err(|_| invalid())?;
-    Ok(predecessor)
+    native::validate_mutation(request).map_err(|_| invalid())
+}
+
+/// A Resume the target refused before issue for a plain reason is answered
+/// with that reason, the first time and on every repeat (#2705).
+fn resume_rejection(saved: &ManagedRequest) -> Option<&'static str> {
+    if saved.phase != ManagedPhase::Rejected || saved.mutation.action != ManagedAction::Resume {
+        return None;
+    }
+    self::model::resume_refusal_text(&saved.receipt.as_ref()?.reason_code)
 }
 
 pub async fn mutate(
@@ -209,10 +253,25 @@ pub async fn mutate(
     let (incarnation, mut private_request) = wire::mutation(&request)?;
     let captured = capture_platform_cw_runtime(&state, &user, &incarnation).await?;
     let info = target_info(&captured).await?;
-    let resume = if wire::is_resume(&private_request) {
-        Some(prepare_resume(&state, &captured, &info, &mut private_request).await?)
-    } else {
+    let is_resume = wire::is_resume(&private_request);
+    // A repeated Resume carries its first admission's control-plane fields
+    // and is answered from it, as every other repeated request is.
+    let resume = if !is_resume {
         None
+    } else {
+        let request_id = Uuid::parse_str(&private_request.request_id).map_err(|_| invalid())?;
+        match journal(&state)
+            .saved_resume(&captured.binding_facts(), &user, request_id)
+            .await?
+        {
+            Some(saved) => {
+                let agent = saved.agent.ok_or_else(invalid)?;
+                let predecessor = saved.predecessor_pod_uid.ok_or_else(invalid)?;
+                fill_resume(&info, &mut private_request, &predecessor, agent)?;
+                None
+            }
+            None => Some(prepare_resume(&state, &captured, &info, &mut private_request).await?),
+        }
     };
     require_support(&private_request, &info)?;
     captured.recheck(&state, &user).await?;
@@ -229,6 +288,11 @@ pub async fn mutate(
                         .admit_resume(captured.binding_facts(), &user, metadata, checked)
                         .await?
                 }
+                None if is_resume => Admission::Existing(Box::new(
+                    journal
+                        .repeat_resume(captured.binding_facts(), &user, metadata)
+                        .await?,
+                )),
                 None => {
                     journal
                         .admit(captured.binding_facts(), &user, metadata)
@@ -271,6 +335,9 @@ pub async fn mutate(
                     }
                 }
             };
+            if let Some(reason) = resume_rejection(&saved) {
+                return Err(self::model::resume_refused(reason));
+            }
             Ok(proto::MutateEnvironmentAgentResponse {
                 operation: Some(wire::operation(&saved)?).into(),
                 ..Default::default()

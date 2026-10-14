@@ -114,30 +114,44 @@ impl Fixture {
     /// The environment's Pod after a Stop/Start (#2705): the first binding
     /// is released and a second one, with the same selection, is live.
     async fn next_pod(&self) -> Result<CapturedBindingFacts> {
+        self.next_pod_as(POD, POD2, 4, &"a".repeat(64)).await
+    }
+    /// Release `previous` and bind `pod` at `generation` with `selection`.
+    async fn next_pod_as(
+        &self,
+        previous: &str,
+        pod: &str,
+        generation: i64,
+        selection: &str,
+    ) -> Result<CapturedBindingFacts> {
         sqlx::query(
-            "UPDATE sandbox_workspace_bindings SET released_at='2026-10-01T12:30:00Z' WHERE pod_uid=$1",
+            "UPDATE sandbox_workspace_bindings SET released_at=bound_at+interval '30 minutes' WHERE pod_uid=$1",
         )
-        .bind(POD)
+        .bind(previous)
         .execute(&self.pool)
         .await?;
+        let bound_at = format!("2026-10-01T{:02}:00:00Z", 9 + generation);
         sqlx::query("INSERT INTO sandbox_workspace_bindings(pod_uid,environment_id,namespace,pod_name,\
             claim_uid,sandbox_uid,workspace_pvc_uid,operation_generation,projection_selection_sha256,\
             managed_credential_clients,credential_scope,bound_at) \
-            VALUES($1,$2,'runtime-sandboxes',$3,$4,$5,$6,4,$7,$8,'pod','2026-10-01T13:00:00Z')")
-            .bind(POD2).bind(ENV).bind(format!("sandbox-{ENV}")).bind(CLAIM).bind(SANDBOX).bind(PVC)
-            .bind("a".repeat(64)).bind(codewire_access::ManagedCredentialClients::default().encode())
+            VALUES($1,$2,'runtime-sandboxes',$3,$4,$5,$6,$7,$8,$9,'pod',$10::timestamptz)")
+            .bind(pod).bind(ENV).bind(format!("sandbox-{ENV}")).bind(CLAIM).bind(SANDBOX).bind(PVC)
+            .bind(generation).bind(selection)
+            .bind(codewire_access::ManagedCredentialClients::default().encode())
+            .bind(&bound_at)
             .execute(&self.pool).await?;
         sqlx::query(
-            "UPDATE sandbox_environment_backend SET pod_uid=$2,bound_at='2026-10-01T13:00:00Z' \
+            "UPDATE sandbox_environment_backend SET pod_uid=$2,bound_at=$3::timestamptz \
              WHERE environment_id=$1",
         )
         .bind(ENV)
-        .bind(POD2)
+        .bind(pod)
+        .bind(&bound_at)
         .execute(&self.pool)
         .await?;
         let facts = read_facts(&self.pool).await?;
         facts.validate()?;
-        ensure!(facts.pod_uid == POD2 && facts.binding_generation == 4);
+        ensure!(facts.pod_uid == pod && facts.binding_generation == generation);
         Ok(facts)
     }
 }
@@ -1803,3 +1817,262 @@ database_case!(
         )?;
     }
 );
+fn resume_refusal(result: AppResult<ResumePredecessor>, needle: &str) -> Result<()> {
+    match result {
+        Err(AppError::Coded { code, detail, .. })
+            if code == "platform_agent_resume_refused" && detail.contains(needle) =>
+        {
+            Ok(())
+        }
+        other => anyhow::bail!("expected a refusal naming {needle:?}, got {other:?}"),
+    }
+}
+const POD3: &str = "6b2d3c4e-5f60-4a71-8b92-0a1b2c3d4e5f";
+const POD4: &str = "8c3e4d5f-6071-4b82-9ca3-1b2c3d4e5f60";
+database_case!(
+    db_resume_refusals_name_why_and_an_unknown_resume_ends_the_conversation,
+    f,
+    {
+        // #2705: each refusal says why. A Resume in progress in this Pod asks
+        // the user to wait; an Unknown Resume at the predecessor's generation
+        // ends the conversation wherever it ran.
+        let m = f.launch().await?;
+        let other = f.launch().await?;
+        let mut child = launch(Uuid::new_v4());
+        child.parent_session_id = Some(other.session_id.clone());
+        child.expected_parent_launch_generation = 1;
+        let issued = f.issue(child.clone()).await?;
+        f.journal
+            .settle(issued, receipt(&child, &f.facts, ManagedLifecycle::Running))
+            .await?;
+        let facts2 = f.next_pod().await?;
+        let predecessor = f
+            .journal
+            .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+            .await?;
+        let first = resume(&m, POD, 1);
+        let (_, owner) = own(f
+            .journal
+            .admit_resume(facts2.clone(), &f.user, first.clone(), predecessor.clone())
+            .await?)?;
+        // A second Resume while the first is admitted in this Pod.
+        match f
+            .journal
+            .admit_resume(
+                facts2.clone(),
+                &f.user,
+                resume(&m, POD, 1),
+                predecessor.clone(),
+            )
+            .await
+        {
+            Err(AppError::Coded { code, detail, .. })
+                if code == "platform_agent_resume_refused"
+                    && detail.contains("already resuming") => {}
+            other => anyhow::bail!("expected the in-progress refusal, got {:?}", other.err()),
+        }
+        // ... and while it is issued here.
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        resume_refusal(
+            f.journal
+                .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+                .await,
+            "already resuming",
+        )?;
+        // Its outcome becomes unknown: the conversation has ended, here and
+        // in every later Pod.
+        ensure!(
+            f.journal
+                .mark_unknown(issued, "platform-agent-dispatch-unknown")
+                .await?
+                .phase
+                == ManagedPhase::Unknown
+        );
+        resume_refusal(
+            f.journal
+                .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+                .await,
+            "unknown outcome",
+        )?;
+        let facts3 = f.next_pod_as(POD2, POD3, 5, &"a".repeat(64)).await?;
+        resume_refusal(
+            f.journal
+                .resume_predecessor(&facts3, &m.session_id, m.driver_id)
+                .await,
+            "unknown outcome",
+        )?;
+        // A child conversation ends with its environment.
+        resume_refusal(
+            f.journal
+                .resume_predecessor(&facts3, &child.session_id, child.driver_id)
+                .await,
+            "child conversation",
+        )?;
+        // Unchanged selection: the other conversation still resumes.
+        f.journal
+            .resume_predecessor(&facts3, &other.session_id, other.driver_id)
+            .await?;
+        // A changed selection: credentials or secret sources.
+        let facts4 = f.next_pod_as(POD3, POD4, 6, &"b".repeat(64)).await?;
+        resume_refusal(
+            f.journal
+                .resume_predecessor(&facts4, &other.session_id, other.driver_id)
+                .await,
+            "selected credentials or secret sources changed",
+        )?;
+    }
+);
+database_case!(
+    db_resume_admission_rereads_the_exact_checked_predecessor,
+    f,
+    {
+        // #2705: the admission reads the predecessor again under its locks
+        // and refuses unless it is exactly the one proven absent.
+        let m = f.launch().await?;
+        let facts2 = f.next_pod().await?;
+        let predecessor = f
+            .journal
+            .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+            .await?;
+        for checked in [
+            ResumePredecessor {
+                pod_name: "sandbox-another".into(),
+                ..predecessor.clone()
+            },
+            ResumePredecessor {
+                namespace: "another-namespace".into(),
+                ..predecessor.clone()
+            },
+            ResumePredecessor {
+                pod_uid: POD3.into(),
+                ..predecessor.clone()
+            },
+            ResumePredecessor {
+                generation: 2,
+                ..predecessor.clone()
+            },
+            ResumePredecessor {
+                agent: ManagedAgent::Claude,
+                ..predecessor.clone()
+            },
+        ] {
+            ensure!(
+                f.journal
+                    .admit_resume(facts2.clone(), &f.user, resume(&m, POD, 1), checked.clone())
+                    .await
+                    .is_err(),
+                "{checked:?}"
+            );
+        }
+        // Nothing was admitted for any of them.
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM environment_platform_agent_requests \
+                     WHERE mutation_json->>'action'='resume') \
+                  + (SELECT count(*) FROM environment_platform_agent_conversations WHERE pod_uid=$1)",
+        )
+        .bind(Uuid::parse_str(POD2)?)
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(rows == 0, "{rows}");
+        own(f
+            .journal
+            .admit_resume(facts2, &f.user, resume(&m, POD, 1), predecessor)
+            .await?)?;
+    }
+);
+database_case!(db_resume_repeat_is_answered_from_its_first_admission, f, {
+    // #2705: a repeated Resume request ID is answered from its first
+    // admission in every phase, never re-derived or refused as in progress.
+    let m = f.launch().await?;
+    // A plain Resume reason on any other action is not a refusal.
+    let l = launch(Uuid::new_v4());
+    let issued = f.issue(l.clone()).await?;
+    let mut wrong = receipt(&l, &f.facts, ManagedLifecycle::Unspecified);
+    wrong.phase = ManagedPhase::Rejected;
+    wrong.reason_code = "resume-driver-alive".into();
+    ensure!(f.journal.settle(issued, wrong).await?.phase == ManagedPhase::Unknown);
+    let facts2 = f.next_pod().await?;
+    let predecessor = f
+        .journal
+        .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+        .await?;
+    let r = resume(&m, POD, 1);
+    ensure!(
+        f.journal
+            .saved_resume(&facts2, &f.user, r.request_id)
+            .await?
+            .is_none()
+    );
+    // A repeat admits nothing new.
+    ensure!(
+        f.journal
+            .repeat_resume(facts2.clone(), &f.user, r.clone())
+            .await
+            .is_err()
+    );
+    let (_, owner) = own(f
+        .journal
+        .admit_resume(facts2.clone(), &f.user, r.clone(), predecessor.clone())
+        .await?)?;
+    ensure!(
+        f.journal
+            .saved_resume(&facts2, &f.user, r.request_id)
+            .await?
+            == Some(r.clone())
+    );
+    let repeat = |phase: ManagedPhase| {
+        let (journal, facts, user, r) = (&f.journal, facts2.clone(), &f.user, r.clone());
+        async move {
+            let saved = journal.repeat_resume(facts, user, r).await?;
+            ensure!(saved.phase == phase, "{:?}", saved.phase);
+            Ok::<_, anyhow::Error>(saved)
+        }
+    };
+    repeat(ManagedPhase::Admitted).await?;
+    let issued = f.journal.issue(&owner, &f.user).await?;
+    repeat(ManagedPhase::Issued).await?;
+    // A different request under the same ID conflicts, and another action's
+    // ID is never answered as a Resume.
+    let mut changed = r.clone();
+    changed.driver_id = Uuid::new_v4();
+    changed.session_id = format!("session-{}", changed.driver_id);
+    ensure!(
+        f.journal
+            .repeat_resume(facts2.clone(), &f.user, changed)
+            .await
+            .is_err()
+    );
+    ensure!(
+        f.journal
+            .saved_resume(&facts2, &f.user, m.request_id)
+            .await
+            .is_err()
+    );
+    // The target refused it for a plain reason: Rejected with that reason,
+    // answered with its text on every repeat, and the row stays at the
+    // predecessor's generation for the next Resume.
+    let mut refusal = receipt(&r, &facts2, ManagedLifecycle::Unspecified);
+    refusal.phase = ManagedPhase::Rejected;
+    refusal.reason_code = "resume-driver-alive".into();
+    refusal.launch_generation = r.expected_launch_generation;
+    let saved = f.journal.settle(issued, refusal).await?;
+    ensure!(saved.phase == ManagedPhase::Rejected);
+    let text = crate::api::platform_agents::resume_rejection(&saved);
+    ensure!(
+        text.is_some_and(|t| t.contains("still running")),
+        "{text:?}"
+    );
+    let again = repeat(ManagedPhase::Rejected).await?;
+    ensure!(crate::api::platform_agents::resume_rejection(&again) == text);
+    let generation: String = sqlx::query_scalar(
+        "SELECT launch_generation FROM environment_platform_agent_conversations WHERE pod_uid=$1",
+    )
+    .bind(Uuid::parse_str(POD2)?)
+    .fetch_one(&f.pool)
+    .await?;
+    ensure!(generation == "1");
+    own(f
+        .journal
+        .admit_resume(facts2.clone(), &f.user, resume(&m, POD, 1), predecessor)
+        .await?)?;
+});

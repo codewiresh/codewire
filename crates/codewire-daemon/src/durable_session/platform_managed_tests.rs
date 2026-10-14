@@ -943,5 +943,67 @@ async fn platform_managed_resume_admits_only_the_named_earlier_pod_of_this_envir
     ] {
         refused(this_pod.clone(), control).await;
     }
-    engine.shutdown().await.unwrap();
+    // A driver this daemon runs for the conversation is alive here; that
+    // refusal names its plain reason.
+    let (control, _held) = tokio::sync::mpsc::channel(1);
+    lock(&engine.inner.active).insert(
+        session.clone(),
+        ActiveSession {
+            token: Uuid::new_v4(),
+            control,
+            task: tokio::spawn(async {}),
+        },
+    );
+    assert!(matches!(
+        engine.platform_resumable(&this_pod, &resume).await,
+        Err(Error::ResumeRefused("resume-driver-alive"))
+    ));
+    lock(&engine.inner.active).remove(&session);
+    // The single write before the helper commits: the record names this Pod
+    // at g+1. A crash anywhere after it leaves nothing to resume again, at
+    // either generation, before or after the daemon restarts.
+    {
+        let handle = engine.handle(&session).unwrap();
+        let mut metadata = handle.metadata.lock().await;
+        let mut moved = origin.clone();
+        moved.pod_uid = this_pod.pod_uid.clone();
+        moved.binding_generation = this_pod.binding_generation;
+        metadata.platform_managed_origin = Some(moved);
+        metadata.launch_generation = generation + 1;
+        metadata.state = S::Starting as i32;
+        metadata.cleanup_unknown = true;
+        metadata.cleanup_confirmed = false;
+        persist_metadata(&engine.inner.root, &metadata)
+            .await
+            .unwrap();
+    }
+    for expected in [generation, generation + 1] {
+        refused(
+            this_pod.clone(),
+            v1::PlatformManagedControl {
+                expected_launch_generation: expected,
+                ..resume.clone()
+            },
+        )
+        .await;
+    }
+    // The crash: an unconfirmed launch cleanup refuses a clean shutdown.
+    assert!(engine.shutdown().await.is_err());
+    drop(engine);
+    let restarted = SessionEngine::new(&config, CredentialBridge::new(None));
+    for expected in [generation, generation + 1] {
+        assert!(matches!(
+            restarted
+                .platform_resumable(
+                    &this_pod,
+                    &v1::PlatformManagedControl {
+                        expected_launch_generation: expected,
+                        ..resume.clone()
+                    },
+                )
+                .await,
+            Err(Error::Refused)
+        ));
+    }
+    let _ = restarted.shutdown().await;
 }

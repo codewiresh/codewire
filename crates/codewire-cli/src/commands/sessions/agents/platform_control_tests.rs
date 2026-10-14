@@ -1372,10 +1372,22 @@ fn platform_adopt_refuses_another_scope_a_live_driver_and_a_changed_route() {
         adopt_request(&f, successor(&f), Route::Anthropic, false),
         "platform route serves another agent",
     );
+    // A plain refusal names its closed reason when only checking, so the
+    // user is told why; the commit checks the same again and errors.
+    let plain = |request: &dyn Fn(bool) -> Envelope, reason: &str, message: &str| {
+        let unchanged = markers();
+        assert_eq!(
+            handle_fixed(&f.environment, request(false)).unwrap(),
+            json!({ "refused": reason })
+        );
+        refused(request(true), message);
+        assert_eq!(markers(), unchanged);
+    };
     // A driver holding its lock is alive in this Pod.
     let driver = StateLock::acquire(&f.dir.join("driver.lock")).unwrap();
-    refused(
-        adopt_request(&f, successor(&f), Route::Codex, true),
+    plain(
+        &|commit| adopt_request(&f, successor(&f), Route::Codex, commit),
+        "resume-driver-alive",
         "a platform driver is still alive",
     );
     drop(driver);
@@ -1383,24 +1395,43 @@ fn platform_adopt_refuses_another_scope_a_live_driver_and_a_changed_route() {
     let mut stale = adopt_request(&f, successor(&f), Route::Codex, true);
     stale.launch_generation = 2;
     assert!(handle_fixed(&f.environment, stale).is_err());
+    // The working directory is gone.
+    let saved_config = fs::read(f.dir.join("config.json")).unwrap();
+    let gone = AgentConfig {
+        working_dir: f.dir.join("gone").to_string_lossy().into_owned(),
+        ..config.clone()
+    };
+    write_private_json(&f.dir.join("config.json"), &gone).unwrap();
+    plain(
+        &|commit| adopt_request(&f, successor(&f), Route::Codex, commit),
+        "resume-working-directory-missing",
+        "platform working directory is gone",
+    );
+    fs::write(f.dir.join("config.json"), saved_config).unwrap();
+    assert_eq!(markers(), before);
     // The saved conversation used another credential route.
-    refused(
-        adopt_request(&f, successor(&f), Route::OpenAi, true),
+    plain(
+        &|commit| adopt_request(&f, successor(&f), Route::OpenAi, commit),
+        "resume-credential-changed",
         "the agent's credential changed",
     );
-    // The predecessor's origin may carry an earlier provider pin; a fully
-    // valid request then reaches provider admission, which needs the image.
+    // The fixture's synthetic provider identity is never the image's, so a
+    // fully valid request reaches provider admission and is refused there.
+    plain(
+        &|commit| adopt_request(&f, successor(&f), Route::Codex, commit),
+        "resume-provider-not-admitted",
+        "this agent's provider is not admitted here",
+    );
+    // The predecessor's origin may carry an earlier provider pin; it is the
+    // new origin's pin that is admitted.
     let mut earlier = f.origin.clone();
     earlier.provider.version = "0.159.0".into();
     write_private_json(&f.dir.join(ORIGIN), &earlier).unwrap();
-    let mut request = adopt_request(&f, successor(&f), Route::Codex, true);
+    let mut request = adopt_request(&f, successor(&f), Route::Codex, false);
     request.origin = earlier.clone();
-    // The fixture's synthetic provider identity is never the image's.
     assert_eq!(
-        handle_fixed(&f.environment, request)
-            .unwrap_err()
-            .to_string(),
-        "platform managed incarnation refused"
+        handle_fixed(&f.environment, request).unwrap(),
+        json!({ "refused": "resume-provider-not-admitted" })
     );
     write_private_json(&f.dir.join(ORIGIN), &f.origin).unwrap();
     assert_eq!(markers(), before);
@@ -1456,6 +1487,74 @@ fn platform_adopt_commit_moves_markers_and_retires_the_predecessor_custody() {
     };
     write_private_json(&f.dir.join(GENERATION), &advanced).unwrap();
     assert!(!resumed(&f.environment, &f.origin.driver_id).unwrap());
+}
+
+#[test]
+fn platform_adopt_commit_crash_points_never_open_either_pod() {
+    // #2705: the daemon's record names this Pod at g+1 before the helper
+    // commits. Whatever prefix of the commit survives a crash, a mutation at
+    // the daemon's record (new origin, g+1) is refused, and so is one at the
+    // predecessor's (old origin, g) once the origin has moved. The driver
+    // fence stays closed until the generation names the resumed Pod.
+    let f = Fixture::new();
+    f.clean_peer();
+    let next = successor(&f);
+    let at = |origin: &Origin, generation: u64| Envelope {
+        origin: origin.clone(),
+        launch_generation: generation,
+        request: Request::Adopt {
+            origin: next.clone(),
+            route: Route::Codex,
+            commit: false,
+        },
+        ..f.request()
+    };
+    let closed = || {
+        assert!(check_markers(&f.dir, &at(&next, 2)).is_err());
+        assert!(!resumed(&f.environment, &f.origin.driver_id).unwrap());
+    };
+    closed();
+    // 1. The config names the admitted program.
+    let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+    write_private_json(
+        &f.dir.join("config.json"),
+        &AgentConfig {
+            program: PathBuf::from("/usr/bin/true"),
+            ..config
+        },
+    )
+    .unwrap();
+    closed();
+    // 2. The predecessor's custody pointer is retired. Only the
+    // predecessor's markers still hold, and a later adopt rewrites the
+    // program, so this prefix is the state before adoption.
+    fs::remove_file(f.dir.join("peer-current.json")).unwrap();
+    closed();
+    check_markers(&f.dir, &at(&f.origin, 1)).unwrap();
+    // 3. The origin moves to this Pod; the generation has not.
+    write_private_json(&f.dir.join(ORIGIN), &next).unwrap();
+    closed();
+    assert!(check_markers(&f.dir, &at(&f.origin, 1)).is_err());
+    assert!(
+        handle_fixed(
+            &f.environment,
+            adopt_request(&f, next.clone(), Route::Codex, false)
+        )
+        .is_err()
+    );
+    // 4. The generation moves last and marks the resumed Pod.
+    let old: Generation = private_record(&f.dir.join(GENERATION)).unwrap();
+    write_private_json(
+        &f.dir.join(GENERATION),
+        &Generation {
+            generation: 2,
+            resumed_from_pod_uid: Some(f.origin.pod_uid.clone()),
+            ..old
+        },
+    )
+    .unwrap();
+    check_markers(&f.dir, &at(&next, 2)).unwrap();
+    assert!(resumed(&f.environment, &f.origin.driver_id).unwrap());
 }
 
 #[test]

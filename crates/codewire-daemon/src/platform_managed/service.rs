@@ -40,7 +40,7 @@ pub(crate) struct Owner {
 fn status(error: Error) -> Status {
     match error {
         // Material-free and refused before any effect, so it says why.
-        Error::EarlierProvider(_) | Error::DeniedBeforeRun => {
+        Error::EarlierProvider(_) | Error::DeniedBeforeRun | Error::ResumeRefused(_) => {
             Status::failed_precondition(error.to_string())
         }
         _ => Status::failed_precondition("platform managed incarnation or outcome refused"),
@@ -319,7 +319,8 @@ impl Service {
                 // a launch's is (#2705).
                 let origin = resume_origin(scope, c)?;
                 ImagePin::admit(&self.inner.config, &origin)?;
-                ProviderPin::admit(origin.agent, &origin.provider)?;
+                ProviderPin::admit(origin.agent, &origin.provider)
+                    .map_err(|_| Error::ResumeRefused(super::PROVIDER_NOT_ADMITTED))?;
                 origin
                     .agent
                     .route(self.inner.config.managed_credential_clients)
@@ -571,6 +572,12 @@ impl Owner {
                     row.cleanup_previous_cleanup_known = true;
                 }
             }
+            // A Resume refused before issue keeps its plain reason (#2705).
+            Err(Error::ResumeRefused(reason)) if row.phase == 1 && resume(&self.request) => {
+                row.phase = 4;
+                row.reason = reason.into();
+                row.cleanup_unknown = false;
+            }
             Err(_) if row.phase == 1 => {
                 row.phase = 4;
                 row.reason = "refused-before-issue".into();
@@ -673,12 +680,26 @@ fn issued_launch(
         )
 }
 
+/// A Resume, whose plain refusals before issue carry their reason (#2705).
+fn resume(request: &v1::PlatformManagedMutationRequest) -> bool {
+    matches!(
+        &request.operation,
+        Some(v1::platform_managed_mutation_request::Operation::Control(c))
+            if c.action == v1::PlatformManagedAction::Resume as i32
+    )
+}
+
 /// The receipt of a launch or a Resume refused before its claim wrote
 /// anything: the same row one refused before issue settles to, never stored.
-/// A Resume refused here keeps its conversation resumable (#2705).
+/// A Resume refused here keeps its conversation resumable and may name its
+/// plain reason (#2705); a launch's reason is always `refused-before-issue`.
 fn refused_launch(
     request: &v1::PlatformManagedMutationRequest,
+    reason: &str,
 ) -> Option<v1::PlatformManagedReceipt> {
+    if reason != "refused-before-issue" && !(resume(request) && wire::resume_refusal(reason)) {
+        return None;
+    }
     let (driver_id, message_id, launch_generation) = match request.operation.as_ref()? {
         v1::platform_managed_mutation_request::Operation::Launch(launch) => (
             request.request_id.clone(),
@@ -713,7 +734,7 @@ fn refused_launch(
         cleanup_unknown: false,
         pipe_acknowledged: false,
         native_acknowledged: false,
-        reason: "refused-before-issue".into(),
+        reason: reason.into(),
         cleanup_of_request_id: None,
         cleanup_previous_generation: 0,
         cleanup_previous_cleanup_known: false,
@@ -823,8 +844,12 @@ impl PlatformManagedService for Service {
             // that leaves orchestration an unknown outcome and its deletion
             // lease unresolved (#2705). Other controls keep the error: a
             // cleanup Stop's receipt must carry generations only its book has.
-            Err(error @ (Error::Refused | Error::EarlierProvider(_))) => {
-                return match refused_launch(&request) {
+            Err(error @ (Error::Refused | Error::EarlierProvider(_) | Error::ResumeRefused(_))) => {
+                let reason = match &error {
+                    Error::ResumeRefused(reason) => reason,
+                    _ => "refused-before-issue",
+                };
+                return match refused_launch(&request, reason) {
                     Some(receipt) => Ok(Response::new(receipt)),
                     None => Err(status(error)),
                 };
@@ -1113,7 +1138,7 @@ mod tests {
     fn platform_service_refuses_a_launch_claim_definitely_and_a_control_claim_opaquely() {
         let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
         let mut request = launch(&scope);
-        let refused = refused_launch(&request).unwrap();
+        let refused = refused_launch(&request, "refused-before-issue").unwrap();
         assert_eq!(
             refused.phase,
             v1::PlatformManagedRequestPhase::Rejected as i32
@@ -1139,7 +1164,9 @@ mod tests {
             l.prompt = Some("fixture task".into());
         }
         assert_eq!(
-            refused_launch(&request).unwrap().message_id,
+            refused_launch(&request, "refused-before-issue")
+                .unwrap()
+                .message_id,
             wire::platform_managed_initial_prompt_id(&request.request_id).unwrap()
         );
         let driver = uuid::Uuid::new_v4().to_string();
@@ -1156,7 +1183,62 @@ mod tests {
                 },
             )),
         };
-        assert!(refused_launch(&control).is_none());
+        assert!(refused_launch(&control, "refused-before-issue").is_none());
+        // Only a Resume carries a plain reason, and only a closed one (#2705).
+        assert!(refused_launch(&request, "resume-driver-alive").is_none());
+    }
+
+    #[test]
+    fn platform_service_refuses_a_resume_claim_with_its_plain_reason() {
+        let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
+        let driver = uuid::Uuid::new_v4().to_string();
+        let resume_request = v1::PlatformManagedMutationRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            scope: Some(scope),
+            operation: Some(v1::platform_managed_mutation_request::Operation::Control(
+                v1::PlatformManagedControl {
+                    action: v1::PlatformManagedAction::Resume as i32,
+                    session_id: format!("session-{driver}"),
+                    driver_id: driver.clone(),
+                    expected_launch_generation: 3,
+                    predecessor_pod_uid: uuid::Uuid::new_v4().to_string(),
+                    agent: v1::PlatformManagedAgent::Codex as i32,
+                    expected_provider_sha256: vec![3; 32],
+                    expected_provider_size: 1024,
+                    expected_provider_version: "0.160.0".into(),
+                    ..Default::default()
+                },
+            )),
+        };
+        assert!(resume(&resume_request));
+        for reason in wire::RESUME_REFUSALS
+            .into_iter()
+            .chain(["refused-before-issue"])
+        {
+            let refused = refused_launch(&resume_request, reason).unwrap();
+            assert_eq!(refused.reason, reason);
+            assert_eq!(
+                refused.phase,
+                v1::PlatformManagedRequestPhase::Rejected as i32
+            );
+            // A refused Resume keeps the predecessor's generation.
+            assert_eq!(refused.launch_generation, 3);
+            assert_eq!(refused.driver_id, driver);
+            assert!(!refused.cleanup_unknown);
+            wire::validate_receipt(&refused).unwrap();
+            if reason != "refused-before-issue" {
+                assert_eq!(
+                    status(Error::ResumeRefused(reason)).message(),
+                    format!("platform managed resume refused: {reason}")
+                );
+            }
+        }
+        for reason in ["", "denied-before-run", "resume-anything", "issued"] {
+            assert!(
+                refused_launch(&resume_request, reason).is_none(),
+                "{reason}"
+            );
+        }
     }
 
     #[test]

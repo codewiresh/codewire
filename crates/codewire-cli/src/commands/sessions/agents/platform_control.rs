@@ -977,9 +977,17 @@ fn adopt(
         route.agent() == agent(origin.agent),
         "platform route serves another agent"
     );
+    // A plain refusal the user can act on names its closed reason when only
+    // checking, and nothing has changed. The commit checks the same again;
+    // a change in between is an error, never a refusal (#2705).
+    let refuse = |reason: &'static str, message: &'static str| -> anyhow::Result<Value> {
+        ensure!(!commit, "{message}");
+        Ok(json!({ "refused": reason }))
+    };
     let _control = StateLock::acquire(&dir.join("control.lock"))?;
-    let _driver = StateLock::try_acquire(&dir.join("driver.lock"))?
-        .context("a platform driver is still alive")?;
+    let Some(_driver) = StateLock::try_acquire(&dir.join("driver.lock"))? else {
+        return refuse("resume-driver-alive", "a platform driver is still alive");
+    };
     let old: Generation = private_record(&dir.join(GENERATION))?;
     ensure!(
         old.version == 1
@@ -990,20 +998,29 @@ fn adopt(
     );
     let config: AgentConfig = private_record(&dir.join("config.json"))?;
     config.validate(environment.id(), &previous.driver_id)?;
-    ensure!(
-        fs::metadata(&config.working_dir).is_ok_and(|m| m.is_dir()),
-        "platform working directory is gone"
-    );
+    if !fs::metadata(&config.working_dir).is_ok_and(|m| m.is_dir()) {
+        return refuse(
+            "resume-working-directory-missing",
+            "platform working directory is gone",
+        );
+    }
     // The saved transcript belongs to one credential identity: a changed
     // route is the owner's decision, so the conversation ends instead.
-    ensure!(
-        lockdown::check(dir, &config)? == route,
-        "the agent's credential changed; start a new conversation"
-    );
-    let provider = codewire_daemon::platform_managed::ProviderPin::admit(
+    if lockdown::check(dir, &config)? != route {
+        return refuse(
+            "resume-credential-changed",
+            "the agent's credential changed; start a new conversation",
+        );
+    }
+    let Ok(provider) = codewire_daemon::platform_managed::ProviderPin::admit(
         agent(origin.agent),
         &origin.provider,
-    )?;
+    ) else {
+        return refuse(
+            "resume-provider-not-admitted",
+            "this agent's provider is not admitted here",
+        );
+    };
     if !commit {
         return Ok(json!({"launch_generation": request.launch_generation}));
     }
