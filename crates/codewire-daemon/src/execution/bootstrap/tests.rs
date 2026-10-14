@@ -235,14 +235,19 @@ async fn startup_host_wait_cannot_extend_the_original_launch_deadline() {
     let (server, mut child) = UnixStream::pair().unwrap();
     let bridge = ingress.bridge.clone();
     let task = tokio::spawn(async move {
-        super::super::projection::relay_accepted_launch(
+        let committed = std::sync::atomic::AtomicBool::new(false);
+        let result = super::super::projection::relay_accepted_launch(
             server,
             context,
             &bridge,
             true,
             &Default::default(),
+            &committed,
         )
-        .await
+        .await;
+        // It failed before the launcher was told to execute (#2769).
+        assert!(!committed.load(std::sync::atomic::Ordering::SeqCst));
+        result
     });
     child
         .read_exact(&mut [0; BOOTSTRAP_HEADER_BYTES])

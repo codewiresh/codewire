@@ -20,6 +20,7 @@ pub(super) struct LaunchRendezvous {
     bridge: CredentialBridge,
     override_names: std::collections::BTreeSet<String>,
     wait_for_initial_host: bool,
+    committed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PreparedProcess {
@@ -116,6 +117,7 @@ impl PreparedProcess {
             bridge: bridge.clone(),
             override_names: environment.override_names.clone(),
             wait_for_initial_host: identity.transport == crate::CredentialBridgeTransport::Hosted,
+            committed: prepared.launch_committed.clone(),
         });
         Ok(prepared)
     }
@@ -142,6 +144,7 @@ impl LaunchRendezvous {
                 &self.bridge,
                 self.wait_for_initial_host,
                 &self.override_names,
+                &self.committed,
             )
             .await
         })
@@ -168,6 +171,7 @@ pub(super) async fn relay_accepted_launch(
     bridge: &CredentialBridge,
     wait_for_initial_host: bool,
     override_names: &std::collections::BTreeSet<String>,
+    committed: &std::sync::atomic::AtomicBool,
 ) -> io::Result<()> {
     let overrides = encode_override_names(override_names)?;
     let remaining = context
@@ -203,6 +207,9 @@ pub(super) async fn relay_accepted_launch(
         sealed.validate().await.map_err(|_| denied())?;
         // Final exec follows this commit; already inherited values cannot be
         // revoked. Peer/lifecycle owners must cancel this future on shutdown.
+        // From here on the program may start, so no later failure, timeout
+        // or cancellation is a denial (#2769).
+        committed.store(true, std::sync::atomic::Ordering::SeqCst);
         channel.write_all(&[LAUNCH_COMMIT]).await?;
         channel.shutdown().await?;
         Ok(())
