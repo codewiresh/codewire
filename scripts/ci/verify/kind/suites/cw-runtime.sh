@@ -216,8 +216,10 @@ retained_managed_workspace_image() {
 # The managed-agent journey alone on a retained cluster without a named
 # profile (#2672): the same synthetic providers, profile and no-network
 # environment as the admitted journey, then the smoke in managed-only mode
-# against the deployed daemon image, then Stop/Start (#2657). Failure keeps
-# the environment and its credentials for diagnosis, like the admitted path.
+# against the deployed daemon image, with twenty back-to-back MESSAGEs to one
+# conversation, none of which may end unknown (#2782), then Stop/Start
+# (#2657). Failure keeps the environment and its credentials for diagnosis,
+# like the admitted path.
 run_retained_managed_agents_journey() {
   local KIND_CREDENTIAL_CLI_HOME credential_name anthropic_name profile_name environment
   local workspace_image update generation pod cli_sha256
@@ -268,7 +270,7 @@ run_retained_managed_agents_journey() {
     SMOKE_ACCESS_TOKEN=at_kind_connect_oidc_codewire_api \
     SMOKE_CW_CLI_PATH="$CARGO_CI_DIR/cw" SMOKE_CW_CLI_SHA256="$cli_sha256" \
     SMOKE_CW_CLI_HOME="$KIND_CREDENTIAL_CLI_HOME" \
-    SMOKE_CW_MANAGED_AGENTS=only \
+    SMOKE_CW_MANAGED_AGENTS=only SMOKE_CW_MANAGED_BACK_TO_BACK=20 \
     "SMOKE_CW_MANAGED_OPENAI_CREDENTIAL=$credential_name" \
     "SMOKE_CW_MANAGED_ANTHROPIC_CREDENTIAL=$anthropic_name" \
     "$CARGO_CI_DIR/examples/environment-cw-runtime-smoke"
@@ -378,7 +380,9 @@ run_admitted_cw_runtime_journey() {
   log "starting one public same-Pod ordinary CW runtime journey for environment $environment"
   local managed_projection=()
   if [ "$managed" = 1 ]; then
-    managed_projection=(SMOKE_CW_MANAGED_AGENTS=1
+    # Twenty MESSAGEs to one conversation, each sent once the one before it
+    # is final; none may end unknown (#2782).
+    managed_projection=(SMOKE_CW_MANAGED_AGENTS=1 SMOKE_CW_MANAGED_BACK_TO_BACK=20
       "SMOKE_CW_MANAGED_OPENAI_CREDENTIAL=$credential_name"
       "SMOKE_CW_MANAGED_ANTHROPIC_CREDENTIAL=$anthropic_name")
   fi
