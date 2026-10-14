@@ -289,10 +289,13 @@ for executable in ('psql', 'docker'):
     path.write_text('#!/bin/sh\nexit 0\n')
     path.chmod(0o755)
 
-def run_case(failure=''):
+lock_dir = temporary / 'lane-locks'
+
+def run_case(failure='', extra=None):
     trace = trace_root / 'trace.jsonl'
     trace.unlink(missing_ok=True)
     environment = {
+        'CODEWIRE_INTEGRATION_LOCK_DIR': str(lock_dir), **(extra or {}),
         'PATH': str(trace_root) + os.pathsep + os.environ['PATH'],
         'CODEWIRE_LOCAL_RUST_CACHE': 'off',
         'CARGO_TARGET_DIR': str(trace_root / 'debug-target'),
@@ -346,6 +349,34 @@ for failure in ['compile:codewire-server-core', 'compile:codewire-platform-crede
     assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, failure
     if failure.startswith('compile:'):
         assert '--no-run' in trace[-1]['args'], failure
+# The integration lane lock (#2755). Another run holds the 62000 range:
+# this hermetic fixture sets no VERIFICATION_PORT_BASE, so it neither takes
+# the lock nor waits on it; a real lane, which is given the base, waits for it.
+import fcntl
+lock_dir.mkdir(mode=0o700, exist_ok=True)
+held = os.open(lock_dir / 'ports-62000.lock', os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(held, fcntl.LOCK_EX)
+(lock_dir / 'ports-62000.lock.holder').write_text('database in /worktrees/other pid=1\n')
+fixture, _, _ = run_case()
+assert fixture.returncode == 0 and '[product-integration] green' in fixture.stdout, fixture.stdout + fixture.stderr
+assert 'integration lane lock' not in fixture.stdout
+lane_environment = dict(environment, VERIFICATION_PORT_BASE='62000', RUN_DIR=str(trace_root / 'lane-run'))
+(trace_root / 'trace.jsonl').unlink(missing_ok=True)
+lane = subprocess.Popen(['bash', str(root / 'scripts/ci/verify/run-integration-verification.sh'), 'database'],
+                        env=lane_environment, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+waiting = lane.stdout.readline()
+while waiting and 'integration lane lock' not in waiting:
+    waiting = lane.stdout.readline()
+assert 'waiting for the integration lane lock' in waiting and 'held by database in /worktrees/other' in waiting, waiting
+import time
+time.sleep(2)
+assert lane.poll() is None and not (trace_root / 'trace.jsonl').exists(), 'a real lane ran while another held its range'
+os.close(held)
+rest, _ = lane.communicate(timeout=300)
+assert lane.returncode == 0 and '[product-integration] green' in rest, rest
+assert 'acquired' in rest
+assert f'{root} pid=' in (lock_dir / 'ports-62000.lock.holder').read_text()
+
 print(f'Database batching: {len(suites) + 10} trace/failure cases; '
       f'all {len(suites)} suite contracts and {sum(suite["count"] for suite in suites)} required tests preserved')
 PYTHON

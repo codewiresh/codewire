@@ -256,11 +256,19 @@ stopped is not replayed; the agent may see an interrupted step and redo it.
 `cw wait --message` for a message sent before the Stop says that it ended with
 the environment.
 
+A conversation waits, and `cw msg` says to try again shortly, while:
+
+- the sandbox's previous Pod is still stopping;
+- another resume of it is already starting in this sandbox;
+- its agent is still running in this sandbox.
+
 A conversation cannot resume, and `cw msg` says why, when:
 
-- the sandbox's previous Pod is still stopping (try again shortly);
-- the environment's selected credentials changed since it started, or the
-  agent's credential changed (for example from an API key to a sign-in);
+- the environment's selected credentials or secret sources changed since it
+  started, or the agent's credential changed (for example from an API key to
+  a sign-in);
+- its working directory no longer exists in the sandbox;
+- the sandbox's agent provider is not admitted for it;
 - its last start, restart or resume has an unknown outcome;
 - it is a child conversation (resume its parent instead).
 

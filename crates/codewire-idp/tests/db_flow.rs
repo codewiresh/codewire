@@ -3007,18 +3007,26 @@ async fn get_session_accepts_codewire_api_key_against_postgres() {
     assert_eq!(body["session"]["id"], "");
     assert!(body["session"].get("token").is_none());
 
-    let mut last_used: Option<chrono::NaiveDateTime> = None;
-    for _ in 0..50 {
-        last_used = sqlx::query_scalar("SELECT last_used_at FROM api_keys WHERE id=$1")
-            .bind(key_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        if last_used.is_some() {
-            break;
+    // Usage is recorded best-effort and detached (#1851): each request's
+    // touch gives up after 250 ms, so on a loaded host one can be dropped.
+    // Repeating the same API-key get-session schedules another; a key whose
+    // usage is never recorded still fails within the deadline.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let last_used: Option<chrono::NaiveDateTime> = loop {
+        let last_used: Option<chrono::NaiveDateTime> =
+            sqlx::query_scalar("SELECT last_used_at FROM api_keys WHERE id=$1")
+                .bind(key_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if last_used.is_some() || std::time::Instant::now() >= deadline {
+            break last_used;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (st, body, _) =
+            sess_req_bearer(&app, "GET", "/api/auth/get-session", &raw_key, "").await;
+        assert_eq!(st, 200, "repeated api-key get-session: {body}");
+    };
     assert!(
         last_used.is_some(),
         "api-key get-session should bump last_used_at"
