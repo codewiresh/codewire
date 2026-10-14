@@ -541,7 +541,7 @@ print("cooperative cancellation: no adopted children")
         self.assertEqual(cargo[4], ["cargo", "test", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", *credential_crates, "--lib"])
         self.assertEqual(cargo[6], ["cargo", "clippy", "--locked", "--offline", "--target",
-                                   "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib",
+                                   "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib", "--tests",
                                    "--", "-D", "warnings"])
         self.assertEqual(cargo[7], ["cargo", "clippy", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", *credential_crates, "--all-targets",
