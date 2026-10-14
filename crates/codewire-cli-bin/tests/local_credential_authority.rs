@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn fixture() -> tempfile::TempDir {
@@ -57,9 +57,33 @@ impl Drop for Authority<'_> {
     }
 }
 
+/// The packaged authority prepares its socket directory in the shared
+/// per-user directory (#2745), outside the fixture. This removes it once the
+/// fixture's credential root is gone, as native_supervisor.rs does for the
+/// supervisor's.
+struct SocketDirCleanup {
+    directory: PathBuf,
+    root: PathBuf,
+}
+
+impl Drop for SocketDirCleanup {
+    fn drop(&mut self) {
+        if !self.root.exists() {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+}
+
 #[test]
 fn the_packaged_authority_starts_and_stores_a_secret_in_the_file_store() {
+    // Declared before the fixture, so it is dropped after the fixture is.
+    let _cleanup: SocketDirCleanup;
     let home = fixture();
+    let root = home.path().join(".codewire/credentials-v1");
+    _cleanup = SocketDirCleanup {
+        directory: codewire_local_vmm::socket_dir::predicted(&root),
+        root,
+    };
     fs::create_dir(home.path().join(".codewire")).unwrap();
     fs::write(
         home.path().join(".codewire/config.toml"),
