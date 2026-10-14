@@ -31,8 +31,8 @@ assert_output() {
 
 docs_output="$(emit '|valid:v3|policy|policy_shell_omittable|complete|' fallback false false false)"
 assert_output "$docs_output" policy true
-for group in standard tooling rust_transport database services_control \
-    services_runtime edge_kind cw_release_assets workspace_image; do
+for group in standard tooling rust_compile rust_transport database \
+    services_control services_runtime edge_kind cw_release_assets workspace_image; do
   assert_output "$docs_output" "$group" false
 done
 
@@ -45,21 +45,69 @@ assert_output "$legacy_policy_output" policy true
 assert_output "$legacy_policy_output" tooling true
 
 receipt_output="$(emit '|valid:v3|policy|rust|kind|complete|' accepted true true true)"
-for group in policy standard tooling rust_transport database services_control \
-    services_runtime edge_kind cw_release_assets workspace_image; do
+for group in policy standard tooling rust_compile rust_transport database \
+    services_control services_runtime edge_kind cw_release_assets workspace_image; do
   assert_output "$receipt_output" "$group" false
 done
 
 selected_output="$(emit \
   '|valid:v3|policy|contracts|security|rust|database|service_idp|service_nats|kind|web|complete|' \
   fallback true false true)"
-for group in policy standard tooling rust_transport database services_control \
-    services_runtime edge_kind cw_release_assets workspace_image; do
+for group in policy standard tooling rust_compile rust_transport database \
+    services_control services_runtime edge_kind cw_release_assets workspace_image; do
   assert_output "$selected_output" "$group" true
 done
 
 desktop_output="$(emit '|valid:v3|complete|' fallback false true false)"
 assert_output "$desktop_output" rust_transport true
+assert_output "$desktop_output" rust_compile true
+
+# Main and full pull-request selections compile with the Rust group, exactly
+# as before the compile decision was separate.
+for rust_selection in '|valid:v3|rust|complete|' '|valid:v3|rust_curated_locks|complete|' \
+    '|valid:v3|transport|complete|' '|valid:v3|transport_derp_contract|complete|'; do
+  rust_output="$(emit "$rust_selection" fallback false false false)"
+  assert_output "$rust_output" rust_compile true
+  assert_output "$rust_output" rust_transport true
+done
+
+# A hosted pull request's quick selection dispatches only what it names: the
+# policy core, ShellCheck in tooling, compiling every Rust target, and Kind
+# when opted in. Artifact facts that would dispatch the CW release assets,
+# the container contract or the desktop package dispatch nothing.
+quick_output="$(emit \
+  '|valid:v3|policy|policy_shell_omittable|pr_quick|rust_compile|complete|' \
+  fallback true true true)"
+assert_output "$quick_output" policy true
+assert_output "$quick_output" rust_compile true
+for group in standard tooling rust_transport database services_control \
+    services_runtime edge_kind cw_release_assets workspace_image; do
+  assert_output "$quick_output" "$group" false
+done
+quick_shell_output="$(emit \
+  '|valid:v3|policy|policy_shell|policy_shell_omittable|pr_quick|complete|' \
+  fallback true true true)"
+assert_output "$quick_shell_output" policy true
+assert_output "$quick_shell_output" tooling true
+for group in standard rust_compile rust_transport database services_control \
+    services_runtime edge_kind cw_release_assets workspace_image; do
+  assert_output "$quick_shell_output" "$group" false
+done
+quick_kind_output="$(emit \
+  '|valid:v3|edge_kind|kind|policy|policy_shell_omittable|pr_quick|rust_compile|complete|' \
+  fallback false false true)"
+for group in policy rust_compile edge_kind; do
+  assert_output "$quick_kind_output" "$group" true
+done
+for group in standard tooling rust_transport database services_control \
+    services_runtime cw_release_assets workspace_image; do
+  assert_output "$quick_kind_output" "$group" false
+done
+# The same artifact facts without pr_quick keep dispatching their groups.
+full_artifact_output="$(emit '|valid:v3|policy|policy_shell_omittable|complete|' fallback true true true)"
+for group in policy rust_compile rust_transport cw_release_assets workspace_image; do
+  assert_output "$full_artifact_output" "$group" true
+done
 
 web_output="$(emit '|valid:v3|web|complete|' fallback false false false)"
 assert_output "$web_output" standard true
@@ -87,8 +135,8 @@ assert_output "$apikey_output" services_control false
 assert_output "$apikey_output" services_runtime false
 
 unknown_output="$(emit '|valid:v3|future_capability|complete|' fallback false false false)"
-for group in policy standard tooling rust_transport database services_control \
-    services_runtime edge_kind cw_release_assets workspace_image; do
+for group in policy standard tooling rust_compile rust_transport database \
+    services_control services_runtime edge_kind cw_release_assets workspace_image; do
   assert_output "$unknown_output" "$group" true
 done
 
@@ -105,8 +153,8 @@ fi
 
 # A superseded main commit dispatches nothing, whatever it selected; the same
 # selection on main's tip (or with the input unset) dispatches as before.
-all_groups=(policy standard tooling rust_transport database services_control
-  services_runtime edge_kind cw_release_assets workspace_image)
+all_groups=(policy standard tooling rust_compile rust_transport database
+  services_control services_runtime edge_kind cw_release_assets workspace_image)
 everything='|valid:v3|future_capability|complete|'
 superseded_emit() {
   local superseded="$1" output="$TMP/superseded-output"
