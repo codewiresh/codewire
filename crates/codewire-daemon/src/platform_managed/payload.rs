@@ -45,7 +45,7 @@ pub enum PinRefusal {
 impl PinRefusal {
     /// A hosted launch refuses on every reason; a pin that changed right
     /// after admission leaves the outcome unknown.
-    fn hosted(self) -> Error {
+    pub(crate) fn hosted(self) -> Error {
         match self {
             Self::Changed => Error::Unknown,
             _ => Error::Refused,
@@ -157,6 +157,26 @@ fn parents(path: &Path) -> Result<Vec<(PathBuf, File)>, PinRefusal> {
         pins.push((p.to_owned(), fd));
     }
     Ok(pins)
+}
+/// The client version the image's package metadata names, for a refusal its
+/// owner reads; `None` when the image has no readable package metadata. It
+/// admits nothing: a launch still requires the full pin.
+pub(crate) fn image_client_version(agent: Agent) -> Option<String> {
+    let package = layout(agent)?.package;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(package)
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.take(64 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 64 * 1024 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let version = value["version"].as_str()?;
+    codewire_daemon_proto::platform_managed::valid_client_version(version)
+        .then(|| version.to_owned())
 }
 impl ProviderPin {
     pub fn discover(agent: Agent) -> Result<Self, Error> {
