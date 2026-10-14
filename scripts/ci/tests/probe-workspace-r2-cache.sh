@@ -164,7 +164,7 @@ for phase in cw-control cw-edit; do
       exit "$status"
     ' cw-probe-producer "$producer_work/cw-producer-result.json" \
       python3 "$ROOT/scripts/ci/images/cw-image-consumer.py" produce \
-      --source-dir "$ROOT" --source-sha "$source_sha" --profile release \
+      --source-dir "$ROOT" --source-sha "$source_sha" --profile "$WORKSPACE_CW_PROFILE" \
       --output "$producer_work/build" --docker-bin "$docker_bin" --builder "$builder" --sccache-mode r2 \
       --cache-from "$common,name=$architecture/cw-runtime/experiments/$seed_id" \
       --cache-to "$common,name=$architecture/cw-runtime/experiments/$seed_id/probes/$nonce/$phase-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" || status=$?
@@ -210,7 +210,7 @@ image_tag="codewire-cache-probe:$nonce"
 status=0
 mkdir -m 0700 "$report/tools/cw-image-work"
 workspace_cache_logged_command "$report/tools/build.log" \
-  bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$ROOT" "$report/tools/cw-image-work" \
+  bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" "$WORKSPACE_CW_PROFILE" "$ROOT" "$report/tools/cw-image-work" \
   --image-source-dir "$work/contexts/tools" \
   --cache-from "$common,name=$architecture/cw-runtime/experiments/$seed_id" \
   --cache-to "$common,name=$architecture/cw-runtime/experiments/$seed_id/probes/$nonce/tools-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" -- \
