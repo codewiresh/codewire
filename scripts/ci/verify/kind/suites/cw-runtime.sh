@@ -42,6 +42,14 @@ run_retained_cw_runtime_suite() {
 }
 
 run_retained_cw_managed_agents_suite() {
+  # A retained cluster without a named profile (`make kind-test`) has no
+  # admitted release producers: it runs the managed journey alone, against
+  # the daemon image the cluster deploys. A named profile keeps the full
+  # admitted CW A/B/A journey with managed workers.
+  if [ "${KIND_PROFILE:-0}" != 1 ] || [ -z "${CLUSTER:-}" ]; then
+    run_retained_managed_agents_journey
+    return $?
+  fi
   CW_RUNTIME_MANAGED_AGENTS=1 run_retained_cw_runtime_suite
 }
 
@@ -180,6 +188,125 @@ cw_runtime_managed_after_restart() {
   log "the restarted Pod launched and stopped managed agent ${session}"
 }
 
+# Fixed public canaries go only to write-only platform enrollment. No provider
+# token, keyring, auth file or value-read route enters the guest.
+cw_runtime_add_managed_credentials() {
+  local credential_name="$1" anthropic_name="$2" profile_name="$3"
+  printf '%s\n' cwlocalopenai0123456789abcdef0123456789abcdef |
+    kind_credential_cli credentials --platform add openai --name "$credential_name"
+  printf '%s\n' cwlocalanthropic0123456789abcdef0123456789abcdef |
+    kind_credential_cli credentials --platform add anthropic --name "$anthropic_name"
+  kind_credential_cli credentials --platform get "$anthropic_name" --output json | jq -e \
+    --arg name "$anthropic_name" 'length == 1 and .[0].name == $name
+      and .[0].provider == "anthropic" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"
+      and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
+  kind_credential_cli credentials --platform --profile "$profile_name" set openai "$credential_name"
+  kind_credential_cli credentials --platform --profile "$profile_name" set anthropic "$anthropic_name"
+}
+
+# The product's pinned workspace image, which `make kind-runtime-images` loads
+# into every node by digest. A managed agent runs only on an image whose agent
+# clients match the daemon's pins. The retained cluster's recorded
+# source-built workspace image can be older than main's daemon; managed info
+# then refuses it (#2694), so the journey runs on the pinned image instead.
+retained_managed_workspace_image() {
+  local reference node images
+  reference="$(sed -n 's/^pub const HARBOR_IMAGE: &str = "\(.*\)";$/\1/p' \
+    "$ROOT/crates/codewire-workspace-image/src/pin.rs")"
+  if ! [[ "$reference" =~ ^registry\.example\.invalid/codewire/workspace@sha256:[0-9a-f]{64}$ ]]; then
+    echo '::error::crates/codewire-workspace-image/src/pin.rs names no pinned workspace image' >&2
+    return 1
+  fi
+  for node in $(kind get nodes --name "$KIND_CLUSTER_NAME"); do
+    # Read the whole listing first: grep -q stopping at the pin would end the
+    # listing with SIGPIPE, which pipefail reports as a missing image.
+    if ! images="$(docker exec "$node" ctr -n k8s.io images ls -q)" ||
+      ! grep -qxF "$reference" <<<"$images"; then
+      echo "::error::${node} lacks the pinned workspace image ${reference}; run make kind-runtime-images" >&2
+      return 1
+    fi
+  done
+  printf '%s\n' "$reference"
+}
+
+# The managed-agent journey alone on a retained cluster without a named
+# profile (#2672): the same synthetic providers, profile and no-network
+# environment as the admitted journey, then the smoke in managed-only mode
+# against the deployed daemon image, then Stop/Start (#2657). Failure keeps
+# the environment and its credentials for diagnosis, like the admitted path.
+run_retained_managed_agents_journey() {
+  local KIND_CREDENTIAL_CLI_HOME credential_name anthropic_name profile_name environment
+  local workspace_image update generation pod cli_sha256
+  require_kind_errexit
+  require_tool jq
+  require_tool kind
+  require_tool kubectl
+  umask 077
+  trap retained_suite_cleanup EXIT
+  validate_retained_cluster
+  cw_runtime_require_synthetic_provider
+  build_retained_kind_smokes
+  if [ ! -x "$CARGO_CI_DIR/examples/environment-cw-runtime-smoke" ]; then
+    echo '::error::the Kind smoke set lacks environment-cw-runtime-smoke; rebuild it before this suite' >&2
+    return 1
+  fi
+  workspace_image="$(retained_managed_workspace_image)"
+  KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-cw-managed.XXXXXX)"
+  [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ]
+  [ "$(stat -c '%u:%a' "$KIND_CREDENTIAL_CLI_HOME")" = "$(id -u):700" ]
+  prepare_kind_credential_cli
+  credential_name="kind-cw-openai-${RANDOM}-${RANDOM}"
+  anthropic_name="kind-cw-anthropic-${RANDOM}-${RANDOM}"
+  profile_name="kind-cw-profile-${RANDOM}-${RANDOM}"
+  kind_credential_cli org set org_contract_1
+  cw_runtime_add_managed_credentials "$credential_name" "$anthropic_name" "$profile_name"
+  environment="$(kind_credential_cli env --platform create --name "$profile_name" \
+    --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
+    --no-network --yes --output json | jq -er '.id')"
+  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+  wait_kind_credential_environment "$environment" running
+  # As in the admitted journey: nothing is projected before the profile is
+  # bound, and the probe's session waits for environment setup to finish,
+  # which a source change requires.
+  kind_credential_probe "$environment" unselected
+  update="$(kind_credential_cli env --platform update "$environment" \
+    --profile "platform:$profile_name" --yes --output json)"
+  generation="$(jq -er '.operation_generation |
+    if type == "number" and . > 0 and . == floor then .
+    else error("expected the acknowledged positive setup generation") end' <<<"$update")"
+  wait_kind_credential_environment "$environment" running
+  pod="$(wait_kind_credential_restarted_workspace "$environment" "$generation")"
+  cli_sha256="$(sha256sum "$CARGO_CI_DIR/cw" | cut -d ' ' -f1)"
+  log "starting the managed-agent journey for environment $environment on the deployed daemon image"
+  env -i PATH=/usr/bin:/bin HOME="$KIND_CREDENTIAL_CLI_HOME" \
+    SMOKE_CW_RUNTIME_BASE_URL="$KIND_INGRESS_URL" \
+    SMOKE_ORG_ID=org_contract_1 SMOKE_ENVIRONMENT_ID="$environment" \
+    SMOKE_ACCESS_TOKEN=at_kind_connect_oidc_codewire_api \
+    SMOKE_CW_CLI_PATH="$CARGO_CI_DIR/cw" SMOKE_CW_CLI_SHA256="$cli_sha256" \
+    SMOKE_CW_CLI_HOME="$KIND_CREDENTIAL_CLI_HOME" \
+    SMOKE_CW_MANAGED_AGENTS=only \
+    "SMOKE_CW_MANAGED_OPENAI_CREDENTIAL=$credential_name" \
+    "SMOKE_CW_MANAGED_ANTHROPIC_CREDENTIAL=$anthropic_name" \
+    "$CARGO_CI_DIR/examples/environment-cw-runtime-smoke"
+  kind_credential_fixture_events | jq -e '
+    any(.[]; .event == "api_key_attempt" and .family == "openai" and .api_attempt > 0)
+    and any(.[]; .event == "api_key_attempt" and .family == "anthropic" and .api_attempt > 0)' >/dev/null
+  cw_runtime_managed_after_restart "$environment" "$pod"
+  pod="$(kind_credential_workspace "$environment")"
+  kind_credential_cli env --platform rm "$environment" --yes --output json
+  wait_kind_credential_environment "$environment" destroyed
+  kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s "pod/$pod"
+  kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
+  # A stored platform credential is revoked before its record is deleted.
+  local name
+  for name in "$credential_name" "$anthropic_name"; do
+    kind_credential_cli credentials --platform revoke "$name" --output json >/dev/null
+    kind_credential_cli credentials --platform delete "$name" --yes
+  done
+  rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"
+  log "retained managed-agent journey (launch, steer, interrupt, revoked provider, Stop, Restart, Stop/Start) green"
+}
+
 run_admitted_cw_runtime_journey() {
   local task="$1" KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment
   local managed="${CW_RUNTIME_MANAGED_AGENTS:-0}" anthropic_name=''
@@ -226,18 +353,7 @@ run_admitted_cw_runtime_journey() {
     $1 == "ID:" { id = $2; count++ }
     END { exit !(count == 1 && id == "org_contract_1") }'
   if [ "$managed" = 1 ]; then
-    # Fixed public canaries go only to write-only platform enrollment. No
-    # provider token, keyring, auth file or value-read route enters the guest.
-    printf '%s\n' cwlocalopenai0123456789abcdef0123456789abcdef |
-      kind_credential_cli credentials --platform add openai --name "$credential_name"
-    printf '%s\n' cwlocalanthropic0123456789abcdef0123456789abcdef |
-      kind_credential_cli credentials --platform add anthropic --name "$anthropic_name"
-    kind_credential_cli credentials --platform get "$anthropic_name" --output json | jq -e \
-      --arg name "$anthropic_name" 'length == 1 and .[0].name == $name
-        and .[0].provider == "anthropic" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"
-        and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
-    kind_credential_cli credentials --platform --profile "$profile_name" set openai "$credential_name"
-    kind_credential_cli credentials --platform --profile "$profile_name" set anthropic "$anthropic_name"
+    cw_runtime_add_managed_credentials "$credential_name" "$anthropic_name" "$profile_name"
   else
     kind_credential_cli credentials --platform connect codex --name "$credential_name"
     kind_credential_cli credentials --platform --profile "$profile_name" set codex "$credential_name"
