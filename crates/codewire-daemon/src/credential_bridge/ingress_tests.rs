@@ -9,8 +9,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use super::*;
 
 // The hosted ingress fixtures each bind their own loopback port. They are
-// serialized within this process only because the prebind case checks a port
-// it released by number (see `process_listens_on`).
+// serialized within this process only because the prebind case rebinds a port
+// it released, by number.
 pub(super) static LOOPBACK_TEST: Mutex<()> = Mutex::const_new(());
 
 /// Where a unit test's Hosted ingress listens: port 0, so the kernel gives
@@ -50,11 +50,10 @@ fn process_holds_socket(inode: u64) -> bool {
     process_socket_inodes().contains(&inode)
 }
 
-/// Whether this process holds a listening IPv4 TCP socket on `address`: the
-/// kernel's listening sockets on that address, intersected with this
-/// process's descriptors. Another process listening there does not count.
+/// The inodes of the kernel's listening IPv4 TCP sockets on `address`, in
+/// this network namespace, whichever process holds them.
 #[cfg(target_os = "linux")]
-fn process_listens_on(address: std::net::SocketAddr) -> bool {
+fn listening_socket_inodes(address: std::net::SocketAddr) -> Vec<u64> {
     const LISTEN: &str = "0A";
     let std::net::SocketAddr::V4(address) = address else {
         panic!("hosted ingress listens on IPv4 loopback");
@@ -64,7 +63,6 @@ fn process_listens_on(address: std::net::SocketAddr) -> bool {
         u32::from_le_bytes(address.ip().octets()),
         address.port()
     );
-    let held = process_socket_inodes();
     std::fs::read_to_string("/proc/self/net/tcp")
         .unwrap()
         .lines()
@@ -75,7 +73,34 @@ fn process_listens_on(address: std::net::SocketAddr) -> bool {
                 .then(|| fields.get(9)?.parse::<u64>().ok())
                 .flatten()
         })
+        .collect()
+}
+
+/// Whether this process holds a listening IPv4 TCP socket on `address`.
+/// Another process listening there, including a child another test forked
+/// that still holds a copy of a closed listener until it execs, does not
+/// count.
+#[cfg(target_os = "linux")]
+fn process_listens_on(address: std::net::SocketAddr) -> bool {
+    let held = process_socket_inodes();
+    listening_socket_inodes(address)
+        .into_iter()
         .any(|inode| held.contains(&inode))
+}
+
+/// Wait until the kernel has closed every listener on `address` this test
+/// released. A child that a concurrent test forks while a listener is open
+/// holds a copy of its descriptor until it execs, so the socket can outlive
+/// this process's close by that long.
+#[cfg(target_os = "linux")]
+async fn released_by_every_process(address: std::net::SocketAddr) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !listening_socket_inodes(address).is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("a released listener stayed open in another process");
 }
 const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -345,7 +370,10 @@ async fn hosted_prebind_is_exact_exclusive_and_does_not_unlink_previous_unix_own
     drop(ingress);
     assert!(!path.exists());
     #[cfg(target_os = "linux")]
-    assert!(!process_holds_socket(first_inode));
+    {
+        assert!(!process_holds_socket(first_inode));
+        released_by_every_process(address).await;
+    }
 
     // A Unix-path failure after successful TCP prebind releases the port and
     // preserves the unexpected filesystem object byte-for-byte. The second
