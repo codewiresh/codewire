@@ -165,6 +165,88 @@ pub(crate) fn prepare_virtiofsd_filesystem_domain(
     Ok(PreparedFilesystemDomain(ruleset))
 }
 
+/// The filesystem a host e2fsprogs tool may use while it works on one
+/// guest-written disk: read and write that one file, run its own program and
+/// the shared libraries it loads, read the loader cache and procfs (the mount
+/// table and swaps it checks), and use `/dev/null` (its configuration, and
+/// e2fsck's descriptor padding). Nothing else can be opened, created, removed
+/// or run; refused reads such as the blkid cache and
+/// `/sys/devices/system/cpu` have fallbacks.
+pub(crate) fn prepare_disk_tool_filesystem_domain(
+    disk: &Path,
+    executable: &Path,
+) -> io::Result<PreparedFilesystemDomain> {
+    let ruleset = create_filesystem_ruleset()?;
+    let file = OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let directory = file | OFlags::DIRECTORY;
+    add_opened_rule(
+        &ruleset,
+        disk,
+        file,
+        LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE,
+    )?;
+    add_opened_rule(
+        &ruleset,
+        executable,
+        file,
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+    )?;
+    // Each real library directory; a link to another one (merged /usr) or an
+    // absent one adds nothing.
+    for libraries in ["/usr/lib", "/usr/lib64", "/lib", "/lib64"] {
+        match open(libraries, directory, Mode::empty()) {
+            Ok(descriptor) => add_path_beneath_rule(
+                &ruleset,
+                descriptor.as_raw_fd(),
+                LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+            )?,
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => {
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match add_opened_rule(
+        &ruleset,
+        Path::new("/etc/ld.so.cache"),
+        file,
+        LANDLOCK_ACCESS_FS_READ_FILE,
+    ) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        result => result?,
+    }
+    add_opened_rule(
+        &ruleset,
+        Path::new("/dev/null"),
+        file,
+        LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE,
+    )?;
+    add_opened_rule(
+        &ruleset,
+        Path::new("/proc"),
+        directory,
+        LANDLOCK_ACCESS_FS_READ_FILE,
+    )?;
+    Ok(PreparedFilesystemDomain(ruleset))
+}
+
+/// A seccomp deny list built before fork, so the child only installs it.
+pub(crate) struct PreparedSyscallFilter(Vec<libc::sock_filter>);
+
+impl PreparedSyscallFilter {
+    pub(crate) fn denying(denied: &[libc::c_long], architecture_denied: &[libc::c_long]) -> Self {
+        let mut filter = base_filter();
+        append_denials(&mut filter, denied.iter().chain(architecture_denied));
+        filter.push(bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW));
+        Self(filter)
+    }
+
+    /// Install the filter; it makes only syscalls, so it is safe between fork
+    /// and exec. The caller has already set `no_new_privs`.
+    pub(crate) fn install(&mut self) -> io::Result<()> {
+        install_filter(&mut self.0)
+    }
+}
+
 fn create_filesystem_ruleset() -> io::Result<OwnedFd> {
     let attributes = LandlockRulesetAttr {
         handled_access_fs: LANDLOCK_HANDLED_ACCESS_FS_V3,
@@ -346,10 +428,7 @@ pub(crate) fn install_denied_syscalls(
     denied: &[libc::c_long],
     architecture_denied: &[libc::c_long],
 ) -> io::Result<()> {
-    let mut filter = base_filter();
-    append_denials(&mut filter, denied.iter().chain(architecture_denied));
-    filter.push(bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW));
-    install_filter(&mut filter)
+    PreparedSyscallFilter::denying(denied, architecture_denied).install()
 }
 
 /// Make `setgroups(2)` an identity-preserving successful no-op.

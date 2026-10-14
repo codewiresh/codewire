@@ -1181,6 +1181,7 @@ mod linux {
             RunnerError::E2fsckFailed(_) => "e2fsck-failed",
             RunnerError::Resize2fsUnavailable => "resize2fs-unavailable",
             RunnerError::Resize2fsFailed(_) => "resize2fs-failed",
+            RunnerError::DiskToolConfinement { .. } => "disk-tool-confinement",
             RunnerError::GenerationNotAdvanced { .. } => "generation-not-advanced",
             RunnerError::InvalidNetworkWorker => "invalid-network-worker",
             RunnerError::NetworkWorkerSpawn => "network-worker-spawn",

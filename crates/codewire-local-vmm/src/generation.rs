@@ -156,7 +156,7 @@ fn format_ext4(disk: &Path, seed_directory: Option<&Path>) -> Result<(), Generat
         }
     }
     let mut command = Command::new(mkfs);
-    command.args([
+    command.args(crate::host::EXT4_FORMAT).args([
         OsStr::new("-q"),
         OsStr::new("-F"),
         OsStr::new("-m"),
