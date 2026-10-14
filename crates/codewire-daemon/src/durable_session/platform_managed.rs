@@ -441,7 +441,67 @@ impl SessionEngine {
             .start_process(handle.clone(), &self.inner.shutdown)
             .await
             .map_err(|_| Error::Unknown)?;
+        // The environment projection was refused before the launcher ran the
+        // agent, with its cleanup confirmed: nothing ran here, so the
+        // adoption is undone and the Resume is a definite refusal the user
+        // can simply repeat (#2769). Any other outcome stands.
+        if denied_before_run(&record) {
+            return self
+                .revert_resume(&handle, &image, &previous, &origin, &c, generation)
+                .await;
+        }
         Ok((record, false, false))
+    }
+    /// Move a Resume whose agent never started back to its predecessor: the
+    /// helper's markers first, then this record. Any refusal or failure
+    /// leaves the outcome unknown, as before (#2769).
+    async fn revert_resume(
+        &self,
+        handle: &Arc<SessionHandle>,
+        image: &ImagePin,
+        previous: &Origin,
+        origin: &Origin,
+        c: &v1::PlatformManagedControl,
+        generation: u64,
+    ) -> Result<(v1::SessionRecord, bool, bool), Error> {
+        // The caller holds the session's operation lock throughout.
+        if lock(&self.inner.active).contains_key(&c.session_id) {
+            return Err(Error::Unknown);
+        }
+        {
+            let metadata = handle.metadata.lock().await;
+            if metadata.platform_managed_origin.as_ref() != Some(origin)
+                || metadata.launch_generation != generation
+                || !denied_before_run(&metadata.to_record())
+            {
+                return Err(Error::Unknown);
+            }
+        }
+        let reverted = image
+            .helper(
+                origin,
+                &c.session_id,
+                generation,
+                json!({"op":"revert","previous":previous}),
+            )
+            .await
+            .map_err(|_| Error::Unknown)?;
+        if reverted["launch_generation"].as_u64() != Some(c.expected_launch_generation) {
+            return Err(Error::Unknown);
+        }
+        let mut metadata = handle.metadata.lock().await;
+        if metadata.platform_managed_origin.as_ref() != Some(origin)
+            || metadata.launch_generation != generation
+            || lock(&self.inner.active).contains_key(&c.session_id)
+        {
+            return Err(Error::Unknown);
+        }
+        metadata.platform_managed_origin = Some(previous.clone());
+        metadata.launch_generation = c.expected_launch_generation;
+        persist_metadata(&self.inner.root, &metadata)
+            .await
+            .map_err(|_| Error::Unknown)?;
+        Err(Error::DeniedBeforeRun)
     }
     async fn platform_control(
         &self,

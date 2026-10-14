@@ -583,7 +583,7 @@ impl Owner {
                 row.reason = "refused-before-issue".into();
                 row.cleanup_unknown = false;
             }
-            Err(Error::DeniedBeforeRun) if issued_launch(&self.request, &row) => {
+            Err(Error::DeniedBeforeRun) if issued_start(&self.request, &row) => {
                 row.phase = 4;
                 row.reason = "denied-before-run".into();
                 row.session_state = v1::SessionLifecycleState::Failed as i32;
@@ -667,17 +667,18 @@ fn resume_origin(
     )
 }
 
-/// An issued launch: the only request a denial before its agent ran settles
-/// as refused.
-fn issued_launch(
+/// An issued launch, or an issued Resume whose adoption was undone (#2769):
+/// the only requests a denial before their agent ran settles as refused. A
+/// refused Resume keeps the predecessor's generation, as its row does.
+fn issued_start(
     request: &v1::PlatformManagedMutationRequest,
     row: &v1::PlatformManagedReceipt,
 ) -> bool {
     row.phase == 2
-        && matches!(
+        && (matches!(
             request.operation,
             Some(v1::platform_managed_mutation_request::Operation::Launch(_))
-        )
+        ) || resume(request))
 }
 
 /// A Resume, whose plain refusals before issue carry their reason (#2705).
@@ -1242,19 +1243,66 @@ mod tests {
     }
 
     #[test]
+    fn platform_service_settles_an_issued_resume_denied_before_run_as_refused() {
+        // #2769: a Resume whose adoption was undone settles like a launch,
+        // at the predecessor's generation its row already carries.
+        let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
+        let driver = uuid::Uuid::new_v4().to_string();
+        let request = v1::PlatformManagedMutationRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            scope: Some(scope),
+            operation: Some(v1::platform_managed_mutation_request::Operation::Control(
+                v1::PlatformManagedControl {
+                    action: v1::PlatformManagedAction::Resume as i32,
+                    session_id: format!("session-{driver}"),
+                    driver_id: driver.clone(),
+                    expected_launch_generation: 3,
+                    predecessor_pod_uid: uuid::Uuid::new_v4().to_string(),
+                    agent: v1::PlatformManagedAgent::Codex as i32,
+                    expected_provider_sha256: vec![3; 32],
+                    expected_provider_size: 1024,
+                    expected_provider_version: "0.160.0".into(),
+                    ..Default::default()
+                },
+            )),
+        };
+        let mut row = v1::PlatformManagedReceipt {
+            request_id: request.request_id.clone(),
+            scope: request.scope.clone(),
+            fingerprint_sha256: wire::platform_managed_request_fingerprint(&request).unwrap(),
+            phase: 2,
+            session_id: format!("session-{driver}"),
+            driver_id: driver,
+            launch_generation: 3,
+            cleanup_unknown: true,
+            reason: "issued".into(),
+            ..Default::default()
+        };
+        assert!(issued_start(&request, &row));
+        row.phase = 1;
+        assert!(!issued_start(&request, &row));
+        row.phase = 4;
+        row.reason = "denied-before-run".into();
+        row.session_state = v1::SessionLifecycleState::Failed as i32;
+        row.cleanup_unknown = false;
+        wire::validate_receipt(&row).unwrap();
+        Stored::new(&request, &row).unwrap().row().unwrap();
+    }
+
+    #[test]
     fn platform_service_settles_only_an_issued_launch_denied_before_run_as_refused() {
         let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
         let request = launch(&scope);
         let mut row = issued(&request).row().unwrap();
-        assert!(issued_launch(&request, &row));
+        assert!(issued_start(&request, &row));
         row.phase = 1;
-        assert!(!issued_launch(&request, &row));
+        assert!(!issued_start(&request, &row));
         row.phase = 2;
         let mut control = request.clone();
         control.operation = Some(v1::platform_managed_mutation_request::Operation::Control(
             v1::PlatformManagedControl::default(),
         ));
-        assert!(!issued_launch(&control, &row));
+        assert!(!issued_start(&control, &row));
         // The settled row is a valid private receipt.
         row.phase = 4;
         row.reason = "denied-before-run".into();
