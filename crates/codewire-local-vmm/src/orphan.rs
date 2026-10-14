@@ -310,7 +310,8 @@ fn inventory_runners(
     runners: &BTreeMap<String, SocketIdentity>,
     orphans: &mut Vec<OrphanEntry>,
 ) {
-    let path = runtime_root.path().join("runners");
+    // Runner sockets live in the root's short socket directory (#2735).
+    let path = crate::socket_dir::predicted(runtime_root.path()).join("runners");
     let mut found = BTreeSet::new();
     let Ok(entries) = fs::read_dir(&path) else {
         for name in runners.keys() {

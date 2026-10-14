@@ -40,6 +40,16 @@ pub(crate) struct CredentialBridge {
     config: Option<CredentialBridgeConfig>,
     inner: Result<Option<SharedCredentialBridge>, Status>,
     owner: Arc<BridgeOwner>,
+    // Where a Hosted ingress listens: the fixed guest-facing loopback address
+    // in the product. Unit tests bind port 0 instead, so the kernel gives
+    // each ingress its own port and no test run contends for a fixed one.
+    loopback: std::net::SocketAddr,
+}
+
+/// The fixed guest-facing loopback address of a Hosted credential ingress.
+/// Guest environments reach the provider routes at this address.
+pub(crate) fn hosted_loopback_address() -> std::net::SocketAddr {
+    (Ipv4Addr::LOCALHOST, CREDENTIAL_BRIDGE_LOOPBACK_PORT).into()
 }
 
 struct BridgeOwner {
@@ -130,6 +140,10 @@ impl CredentialBridge {
         Self {
             config,
             inner,
+            #[cfg(not(test))]
+            loopback: hosted_loopback_address(),
+            #[cfg(test)]
+            loopback: ingress_tests::TEST_LOOPBACK_ADDRESS,
             owner: Arc::new(BridgeOwner {
                 accepting: Mutex::new(true),
                 permits: Arc::new(Semaphore::new(3)),
@@ -331,7 +345,7 @@ impl CredentialBridge {
         // another occupant of the fixed port) must leave the prior UDS intact.
         // Local VMs already own their loopback forwarder and never bind here.
         let loopback = if config.transport == CredentialBridgeTransport::Hosted {
-            Some(bind_hosted_loopback()?)
+            Some(bind_hosted_loopback(self.loopback)?)
         } else {
             None
         };
@@ -373,15 +387,15 @@ impl CredentialBridge {
     }
 }
 
-fn bind_hosted_loopback() -> io::Result<TcpListener> {
-    let address = (Ipv4Addr::LOCALHOST, CREDENTIAL_BRIDGE_LOOPBACK_PORT).into();
+fn bind_hosted_loopback(address: std::net::SocketAddr) -> io::Result<TcpListener> {
     let socket = TcpSocket::new_v4()?;
     // Permit restart after this owner's connections enter TIME_WAIT. This is
     // NOT SO_REUSEPORT: a live owner remains exclusive and fails a second bind.
     socket.set_reuseaddr(true)?;
     socket.bind(address)?;
     let listener = socket.listen(128)?;
-    if listener.local_addr()? != address {
+    let bound = listener.local_addr()?;
+    if bound.ip() != address.ip() || (address.port() != 0 && bound.port() != address.port()) {
         return Err(io::Error::other("credential loopback address is invalid"));
     }
     Ok(listener)

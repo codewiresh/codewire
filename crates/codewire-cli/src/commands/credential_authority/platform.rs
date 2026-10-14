@@ -31,6 +31,12 @@ use crate::config;
 
 const MAX_AUTH_FILE_BYTES: u64 = 64 * 1024;
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+/// With nothing sent upstream for this long, one keepalive goes up, and the
+/// server's answer comes back down. Both directions then carry data well
+/// inside the platform edge's idle limits: ingress-nginx ends a request whose
+/// body is silent for 60 seconds, and Cloudflare a response silent for 125
+/// (#2702). Only against a server that said it answers keepalives.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(25);
 
 pub(super) struct NativePlatformCredentialConnector;
 
@@ -49,12 +55,12 @@ impl PlatformCredentialConnector for NativePlatformCredentialConnector {
                 let open = opening(&binding, ready)?;
                 let client = authenticated_client(&binding, deadline).await?;
                 live(deadline)?;
-                let upstream = client
+                let admitted = client
                     .delegate_credentials(open)
                     .await
                     .map_err(client_error)?;
                 live(deadline)?;
-                Ok(relay(upstream, input))
+                Ok(relay(admitted.stream, admitted.accepts_keepalive, input))
             })
             .await
             .map_err(|_| expired())?
@@ -227,26 +233,94 @@ impl Upstream for CredentialDelegationStream {
     }
 }
 
-fn relay(upstream: impl Upstream, input: PlatformCredentialInput) -> PlatformCredentialOutput {
+/// Keepalives of one admitted stream: when the next is due, and whether one
+/// still waits for its answer. A second is never sent before that answer.
+struct Keepalive {
+    due: Instant,
+    pending: bool,
+}
+
+/// `keepalive` is the admitted server's `accepts_keepalive`; an older server
+/// ends a stream that carries one, so none is sent to it.
+fn relay(
+    upstream: impl Upstream,
+    keepalive: bool,
+    input: PlatformCredentialInput,
+) -> PlatformCredentialOutput {
+    let keepalive = keepalive.then(|| Keepalive {
+        due: Instant::now() + KEEPALIVE_IDLE,
+        pending: false,
+    });
     Box::pin(stream::try_unfold(
-        (upstream, input),
-        |(mut upstream, mut input)| async move {
+        (upstream, input, keepalive),
+        |(mut upstream, mut input, mut keepalive)| async move {
             loop {
+                let due = keepalive
+                    .as_ref()
+                    .filter(|keepalive| !keepalive.pending)
+                    .map(|keepalive| keepalive.due);
                 tokio::select! {
                     next = upstream.receive() => {
                         let Some(response) = next? else { return Ok(None); };
-                        return Ok(Some((decode(response)?, (upstream, input))));
+                        if matches!(
+                            response.output,
+                            Some(delegate_credentials_response::Output::Keepalive(_))
+                        ) {
+                            // Only the answer to the one keepalive sent.
+                            match keepalive.as_mut() {
+                                Some(keepalive) if keepalive.pending => {
+                                    keepalive.pending = false;
+                                    continue;
+                                }
+                                _ => return Err(denied()),
+                            }
+                        }
+                        return Ok(Some((decode(response)?, (upstream, input, keepalive))));
                     }
                     next = input.next() => {
                         let Some(request) = next else { return Ok(None); };
                         let request = encode(request.map_err(|_| unavailable())?)?;
-                        tokio::time::timeout(SEND_TIMEOUT, upstream.send(request))
-                            .await.map_err(|_| unavailable())??;
+                        send(&mut upstream, request).await?;
+                        if let Some(keepalive) = keepalive.as_mut() {
+                            keepalive.due = Instant::now() + KEEPALIVE_IDLE;
+                        }
+                    }
+                    () = sleep_until_some(due) => {
+                        send(&mut upstream, keepalive_request()).await?;
+                        if let Some(keepalive) = keepalive.as_mut() {
+                            keepalive.pending = true;
+                            keepalive.due = Instant::now() + KEEPALIVE_IDLE;
+                        }
                     }
                 }
             }
         },
     ))
+}
+
+async fn send(
+    upstream: &mut impl Upstream,
+    request: DelegateCredentialsRequest,
+) -> Result<(), Status> {
+    tokio::time::timeout(SEND_TIMEOUT, upstream.send(request))
+        .await
+        .map_err(|_| unavailable())?
+}
+
+async fn sleep_until_some(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn keepalive_request() -> DelegateCredentialsRequest {
+    DelegateCredentialsRequest {
+        input: Some(delegate_credentials_request::Input::Keepalive(
+            Box::default(),
+        )),
+        ..Default::default()
+    }
 }
 
 fn encode(

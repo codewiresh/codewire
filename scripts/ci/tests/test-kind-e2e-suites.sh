@@ -1561,6 +1561,63 @@ done
     "$FIXTURE/missing-consumed-receipt.out" ||
     fail 'missing consumed smoke build receipt was not decisive'
 )
+# `make kind-test` (test-selected.sh) builds the retained smokes in the
+# kind-dev target its deploys compile in; every other retained caller keeps
+# the host Cargo build. A failed kind-dev build fails the suite.
+mkdir -p "$FIXTURE/smoke-root/scripts/dev/kind" "$FIXTURE/smoke-root/scripts/ci/images"
+for smoke_builder in scripts/dev/kind/build-smokes.sh scripts/ci/images/build-kind-smokes.sh; do
+  printf '#!/usr/bin/env bash\nprintf "%%s %%s %%s\\n" %s "${KIND_CLUSTER_NAME:-}" "$*" >>"%s"\nexit "${FAKE_SMOKE_STATUS:-0}"\n' \
+    "$smoke_builder" "$FIXTURE/smoke-builds" >"$FIXTURE/smoke-root/$smoke_builder"
+  chmod +x "$FIXTURE/smoke-root/$smoke_builder"
+done
+(
+  ROOT="$FIXTURE/smoke-root"
+  RUN_DIR="$FIXTURE/smoke-run"
+  KIND_CLUSTER_NAME=codewire-ux-2099
+  CARGO_CI_DIR="$FIXTURE/host-ci"
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
+  KIND_RETAINED_USE_CLUSTER_WORKSPACE=1
+  log() { :; }
+  build_retained_kind_smokes
+  [ "$CARGO_CI_DIR" = "$ROOT/.tmp/kind-dev/codewire-ux-2099/smokes" ] ||
+    fail "kind-dev smokes are read from ${CARGO_CI_DIR}"
+  FAKE_SMOKE_STATUS=7
+  export FAKE_SMOKE_STATUS
+  expect_failure failed-kind-dev-smokes build_retained_kind_smokes
+)
+(
+  ROOT="$FIXTURE/smoke-root"
+  RUN_DIR="$FIXTURE/smoke-run"
+  KIND_CLUSTER_NAME=codewire-ux-2099
+  CARGO_CI_DIR="$FIXTURE/host-ci"
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
+  unset KIND_RETAINED_USE_CLUSTER_WORKSPACE
+  log() { :; }
+  build_retained_kind_smokes
+  [ "$CARGO_CI_DIR" = "$FIXTURE/host-ci" ] ||
+    fail "host-built smokes are read from ${CARGO_CI_DIR}"
+)
+printf '%s\n' \
+  "scripts/dev/kind/build-smokes.sh codewire-ux-2099 $FIXTURE/smoke-root/.tmp/kind-dev/codewire-ux-2099/smokes $FIXTURE/smoke-run/billing-contract-build.jsonl" \
+  "scripts/dev/kind/build-smokes.sh codewire-ux-2099 $FIXTURE/smoke-root/.tmp/kind-dev/codewire-ux-2099/smokes $FIXTURE/smoke-run/billing-contract-build.jsonl" \
+  "scripts/ci/images/build-kind-smokes.sh codewire-ux-2099 $FIXTURE/smoke-run/billing-contract-build.jsonl" |
+  cmp -s - "$FIXTURE/smoke-builds" || {
+    cat "$FIXTURE/smoke-builds" >&2
+    fail 'retained smoke builds did not follow the kind-dev or host route'
+  }
+# The TTL smoke runs the checked-in provenance suite named by its caller, not a
+# path compiled into it: a container-built smoke runs against this checkout.
+grep -Fq 'required_env("SMOKE_KIND_E2E")' \
+  "$ROOT/crates/codewire-orchestration/src/bin/reconciler-ttl-smoke.rs" ||
+  fail 'TTL smoke does not take the provenance suite from its caller'
+grep -Fq 'SMOKE_KIND_E2E="$ROOT/scripts/ci/verify/kind-e2e.sh"' "$COMMON" ||
+  fail 'Kind does not name the provenance suite for the TTL smoke'
+if grep -n 'CARGO_MANIFEST_DIR' \
+    "$ROOT"/crates/codewire-orchestration/src/bin/*-smoke.rs \
+    "$ROOT"/crates/codewire-client/examples/*-smoke.rs; then
+  fail 'a Kind smoke compiles in a checkout path; it must run when built elsewhere'
+fi
+
 # The verified consumed inventory is exactly the artifact transport contract.
 python3 - "$ROOT" <<'PY'
 import pathlib

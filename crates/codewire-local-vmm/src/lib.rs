@@ -127,6 +127,8 @@ pub mod setup_pack;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod skill_snapshot;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod socket_dir;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod state;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervisor;

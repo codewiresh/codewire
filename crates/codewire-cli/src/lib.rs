@@ -875,6 +875,18 @@ async fn serve_hosted_daemon(
     #[cfg(target_os = "linux")]
     codewire_daemon::claude_home::ClaudeHome::new(&config.home_root, &config.workspace_root)
         .prepare(config.managed_credential_clients);
+    // Stock `gh` reaches the GitHub API route only through this daemon's Unix
+    // ingress socket. While the GitHub client is selected, sessions are given
+    // Codewire's own `gh` configuration directory; its one file is written
+    // here, beside the sockets, and removed when GitHub is not selected.
+    #[cfg(target_os = "linux")]
+    codewire_daemon::gh_config::GhConfig::default().prepare(config.managed_credential_clients);
+    // While the SSH key is selected, `~/.ssh/known_hosts` lists GitHub's
+    // published host keys, so no `git@github.com` connection (Codewire's own
+    // `git://` rewrite included) trusts a host key on first use.
+    #[cfg(target_os = "linux")]
+    codewire_daemon::ssh_known_hosts::SshKnownHosts::new(&config.home_root)
+        .prepare(config.managed_credential_clients);
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
         .await
         .with_context(|| format!("listen hosted daemon {}", config.listen_addr))?;

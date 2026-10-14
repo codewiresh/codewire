@@ -21,9 +21,9 @@ For CLI usage:
 cw env create https://github.com/owner/public-repo
 ```
 
-Hosted private-repository access is not connected to environment creation in
-the current release. Repository URLs containing embedded credentials are
-rejected.
+Private GitHub repositories need a GitHub connection in your credential
+profile; see [Repository access](@/settings/github-integration.md). Repository
+URLs containing embedded credentials are rejected.
 
 ## Next steps
 

@@ -16,10 +16,11 @@ use codewire_proto::codewire::v1::{
     CredentialAuthenticationKind, CredentialMutationServiceClient, CredentialServiceClient,
     CredentialStatus, DeleteAccessProfileRequest, DeleteCredentialRequest, EnrollCodexRequest,
     EnrollCodexResponse, GenerateSshCredentialRequest, GetAccessProfileRequest,
-    GetCredentialRequest, ListAccessProfilesRequest, ListCredentialsRequest,
-    RenameAccessProfileRequest, RenameCredentialRequest, RevokeCredentialRequest,
-    RotateApiKeyCredentialRequest, UpdateAccessProfileRequest, enroll_codex_response,
-    get_access_profile_request, get_credential_request,
+    GetCredentialRequest, GithubAppAccountKind, GithubAppPendingPermissions,
+    GithubRepositoryServiceClient, ListAccessProfilesRequest, ListCredentialsRequest,
+    ListGithubPendingPermissionsRequest, RenameAccessProfileRequest, RenameCredentialRequest,
+    RevokeCredentialRequest, RotateApiKeyCredentialRequest, UpdateAccessProfileRequest,
+    enroll_codex_response, get_access_profile_request, get_credential_request,
 };
 use connectrpc::{
     ConnectError, ErrorCode,
@@ -531,16 +532,170 @@ fn unix_now() -> Result<u64, ConnectError> {
         .map_err(|_| invalid_metadata())
 }
 
+/// An installation of the Codewire GitHub App that has not yet granted the
+/// permissions Codewire needs, as a connect's response or the credentials
+/// page's live check reported it (#2712). Never stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GithubPendingPermissions {
+    pub(crate) account: String,
+    pub(crate) installation_id: u64,
+    pub(crate) kind: GithubAccountKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GithubAccountKind {
+    User,
+    Organization,
+    /// Accepted in the enterprise's own settings: no page to link.
+    Enterprise,
+}
+
+/// At most this many installations are named on the page.
+const MAX_GITHUB_PENDING: usize = 8;
+/// The live status is advisory: the page renders without it after this.
+const GITHUB_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_GITHUB_PENDING_RESPONSE_BYTES: usize = 16 * 1024;
+
+impl GithubPendingPermissions {
+    pub(crate) fn new(
+        account: &str,
+        installation_id: u64,
+        kind: GithubAccountKind,
+    ) -> Option<Self> {
+        (valid_github_login(account) && installation_id > 0).then(|| Self {
+            account: account.to_owned(),
+            installation_id,
+            kind,
+        })
+    }
+
+    /// GitHub's settings page for this installation, where its owner reviews
+    /// and accepts the App's permission request. Built only from the validated
+    /// login and numeric ID. An enterprise has no such page to link.
+    pub(crate) fn settings_url(&self) -> Option<String> {
+        match self.kind {
+            GithubAccountKind::User => Some(format!(
+                "https://github.com/settings/installations/{}",
+                self.installation_id
+            )),
+            GithubAccountKind::Organization => Some(format!(
+                "https://github.com/organizations/{}/settings/installations/{}",
+                self.account, self.installation_id
+            )),
+            GithubAccountKind::Enterprise => None,
+        }
+    }
+
+    /// The first installation's GitHub settings page there is, where
+    /// connect sends the person to accept. An enterprise has none.
+    pub(crate) fn first_page(pending: &[Self]) -> Option<String> {
+        pending.iter().find_map(Self::settings_url)
+    }
+
+    /// The service's entries, validated again: an invalid login, a zero ID
+    /// or an unknown kind is dropped, never shown.
+    fn from_wire(pending: &[GithubAppPendingPermissions]) -> Vec<Self> {
+        pending
+            .iter()
+            .filter_map(|pending| {
+                let kind = match pending.account_kind.as_known()? {
+                    GithubAppAccountKind::User => GithubAccountKind::User,
+                    GithubAppAccountKind::Organization => GithubAccountKind::Organization,
+                    GithubAppAccountKind::Enterprise => GithubAccountKind::Enterprise,
+                    _ => return None,
+                };
+                Self::new(&pending.account, pending.installation_id, kind)
+            })
+            .take(MAX_GITHUB_PENDING)
+            .collect()
+    }
+}
+
+/// Whether this credentials page load may run the live GitHub check: never
+/// for a navigation another site started, so a link elsewhere cannot make
+/// the dashboard call GitHub or renew a token (#2712). A request without
+/// fetch metadata (no browser, or an old one) is the person's own.
+pub(crate) fn live_check_allowed(headers: &axum::http::HeaderMap, public_origin: &str) -> bool {
+    match headers
+        .get("sec-fetch-site")
+        .map(|value| value.to_str().unwrap_or("unreadable"))
+    {
+        None | Some("same-origin" | "same-site" | "none") => true,
+        Some("cross-site") => false,
+        // Anything else counts only with a referrer from this dashboard.
+        Some(_) => {
+            let origin = |value: &str| {
+                url::Url::parse(value)
+                    .ok()
+                    .map(|url| url.origin().ascii_serialization())
+            };
+            headers
+                .get(axum::http::header::REFERER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(origin)
+                .is_some_and(|referrer| Some(referrer) == origin(public_origin))
+        }
+    }
+}
+
+/// The installations of the signed-in person's GitHub App connection that
+/// have not yet granted what Codewire needs, checked live by the credential
+/// service with that person's own connection and authority (#2712). Advisory:
+/// an error, or no answer within two seconds, is an empty list, so the page
+/// never fails or waits long because of GitHub.
+pub(crate) async fn github_pending_permissions(
+    state: &AppState,
+    cookie: HeaderValue,
+) -> Vec<GithubPendingPermissions> {
+    let client = GithubRepositoryServiceClient::new(
+        BrowserTransport {
+            http: state.credential_http.clone(),
+            cookie: Some(cookie),
+            origin: Some(
+                HeaderValue::from_str(&state.public_origin)
+                    .expect("validated dashboard public origin is a valid header value"),
+            ),
+        },
+        ClientConfig::new(state.credential_origin.clone())
+            .with_default_timeout(GITHUB_PENDING_TIMEOUT)
+            .with_default_max_message_size(MAX_GITHUB_PENDING_RESPONSE_BYTES),
+    );
+    match tokio::time::timeout(
+        GITHUB_PENDING_TIMEOUT,
+        client.list_github_pending_permissions(ListGithubPendingPermissionsRequest::default()),
+    )
+    .await
+    {
+        Ok(Ok(response)) => {
+            GithubPendingPermissions::from_wire(&response.into_owned().pending_permissions)
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// A GitHub login: 1–39 letters, digits or single hyphens, not at either end.
+fn valid_github_login(value: &str) -> bool {
+    (1..=39).contains(&value.len())
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && !value.contains("--")
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 /// Complete the server-side GitHub App callback. The callback code is sent
 /// only to credential-service over the authenticated mutation connection; the
-/// browser receives no token, provider response, or installation metadata.
+/// browser receives no token or provider response. The installations that
+/// have not granted what Codewire needs (#2712) come back for the callback to
+/// send the person to the first one's GitHub settings page.
 pub(crate) async fn complete_github_app_authorization(
     state: &AppState,
     cookie: HeaderValue,
     code: Vec<u8>,
     credential_id: Option<String>,
     expected_generation: Option<u64>,
-) -> Result<(), ConnectError> {
+) -> Result<Vec<GithubPendingPermissions>, ConnectError> {
     let current = match (&credential_id, expected_generation) {
         (None, None) => None,
         (Some(id), Some(generation)) => {
@@ -568,7 +723,12 @@ pub(crate) async fn complete_github_app_authorization(
         .credential
         .into_option()
         .ok_or_else(invalid_metadata)?;
-    validate_github_app_authorization_ack(&credential, current.as_ref())
+    validate_github_app_authorization_ack(&credential, current.as_ref())?;
+    // Advisory only: the connection is saved either way, so a malformed entry
+    // is dropped rather than failing a connect that succeeded.
+    Ok(GithubPendingPermissions::from_wire(
+        &response.pending_permissions,
+    ))
 }
 
 pub(crate) async fn validate_github_app_reconnect(
@@ -1550,6 +1710,117 @@ fn invalid_metadata() -> ConnectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_load_another_site_started_skips_the_live_check() {
+        let origin = "https://codewire.sh";
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            axum::http::HeaderMap::from_iter(pairs.iter().map(|(name, value)| {
+                (
+                    axum::http::HeaderName::from_static(name),
+                    HeaderValue::from_static(value),
+                )
+            }))
+        };
+        for allowed in [
+            headers(&[]),
+            headers(&[("sec-fetch-site", "same-origin")]),
+            headers(&[("sec-fetch-site", "same-site")]),
+            headers(&[("sec-fetch-site", "none")]),
+            headers(&[
+                ("sec-fetch-site", "cross-origin"),
+                ("referer", "https://codewire.sh/settings/"),
+            ]),
+        ] {
+            assert!(live_check_allowed(&allowed, origin), "{allowed:?}");
+        }
+        for refused in [
+            headers(&[("sec-fetch-site", "cross-site")]),
+            // A same-origin referrer does not excuse a cross-site load.
+            headers(&[
+                ("sec-fetch-site", "cross-site"),
+                ("referer", "https://codewire.sh/settings/"),
+            ]),
+            headers(&[("sec-fetch-site", "cross-origin")]),
+            headers(&[
+                ("sec-fetch-site", "cross-origin"),
+                ("referer", "https://elsewhere.example/settings/credentials/"),
+            ]),
+            headers(&[
+                ("sec-fetch-site", "cross-origin"),
+                ("referer", "https://codewire.sh.elsewhere.example/"),
+            ]),
+        ] {
+            assert!(!live_check_allowed(&refused, origin), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn github_pending_permissions_keep_only_validated_entries() {
+        let wire = |account: &str, installation_id: u64, kind: GithubAppAccountKind| {
+            GithubAppPendingPermissions {
+                account: account.into(),
+                installation_id,
+                account_kind: kind.into(),
+                ..Default::default()
+            }
+        };
+        let pending = GithubPendingPermissions::from_wire(&[
+            wire("octo-user", 12345, GithubAppAccountKind::User),
+            wire("octo-org", 678, GithubAppAccountKind::Organization),
+            wire("octo-ent", 9, GithubAppAccountKind::Enterprise),
+            wire("octo", 1, GithubAppAccountKind::Unspecified),
+            wire("octo", 0, GithubAppAccountKind::User),
+            wire("-octo", 1, GithubAppAccountKind::User),
+            wire("octo--org", 1, GithubAppAccountKind::User),
+            wire("octo/../evil", 1, GithubAppAccountKind::User),
+            wire("evil.com/x", 1, GithubAppAccountKind::Organization),
+            wire(
+                "a-very-long-login-name-that-github-would-refuse",
+                1,
+                GithubAppAccountKind::User,
+            ),
+        ]);
+        assert_eq!(
+            pending,
+            [
+                GithubPendingPermissions::new("octo-user", 12345, GithubAccountKind::User).unwrap(),
+                GithubPendingPermissions::new("octo-org", 678, GithubAccountKind::Organization)
+                    .unwrap(),
+                GithubPendingPermissions::new("octo-ent", 9, GithubAccountKind::Enterprise)
+                    .unwrap(),
+            ]
+        );
+        assert_eq!(
+            pending[0].settings_url().as_deref(),
+            Some("https://github.com/settings/installations/12345")
+        );
+        assert_eq!(
+            pending[1].settings_url().as_deref(),
+            Some("https://github.com/organizations/octo-org/settings/installations/678")
+        );
+        assert_eq!(pending[2].settings_url(), None);
+        let many: Vec<_> = (1..=MAX_GITHUB_PENDING as u64 + 3)
+            .map(|id| wire("octo", id, GithubAppAccountKind::User))
+            .collect();
+        assert_eq!(
+            GithubPendingPermissions::from_wire(&many).len(),
+            MAX_GITHUB_PENDING
+        );
+        // Connect sends the person to the first page there is; the page names
+        // every installation still short. Enterprises are only named.
+        assert_eq!(
+            GithubPendingPermissions::first_page(&pending).as_deref(),
+            Some("https://github.com/settings/installations/12345")
+        );
+        assert_eq!(
+            GithubPendingPermissions::first_page(&[pending[2].clone(), pending[1].clone()])
+                .as_deref(),
+            Some("https://github.com/organizations/octo-org/settings/installations/678")
+        );
+        assert_eq!(GithubPendingPermissions::first_page(&pending[2..]), None);
+        assert_eq!(GithubPendingPermissions::first_page(&[]), None);
+    }
 
     fn credential(
         id: &str,

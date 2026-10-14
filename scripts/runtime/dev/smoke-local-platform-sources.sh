@@ -111,11 +111,17 @@ USAGE
 local_platform_validate_socket_paths() {
   # Match the short private layout used by smoke-native-local-environment.sh.
   # Count bytes, not locale-dependent characters; reserve sockaddr_un's NUL.
-  local LC_ALL=C smoke_home_path="$1" smoke_runtime_path="$2" socket
+  local LC_ALL=C smoke_home_path="$1" smoke_runtime_path="$2" socket engine_sockets credential_sockets
+  # VM sockets live in the engine's short per-user directory (#2735), and the
+  # credential authority's in its root's (#2745).
+  engine_sockets="$(python3 -I "$REPO_ROOT/scripts/dev/native_socket_dir.py" "$smoke_home_path/n/engine")" ||
+    die 'native socket directory is unavailable'
+  credential_sockets="$(python3 -I "$REPO_ROOT/scripts/dev/native_socket_dir.py" "$smoke_home_path/.codewire/credentials-v1")" ||
+    die 'native socket directory is unavailable'
   for socket in \
-    "$smoke_home_path/n/engine/vms/00000000-0000-4000-8000-000000000000/vsock/vsock.sock" \
-    "$smoke_home_path/.codewire/credentials-v1/authority.sock" \
-    "$smoke_home_path/.codewire/credentials-v1/ssh-00000000-0000-4000-8000-000000000000/agent" \
+    "$engine_sockets/vms/00000000-0000-4000-8000-000000000000/vsock/vsock.sock" \
+    "$credential_sockets/authority.sock" \
+    "$credential_sockets/ssh-00000000-0000-4000-8000-000000000000/agent" \
     "$smoke_runtime_path/.codewire-provider-login-00000000-0000-4000-8000-000000000000/a"; do
     (( ${#socket} < 108 )) ||
       die 'local/platform scratch or XDG runtime parent is too long for Linux Unix sockets; choose a shorter parent before login'

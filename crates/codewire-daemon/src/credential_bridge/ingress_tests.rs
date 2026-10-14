@@ -8,18 +8,105 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::*;
 
-// Production uses one fixed port per Pod. Serialize these real-socket fixtures
-// within this process; an unrelated occupant is a test failure, never evicted.
+// The hosted ingress fixtures each bind their own loopback port. They are
+// serialized within this process only because the prebind case rebinds a port
+// it released, by number.
 pub(super) static LOOPBACK_TEST: Mutex<()> = Mutex::const_new(());
+
+/// Where a unit test's Hosted ingress listens: port 0, so the kernel gives
+/// each ingress a port no other socket holds, and no test run on this host
+/// contends for a fixed or pre-picked port. A test that needs a second owner
+/// of the same address sets that bridge's `loopback` to the first one's.
+pub(super) const TEST_LOOPBACK_ADDRESS: std::net::SocketAddr =
+    std::net::SocketAddr::V4(std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+
+/// The kernel identity (inode) of a socket this process holds.
+#[cfg(target_os = "linux")]
+fn socket_inode(socket: &impl std::os::fd::AsFd) -> u64 {
+    rustix::fs::fstat(socket).unwrap().st_ino
+}
+
+/// The inodes of every socket this process holds open.
+#[cfg(target_os = "linux")]
+fn process_socket_inodes() -> std::collections::BTreeSet<u64> {
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+        .filter_map(|link| {
+            link.to_str()?
+                .strip_prefix("socket:[")?
+                .strip_suffix(']')?
+                .parse()
+                .ok()
+        })
+        .collect()
+}
+
+/// Whether this process still holds the socket with `inode`. This asks the
+/// process's own descriptor table, so another process reusing the port can
+/// never make a released socket look held, nor a held one released.
+#[cfg(target_os = "linux")]
+fn process_holds_socket(inode: u64) -> bool {
+    process_socket_inodes().contains(&inode)
+}
+
+/// The inodes of the kernel's listening IPv4 TCP sockets on `address`, in
+/// this network namespace, whichever process holds them.
+#[cfg(target_os = "linux")]
+fn listening_socket_inodes(address: std::net::SocketAddr) -> Vec<u64> {
+    const LISTEN: &str = "0A";
+    let std::net::SocketAddr::V4(address) = address else {
+        panic!("hosted ingress listens on IPv4 loopback");
+    };
+    let local = format!(
+        "{:08X}:{:04X}",
+        u32::from_le_bytes(address.ip().octets()),
+        address.port()
+    );
+    std::fs::read_to_string("/proc/self/net/tcp")
+        .unwrap()
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            (fields.get(1) == Some(&local.as_str()) && fields.get(3) == Some(&LISTEN))
+                .then(|| fields.get(9)?.parse::<u64>().ok())
+                .flatten()
+        })
+        .collect()
+}
+
+/// Whether this process holds a listening IPv4 TCP socket on `address`.
+/// Another process listening there, including a child another test forked
+/// that still holds a copy of a closed listener until it execs, does not
+/// count.
+#[cfg(target_os = "linux")]
+fn process_listens_on(address: std::net::SocketAddr) -> bool {
+    let held = process_socket_inodes();
+    listening_socket_inodes(address)
+        .into_iter()
+        .any(|inode| held.contains(&inode))
+}
+
+/// Wait until the kernel has closed every listener on `address` this test
+/// released. A child that a concurrent test forks while a listener is open
+/// holds a copy of its descriptor until it execs, so the socket can outlive
+/// this process's close by that long.
+#[cfg(target_os = "linux")]
+async fn released_by_every_process(address: std::net::SocketAddr) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !listening_socket_inodes(address).is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("a released listener stayed open in another process");
+}
 const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 trait HttpIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> HttpIo for T {}
 type HttpStream = Box<dyn HttpIo>;
-
-fn loopback_address() -> std::net::SocketAddr {
-    (Ipv4Addr::LOCALHOST, CREDENTIAL_BRIDGE_LOOPBACK_PORT).into()
-}
 
 fn config(path: PathBuf, transport: CredentialBridgeTransport) -> CredentialBridgeConfig {
     CredentialBridgeConfig {
@@ -35,6 +122,9 @@ fn config(path: PathBuf, transport: CredentialBridgeTransport) -> CredentialBrid
 struct Harness {
     _temp: tempfile::TempDir,
     bridge: CredentialBridge,
+    address: std::net::SocketAddr,
+    #[cfg(target_os = "linux")]
+    loopback_inode: u64,
     token: PathBuf,
     stop: CancellationToken,
     server: Option<tokio::task::JoinHandle<io::Result<()>>>,
@@ -51,15 +141,22 @@ impl Harness {
         );
         let bridge = CredentialBridge::new(Some(config));
         let ingress = bridge.prepare_ingress(false).unwrap().unwrap();
-        assert_eq!(
-            ingress.loopback.as_ref().unwrap().local_addr().unwrap(),
-            loopback_address()
-        );
+        let loopback = ingress.loopback.as_ref().unwrap();
+        let address = loopback.local_addr().unwrap();
+        assert!(address.ip().is_loopback() && address.port() != 0);
+        #[cfg(target_os = "linux")]
+        let loopback_inode = socket_inode(loopback);
+        // The release checks in `stop` see a held listener as held.
+        #[cfg(target_os = "linux")]
+        assert!(process_holds_socket(loopback_inode) && process_listens_on(address));
         let stop = CancellationToken::new();
         let server = tokio::spawn(ingress.serve(stop.clone().cancelled_owned()));
         Self {
             _temp: temp,
             bridge,
+            address,
+            #[cfg(target_os = "linux")]
+            loopback_inode,
             token,
             stop,
             server: Some(server),
@@ -72,7 +169,7 @@ impl Harness {
 
     async fn connect(&self, tcp: bool) -> HttpStream {
         if tcp {
-            Box::new(TcpStream::connect(loopback_address()).await.unwrap())
+            Box::new(TcpStream::connect(self.address).await.unwrap())
         } else {
             Box::new(UnixStream::connect(self.socket()).await.unwrap())
         }
@@ -148,15 +245,20 @@ impl Harness {
             .unwrap();
         assert!(self.bridge.owner.tasks.is_empty());
         assert!(!self.socket().exists());
-        assert!(TcpStream::connect(loopback_address()).await.is_err());
         assert!(
             self.bridge
                 .connect_with_token_file(tokio_stream::pending(), &self.token)
                 .await
                 .is_err()
         );
-        // The owner released the real socket, not merely its pathname.
-        drop(bind_hosted_loopback().unwrap());
+        // The owner closed the real loopback socket, not merely its pathname:
+        // the listener it bound is gone from this process, which no other
+        // process's use of the port can disguise.
+        #[cfg(target_os = "linux")]
+        {
+            assert!(!process_holds_socket(self.loopback_inode));
+            assert!(!process_listens_on(self.address));
+        }
     }
 }
 
@@ -244,14 +346,19 @@ async fn hosted_prebind_is_exact_exclusive_and_does_not_unlink_previous_unix_own
     let config = config(path.clone(), CredentialBridgeTransport::Hosted);
     let bridge = CredentialBridge::new(Some(config.clone()));
     let ingress = bridge.prepare_ingress(false).unwrap().unwrap();
-    assert_eq!(
-        ingress.loopback.as_ref().unwrap().local_addr().unwrap(),
-        loopback_address()
-    );
+    let address = ingress.loopback.as_ref().unwrap().local_addr().unwrap();
+    assert!(address.ip().is_loopback() && address.port() != 0);
+    #[cfg(target_os = "linux")]
+    let first_inode = socket_inode(ingress.loopback.as_ref().unwrap());
+    #[cfg(target_os = "linux")]
+    assert!(process_holds_socket(first_inode) && process_listens_on(address));
     let before = std::fs::symlink_metadata(&path).unwrap();
     assert_eq!(before.mode() & 0o777, 0o600);
     assert_eq!(before.uid(), config.ingress_uid);
-    let second = CredentialBridge::new(Some(config));
+    // A second Hosted owner of the same address is refused while the first
+    // holds it.
+    let mut second = CredentialBridge::new(Some(config));
+    second.loopback = address;
     assert!(
         matches!(second.prepare_ingress(false), Err(error) if error.kind() == io::ErrorKind::AddrInUse)
     );
@@ -262,9 +369,15 @@ async fn hosted_prebind_is_exact_exclusive_and_does_not_unlink_previous_unix_own
     drop(client);
     drop(ingress);
     assert!(!path.exists());
+    #[cfg(target_os = "linux")]
+    {
+        assert!(!process_holds_socket(first_inode));
+        released_by_every_process(address).await;
+    }
 
-    // A Unix-path failure after successful TCP prebind releases the fixed port
-    // and preserves the unexpected filesystem object byte-for-byte.
+    // A Unix-path failure after successful TCP prebind releases the port and
+    // preserves the unexpected filesystem object byte-for-byte. The second
+    // owner binds the address the first one just released.
     std::fs::write(&path, b"synthetic existing non-socket").unwrap();
     assert!(
         matches!(second.prepare_ingress(false), Err(error) if error.kind() == io::ErrorKind::InvalidData)
@@ -273,22 +386,26 @@ async fn hosted_prebind_is_exact_exclusive_and_does_not_unlink_previous_unix_own
         std::fs::read(&path).unwrap(),
         b"synthetic existing non-socket"
     );
-    drop(bind_hosted_loopback().unwrap());
+    #[cfg(target_os = "linux")]
+    assert!(!process_listens_on(address));
 }
 
 #[tokio::test]
 async fn local_ingress_does_not_claim_the_guest_forwarders_loopback_socket() {
     let _lock = LOOPBACK_TEST.lock().await;
-    let existing_forwarder = bind_hosted_loopback().unwrap();
+    let existing_forwarder = bind_hosted_loopback(TEST_LOOPBACK_ADDRESS).unwrap();
+    let address = existing_forwarder.local_addr().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("local.sock");
-    let bridge =
+    // A Local bridge pointed at the forwarder's own address never binds it.
+    let mut bridge =
         CredentialBridge::new(Some(config(path.clone(), CredentialBridgeTransport::Local)));
+    bridge.loopback = address;
     let ingress = bridge.prepare_ingress(false).unwrap().unwrap();
     assert!(ingress.loopback.is_none());
     drop(ingress);
     assert!(!path.exists());
-    assert_eq!(existing_forwarder.local_addr().unwrap(), loopback_address());
+    assert_eq!(existing_forwarder.local_addr().unwrap(), address);
 }
 
 #[tokio::test]
@@ -783,4 +900,18 @@ async fn hosted_accept_errors_are_terminal_but_transient_connection_errors_are_n
         () = failed.cancelled() => {},
     }
     assert!(failed.is_cancelled());
+}
+
+#[test]
+fn hosted_ingress_listens_on_the_fixed_guest_port_in_the_product() {
+    // The product's default, asserted without binding it: guests reach the
+    // provider routes at 127.0.0.1:38081 (see env.rs base URLs).
+    assert_eq!(
+        hosted_loopback_address(),
+        "127.0.0.1:38081".parse::<std::net::SocketAddr>().unwrap()
+    );
+    assert_eq!(CREDENTIAL_BRIDGE_LOOPBACK_PORT, 38081);
+    // Unit tests never take it, nor any fixed port: each ingress binds port 0.
+    assert_eq!(CredentialBridge::new(None).loopback, TEST_LOOPBACK_ADDRESS);
+    assert_eq!(TEST_LOOPBACK_ADDRESS, "127.0.0.1:0".parse().unwrap());
 }

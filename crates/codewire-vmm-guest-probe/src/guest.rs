@@ -130,7 +130,10 @@ const CONTAINER_MACHINE_ID_DESTINATION: &str = "/etc/machine-id";
 const CONTAINER_HOSTS_DESTINATION: &str = "/etc/hosts";
 const CONTAINER_RESOLV_CONF_DESTINATION: &str = "/etc/resolv.conf";
 const CONTAINER_POWEROFF_DESTINATION: &str = "/run/codewire-host/poweroff.sock";
-const CONTAINER_CREDENTIAL_SOCKET: &str = "/run/codewire-host/credential.sock";
+const CONTAINER_CREDENTIAL_SOCKET: &str = codewire_access::MANAGED_HTTP_NATIVE_SOCKET;
+/// Codewire's `gh` configuration on the read-only control mount, which the
+/// workspace sees as [`codewire_access::GH_NATIVE_CONFIG_DIR`].
+const CONTAINER_GH_CONFIG_PATH: &str = "/run/codewire/container/gh";
 // Completion belongs to the extant root, not the shared workspace/home disk.
 // Rebuilding a lost root must install again; an intact rollback root must not.
 const INSTALL_STATE_PATH: &str = "/generation/install.state";
@@ -442,6 +445,7 @@ pub fn run_init() -> Result<()> {
     record_boot_stage("ownership-ready")?;
     prepare_install_state()?;
     let poweroff = prepare_container_control(&seed, &plan.identity)?;
+    prepare_gh_projection(&plan.identity, seed.managed_credential_clients())?;
     prepare_docker_runtime(&seed, &plan.identity)?;
     record_boot_stage("container-control-ready")?;
     let mut network = match spawn_guest_network_agent() {
@@ -467,6 +471,7 @@ pub fn run_init() -> Result<()> {
         record_boot_stage("workspace-layout-failed")?;
         return Err(error);
     }
+    seed_github_known_hosts(&plan.identity, seed.managed_credential_clients());
     if let Err(error) = mount_skill_snapshots(&seed, &plan) {
         record_boot_stage("workspace-skills-failed")?;
         return Err(error);
@@ -3830,6 +3835,218 @@ fn prepare_codex_projection_at(
         .context("sync persistent Codex home")
 }
 
+/// Publish Codewire's `gh` configuration while the GitHub client is selected:
+/// one file naming the workspace's credential ingress socket, so stock `gh`
+/// reaches the GitHub API route through it. The directory and file belong to
+/// the workspace user (0700, 0600) and sit on the control mount, which the
+/// workspace sees read-only; the user's own `~/.config/gh` is never touched.
+fn prepare_gh_projection(
+    identity: &WorkspaceIdentity,
+    clients: codewire_access::ManagedCredentialClients,
+) -> Result<()> {
+    prepare_gh_projection_at(Path::new(CONTAINER_GH_CONFIG_PATH), identity, clients)
+}
+
+fn prepare_gh_projection_at(
+    root: &Path,
+    identity: &WorkspaceIdentity,
+    clients: codewire_access::ManagedCredentialClients,
+) -> Result<()> {
+    let path = root.join(codewire_access::GH_CONFIG_FILE_NAME);
+    let Some(projection) = clients
+        .for_placement(codewire_access::ManagedCredentialClientPlacement::Native)
+        .gh
+    else {
+        // Both are Codewire's own. Unlink never follows a symlink, and a
+        // directory holding anything else is left alone.
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("clear managed gh configuration"),
+        }
+        return match fs::remove_dir(root) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::DirectoryNotEmpty
+                        | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error).context("clear managed gh configuration directory"),
+        };
+    };
+    create_dir(root, 0o700)?;
+    lchown(root, identity.uid, identity.gid)?;
+    write_durable(&path, projection.config_yml().as_bytes(), 0o600)
+        .context("publish managed gh configuration")?;
+    lchown(&path, identity.uid, identity.gid)?;
+    let directory = fs::symlink_metadata(root).context("inspect managed gh directory")?;
+    let metadata = fs::symlink_metadata(&path).context("inspect managed gh configuration")?;
+    ensure!(
+        directory.file_type().is_dir()
+            && directory.uid() == identity.uid
+            && directory.gid() == identity.gid
+            && directory.permissions().mode() & 0o777 == 0o700
+            && metadata.file_type().is_file()
+            && metadata.uid() == identity.uid
+            && metadata.gid() == identity.gid
+            && metadata.permissions().mode() & 0o777 == 0o600
+            && metadata.nlink() == 1,
+        "managed gh configuration metadata is invalid"
+    );
+    let actual = read_bounded(&path, projection.config_yml().len().saturating_add(1))
+        .context("verify managed gh configuration")?;
+    ensure!(
+        actual == projection.config_yml().as_bytes(),
+        "managed gh configuration changed"
+    );
+    Ok(())
+}
+
+/// The largest `~/.ssh/known_hosts` the guest reads; a larger one is left
+/// alone.
+const MAX_KNOWN_HOSTS_BYTES: u64 = 4 * 1024 * 1024;
+
+/// While the SSH key is selected, list GitHub's published host keys
+/// ([`codewire_access::GITHUB_SSH_KNOWN_HOSTS`]) in the workspace user's
+/// `~/.ssh/known_hosts`, as a hosted daemon does, so no `git@github.com`
+/// connection, Codewire's own `git://` rewrite included, trusts a host key on
+/// first use. A failure is reported and never stops the boot: OpenSSH then
+/// asks once, as it did before.
+fn seed_github_known_hosts(
+    identity: &WorkspaceIdentity,
+    clients: codewire_access::ManagedCredentialClients,
+) {
+    if let Err(error) = seed_github_known_hosts_at(Path::new(HOME_MERGED_PATH), identity, clients) {
+        eprintln!("GitHub SSH host keys were not recorded in the workspace home: {error:#}");
+    }
+}
+
+/// Root writes in the user's home before the workspace starts, so every step
+/// is relative to the mounted home, never follows a symlink and never crosses
+/// a mount. Only a `~/.ssh` directory and a regular `known_hosts` file of the
+/// workspace user are used; ones the guest creates get that owner and modes
+/// `0700` and `0600`. GitHub's missing lines are appended, compared as whole
+/// lines; existing lines are never rewritten, reordered or removed.
+fn seed_github_known_hosts_at(
+    home: &Path,
+    identity: &WorkspaceIdentity,
+    clients: codewire_access::ManagedCredentialClients,
+) -> Result<()> {
+    if !clients.contains(codewire_access::ManagedCredentialClient::Ssh) {
+        return Ok(());
+    }
+    let confined = ResolveFlags::BENEATH
+        | ResolveFlags::NO_MAGICLINKS
+        | ResolveFlags::NO_SYMLINKS
+        | ResolveFlags::NO_XDEV;
+    let uid = Some(rustix::fs::Uid::from_raw(identity.uid));
+    let gid = Some(rustix::fs::Gid::from_raw(identity.gid));
+    let home = rustix::fs::open(
+        home,
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::NOFOLLOW
+            | RustixOFlags::CLOEXEC,
+        RustixMode::empty(),
+    )
+    .context("open workspace home for SSH host keys")?;
+    let created = match rustix::fs::mkdirat(&home, ".ssh", RustixMode::from_raw_mode(0o700)) {
+        Ok(()) => true,
+        Err(RustixErrno::EXIST) => false,
+        Err(error) => return Err(error).context("create workspace ~/.ssh"),
+    };
+    let ssh = match rustix::fs::openat2(
+        &home,
+        ".ssh",
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::NOFOLLOW
+            | RustixOFlags::CLOEXEC,
+        RustixMode::empty(),
+        confined,
+    ) {
+        Ok(ssh) => ssh,
+        // A symlink, a file or another mount: the user's.
+        Err(RustixErrno::LOOP | RustixErrno::NOTDIR | RustixErrno::XDEV) => return Ok(()),
+        Err(error) => return Err(error).context("open workspace ~/.ssh"),
+    };
+    if created {
+        rustix::fs::fchown(&ssh, uid, gid).context("set workspace ~/.ssh ownership")?;
+        rustix::fs::fchmod(&ssh, RustixMode::from_raw_mode(0o700))
+            .context("set workspace ~/.ssh mode")?;
+    }
+    let stat = rustix::fs::fstat(&ssh).context("inspect workspace ~/.ssh")?;
+    if RustixFileType::from_raw_mode(stat.st_mode) != RustixFileType::Directory
+        || stat.st_uid != identity.uid
+    {
+        return Ok(());
+    }
+    let file = match rustix::fs::openat2(
+        &ssh,
+        "known_hosts",
+        RustixOFlags::RDWR
+            | RustixOFlags::CREATE
+            | RustixOFlags::EXCL
+            | RustixOFlags::NOFOLLOW
+            | RustixOFlags::CLOEXEC,
+        RustixMode::from_raw_mode(0o600),
+        confined,
+    ) {
+        Ok(file) => {
+            rustix::fs::fchown(&file, uid, gid).context("set known_hosts ownership")?;
+            rustix::fs::fchmod(&file, RustixMode::from_raw_mode(0o600))
+                .context("set known_hosts mode")?;
+            file
+        }
+        Err(RustixErrno::EXIST) => match rustix::fs::openat2(
+            &ssh,
+            "known_hosts",
+            RustixOFlags::RDWR
+                | RustixOFlags::NOFOLLOW
+                | RustixOFlags::NONBLOCK
+                | RustixOFlags::CLOEXEC,
+            RustixMode::empty(),
+            confined,
+        ) {
+            Ok(file) => file,
+            Err(RustixErrno::LOOP | RustixErrno::NXIO | RustixErrno::ISDIR | RustixErrno::XDEV) => {
+                return Ok(());
+            }
+            Err(error) => return Err(error).context("open workspace known_hosts"),
+        },
+        Err(error) => return Err(error).context("create workspace known_hosts"),
+    };
+    let stat = rustix::fs::fstat(&file).context("inspect workspace known_hosts")?;
+    if RustixFileType::from_raw_mode(stat.st_mode) != RustixFileType::RegularFile
+        || stat.st_uid != identity.uid
+    {
+        return Ok(());
+    }
+    let mut file = File::from(file);
+    let mut existing = Vec::new();
+    (&mut file)
+        .take(MAX_KNOWN_HOSTS_BYTES + 1)
+        .read_to_end(&mut existing)
+        .context("read workspace known_hosts")?;
+    if existing.len() as u64 > MAX_KNOWN_HOSTS_BYTES {
+        return Ok(());
+    }
+    let additions = codewire_access::github_known_hosts_additions(&existing);
+    if additions.is_empty() {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(0))
+        .context("seek workspace known_hosts")?;
+    file.write_all(&additions)
+        .context("append GitHub host keys to workspace known_hosts")?;
+    file.sync_all().context("sync workspace known_hosts")
+}
+
 fn lchown(path: &Path, uid: libc::uid_t, gid: libc::gid_t) -> Result<()> {
     let path_bytes = CString::new(path.as_os_str().as_bytes())
         .context("persistent workspace path contains NUL")?;
@@ -6207,6 +6424,147 @@ mod tests {
         fs::create_dir(&config).unwrap();
         assert!(prepare_codex_projection_at(&codex_home, &plan, clients).is_err());
         assert!(fs::symlink_metadata(&config).unwrap().file_type().is_dir());
+    }
+
+    /// #2720: while the SSH key is selected the workspace home lists GitHub's
+    /// published host keys, created with the workspace owner or appended to
+    /// the user's own file; nothing is followed through a symlink.
+    #[test]
+    fn github_host_keys_are_seeded_into_the_workspace_home_while_the_key_is_selected() {
+        let ssh = codewire_access::ManagedCredentialClients::from_profile_slots(["ssh"]).unwrap();
+        let github =
+            codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap();
+        let mut identity = test_workspace_plan().identity;
+        identity.uid = unsafe { libc::geteuid() };
+        identity.gid = unsafe { libc::getegid() };
+        let all = format!("{}\n", codewire_access::GITHUB_SSH_KNOWN_HOSTS.join("\n"));
+
+        // Not selected: nothing is created.
+        let temporary = TempDir::new().unwrap();
+        let home = temporary.path().join("home");
+        fs::create_dir(&home).unwrap();
+        seed_github_known_hosts_at(&home, &identity, github).unwrap();
+        assert!(fs::read_dir(&home).unwrap().next().is_none());
+
+        // Created with the workspace owner and private modes, then current.
+        seed_github_known_hosts_at(&home, &identity, ssh).unwrap();
+        let known_hosts = home.join(".ssh/known_hosts");
+        assert_eq!(fs::read_to_string(&known_hosts).unwrap(), all);
+        let directory = fs::symlink_metadata(home.join(".ssh")).unwrap();
+        assert_eq!(directory.permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            (directory.uid(), directory.gid()),
+            (identity.uid, identity.gid)
+        );
+        let file = fs::symlink_metadata(&known_hosts).unwrap();
+        assert_eq!(file.permissions().mode() & 0o777, 0o600);
+        assert_eq!((file.uid(), file.gid()), (identity.uid, identity.gid));
+        seed_github_known_hosts_at(&home, &identity, ssh).unwrap();
+        assert_eq!(fs::read_to_string(&known_hosts).unwrap(), all);
+
+        // The user's own lines stay, and only the missing ones are appended.
+        let own = format!(
+            "git.example.com ssh-ed25519 QUJDRA==\n{}\n",
+            codewire_access::GITHUB_SSH_KNOWN_HOSTS[2]
+        );
+        fs::write(&known_hosts, &own).unwrap();
+        seed_github_known_hosts_at(&home, &identity, ssh).unwrap();
+        assert_eq!(
+            fs::read_to_string(&known_hosts).unwrap(),
+            format!(
+                "{own}{}\n{}\n",
+                codewire_access::GITHUB_SSH_KNOWN_HOSTS[0],
+                codewire_access::GITHUB_SSH_KNOWN_HOSTS[1]
+            )
+        );
+
+        // A symlinked `~/.ssh` or `known_hosts` is the user's and untouched.
+        let outside = temporary.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let linked = temporary.path().join("linked-home");
+        fs::create_dir(&linked).unwrap();
+        std::os::unix::fs::symlink(&outside, linked.join(".ssh")).unwrap();
+        seed_github_known_hosts_at(&linked, &identity, ssh).unwrap();
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+        let target = temporary.path().join("target");
+        fs::write(&target, b"outside-sentinel").unwrap();
+        fs::remove_file(&known_hosts).unwrap();
+        std::os::unix::fs::symlink(&target, &known_hosts).unwrap();
+        seed_github_known_hosts_at(&home, &identity, ssh).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"outside-sentinel");
+    }
+
+    #[test]
+    fn gh_projection_is_one_private_file_naming_the_workspace_ingress_socket() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path().join("gh");
+        let mut identity = test_workspace_plan().identity;
+        identity.uid = unsafe { libc::geteuid() };
+        identity.gid = unsafe { libc::getegid() };
+        let config = root.join(codewire_access::GH_CONFIG_FILE_NAME);
+        let github =
+            codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap();
+        let other = codewire_access::ManagedCredentialClients::from_profile_slots(["codex", "ssh"])
+            .unwrap();
+
+        // Not selected: nothing is created.
+        prepare_gh_projection_at(&root, &identity, other).unwrap();
+        assert!(fs::symlink_metadata(&root).is_err());
+
+        prepare_gh_projection_at(&root, &identity, github).unwrap();
+        // The socket the workspace sees, beside the directory it is given.
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "version: 1\nhttp_unix_socket: /run/codewire-host/credential.sock\n"
+        );
+        assert_eq!(
+            CONTAINER_CREDENTIAL_SOCKET,
+            "/run/codewire-host/credential.sock"
+        );
+        let directory = fs::symlink_metadata(&root).unwrap();
+        assert!(directory.file_type().is_dir());
+        assert_eq!(directory.permissions().mode() & 0o777, 0o700);
+        assert_eq!(directory.uid(), identity.uid);
+        let metadata = fs::symlink_metadata(&config).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            (metadata.uid(), metadata.gid()),
+            (identity.uid, identity.gid)
+        );
+        assert_eq!(metadata.nlink(), 1);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+
+        // The guest path and the workspace path are the same directory on
+        // the control mount, and the workspace's variable names the latter.
+        assert_eq!(
+            Path::new(CONTAINER_GH_CONFIG_PATH).strip_prefix(CONTAINER_CONTROL_PATH),
+            Path::new(codewire_access::GH_NATIVE_CONFIG_DIR)
+                .strip_prefix(CONTAINER_CONTROL_DESTINATION)
+        );
+        assert_eq!(
+            Path::new(CREDENTIAL_INGRESS_SOCKET).strip_prefix(CONTAINER_CONTROL_PATH),
+            Path::new(CONTAINER_CREDENTIAL_SOCKET).strip_prefix(CONTAINER_CONTROL_DESTINATION)
+        );
+
+        // A symlink of the file's name is replaced, never followed.
+        let outside = temporary.path().join("outside");
+        fs::write(&outside, b"outside-sentinel").unwrap();
+        fs::remove_file(&config).unwrap();
+        std::os::unix::fs::symlink(&outside, &config).unwrap();
+        prepare_gh_projection_at(&root, &identity, github).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"outside-sentinel");
+        assert!(fs::symlink_metadata(&config).unwrap().file_type().is_file());
+
+        // Deselected: Codewire's file and empty directory go.
+        prepare_gh_projection_at(&root, &identity, other).unwrap();
+        assert!(fs::symlink_metadata(&root).is_err());
+        // Anything else left in the directory stays.
+        prepare_gh_projection_at(&root, &identity, github).unwrap();
+        fs::write(root.join("state.yml"), b"preserve").unwrap();
+        prepare_gh_projection_at(&root, &identity, Default::default()).unwrap();
+        assert!(!config.exists());
+        assert_eq!(fs::read(root.join("state.yml")).unwrap(), b"preserve");
     }
 
     #[test]

@@ -192,7 +192,29 @@ impl Endpoint {
             );
             after = response.next_after_session_id;
         }
+        if self.ended_with_environment(reference).await? {
+            anyhow::bail!(ended_with_environment(reference));
+        }
         anyhow::bail!("managed platform session {reference:?} was not found in the original scope")
+    }
+    /// Whether `reference` names a managed conversation of an earlier
+    /// incarnation of this environment: the session list still shows it, but
+    /// the current scope does not, because a Stop/Start ended it (#2705).
+    async fn ended_with_environment(&self, reference: &str) -> anyhow::Result<bool> {
+        let sessions = self
+            .client
+            .list_sessions(codewire_client::ListSessionsRequest {
+                org_id: self.org_id.clone(),
+                environment_id: self.environment_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?
+            .sessions;
+        Ok(sessions.iter().any(|session| {
+            (session.session_id == reference || session.name == reference)
+                && is_platform_driver(&session.command)
+        }))
     }
     async fn mutate(
         &self,
@@ -228,6 +250,12 @@ impl Endpoint {
         if let Some(output) = output {
             print_operation(&operation, output)?;
         }
+        // A refusal is definite: nothing was started or changed, so there is
+        // nothing to observe and the request can simply be made again.
+        anyhow::ensure!(
+            operation.phase.as_known() != Some(rpc::EnvironmentAgentPhase::Rejected),
+            "request {id} was refused; nothing was started or changed"
+        );
         anyhow::ensure!(
             operation.phase.as_known() == Some(rpc::EnvironmentAgentPhase::Completed),
             "request {id} remains {}; use cw env agent observe {} --request-id {id}; no replay was sent",
@@ -308,6 +336,20 @@ impl Conversation {
             ..Default::default()
         }
     }
+}
+/// The managed driver a platform Sandbox runs; the Sandbox is always Linux.
+fn is_platform_driver(command: &[String]) -> bool {
+    command
+        .get(1)
+        .is_some_and(|arg| arg == "__platform-agent-driver")
+}
+/// Said plainly when a conversation, or a message in it, belongs to an
+/// earlier incarnation of the environment (#2705).
+fn ended_with_environment(reference: &str) -> String {
+    format!(
+        "managed conversation {reference:?} ended when its environment stopped; \
+         start a new one with `cw run ENV --agent codex|claude`"
+    )
 }
 fn location_path(message: &str) -> anyhow::Result<PathBuf> {
     Ok(ResolvePaths::from_env(&OsEnv)?
@@ -393,6 +435,7 @@ pub(super) async fn run(
     let kind = match agent {
         AgentKind::Codex => rpc::EnvironmentAgentKind::Codex,
         AgentKind::Claude => rpc::EnvironmentAgentKind::Claude,
+        AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
     };
     let provider = support
         .iter()
@@ -432,7 +475,7 @@ pub(super) async fn run(
         model: args
             .model
             .clone()
-            .unwrap_or_else(|| agent.default_model().into()),
+            .unwrap_or_else(|| agent.default_model().unwrap_or_default().into()),
         effort: agent_effort(agent, args.effort.as_deref())?,
         working_dir: args
             .workdir
@@ -713,7 +756,7 @@ async fn await_location(
     );
     let deadline = Instant::now() + timeout;
     loop {
-        let response = client
+        let response = match client
             .read_environment_agent(rpc::ReadEnvironmentAgentRequest {
                 org_id: location.org_id.clone(),
                 environment_id: location.environment_id.clone(),
@@ -726,7 +769,20 @@ async fn await_location(
                 limit: 0,
                 ..Default::default()
             })
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if incarnation_ended(location, client).await {
+                    anyhow::bail!(
+                        "managed message {} was sent before its environment stopped; {}",
+                        location.message_id,
+                        ended_with_environment(&location.session_id)
+                    );
+                }
+                return Err(error.into());
+            }
+        };
         let value: Value = serde_json::from_slice(&response.record_json)?;
         let record: MessageRecord = serde_json::from_value(
             value
@@ -749,6 +805,37 @@ async fn await_location(
             location.message_id
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+/// Whether the message's original scope names an earlier Pod than the
+/// environment's current one. Any failure to tell answers no, so the original
+/// error is shown.
+async fn incarnation_ended(
+    location: &MessageLocation,
+    client: &codewire_client::CodewireClient,
+) -> bool {
+    let Ok(current) = client
+        .get_environment_agent_info(rpc::GetEnvironmentAgentInfoRequest {
+            org_id: location.org_id.clone(),
+            environment_id: location.environment_id.clone(),
+            ..Default::default()
+        })
+        .await
+    else {
+        return false;
+    };
+    let pod = |scope: &rpc::EnvironmentAgentScope| {
+        scope
+            .incarnation
+            .as_option()
+            .map(|incarnation| incarnation.pod_uid.clone())
+    };
+    match (
+        current.scope.as_option().and_then(pod),
+        pod(&location.scope),
+    ) {
+        (Some(current), Some(original)) => current != original,
+        _ => false,
     }
 }
 pub(super) async fn wait(

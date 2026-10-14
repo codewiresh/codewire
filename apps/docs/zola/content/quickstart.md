@@ -40,9 +40,9 @@ repository.
 4. Click **Create Environment**
 
 {% aside(kind="note") %}
-  Hosted private-repository access is not connected to environment creation in
-  the current release. Repository URLs containing embedded credentials are
-  rejected.
+  Private GitHub repositories need a GitHub connection in your credential
+  profile; see [Repository access](@/settings/github-integration.md).
+  Repository URLs containing embedded credentials are rejected.
 {% end %}
 
 ### 4. Connect

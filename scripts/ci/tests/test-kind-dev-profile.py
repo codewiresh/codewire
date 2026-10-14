@@ -66,7 +66,8 @@ entry = {"tool": tool, "args": args, "cluster": os.environ.get("KIND_CLUSTER_NAM
          "kubeconfig": os.environ.get("KUBECONFIG"), "smokes": os.environ.get("CARGO_CI_DIR"),
          "watch_addr": os.environ.get("CODEWIRE_DASHBOARD_LISTEN_ADDR"),
          "skip_current": os.environ.get("KIND_DEPLOY_SKIP_CURRENT"),
-         "crate": os.environ.get("KIND_DEV_CRATE")}
+         "crate": os.environ.get("KIND_DEV_CRATE"), "bins": os.environ.get("KIND_DEV_BIN"),
+         "features": os.environ.get("KIND_DEV_FEATURES"), "cwd": os.getcwd()}
 if tool == "docker" and args[:2] == ["buildx", "build"]:
     entry["dockerfile"] = sys.stdin.read()
 with (state / "calls").open("a") as log: log.write(json.dumps(entry) + "\n")
@@ -135,11 +136,20 @@ elif tool == "docker":
         outputs = [args[i + 1] for i, arg in enumerate(args[:-1])
                    if arg == "--set" and args[i + 1].startswith("kind-dev-binary.output=")]
         if len(outputs) != 1: sys.exit(64)
+        if os.environ.get("FAKE_BAKE_FAIL") == os.environ.get("KIND_DEV_CRATE"): sys.exit(23)
         output = outputs[0]
         destination = pathlib.Path(output.split("dest=", 1)[1])
-        binary = destination / os.environ["KIND_DEV_BIN"]
-        binary.write_text(os.environ.get("FAKE_BINARY_CONTENT", "synthetic-current-source"))
-        binary.chmod(0o755)
+        build_args = dict(args[i + 1].removeprefix("kind-dev-binary.args.").split("=", 1)
+                          for i, arg in enumerate(args[:-1])
+                          if arg == "--set" and args[i + 1].startswith("kind-dev-binary.args."))
+        produced = [destination / name for name in os.environ["KIND_DEV_BIN"].split()]
+        produced += [destination / "examples" / name for name in build_args.get("KIND_DEV_EXAMPLES", "").split()]
+        if build_args.get("KIND_DEV_TEST"): produced.append(destination / "tests" / build_args["KIND_DEV_TEST"])
+        for binary in produced:
+            if binary.name == os.environ.get("FAKE_MISSING_OUTPUT"): continue
+            binary.parent.mkdir(exist_ok=True)
+            binary.write_text(os.environ.get("FAKE_BINARY_CONTENT", "synthetic-current-source"))
+            binary.chmod(0o755)
         if "kind-dev-binary.args.KIND_DEV_FIXTURE_FEATURES=enrollment,kind-e2e" in args and not os.environ.get("FAKE_MISSING_FIXTURE"):
             fixture = destination / "kind-fixtures" / os.environ["KIND_DEV_BIN"]
             fixture.parent.mkdir()
@@ -214,6 +224,15 @@ def record_digest(service_digest: str, crate: str, features: str = "", fixture_f
     return hashlib.sha256(f"{service_digest} {crate} {features} {fixture_features}\n".encode()).hexdigest()
 
 
+# The smoke inventory the retained suites consume (common.sh).
+SMOKE_INVENTORY = [
+    "crd-smoke", "environment-setup-smoke", "exec-smoke", "exec-stream-smoke", "file-service-smoke",
+    "prepare-stream-smoke", "log-stream-smoke", "temporal-smoke", "temporal-fencing-smoke", "reconciler-ttl-smoke",
+    "cw", "examples/platform-run-smoke", "examples/environment-session-smoke", "examples/environment-cw-runtime-smoke",
+    "examples/coordinator-ingress-smoke",
+]
+
+
 # deploy-service.sh build parameters: crate, features, fixture features.
 BUILDS = {
     "idp": ("codewire-idp", "", ""), "orchestration": ("codewire-orchestration", "kind-e2e", ""),
@@ -255,6 +274,10 @@ class DeveloperProfileTests(unittest.TestCase):
         self.calls_path.touch()
         for name in ("dev-loop.sh", "deploy-service.sh", "test-selected.sh"):
             shutil.copy2(CONSUMERS / "scripts/dev/kind" / name, self.tree / "scripts/dev/kind" / name)
+        # Consumers that predate the shared kind-dev builder do not have these.
+        for name in ("dev-builder.sh", "build-smokes.sh"):
+            if (CONSUMERS / "scripts/dev/kind" / name).exists():
+                shutil.copy2(CONSUMERS / "scripts/dev/kind" / name, self.tree / "scripts/dev/kind" / name)
         shutil.copy2(ROOT / "scripts/dev/kind/profile.sh", self.tree / "scripts/dev/kind/profile.sh")
         self.write_program(self.tree / "scripts/dev/kind/cluster-profile.py", FAKE_CORE)
         self.write_program(self.tree / "scripts/ci/verify/kind-e2e.sh", FAKE_SUITE)
@@ -342,8 +365,9 @@ class DeveloperProfileTests(unittest.TestCase):
 
     def run_script(self, script: str, *args: str, timeout: int = 30, **environment: str) -> subprocess.CompletedProcess[str]:
         env = self.env | environment
+        # Started outside the tree, as from another worktree's directory.
         return subprocess.run(["bash", str(self.tree / "scripts/dev/kind" / script), *args],
-                              env=env, text=True, capture_output=True, timeout=timeout)
+                              env=env, text=True, capture_output=True, timeout=timeout, cwd=self.directory)
 
     def run_adapter(self, command: str, **environment: str) -> subprocess.CompletedProcess[str]:
         env = self.env | environment | {"FIXTURE_TREE": str(self.tree)}
@@ -760,6 +784,126 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         bake, = [call["args"] for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
         self.assertEqual(bake[bake.index("--builder") + 1], builder)
 
+    SMOKE_BUILDS = [
+        ("codewire-orchestration", "kind-e2e",
+         "crd-smoke environment-setup-smoke exec-smoke exec-stream-smoke file-service-smoke prepare-stream-smoke "
+         "log-stream-smoke temporal-smoke temporal-fencing-smoke reconciler-ttl-smoke sidecar-smoke", "", ""),
+        ("codewire-client", "", "", "platform-run-smoke environment-session-smoke environment-cw-runtime-smoke", ""),
+        ("codewire-client", "kind-e2e", "", "coordinator-ingress-smoke", ""),
+        ("codewire-cli-bin", "", "cw", "", ""),
+        ("codewire-billing", "", "", "", "wire_contract"),
+    ]
+
+    def run_smokes(self, **environment: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+        smokes, receipt = self.directory / "smokes", self.directory / "run" / "billing-contract-build.jsonl"
+        result = subprocess.run(["bash", str(self.tree / "scripts/dev/kind/build-smokes.sh"), str(smokes), str(receipt)],
+                                env=self.env | {"CLUSTER": "", "KIND_CLUSTER_NAME": "codewire-ux-2099"} | environment,
+                                text=True, capture_output=True, timeout=30, cwd=self.directory)
+        return result, smokes, receipt
+
+    @staticmethod
+    def bake_arg(bake: list[str], name: str) -> str:
+        value, = [arg.split("=", 1)[1] for i, arg in enumerate(bake)
+                  if i and bake[i - 1] == "--set" and arg.startswith(f"kind-dev-binary.args.{name}=")]
+        return value
+
+    def test_smokes_build_in_the_deploy_builder_and_target(self) -> None:
+        result = self.run_script("deploy-service.sh", "idp", CLUSTER="", KIND_CLUSTER_NAME="codewire-ux-2099",
+                                 FAKE_RECORDS=current_records("idp", daemon=IMAGE_ID))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        deploy_call, = [call for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
+        deploy = deploy_call["args"]
+        self.calls_path.write_text("")
+        result, smokes, receipt = self.run_smokes()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CODEWIRE_CI_PHASE name=kind-smoke-binary-build seconds=", result.stdout)
+        # The builder that exists already is reused, so no second builder.
+        self.assertFalse([call for call in self.calls("docker") if call["args"][:2] == ["buildx", "create"]])
+        bakes = [call for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
+        self.assertEqual([(call["crate"], call["features"], call["bins"], self.bake_arg(call["args"], "KIND_DEV_EXAMPLES"),
+                           self.bake_arg(call["args"], "KIND_DEV_TEST")) for call in bakes], self.SMOKE_BUILDS)
+        # Bake takes its build context from the working directory: both build
+        # this worktree's source, whatever directory they were started from.
+        self.assertEqual(deploy_call["cwd"], str(self.tree))
+        for call in bakes:
+            self.assertEqual(call["cwd"], str(self.tree))
+            # The deploy's builder and the worktree's own target: a smoke only
+            # links what the deploy compiled and never another tree's crates.
+            self.assertEqual(call["args"][call["args"].index("--builder") + 1],
+                             deploy[deploy.index("--builder") + 1])
+            self.assertEqual(self.bake_arg(call["args"], "KIND_DEV_TREE"), self.bake_arg(deploy, "KIND_DEV_TREE"))
+            self.assertEqual(self.bake_arg(call["args"], "KIND_DEV_TREE"),
+                             hashlib.sha256(str(self.tree).encode()).hexdigest()[:16])
+        installed = sorted(str(path.relative_to(smokes)) for path in smokes.rglob("*") if path.is_file())
+        expected = sorted(SMOKE_INVENTORY + ["sidecar-smoke", "kind-smoke-tests/wire_contract"])
+        self.assertEqual(installed, expected)
+        # The suite selects the billing contract from the receipt with its own query.
+        common = (ROOT / "scripts/ci/verify/kind/common.sh").read_text()
+        query = common.split("binary=\"$(jq -ser '", 1)[1].split("'", 1)[0]
+        selected = subprocess.run(["jq", "-ser", query, str(receipt)], text=True, capture_output=True, check=True)
+        self.assertEqual(selected.stdout.strip(), str(smokes / "kind-smoke-tests/wire_contract"))
+
+    def test_smokes_stop_at_a_failed_or_incomplete_build(self) -> None:
+        for failure, environment, message in (
+                ("failed build", {"FAKE_BAKE_FAIL": "codewire-client"}, ""),
+                ("missing binary", {"FAKE_MISSING_OUTPUT": "temporal-smoke"}, "the build produced no temporal-smoke"),
+                ("missing test", {"FAKE_MISSING_OUTPUT": "wire_contract"}, "the build produced no test wire_contract")):
+            with self.subTest(failure):
+                self.calls_path.write_text("")
+                result, _, receipt = self.run_smokes(**environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(receipt.exists())
+                self.assertNotIn("CODEWIRE_CI_PHASE", result.stdout)
+        crates = [call["crate"] for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
+        self.assertEqual(crates, [build[0] for build in self.SMOKE_BUILDS])
+
+    def test_smokes_refuse_relative_destinations(self) -> None:
+        result = subprocess.run(["bash", str(self.tree / "scripts/dev/kind/build-smokes.sh"), "smokes", "receipt.jsonl"],
+                                env=self.env | {"CLUSTER": ""}, text=True, capture_output=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("usage: build-smokes.sh", result.stderr)
+        self.assertFalse(self.calls("docker"))
+
+    def test_dev_builds_use_the_local_kind_dev_profile(self) -> None:
+        import tomllib
+        # The workspace manifest, which CI and shipped builds read, does not
+        # define it; only the kind-dev build passes this file with --config.
+        self.assertNotIn("kind-dev", tomllib.loads((ROOT / "Cargo.toml").read_text())["profile"])
+        profiles = tomllib.loads((ROOT / "scripts/dev/kind/cargo-profile.toml").read_text())["profile"]
+        # It only lowers the workspace's own optimization; external crates keep
+        # the ci profile's settings, share the compiler cache and keep the
+        # services fast.
+        self.assertEqual(list(profiles), ["kind-dev"])
+        dev = dict(profiles["kind-dev"])
+        packages = dev.pop("package")
+        self.assertEqual(dev, {"inherits": "ci", "opt-level": 1, "codegen-units": 256})
+        self.assertEqual(packages, {"*": {"opt-level": 3, "codegen-units": 16}})
+        dockerfile = (ROOT / "deployments/docker/kind-dev-binary.Dockerfile").read_text()
+        builder = dockerfile[:dockerfile.index("FROM scratch")]
+        self.assertEqual(re.findall(r"cargo (?:build|test) --locked (--config \S+ --profile \S+)", builder),
+                         ["--config scripts/dev/kind/cargo-profile.toml --profile kind-dev"] * 3)
+        self.assertNotIn("$CARGO_TARGET_DIR/ci/", builder)
+        self.assertEqual(builder.count("$CARGO_TARGET_DIR/kind-dev/"), 2)
+
+    def test_every_copied_input_is_content_hashed(self) -> None:
+        # Cargo judges freshness by modification time; the target's content
+        # record is what keeps it from reusing a crate built from other source
+        # (#2273). A copied input that is not hashed would escape it.
+        dockerfile = (ROOT / "deployments/docker/kind-dev-binary.Dockerfile").read_text()
+        builder = dockerfile[:dockerfile.index("FROM scratch")]
+        copied = {source for line in builder.splitlines() if line.startswith("COPY ") and "--from" not in line
+                  for source in line.split()[1:-1]}
+        hashed = re.search(r"find (.*?) -type f -print0", builder.replace("\\\n", " "), re.S)
+        self.assertIsNotNone(hashed)
+        self.assertEqual(set(hashed.group(1).split()), copied)
+        for guard in ('export CARGO_TARGET_DIR="/src/target/trees/$KIND_DEV_TREE"',
+                      'grep -vxFf "$built" /tmp/kind-dev-sources.sha256 | cut -c67- | tr \'\\n\' \'\\0\' | xargs -0r touch -c',
+                      'cp /tmp/kind-dev-sources.sha256 "$built"'):
+            self.assertIn(guard, builder)
+        self.assertTrue(builder.rstrip().endswith('cp /tmp/kind-dev-sources.sha256 "$built"'),
+                        "the content record must be written only after every build step succeeded")
+
     def test_mesh_deploys_into_its_own_image(self) -> None:
         result = self.run_script("deploy-service.sh", "mesh")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -938,7 +1082,7 @@ class SelectionTableTests(unittest.TestCase):
         builder = dockerfile[:dockerfile.index("FROM scratch")]
         copied = {source for line in builder.splitlines() if line.startswith("COPY ") and "--from" not in line
                   for source in line.split()[1:-1]}
-        declared = {"crates"} | {path for path in sources.SHARED_INPUTS if not path.startswith("deployments/")}
+        declared = {"crates"} | {path for path in sources.SHARED_INPUTS if path not in sources.RECIPE_INPUTS}
         declared |= {path for paths in sources.CRATE_INPUTS.values() for path in paths}
         self.assertEqual(copied, declared)
         for path in sources.SHARED_INPUTS:
@@ -997,12 +1141,13 @@ class ServiceSourcesTests(unittest.TestCase):
         for path in ("Cargo.toml", "Cargo.lock", "proto/codewire/v1/a.proto", "libs/daemon-proto/proto/b.proto",
                      "packages/codewire-design/styles.css", "apps/cli/install.sh", "apps/cli/GPG_PUBLIC_KEY.asc",
                      "deployments/docker/rust-base.Dockerfile", "deployments/docker/kind-dev-binary.Dockerfile",
+                     "scripts/ci/images/run-rust-build.sh", "scripts/dev/kind/cargo-profile.toml",
                      "docs/README.md"):
             (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
             (self.repo / path).write_text(path + "\n")
         (self.repo / ".gitignore").write_text("target/\n")
         helper = self.repo / "scripts/dev/kind/service-sources.py"
-        helper.parent.mkdir(parents=True)
+        helper.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(CONSUMERS / "scripts/dev/kind/service-sources.py", helper)
         metadata = Path(temp.name) / "metadata.json"
         metadata.write_text(json.dumps({"packages": packages}))
@@ -1060,6 +1205,16 @@ class ServiceSourcesTests(unittest.TestCase):
         self.edit("proto/codewire/v1/a.proto")
         sources = load_service_sources()
         self.assertEqual(self.changes(), [f"service {name}" for name in sources.SERVICES])
+
+    def test_build_recipe_feeds_every_service(self) -> None:
+        # The compiler wrapper the toolchain image installs and the kind-dev
+        # Cargo profile decide the build, like the Dockerfiles themselves.
+        sources = load_service_sources()
+        for path in sources.RECIPE_INPUTS + ("scripts/dev/kind/cargo-profile.toml",):
+            with self.subTest(path=path):
+                self.edit(path, f"changed {path}\n")
+                self.assertEqual(self.changes(), [f"service {name}" for name in sources.SERVICES])
+                self.git("checkout", "--", path)
 
     def test_workspace_image_pin_feeds_no_service(self) -> None:
         self.edit("crates/codewire-workspace-image/src/lib.rs")

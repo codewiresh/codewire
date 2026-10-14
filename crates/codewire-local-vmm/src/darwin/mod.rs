@@ -1,6 +1,7 @@
 //! Darwin host primitives for the shared local runtime.
 
 mod acl;
+pub(crate) mod disk_tool;
 pub mod path;
 pub mod process;
 pub mod sandbox;
@@ -119,6 +120,10 @@ pub(crate) fn e2fsprogs(program: &str) -> Option<PathBuf> {
     tool.revalidate().ok()?;
     Some(tool.path().to_owned())
 }
+
+/// The runtime's pinned `mke2fs.conf` ([`mke2fs_config`]) sets every new
+/// disk's format, so `mkfs.ext4` takes no format options here.
+pub(crate) const EXT4_FORMAT: [&str; 0] = [];
 
 /// The pinned mke2fs configuration (`MKE2FS_CONFIG`) every format uses, so a
 /// disk never depends on a host or build-machine file.

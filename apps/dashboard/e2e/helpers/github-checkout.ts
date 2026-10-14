@@ -10,6 +10,13 @@ const execFileAsync = promisify(execFile);
 const serverUrl = process.env.SERVER_URL || "http://127.0.0.1:8080";
 export const githubCheckoutName = "github-repository-draft";
 export const githubCheckoutUrl = "https://github.com/synthetic-user/repository-01.git";
+// Git in the Sandbox reaches github.com through the managed GitHub route, set
+// as Git's own insteadOf configuration in the session environment. The stored
+// origin stays canonical; `git remote get-url` reports the rewritten URL.
+const githubManagedRoute = githubCheckoutUrl.replace(
+  "https://github.com/",
+  "http://127.0.0.1:38081/_codewire/github/",
+);
 // The same pinned workspace contract used by ssr-dashboard.environments.ssr.ts.
 export const githubCheckoutImage = process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE || defaultWorkspaceImage;
 // Public deterministic fixture identity; not a credential. The install marker
@@ -168,13 +175,19 @@ export async function verifyGithubCheckout(page: Page, orgId: string, before: Gi
         "cd /workspace/repository-01",
         "test \"$(cat /workspace/github-checkout-proof)\" = 'checkout-before-install-ok'",
         `test "$(git rev-parse HEAD)" = '${checkoutCommit}'`,
-        `test "$(git remote get-url origin)" = '${githubCheckoutUrl}'`,
+        `test "$(git config --get remote.origin.url)" = '${githubCheckoutUrl}'`,
+        `test "$(git remote get-url origin)" = '${githubManagedRoute}'`,
         "test -z \"$(git status --porcelain)\"",
         // Only fixed, bounded relevant configuration is examined. Never echo
         // environment/configuration bytes into test output or artifacts.
         "test \"$HOME\" = /home/codewire",
         "test \"${XDG_CONFIG_HOME:-/home/codewire/.config}\" = /home/codewire/.config",
-        "test \"${GH_CONFIG_DIR:-/home/codewire/.config/gh}\" = /home/codewire/.config/gh",
+        // Stock gh is configured by Codewire while GitHub is selected: its own
+        // directory with one file naming the ingress socket, and a public
+        // placeholder token. The user's ~/.config/gh is not read.
+        "test \"$GH_CONFIG_DIR\" = /codewire/run/gh",
+        "test \"$GH_TOKEN\" = codewire-managed",
+        "test \"$(cat \"$GH_CONFIG_DIR/config.yml\")\" = \"$(printf 'version: 1\\nhttp_unix_socket: /codewire/run/credentials.sock')\"",
         "for directory in .git /home/codewire /home/codewire/.config /home/codewire/.config/git /home/codewire/.config/gh; do",
         "  test ! -L \"$directory\"",
         "  if [ -e \"$directory\" ]; then",

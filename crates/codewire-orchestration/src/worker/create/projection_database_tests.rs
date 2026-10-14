@@ -539,7 +539,10 @@ async fn database_capture_selects_the_anthropic_form_of_the_pinned_credential() 
         ensure!(key_clients == "v1:anthropic", "api key: {key_clients}");
         ensure!(key_reserved == reserved);
         ensure!(key_environment.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str) == Some("codewire-managed"));
-        ensure!(key_environment.get("CLAUDE_CODE_OAUTH_TOKEN").map(String::as_str) == Some(""));
+        // The other form's names are reserved but never rendered.
+        for name in ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] {
+            ensure!(!key_environment.contains_key(name), "{name}");
+        }
 
         // The pinned subscription token selects Claude Code's subscription
         // form; the reserved names are unchanged.
@@ -558,7 +561,7 @@ async fn database_capture_selects_the_anthropic_form_of_the_pinned_credential() 
                 == Some("codewire-managed")
         );
         for name in ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"] {
-            ensure!(token_environment.get(name).map(String::as_str) == Some(""), "{name}");
+            ensure!(!token_environment.contains_key(name), "{name}");
         }
         ensure!(
             token_environment.get("ANTHROPIC_BASE_URL").map(String::as_str)

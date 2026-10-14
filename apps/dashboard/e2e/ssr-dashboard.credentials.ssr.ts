@@ -16,6 +16,9 @@ async function openGithubConnection(page: Page) {
   await expect(page.getByRole("dialog", { name: "Connect GitHub", exact: true })).toBeVisible();
 }
 
+// GitHub's settings page for one user or organization installation.
+const githubAcceptPage = /^https:\/\/github\.com\/(?:organizations\/[A-Za-z0-9-]+\/)?settings\/installations\/\d+$/;
+
 async function completeGithubAppConnection(page: Page, code: string, alterCallback?: (url: URL) => void) {
   const dialog = page.locator("dialog[open]");
   const form = dialog.locator('form[action^="/settings/credentials/_actions/github/authorize"]');
@@ -78,6 +81,15 @@ async function completeGithubAppConnection(page: Page, code: string, alterCallba
   };
   const onPaused = (event: Parameters<typeof authorizeProvider>[0]) => {
     pending.add(event.requestId);
+    if (githubAcceptPage.test(event.request.url)) {
+      // #2712: the callback sends the person to GitHub's own page for
+      // accepting the updated permissions. Answer it here, never off-cluster.
+      void transport.send("Fetch.fulfillRequest", {
+        requestId: event.requestId, responseCode: 200,
+        responseHeaders: [{ name: "Content-Type", value: "text/html" }], body: "",
+      }).then(() => pending.delete(event.requestId), rejectProvider);
+      return;
+    }
     void authorizeProvider(event).then(() => {
       pending.delete(event.requestId);
       resolveProvider();
@@ -94,9 +106,14 @@ async function completeGithubAppConnection(page: Page, code: string, alterCallba
   try {
     const { frameTree } = await transport.send("Page.getFrameTree");
     mainFrameId = frameTree.frame.id;
-    await transport.send("Fetch.enable", { patterns: [{
-      urlPattern: "https://github.com/login/oauth/authorize*", resourceType: "Document", requestStage: "Request",
-    }] });
+    await transport.send("Fetch.enable", { patterns: [
+      { urlPattern: "https://github.com/login/oauth/authorize*", resourceType: "Document", requestStage: "Request" },
+      { urlPattern: "https://github.com/settings/installations/*", resourceType: "Document", requestStage: "Request" },
+      {
+        urlPattern: "https://github.com/organizations/*/settings/installations/*",
+        resourceType: "Document", requestStage: "Request",
+      },
+    ] });
     const [authorization, response] = await Promise.all([
       page.waitForResponse((response) => response.request().method() === "POST"
         && response.url() === new URL(action, ssrUrl).toString(), { timeout: 30_000 }),
@@ -222,6 +239,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(connection).not.toContainText("one-time code");
       await expect(connection.getByRole("link", { name: "Install/manage repository access" }))
         .toHaveAttribute("href", "https://github.com/apps/codewire-synthetic/installations/new");
+      await expect(connection).toContainText("choose Only select repositories");
       expect(await githubConnectionMetadata(owner)).toEqual([]);
       // These returns never reach provider exchange or publish a credential.
       // Each retry starts from the newly rendered form and a fresh state cookie.
@@ -251,6 +269,8 @@ test.describe("managed provider credential browser journey", () => {
       const completedCallback = await completeGithubAppConnection(page, "kind-synthetic-code-one");
       await expect(page).toHaveURL(`${ssrUrl}${settingsPath}&message=github-app-connected`);
       await expect(page.getByRole("status")).toHaveText("GitHub connected through the GitHub App.");
+      // The synthetic installation granted everything Codewire needs (#2712).
+      await expect(page.getByRole("region", { name: "GitHub permissions", exact: true })).toHaveCount(0);
       const enrolled = await githubConnectionMetadata(owner);
       expect(enrolled).toHaveLength(1);
       // App user authorization publishes OAuth material; the separate
@@ -403,6 +423,65 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page).toHaveURL(new RegExp(`^${ssrUrl}/${slug}/[0-9a-f-]{36}/\\?message=environment-created$`));
       await verifyGithubCheckout(page, orgId, before);
       await destroyGithubCheckout(page, orgId);
+
+      // #2712: a reconnect whose installations still have the grant from
+      // before Codewire asked for write access saves the connection, then
+      // sends the person straight to the first installation's GitHub settings
+      // page to accept (the helper answers it on-cluster, never following it).
+      const reconnectWith = async (code: string) => {
+        await page.goto("/settings/credentials/");
+        row = credentialRows.filter({ hasText: name });
+        await row.locator("details.cw-menu > summary").click();
+        await row.getByRole("button", { name: "Reconnect", exact: true }).click();
+        await page.locator("dialog[open]").getByRole("checkbox").check();
+        await completeGithubAppConnection(page, code);
+      };
+      await reconnectWith("kind-synthetic-code-limited");
+      // The helper requires the page to be exactly the callback's Location.
+      await expect(page).toHaveURL("https://github.com/settings/installations/41");
+      // Nothing is carried in a cookie: the page checks live when they return.
+      expect((await page.context().cookies()).map((cookie) => cookie.name))
+        .not.toContain("codewire_github_accept");
+      const permissions = page.getByRole("region", { name: "GitHub permissions", exact: true });
+      // A page load another site starts never runs the live check, so a link
+      // elsewhere cannot make the dashboard call GitHub or renew a token.
+      await Promise.all([
+        page.waitForURL(`${ssrUrl}/settings/credentials/`),
+        page.evaluate((target) => { window.location.assign(target); }, `${ssrUrl}/settings/credentials/`),
+      ]);
+      await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
+      await expect(permissions).toHaveCount(0);
+      // Back on Codewire by the person's own navigation (or a Setup URL
+      // return when the App has one), the live status names both.
+      await page.goto("/settings/credentials/?installation_id=41&setup_action=update");
+      await expect(page.getByRole("status")).toHaveText("GitHub permissions updated.");
+      const waiting = "GitHub is waiting for you to accept Codewire's updated permissions on";
+      await expect(permissions).toContainText(`${waiting} synthetic-user.`);
+      await expect(permissions).toContainText(`${waiting} synthetic-works.`);
+      const review = permissions.getByRole("link", { name: "Review on GitHub", exact: true });
+      await expect(review).toHaveCount(2);
+      await expect(review.nth(0)).toHaveAttribute("href", "https://github.com/settings/installations/41");
+      await expect(review.nth(1))
+        .toHaveAttribute("href", "https://github.com/organizations/synthetic-works/settings/installations/42");
+      await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
+      // It lasts: every visit checks again while GitHub holds the earlier grant.
+      await page.goto("/settings/credentials/");
+      await expect(permissions).toContainText(`${waiting} synthetic-user.`);
+      // Once GitHub reports the full grant for the connection, it is gone.
+      // The synthetic provider models the accepted grant as a login whose
+      // installation lists it; reconnecting stores that connection.
+      await reconnectWith("kind-synthetic-code-one");
+      await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=github-app-connected$/);
+      await page.goto("/settings/credentials/");
+      await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
+      await expect(permissions).toHaveCount(0);
+      // A GitHub error during the live check shows nothing and never blocks
+      // the page: this login's listing answers its connect, then fails.
+      await reconnectWith("kind-synthetic-code-unreliable");
+      await expect(page).toHaveURL("https://github.com/settings/installations/41");
+      await page.goto("/settings/credentials/");
+      await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
+      await expect(permissions).toHaveCount(0);
 
       // Delete removes the connection directly and leaves every profile as it
       // was: profiles show GitHub as missing, Create cannot browse.

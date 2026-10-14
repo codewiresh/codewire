@@ -748,14 +748,7 @@ fn already_exists(error: &PathError) -> bool {
 /// The trusted e2fsprogs that build and inspect a catalog disk: the system
 /// tools on Linux, the admitted runtime's pinned build on Darwin.
 fn filesystem_tool(name: &str) -> Result<PathBuf, CwRuntimeError> {
-    #[cfg(target_os = "linux")]
-    {
-        Ok(Path::new("/usr/sbin").join(name))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        crate::host::e2fsprogs(name).ok_or(CwRuntimeError::E2fsprogsUnavailable)
-    }
+    crate::host::e2fsprogs(name).ok_or(CwRuntimeError::E2fsprogsUnavailable)
 }
 // Closing the final reference releases flock. Explicit LOCK_UN would also
 // release an orphan leaf tool's reference to this same open file description.
@@ -917,23 +910,27 @@ fn format_runtime_disk(
         temporary,
         publication,
         &filesystem_tool("mkfs.ext4")?,
-        &[
-            "-q".into(),
-            "-F".into(),
-            "-m".into(),
-            "0".into(),
-            "-N".into(),
-            "4096".into(),
-            "-O".into(),
-            "^has_journal".into(),
-            "-E".into(),
-            "lazy_itable_init=0".into(),
-            "-L".into(),
-            "CWRUNTIME".into(),
-            "-d".into(),
-            seed.path().as_os_str().to_owned(),
-            disk.as_os_str().to_owned(),
-        ],
+        &crate::host::EXT4_FORMAT
+            .iter()
+            .map(std::ffi::OsString::from)
+            .chain([
+                "-q".into(),
+                "-F".into(),
+                "-m".into(),
+                "0".into(),
+                "-N".into(),
+                "4096".into(),
+                "-O".into(),
+                "^has_journal".into(),
+                "-E".into(),
+                "lazy_itable_init=0".into(),
+                "-L".into(),
+                "CWRUNTIME".into(),
+                "-d".into(),
+                seed.path().as_os_str().to_owned(),
+                disk.as_os_str().to_owned(),
+            ])
+            .collect::<Vec<_>>(),
         deadline,
     )?;
     let mut commands = String::from("rmdir /lost+found\n");
@@ -1241,9 +1238,17 @@ pub enum CwRuntimeError {
     DiskChanged,
     #[error("cw runtime disk production or inode verification failed")]
     ToolFailed,
-    #[cfg(target_os = "macos")]
-    #[error(
-        "the local VM runtime's debugfs or mkfs.ext4 is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+    #[cfg_attr(
+        target_os = "linux",
+        error(
+            "debugfs or mkfs.ext4 is unavailable; install your distribution's e2fsprogs package (cw looks in /usr/sbin and /usr/bin)"
+        )
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "the local VM runtime's debugfs or mkfs.ext4 is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
     )]
     E2fsprogsUnavailable,
     #[error(transparent)]
@@ -1570,7 +1575,9 @@ mod tests {
             store.publication_guard(),
             Err(CwRuntimeError::PublicationBusy)
         ));
-        drop(first);
+        // Recovery below runs under this same guard. Releasing and retaking it
+        // could meet a concurrent test's forked child holding a copy (#2678).
+        let _publication = first;
         let name = format!("catalog-{}", Uuid::new_v4());
         let directory =
             PrivateRoot::open(&store.staging.create_dir(Path::new(&name), 0o700).unwrap()).unwrap();
@@ -1584,7 +1591,6 @@ mod tests {
             .unwrap();
         let ingest = format!(".ingest-{}", Uuid::new_v4());
         write_private(&store.assets, Path::new(&ingest), b"partial").unwrap();
-        let _publication = store.publication_guard().unwrap();
         store
             .recover_abandoned(Instant::now() + Duration::from_secs(1))
             .unwrap();

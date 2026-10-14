@@ -2595,11 +2595,9 @@ class ClaudeSessionDriver(unittest.TestCase):
     into the session; the driver must only observe it."""
 
     SUBSCRIPTION = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081/_codewire/anthropic",
-                    "CLAUDE_CODE_OAUTH_TOKEN": "codewire-managed",
-                    "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_API_KEY": ""}
+                    "CLAUDE_CODE_OAUTH_TOKEN": "codewire-managed"}
     API_KEY = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081/_codewire/anthropic",
-               "ANTHROPIC_AUTH_TOKEN": "codewire-managed",
-               "ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": ""}
+               "ANTHROPIC_AUTH_TOKEN": "codewire-managed"}
 
     def setUp(self):
         scratch = tempfile.TemporaryDirectory(prefix="kind-claude-session-")
@@ -2666,8 +2664,11 @@ class ClaudeSessionDriver(unittest.TestCase):
                 [call] = self.calls()
                 self.assertEqual(call["argv"], ["-p", CLAUDE.PROMPT])
                 self.assertEqual(call["stdin"], "")
-                self.assertEqual(call["env"], {**projected,
-                                               "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
+                # Exactly the form's names, the others absent, plus the
+                # harness's own switch.
+                self.assertEqual(call["env"], {
+                    **{name: projected.get(name) for name in CLAUDE.NAMES},
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
                 # A fresh private home, never the workspace user's own login.
                 self.assertEqual(call["cwd"], call["home"])
                 self.assertTrue(Path(call["home"]).name.startswith("kind-claude-"))
@@ -2677,6 +2678,9 @@ class ClaudeSessionDriver(unittest.TestCase):
         for name, value in (
                 ("CLAUDE_CODE_OAUTH_TOKEN", ""),
                 ("ANTHROPIC_AUTH_TOKEN", "codewire-managed"),
+                # The other names must be absent, not merely empty.
+                ("ANTHROPIC_AUTH_TOKEN", ""),
+                ("ANTHROPIC_API_KEY", ""),
                 ("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
                 ("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-other")):
             with self.subTest(name=name, value=value):
@@ -2686,7 +2690,7 @@ class ClaudeSessionDriver(unittest.TestCase):
                 self.assertEqual(events, [{"event": "failed", "form": "subscription_token",
                                            "outcome": "success",
                                            "reason": "projection_values"}])
-        for name in CLAUDE.NAMES:
+        for name in self.SUBSCRIPTION:
             with self.subTest(missing=name):
                 environ = self.environ()
                 del environ[name]

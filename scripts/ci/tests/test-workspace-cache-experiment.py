@@ -859,7 +859,8 @@ class WorkflowTests(unittest.TestCase):
     def test_measurement_allocation_and_failures_keep_ordinary_gates(self):
         body = workflow_job("workspace-cache-measurement")
         self.assertIn("    name: Workspace cache experiment (${{ matrix.case }})\n", body)
-        self.assertIn("    runs-on: ci-heavy\n", body)
+        self.assertIn("    runs-on: " + chr(36) + "{{ github.event_name == 'push' && github.ref == "
+                      "'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}\n", body)
         self.assertIn("    enable-openid-connect: true\n", body)
         self.assertNotIn("continue-on-error", body)
         self.assertIn("workspace_cache_experiment == 'true'", body)

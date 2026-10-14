@@ -12,6 +12,8 @@ pub mod env;
 pub mod execution;
 pub mod files;
 #[cfg(target_os = "linux")]
+pub mod gh_config;
+#[cfg(target_os = "linux")]
 pub mod host_control;
 #[cfg(unix)]
 mod host_process;
@@ -26,6 +28,9 @@ mod private_files;
 pub mod server;
 pub mod service;
 pub mod session;
+#[cfg(target_os = "linux")]
+pub mod ssh_known_hosts;
+pub mod stop_evidence;
 
 pub use codewire_daemon_proto::{DaemonAuthToken, HOSTED_EXEC_AMBIGUOUS_EXIT_CODE};
 pub use config::{
@@ -36,6 +41,7 @@ pub use config::{
     NativeLaunchProjectionConfig, SHIM_ADDR_ENV, WORKSPACE_ROOT_ENV, WorkspaceBinding,
     WorkspaceBindingConfig, codex_login_check_period,
 };
+pub use durable_session::NeverRestarts;
 pub use server::serve_grpc_with_incoming;
 #[cfg(target_os = "linux")]
 pub use server::serve_host_control_grpc_with_incoming;

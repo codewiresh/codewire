@@ -70,6 +70,8 @@ def module(name, path):
 
 
 managed = module("cw_native_managed_acceptance", Path(__file__).with_name("test-cli-native-managed.py"))
+# Runner sockets live in the state root's short socket directory (#2735).
+socket_dir = module("cw_native_socket_dir", Path(__file__).with_name("native_socket_dir.py"))
 require = managed.require
 Failure = managed.Failure
 
@@ -376,7 +378,8 @@ class HostCustody:
             path = path_arg(runner_socket)
             require(state.name == "state.json" and state.parent.name == environment
                     and state.parent.parent.name == "vms" and state.parent.parent.parent.name == "engine"
-                    and path == state.parent.parent.parent.parent / "runners" / f"{environment}.sock",
+                    and path == socket_dir.predicted(state.parent.parent.parent.parent)
+                    / "runners" / f"{environment}.sock",
                     "host custody paths do not select this environment's canonical VM and runner")
             raw, self.state_stamp = regular(state, MAX_JSON, private_parent=True)
             self.state_path = state
@@ -1677,8 +1680,14 @@ def contract_tests(producer=None, image=None):
                 root = Path(name)
                 state = root / "engine" / "vms" / environment / "state.json"
                 state.parent.mkdir(parents=True, mode=0o700)
-                runner = root / "runners" / f"{environment}.sock"
-                runner.parent.mkdir(mode=0o700)
+                runner = socket_dir.predicted(root) / "runners" / f"{environment}.sock"
+                # Each level private, as cw creates them; an existing per-user
+                # directory is left as it is.
+                for level in (runner.parent.parent.parent, runner.parent.parent, runner.parent):
+                    try:
+                        level.mkdir(mode=0o700)
+                    except FileExistsError:
+                        pass
                 expected = {"pid": 42}
                 state.write_bytes(producer.canonical({"vm_id": environment, "phase": "running",
                                                      "generation": 1, "process": expected}))

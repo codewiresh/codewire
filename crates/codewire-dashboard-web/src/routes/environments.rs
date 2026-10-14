@@ -3927,6 +3927,17 @@ mod tests {
         assert!(html.contains("<dt>Auto-delete</dt><dd data-sandbox-lifetime><time datetime=\"2026-09-17T00:26:00.123456789Z\">17 Sep 2026, 00:26 UTC</time></dd>"));
     }
 
+    /// Rows and lifecycle copy say "deleted"; the list filter says it too,
+    /// while its value keeps the API state name.
+    #[test]
+    fn the_state_filter_names_deleted_sandboxes_as_the_rows_do() {
+        let template = include_str!("../../templates/organization-environments-content.html");
+        assert!(template.contains(
+            "<option value=\"destroyed\"{% if page.state_selected(\"destroyed\") %} selected{% endif %}>Deleted</option>"
+        ));
+        assert!(!template.contains(">Destroyed<"));
+    }
+
     #[test]
     fn repository_urls_reject_credentials_and_unsafe_schemes() {
         assert!(valid_repository_url("https://github.com/codewire/codewire"));

@@ -1,6 +1,7 @@
 //! Trusted local placements use the ordinary daemon session owner, not a VM.
 //! Runtime state is private and separate from the child's real HOME/workspace.
 use super::*;
+use codewire_daemon::stop_evidence::SHUTDOWN_MARKER;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -9,6 +10,10 @@ use tokio_stream::{StreamExt, wrappers::UnixListenerStream};
 const HOST_DATA_DIR_ENV: &str = "CW_HOST_DATA_DIR";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(25);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// A session stop or restart may first spend up to 10 s interrupting an
+/// agent's active run; its request deadline covers that and the stop.
+const SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn ensure_host_supported() -> anyhow::Result<()> {
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
@@ -123,6 +128,14 @@ pub(crate) fn write_private_json<T: serde::Serialize>(
     path: &std::path::Path,
     value: &T,
 ) -> anyhow::Result<()> {
+    write_private(path, &serde_json::to_vec(value)?)
+}
+
+/// Replaces `path` with an owner-only file of `bytes`, in an existing
+/// owner-private directory, through an exclusive temporary sibling and a
+/// rename: a reader never sees part of it, and a symlink at `path` is
+/// replaced, never followed.
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
     let parent = path.parent().context("runtime file parent")?;
     existing_private_directory(parent)?;
@@ -132,7 +145,7 @@ pub(crate) fn write_private_json<T: serde::Serialize>(
         .create_new(true)
         .mode(0o600)
         .open(&temporary)?;
-    file.write_all(&serde_json::to_vec(value)?)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(&temporary, path)?;
     fs::File::open(parent)?.sync_all()?;
@@ -447,6 +460,7 @@ fn check_socket_path(path: &std::path::Path) -> anyhow::Result<()> {
 
 async fn connect_host_channel(
     environment: &HostEnvironment,
+    request_timeout: Duration,
 ) -> anyhow::Result<(tonic::transport::Channel, String)> {
     let root = environment.root();
     existing_private_directory(&root)?;
@@ -481,7 +495,7 @@ async fn connect_host_channel(
     });
     let channel = tonic::transport::Endpoint::from_static("http://codewire-host")
         .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(5))
+        .timeout(request_timeout)
         .connect_with_connector(connector)
         .await?;
     let token: String = read_private(&root.join("daemon-token.json"))?;
@@ -490,8 +504,9 @@ async fn connect_host_channel(
 
 async fn connect_host(
     environment: &HostEnvironment,
+    request_timeout: Duration,
 ) -> anyhow::Result<codewire_daemon::client::SessionClient> {
-    let (channel, token) = connect_host_channel(environment).await?;
+    let (channel, token) = connect_host_channel(environment, request_timeout).await?;
     let client = codewire_daemon::client::SessionClient::from_channel(channel, token)?;
     client.require_ready().await?;
     Ok(client)
@@ -509,7 +524,7 @@ pub(crate) async fn host_control_client(
     if current.id != environment.id || current.state != "running" {
         anyhow::bail!("host control environment identity changed");
     }
-    let (channel, token) = connect_host_channel(&current).await?;
+    let (channel, token) = connect_host_channel(&current, REQUEST_TIMEOUT).await?;
     let client =
         codewire_daemon::client::HostControlClient::from_channel(channel, token, current.id)?;
     client.require_ready().await?;
@@ -519,13 +534,32 @@ pub(crate) async fn host_control_client(
 pub(crate) async fn host_session_client(
     environment: &HostEnvironment,
 ) -> anyhow::Result<codewire_daemon::client::SessionClient> {
-    tokio::time::timeout(START_TIMEOUT, connect_or_start_host(environment))
-        .await
-        .context("host readiness deadline exceeded; runtime retained for diagnosis")?
+    host_session_client_within(environment, REQUEST_TIMEOUT).await
+}
+
+/// For StopSession and RestartSession, whose daemon may first interrupt an
+/// agent's active run.
+pub(crate) async fn host_stop_client(
+    environment: &HostEnvironment,
+) -> anyhow::Result<codewire_daemon::client::SessionClient> {
+    host_session_client_within(environment, SESSION_STOP_TIMEOUT).await
+}
+
+async fn host_session_client_within(
+    environment: &HostEnvironment,
+    request_timeout: Duration,
+) -> anyhow::Result<codewire_daemon::client::SessionClient> {
+    tokio::time::timeout(
+        START_TIMEOUT,
+        connect_or_start_host(environment, request_timeout),
+    )
+    .await
+    .context("host readiness deadline exceeded; runtime retained for diagnosis")?
 }
 
 async fn connect_or_start_host(
     environment: &HostEnvironment,
+    request_timeout: Duration,
 ) -> anyhow::Result<codewire_daemon::client::SessionClient> {
     if environment.state != "running" {
         anyhow::bail!(
@@ -533,7 +567,7 @@ async fn connect_or_start_host(
             environment.name
         );
     }
-    if let Ok(client) = connect_host(environment).await {
+    if let Ok(client) = connect_host(environment, request_timeout).await {
         return Ok(client);
     }
     let root = environment.root();
@@ -543,7 +577,7 @@ async fn connect_or_start_host(
     if current.state != "running" {
         anyhow::bail!("host environment was stopped during connection");
     }
-    if let Ok(client) = connect_host(environment).await {
+    if let Ok(client) = connect_host(environment, request_timeout).await {
         return Ok(client);
     }
     let mut launched = None;
@@ -580,7 +614,7 @@ async fn connect_or_start_host(
     }
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        if let Ok(client) = connect_host(environment).await {
+        if let Ok(client) = connect_host(environment, request_timeout).await {
             return Ok(client);
         }
         if let Some(child) = launched.as_mut()
@@ -628,7 +662,7 @@ pub(crate) async fn host_lifecycle(
         environment = current;
         environment.state = "stopped".into();
         write_private_json(&root.join("host.json"), &environment)?;
-        write_private_json(&root.join("shutdown.json"), &true)?;
+        write_private_json(&root.join(SHUTDOWN_MARKER), &true)?;
         let deadline = Instant::now() + STOP_TIMEOUT;
         loop {
             if let Some(available) = HostLock::acquire(&root.join("daemon.lock"))? {
@@ -690,8 +724,8 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
         }
         fs::remove_file(&socket)?;
     }
-    if root.join("shutdown.json").exists() {
-        fs::remove_file(root.join("shutdown.json"))?;
+    if root.join(SHUTDOWN_MARKER).exists() {
+        fs::remove_file(root.join(SHUTDOWN_MARKER))?;
     }
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
@@ -705,21 +739,39 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
     });
     let token: String = read_private(&root.join("daemon-token.json"))?;
     let config = host_daemon_config(&environment, token)?;
+    // daemon.log gets the daemon's value-blind warnings, and each interrupt
+    // a stop or restart sends an agent's active run before it signals it.
+    // It has no rotation, so an inherited RUST_LOG never widens it.
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "warn,codewire_daemon=info",
+        ))
+        .try_init();
     let shutdown_root = root.clone();
     let shutdown = async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("install host daemon SIGTERM observer");
+        // A signal takes the environment down as `cw env stop` does. The
+        // daemon marks the takedown itself before it stops anything (see
+        // `codewire_daemon::stop_evidence`), so a conversation's driver that
+        // a rebooting host signals in the same moment finds the marker.
         tokio::select! {
             _=term.recv()=>{},
             _=tokio::signal::ctrl_c()=>{},
             _=async {
                 loop {
-                    if shutdown_root.join("shutdown.json").is_file(){break;}
+                    if shutdown_root.join(SHUTDOWN_MARKER).is_file(){break;}
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }=>{},
         }
     };
+    // The environment is its conversations' executor: each noel conversation
+    // its takedown paused starts again with it, and no other.
+    #[cfg(target_os = "linux")]
+    let resume = tokio::spawn(resume_paused_conversations(environment.clone()));
     #[cfg(target_os = "linux")]
     let result = codewire_daemon::serve_host_control_grpc_with_incoming(
         config,
@@ -729,6 +781,8 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
         shutdown,
     )
     .await;
+    #[cfg(target_os = "linux")]
+    resume.abort();
     #[cfg(not(target_os = "linux"))]
     let result = codewire_daemon::serve_grpc_with_incoming(config, incoming, shutdown).await;
     if let Ok(after) = fs::symlink_metadata(&socket)
@@ -737,6 +791,27 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
         fs::remove_file(&socket)?;
     }
     result
+}
+
+/// Once this daemon answers its own socket, restarts the noel conversations
+/// its environment's takedown paused. It never starts or repairs a daemon:
+/// it is the daemon, and connects only to itself.
+#[cfg(target_os = "linux")]
+async fn resume_paused_conversations(environment: HostEnvironment) {
+    let deadline = Instant::now() + START_TIMEOUT;
+    let client = loop {
+        match connect_host(&environment, SESSION_STOP_TIMEOUT).await {
+            Ok(client) => break client,
+            Err(error) if Instant::now() >= deadline => {
+                eprintln!("cw host daemon: paused noel conversations were not resumed: {error:#}");
+                return;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    };
+    if let Err(error) = resume_paused(&environment, &client).await {
+        eprintln!("cw host daemon: paused noel conversations were not all resumed: {error:#}");
+    }
 }
 
 fn host_daemon_config(
@@ -765,7 +840,7 @@ pub(crate) async fn host_daemon_health(environment: &HostEnvironment) -> String 
     if environment.state != "running" {
         return "stopped".into();
     }
-    if connect_host(environment).await.is_ok() {
+    if connect_host(environment, REQUEST_TIMEOUT).await.is_ok() {
         "ready".into()
     } else {
         "unavailable".into()

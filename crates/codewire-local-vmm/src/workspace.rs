@@ -2015,15 +2015,10 @@ fn bounded_staging_regular_bytes(root: &Path, maximum: u64) -> Result<u64, Works
 }
 
 fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
-    #[cfg(target_os = "linux")]
-    let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
-        .into_iter()
-        .find(|candidate| Path::new(candidate).is_file())
-        .ok_or(WorkspaceError::MkfsUnavailable)?;
-    #[cfg(target_os = "macos")]
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
     let mut command = Command::new(mkfs);
     command
+        .args(crate::host::EXT4_FORMAT)
         .args([
             OsStr::new("-q"),
             OsStr::new("-F"),
@@ -2053,15 +2048,10 @@ fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
 }
 
 fn format_empty_ext4(disk: &Path) -> Result<(), WorkspaceError> {
-    #[cfg(target_os = "linux")]
-    let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
-        .into_iter()
-        .find(|candidate| Path::new(candidate).is_file())
-        .ok_or(WorkspaceError::MkfsUnavailable)?;
-    #[cfg(target_os = "macos")]
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
     let mut command = Command::new(mkfs);
     command
+        .args(crate::host::EXT4_FORMAT)
         .args(["-q", "-F", "-m", "0"])
         .arg(disk)
         .env_clear()
@@ -2233,7 +2223,9 @@ pub enum WorkspaceError {
     },
     #[cfg_attr(
         target_os = "linux",
-        error("mkfs.ext4 is required for native workspace provisioning")
+        error(
+            "mkfs.ext4 is required for native workspace provisioning; install your distribution's e2fsprogs package (cw looks in /usr/sbin and /usr/bin)"
+        )
     )]
     #[cfg_attr(
         target_os = "macos",

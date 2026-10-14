@@ -171,7 +171,7 @@ async function assertExplicitCreateRecovery(page: Page) {
     // closing asks first, and Keep editing keeps the drawer and its query.
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue("draft-name-restored");
     await page.locator("[data-drawer-panel]").getByRole("link", { name: "Close Create Sandbox" }).click();
-    const discardRestored = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+    const discardRestored = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
     await expect(discardRestored.getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
     await discardRestored.getByRole("button", { name: "Keep editing", exact: true }).click();
     await expect(discardRestored).toBeHidden();
@@ -533,11 +533,11 @@ test.describe.serial("server-rendered environments", () => {
     // Restore brings back authored fields, which stay until Create or an
     // explicit Discard: Escape must ask, not silently close the drawer.
     await page.keyboard.press("Escape");
-    const discard = page.getByRole("dialog", { name: "Discard changes?", exact: true });
+    const discard = page.getByRole("dialog", { name: "Leave Create Sandbox?", exact: true });
     await expect(discard.getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
     await expect(page.locator("[data-drawer]")).toBeVisible();
     await expect(page.locator("#environment-name")).toHaveValue("draft-name-restored");
-    await discard.getByRole("button", { name: "Discard changes", exact: true }).click();
+    await discard.getByRole("button", { name: "Discard draft", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/${slug}/$`));
     await expect(page.locator("[data-drawer]")).toBeHidden();
   });
@@ -934,15 +934,6 @@ test.describe.serial("server-rendered environments", () => {
     await openRowActions(row);
     await expect(row.locator(".cw-row-menu-meta")).toContainText("usage");
 
-    const terminalLink = row.getByRole("link", { name: "Terminal", exact: true });
-    await terminalLink.click();
-    await expect(page).toHaveURL(`${ssrUrl}/${slug}/${environmentId}/`);
-    // Runtime Running precedes setup completion; projection and workspace
-    // replacement still belong to setup until this authenticated status arrives.
-    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled({ timeout: 300_000 });
-    const initialDeadline = await sourceDeletionDeadline();
-    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", initialDeadline, { timeout: 30_000 });
-    await expect(page.getByRole("tab")).toHaveCount(0);
     let launchRequests = 0;
     let stopRequests = 0;
     let sandboxStopRequests = 0;
@@ -951,27 +942,25 @@ test.describe.serial("server-rendered environments", () => {
       if (new URL(request.url()).pathname.endsWith("/_actions/terminal-sessions/stop")) stopRequests += 1;
       if (new URL(request.url()).pathname.endsWith("/_actions/sandboxes/stop")) sandboxStopRequests += 1;
     });
-    await page.getByRole("button", { name: "New terminal", exact: true }).click();
-    // The bounded private RPC may time out after creating the shell. Inspect
-    // inventory once, as the UI advises, without repeating a non-idempotent New.
+    const terminalLink = row.getByRole("link", { name: "Terminal", exact: true });
+    await terminalLink.click();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/${environmentId}/`);
+    // Runtime Running precedes setup completion; projection and workspace
+    // replacement still belong to setup until this authenticated status
+    // arrives. Then the page opens its one terminal by itself. The bounded
+    // private RPC may time out after creating the shell: Retry re-lists once
+    // and re-attaches it, without repeating a non-idempotent launch.
     await expect.poll(async () => (await page.getByRole("tab").count()) === 1
-      || (await page.locator("[data-terminal-message]").innerText()).includes("change could not be confirmed"), { timeout: 90_000 }).toBe(true);
+      || (await page.locator("[data-terminal-empty]").innerText()).includes("could not be confirmed"), { timeout: 300_000 }).toBe(true);
     const recoveredLaunch = await page.getByRole("tab").count() === 0;
-    if (recoveredLaunch) {
-      await (await workspaceMenu(page, "Terminal actions")).getByRole("button", { name: "Refresh sessions", exact: true }).click();
-      // Refresh closes the menu; open it again to choose the recovered session.
-      const terminalMenu = await workspaceMenu(page, "Terminal actions");
-      const existing = terminalMenu.getByLabel("Existing terminal", { exact: true });
-      const recovered = existing.locator('option:not([value=""])');
-      await expect(recovered).toHaveCount(1);
-      await expect(recovered).toContainText(/ · (starting|running)$/);
-      await existing.selectOption((await recovered.getAttribute("value"))!);
-      await terminalMenu.getByRole("button", { name: "Open terminal", exact: true }).click();
-    }
+    if (recoveredLaunch) await page.getByRole("button", { name: "Retry", exact: true }).click();
     await expect(page.getByRole("tab")).toHaveCount(1, { timeout: 15_000 });
+    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+    const initialDeadline = await sourceDeletionDeadline();
+    await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", initialDeadline, { timeout: 30_000 });
     expect(launchRequests).toBe(1);
     expect(stopRequests).toBe(0);
-    test.info().annotations.push({ type: "terminal-launch", description: recoveredLaunch ? "Recovered by one read-only refresh after unknown outcome" : "Directly acknowledged" });
+    test.info().annotations.push({ type: "terminal-launch", description: recoveredLaunch ? "Recovered by one Retry re-list after unknown outcome" : "Directly acknowledged" });
     const terminalRoot = page.locator(".cw-terminal-page [data-terminal-tab-panel]:not([hidden]) [data-terminal-root]");
     await expect(terminalRoot.locator(".xterm")).toBeVisible({ timeout: 15_000 });
     const firstSessionId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
@@ -1252,15 +1241,14 @@ test.describe.serial("server-rendered environments", () => {
     await closeTicketBeforeAttachment(page, ticket);
     await expectTerminalLeaseDrained();
     expect(disallowedBrowserCalls).toEqual([]);
-    await page.goto(filteredDetailPath);
-    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
-    await expect(page.getByRole("tab")).toHaveCount(0);
-    await expectTerminalLeaseDrained();
-    // One live terminal stays open across Stop and Start (#2136).
+    // Every terminal was closed, so a new visit opens one by itself. That one
+    // live terminal stays open across Stop and Start (#2136).
     const launchesBeforeStop = launchRequests;
-    await page.getByRole("button", { name: "New terminal", exact: true }).click();
-    await expect(page.getByRole("tab")).toHaveCount(1);
+    await page.goto(filteredDetailPath);
+    await expect(page.getByRole("tab")).toHaveCount(1, { timeout: 60_000 });
+    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
     await expect(page.locator("[data-terminal-connection]")).toHaveText("Connected", { timeout: 60_000 });
+    expect(launchRequests).toBe(launchesBeforeStop + 1);
     const lifecycleSessionId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(lifecycleSessionId).toBeTruthy();
     const sandboxStopsBeforeCancel = sandboxStopRequests;

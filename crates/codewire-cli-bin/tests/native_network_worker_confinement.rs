@@ -2,20 +2,21 @@
 
 //! #1905 condition 2 on each supported macOS version: the confined packet
 //! worker, started as the product starts it, holds only the descriptors it was
-//! given. Linux proves the same by reading `/proc/<pid>/fd`; Darwin reads the
+//! given, its broker IPC sessions (#2638) among them. Linux proves the same by reading `/proc/<pid>/fd`; Darwin reads the
 //! worker's descriptor table with libproc. That Seatbelt refuses new files and
 //! internet sockets after confinement is proved by the `darwin::sandbox` tests.
 
 use std::io::{Read as _, Write as _};
-use std::os::fd::{AsRawFd as _, RawFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
+use codewire_egress_broker::ipc::{BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS};
 use codewire_local_vmm::egress_broker::{
-    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_HOST_ADDRESSES_FD,
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_FIRST_SESSION_FD,
+    EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
     EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE,
     encode_developer_egress_broker_bootstrap,
 };
@@ -218,16 +219,34 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         vm_id,
         generation,
     );
-    // The broker also takes the runner's host-address control socket (#2614).
+    // The broker also takes the runner's host-address control socket (#2614)
+    // and its IPC sessions after the admission session (#2638).
     let (mut control, control_child) = UnixStream::pair().unwrap();
+    let mut sources = vec![
+        (above_targets(&broker_child), EGRESS_BROKER_BOOTSTRAP_FD),
+        (
+            above_targets(&control_child),
+            EGRESS_BROKER_HOST_ADDRESSES_FD,
+        ),
+    ];
+    let mut sessions = Vec::new();
+    for index in 0..EGRESS_BROKER_INHERITED_SESSIONS {
+        let (worker_end, broker_end) = UnixStream::pair().unwrap();
+        sources.push((
+            above_targets(&broker_end),
+            EGRESS_BROKER_FIRST_SESSION_FD + index as RawFd,
+        ));
+        sessions.push(worker_end);
+    }
     inherit_descriptors_only(
         &mut broker_command,
-        [
-            (broker_child.as_raw_fd(), EGRESS_BROKER_BOOTSTRAP_FD),
-            (control_child.as_raw_fd(), EGRESS_BROKER_HOST_ADDRESSES_FD),
-        ],
+        sources
+            .iter()
+            .map(|(source, target)| (source.as_raw_fd(), *target))
+            .collect(),
     );
     let mut broker = ChildGuard(broker_command.spawn().unwrap());
+    drop(sources);
     drop(broker_child);
     drop(control_child);
     control
@@ -289,12 +308,16 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         read_status_frame(&mut worker_parent),
         WORKER_PREPARED_MESSAGE
     );
-    send_descriptor(
-        worker_parent.as_raw_fd(),
-        broker_parent.as_raw_fd(),
-        BROKER_DESCRIPTOR_MARKER,
-    );
+    // The admission session (the broker's bootstrap stream), then the rest.
+    for session in std::iter::once(&broker_parent).chain(&sessions) {
+        send_descriptor(
+            worker_parent.as_raw_fd(),
+            session.as_raw_fd(),
+            BROKER_DESCRIPTOR_MARKER,
+        );
+    }
     drop(broker_parent);
+    drop(sessions);
     assert_eq!(
         read_status_frame(&mut worker_parent),
         WORKER_BROKER_READY_MESSAGE
@@ -362,7 +385,7 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
     to_test.sort_unstable();
     to_test.dedup();
     assert_eq!(to_test.len(), 2, "bootstrap and guest: {held:?}");
-    assert_eq!(to_broker, 1, "broker channel: {held:?}");
+    assert_eq!(to_broker, BROKER_IPC_SESSIONS, "broker sessions: {held:?}");
 
     drop(guest);
     assert_eq!(
@@ -400,9 +423,17 @@ fn set_timeouts(stream: &UnixStream) {
 /// The child inherits standard I/O and `source` at `target`, nothing else:
 /// a descriptor another test thread opened without close-on-exec yet is
 /// closed on exec too.
-/// Like `inherit_only`, for several (source, target) pairs; sources are well
-/// above every target.
-fn inherit_descriptors_only<const N: usize>(command: &mut Command, pairs: [(RawFd, RawFd); N]) {
+/// A duplicate above every fixed target a role inherits, as the runner makes.
+fn above_targets(descriptor: &UnixStream) -> OwnedFd {
+    let duplicated = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
+    assert!(duplicated >= 64);
+    unsafe { OwnedFd::from_raw_fd(duplicated) }
+}
+
+/// Like `inherit_only`, for several (source, target) pairs; sources are above
+/// every target.
+fn inherit_descriptors_only(command: &mut Command, pairs: Vec<(RawFd, RawFd)>) {
+    assert!(pairs.iter().all(|(source, _)| *source >= 64));
     // SAFETY: the hook performs only async-signal-safe descriptor syscalls.
     unsafe {
         command.pre_exec(move || {
@@ -411,7 +442,7 @@ fn inherit_descriptors_only<const N: usize>(command: &mut Command, pairs: [(RawF
                     libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
                 }
             }
-            for (source, target) in pairs {
+            for &(source, target) in &pairs {
                 if source != target && libc::dup2(source, target) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -419,7 +450,7 @@ fn inherit_descriptors_only<const N: usize>(command: &mut Command, pairs: [(RawF
                     return Err(std::io::Error::last_os_error());
                 }
             }
-            for (source, target) in pairs {
+            for &(source, target) in &pairs {
                 if source != target {
                     libc::fcntl(source, libc::F_SETFD, libc::FD_CLOEXEC);
                 }

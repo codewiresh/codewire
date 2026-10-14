@@ -12,9 +12,10 @@ name: cw four-target dry run
 # The macOS arm64 cw embeds the local VM runtime (#2539). When one of the
 # runtime's inputs changed (local_runtime_parts.py RUNTIME_INPUTS), or on
 # dispatch, the runtime is built as a release builds it but only from cached
-# slow parts, and the delivery embeds it. Otherwise each side only checks its
-# slow parts are cached. A missing part is a warning: the next release builds
-# it.
+# slow parts, and the delivery embeds it. The Linux side also builds the
+# Linux x86_64 target (#2733), the linux fragment, which the delivery does not
+# embed yet. Otherwise each side only checks its slow parts are cached. A
+# missing part is a warning: the next release builds it.
 
 on:
   push:
@@ -33,7 +34,9 @@ on:
       - 'scripts/ci/verify/build-local-vmm-initramfs.sh'
       - 'scripts/ci/verify/build-linux-vmm-kernel.py'
       - 'scripts/ci/verify/linux-vmm-kernel/**'
+      - 'scripts/dev/build-native-managed-agent.py'
       - 'scripts/dev/cw-runtime-image.py'
+      - 'scripts/dev/linux-local-runtime.py'
       - 'scripts/dev/macos-local-runtime.py'
       - 'scripts/dev/macos-ext4-tool.py'
       - 'scripts/dev/macos-git-tool.py'
@@ -62,6 +65,12 @@ env:
   # The release's exact rcodesign pin (cli-release.yaml).
   RCODESIGN_VERSION: 0.29.0
   RCODESIGN_X86_64_LINUX_SHA256: dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002
+  # Cargo fetches git dependencies (noeljackson/av, tauri-apps/wry and
+  # others) from github.com. Without a bound, a stalled connection holds
+  # the job until its deadline (#2691). This bound fails a stalled connect,
+  # TLS handshake or transfer in 20 s, and cargo logs and retries it.
+  CARGO_HTTP_TIMEOUT: '20'
+  CARGO_NET_RETRY: '5'
   DRY_RUN_VERSION: v0.0.0
 
 jobs:
@@ -104,6 +113,13 @@ jobs:
     needs: [protected-main, superseded]
     if: needs.superseded.outputs.superseded == 'false'
     runs-on: ci-protected
+    # A wedged step must not hold this workflow's one-at-a-time queue until
+    # the runner's 330-minute limit (run 13161 waited 5.5 h on a git fetch).
+    # Each job's limit is about three times its recent successful runs:
+    # Linux side 9.6-9.8 min before it built the x86_64 guest root and both
+    # cw runtimes (#2733), which build-native-managed-agent.py bounds at
+    # 20 min each; macOS 18.9-22.2 min, assembly 30.4-31.9 min.
+    timeout-minutes: 75
     outputs:
       mode: ${{ steps.select.outputs.mode }}
       present: ${{ steps.build.outputs.present }}
@@ -135,8 +151,8 @@ jobs:
         if: steps.select.outputs.mode == 'full'
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
-          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -152,7 +168,8 @@ jobs:
           mkdir -m 0700 "$work" "$work/tmp"
           status=0
           TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}" \
-            scripts/ci/release/build-local-runtime.sh linux --output "$work/linux" || status=$?
+            scripts/ci/release/build-local-runtime.sh linux --source-sha "$GITHUB_SHA" \
+            --version "$DRY_RUN_VERSION" --output "$work/linux" || status=$?
           case "$status" in
             0) ;;
             4) echo '::warning::A slow runtime part is not cached; the next release builds it. This dry run embeds no runtime.'
@@ -192,6 +209,7 @@ jobs:
     needs: [protected-main, superseded, build-runtime-linux]
     if: needs.superseded.outputs.superseded == 'false'
     runs-on: macos-arm64
+    timeout-minutes: 60
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
       runtime: ${{ steps.runtime.outputs.present }}
@@ -203,8 +221,8 @@ jobs:
       - name: Install protoc (pinned)
         run: |
           set -euo pipefail
-          curl -fsSL -o "$HOME/protoc.zip" "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip"
-          echo "193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2  $HOME/protoc.zip" | shasum -a 256 -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip" \
+            193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2 "$HOME/protoc.zip"
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q "$HOME/protoc.zip" -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -278,6 +296,7 @@ jobs:
     name: Sign the macOS pair with the rcodesign stand-in (never signs)
     needs: [protected-main, build-darwin]
     runs-on: ci-protected
+    timeout-minutes: 20
     outputs:
       darwin_sums_sha256: ${{ steps.sign.outputs.darwin_sums_sha256 }}
     steps:
@@ -302,9 +321,9 @@ jobs:
         run: |
           set -euo pipefail
           archive="apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl"
-          curl -fsSLo rcodesign.tar.gz \
-            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${archive}.tar.gz"
-          echo "${RCODESIGN_X86_64_LINUX_SHA256}  rcodesign.tar.gz" | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${archive}.tar.gz" \
+            "$RCODESIGN_X86_64_LINUX_SHA256" rcodesign.tar.gz
           mkdir -m 0700 .rcodesign
           tar -xzf rcodesign.tar.gz -C .rcodesign --strip-components=1 "${archive}/rcodesign"
           .rcodesign/rcodesign --version
@@ -336,6 +355,7 @@ jobs:
     name: Assemble and verify the unsigned four-target delivery
     needs: [protected-main, build-darwin, sign-darwin]
     runs-on: ci-protected
+    timeout-minutes: 90
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -347,8 +367,8 @@ jobs:
       - name: Install protoc (pinned)
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
-          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -358,8 +378,7 @@ jobs:
         run: |
           set -euo pipefail
           zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          curl -fsSLo zig.tar.xz "$zig_url"
-          echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "$zig_url" "$ZIG_X86_64_LINUX_SHA256" zig.tar.xz
           tar -xf zig.tar.xz
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
 

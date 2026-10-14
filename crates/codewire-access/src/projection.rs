@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 const CODEX_PROVIDER_ID: &str = "codewire_openai";
+const CODEX_OPENAI_API_PROVIDER_ID: &str = "codewire_openai_api";
 const MIN_UNPRIVILEGED_PORT: u16 = 1024;
 
 /// Relative path for the generated credential-free Codex provider config.
@@ -27,6 +28,23 @@ pub const SSH_NATIVE_AUTH_SOCK: &str = "/run/codewire-host/ssh-agent.sock";
 pub const SSH_PLATFORM_AUTH_SOCK: &str = "/codewire/run/ssh-agent.sock";
 /// Fixed per-environment HTTP ingress; callers own listener authentication and readiness.
 pub const MANAGED_HTTP_PORT: u16 = 38_081;
+/// Hosted workspace path of the same ingress as a Unix socket. Stock `gh`
+/// reaches the GitHub API route through it.
+pub const MANAGED_HTTP_PLATFORM_SOCKET: &str = "/codewire/run/credentials.sock";
+/// Native workspace path of the same ingress as a Unix socket.
+pub const MANAGED_HTTP_NATIVE_SOCKET: &str = "/run/codewire-host/credential.sock";
+/// Hosted workspace directory holding Codewire's `gh` configuration. It is
+/// written and owned by the workspace daemon, never the user's `~/.config/gh`.
+pub const GH_PLATFORM_CONFIG_DIR: &str = "/codewire/run/gh";
+/// Native workspace directory holding Codewire's `gh` configuration, on the
+/// guest's read-only control mount.
+pub const GH_NATIVE_CONFIG_DIR: &str = "/run/codewire-host/gh";
+/// Relative path of the generated `gh` configuration in that directory.
+pub const GH_CONFIG_FILE_NAME: &str = "config.yml";
+/// Public placeholder that makes stock `gh` send requests at all. It is not a
+/// credential: the broker drops the guest's authorization and adds the
+/// owner's GitHub login outside the workspace.
+pub const GH_TOKEN_PLACEHOLDER: &str = "codewire-managed";
 /// Workspace environment variable carrying the managed clients orchestration
 /// rendered for one Pod, in [`ManagedCredentialClients::encode`] form.
 pub const MANAGED_CREDENTIAL_CLIENTS_ENV: &str = "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS";
@@ -40,6 +58,69 @@ pub const MANAGED_ANTHROPIC_API_PREFIX: &str = "/_codewire/anthropic";
 /// Smart Git prefix on the existing managed HTTP ingress. Only the selected
 /// GitHub adapter may resolve this route to an upstream provider.
 pub const MANAGED_GITHUB_GIT_PREFIX: &str = "/_codewire/github/";
+/// The four forms of a github.com remote that Git accepts, as the prefixes
+/// Git's `url.<base>.insteadOf` matches: HTTPS, the anonymous `git://`
+/// protocol GitHub has retired, and the two SSH spellings. Each is followed by
+/// `<owner>/<repository>`. Only these are rewritten; other hosts never are.
+pub const GITHUB_HTTPS_URL: &str = "https://github.com/";
+pub const GITHUB_GIT_URL: &str = "git://github.com/";
+pub const GITHUB_SCP_URL: &str = "git@github.com:";
+pub const GITHUB_SSH_URL: &str = "ssh://git@github.com/";
+/// GitHub's published SSH host keys (`ssh_keys` at
+/// <https://api.github.com/meta>), as canonical `known_hosts` lines in the
+/// order `codewire_project::canonical_repository_known_hosts` returns them. A test binds each
+/// key to the SHA256 fingerprint GitHub documents, so this is trust from a
+/// published channel, never from a first connection.
+pub const GITHUB_SSH_KNOWN_HOSTS: [&str; 3] = [
+    "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
+    "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+    "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=",
+];
+
+/// The bytes to append to a `known_hosts` file holding `existing` so that it
+/// lists every line of [`GITHUB_SSH_KNOWN_HOSTS`]. Each missing line is added
+/// on its own line, after a newline when `existing` does not end in one. The
+/// result is empty when every line is already present, compared as whole
+/// lines. Existing lines are never rewritten or reordered.
+pub fn github_known_hosts_additions(existing: &[u8]) -> Vec<u8> {
+    let mut additions = Vec::new();
+    for line in GITHUB_SSH_KNOWN_HOSTS {
+        let present = existing
+            .split(|byte| *byte == b'\n')
+            .any(|current| current.strip_suffix(b"\r").unwrap_or(current) == line.as_bytes());
+        if present {
+            continue;
+        }
+        if additions.is_empty() && !existing.is_empty() && !existing.ends_with(b"\n") {
+            additions.push(b'\n');
+        }
+        additions.extend_from_slice(line.as_bytes());
+        additions.push(b'\n');
+    }
+    additions
+}
+
+/// The HTTPS and `git://` forms, which the managed route serves beside an SSH
+/// key.
+const GITHUB_HTTP_FORMS: [&str; 2] = [GITHUB_HTTPS_URL, GITHUB_GIT_URL];
+/// The one form an SSH key alone takes over: GitHub no longer serves
+/// `git://`. HTTPS stays anonymous, so a key GitHub does not accept (a deploy
+/// key, another host's key) never breaks a public HTTPS fetch.
+const GITHUB_GIT_PROTOCOL_FORM: [&str; 1] = [GITHUB_GIT_URL];
+/// Every form, in the order of their `GIT_CONFIG_*` index: the HTTPS form is
+/// always index 0, which is the name the GitHub client reserves.
+const GITHUB_ALL_FORMS: [&str; 4] = [
+    GITHUB_HTTPS_URL,
+    GITHUB_GIT_URL,
+    GITHUB_SCP_URL,
+    GITHUB_SSH_URL,
+];
+/// Destinations a workspace process must reach directly, whatever proxy it is
+/// told to use: every managed HTTP route is the workspace's own loopback
+/// ingress, and a request to it carries prompts and repository content.
+pub const MANAGED_NO_PROXY: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
+/// Both spellings of the proxy exemption list that HTTP clients read.
+pub const NO_PROXY_NAMES: [&str; 2] = ["NO_PROXY", "no_proxy"];
 
 /// Stock clients configured by selected profile slots, not credential auth
 /// kinds. The Anthropic client alone has two forms: see
@@ -74,12 +155,26 @@ impl ManagedCredentialClient {
                 "ANTHROPIC_AUTH_TOKEN",
                 "CLAUDE_CODE_OAUTH_TOKEN",
             ],
+            // The Git configuration an SSH-only selection projects (see
+            // `ManagedCredentialClients::github_git_rewrite`) is deliberately
+            // not listed, for the same reason as the GitHub client's
+            // further names below: the projected value wins instead.
             Self::Ssh => &["SSH_AUTH_SOCK"],
             // Git's environment configuration routes github.com through the
             // managed GitHub route; never a provider token or a written file.
             // This replaces the former checkout-only rewrite, so git in the
             // workspace keeps working after checkout. A declared variable of
             // these names is refused, never merged or overwritten.
+            //
+            // The other names the client projects (`GIT_CONFIG_KEY_1` and
+            // up, `GIT_CONFIG_VALUE_1` and up, and the `gh` names) are
+            // deliberately not listed. This set is bound into every
+            // environment's projection selection digest, so adding a name
+            // would refuse the launches of running environments until they
+            // restart. Every placement lets the projected value win over a
+            // declared one of those names instead. `GH_TOKEN` is already
+            // refused with the GitHub provider's own names
+            // (`HttpProvider::reserved_environment_keys`).
             Self::GitHub => &["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"],
         }
     }
@@ -273,6 +368,76 @@ impl ManagedCredentialClients {
         Ok(())
     }
 
+    /// Whether a selected client reaches its route over the loopback HTTP
+    /// ingress: every client but SSH, whose signer is a Unix socket.
+    pub fn uses_loopback_http(self) -> bool {
+        [
+            ManagedCredentialClient::Codex,
+            ManagedCredentialClient::OpenAi,
+            ManagedCredentialClient::Anthropic,
+            ManagedCredentialClient::GitHub,
+        ]
+        .into_iter()
+        .any(|client| self.contains(client))
+    }
+
+    /// The value of [`NO_PROXY_NAMES`] for a process of this selection, given
+    /// the value `current` it would otherwise have. While an HTTP client is
+    /// selected, [`MANAGED_NO_PROXY`] is appended to it, so a declared
+    /// `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` never receives a managed
+    /// route's loopback request. The declared entries stay as written and in
+    /// order, and an entry already listed is not repeated. Without an HTTP
+    /// client the value is the caller's, unchanged.
+    ///
+    /// The names are deliberately not reserved: a declared list is extended,
+    /// never refused, and the reserved set is bound into every environment's
+    /// projection selection digest.
+    pub fn no_proxy(self, current: Option<&str>) -> Option<String> {
+        if !self.uses_loopback_http() {
+            return current.map(str::to_owned);
+        }
+        let mut value = current.unwrap_or_default().to_owned();
+        for destination in MANAGED_NO_PROXY {
+            if value
+                .split(',')
+                .any(|entry| entry.trim().eq_ignore_ascii_case(destination))
+            {
+                continue;
+            }
+            if !value.is_empty() && !value.ends_with(',') {
+                value.push(',');
+            }
+            value.push_str(destination);
+        }
+        Some(value)
+    }
+
+    /// Where Git in the workspace sends each github.com remote form: the
+    /// rewrite base and the forms rewritten to it, or `None` without GitHub
+    /// or an SSH key. `origin` is the managed HTTP ingress.
+    ///
+    /// | Selected | Rewritten |
+    /// |---|---|
+    /// | GitHub connection only | every form to the managed GitHub route |
+    /// | SSH key only | `git://` to `git@github.com:`, for the key; HTTPS stays anonymous |
+    /// | both | HTTPS and `git://` to the managed GitHub route; SSH forms keep the key |
+    ///
+    /// The managed route is the broker's, which adds the owner's GitHub login
+    /// outside the workspace; the SSH key stays behind the signer. Neither
+    /// rewrite delivers a credential.
+    fn github_git_rewrite(self, origin: &str) -> Option<(String, &'static [&'static str])> {
+        let managed = || format!("{origin}{MANAGED_GITHUB_GIT_PREFIX}");
+        match (
+            self.contains(ManagedCredentialClient::GitHub),
+            self.contains(ManagedCredentialClient::Ssh),
+        ) {
+            (true, false) => Some((managed(), &GITHUB_ALL_FORMS)),
+            (true, true) => Some((managed(), &GITHUB_HTTP_FORMS)),
+            (false, true) => Some((GITHUB_SCP_URL.to_owned(), &GITHUB_GIT_PROTOCOL_FORM)),
+            (false, false) => None,
+        }
+    }
+
     /// Generate only fixed public routing inputs for the selected clients.
     /// Placeholder strings are not authentication: the admitted local or hosted
     /// ingress and broker grants remain responsible for authority. Both layouts
@@ -309,38 +474,57 @@ impl ManagedCredentialClients {
                 "ANTHROPIC_BASE_URL".into(),
                 format!("{origin}{MANAGED_ANTHROPIC_API_PREFIX}"),
             );
+            // Only the selected form's variable is projected. The other
+            // Anthropic names are reserved while the client is selected, so
+            // every placement removes an inherited value of them instead of
+            // projecting it as an empty string, which a newer Claude Code
+            // could read as set.
             if self.anthropic_subscription_token() {
                 // Claude Code's subscription mode: the placeholder makes it
                 // send its own OAuth form (bearer plus the OAuth beta) to
                 // the managed route, where the broker replaces it with the
                 // owner's Claude subscription token. The token itself never
-                // enters the Sandbox. Claude Code 2.1.288 treats the empty
-                // higher-precedence names as unset (pinned-client probe).
+                // enters the Sandbox.
                 environment.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "codewire-managed".into());
-                environment.insert("ANTHROPIC_AUTH_TOKEN".into(), String::new());
-                environment.insert("ANTHROPIC_API_KEY".into(), String::new());
             } else {
+                // The API-key form: a bearer the broker replaces with the
+                // selected API key.
                 environment.insert("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into());
-                // Clear competing inherited auth inputs; do not import or read
-                // a saved login. The stock client's exact precedence needs its
-                // own pinned-client proof, not a claim from this pure renderer.
-                environment.insert("ANTHROPIC_API_KEY".into(), String::new());
-                environment.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new());
             }
         }
-        if self.contains(ManagedCredentialClient::GitHub) {
-            // Git 2.31+ reads configuration from the environment: every
-            // https://github.com/ remote goes to the managed GitHub route,
-            // where the broker adds the owner's GitHub login outside the
-            // workspace, so fetch, pull and push work with no login step.
-            // Only this endpoint is projected: no token, helper or file.
-            environment.insert("GIT_CONFIG_COUNT".into(), "1".into());
-            environment.insert(
-                "GIT_CONFIG_KEY_0".into(),
-                format!("url.{origin}{MANAGED_GITHUB_GIT_PREFIX}.insteadOf"),
-            );
-            environment.insert("GIT_CONFIG_VALUE_0".into(), "https://github.com/".into());
+        if let Some((base, forms)) = self.github_git_rewrite(&origin) {
+            // Git 2.31+ reads configuration from the environment. Each entry
+            // is one value of Git's own `url.<base>.insteadOf`, a multi-valued
+            // key: a github.com remote written in that form is fetched from
+            // and pushed to `<base>` instead. Only the destination changes;
+            // the remote keeps the URL as written. No token, helper or file.
+            environment.insert("GIT_CONFIG_COUNT".into(), forms.len().to_string());
+            for (index, form) in forms.iter().enumerate() {
+                environment.insert(
+                    format!("GIT_CONFIG_KEY_{index}"),
+                    format!("url.{base}.insteadOf"),
+                );
+                environment.insert(format!("GIT_CONFIG_VALUE_{index}"), (*form).into());
+            }
         }
+        let gh = self.contains(ManagedCredentialClient::GitHub).then(|| {
+            // Stock `gh` speaks HTTPS to api.github.com unless its own
+            // configuration names a Unix socket. Its directory is Codewire's,
+            // so the user's `~/.config/gh` is neither read nor written while
+            // GitHub is selected. The placeholder only makes `gh` send; the
+            // route, its grants and its closed operations are the broker's.
+            let (directory, socket) = match placement {
+                ManagedCredentialClientPlacement::Native => {
+                    (GH_NATIVE_CONFIG_DIR, MANAGED_HTTP_NATIVE_SOCKET)
+                }
+                ManagedCredentialClientPlacement::Platform => {
+                    (GH_PLATFORM_CONFIG_DIR, MANAGED_HTTP_PLATFORM_SOCKET)
+                }
+            };
+            environment.insert("GH_TOKEN".into(), GH_TOKEN_PLACEHOLDER.into());
+            environment.insert("GH_CONFIG_DIR".into(), directory.into());
+            GhConfigProjection::for_socket(socket)
+        });
         if self.contains(ManagedCredentialClient::Ssh) {
             let socket = match placement {
                 ManagedCredentialClientPlacement::Native => SSH_NATIVE_AUTH_SOCK,
@@ -348,7 +532,11 @@ impl ManagedCredentialClients {
             };
             environment.insert("SSH_AUTH_SOCK".into(), socket.into());
         }
-        ManagedCredentialClientProjection { environment, codex }
+        ManagedCredentialClientProjection {
+            environment,
+            codex,
+            gh,
+        }
     }
 }
 
@@ -358,44 +546,127 @@ impl ManagedCredentialClients {
 pub struct ManagedCredentialClientProjection {
     pub environment: BTreeMap<String, String>,
     pub codex: Option<CodexProviderProjection>,
+    /// The file the placement writes as [`GH_CONFIG_FILE_NAME`] in the
+    /// projected `GH_CONFIG_DIR`, while the GitHub client is selected.
+    pub gh: Option<GhConfigProjection>,
+}
+
+/// Deterministic machine-owned `gh` configuration: where the managed ingress
+/// listens, and nothing else. It names no host, account, token or helper.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GhConfigProjection {
+    config_yml: String,
+}
+
+impl GhConfigProjection {
+    /// `socket` is one of this crate's fixed ingress paths, which need no
+    /// YAML quoting. The version line is `gh`'s current schema, so the pinned
+    /// client reads the file without migrating or rewriting it.
+    fn for_socket(socket: &str) -> Self {
+        Self {
+            config_yml: format!("version: 1\nhttp_unix_socket: {socket}\n"),
+        }
+    }
+
+    /// Return the complete UTF-8 contents to install as
+    /// [`GH_CONFIG_FILE_NAME`].
+    pub fn config_yml(&self) -> &str {
+        &self.config_yml
+    }
 }
 
 /// Deterministic machine-owned Codex configuration for a protected provider
 /// route.
 ///
-/// The projection contains no provider credential or environment-key lookup.
-/// Both placements use the guest loopback listener and keep material in their
-/// broker boundary.
+/// The projection contains no provider credential. Every placement uses the
+/// guest loopback listener and keeps material in its broker boundary. The
+/// Codex slot's provider names no environment key; the OpenAI API-key slot's
+/// names only the session's public `OPENAI_API_KEY` placeholder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexProviderProjection {
     config_toml: String,
+    overrides: [String; 3],
 }
 
 impl CodexProviderProjection {
     /// Create a Responses-only provider projection for one unprivileged IPv4
-    /// loopback port owned by the guest-side Codewire listener.
+    /// loopback port owned by the guest-side Codewire listener. This is the
+    /// Codex slot's route: the broker adds the ChatGPT sign-in, or the API key
+    /// held in that slot.
     pub fn for_loopback_port(port: u16) -> Result<Self, ProjectionError> {
+        Self::provider(port, CODEX_PROVIDER_ID, "Codewire OpenAI", "/v1", None)
+    }
+
+    /// The same for Codex through the distinct OpenAI API-key slot: that
+    /// slot's managed base path, with Codex sending the session's
+    /// `OPENAI_API_KEY` placeholder, which the broker replaces. A managed
+    /// agent uses it when its profile has no Codex slot.
+    pub fn for_openai_api_loopback_port(port: u16) -> Result<Self, ProjectionError> {
+        Self::provider(
+            port,
+            CODEX_OPENAI_API_PROVIDER_ID,
+            "Codewire OpenAI API",
+            MANAGED_OPENAI_API_PREFIX,
+            Some("OPENAI_API_KEY"),
+        )
+    }
+
+    /// One provider as a configuration file and as the equivalent overrides,
+    /// rendered from the same settings. Every value is a fixed ASCII token
+    /// that needs no TOML escaping.
+    fn provider(
+        port: u16,
+        id: &str,
+        name: &str,
+        base_path: &str,
+        env_key: Option<&str>,
+    ) -> Result<Self, ProjectionError> {
         if port < MIN_UNPRIVILEGED_PORT {
             return Err(ProjectionError::InvalidGuestEndpoint);
         }
+        let mut settings = vec![
+            ("name", format!("\"{name}\"")),
+            (
+                "base_url",
+                format!("\"http://127.0.0.1:{port}{base_path}\""),
+            ),
+        ];
+        if let Some(env_key) = env_key {
+            settings.push(("env_key", format!("\"{env_key}\"")));
+        }
+        settings.extend([
+            ("wire_api", "\"responses\"".to_owned()),
+            ("requires_openai_auth", "false".to_owned()),
+            ("supports_websockets", "false".to_owned()),
+        ]);
+        let lines: String = settings
+            .iter()
+            .map(|(key, value)| format!("{key} = {value}\n"))
+            .collect();
+        let inline = settings
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
         Ok(Self {
             config_toml: format!(
                 concat!(
-                    "model_provider = \"{provider}\"\n",
+                    "model_provider = \"{id}\"\n",
                     "\n",
-                    "[model_providers.{provider}]\n",
-                    "name = \"Codewire OpenAI\"\n",
-                    "base_url = \"http://127.0.0.1:{port}/v1\"\n",
-                    "wire_api = \"responses\"\n",
-                    "requires_openai_auth = false\n",
-                    "supports_websockets = false\n",
+                    "[model_providers.{id}]\n",
+                    "{lines}",
                     "\n",
                     "[features]\n",
                     "enable_request_compression = false\n",
                 ),
-                provider = CODEX_PROVIDER_ID,
-                port = port,
+                id = id,
+                lines = lines,
             ),
+            overrides: [
+                format!("model_provider=\"{id}\""),
+                format!("model_providers.{id}={{{inline}}}"),
+                "features.enable_request_compression=false".to_owned(),
+            ],
         })
     }
 
@@ -404,6 +675,7 @@ impl CodexProviderProjection {
     fn with_managed_header(self) -> Self {
         Self {
             config_toml: format!("{CODEX_MANAGED_CONFIG_HEADER}\n{}", self.config_toml),
+            ..self
         }
     }
 
@@ -416,6 +688,13 @@ impl CodexProviderProjection {
     /// Consume the projection and return its complete UTF-8 contents.
     pub fn into_config_toml(self) -> String {
         self.config_toml
+    }
+
+    /// The same settings as Codex `-c` override values, each one `key=value`
+    /// whose value is TOML. A launch that must keep this provider whatever
+    /// its configuration file later holds passes every one after `-c`.
+    pub fn overrides(&self) -> &[String] {
+        &self.overrides
     }
 }
 
@@ -515,6 +794,99 @@ mod tests {
         }
         assert_eq!(CODEX_CONFIG_FILE_NAME, "config.toml");
         assert_eq!(projection.clone().into_config_toml(), config);
+    }
+
+    /// The `-c` override values merged into one table, as Codex applies them.
+    fn overrides_table(projection: &CodexProviderProjection) -> toml::Table {
+        fn merge(into: &mut toml::Table, from: toml::Table) {
+            for (key, value) in from {
+                match (into.get_mut(&key), value) {
+                    (Some(Value::Table(existing)), Value::Table(table)) => merge(existing, table),
+                    (_, value) => {
+                        into.insert(key, value);
+                    }
+                }
+            }
+        }
+        let mut table = toml::Table::new();
+        for value in projection.overrides() {
+            merge(
+                &mut table,
+                toml::from_str(value).expect("valid TOML override"),
+            );
+        }
+        table
+    }
+
+    #[test]
+    fn overrides_are_the_configuration_file_as_codex_command_line_values() {
+        let codex = CodexProviderProjection::for_loopback_port(38_081).unwrap();
+        assert_eq!(
+            codex.overrides(),
+            [
+                "model_provider=\"codewire_openai\"",
+                concat!(
+                    "model_providers.codewire_openai={name=\"Codewire OpenAI\",",
+                    "base_url=\"http://127.0.0.1:38081/v1\",wire_api=\"responses\",",
+                    "requires_openai_auth=false,supports_websockets=false}"
+                ),
+                "features.enable_request_compression=false",
+            ]
+        );
+        for projection in [
+            codex,
+            CodexProviderProjection::for_openai_api_loopback_port(38_081).unwrap(),
+        ] {
+            assert_eq!(
+                overrides_table(&projection),
+                toml::from_str::<toml::Table>(projection.config_toml()).unwrap()
+            );
+            // The ownership header changes the file only.
+            assert_eq!(
+                projection.clone().with_managed_header().overrides(),
+                projection.overrides()
+            );
+        }
+    }
+
+    #[test]
+    fn openai_api_slot_provider_names_its_managed_base_and_the_public_placeholder() {
+        let projection = CodexProviderProjection::for_openai_api_loopback_port(38_081).unwrap();
+        assert_eq!(
+            projection.config_toml(),
+            concat!(
+                "model_provider = \"codewire_openai_api\"\n",
+                "\n",
+                "[model_providers.codewire_openai_api]\n",
+                "name = \"Codewire OpenAI API\"\n",
+                "base_url = \"http://127.0.0.1:38081/_codewire/openai/v1\"\n",
+                "env_key = \"OPENAI_API_KEY\"\n",
+                "wire_api = \"responses\"\n",
+                "requires_openai_auth = false\n",
+                "supports_websockets = false\n",
+                "\n",
+                "[features]\n",
+                "enable_request_compression = false\n",
+            )
+        );
+        // The base and the key name are the OpenAI client's own projection:
+        // Codex reads the placeholder the session already has.
+        let environment = ManagedCredentialClients::from_profile_slots(["openai"])
+            .unwrap()
+            .for_placement(ManagedCredentialClientPlacement::Platform)
+            .environment;
+        assert!(projection.config_toml().contains(&format!(
+            "base_url = \"{}\"\n",
+            environment["OPENAI_BASE_URL"]
+        )));
+        assert!(environment.contains_key("OPENAI_API_KEY"));
+        for forbidden in ["experimental_bearer_token", "auth.command", "Bearer "] {
+            assert!(!projection.config_toml().contains(forbidden));
+        }
+        assert_eq!(
+            CodexProviderProjection::for_openai_api_loopback_port(MIN_UNPRIVILEGED_PORT - 1),
+            Err(ProjectionError::InvalidGuestEndpoint)
+        );
     }
 
     #[test]

@@ -125,6 +125,19 @@ cw_runtime_managed_after_restart() {
     echo '::error::the managed-agent records from the first Pod did not list after Stop/Start' >&2
     return 1
   }
+  # A conversation from the first Pod ended with it: a message to it is
+  # refused plainly, not as a scope error (#2705). Nothing is sent.
+  local ended refused
+  ended="$(jq -er '[.[] | select(.command[1] == "__platform-agent-driver")][0].session_id' <<<"$listed")"
+  if refused="$(kind_credential_cli msg "$environment" "$ended" 'cw-runtime-after-restart' \
+    --output json 2>&1)"; then
+    echo '::error::a message to a conversation from the first Pod was accepted' >&2
+    return 1
+  fi
+  grep -Fq 'ended when its environment stopped' <<<"$refused" || {
+    echo '::error::a message to an ended conversation did not say it ended with the environment' >&2
+    return 1
+  }
   launched="$(kind_credential_launch "$environment" --no-tty --detach --output json -- \
     sh -c 'printf cw-runtime-after-restart')"
   session="$(jq -er '.session_id | select(type == "string" and test("^session-[0-9a-f-]{36}$"))' \
