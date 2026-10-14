@@ -1958,7 +1958,11 @@ async fn host_launch_cancellation_cleans_spawned_descendants_before_failed_ackno
         let descendant = FixtureDescendant::capture(pid);
         cancel.cancel();
         drop(metadata);
-        let record = tokio::time::timeout(Duration::from_secs(4), task)
+        // The fixture ignores TERM, and the launcher allows up to
+        // LAUNCH_CLEANUP_TIMEOUT (5 s) for confirmed termination, so on a
+        // loaded host cancellation and cleanup take longer than they do
+        // alone. The bound only catches a hang; the outcome is asserted below.
+        let record = tokio::time::timeout(Duration::from_secs(30), task)
             .await
             .unwrap()
             .unwrap()

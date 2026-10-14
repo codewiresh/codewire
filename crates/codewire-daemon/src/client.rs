@@ -1418,10 +1418,13 @@ impl CredentialBridgeResponseSender {
 fn validate_credential_bridge_guest_message(
     message: &bridge_v1::CredentialBridgeGuestMessage,
 ) -> Result<(), SessionClientError> {
+    // A malformed frame ends the epoch. The deadline is the request's own:
+    // its handler refuses an out-of-range one with a typed failure, and the
+    // epoch keeps serving every other request (#2763).
     if let Some(bridge_v1::credential_bridge_guest_message::Payload::Ssh(request)) =
         &message.payload
     {
-        ssh::validate_request(request).map_err(SessionClientError::Status)?;
+        ssh::validate_request_shape(request).map_err(SessionClientError::Status)?;
     }
     Ok(())
 }

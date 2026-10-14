@@ -476,6 +476,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-kind-watch-github-app.sh|\
       scripts/ci/tests/fixtures/cargo-cache-df.sh|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
+      scripts/ci/tests/test-integration-lane.py|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
@@ -542,7 +543,7 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      scripts/ci/verify/run-integration-verification.sh)
+      scripts/ci/verify/run-integration-verification.sh|scripts/ci/verify/integration-lane.py)
         # This file owns database execution and every service's integration
         # harness. Its changes must qualify both executable families.
         select_token policy
@@ -1728,9 +1729,10 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/mirror-github.sh|\
       scripts/ci/release/package-cw-release.sh|scripts/ci/release/publish-cw-release.sh|\
       scripts/ci/release/cw_release.py|scripts/ci/release/cw_release_r2.py|\
-      scripts/ci/release/sign-cw-release.sh|\
+      scripts/ci/release/sign-cw-release.sh|scripts/ci/release/sign-macos-cw.sh|\
       scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/setup/fetch-openbao-release-signing-key.sh|\
+      scripts/ci/setup/fetch-openbao-macos-signing.sh|\
       scripts/ci/tests/cw_release_fixtures.py|scripts/ci/tests/test-cli-release-workflow.py|\
       scripts/ci/tests/test-cw-release-delivery.py|scripts/ci/tests/test-cw-release-r2.py|\
       scripts/ci/tests/test-package-cw-release.py|\
@@ -1745,6 +1747,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-cw-install.py|\
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-release-signing-key.sh|\
+      scripts/ci/tests/test-fetch-openbao-macos-signing.sh|scripts/ci/tests/test-sign-macos-cw.sh|\
+      scripts/ci/tests/fixtures/rcodesign-stand-in.sh|\
       scripts/ci/tests/test-copy-image-to-ghcr.sh|\
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\
       scripts/ci/tests/test-publish-image-to-ghcr.sh|\

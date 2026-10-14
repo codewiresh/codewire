@@ -65,6 +65,7 @@ async fn platform_generation_reuses_only_the_exact_owner_binding() {
         Arc::new(BrokerLeaseAuditLog::default()),
         LocalSshOperationRuntime::new(None),
         Some(Arc::new(NeverConnect)),
+        Arc::new(crate::broker_log::BrokerLog::disabled()),
     );
     let id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
     let config = LocalBrokerProcessConfig {
