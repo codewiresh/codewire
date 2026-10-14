@@ -874,6 +874,7 @@ fn authentication_kind_label(value: CredentialAuthKind) -> &'static str {
         CredentialAuthKind::AccessToken => "access_token",
         CredentialAuthKind::GitHubApp => "github_app",
         CredentialAuthKind::SshKey => "ssh_key",
+        CredentialAuthKind::ClaudeSignIn => "claude_sign_in",
     }
 }
 

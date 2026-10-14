@@ -1146,6 +1146,34 @@ uncertain or terminal evidence to make it succeed. A used deployment requires
 a separately reviewed recovery. These fixtures and instructions authorize no
 live schema change or reset.
 
+### Claude sign-in credentials
+
+Migration `0041_claude_sign_in_credentials.up.sql` admits the
+`claude_sign_in` authentication kind: Claude Code's own claude.ai sign-in,
+whose refresh token the credential service rotates (#2559). It is its own
+kind rather than a column beside `oauth`, so a pasted Claude subscription
+token stays the anthropic provider's `oauth` kind with its raw material
+unchanged, an older binary reading a sign-in fails closed on the unknown kind,
+and the immutable credential-lock function needs no change. A second check
+admits the kind only for a user's anthropic credential. The migration changes
+two CHECK constraints and no row.
+
+The fixture binds the accepted history 1–40 from canonical main
+`e8e54d1bc` by digest, seeds a subscription token, a Codex login and an
+organization's Anthropic API key under version 40, proves the prior schema
+refuses a sign-in, and then proves the upgrade keeps every row byte for byte,
+admits a person's Anthropic sign-in and refuses an organization's or another
+provider's. A second start applies nothing. The version-41 application schema
+fingerprint, measured on disposable PostgreSQL, is
+`6a6a17eb52120fa37b56eef07bff233eed562ddd5f9dc755191381bbf77e3401`.
+
+`0041_claude_sign_in_credentials.down.sql` is permitted only while no Claude
+sign-in exists: it raises without changing anything when one does, and
+otherwise restores the accepted version-40 constraint exactly. Revoke and
+delete each sign-in first, or restore the accepted prior schema from a
+separately owned backup. These fixtures and instructions authorize no live
+schema change or reset.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

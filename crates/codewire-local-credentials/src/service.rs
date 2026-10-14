@@ -2088,6 +2088,7 @@ fn auth_kind_from_proto(value: i32) -> Result<CredentialAuthKind, Status> {
         Ok(CredentialAuthenticationKind::AccessToken) => Ok(CredentialAuthKind::AccessToken),
         Ok(CredentialAuthenticationKind::GithubApp) => Ok(CredentialAuthKind::GitHubApp),
         Ok(CredentialAuthenticationKind::SshKey) => Ok(CredentialAuthKind::SshKey),
+        Ok(CredentialAuthenticationKind::ClaudeSignIn) => Ok(CredentialAuthKind::ClaudeSignIn),
         Ok(CredentialAuthenticationKind::Unspecified) | Err(_) => Err(Status::invalid_argument(
             "invalid credential authentication kind",
         )),
@@ -2101,6 +2102,7 @@ pub(crate) fn auth_kind_to_proto(value: CredentialAuthKind) -> CredentialAuthent
         CredentialAuthKind::AccessToken => CredentialAuthenticationKind::AccessToken,
         CredentialAuthKind::GitHubApp => CredentialAuthenticationKind::GithubApp,
         CredentialAuthKind::SshKey => CredentialAuthenticationKind::SshKey,
+        CredentialAuthKind::ClaudeSignIn => CredentialAuthenticationKind::ClaudeSignIn,
     }
 }
 

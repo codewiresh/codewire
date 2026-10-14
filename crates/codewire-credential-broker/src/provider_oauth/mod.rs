@@ -1,4 +1,5 @@
-//! Codewire's own OAuth device logins for provider credential enrollment.
+//! Codewire's own OAuth logins for provider credential enrollment: the Codex
+//! and GitHub device logins, and the Claude sign-in by pasted code.
 //!
 //! Each flow runs over a [`BrokerUpstreamTransport`]: production uses the
 //! pinned, allowlisted provider HTTPS transport, and the Kind fixture an
@@ -8,6 +9,7 @@
 //! Provider material exists only in zeroizing memory until the caller moves it
 //! into its protected store.
 
+pub mod claude;
 pub mod codex;
 pub mod github;
 

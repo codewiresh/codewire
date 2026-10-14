@@ -2,6 +2,7 @@
 //! No Kubernetes, provider network, ambient configuration or real credentials.
 
 mod checked;
+mod claude_sign_in;
 mod codex_login;
 mod decision;
 mod keepalive;
