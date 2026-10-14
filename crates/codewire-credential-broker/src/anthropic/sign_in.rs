@@ -14,7 +14,10 @@ use av_credential_proxy::{ProxyRouteConfig, validate_proxy_route};
 use codewire_access::CredentialAuthKind;
 
 use super::subscription::{route, with_oauth_beta};
-use super::{Outbound, PreparedAnthropicRequest, ValidatedAnthropicRequest, validate_lease_kind};
+use super::{
+    Outbound, PreparedAnthropicRequest, ValidatedAnthropicRequest, validate_lease,
+    validate_lease_kind,
+};
 use crate::claude_oauth::ClaudeOAuthCredential;
 use crate::{BrokerCredentialLease, CredentialBrokerError};
 
@@ -44,6 +47,27 @@ impl AnthropicClaudeSignInAdapter {
         lease: L,
     ) -> Result<ClaudeOAuthCredential, CredentialBrokerError> {
         validate_lease_kind(&lease, CredentialAuthKind::ClaudeSignIn)?;
+        lease.with_material(|material| {
+            ClaudeOAuthCredential::parse(material)
+                .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)
+        })
+    }
+
+    /// Parse the selected sign-in for sealed delivery to the workspace daemon,
+    /// a listed direct delivery exception. The lease must carry the dedicated
+    /// Claude login permission; a proxied Messages lease never qualifies, nor
+    /// the reverse, and a setup token or API key is refused before its
+    /// material is read.
+    pub(crate) fn login_credential_from_lease<L: BrokerCredentialLease>(
+        &self,
+        lease: L,
+    ) -> Result<ClaudeOAuthCredential, CredentialBrokerError> {
+        validate_lease(
+            &lease,
+            CredentialAuthKind::ClaudeSignIn,
+            codewire_access::CLAUDE_LOGIN_OPERATION,
+            codewire_access::CLAUDE_LOGIN_ROUTE,
+        )?;
         lease.with_material(|material| {
             ClaudeOAuthCredential::parse(material)
                 .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)
@@ -92,6 +116,18 @@ mod tests {
 
     fn lease(kind: CredentialAuthKind) -> Lease {
         let mut lease = Lease::new("anthropic", kind, "anthropic", "messages", "anthropic-api");
+        lease.material = material();
+        lease
+    }
+
+    fn login_lease(kind: CredentialAuthKind) -> Lease {
+        let mut lease = Lease::new(
+            "anthropic",
+            kind,
+            "anthropic",
+            codewire_access::CLAUDE_LOGIN_OPERATION,
+            codewire_access::CLAUDE_LOGIN_ROUTE,
+        );
         lease.material = material();
         lease
     }
@@ -159,5 +195,32 @@ mod tests {
             adapter.credential_from_lease(raw),
             Err(CredentialBrokerError::InvalidCredentialMaterial)
         ));
+    }
+
+    #[test]
+    fn proxied_and_login_leases_never_substitute_for_each_other() {
+        let adapter = AnthropicClaudeSignInAdapter::new().unwrap();
+        let login = adapter
+            .login_credential_from_lease(login_lease(CredentialAuthKind::ClaudeSignIn))
+            .unwrap();
+        assert_eq!(login.access_token(), "synthetic-sign-in-access");
+        for (rejected, as_login) in [
+            (lease(CredentialAuthKind::ClaudeSignIn), true),
+            (login_lease(CredentialAuthKind::ClaudeSignIn), false),
+            (login_lease(CredentialAuthKind::OAuth), true),
+            (login_lease(CredentialAuthKind::ApiKey), true),
+        ] {
+            let reads = rejected.reads.clone();
+            let result = if as_login {
+                adapter.login_credential_from_lease(rejected)
+            } else {
+                adapter.credential_from_lease(rejected)
+            };
+            assert!(matches!(
+                result,
+                Err(CredentialBrokerError::UnsupportedLease)
+            ));
+            assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 0);
+        }
     }
 }

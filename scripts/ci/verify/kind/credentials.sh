@@ -1424,11 +1424,12 @@ SQL
 
 # Orchestration recorded the form the bound credential's kind selects: the
 # Anthropic client alone, or with GitHub while the creator is connected. Bit
-# 0x20 is the subscription form.
+# 0x20 is the subscription form and bit 0x40 the sign-in form.
 assert_kind_credential_claude_selection() {
   local form="$1" clients="$2"
   case "$form:$clients" in
     api_key:v1:anthropic | api_key:v2:14 | subscription_token:v2:24 | subscription_token:v2:34) ;;
+    sign_in:v2:44 | sign_in:v2:54) ;;
     *)
       echo "::error::the ${form} form recorded unexpected managed clients ${clients}" >&2
       return 1
@@ -1478,8 +1479,12 @@ kind_credential_claude_run() {
   local environment="$1" driver="$2" form="$3" outcome="$4"
   local launched session attempt state output
   [[ "$driver" =~ ^/tmp/codewire-kind-claude-session-[0-9]{1,12}\.py$ ]] || return 1
-  case "$form" in api_key | subscription_token) ;; *) return 1 ;; esac
-  case "$outcome" in success | refused | withheld) ;; *) return 1 ;; esac
+  case "$form:$outcome" in
+    api_key:success | api_key:refused | api_key:withheld) ;;
+    subscription_token:success | subscription_token:refused | subscription_token:withheld) ;;
+    sign_in:success | sign_in:withheld | sign_in:logged_out) ;;
+    *) return 1 ;;
+  esac
   launched="$(kind_credential_launch "$environment" --no-tty --detach --output json -- \
     python3 -B -u "$driver" "$form" "$outcome")" || return $?
   session="$(jq -er '.session_id | select(type == "string" and test("^[A-Za-z0-9_-]{1,128}$"))' \
@@ -1676,14 +1681,18 @@ KIND_CLAUDE_SIGN_IN_SECONDS=60
 # `cw credentials --platform connect claude` as a person runs it. The CLI
 # prints Claude's authorize URL; the code is pasted on its stdin, never argv,
 # after `#` and that URL's own state (`match`) or another one (`mismatch`).
-# The CLI's stdout is printed and its status returned.
+# With `reconnect`, the existing sign-in of that name is reconnected in place
+# (`--yes` answers the CLI's confirmation). The CLI's stdout is printed and
+# its status returned.
 kind_credential_claude_connect() {
   local name="$1" paste="$2" scratch fifo pid writer url state status=0 attempt
+  local -a confirm=()
   case "$paste" in match | mismatch) ;; *) return 1 ;; esac
+  case "${3:-}" in "") ;; reconnect) confirm=(--yes) ;; *) return 1 ;; esac
   scratch="$(mktemp -d "$KIND_CREDENTIAL_CLI_HOME/connect.XXXXXX")" || return $?
   fifo="$scratch/stdin"
   mkfifo -m 600 "$fifo" || return $?
-  kind_credential_cli credentials --platform connect claude --name "$name" \
+  kind_credential_cli credentials --platform connect claude --name "$name" "${confirm[@]}" \
     <"$fifo" >"$scratch/stdout" 2>"$scratch/stderr" &
   pid=$!
   exec {writer}>"$fifo"
@@ -1736,14 +1745,98 @@ assert_kind_credential_claude_sign_in() {
   }
 }
 
-# A Claude sign-in through the public CLI and stock Claude Code in a daemon
-# session. A code pasted from another sign-in is refused and nothing is
-# stored; the real one stores the anthropic provider's Claude sign-in. The
-# fixture's first access token is about to expire, so the session's first
-# request makes the broker refresh it through the durable journal, and the
-# provider sees only the rotated token. Revoking the sign-in withholds the
-# capability at the next request: Claude Code reports the broker's 403 and
-# nothing reaches the provider. No token reaches the Sandbox.
+# One claude_login.py mode in the exact workspace. Its stdout is closed events
+# only; the mode passes only when its last event is its own completion.
+kind_credential_claude_login() {
+  local environment="$1" mode="$2" pod output status=0
+  shift 2
+  pod="$(kind_credential_workspace "$environment")" || return $?
+  output="$(kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- \
+    python3 -B -u - "$mode" "$@" < "$ROOT/scripts/ci/verify/kind/claude_login.py")" || status=$?
+  printf '%s\n' "$output" >> "$RUN_DIR/credential-claude-login.jsonl" || return $?
+  printf '%s\n' "$output"
+  if [ "$status" -ne 0 ] || ! jq -se --arg mode "$mode" \
+      'length >= 2 and .[-1] == {event: "complete", mode: $mode}
+        and all(.[]; .event != "failed")' <<<"$output" >/dev/null; then
+    echo "::error::Claude Code login acceptance failed in mode ${mode}" >&2
+    return 1
+  fi
+}
+
+# The latest synthetic sign-in generation the fixture issued and how it was
+# granted, as "GENERATION GRANT". The fixture's tokens themselves
+# (`sk-ant-oat01-CW_KIND_SYNTHETIC_SIGN_IN_ACCESS-<generation>`) are compared
+# only inside the workspace, by claude_login.py, which reports the generation.
+kind_credential_claude_latest_token() {
+  kind_credential_fixture_events | jq -er '
+    [.[] | select(.event == "claude_sign_in_token")] | last
+    | if . != null and (.generation | type) == "number"
+        and (.grant == "authorization_code" or .grant == "refresh_token")
+      then "\(.generation) \(.grant)" else error("no Claude sign-in token issued") end'
+}
+
+# Bound on the rotation probe reporting its first turn.
+KIND_CLAUDE_ROTATION_READY_SECONDS=180
+
+# claude_login.py `rotation` in the background of the calling shell: once its
+# long-lived Claude Code answered a turn with the delivered token, it creates
+# READY in the Pod, and the sign-in is reconnected in place, so the daemon
+# delivers a later token to the same running process. Prints the adopted
+# generation.
+kind_credential_claude_rotation() {
+  local environment="$1" name="$2" previous="$3" pod ready probe status=0 attempt output generation
+  [[ "$previous" =~ ^[1-9][0-9]{0,8}$ ]] || return 1
+  pod="$(kind_credential_workspace "$environment")" || return $?
+  ready="/tmp/codewire-kind-claude-rotation-${RANDOM}${RANDOM}"
+  kind_credential_claude_login "$environment" rotation "$previous" "$ready" \
+    >"$RUN_DIR/credential-claude-rotation.jsonl" 2>&1 &
+  probe=$!
+  for ((attempt = 0; attempt < KIND_CLAUDE_ROTATION_READY_SECONDS; attempt++)); do
+    if kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- test -e "$ready" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$probe" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  if kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- test -e "$ready" 2>/dev/null; then
+    kind_credential_claude_connect "$name" match reconnect >/dev/null || status=$?
+  else
+    echo "::error::the Claude login rotation probe never answered its first turn" >&2
+    status=1
+  fi
+  wait "$probe" || status=$?
+  output="$(cat -- "$RUN_DIR/credential-claude-rotation.jsonl")"
+  [ "$status" -eq 0 ] || {
+    printf '%s\n' "$output" >&2
+    return "$status"
+  }
+  generation="$(jq -er 'select(.event == "rotation_adopted")
+    | select(.generation > .previous and .second_turn == .generation
+        and .first_turn == .previous and .restarted == false) | .generation' \
+    <<<"$output" || true)"
+  [[ "$generation" =~ ^[1-9][0-9]*$ ]] || {
+    echo '::error::the Claude login rotation event is missing its adopted generation' >&2
+    return 1
+  }
+  printf '%s\n' "$generation"
+}
+
+# A Claude sign-in through the public CLI, delivered as Claude Code's own
+# login. A code pasted from another sign-in is refused and nothing is stored;
+# the real one stores the anthropic provider's Claude sign-in, whose selection
+# is the Anthropic client's sign-in form (the base URL alone). The workspace
+# daemon writes the creator's login into ~/.claude/.credentials.json: the
+# fixture's first access token is about to expire, so the broker refreshes it
+# before delivery. Stock Claude Code uses that login, both in a daemon session
+# through the managed route and, in claude_login.py, against a loopback
+# backend that sees the token it presents. Reconnecting rotates the login,
+# which one running Claude Code adopts without a restart. A user's own login
+# is never touched, a logout stays logged out until a new container, and
+# revocation removes Codewire's login while keeping the file's other keys;
+# Claude Code then has no login and nothing reaches the provider. No refresh
+# token reaches the Sandbox.
 kind_credential_claude_sign_in() (
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
     log "release-image gate: synthetic Claude sign-in composition is not selected"
@@ -1751,7 +1844,8 @@ kind_credential_claude_sign_in() (
   fi
   log "running a Claude sign-in through the public CLI with stock Claude Code"
   local KIND_CREDENTIAL_CLI_HOME suffix name profile environment workspace_image update
-  local generation pod pod_uid clients driver baseline tokens revision
+  local generation pod pod_uid clients driver baseline tokens revision latest exchanged
+  local login_events delivered rotated
   local stage_environment="" stage_profiles="" stage_credentials=""
   set -E
   trap 'echo "::error::Claude sign-in acceptance failed: command=${BASH_COMMAND} status=$?" >&2' ERR
@@ -1781,6 +1875,12 @@ kind_credential_claude_sign_in() (
     '[.[] | select(.event == "claude_sign_in_token")] | length')"
   kind_credential_claude_connect "$name" match >/dev/null
   assert_kind_credential_claude_sign_in "$name" 1 >/dev/null
+  latest="$(kind_credential_claude_latest_token)"
+  [[ "$latest" =~ ^([1-9][0-9]*)\ authorization_code$ ]] || {
+    echo "::error::the sign-in's code exchange is not the fixture's latest token" >&2
+    return 1
+  }
+  exchanged="${BASH_REMATCH[1]}"
 
   stage_profiles="$profile"
   kind_credential_cli credentials --platform --profile "$profile" set anthropic "$name"
@@ -1800,15 +1900,33 @@ kind_credential_claude_sign_in() (
   pod="$(wait_kind_credential_restarted_workspace "$environment" "$generation")"
   pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
   clients="$(kind_credential_managed_clients "$environment" "$pod_uid")"
-  # The sign-in uses Claude Code's subscription form behind the broker.
-  assert_kind_credential_claude_selection subscription_token "$clients"
+  # The sign-in selects Claude Code's own login: the base URL alone.
+  assert_kind_credential_claude_selection sign_in "$clients"
+
+  # The daemon delivers the creator's login. Its first token is about to
+  # expire, so the broker refreshed it first: the file holds a later,
+  # refreshed generation, the fixture's latest, and stock Claude Code
+  # presents exactly it.
+  login_events="$(kind_credential_claude_login "$environment" deliver "$((exchanged + 1))")"
+  delivered="$(jq -er 'select(.event == "delivered") | .generation' <<<"$login_events" || true)"
+  [[ "$delivered" =~ ^[1-9][0-9]*$ ]] || {
+    echo '::error::the delivered Claude login event is missing its generation' >&2
+    return 1
+  }
+  [ "$(kind_credential_claude_latest_token)" = "$delivered refresh_token" ] || {
+    echo "::error::the delivered Claude login is not the fixture's latest refreshed token" >&2
+    return 1
+  }
+
+  # Stock Claude Code in a daemon session reaches the provider through the
+  # managed route, where the broker presents the stored token.
   baseline="$(kind_credential_fixture_events | jq -er \
     '[.[] | select(.event == "anthropic_response" or .event == "anthropic_rejected")] | length')"
   driver="$(kind_credential_claude_stage "$pod")"
-  kind_credential_claude_run "$environment" "$driver" subscription_token success
+  kind_credential_claude_run "$environment" "$driver" sign_in success
   baseline="$(assert_kind_credential_anthropic_events "$baseline" sign_in 200)"
-  # The code exchange, then at least one refresh that the first request
-  # forced, each issuing the next generation in order.
+  # The code exchange, then at least one refresh, each issuing the next
+  # generation in order.
   kind_credential_fixture_events | jq -e --argjson tokens "$tokens" '
     [.[] | select(.event == "claude_sign_in_token")][$tokens:] as $issued
     | ($issued | length) >= 2
@@ -1820,9 +1938,34 @@ kind_credential_claude_sign_in() (
   }
   revision="$(assert_kind_credential_claude_sign_in "$name" 2)"
 
-  # Revocation withholds the capability at the next request.
+  # Reconnecting replaces the login; one running Claude Code adopts the
+  # re-delivered token at its next turn, without a restart.
+  rotated="$(kind_credential_claude_rotation "$environment" "$name" "$delivered")"
+  [ "$rotated" -gt "$delivered" ] || return 1
+  # A user's own login is never touched, and a logout stays logged out.
+  kind_credential_claude_login "$environment" own-login >/dev/null
+  kind_credential_claude_login "$environment" logout >/dev/null
+
+  # A new container forgets the logout and delivers the login again, beside
+  # the key the probe planted in the persistent home.
+  kind_credential_cli env --platform stop "$environment" --output json >/dev/null
+  wait_kind_credential_environment "$environment" stopped
+  kind_credential_cli env --platform start "$environment" --output json >/dev/null
+  wait_kind_credential_environment "$environment" running
+  login_events="$(kind_credential_claude_login "$environment" redelivered)"
+  jq -e 'select(.event == "redelivered") | .unrelated == "kept"' <<<"$login_events" >/dev/null || {
+    echo "::error::the redelivered Claude login dropped the file's other keys" >&2
+    return 1
+  }
+
+  # Revocation removes Codewire's login at the daemon's next check and keeps
+  # the file's other keys. Claude Code then has no login, and nothing reaches
+  # the provider.
   kind_credential_cli credentials --platform revoke "$name" --output json >/dev/null
-  kind_credential_claude_run "$environment" "$driver" subscription_token withheld
+  kind_credential_claude_login "$environment" revoked >/dev/null
+  pod="$(kind_credential_workspace "$environment")"
+  driver="$(kind_credential_claude_stage "$pod")"
+  kind_credential_claude_run "$environment" "$driver" sign_in logged_out
   kind_credential_fixture_events | jq -e --argjson baseline "$baseline" \
     '[.[] | select(.event == "anthropic_response" or .event == "anthropic_rejected")]
       | length == $baseline' >/dev/null || {
@@ -1837,5 +1980,5 @@ kind_credential_claude_sign_in() (
   stage_profiles=""
   kind_credential_cli credentials --platform delete "$name" --yes
   stage_credentials=""
-  log "a Claude sign-in through the public CLI served stock Claude Code, refreshed on demand at revision ${revision}, and was withheld once revoked; no token reached the Sandbox"
+  log "a Claude sign-in through the public CLI was delivered as Claude Code's own login at generation ${delivered} (revision ${revision}), served stock Claude Code, rotated to generation ${rotated} in a running process, kept a user's own login and a logout, and was removed once revoked; no refresh token reached the Sandbox"
 )

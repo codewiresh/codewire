@@ -176,6 +176,13 @@ mod at {
                 Err(rustix::io::Errno::EXIST) => {}
                 Err(error) => return Err(error.into()),
             }
+            self.open_child(name)
+        }
+
+        /// Open the existing directory `name` here. `Ok(None)` when it is a
+        /// symlink, not a directory, or not the effective uid's; `NotFound`
+        /// passes through.
+        pub(crate) fn open_child(&self, name: &str) -> io::Result<Option<Self>> {
             let descriptor = match rustix::fs::openat(
                 &self.0,
                 name,

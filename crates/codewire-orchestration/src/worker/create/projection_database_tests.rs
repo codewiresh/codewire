@@ -570,8 +570,9 @@ async fn database_capture_selects_the_anthropic_form_of_the_pinned_credential() 
                 == Some("http://127.0.0.1:38081/_codewire/anthropic")
         );
 
-        // A Claude sign-in uses the same subscription form for now: the
-        // broker injects its access token and refreshes it.
+        // A Claude sign-in selects the sign-in form: the base URL alone, so
+        // Claude Code reads the login the daemon writes. Every Anthropic name
+        // stays reserved.
         sqlx::query(
             "UPDATE platform_environment_access_bindings SET profile_revision=3 WHERE environment_id=$1",
         )
@@ -580,11 +581,14 @@ async fn database_capture_selects_the_anthropic_form_of_the_pinned_credential() 
         .await?;
         let (sign_in_reserved, sign_in_clients, sign_in_environment) =
             capture("sign-in").await?;
-        ensure!(sign_in_clients == "v2:24", "sign-in: {sign_in_clients}");
+        ensure!(sign_in_clients == "v2:44", "sign-in: {sign_in_clients}");
         ensure!(sign_in_reserved == reserved);
+        for name in ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"] {
+            ensure!(!sign_in_environment.contains_key(name), "{name}");
+        }
         ensure!(
-            sign_in_environment.get("CLAUDE_CODE_OAUTH_TOKEN").map(String::as_str)
-                == Some("codewire-managed")
+            sign_in_environment.get("ANTHROPIC_BASE_URL").map(String::as_str)
+                == Some("http://127.0.0.1:38081/_codewire/anthropic")
         );
 
         // The form follows the pinned revision, never the profile's current

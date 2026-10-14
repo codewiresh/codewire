@@ -80,6 +80,7 @@ fn decode_environment(row: sqlx::postgres::PgRow) -> anyhow::Result<EnvironmentR
         profile_slots_overflow: row.try_get("profile_slots_overflow")?,
         github_connected: row.try_get("github_connected")?,
         anthropic_subscription_token: row.try_get("anthropic_subscription_token")?,
+        anthropic_sign_in: row.try_get("anthropic_sign_in")?,
     };
     let projection_selection = captured.selection(&project_spec, &org_id, operation_generation);
     let managed_credential_clients = projection_selection

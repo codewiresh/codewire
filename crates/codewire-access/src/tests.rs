@@ -719,7 +719,8 @@ fn claude_subscription_tokens_are_personal_anthropic_oauth_only() {
     }
 
     // The owner's own token is selectable in the Anthropic slot only, with
-    // exactly the Messages and token-counting permissions.
+    // the slot's Messages permission and its dedicated login permission,
+    // which the broker admits for a Claude sign-in only.
     let selected = platform_profile(&user, &personal);
     validate_profile_entries(&selected, &credentials, &catalog).unwrap();
     let mut grant_context = context([personal.id.clone()]);
@@ -743,7 +744,10 @@ fn claude_subscription_tokens_are_personal_anthropic_oauth_only() {
         .expect("Anthropic grant");
     assert_eq!(
         grant.permissions,
-        BTreeSet::from([permission("messages", "anthropic-api")])
+        BTreeSet::from([
+            permission("messages", "anthropic-api"),
+            permission("claude-login", "claude-login"),
+        ])
     );
     assert_eq!(
         HttpProvider::for_credential(&slot("anthropic"), &personal),

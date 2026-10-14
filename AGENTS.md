@@ -343,15 +343,18 @@ weakening of the required local hardware gate.
 - Direct delivery of provider material into a sandbox is allowed only where the
   proxy cannot work, with owner approval, listed with its reason in
   docs/dev/SECRETS-AND-CREDENTIALS.md "Direct delivery exceptions" and cited at
-  the delivering code. The only exception is the Sandbox creator's own personal
-  Codex ChatGPT access token and ID token, written as Codex's
-  `~/.codex/auth.json` with a non-empty placeholder refresh token, because
-  Codex enables `/usage`, analytics and account routing only with its own
-  login. Refresh tokens, API keys, GitHub and SSH material and
-  organization-owned credentials are never delivered. A delivered token is a
-  bearer token for the creator's ChatGPT account, usable from anywhere, and
-  stays valid at the provider until its `exp`; every process in the Sandbox,
-  and anyone who can open the Sandbox's terminal, can read it.
+  the delivering code. The only exceptions are the Sandbox creator's own
+  personal sign-ins for Codex and Claude Code: the Codex ChatGPT access token
+  and ID token, written as Codex's `~/.codex/auth.json`, and the Claude access
+  token, written as Claude Code's `~/.claude/.credentials.json`
+  (`claudeAiOauth`), each with a non-empty placeholder refresh token, because
+  each agent enables `/usage` and its plan and account features only with its
+  own login. Refresh tokens, API keys, Claude setup tokens, GitHub and SSH
+  material and organization-owned credentials are never delivered. A
+  delivered token is a bearer token for the creator's account, usable from
+  anywhere, and stays valid at the provider until it expires (about 8 hours
+  for Claude); every process in the Sandbox, and anyone who can open the
+  Sandbox's terminal, can read it.
 - A hosted platform broker bridge epoch may reuse one authority decision (its
   runtime session and derived grants, never material) for at most 60 seconds,
   and releases nothing under an older one. Only epoch admission creates it, and
@@ -364,9 +367,10 @@ weakening of the required local hardware gate.
   organization, environment, binding, personal-credential confirmation or Pod
   lineage change within 60 seconds. Decrypted provider material may be reused
   only within one bridge epoch (hosted or owner-local delegation), for at most
-  two minutes, for exactly the record that lease admitted. Codex login delivery,
-  owner-local delegation leases, SSH signing, OAuth refresh admission and
-  keep-alive, and environment projection keep full per-call authority checks.
+  two minutes, for exactly the record that lease admitted. Codex and Claude
+  login delivery, owner-local delegation leases, SSH signing, OAuth refresh
+  admission and keep-alive, and environment projection keep full per-call
+  authority checks.
   SSH signing, OAuth keep-alive refresh and direct delivery never reuse
   material; an on-demand OAuth refresh uses the request's own lease, whose exact
   generation refresh admission rechecks. Do not add a process-wide or persistent

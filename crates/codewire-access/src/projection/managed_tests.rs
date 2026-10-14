@@ -25,11 +25,16 @@ fn projected_names(selected: ManagedCredentialClients) -> BTreeSet<&'static str>
     let mut names = selected.reserved_environment_keys();
     if selected.contains(ManagedCredentialClient::Anthropic) {
         names.remove("ANTHROPIC_API_KEY");
-        names.remove(if selected.anthropic_subscription_token() {
-            "ANTHROPIC_AUTH_TOKEN"
+        if selected.anthropic_sign_in() {
+            names.remove("ANTHROPIC_AUTH_TOKEN");
+            names.remove("CLAUDE_CODE_OAUTH_TOKEN");
         } else {
-            "CLAUDE_CODE_OAUTH_TOKEN"
-        });
+            names.remove(if selected.anthropic_subscription_token() {
+                "ANTHROPIC_AUTH_TOKEN"
+            } else {
+                "CLAUDE_CODE_OAUTH_TOKEN"
+            });
+        }
     }
     if selected.contains(ManagedCredentialClient::GitHub) {
         names.extend(["GH_CONFIG_DIR", "GH_TOKEN"]);
@@ -564,6 +569,127 @@ fn anthropic_subscription_form_adds_16_canonical_encodings_and_keeps_the_api_key
             );
             continue;
         }
+        assert_eq!(
+            ManagedCredentialClients::decode(invalid),
+            Err(ProjectionError::InvalidManagedClientSelection),
+            "{invalid}"
+        );
+    }
+}
+
+/// The sign-in form: 16 more encodings, never combined with the
+/// subscription-token form, projecting the base URL alone while every
+/// Anthropic name stays reserved.
+#[test]
+fn anthropic_sign_in_form_adds_16_encodings_and_projects_the_base_url_alone() {
+    for slots in [vec![], vec!["codex"], vec!["openai", "ssh", "github"]] {
+        assert_eq!(
+            clients(&slots).with_anthropic_sign_in(),
+            Err(ProjectionError::InvalidManagedClientSelection)
+        );
+    }
+    assert!(!clients(&["anthropic"]).anthropic_sign_in());
+    let others = ["codex", "openai", "ssh", "github"];
+    let expected = [
+        "v2:44", "v2:45", "v2:46", "v2:47", "v2:4c", "v2:4d", "v2:4e", "v2:4f", "v2:54", "v2:55",
+        "v2:56", "v2:57", "v2:5c", "v2:5d", "v2:5e", "v2:5f",
+    ];
+    let mut unique = BTreeSet::new();
+    for (index, encoding) in expected.into_iter().enumerate() {
+        let api_key = clients(
+            &std::iter::once("anthropic")
+                .chain(
+                    others
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(bit, slot)| (index & (1 << bit) != 0).then_some(*slot)),
+                )
+                .collect::<Vec<_>>(),
+        );
+        let sign_in = api_key.with_anthropic_sign_in().unwrap();
+        assert_eq!(sign_in.encode(), encoding);
+        assert!(sign_in.encode().len() < 32);
+        assert_eq!(ManagedCredentialClients::decode(encoding).unwrap(), sign_in);
+        assert!(sign_in.anthropic_sign_in() && !sign_in.anthropic_subscription_token());
+        assert_eq!(sign_in.with_anthropic_sign_in(), Ok(sign_in));
+        // The two forms never combine, in either order.
+        assert_eq!(
+            sign_in.with_anthropic_subscription_token(),
+            Err(ProjectionError::InvalidManagedClientSelection)
+        );
+        assert_eq!(
+            api_key
+                .with_anthropic_subscription_token()
+                .unwrap()
+                .with_anthropic_sign_in(),
+            Err(ProjectionError::InvalidManagedClientSelection)
+        );
+        for client in [
+            ManagedCredentialClient::Codex,
+            ManagedCredentialClient::OpenAi,
+            ManagedCredentialClient::Ssh,
+            ManagedCredentialClient::GitHub,
+        ] {
+            assert_eq!(sign_in.contains(client), api_key.contains(client));
+        }
+        assert_eq!(
+            sign_in.reserved_environment_keys(),
+            api_key.reserved_environment_keys()
+        );
+        for placement in [
+            ManagedCredentialClientPlacement::Native,
+            ManagedCredentialClientPlacement::Platform,
+        ] {
+            let projection = sign_in.for_placement(placement);
+            let reference = api_key.for_placement(placement);
+            assert_eq!(projection.codex, reference.codex);
+            assert_eq!(
+                projection
+                    .environment
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+                projected_names(sign_in)
+            );
+            assert_eq!(
+                projection.environment["ANTHROPIC_BASE_URL"],
+                "http://127.0.0.1:38081/_codewire/anthropic"
+            );
+            for name in [
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ] {
+                assert!(!projection.environment.contains_key(name), "{name}");
+                assert!(sign_in.reserved_environment_keys().contains(name), "{name}");
+            }
+            for (name, value) in &reference.environment {
+                if !name.starts_with("ANTHROPIC_") {
+                    assert_eq!(projection.environment.get(name), Some(value), "{name}");
+                }
+            }
+        }
+        assert!(unique.insert(encoding));
+    }
+    // Disjoint from the other 48 encodings.
+    for bits in 0..32 {
+        let slots = ["codex", "openai", "anthropic", "ssh", "github"];
+        let selected = ManagedCredentialClients::from_profile_slots(
+            slots
+                .iter()
+                .enumerate()
+                .filter_map(|(index, slot)| (bits & (1 << index) != 0).then_some(*slot)),
+        )
+        .unwrap();
+        assert!(unique.insert(selected.encode()));
+        if let Ok(subscription) = selected.with_anthropic_subscription_token() {
+            assert!(unique.insert(subscription.encode()));
+        }
+    }
+    assert_eq!(unique.len(), 64);
+    for invalid in [
+        "v2:40", "v2:41", "v2:48", "v2:50", "v2:60", "v2:64", "v2:7f", "v2:4F",
+    ] {
         assert_eq!(
             ManagedCredentialClients::decode(invalid),
             Err(ProjectionError::InvalidManagedClientSelection),
