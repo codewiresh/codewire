@@ -245,6 +245,7 @@ impl Lifecycle {
                 platform: None,
                 local_profile: None,
                 renewal: RENEWAL,
+                log: Arc::new(crate::broker_log::BrokerLog::disabled()),
             }),
             shutdown_rx,
             state,
