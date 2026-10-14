@@ -829,3 +829,30 @@ async fn platform_managed_malformed_retained_record_refuses_the_store_with_its_r
         engine.shutdown().await.unwrap();
     }
 }
+
+#[test]
+fn a_launch_is_denied_before_run_only_when_its_projection_failed_and_cleanup_is_confirmed() {
+    let denied = v1::SessionRecord {
+        state: v1::SessionLifecycleState::Failed as i32,
+        cleanup_unknown: false,
+        status_message: crate::durable_session::LAUNCH_PROJECTION_DENIED.into(),
+        launch_generation: 1,
+        ..Default::default()
+    };
+    assert!(denied_before_run(&denied));
+    // Unconfirmed cleanup, a program that started, another failure, an exit
+    // status or another state each keep the outcome unknown.
+    let mut unconfirmed = denied.clone();
+    unconfirmed.cleanup_unknown = true;
+    let mut started = denied.clone();
+    started.started_at = Some(prost_types::Timestamp::default());
+    let mut other = denied.clone();
+    other.status_message = "session stdin pipe is unavailable".into();
+    let mut exited = denied.clone();
+    exited.exit_code = Some(1);
+    let mut interrupted = denied.clone();
+    interrupted.state = v1::SessionLifecycleState::Interrupted as i32;
+    for record in [unconfirmed, started, other, exited, interrupted] {
+        assert!(!denied_before_run(&record));
+    }
+}

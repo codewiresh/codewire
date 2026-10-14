@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -84,6 +84,23 @@ fn local_vm_roles_are_hidden_and_other_host_effect_entrypoints_stay_unavailable(
     assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
 }
 
+/// The packaged supervisor prepares its socket directory in the shared
+/// per-user directory (#2735), outside the fixture. This removes it once the
+/// fixture's state root is gone, as the library tests do; a fixture retained
+/// for diagnosis keeps its sockets too.
+struct SocketDirCleanup {
+    directory: PathBuf,
+    state_root: PathBuf,
+}
+
+impl Drop for SocketDirCleanup {
+    fn drop(&mut self) {
+        if !self.state_root.exists() {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+}
+
 struct OwnedSupervisor<'a> {
     child: Child,
     fixture: &'a mut tempfile::TempDir,
@@ -131,11 +148,17 @@ impl Drop for OwnedSupervisor<'_> {
 
 #[tokio::test]
 async fn packaged_supervisor_serves_private_metadata_and_reopens_after_exit() {
+    // Declared before the fixture, so it is dropped after the fixture is.
+    let _cleanup: SocketDirCleanup;
     let mut home = fixture();
     let path = home.path().to_owned();
     // Sockets live in the state root's short per-user directory (#2735).
-    let socket =
-        codewire_local_vmm::socket_dir::predicted(&path.join("state")).join("supervisor.sock");
+    let sockets = codewire_local_vmm::socket_dir::predicted(&path.join("state"));
+    _cleanup = SocketDirCleanup {
+        directory: sockets.clone(),
+        state_root: path.join("state"),
+    };
+    let socket = sockets.join("supervisor.sock");
     for _ in 0..2 {
         let deadline = Instant::now() + Duration::from_secs(15);
         let process = command(&path)
