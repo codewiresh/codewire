@@ -150,7 +150,7 @@ const CLAUDE_SANDBOX_POLICY: &str = "Sandbox execution: installed Claude CLI in 
 /// provider can refuse it for an account or a model. A trusted host passes no
 /// mode: there the user's own rules decide, on their own machine.
 const CLAUDE_SANDBOX_PERMISSION_MODE: [&str; 2] = ["--permission-mode", "auto"];
-const NOEL_POLICY: &str = "trusted host execution: installed noel with the user's ordinary pi settings, login and project trust; its tools run without approval prompts, and extension dialogs are declined";
+const NOEL_POLICY: &str = "trusted host execution: installed noel with the user's ordinary noel settings, login and project trust; its tools run without approval prompts, and extension dialogs are declined";
 const NOEL_HOST_ONLY: &str = "noel managed conversations are qualified only on trusted Linux hosts (`cw env create --local --type host`)";
 const NOT_QUALIFIED: &str = "managed agent conversations are qualified only on trusted host environments (`cw env create --local --type host`); sandbox and platform placements are not qualified yet";
 
@@ -1179,10 +1179,13 @@ fn apply_delivery_failure(record: &mut MessageRecord, definitive: bool, error: &
 // ---------------------------------------------------------------------------
 
 /// Managed drivers own their input; raw send and interactive attach must refuse.
+/// A platform managed driver runs in its Sandbox, which is always Linux, so a
+/// client on any OS recognises it and stops or restarts it through the
+/// platform control path (#2710).
 pub(crate) fn is_managed_session(view: &EnvironmentSessionView) -> bool {
-    view.command.iter().any(|arg| {
-        arg == DRIVER_COMMAND || (cfg!(target_os = "linux") && arg == "__platform-agent-driver")
-    })
+    view.command
+        .iter()
+        .any(|arg| arg == DRIVER_COMMAND || arg == "__platform-agent-driver")
 }
 
 pub(super) async fn stop_native_managed(
@@ -4715,6 +4718,51 @@ async fn claude_control_probe(peer: &mut Peer, request_id: &str) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_running_command(command: &[&str]) -> EnvironmentSessionView {
+        EnvironmentSessionView {
+            session_id: "session".into(),
+            name: String::new(),
+            parent_session_id: String::new(),
+            cleanup_unknown: false,
+            started_at: String::new(),
+            launch_generation: 1,
+            state: "running".into(),
+            command: command.iter().map(|arg| (*arg).to_owned()).collect(),
+            working_dir: String::new(),
+            pty: false,
+            exit_code: None,
+            output_end_offset: 0,
+            output_start_offset: 0,
+            status_message: String::new(),
+        }
+    }
+
+    /// #2710: a platform managed driver runs in its Linux Sandbox, so a cw on
+    /// any OS, macOS included, sees its session as managed.
+    #[test]
+    fn a_platform_managed_driver_is_managed_on_every_client_os() {
+        let environment = uuid::Uuid::new_v4().to_string();
+        let driver = uuid::Uuid::new_v4().to_string();
+        let platform = [
+            "/codewire/bin/cw",
+            "__platform-agent-driver",
+            "--environment",
+            environment.as_str(),
+            "--driver-id",
+            driver.as_str(),
+        ];
+        assert!(is_managed_session(&session_running_command(&platform)));
+        assert!(is_managed_session(&session_running_command(&[
+            "cw",
+            DRIVER_COMMAND,
+            "--environment",
+            "env",
+        ])));
+        assert!(!is_managed_session(&session_running_command(&[
+            "bash", "-l"
+        ])));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

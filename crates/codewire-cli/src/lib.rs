@@ -881,6 +881,12 @@ async fn serve_hosted_daemon(
     // here, beside the sockets, and removed when GitHub is not selected.
     #[cfg(target_os = "linux")]
     codewire_daemon::gh_config::GhConfig::default().prepare(config.managed_credential_clients);
+    // While the SSH key is selected, `~/.ssh/known_hosts` lists GitHub's
+    // published host keys, so no `git@github.com` connection (Codewire's own
+    // `git://` rewrite included) trusts a host key on first use.
+    #[cfg(target_os = "linux")]
+    codewire_daemon::ssh_known_hosts::SshKnownHosts::new(&config.home_root)
+        .prepare(config.managed_credential_clients);
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
         .await
         .with_context(|| format!("listen hosted daemon {}", config.listen_addr))?;

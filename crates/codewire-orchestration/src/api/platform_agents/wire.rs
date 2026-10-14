@@ -12,6 +12,39 @@ pub(super) const FRAME_BYTES: usize = 256 * 1024;
 pub(super) fn invalid() -> AppError {
     AppError::BadRequest("platform agent request metadata is invalid".into())
 }
+/// What the caller is told when its own Sandbox's image carries other agent
+/// clients than its daemon pins. The versions are its own image's.
+pub(super) fn stale_image_text(stale: &[native::StaleImageClient]) -> String {
+    fn product(agent: private::PlatformManagedAgent) -> &'static str {
+        match agent {
+            private::PlatformManagedAgent::Claude => "Claude Code",
+            _ => "Codex",
+        }
+    }
+    fn join(items: Vec<String>) -> String {
+        match items.as_slice() {
+            [one] => one.clone(),
+            [first, second] => format!("{first} and {second}"),
+            _ => items.join(", "),
+        }
+    }
+    let has = stale
+        .iter()
+        .map(|client| match &client.installed {
+            Some(version) => format!("{} {version}", product(client.agent)),
+            None => format!("no {}", product(client.agent)),
+        })
+        .collect();
+    let need = stale
+        .iter()
+        .map(|client| format!("{} {}", product(client.agent), client.pinned))
+        .collect();
+    format!(
+        "This Sandbox's image has {}; managed agents need {}. Recreate the Sandbox to use managed agents.",
+        join(has),
+        join(need)
+    )
+}
 pub(super) fn unavailable() -> AppError {
     AppError::Upstream("original platform agent operation is unavailable".into())
 }

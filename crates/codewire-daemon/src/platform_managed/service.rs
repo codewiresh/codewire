@@ -40,7 +40,9 @@ pub(crate) struct Owner {
 fn status(error: Error) -> Status {
     match error {
         // Material-free and refused before any effect, so it says why.
-        Error::EarlierProvider(_) => Status::failed_precondition(error.to_string()),
+        Error::EarlierProvider(_) | Error::DeniedBeforeRun => {
+            Status::failed_precondition(error.to_string())
+        }
         _ => Status::failed_precondition("platform managed incarnation or outcome refused"),
     }
 }
@@ -548,6 +550,12 @@ impl Owner {
                 row.reason = "refused-before-issue".into();
                 row.cleanup_unknown = false;
             }
+            Err(Error::DeniedBeforeRun) if issued_launch(&self.request, &row) => {
+                row.phase = 4;
+                row.reason = "denied-before-run".into();
+                row.session_state = v1::SessionLifecycleState::Failed as i32;
+                row.cleanup_unknown = false;
+            }
             _ => {
                 row.phase = 5;
                 row.reason = "issued-outcome-unknown".into();
@@ -597,6 +605,56 @@ fn admit_scope(tree: &files::Tree, scope: &v1::PlatformManagedScope) -> Result<(
         None => tree.write("scope.bin", &scope_bytes, false),
         _ => Err(Error::Refused),
     }
+}
+
+/// An issued launch: the only request a denial before its agent ran settles
+/// as refused.
+fn issued_launch(
+    request: &v1::PlatformManagedMutationRequest,
+    row: &v1::PlatformManagedReceipt,
+) -> bool {
+    row.phase == 2
+        && matches!(
+            request.operation,
+            Some(v1::platform_managed_mutation_request::Operation::Launch(_))
+        )
+}
+
+/// The receipt of a launch refused before its claim wrote anything: the same
+/// row a launch refused before issue settles to, never stored.
+fn refused_launch(
+    request: &v1::PlatformManagedMutationRequest,
+) -> Option<v1::PlatformManagedReceipt> {
+    let Some(v1::platform_managed_mutation_request::Operation::Launch(launch)) =
+        request.operation.as_ref()
+    else {
+        return None;
+    };
+    let message_id = match launch.prompt {
+        Some(_) => wire::platform_managed_initial_prompt_id(&request.request_id).ok()?,
+        None => String::new(),
+    };
+    let receipt = v1::PlatformManagedReceipt {
+        request_id: request.request_id.clone(),
+        scope: Some(request.scope.clone()?),
+        fingerprint_sha256: wire::platform_managed_request_fingerprint(request).ok()?,
+        phase: v1::PlatformManagedRequestPhase::Rejected as i32,
+        session_id: format!("session-{}", request.request_id),
+        driver_id: request.request_id.clone(),
+        message_id,
+        launch_generation: 1,
+        session_state: v1::SessionLifecycleState::Unspecified as i32,
+        exit_code: None,
+        cleanup_unknown: false,
+        pipe_acknowledged: false,
+        native_acknowledged: false,
+        reason: "refused-before-issue".into(),
+        cleanup_of_request_id: None,
+        cleanup_previous_generation: 0,
+        cleanup_previous_cleanup_known: false,
+    };
+    wire::validate_receipt(&receipt).ok()?;
+    Some(receipt)
 }
 
 fn valid_settlement(
@@ -658,12 +716,27 @@ impl PlatformManagedService for Service {
         self.check_info(&r).map_err(status)?;
         let (hash, size) = ImagePin::identity().map_err(status)?;
         let mut agents = Vec::new();
+        let mut stale = Vec::new();
         for agent in [Agent::Codex, Agent::Claude] {
             if agent
                 .route(self.inner.config.managed_credential_clients)
                 .is_some()
             {
-                let pin = ProviderPin::discover(agent).map_err(status)?;
+                let pin = match ProviderPin::admit_image_client(agent) {
+                    Ok(pin) => pin,
+                    // An older Sandbox keeps its image while this daemon follows
+                    // the current release: say which clients it lacks.
+                    Err(PinRefusal::Missing | PinRefusal::Version) => {
+                        stale.push(wire::StaleImageClient {
+                            agent: v1::PlatformManagedAgent::try_from(agent.wire())
+                                .map_err(|_| status(Error::Refused))?,
+                            installed: image_client_version(agent),
+                            pinned: pinned_version(agent).to_owned(),
+                        });
+                        continue;
+                    }
+                    Err(refusal) => return Err(status(refusal.hosted())),
+                };
                 agents.push(v1::PlatformManagedAgentSupport {
                     agent: agent.wire(),
                     provider_sha256: pin.identity.sha256.to_vec(),
@@ -674,6 +747,11 @@ impl PlatformManagedService for Service {
                     interrupt: true,
                 });
             }
+        }
+        if !stale.is_empty() {
+            let message =
+                wire::stale_image_message(&stale).ok_or_else(|| status(Error::Refused))?;
+            return Err(Status::failed_precondition(message));
         }
         Ok(Response::new(v1::PlatformManagedInfoResponse {
             protocol_version: wire::PROTOCOL,
@@ -692,7 +770,22 @@ impl PlatformManagedService for Service {
     ) -> Result<Response<v1::PlatformManagedReceipt>, Status> {
         self.authorize(&r)?;
         wire::validate_mutation(r.get_ref()).map_err(invalid)?;
-        let (owner, row, dispatch) = self.claim(r.into_inner()).await.map_err(status)?;
+        let request = r.into_inner();
+        let (owner, row, dispatch) = match self.claim(request.clone()).await {
+            Ok(claimed) => claimed,
+            // A refused claim wrote nothing and started nothing. For a launch,
+            // say so with a definite refusal instead of an error that leaves
+            // orchestration an unknown outcome and its deletion lease
+            // unresolved (#2705). A control keeps the error: a cleanup Stop's
+            // receipt must carry generations only its book can supply.
+            Err(error @ (Error::Refused | Error::EarlierProvider(_))) => {
+                return match refused_launch(&request) {
+                    Some(receipt) => Ok(Response::new(receipt)),
+                    None => Err(status(error)),
+                };
+            }
+            Err(error) => return Err(status(error)),
+        };
         if !dispatch {
             return Ok(Response::new(row));
         }
@@ -969,6 +1062,86 @@ mod tests {
                 "platform managed incarnation or outcome refused"
             );
         }
+    }
+
+    #[test]
+    fn platform_service_refuses_a_launch_claim_definitely_and_a_control_claim_opaquely() {
+        let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
+        let mut request = launch(&scope);
+        let refused = refused_launch(&request).unwrap();
+        assert_eq!(
+            refused.phase,
+            v1::PlatformManagedRequestPhase::Rejected as i32
+        );
+        assert_eq!(refused.reason, "refused-before-issue");
+        assert!(!refused.cleanup_unknown);
+        assert_eq!(
+            refused.session_id,
+            format!("session-{}", request.request_id)
+        );
+        assert_eq!(refused.driver_id, request.request_id);
+        assert_eq!(refused.launch_generation, 1);
+        assert!(refused.message_id.is_empty());
+        assert_eq!(
+            refused.fingerprint_sha256,
+            wire::platform_managed_request_fingerprint(&request).unwrap()
+        );
+        wire::validate_receipt(&refused).unwrap();
+        // A launch with a prompt names its initial message, as the stored row does.
+        if let Some(v1::platform_managed_mutation_request::Operation::Launch(l)) =
+            request.operation.as_mut()
+        {
+            l.prompt = Some("fixture task".into());
+        }
+        assert_eq!(
+            refused_launch(&request).unwrap().message_id,
+            wire::platform_managed_initial_prompt_id(&request.request_id).unwrap()
+        );
+        let driver = uuid::Uuid::new_v4().to_string();
+        let control = v1::PlatformManagedMutationRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            scope: Some(scope),
+            operation: Some(v1::platform_managed_mutation_request::Operation::Control(
+                v1::PlatformManagedControl {
+                    action: 4,
+                    session_id: format!("session-{driver}"),
+                    driver_id: driver,
+                    expected_launch_generation: 1,
+                    ..Default::default()
+                },
+            )),
+        };
+        assert!(refused_launch(&control).is_none());
+    }
+
+    #[test]
+    fn platform_service_settles_only_an_issued_launch_denied_before_run_as_refused() {
+        let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
+        let request = launch(&scope);
+        let mut row = issued(&request).row().unwrap();
+        assert!(issued_launch(&request, &row));
+        row.phase = 1;
+        assert!(!issued_launch(&request, &row));
+        row.phase = 2;
+        let mut control = request.clone();
+        control.operation = Some(v1::platform_managed_mutation_request::Operation::Control(
+            v1::PlatformManagedControl::default(),
+        ));
+        assert!(!issued_launch(&control, &row));
+        // The settled row is a valid private receipt.
+        row.phase = 4;
+        row.reason = "denied-before-run".into();
+        row.session_state = v1::SessionLifecycleState::Failed as i32;
+        row.cleanup_unknown = false;
+        wire::validate_receipt(&row).unwrap();
+        row.cleanup_unknown = true;
+        assert!(wire::validate_receipt(&row).is_err());
+        let refused = status(Error::DeniedBeforeRun);
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            refused.message(),
+            "the environment launch was denied before the managed agent started"
+        );
     }
 
     #[test]

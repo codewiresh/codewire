@@ -543,6 +543,9 @@ enum Ended {
     Oversized,
     /// A frame made no progress for the stall timeout.
     Stalled,
+    /// An SSH frame's shape is invalid: a protocol violation, unlike an
+    /// out-of-range deadline, which fails only its own request.
+    Malformed,
 }
 
 impl Ended {
@@ -553,8 +556,9 @@ impl Ended {
             reason = match self {
                 Self::Oversized => "oversized",
                 Self::Stalled => "stalled",
+                Self::Malformed => "malformed",
             },
-            "credential relay ended an epoch at its byte or progress bound"
+            "credential relay ended an epoch at its byte, progress or framing bound"
         );
     }
 }
@@ -1012,23 +1016,17 @@ async fn forward_guest(
         ) {
             return Ok(());
         }
-        // Preserve an SSH request's original deadline through this bounded
-        // queue. The authority and pending-response owner recheck at their own
-        // boundaries; the relay adds no request or credential selector.
-        let deadline = match &frame.payload {
-            Some(v1::credential_bridge_guest_message::Payload::Ssh(request)) => {
-                if codewire_daemon_proto::ssh::validate_request(request).is_err() {
-                    return Ok(());
-                }
-                let Ok(remaining) =
-                    codewire_daemon_proto::ssh::remaining_deadline(request.deadline_unix_ms)
-                else {
-                    return Ok(());
-                };
-                Some(remaining)
-            }
-            _ => None,
-        };
+        // A malformed SSH frame ends the epoch. Its deadline is the request's
+        // own (#2767): the frame is forwarded unchanged, and the broker
+        // refuses an expired or out-of-range deadline with a typed failure to
+        // that request alone, so a skewed guest clock never ends the epoch
+        // that carries every other request. The relay adds no request or
+        // credential selector.
+        if let Some(v1::credential_bridge_guest_message::Payload::Ssh(request)) = &frame.payload
+            && codewire_daemon_proto::ssh::validate_request_shape(request).is_err()
+        {
+            return Err(Ended::Malformed);
+        }
         let bytes = frame.encoded_len();
         // Whether the frame was queued; false once the broker leg is gone.
         let queue = async {
@@ -1047,22 +1045,17 @@ async fn forward_guest(
                 .await
                 .unwrap_or(Err(Ended::Stalled))
         };
+        // The stall bound alone limits this wait, never a request's deadline:
+        // a request that expires while queued is still forwarded, and the
+        // broker refuses it alone.
         let queued = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Ok(()),
-            _ = sleep_for(deadline), if deadline.is_some() => return Ok(()),
             result = queued => result?,
         };
         if !queued {
             return Ok(());
         }
-    }
-}
-
-async fn sleep_for(duration: Option<Duration>) {
-    match duration {
-        Some(duration) => tokio::time::sleep(duration).await,
-        None => std::future::pending().await,
     }
 }
 

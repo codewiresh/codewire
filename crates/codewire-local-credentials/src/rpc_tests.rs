@@ -180,6 +180,7 @@ fn runtime_config(temp: &tempfile::TempDir) -> AuthorityRuntimeConfig {
         root: temp.path().join("authority"),
         executable: fs::canonicalize(std::env::current_exe().expect("current executable"))
             .expect("canonical executable"),
+        socket_dir: temp.path().join("authority"),
     }
 }
 
@@ -1762,8 +1763,9 @@ async fn compatibility_authority_process_fixture() {
         "protocol-mismatch" | "info-unavailable"
     ));
     let config = AuthorityRuntimeConfig {
-        root: root.into(),
+        root: root.clone().into(),
         executable: fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
+        socket_dir: root.into(),
     };
     let (incoming, identity) = bind_owner_only(&config).unwrap();
     let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -2159,4 +2161,100 @@ fn authority_prepares_one_missing_private_state_parent() {
         assert_eq!(metadata.mode() & 0o7777, 0o700);
         assert_eq!(metadata.uid(), current_uid());
     }
+}
+
+/// Waits for an endpoint an in-process authority is about to publish.
+async fn wait_for_socket(path: &std::path::Path) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("authority endpoint appears");
+}
+
+/// #2745: the authority listens in its short socket directory. One a cw
+/// before that started still listens in the credential root; a client uses
+/// it while it runs, and the next authority removes its dead endpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_legacy_authority_serves_until_a_new_one_listens_in_the_socket_dir() {
+    let temp = tempfile::tempdir().unwrap();
+    let sockets = temp.path().join("sockets");
+    fs::create_dir(&sockets).unwrap();
+    fs::set_permissions(&sockets, fs::Permissions::from_mode(0o700)).unwrap();
+    let config = AuthorityRuntimeConfig {
+        socket_dir: sockets.clone(),
+        ..runtime_config(&temp)
+    };
+    let legacy = AuthorityRuntimeConfig {
+        socket_dir: config.root.clone(),
+        ..config.clone()
+    };
+    assert_eq!(legacy.socket(), config.legacy_socket());
+    assert_eq!(config.socket(), sockets.join("authority.sock"));
+
+    let (shutdown, server) = start_server(legacy.clone(), TestProtectedStore::default()).await;
+    wait_for_socket(&config.legacy_socket()).await;
+    let client = LocalCredentialClient::connect_or_start_with(
+        &config,
+        |_| -> Result<Child, AuthorityRuntimeError> {
+            panic!("a live earlier authority must not be replaced")
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
+    assert!(
+        LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
+            panic!("admission must not spawn")
+        })
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert!(!config.socket().exists());
+    drop(client);
+    shutdown.send(()).unwrap();
+    server.await.unwrap().unwrap();
+
+    // A killed earlier authority leaves its endpoint behind.
+    if !config.legacy_socket().exists() {
+        drop(std::os::unix::net::UnixListener::bind(config.legacy_socket()).unwrap());
+        fs::set_permissions(config.legacy_socket(), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let (shutdown, server) = start_server(config.clone(), TestProtectedStore::default()).await;
+    wait_for_socket(&config.socket()).await;
+    assert!(!config.legacy_socket().exists());
+    let client = LocalCredentialClient::connect(&config).await.unwrap();
+    assert_eq!(client.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
+    drop(client);
+    shutdown.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[test]
+fn a_socket_path_over_the_kernel_limit_is_refused_by_name() {
+    let config = AuthorityRuntimeConfig {
+        root: "/synthetic/credentials-v1".into(),
+        executable: "/synthetic/bin/cw".into(),
+        socket_dir: format!("/{}", "d".repeat(crate::MAXIMUM_SOCKET_PATH_BYTES)).into(),
+    };
+    let error = config.validate().unwrap_err();
+    let length = config.socket().as_os_str().len();
+    assert!(matches!(
+        &error,
+        AuthorityRuntimeError::SocketPathTooLong { path, length: found, limit }
+            if *path == config.socket()
+                && *found == length
+                && *limit == crate::MAXIMUM_SOCKET_PATH_BYTES
+    ));
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the local credential authority socket path {} is {length} bytes; the limit is {}",
+            config.socket().display(),
+            crate::MAXIMUM_SOCKET_PATH_BYTES
+        )
+    );
 }

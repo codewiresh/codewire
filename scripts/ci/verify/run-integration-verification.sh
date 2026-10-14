@@ -35,6 +35,13 @@ ORCHESTRATION_KUBE_STUB_PORT=$((PORT_BASE + 8))
 ORCHESTRATION_DAEMON_PORT=$((PORT_BASE + 9))
 ORCHESTRATION_UNAVAILABLE_DAEMON_PORT=$((PORT_BASE + 10))
 TEMPORAL_HOST_PORT="127.0.0.1:${TEMPORAL_PORT}"
+# Lanes on one host share these fixed port ranges (#2755). A real lane, which
+# is given VERIFICATION_PORT_BASE, holds a host-wide lock for its range, and
+# each service it tests must carry this run's token in its environment.
+INTEGRATION_LANE="$ROOT/scripts/ci/verify/integration-lane.py"
+CODEWIRE_INTEGRATION_RUN_ID="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+export CODEWIRE_INTEGRATION_RUN_ID
+LANE_LOCK_PID=""
 INTEGRATION_DOCKER_NETWORK="${INTEGRATION_DOCKER_NETWORK:-}"
 INTEGRATION_NATS_HOST="${INTEGRATION_NATS_HOST:-codewire-integration-nats}"
 if [ -n "$INTEGRATION_DOCKER_NETWORK" ]; then
@@ -63,6 +70,33 @@ export PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-5}" TZ=UTC
 
 log() {
   printf '[product-integration] %s\n' "$*"
+}
+
+# Waits, rather than fails, while another run holds this lane's port range.
+# Hermetic fixtures set no VERIFICATION_PORT_BASE, so they neither take the
+# lock nor wait on it.
+acquire_lane_lock() {
+  [ -n "${VERIFICATION_PORT_BASE:-}" ] || return 0
+  local dir="${CODEWIRE_INTEGRATION_LOCK_DIR:-/tmp/codewire-integration-lanes}"
+  local ready="$RUN_DIR/lane-lock.ready"
+  rm -f "$ready"
+  python3 -B "$INTEGRATION_LANE" lock --file "$dir/ports-${PORT_BASE}.lock" \
+    --parent "$$" --label "$MODE in $ROOT" --ready "$ready" &
+  LANE_LOCK_PID=$!
+  until [ -s "$ready" ]; do
+    if ! kill -0 "$LANE_LOCK_PID" 2>/dev/null; then
+      echo "::error::the integration lane lock helper exited"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# A healthy answer on the port is not enough: it must come from a process this
+# run started, never from another run's service on the same port.
+require_own_listener() {
+  python3 -B "$INTEGRATION_LANE" owner --name "$1" --port "$2" \
+    --token "$CODEWIRE_INTEGRATION_RUN_ID"
 }
 
 selected() {
@@ -94,6 +128,11 @@ cleanup() {
   integration_postgres_cleanup
   if [ -n "$IDP_SIGNING_KEK_DIR" ]; then
     rm -rf -- "$IDP_SIGNING_KEK_DIR"
+  fi
+  # Release the port range only after this run's services have stopped.
+  if [ -n "$LANE_LOCK_PID" ]; then
+    kill "$LANE_LOCK_PID" 2>/dev/null || true
+    wait "$LANE_LOCK_PID" 2>/dev/null || true
   fi
 }
 
@@ -141,6 +180,7 @@ start_proc() {
   "$@" > "$RUN_DIR/${name}.log" 2>&1 &
   echo $! > "$RUN_DIR/${name}.pid"
   wait_http "$name" "http://127.0.0.1:${port}/healthz" "$RUN_DIR/${name}.pid"
+  require_own_listener "$name" "$port"
 }
 
 stop_proc() {
@@ -440,7 +480,7 @@ run_database() {
     cargo test --locked -p codewire-orchestration --lib \
       'api::platform_agents::journal::database_tests::db_' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform managed agent journal matrix" "$logfile" 34
+  assert_passed_count "platform managed agent journal matrix" "$logfile" 35
 
   logfile="$RUN_DIR/environment-resize-admission.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -519,6 +559,7 @@ start_temporal() {
     if "$RUN_DIR/bin/temporal" operator cluster health \
         --address "$TEMPORAL_HOST_PORT" >/dev/null 2>&1; then
       log "Temporal ready"
+      require_own_listener temporal "$TEMPORAL_PORT"
       return
     fi
     sleep 1
@@ -1262,6 +1303,10 @@ filter_service_selection() {
   done
   printf '%scomplete|\n' "$filtered"
 }
+
+case "$MODE" in
+  database|services-control|services-runtime) acquire_lane_lock ;;
+esac
 
 case "$MODE" in
   database)

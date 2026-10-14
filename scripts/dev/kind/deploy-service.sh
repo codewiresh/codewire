@@ -47,6 +47,8 @@ destination=/
 features=""
 fixture=""
 fixture_features=""
+toolchain=codewire-rust-base
+rust_target=""
 case "$SERVICE" in
   idp | billing | coordinator) ;;
   mesh)
@@ -71,6 +73,11 @@ case "$SERVICE" in
     crate=codewire-cli-bin
     bin=cw
     destination=/usr/local/bin/
+    # The orchestration admits only the static musl cw with a source
+    # provenance as a CW runtime identity; managed agents need it. Build it
+    # with the gate's CW toolchain, as the gate's producer does.
+    toolchain=codewire-cw-toolchain
+    rust_target=x86_64-unknown-linux-musl
     ;;
   *) die "usage: $0 <idp|orchestration|credential-service|billing|coordinator|mesh|dashboard|daemon>" ;;
 esac
@@ -222,12 +229,20 @@ log "compiling ${crate} ${bin}${features:+ (features ${features})}${fixture:+ an
 out="$(mktemp -d "$STATE/out.XXXXXX")"
 trap 'rm -rf "$out"' EXIT
 tree="$(kind_dev_tree "$ROOT")"
+revision=""
+if [ -n "$rust_target" ]; then
+  revision="$(git -C "$ROOT" rev-parse --verify 'HEAD^{commit}')" \
+    || die 'the worktree has no commit to name as the source revision'
+fi
 # Bake resolves the build context against the working directory, not the bake
 # file: build this worktree's source into this worktree's target.
 (cd "$ROOT" && KIND_DEV_CRATE="$crate" KIND_DEV_BIN="$bin" KIND_DEV_FEATURES="$features" \
   docker buildx bake --builder "$BUILDER" --file "$ROOT/docker-bake.hcl" \
     --set "kind-dev-binary.args.KIND_DEV_TREE=${tree}" \
     --set "kind-dev-binary.args.KIND_DEV_FIXTURE_FEATURES=${fixture_features}" \
+    --set "kind-dev-binary.args.KIND_DEV_BASE=${toolchain}" \
+    --set "kind-dev-binary.args.KIND_DEV_TARGET=${rust_target}" \
+    --set "kind-dev-binary.args.KIND_DEV_SOURCE_REVISION=${revision}" \
     --set "kind-dev-binary.output=type=local,dest=${out}" kind-dev-binary)
 [ -x "$out/$bin" ] || die "the build produced no ${bin} binary"
 install -m 0755 "$out/$bin" "$STATE/bin/$bin"

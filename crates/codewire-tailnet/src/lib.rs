@@ -46,6 +46,9 @@ pub mod direct_udp;
 /// Reconnecting DERP transport adapter for Conn.
 pub mod derp_transport;
 
+/// Absolute lookups for the endpoint names a Sandbox daemon dials (#2701).
+pub mod dns;
+
 /// UDP peer relay server/client primitives for #257.
 pub mod udp_relay;
 

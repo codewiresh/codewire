@@ -2018,6 +2018,7 @@ fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
     let mut command = Command::new(mkfs);
     command
+        .args(crate::host::EXT4_FORMAT)
         .args([
             OsStr::new("-q"),
             OsStr::new("-F"),
@@ -2050,6 +2051,7 @@ fn format_empty_ext4(disk: &Path) -> Result<(), WorkspaceError> {
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
     let mut command = Command::new(mkfs);
     command
+        .args(crate::host::EXT4_FORMAT)
         .args(["-q", "-F", "-m", "0"])
         .arg(disk)
         .env_clear()

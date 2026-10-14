@@ -411,7 +411,18 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
         NO_PROXY_NAMES, SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK,
     };
     use codewire_daemon::CredentialBridgeTransport;
-    const GIT: [&str; 3] = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"];
+    // Git's GitHub URL rewrite: at most four `insteadOf` entries.
+    const GIT: [&str; 9] = [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_KEY_1",
+        "GIT_CONFIG_VALUE_1",
+        "GIT_CONFIG_KEY_2",
+        "GIT_CONFIG_VALUE_2",
+        "GIT_CONFIG_KEY_3",
+        "GIT_CONFIG_VALUE_3",
+    ];
     const GH_TOKEN: &str = "GH_TOKEN";
     const GH_CONFIG_DIR: &str = "GH_CONFIG_DIR";
     const SSH: &str = "SSH_AUTH_SOCK";
@@ -521,8 +532,14 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
 
             let github = selected.contains(ManagedCredentialClient::GitHub);
             let ssh = selected.contains(ManagedCredentialClient::Ssh);
+            // Either Git credential rewrites GitHub's URL forms (#2720).
+            assert_eq!(
+                shell.contains_key(GIT[0]),
+                github || ssh,
+                "{context} {}",
+                GIT[0]
+            );
             for name in GIT {
-                assert_eq!(shell.contains_key(name), github, "{context} {name}");
                 assert_eq!(shell.get(name), projected.get(name), "{context} {name}");
                 assert_eq!(local.get(name), shell.get(name), "{context} {name}");
             }
@@ -1110,6 +1127,56 @@ fn platform_control_linked_or_nonprivate_record_refuses_without_repairing_it() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(handle_fixed(&fixture.environment, fixture.request()).is_err());
     assert_eq!(fs::symlink_metadata(&path).unwrap().mode() & 0o7777, 0o644);
+}
+/// A platform steer and interrupt each name the active turn; native intake
+/// takes an explicit turn only for a steer, so the interrupt must still queue
+/// and keep that turn on its record (#2787). A changed turn refuses.
+#[test]
+fn platform_control_queues_a_steer_and_an_interrupt_naming_the_active_turn() {
+    let f = Fixture::new();
+    f.clean_peer();
+    let mut state: DriverState = private_record(&f.dir.join("state.json")).unwrap();
+    state.phase = DriverPhase::Busy;
+    state.active_message_id = Some(f.message.clone());
+    state.current_turn_id = Some("turn-1".into());
+    write_private_json(&f.dir.join("state.json"), &state).unwrap();
+    let queue = |action, text: &str, turn: &str| {
+        let id = uuid::Uuid::new_v4().to_string();
+        let request = Envelope {
+            request: Request::Queue {
+                driver_id: f.origin.driver_id.clone(),
+                session_id: f.session.clone(),
+                message_id: id.clone(),
+                action,
+                text: text.into(),
+                reply_to: None,
+                expected_turn_id: Some(turn.into()),
+                expected_active_message_id: Some(f.message.clone()),
+            },
+            ..f.request()
+        };
+        (id, handle_fixed(&f.environment, request))
+    };
+    let controls = [
+        (MessageAction::Steer, "Keep waiting."),
+        (MessageAction::Interrupt, ""),
+    ];
+    for (action, text) in controls {
+        let (id, queued) = queue(action, text, "turn-1");
+        let record = &queued.unwrap()["record"];
+        assert_eq!(record["id"], id);
+        assert_eq!(record["action"], json!(action));
+        assert_eq!(record["expected_turn_id"], "turn-1");
+        assert_eq!(record["expected_active_message_id"], json!(f.message));
+        assert_eq!(record["platform_launch_generation"], 1);
+        let saved: MessageRecord = private_record(&message_path(&f.dir, &id)).unwrap();
+        assert_eq!(saved.expected_turn_id.as_deref(), Some("turn-1"));
+    }
+    for (action, text) in controls {
+        let (id, queued) = queue(action, text, "turn-0");
+        assert!(queued.is_err());
+        assert!(!message_path(&f.dir, &id).exists());
+    }
 }
 #[test]
 fn platform_control_raw_queue_and_unknown_envelope_fields_cannot_reach_native_intake() {

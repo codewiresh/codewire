@@ -18,18 +18,19 @@ thread_local! {
 
 pub(super) fn inject(point: &str, path: &Path) -> Result<(), PathError> {
     FAULT.with(|slot| {
-        if let Some(mut fault) = slot.get() {
-            if fault.point == point && path.as_os_str().as_bytes() == fault.leaf.as_bytes() {
-                if fault.skip > 0 {
-                    fault.skip -= 1;
-                    slot.set(Some(fault));
-                } else {
-                    slot.set(None);
-                    return Err(io_at(
-                        path,
-                        io::Error::other(format!("injected {point} failure")),
-                    ));
-                }
+        if let Some(mut fault) = slot.get()
+            && fault.point == point
+            && path.as_os_str().as_bytes() == fault.leaf.as_bytes()
+        {
+            if fault.skip > 0 {
+                fault.skip -= 1;
+                slot.set(Some(fault));
+            } else {
+                slot.set(None);
+                return Err(io_at(
+                    path,
+                    io::Error::other(format!("injected {point} failure")),
+                ));
             }
         }
         Ok(())

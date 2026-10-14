@@ -50,6 +50,8 @@ pub(super) struct RepositoryProcessManager<S: ProtectedStore> {
     authority: Arc<LocalCredentialAuthority<S>>,
     spawner: Option<Arc<dyn LocalRepositoryProcessSpawner>>,
     authority_root: PathBuf,
+    /// Holds each SSH runtime (its agent socket), outside HOME (#2745).
+    socket_dir: PathBuf,
     jobs: Arc<Semaphore>,
     shutdown: watch::Sender<bool>,
     failed: Arc<AtomicBool>,
@@ -62,6 +64,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         authority: Arc<LocalCredentialAuthority<S>>,
         spawner: Option<Arc<dyn LocalRepositoryProcessSpawner>>,
         authority_root: PathBuf,
+        socket_dir: PathBuf,
         ssh_runtime: Arc<crate::broker_channel::LocalSshOperationRuntime>,
         platform_connector: Option<Arc<dyn crate::PlatformCredentialConnector>>,
     ) -> Self {
@@ -69,6 +72,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
             authority,
             spawner,
             authority_root,
+            socket_dir,
             jobs: Arc::new(Semaphore::new(MAX_REPOSITORY_JOBS as usize)),
             shutdown: watch::channel(false).0,
             failed: Arc::new(AtomicBool::new(false)),
@@ -270,7 +274,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         let mut ssh_cleanup = match transport {
             LocalRepositoryTransport::GitHubOAuth => None,
             LocalRepositoryTransport::Ssh => Some(create_repository_ssh_runtime(
-                &self.authority_root,
+                &self.socket_dir,
                 Arc::clone(&self.failed),
             )?),
         };
@@ -401,10 +405,10 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
 }
 
 fn create_repository_ssh_runtime(
-    authority_root: &std::path::Path,
+    socket_dir: &std::path::Path,
     failed: Arc<AtomicBool>,
 ) -> Result<RepositorySshRuntimeGuard, Status> {
-    let path = authority_root.join(format!(
+    let path = socket_dir.join(format!(
         "{REPOSITORY_SSH_RUNTIME_PREFIX}{}",
         uuid::Uuid::new_v4()
     ));
@@ -460,9 +464,9 @@ fn remove_repository_ssh_runtime(
 }
 
 pub(super) fn cleanup_repository_ssh_runtimes(
-    authority_root: &std::path::Path,
+    directory: &std::path::Path,
 ) -> Result<(), AuthorityRuntimeError> {
-    for entry in fs::read_dir(authority_root).map_err(|_| AuthorityRuntimeError::Serve)? {
+    for entry in fs::read_dir(directory).map_err(|_| AuthorityRuntimeError::Serve)? {
         let entry = entry.map_err(|_| AuthorityRuntimeError::Serve)?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;

@@ -771,6 +771,11 @@ run_paths_case retired_connectcore_deletion pull_request refs/pull/83/head false
 run_paths_case integration_service_harness pull_request refs/pull/831/head false \
   'database policy security security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   scripts/ci/verify/run-integration-verification.sh
+# The integration lane lock and service-ownership helper (#2755) is part of
+# the same harness.
+run_present_paths_case integration_lane_lock pull_request refs/pull/2755/head false \
+  'database policy security security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  scripts/ci/verify/integration-lane.py
 run_paths_case temporal_service pull_request refs/pull/84/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
   crates/codewire-orchestration/src/worker/create.rs
@@ -1145,6 +1150,9 @@ run_paths_case cli_native_managed_journey pull_request refs/pull/2255/head false
 run_paths_case cli_native_update_journey pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/test-cli-native-update.py
+run_paths_case cli_native_socket_dir_helper pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/native_socket_dir.py
 run_paths_case cli_native_update_entrypoint_regression pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/ci/tests/test-native-managed-update-entrypoint.py
@@ -1162,7 +1170,10 @@ run_paths_case cw_release_delivery_shell pull_request refs/pull/2255/head false 
   scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh \
   scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh \
   scripts/ci/setup/fetch-openbao-release-signing-key.sh \
-  scripts/ci/tests/test-fetch-openbao-release-signing-key.sh
+  scripts/ci/tests/test-fetch-openbao-release-signing-key.sh \
+  scripts/ci/release/sign-macos-cw.sh scripts/ci/setup/fetch-openbao-macos-signing.sh \
+  scripts/ci/tests/test-fetch-openbao-macos-signing.sh scripts/ci/tests/test-sign-macos-cw.sh \
+  scripts/ci/tests/fixtures/rcodesign-stand-in.sh
 run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \
@@ -1172,7 +1183,7 @@ run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false 
   scripts/ci/release/build-runtime-kernel.sh scripts/ci/tests/test-local-runtime-parts.py \
   scripts/ci/release/build-local-runtime.sh scripts/ci/release/build-runtime-guest-root.sh \
   scripts/ci/release/runtime-container.sh scripts/ci/release/dry-run-superseded.sh \
-  scripts/ci/tests/test-dry-run-superseded.sh
+  scripts/ci/tests/test-dry-run-superseded.sh scripts/ci/release/build-runtime-cw.sh
 # The published workspace pin selects every consumer that compiles it; its
 # tool and post-publish proposal select the release proofs that run them.
 run_paths_case workspace_image_pin pull_request refs/pull/2255/head false \
@@ -1333,6 +1344,8 @@ run_present_paths_case macos_git_developer_tool pull_request refs/pull/2064/head
   "$policy security security_js" scripts/dev/macos-git-tool.py scripts/dev/test-macos-git-tool.py
 run_present_paths_case macos_local_runtime_installer pull_request refs/pull/2064/head false \
   "$policy security security_js" Makefile scripts/dev/macos-local-runtime.py scripts/dev/test-macos-local-runtime.py
+run_present_paths_case linux_local_runtime_packer pull_request refs/pull/2733/head false \
+  "$policy security security_js" scripts/dev/linux-local-runtime.py scripts/dev/test-linux-local-runtime.py
 run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pull/2064/head false \
   'policy security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs

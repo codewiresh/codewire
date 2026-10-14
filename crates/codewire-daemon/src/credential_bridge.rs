@@ -41,8 +41,8 @@ pub(crate) struct CredentialBridge {
     inner: Result<Option<SharedCredentialBridge>, Status>,
     owner: Arc<BridgeOwner>,
     // Where a Hosted ingress listens: the fixed guest-facing loopback address
-    // in the product. Each unit-test process uses its own port instead, so
-    // two test runs on one host never contend for the product's port.
+    // in the product. Unit tests bind port 0 instead, so the kernel gives
+    // each ingress its own port and no test run contends for a fixed one.
     loopback: std::net::SocketAddr,
 }
 
@@ -143,7 +143,7 @@ impl CredentialBridge {
             #[cfg(not(test))]
             loopback: hosted_loopback_address(),
             #[cfg(test)]
-            loopback: ingress_tests::process_loopback_address(),
+            loopback: ingress_tests::TEST_LOOPBACK_ADDRESS,
             owner: Arc::new(BridgeOwner {
                 accepting: Mutex::new(true),
                 permits: Arc::new(Semaphore::new(3)),
