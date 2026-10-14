@@ -640,6 +640,10 @@ run_paths_case rust_toolchain_guard pull_request refs/pull/506/head false \
   .gitea/workflows/rust-latest-canary.yaml \
   scripts/ci/verify/check-rust-toolchain.sh \
   scripts/ci/tests/test-rust-toolchain.sh
+run_paths_case local_rust_cache_helper pull_request refs/pull/2753/head false \
+  'policy security security_js' \
+  scripts/ci/verify/local-rust-cache.sh \
+  scripts/ci/tests/test-local-rust-cache.sh
 run_paths_case application_migration pull_request refs/pull/6/head false \
   'database policy rust rust_pkg_codewire_server_core service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   crates/codewire-server-core/migrations/0001_baseline.sql

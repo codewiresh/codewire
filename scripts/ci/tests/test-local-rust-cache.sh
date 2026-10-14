@@ -11,7 +11,21 @@ readonly WRAPPER="$ROOT/scripts/ci/verify/local-rust-cache-rustc.sh"
 
 mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/local-rust-cache-test.XXXXXX")"
+# Fake servers listen under a short directory: a socket path has 107 bytes.
+hang=''
 cleanup() {
+  local pid_file pid
+  if [[ -n "$hang" ]]; then
+    # Only processes still running this test's fake server are stopped.
+    for pid_file in "$hang"/*/server.sock.pid "$hang"/*/server.sock.compiler; do
+      [[ -s "$pid_file" ]] || continue
+      pid="$(cat -- "$pid_file")"
+      if { tr '\0' ' ' <"/proc/$pid/cmdline"; } 2>/dev/null | grep -Fq -- "$hang/"; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+    done
+    rm -rf -- "$hang"
+  fi
   rm -rf -- "$work"
 }
 trap cleanup EXIT
@@ -89,6 +103,8 @@ base="$work/home/.cache/codewire-sccache"
 [[ "$(env_value CODEWIRE_LOCAL_SCCACHE_BIN "$work/env")" == "$work/fake/sccache" ]] ||
   fail 'absolute sccache path'
 [[ "$(env_value CODEWIRE_LOCAL_SCCACHE_TMPDIR "$work/env")" == "$base/tmp" ]] || fail 'cache tmpdir'
+[[ "$(env_value CODEWIRE_LOCAL_SCCACHE_RESTARTS "$work/env")" == "$base/server-restarts" ]] ||
+  fail 'restart count path'
 [[ "$(cat "$base/sccache.conf")" == 'server_startup_timeout_ms = 60000' ]] || fail 'startup timeout'
 ! grep -q '^SCCACHE_BUCKET=\|^SCCACHE_ENDPOINT=' "$work/env" ||
   fail 'a remote cache selection reached the build'
@@ -185,4 +201,301 @@ direct="$(env -u CODEWIRE_LOCAL_SCCACHE_BIN CARGO_TARGET_DIR="$work/target" \
   "$WRAPPER" bash -c 'printf "%s" "${CARGO_TARGET_DIR-unset}"')"
 [[ "$direct" == unset ]] || fail 'uncached fallback kept the target directory'
 
+# A compile that fails because its hung server was stopped compiles locally:
+# sccache 0.17 fails a request that was still waiting for the server's first
+# answer. Any other failure, and every success, is sccache's own result.
+mkdir -p "$work/restart-fake"
+cat >"$work/restart-fake/sccache" <<'EOF'
+#!/usr/bin/env bash
+if [[ -e "$(dirname "$0")/succeeds" ]]; then
+  exit 0
+fi
+if [[ -e "$(dirname "$0")/restart" ]]; then
+  read -r count <"$CODEWIRE_LOCAL_SCCACHE_RESTARTS"
+  printf '%s\n' "$((count + 1))" >"$CODEWIRE_LOCAL_SCCACHE_RESTARTS"
+fi
+printf 'sccache: error: failed to execute compile\n' >&2
+exit 2
+EOF
+cat >"$work/compiler" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$work/compiled"
+EOF
+chmod +x "$work/restart-fake/sccache" "$work/compiler"
+printf '4\n' >"$work/restarts"
+compile_via_wrapper() {
+  rm -f -- "$work/compiled"
+  env CODEWIRE_LOCAL_SCCACHE_BIN="$work/restart-fake/sccache" \
+    CODEWIRE_LOCAL_SCCACHE_TMPDIR="$base/tmp" CODEWIRE_LOCAL_SCCACHE_RESTARTS="$work/restarts" \
+    "$WRAPPER" "$work/compiler" --crate-name fixture 2>/dev/null
+}
+status=0
+compile_via_wrapper || status=$?
+[[ "$status" == 2 && ! -e "$work/compiled" ]] || fail 'a failed compile was retried with no restart'
+touch "$work/restart-fake/restart"
+compile_via_wrapper || fail 'a compile failed by a server restart did not compile locally'
+[[ "$(cat "$work/compiled")" == '--crate-name fixture' ]] || fail 'the local compile changed the command'
+rm -- "$work/restart-fake/restart"
+touch "$work/restart-fake/succeeds"
+compile_via_wrapper || fail 'a cached compile failed'
+[[ ! -e "$work/compiled" ]] || fail 'a cached compile also compiled locally'
+
 printf '[test-local-rust-cache] selection, CI isolation and wrapper key: OK\n'
+
+# A hung server (#2753) is found from the kernel's process and socket tables,
+# so this part runs on Linux, where the shared workstation and CI run.
+if [[ "$(uname -s)" != Linux ]]; then
+  printf '[test-local-rust-cache] hung-server check: skipped off Linux\n'
+  exit 0
+fi
+# shellcheck source=scripts/ci/verify/local-rust-cache.sh
+source "$HELPER"
+local_rust_cache_server_check_supported || fail 'hang check unsupported on Linux'
+hang="$(mktemp -d "${TMPDIR:-/tmp}/lrc.XXXXXX")"
+(("${#hang}" < 80)) || fail "temporary directory too long for a socket: $hang"
+mkdir -p "$hang/fake"
+
+# Each fake server is a real process with clients connected to its socket, as
+# the hung server had; a server that stops accepting leaves them queued. It
+# ignores --stop-server or TERM when told to, and a compiling one runs a child
+# as sccache runs rustc.
+cat >"$work/fake-server.py" <<'EOF'
+import os, signal, socket, subprocess, sys, time
+path, clients, *flags = sys.argv[1:]
+queued = '--queued' in flags
+if '--ignore-term' in flags:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+listener = socket.socket(socket.AF_UNIX)
+listener.bind(path)
+listener.listen(16)
+held = []
+for _ in range(int(clients)):
+    client = socket.socket(socket.AF_UNIX)
+    client.connect(path)
+    held += [client] if queued else [client, listener.accept()[0]]
+if '--compiling' in flags:
+    compiler = subprocess.Popen(
+        [sys.executable, '-I', '-c', 'import time; time.sleep(300)', path])
+    with open(path + '.compiler', 'w') as out:
+        out.write(f'{compiler.pid}\n')
+with open(path + '.pid', 'w') as out:
+    out.write(f'{os.getpid()}\n')
+while '--ignore-stop' in flags or not os.path.exists(path + '.stop'):
+    time.sleep(0.05)
+EOF
+cat >"$hang/fake/sccache" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+here="$(dirname "$0")"
+printf '%s %s\n' "$*" "${SCCACHE_SERVER_UDS:-}" >>"$here/calls"
+case "${1:-}" in
+  --version) printf 'sccache 0.17.0\n' ;;
+  --show-stats) [[ ! -e "$here/stats-unanswered" ]] && cat "$here/stats" ;;
+  --stop-server) : >"$SCCACHE_SERVER_UDS.stop" ;;
+  --dist-status) printf '{"Disabled":"disabled"}\n' ;;
+  *) exit 64 ;;
+esac
+EOF
+chmod +x "$hang/fake/sccache"
+fake_sccache="$hang/fake/sccache"
+
+# Usage: start_server BASE CLIENTS [--ignore-stop] [--ignore-term] [--compiling] [--queued]
+start_server() {
+  local base="$1" tries=100
+  shift
+  mkdir -p "$base/cache"
+  rm -f -- "$base/server.sock" "$base/server.sock".* "$base/server-progress"
+  (python3 -I "$work/fake-server.py" "$base/server.sock" "$@" </dev/null >/dev/null 2>&1 &)
+  until [[ -s "$base/server.sock.pid" ]]; do
+    ((tries-- > 0)) || fail "fake server at $base did not start"
+    sleep 0.05
+  done
+}
+server_running() {
+  local_rust_cache_process_start "$(cat -- "$1/server.sock.pid")" >/dev/null
+}
+# Statistics in sccache 0.17's layout; HITS and MISSES are finished compiles.
+set_stats() {
+  printf '%-34s %8s\n' 'Compile requests' 7750 'Compile requests executed' 4885 \
+    'Cache hits' "$1" 'Cache hits (Rust)' "$1" 'Cache misses' "$2" \
+    'Cache misses (Rust)' "$2" 'Cache hits rate' '47.02 %' 'Cache errors' 0 \
+    'Compilations' "$2" 'Compilation failures' 0 'Non-cacheable calls' 31 \
+    >"$hang/fake/stats"
+}
+# Run one check of BASE; its status lines go to $hang/stderr.
+check() {
+  : >"$hang/fake/calls"
+  local_rust_cache_check_server "$1" "$fake_sccache" 2>"$hang/stderr"
+}
+# Usage: age_mark BASE STALLED_SECONDS LAST_SEEN_SECONDS_AGO
+age_mark() {
+  local inode progress since seen now
+  IFS=' ' read -r inode progress since seen <"$1/server-progress"
+  now="$(date +%s)"
+  printf '%s %s %s %s\n' "$inode" "$progress" "$((now - $2))" "$((now - $3))" \
+    >"$1/server-progress"
+}
+marked_since() {
+  local inode progress since seen
+  IFS=' ' read -r inode progress since seen <"$1/server-progress"
+  printf '%s\n' "$since"
+}
+# Usage: assert_kept BASE CASE
+assert_kept() {
+  server_running "$1" || fail "$2: the server stopped"
+  ! grep -q -- '^--stop-server ' "$hang/fake/calls" || fail "$2: --stop-server was sent"
+}
+
+set_stats 2272 2560
+
+# Hung, as on 2026-10-14: clients wait, statistics answer, no compile finishes
+# or runs, and --stop-server leaves the process running. A first observation
+# only starts the clock, and four minutes is not yet a hang. After five, the
+# exact server is terminated; another server on the account and the cache
+# directory are left alone.
+base="$hang/term"
+start_server "$base" 3 --ignore-stop
+start_server "$hang/other" 3 --ignore-stop
+printf 'cached\n' >"$base/cache/entry"
+check "$base" || fail 'a new stall failed the check'
+[[ -s "$base/server-progress" ]] || fail 'the first observation was not recorded'
+assert_kept "$base" 'a new stall'
+age_mark "$base" 240 30
+check "$base" || fail 'a short stall failed the check'
+assert_kept "$base" 'a four-minute stall'
+age_mark "$base" 400 30
+check "$base" || fail 'a stopped hung server failed the check'
+! server_running "$base" || fail 'the hung server still runs'
+[[ "$(grep -c -- '^--stop-server ' "$hang/fake/calls")" == 1 ]] ||
+  fail '--stop-server was not tried once first'
+grep -Eq "^CODEWIRE_LOCAL_RUST_CACHE state=restarted reason=server-hung at=[0-9TZ:-]+ pid=[0-9]+ clients=3 stalled=[0-9]+s by=TERM\$" \
+  "$hang/stderr" || fail "restart status: $(cat "$hang/stderr")"
+server_running "$hang/other" || fail 'another server was stopped'
+[[ "$(cat "$base/cache/entry")" == cached ]] || fail 'the cache directory changed'
+[[ ! -e "$base/server-progress" ]] || fail 'the stopped server kept its progress mark'
+[[ "$(cat "$base/server-restarts")" == 1 ]] || fail 'the restart was not counted'
+grep -Fq 'state=restarted reason=server-hung' "$base/server-check.log" ||
+  fail 'the restart was not logged'
+
+# A server that ignores TERM too is killed.
+base="$hang/kill"
+start_server "$base" 2 --ignore-stop --ignore-term
+check "$base"
+age_mark "$base" 400 30
+check "$base" || fail 'a killed hung server failed the check'
+! server_running "$base" || fail 'the TERM-proof hung server still runs'
+grep -Fq ' by=KILL' "$hang/stderr" || fail "kill status: $(cat "$hang/stderr")"
+
+# Unresponsive: the server accepts no client and answers no statistics, as a
+# stopped or deadlocked one does; five minutes of that is a hang too.
+base="$hang/unresponsive"
+start_server "$base" 2 --queued
+touch "$hang/fake/stats-unanswered"
+check "$base"
+[[ -s "$base/server-progress" ]] || fail 'clients queued on an unresponsive server were not seen'
+age_mark "$base" 400 30
+check "$base" || fail 'a stopped unresponsive server failed the check'
+rm -- "$hang/fake/stats-unanswered"
+! server_running "$base" || fail 'the unresponsive server still runs'
+grep -Eq ' clients=2 stalled=[0-9]+s by=stop-server$' "$hang/stderr" ||
+  fail "unresponsive status: $(cat "$hang/stderr")"
+
+# Slow but progressing: one more compile finished since the clock started.
+base="$hang/slow"
+start_server "$base" 2 --ignore-stop
+check "$base"
+age_mark "$base" 400 30
+set_stats 2273 2560
+check "$base"
+assert_kept "$base" 'a progressing server'
+(($(date +%s) - $(marked_since "$base") < 60)) || fail 'progress did not restart the clock'
+set_stats 2272 2560
+
+# A long compile: nothing finished for over five minutes, but the server runs
+# a compiler, so it is working however slow that compile is.
+base="$hang/compiling"
+start_server "$base" 2 --ignore-stop --compiling
+check "$base"
+age_mark "$base" 400 30
+check "$base"
+assert_kept "$base" 'a server running a compiler'
+(($(date +%s) - $(marked_since "$base") < 60)) || fail 'a running compiler did not restart the clock'
+
+# Healthy: no client waits, so an old mark is dropped and nothing is stopped.
+base="$hang/idle"
+start_server "$base" 0 --ignore-stop
+printf '1 2272 1 1\n' >"$base/server-progress"
+check "$base"
+assert_kept "$base" 'an idle server'
+[[ ! -e "$base/server-progress" ]] || fail 'an idle server kept a progress mark'
+
+# Observations ten minutes apart do not show clients waiting throughout.
+base="$hang/gap"
+start_server "$base" 2 --ignore-stop
+check "$base"
+age_mark "$base" 600 400
+check "$base"
+assert_kept "$base" 'a stall seen across a gap'
+(($(date +%s) - $(marked_since "$base") < 60)) || fail 'a gap did not restart the clock'
+
+# Before use: the selection stops a hung server that honours --stop-server,
+# then starts the next one, and the caller gets the cache.
+base="$hang/select"
+start_server "$base" 2
+check "$base"
+age_mark "$base" 400 30
+: >"$hang/fake/calls"
+selected="$(env -u GITHUB_ACTIONS -u CI -u CODEWIRE_SCCACHE_MODE -u RUSTC_WRAPPER \
+  -u CARGO_BUILD_RUSTC_WRAPPER -u CARGO_INCREMENTAL -u CARGO_BUILD_INCREMENTAL \
+  -u CODEWIRE_LOCAL_RUST_CACHE PATH="$hang/fake:$PATH" \
+  CODEWIRE_LOCAL_SCCACHE_BASE="$base" timeout 60 "$HELPER" printenv RUSTC_WRAPPER \
+  2>"$hang/stderr")" || fail "selection over a hung server: $(cat "$hang/stderr")"
+[[ "$selected" == "$WRAPPER" ]] || fail 'selection over a hung server did not select the cache'
+! server_running "$base" || fail 'selection kept the hung server'
+for expected in 'state=restarted reason=server-hung' ' by=stop-server' 'state=active'; do
+  grep -Fq -- "$expected" "$hang/stderr" || fail "selection status: $(cat "$hang/stderr")"
+done
+[[ "$(sed -n 's/ .*//p' "$hang/fake/calls" | grep -v -- --show-stats | tr '\n' ' ')" == \
+  '--version --stop-server --dist-status ' ]] ||
+  fail "selection did not stop the hung server before starting one: $(cat "$hang/fake/calls")"
+
+# The watcher: it runs while its caller does, holds none of the caller's
+# descriptors, stops a hung server between builds, and exits with the caller.
+base="$hang/watch"
+start_server "$base" 2
+check "$base"
+age_mark "$base" 400 30
+sleep 60 &
+caller=$!
+# A separate shell starts the watcher, as an entrypoint does; its arguments
+# name the watcher, which keeps that command line.
+watch_mark="lrc-watch-test $HELPER $base"
+bash -c 'source "$1"; CODEWIRE_LOCAL_SCCACHE_WATCH_SECONDS=1
+  local_rust_cache_start_watch "$2" "$3" "$4"' lrc-watch-test "$HELPER" "$base" \
+  "$fake_sccache" "$caller" >"$hang/caller-stdout" 7>"$hang/caller-fd"
+holders() {
+  find /proc/[0-9]*/fd -maxdepth 1 -lname "$1" 2>/dev/null | sed 's|/fd/.*||' | sort -u
+}
+[[ -n "$(pgrep -f -- "$watch_mark")" ]] || fail 'the watcher did not start'
+[[ -z "$(holders "$hang/caller-stdout")$(holders "$hang/caller-fd")" ]] ||
+  fail 'the watcher kept a caller descriptor open'
+tries=150
+while server_running "$base"; do
+  ((tries-- > 0)) || fail 'the watcher did not stop the hung server'
+  sleep 0.1
+done
+until grep -Fq 'state=restarted reason=server-hung' "$base/server-check.log" 2>/dev/null; do
+  ((tries-- > 0)) || fail 'the watcher did not log the restart'
+  sleep 0.1
+done
+[[ "$(cat "$base/server-restarts")" == 1 ]] || fail 'the watcher did not count its restart'
+[[ -n "$(pgrep -f -- "$watch_mark")" ]] || fail 'the watcher stopped while its caller ran'
+kill "$caller"
+wait "$caller" 2>/dev/null || true
+tries=100
+while [[ -n "$(pgrep -f -- "$watch_mark")" ]]; do
+  ((tries-- > 0)) || fail 'the watcher outlived its caller'
+  sleep 0.1
+done
+
+printf '[test-local-rust-cache] hung server: stopped by progress, slow and idle servers kept: OK\n'
