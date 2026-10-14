@@ -815,12 +815,27 @@ impl PlatformManagedService for Service {
         self.check_info(&r).map_err(status)?;
         let (hash, size) = ImagePin::identity().map_err(status)?;
         let mut agents = Vec::new();
+        let mut stale = Vec::new();
         for agent in [Agent::Codex, Agent::Claude] {
             if agent
                 .route(self.inner.config.managed_credential_clients)
                 .is_some()
             {
-                let pin = ProviderPin::discover(agent).map_err(status)?;
+                let pin = match ProviderPin::admit_image_client(agent) {
+                    Ok(pin) => pin,
+                    // An older Sandbox keeps its image while this daemon follows
+                    // the current release: say which clients it lacks.
+                    Err(PinRefusal::Missing | PinRefusal::Version) => {
+                        stale.push(wire::StaleImageClient {
+                            agent: v1::PlatformManagedAgent::try_from(agent.wire())
+                                .map_err(|_| status(Error::Refused))?,
+                            installed: image_client_version(agent),
+                            pinned: pinned_version(agent).to_owned(),
+                        });
+                        continue;
+                    }
+                    Err(refusal) => return Err(status(refusal.hosted())),
+                };
                 agents.push(v1::PlatformManagedAgentSupport {
                     agent: agent.wire(),
                     provider_sha256: pin.identity.sha256.to_vec(),
@@ -831,6 +846,11 @@ impl PlatformManagedService for Service {
                     interrupt: true,
                 });
             }
+        }
+        if !stale.is_empty() {
+            let message =
+                wire::stale_image_message(&stale).ok_or_else(|| status(Error::Refused))?;
+            return Err(Status::failed_precondition(message));
         }
         Ok(Response::new(v1::PlatformManagedInfoResponse {
             protocol_version: wire::PROTOCOL,

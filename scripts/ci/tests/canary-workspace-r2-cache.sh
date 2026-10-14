@@ -25,7 +25,11 @@ mkdir -m 0700 "$report"
 work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-r2-canary.XXXXXX")"
 cleanup() {
   local status=$? cleanup_status=0
-  trap - EXIT INT TERM
+  # GNU timeout delivers a signal it receives twice, to this child and then
+  # to its process group. A second TERM or INT must not cut erasure short;
+  # the outer timeout's kill-after still bounds this cleanup.
+  trap - EXIT
+  trap '' INT TERM
   workspace_cache_cleanup_builder || cleanup_status=$?
   rm -rf "$work"
   [[ "$status" != 0 || "$cleanup_status" == 0 ]] || status="$cleanup_status"
