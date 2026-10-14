@@ -17,6 +17,7 @@ green_results=(
   VERIFICATION_RUST_TRANSPORT_RESULT=success
   VERIFICATION_RUST_COMPILE_EXPECTED=true
   VERIFICATION_RUST_COMPILE_RESULT=success
+  VERIFICATION_RUST_SHARDS_EXPECTED=true
   VERIFICATION_RUST_PACKAGES_RESULT=success
   VERIFICATION_RUST_FEATURES_RESULT=success
   VERIFICATION_DATABASE_EXPECTED=true
@@ -44,6 +45,7 @@ unselected_results=(
   VERIFICATION_RUST_TRANSPORT_RESULT=skipped
   VERIFICATION_RUST_COMPILE_EXPECTED=false
   VERIFICATION_RUST_COMPILE_RESULT=skipped
+  VERIFICATION_RUST_SHARDS_EXPECTED=false
   VERIFICATION_RUST_PACKAGES_RESULT=skipped
   VERIFICATION_RUST_FEATURES_RESULT=skipped
   VERIFICATION_DATABASE_EXPECTED=false
@@ -117,6 +119,25 @@ expect_failure quick_rust_tests_ran \
   "${quick_results[@]}" \
   VERIFICATION_SELECTION="$quick_selection" \
   VERIFICATION_RUST_TRANSPORT_RESULT=success
+
+# Curated locks alone run Rust / transport verification without the shards.
+env "${green_results[@]}" \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust_curated_locks|complete|' \
+  VERIFICATION_RUST_SHARDS_EXPECTED=false \
+  VERIFICATION_RUST_PACKAGES_RESULT=skipped \
+  VERIFICATION_RUST_FEATURES_RESULT=skipped \
+  "$CHECK" >/dev/null
+
+expect_failure shards_ran_unselected \
+  'rust-packages unselected capability group concluded success' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust_curated_locks|complete|' \
+  VERIFICATION_RUST_SHARDS_EXPECTED=false \
+  VERIFICATION_RUST_FEATURES_RESULT=skipped
+
+expect_failure missing_shards_expectation \
+  'rust-packages capability expectation is missing' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
+  VERIFICATION_RUST_SHARDS_EXPECTED=
 
 expect_failure missing_compile_expectation \
   'rust-compile capability expectation is missing' \
