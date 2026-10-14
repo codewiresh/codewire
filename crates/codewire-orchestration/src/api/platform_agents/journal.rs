@@ -463,6 +463,16 @@ impl ManagedJournal {
             let c = conversation(tx, b, m).await?.ok_or_else(conflict)?;
             if let Some(id) = c.active_request_id {
                 let original = load(tx, id, true).await?.ok_or_else(conflict)?.decode()?;
+                // Only that request's own cleanup may follow it (#2782).
+                if m.cleanup_of_request_id != Some(id) {
+                    return Err(request_blocked(
+                        original.mutation.action,
+                        id,
+                        original.phase == ManagedPhase::Unknown,
+                        &b.environment_id,
+                        &m.session_id,
+                    ));
+                }
                 c.require_cleanup(b, m, &original)?;
                 if let Some(previous_id) = c.cleanup_request_id {
                     let previous = load(tx, previous_id, true)

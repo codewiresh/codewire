@@ -265,6 +265,7 @@ fn is_state_conflict_reason(reason: &str) -> bool {
             | "organization_mutation_lease_conflict"
             | "organization_mutation_barrier_not_drained"
             | "platform_agent_resume_refused"
+            | "platform_agent_request_refused"
     )
 }
 
@@ -437,6 +438,15 @@ mod tests {
                     StatusCode::CONFLICT,
                     "platform_agent_resume_refused",
                     "the environment's previous Pod is still stopping; try again shortly",
+                ),
+                ConnectCode::FailedPrecondition,
+            ),
+            (
+                coded(
+                    StatusCode::CONFLICT,
+                    "platform_agent_request_refused",
+                    "message 00000000-0000-4000-8000-000000000001 is still in progress; \
+                     try again shortly",
                 ),
                 ConnectCode::FailedPrecondition,
             ),

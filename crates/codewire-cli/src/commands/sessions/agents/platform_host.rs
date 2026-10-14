@@ -313,6 +313,14 @@ impl Endpoint {
             if resume_refused(&e.source) {
                 return anyhow::anyhow!("the conversation cannot continue: {}", e.source.message());
             }
+            // Refused at admission, before anything was sent: a definite
+            // answer, never an uncertain outcome to observe (#2782).
+            if request_refused(&e.source) {
+                return anyhow::anyhow!(
+                    "request {id} was refused: {}; nothing was sent",
+                    e.source.message()
+                );
+            }
             anyhow::anyhow!(
                 "{e}; use cw env agent observe {} --request-id {id}; no retry was sent",
                 self.environment_id
@@ -436,6 +444,12 @@ impl Conversation {
 fn resume_refused(error: &codewire_client::ClientError) -> bool {
     error.code() == codewire_client::ErrorCode::FailedPrecondition
         && error.reason() == Some("PLATFORM_AGENT_RESUME_REFUSED")
+}
+/// A request the platform refused at admission because the conversation's
+/// last request has not settled; the reason names it and the way out.
+fn request_refused(error: &codewire_client::ClientError) -> bool {
+    error.code() == codewire_client::ErrorCode::FailedPrecondition
+        && error.reason() == Some("PLATFORM_AGENT_REQUEST_REFUSED")
 }
 /// The managed driver a platform Sandbox runs; the Sandbox is always Linux.
 fn is_platform_driver(command: &[String]) -> bool {

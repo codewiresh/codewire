@@ -1980,6 +1980,69 @@ database_case!(
             .await?)?;
     }
 );
+database_case!(
+    db_a_blocked_conversation_names_its_request_and_the_way_out,
+    f,
+    {
+        // #2782: while a conversation's request has not settled, only that
+        // request's cleanup may follow; anything else is refused definitely,
+        // naming the request and the way out, not as a plain conflict.
+        let blocked = |result: AppResult<Admission>, needles: &[&str]| -> Result<()> {
+            match result {
+                Err(AppError::Coded { code, detail, .. })
+                    if code == "platform_agent_request_refused"
+                        && needles.iter().all(|n| detail.contains(n)) =>
+                {
+                    Ok(())
+                }
+                Err(other) => anyhow::bail!("expected a named refusal {needles:?}, got {other:?}"),
+                Ok(_) => anyhow::bail!("expected a named refusal {needles:?}, got an admission"),
+            }
+        };
+        let m = f.launch().await?;
+        let first = control(&m, ManagedAction::Message);
+        let (_, owner) = f.admit(first.clone()).await?;
+        let id = first.request_id.to_string();
+        blocked(
+            f.journal
+                .admit(
+                    f.facts.clone(),
+                    &f.user,
+                    control(&m, ManagedAction::Message),
+                )
+                .await,
+            &["message", &id, "still in progress", "try again shortly"],
+        )?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        f.journal
+            .mark_unknown(issued, "platform-agent-dispatch-unknown")
+            .await?;
+        for action in [
+            ManagedAction::Message,
+            ManagedAction::Restart,
+            ManagedAction::Stop,
+        ] {
+            blocked(
+                f.journal
+                    .admit(f.facts.clone(), &f.user, control(&m, action))
+                    .await,
+                &[
+                    &format!("message {id}'s outcome is unknown"),
+                    &format!("cw stop {ENV} {} --cleanup-request-id {id}", m.session_id),
+                ],
+            )?;
+        }
+        // Its own cleanup is still admitted.
+        own(f
+            .journal
+            .admit(
+                f.facts.clone(),
+                &f.user,
+                cleanup(&first, first.expected_launch_generation),
+            )
+            .await?)?;
+    }
+);
 database_case!(db_resume_repeat_is_answered_from_its_first_admission, f, {
     // #2705: a repeated Resume request ID is answered from its first
     // admission in every phase, never re-derived or refused as in progress.
