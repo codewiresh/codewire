@@ -770,6 +770,27 @@ class InspectionTests(SyntheticSource):
                     artifact.inspect(IMAGE_ID)
 
 
+class VerificationProfileTests(unittest.TestCase):
+    def test_every_reader_pins_one_ci_profile_and_publication_stays_release(self):
+        root = HELPER.parents[3]
+        shell = (root / "scripts/ci/images/workspace-cache.sh").read_text()
+        pins = [line.split("=", 1)[1] for line in shell.splitlines()
+                if line.startswith("readonly WORKSPACE_CW_PROFILE=")]
+        spec = importlib.util.spec_from_file_location(
+            "workspace_cache_report_profile", root / "scripts/ci/verify/workspace-cache-report.py")
+        report = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(report)
+        self.assertEqual(pins, ["ci"])
+        self.assertEqual(artifact.WORKSPACE_CW_PROFILE, "ci")
+        self.assertEqual(report.WORKSPACE_CW_PROFILE, "ci")
+        self.assertEqual(shell.count('cw-image-consumer.sh" "$WORKSPACE_CW_PROFILE" '), 2)
+        self.assertNotIn('cw-image-consumer.sh" release', shell)
+        # Only verification changes; publication builds the release profile.
+        publish = (root / "scripts/ci/images/build-push-image.sh").read_text()
+        self.assertEqual(publish.count('cw-image-consumer.sh" release '), 3)
+        self.assertNotIn("WORKSPACE_CW_PROFILE", publish)
+
+
 class CwCopyTests(unittest.TestCase):
     def setUp(self):
         path = Path(__file__).with_name("cw_image_fixtures.py")
@@ -783,7 +804,8 @@ class CwCopyTests(unittest.TestCase):
         self.source = self.fixture.create_source(self.root)
         self.work = self.base / "cw-image-work"
         self.work.mkdir(mode=0o700)
-        self.original = self.fixture.make_producer(self.root, self.work / "build")
+        self.original = self.fixture.make_producer(self.root, self.work / "build",
+                                                   profile=artifact.WORKSPACE_CW_PROFILE)
         self.reference = self.work / "cw-producer-result.json"
         self.fixture.write(self.reference, self.fixture.release.canonical(self.original), 0o400)
         self.settings = self.base / "settings.json"
@@ -885,7 +907,7 @@ class CwCopyTests(unittest.TestCase):
         self.assert_no_effects()
 
     def test_reference_closed_fields_and_profile_version_are_not_authority(self):
-        for key, value in (("profile", "ci"), ("version", "1.0.0"),
+        for key, value in (("profile", "release"), ("version", "1.0.0"),
                            ("cache_qualified", True), ("unexpected", True)):
             changed = self.original | {key: value}
             self.reference.chmod(0o600)
