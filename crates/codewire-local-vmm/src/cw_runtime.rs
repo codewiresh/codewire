@@ -910,23 +910,27 @@ fn format_runtime_disk(
         temporary,
         publication,
         &filesystem_tool("mkfs.ext4")?,
-        &[
-            "-q".into(),
-            "-F".into(),
-            "-m".into(),
-            "0".into(),
-            "-N".into(),
-            "4096".into(),
-            "-O".into(),
-            "^has_journal".into(),
-            "-E".into(),
-            "lazy_itable_init=0".into(),
-            "-L".into(),
-            "CWRUNTIME".into(),
-            "-d".into(),
-            seed.path().as_os_str().to_owned(),
-            disk.as_os_str().to_owned(),
-        ],
+        &crate::host::EXT4_FORMAT
+            .iter()
+            .map(std::ffi::OsString::from)
+            .chain([
+                "-q".into(),
+                "-F".into(),
+                "-m".into(),
+                "0".into(),
+                "-N".into(),
+                "4096".into(),
+                "-O".into(),
+                "^has_journal".into(),
+                "-E".into(),
+                "lazy_itable_init=0".into(),
+                "-L".into(),
+                "CWRUNTIME".into(),
+                "-d".into(),
+                seed.path().as_os_str().to_owned(),
+                disk.as_os_str().to_owned(),
+            ])
+            .collect::<Vec<_>>(),
         deadline,
     )?;
     let mut commands = String::from("rmdir /lost+found\n");
