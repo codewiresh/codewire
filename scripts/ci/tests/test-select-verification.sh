@@ -771,6 +771,11 @@ run_paths_case retired_connectcore_deletion pull_request refs/pull/83/head false
 run_paths_case integration_service_harness pull_request refs/pull/831/head false \
   'database policy security security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   scripts/ci/verify/run-integration-verification.sh
+# The integration lane lock and service-ownership helper (#2755) is part of
+# the same harness.
+run_present_paths_case integration_lane_lock pull_request refs/pull/2755/head false \
+  'database policy security security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  scripts/ci/verify/integration-lane.py
 run_paths_case temporal_service pull_request refs/pull/84/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
   crates/codewire-orchestration/src/worker/create.rs
@@ -1165,7 +1170,10 @@ run_paths_case cw_release_delivery_shell pull_request refs/pull/2255/head false 
   scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh \
   scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh \
   scripts/ci/setup/fetch-openbao-release-signing-key.sh \
-  scripts/ci/tests/test-fetch-openbao-release-signing-key.sh
+  scripts/ci/tests/test-fetch-openbao-release-signing-key.sh \
+  scripts/ci/release/sign-macos-cw.sh scripts/ci/setup/fetch-openbao-macos-signing.sh \
+  scripts/ci/tests/test-fetch-openbao-macos-signing.sh scripts/ci/tests/test-sign-macos-cw.sh \
+  scripts/ci/tests/fixtures/rcodesign-stand-in.sh
 run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \

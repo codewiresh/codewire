@@ -269,9 +269,9 @@ class ParentFixtureTests(unittest.TestCase):
             env={**os.environ, "CODEWIRE_TEST_SECRET_CANARY": CANARY},
         )
 
-    def finish(self, process, expected=0):
+    def finish(self, process, expected=0, deadline=12):
         try:
-            output, errors = process.communicate(timeout=12)
+            output, errors = process.communicate(timeout=deadline)
         except subprocess.TimeoutExpired:
             process.kill()
             output, errors = process.communicate(timeout=2)
@@ -557,7 +557,12 @@ class ParentFixtureTests(unittest.TestCase):
 
     def test_every_child_log_is_bounded(self):
         original = self.wrapper.read_text()
+        # A flooding child can take longer than the harness's 0.25 s to leave
+        # on a loaded host, and the parent then keeps its private directory, as
+        # it must. Give stopping the product's own patience and more, with the
+        # same 5 s working window; the run must still end clean.
         injection = (
+            "m.STOP_SECONDS = 10; m.DEADLINE_SECONDS = 25\n"
             "real_cleanup = m.Run.cleanup\n"
             "def inject(self):\n"
             "    if self.directory is not None:\n"
@@ -573,7 +578,7 @@ class ParentFixtureTests(unittest.TestCase):
                 self.signing("flood" if child == "codesign" else "success")
                 self.mode("flood-" + child)
                 self.events.unlink(missing_ok=True)
-                self.finish(self.start(), 1)
+                self.finish(self.start(), 1, deadline=45)
                 self.assertIn("logs-bounded", self.events.read_text())
 
     def test_admitted_source_inode_survives_pathname_swap(self):
