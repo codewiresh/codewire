@@ -613,11 +613,7 @@ probe_connect_surface() {
 }
 
 build_selected_services() {
-  local packages=()
-  local orchestration_bins=(
-    --bin codewire-orchestration
-    --bin log-stream-smoke
-  )
+  local packages=() binary
   selected service_idp && packages+=( -p codewire-idp )
   selected service_coordinator && packages+=( -p codewire-coordinator )
   selected service_billing && packages+=( -p codewire-billing )
@@ -633,10 +629,19 @@ build_selected_services() {
     cargo_ci build --locked --profile ci "${packages[@]}"
   fi
   if selected service_orchestration; then
-    selected service_temporal && orchestration_bins+=( --bin temporal-smoke )
     cargo_ci build --locked --profile ci -p codewire-cli-bin --bin cw
-    cargo_ci build --locked --profile ci -p codewire-orchestration \
-      "${orchestration_bins[@]}" --features kind-e2e
+    # One build for the wire contract and the service: an integration test
+    # also builds every binary of its package, with the test's features, into
+    # the profile directory. A separate `cargo build` of the binaries resolves
+    # features without dev-dependencies and compiled the crate once more.
+    cargo_ci test --locked --profile ci -p codewire-orchestration \
+      --features kind-e2e --test wire_contract --no-run
+    for binary in codewire-orchestration log-stream-smoke temporal-smoke; do
+      [ -x "$CARGO_CI_DIR/$binary" ] || {
+        echo "::error::the orchestration test build produced no $binary"
+        return 1
+      }
+    done
   fi
 }
 
