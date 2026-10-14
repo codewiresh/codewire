@@ -219,7 +219,12 @@ pub fn validate_receipt(r: &v1::PlatformManagedReceipt) -> Result<(), &'static s
         1 => r.reason == "pending",
         2 => r.reason == "issued",
         3 => r.reason == "settled",
-        4 => r.reason == "refused-before-issue",
+        // Refused before any effect, or an issued launch refused before its
+        // agent ran, with cleanup confirmed.
+        4 => matches!(
+            r.reason.as_str(),
+            "refused-before-issue" | "denied-before-run"
+        ),
         5 => matches!(
             r.reason.as_str(),
             "issued-outcome-unknown" | "target-owner-lost"
