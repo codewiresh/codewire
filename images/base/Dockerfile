@@ -8,11 +8,15 @@ ENV SHELL=/bin/bash
 # Noble is installed only from this signed, dated Ubuntu snapshot. The pinned
 # parent has no CA bundle, so the first transaction disables TLS peer checking
 # only while apt still verifies the signed InRelease and package hashes. Every
-# later transaction uses normal TLS verification.
+# later transaction uses normal TLS verification. CI may supply an internal
+# HTTP cache of the same snapshot as an optional secret; apt-get-with-retry
+# reads it without changing these sources, and the lists named after that cache
+# are removed before this layer ends.
 COPY ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources
 COPY apt-transport.conf /etc/apt/apt.conf.d/80-codewire-transport
 COPY --chmod=0755 apt-get-with-retry /usr/local/sbin/apt-get-with-retry
-RUN rm -f /etc/apt/sources.list && \
+RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
+    rm -f /etc/apt/sources.list && \
     apt-get-with-retry -o Acquire::https::Verify-Peer=false update && \
     apt-get-with-retry -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \

@@ -15,7 +15,9 @@ green_results=(
   VERIFICATION_TOOLING_RESULT=success
   VERIFICATION_RUST_TRANSPORT_EXPECTED=true
   VERIFICATION_RUST_TRANSPORT_RESULT=success
+  VERIFICATION_RUST_COMPILE_EXPECTED=true
   VERIFICATION_RUST_COMPILE_RESULT=success
+  VERIFICATION_RUST_SHARDS_EXPECTED=true
   VERIFICATION_RUST_PACKAGES_RESULT=success
   VERIFICATION_RUST_FEATURES_RESULT=success
   VERIFICATION_DATABASE_EXPECTED=true
@@ -41,7 +43,9 @@ unselected_results=(
   VERIFICATION_TOOLING_RESULT=skipped
   VERIFICATION_RUST_TRANSPORT_EXPECTED=false
   VERIFICATION_RUST_TRANSPORT_RESULT=skipped
+  VERIFICATION_RUST_COMPILE_EXPECTED=false
   VERIFICATION_RUST_COMPILE_RESULT=skipped
+  VERIFICATION_RUST_SHARDS_EXPECTED=false
   VERIFICATION_RUST_PACKAGES_RESULT=skipped
   VERIFICATION_RUST_FEATURES_RESULT=skipped
   VERIFICATION_DATABASE_EXPECTED=false
@@ -86,6 +90,59 @@ env "${green_results[@]}" \
   VERIFICATION_TESTED_TREE_HEAD=0123456789abcdef0123456789abcdef01234567 \
   VERIFICATION_TESTED_TREE_RUN=501 \
   "$CHECK" >/dev/null
+
+# A hosted quick pull request passes with only its quick groups: the policy
+# core, ShellCheck in tooling and compiling every Rust target. Every other
+# group is unselected and must stay skipped.
+quick_results=(
+  "${unselected_results[@]}"
+  VERIFICATION_POLICY_EXPECTED=true
+  VERIFICATION_POLICY_RESULT=success
+  VERIFICATION_TOOLING_EXPECTED=true
+  VERIFICATION_TOOLING_RESULT=success
+  VERIFICATION_RUST_COMPILE_EXPECTED=true
+  VERIFICATION_RUST_COMPILE_RESULT=success
+)
+quick_selection='|valid:v3|policy|policy_shell|policy_shell_omittable|pr_quick|rust_compile|complete|'
+env "${green_results[@]}" "${quick_results[@]}" \
+  VERIFICATION_SELECTION="$quick_selection" \
+  "$CHECK" >/dev/null
+
+expect_failure quick_compile_skipped \
+  'rust-compile selected capability group concluded skipped' \
+  "${quick_results[@]}" \
+  VERIFICATION_SELECTION="$quick_selection" \
+  VERIFICATION_RUST_COMPILE_RESULT=skipped
+
+expect_failure quick_rust_tests_ran \
+  'rust-transport unselected capability group concluded success' \
+  "${quick_results[@]}" \
+  VERIFICATION_SELECTION="$quick_selection" \
+  VERIFICATION_RUST_TRANSPORT_RESULT=success
+
+# Curated locks alone run Rust / transport verification without the shards.
+env "${green_results[@]}" \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust_curated_locks|complete|' \
+  VERIFICATION_RUST_SHARDS_EXPECTED=false \
+  VERIFICATION_RUST_PACKAGES_RESULT=skipped \
+  VERIFICATION_RUST_FEATURES_RESULT=skipped \
+  "$CHECK" >/dev/null
+
+expect_failure shards_ran_unselected \
+  'rust-packages unselected capability group concluded success' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust_curated_locks|complete|' \
+  VERIFICATION_RUST_SHARDS_EXPECTED=false \
+  VERIFICATION_RUST_FEATURES_RESULT=skipped
+
+expect_failure missing_shards_expectation \
+  'rust-packages capability expectation is missing' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
+  VERIFICATION_RUST_SHARDS_EXPECTED=
+
+expect_failure missing_compile_expectation \
+  'rust-compile capability expectation is missing' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
+  VERIFICATION_RUST_COMPILE_EXPECTED=
 
 expect_failure standard_failure 'standard selected capability group concluded failure' \
   VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \

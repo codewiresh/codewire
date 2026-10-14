@@ -3,6 +3,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PRIMARY_ROOT="$ROOT"
+# Cases below set the CI apt snapshot cache explicitly.
+unset CODEWIRE_APT_SNAPSHOT_MIRROR
 mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/workspace-cache-test.MixedCase.XXXXXX")"
 credential_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-workspace-cache-data.XXXXXX")"
@@ -175,7 +177,7 @@ exercise() (
   printf '%s\n' "${layer_args[@]}" >"$work/layer-args"
   workspace_cache_compiler_args
   printf '%s\n' "${compiler_args[@]}" >"$work/compiler-args"
-  workspace_cache_build workspace "$source_tree" amd64 "$work/build.log" \
+  workspace_cache_build "${EXERCISE_TARGET:-workspace}" "$source_tree" amd64 "$work/build.log" \
     --file "$ROOT/images/workspace/Dockerfile" "$ROOT"
 )
 for compiler in disabled local r2; do
@@ -206,8 +208,32 @@ for compiler in disabled local r2; do
     if [[ "$compiler" == r2 ]]; then grep -q 'id=aws_shared_credentials,src=' "$work/compiler-args"
     else ! grep -q -- '--secret' "$work/compiler-args" || exit 1; fi
     ! grep -Eq 'synthetic-workspace-(key|secret)' "$FAKE_LOG" "$work/out" "$work/layer-args" "$work/compiler-args" "$work/buildkitd.toml" || exit 1
+    ! grep -q 'codewire-apt-mirror' "$FAKE_LOG" || exit 1
   done
 done
+# The CI apt snapshot cache reaches only base and workspace builds, as an
+# optional secret named by environment, and never as an argument value.
+readonly apt_mirror_secret=' --secret id=codewire-apt-mirror\,env=CODEWIRE_APT_SNAPSHOT_MIRROR '
+for target in base workspace canary-probe; do
+  for mirror in '' http://apt-cache.invalid:8080; do
+    : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
+    CODEWIRE_APT_SNAPSHOT_MIRROR="$mirror" EXERCISE_TARGET="$target" \
+      CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=local exercise >"$work/out"
+    expected=0
+    [[ -z "$mirror" || "$target" == canary-probe ]] || expected=1
+    [[ "$(grep '^buildx build ' "$FAKE_LOG" | grep -cF -- "$apt_mirror_secret" || true)" == "$expected" ]] || {
+      echo "apt snapshot secret for target=$target mirror=${mirror:-unset} is not $expected" >&2; exit 1;
+    }
+    ! grep -q 'apt-cache.invalid' "$FAKE_LOG" "$work/out" || exit 1
+  done
+done
+# The no-cache retry after a remote layer read failure keeps the secret.
+: >"$FAKE_LOG"; : >"$FAKE_BUILDS"
+CODEWIRE_APT_SNAPSHOT_MIRROR=http://apt-cache.invalid:8080 \
+  CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=r2 FAKE_FAILURE=cache exercise >"$work/out"
+[[ "$(wc -l <"$FAKE_BUILDS")" == 2 && "$(cat "$work/fallback")" == true ]]
+[[ "$(grep '^buildx build ' "$FAKE_LOG" | grep -cF -- "$apt_mirror_secret")" == 2 ]]
+grep '^buildx build ' "$FAKE_LOG" | tail -n 1 | grep -qF -- "--no-cache$apt_mirror_secret--file "
 # The measured warm workers import only their successful producer. Their own
 # exports are distinct, so neither parallel replicate can seed the other.
 measurement_args() (
@@ -444,5 +470,5 @@ for pid_file in "$FAKE_CANARY_PROCESS" "$FAKE_CANARY_CHILD"; do
   state="$(ps -o stat= -p "$child_pid" || true)"
   [[ -z "$state" || "$state" == Z* ]] || { kill -TERM "$child_pid"; echo 'canary left a live child' >&2; exit 1; }
 done
-printf 'workspace cache: 9 mode pairs, %s diagnostic cases, owned daemon credentials, bounded retry and failure cleanup passed\n' \
+printf 'workspace cache: 9 mode pairs, 7 apt snapshot cases, %s diagnostic cases, owned daemon credentials, bounded retry and failure cleanup passed\n' \
   "$diagnostic_cases"
