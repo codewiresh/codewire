@@ -2418,8 +2418,6 @@ impl SessionEngine {
             }
             None => None,
         };
-        #[cfg(not(target_os = "linux"))]
-        let platform_image: Option<()> = None;
         let mut prepared = match prepare_pipe_process(
             &self.inner.config,
             &self.inner.credential_bridge,

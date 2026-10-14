@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Preserve the Linux-hosted Darwin package check, including bundled C inputs.
 # Installation belongs to the selected workflow job or local developer setup.
+# It runs clippy with warnings as errors: Linux clippy never compiles
+# cfg(target_os = "macos") code, so a rustc warning or clippy lint there is
+# caught only here (a macOS-only unused variable passed `check` for a week).
 #
 # With --cli it checks the macOS cw for both Mac targets instead. That cw
 # links Apple frameworks (Security, SystemConfiguration), so only a Mac links
@@ -80,14 +83,14 @@ export CARGO_ZIGBUILD_ZIG_PATH="$zig_bin"
 if [[ "$mode" == cli ]]; then
   printf '[darwin-cross] Zig %s; cargo-zigbuild %s; macOS cw for aarch64 and x86_64\n' \
     "$zig_version" "$DARWIN_CHECK_ZIGBUILD_VERSION"
-  exec "$zigbuild_bin" check --locked -p codewire-cli-bin --bin cw \
-    --target aarch64-apple-darwin --target x86_64-apple-darwin
+  exec "$zigbuild_bin" clippy --locked -p codewire-cli-bin --bin cw \
+    --target aarch64-apple-darwin --target x86_64-apple-darwin -- -D warnings
 fi
 printf '[darwin-cross] Zig %s; cargo-zigbuild %s; target aarch64-apple-darwin\n' \
   "$zig_version" "$DARWIN_CHECK_ZIGBUILD_VERSION"
 
-# `cargo zigbuild check` is a build invocation, not this check subcommand.
+# `cargo zigbuild clippy` is a build invocation, not this check subcommand.
 # Keep the original packages, locked resolution, target and default features.
 # exec propagates the one actual Cargo check's failure to qualification.
-exec "$zigbuild_bin" check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
-  --target aarch64-apple-darwin
+exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
+  --target aarch64-apple-darwin -- -D warnings

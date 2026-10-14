@@ -246,6 +246,7 @@ impl TestServer {
             credential_authority_root: parent.path().join("authority"),
             executable: fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
         };
+        crate::socket_dir::prepare(&config.root).unwrap();
         let socket = config.supervisor_socket();
         let listener = UnixListener::bind(&socket).unwrap();
         let identity = host_path::set_socket_private(&socket).unwrap();
@@ -289,7 +290,7 @@ impl TestServer {
             .unwrap();
         self.identity.revalidate(&self.socket).unwrap();
         assert!(
-            host_path::PrivateRoot::open(&self.config.root)
+            host_path::PrivateRoot::open(&self.config.socket_dir())
                 .unwrap()
                 .remove_private_socket(Path::new("supervisor.sock"))
                 .unwrap()
@@ -739,7 +740,7 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
     }
     server.shutdown.take().unwrap().send(()).unwrap();
     bounded(&mut server.task).await.unwrap();
-    host_path::PrivateRoot::open(&server.config.root)
+    host_path::PrivateRoot::open(&server.config.socket_dir())
         .unwrap()
         .remove_private_socket(Path::new("supervisor.sock"))
         .unwrap();

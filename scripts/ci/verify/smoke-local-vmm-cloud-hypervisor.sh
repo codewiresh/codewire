@@ -399,8 +399,11 @@ mkdir -m 0700 "$STATE_ROOT" "$SMOKE_ROOT/run" "$SMOKE_ROOT/runtime-home" "$OUTSI
 VM_ID="$(tr -d '\n' </proc/sys/kernel/random/uuid)"
 [[ "$VM_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] ||
   die 'kernel did not provide a valid random VM UUID'
-require_unix_socket_capacity "$STATE_ROOT/vms/$VM_ID/api/api.sock"
-require_unix_socket_capacity "$STATE_ROOT/vms/$VM_ID/vsock/vsock.sock"
+# A VM's sockets live in the state root's short per-user directory (#2735).
+SOCKET_DIR="$(python3 -I "$ROOT/scripts/dev/native_socket_dir.py" "$STATE_ROOT")" ||
+  die 'native socket directory is unavailable'
+require_unix_socket_capacity "$SOCKET_DIR/vms/$VM_ID/api/api.sock"
+require_unix_socket_capacity "$SOCKET_DIR/vms/$VM_ID/vsock/vsock.sock"
 STATE_FS_UUID="$(tr -d '\n' </proc/sys/kernel/random/uuid)"
 [[ "$STATE_FS_UUID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] ||
   die 'kernel did not provide a valid random state-disk UUID'

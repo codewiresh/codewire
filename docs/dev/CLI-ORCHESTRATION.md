@@ -188,9 +188,11 @@ passing responses through unchanged.
 
 noel, the Rust port of pi, runs only on a trusted Linux host; macOS hosts,
 VMs, Mesh members and platform sandboxes refuse it. Codewire looks up `noel`
-on PATH, never an installed `pi`. It keeps the user's ordinary pi settings,
-login and project trust; its tools run without approval prompts, and the
-driver declines any extension dialog. `--model PROVIDER/ID` is required.
+on PATH, never an installed `pi`. It keeps the user's ordinary noel settings
+(`~/.noel`), login and project trust; its tools run without approval prompts,
+and the driver declines any extension dialog. noel's notifications, such as
+an account failover switch, appear in `cw logs` and get no answer.
+`--model PROVIDER/ID` is required.
 `--effort` `low` to `max` becomes `--thinking`, `ultra` is refused, and
 without `--effort` noel keeps its own level. Startup requires noel to report
 the saved session, the requested model and level, and its `run-id` and
@@ -229,7 +231,7 @@ model reads the file when a task calls for delegation.
   placement: no file is written and no `--skill` is passed. Codex and Claude
   are launched exactly as before.
 - **An older noel.** Listing a `--skill` directory needs a noel built from
-  noeljackson/pi `main` at `08566af5` or later. An older noel accepts the
+  noeljackson/noel `main` at `08566af5` or later. An older noel accepts the
   option and ignores the directory: the conversation starts and works as
   before, its model is told nothing, and nothing reports it.
 
@@ -641,10 +643,11 @@ recovery. It runs on Linux and macOS; [MACOS-CLI.md](MACOS-CLI.md) describes
 the macOS process-ownership check. The second uses ordinary installed
 Codex/Claude login and observes conversation resume, Claude xhigh and a
 resumed lead invoking `cw` itself. The synthetic noel peer sends the records
-the noel binary sends for its `faux/echo` model; it adds only a dialog, which
-noel never opens, and a JSON-RPC mode for an older pi build. The real-noel
+the noel binary sends for its `faux/echo` model, and the notification noel
+sends on an account failover switch; it adds only a dialog, which noel never
+opens, and a JSON-RPC mode for an older pi build. The real-noel
 journey runs a built noel with `faux/echo`, offline, with a private HOME and
-pi agent directory. It observes the first answer in `cw inbox`, a second turn
+noel directory. It observes the first answer in `cw inbox`, a second turn
 in the same session, a worker waking its lead once per finished message, a
 slow turn's refused and acknowledged steers and interrupt, and a restart whose
 next message answers normally in the same session. Both prove the stop rules
@@ -686,7 +689,7 @@ again is refused and starts no second worker; and the lead is woken once per
 finished worker message, with its result. It then reads a worker's state,
 follows up, steers, waits for one result, interrupts, and stops a worker that
 has a worker of its own, with `cw stop` and `cw stop --all`.
-The real-noel journey needs a noel built from noeljackson/pi `main` at
+The real-noel journey needs a noel built from noeljackson/noel `main` at
 `08566af5` or later, which lists `--skill` directories; its other checks need
 `ef09c03f`.
 
@@ -698,7 +701,7 @@ run once; the lead hears once, and `cw inbox` and `cw logs` note the resume.
 When the driver is killed after it sent `resume_run`, the next start resumes
 the run again, counted twice. The real-noel journey adds noel's `faux/script`
 model: a model request the kill cut off is sent again (noel's
-`PI_FAUX_SCRIPT_LOG` holds it twice), and a `bash` call killed while it
+`NOEL_FAUX_SCRIPT_LOG` holds it twice), and a `bash` call killed while it
 sleeps after appending a line to a file never runs again (the file keeps one
 line). The synthetic journey also proves a killed Codex or Claude driver or
 process still ends the message unknown, and that neither agent is started

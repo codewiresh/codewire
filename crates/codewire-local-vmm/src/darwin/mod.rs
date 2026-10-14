@@ -1,6 +1,7 @@
 //! Darwin host primitives for the shared local runtime.
 
 mod acl;
+pub(crate) mod disk_tool;
 pub mod path;
 pub mod process;
 pub mod sandbox;

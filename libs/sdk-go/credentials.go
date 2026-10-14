@@ -101,6 +101,43 @@ func (s *CredentialService) ListGithubRepositories(ctx context.Context, pageSize
 	return page, nil
 }
 
+// GithubPendingPermissions is an installation of the owner's GitHub App
+// connection that has not yet granted what Codewire needs. Kind is "user",
+// "organization" or "enterprise".
+type GithubPendingPermissions struct {
+	Account        string `json:"account"`
+	InstallationID uint64 `json:"installation_id"`
+	AccountKind    string `json:"account_kind"`
+}
+
+// ListGithubPendingPermissions checks the authenticated owner's GitHub App
+// connection live and returns only the installations still short of what
+// Codewire needs. An entry of an unknown kind is dropped.
+func (s *CredentialService) ListGithubPendingPermissions(ctx context.Context) ([]GithubPendingPermissions, error) {
+	if err := ensureCredentialConverterCoverage(); err != nil {
+		return nil, err
+	}
+	response, err := s.client.githubRepositories.ListGithubPendingPermissions(ctx, connect.NewRequest(&codewirev1.ListGithubPendingPermissionsRequest{}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	kinds := map[codewirev1.GithubAppAccountKind]string{
+		codewirev1.GithubAppAccountKind_GITHUB_APP_ACCOUNT_KIND_USER:         "user",
+		codewirev1.GithubAppAccountKind_GITHUB_APP_ACCOUNT_KIND_ORGANIZATION: "organization",
+		codewirev1.GithubAppAccountKind_GITHUB_APP_ACCOUNT_KIND_ENTERPRISE:   "enterprise",
+	}
+	pending := make([]GithubPendingPermissions, 0, len(response.Msg.PendingPermissions))
+	for _, value := range response.Msg.PendingPermissions {
+		if value == nil {
+			return nil, fmt.Errorf("codewire: missing GitHub installation metadata")
+		}
+		if kind, ok := kinds[value.AccountKind]; ok {
+			pending = append(pending, GithubPendingPermissions{Account: value.Account, InstallationID: value.InstallationId, AccountKind: kind})
+		}
+	}
+	return pending, nil
+}
+
 // Bounded admission/cleanup room around the server's original 15-minute limit.
 // This does not change the timeout of any ordinary SDK request.
 const credentialEnrollmentTimeout = 16 * time.Minute
@@ -168,6 +205,12 @@ func ensureCredentialConverterCoverage() error {
 		}
 		credentialConverterCoverageErr = ensureDescriptorCoverage("GitHub repository", messages.ByName("GithubRepository"), map[protoreflect.FieldNumber]protoreflect.Name{
 			1: "repository_id", 2: "full_name", 3: "default_branch", 4: "clone_url", 5: "is_private", 6: "archived", 7: "disabled",
+		})
+		if credentialConverterCoverageErr != nil {
+			return
+		}
+		credentialConverterCoverageErr = ensureDescriptorCoverage("GitHub pending permissions", messages.ByName("GithubAppPendingPermissions"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "account", 2: "installation_id", 3: "account_kind",
 		})
 	})
 	return credentialConverterCoverageErr

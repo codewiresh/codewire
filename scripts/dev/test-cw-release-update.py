@@ -150,7 +150,10 @@ def main(argv=None):
 
     before = real_install()
     # A plain [a-z0-9-] name, so a host firewall rule can match the stored versions.
-    root = Path(os.environ.get("TMPDIR") or tempfile.gettempdir()) / f"cwu-{secrets.token_hex(6)}"
+    # Resolved: install.sh refuses a prefix under a symbolic link such as macOS's
+    # /var -> /private/var, where the default TMPDIR lives.
+    base = Path(os.environ.get("TMPDIR") or tempfile.gettempdir()).resolve()
+    root = base / f"cwu-{secrets.token_hex(6)}"
     root.mkdir(mode=0o700)
     journey = Journey(root)
     report = {"from": args.source, "to": args.to, "channel": args.channel, "root": str(root)}

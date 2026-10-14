@@ -110,10 +110,6 @@ const HOST_PORT_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 const HOST_PORT_ACCEPT_QUEUE: usize = 64;
 const VMM_CASCADE_EXIT_TIMEOUT: Duration = Duration::from_millis(250);
 #[cfg(target_os = "linux")]
-const E2FSCK: &str = "/usr/bin/e2fsck";
-#[cfg(target_os = "linux")]
-const RESIZE2FS: &str = "/usr/bin/resize2fs";
-#[cfg(target_os = "linux")]
 const DIRECT_SHARE_SOURCE_FD: RawFd = 3;
 #[cfg(target_os = "linux")]
 const DIRECT_SHARE_READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -908,16 +904,31 @@ fn same_disk_object_ignoring_size(
         && expected.file.links == actual.file.links
 }
 
-async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
-    #[cfg(target_os = "linux")]
-    let program = E2FSCK;
+/// `program leading_args... disk`. e2fsck and resize2fs parse a filesystem
+/// the guest wrote, so on macOS they run confined to that one disk
+/// ([`crate::darwin::disk_tool`]).
+fn disk_tool_command(
+    program: &Path,
+    leading_args: &[&str],
+    disk: &Path,
+) -> std::io::Result<tokio::process::Command> {
     #[cfg(target_os = "macos")]
+    return crate::darwin::disk_tool::command(program, leading_args, disk);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut command = tokio::process::Command::new(program);
+        command.args(leading_args).arg(disk);
+        Ok(command)
+    }
+}
+
+async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
     let program = crate::host::e2fsprogs("e2fsck").ok_or(RunnerError::E2fsckUnavailable)?;
-    let status = tokio::process::Command::new(program)
-        .args(["-p", "-f"])
-        .arg(disk)
+    let status = disk_tool_command(&program, &["-p", "-f"], disk)
+        .map_err(|_| RunnerError::E2fsckUnavailable)?
         .env_clear()
         .env("LC_ALL", "C")
+        .env("E2FSCK_CONFIG", "/dev/null")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -931,12 +942,9 @@ async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
 }
 
 async fn run_resize2fs(disk: &Path) -> Result<(), RunnerError> {
-    #[cfg(target_os = "linux")]
-    let program = RESIZE2FS;
-    #[cfg(target_os = "macos")]
     let program = crate::host::e2fsprogs("resize2fs").ok_or(RunnerError::Resize2fsUnavailable)?;
-    let status = tokio::process::Command::new(program)
-        .arg(disk)
+    let status = disk_tool_command(&program, &[], disk)
+        .map_err(|_| RunnerError::Resize2fsUnavailable)?
         .env_clear()
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
@@ -5276,7 +5284,12 @@ pub enum RunnerError {
     DiskShrinkUnsupported { current: u64, requested: u64 },
     #[error("state disk identity changed during growth: {0}")]
     StateDiskGrowthIdentityMismatch(PathBuf),
-    #[cfg_attr(target_os = "linux", error("/usr/bin/e2fsck is unavailable"))]
+    #[cfg_attr(
+        target_os = "linux",
+        error(
+            "e2fsck is unavailable; install your distribution's e2fsprogs package (cw looks in /usr/sbin and /usr/bin)"
+        )
+    )]
     #[cfg_attr(
         target_os = "macos",
         error(
@@ -5286,7 +5299,12 @@ pub enum RunnerError {
     E2fsckUnavailable,
     #[error("e2fsck failed with status {0:?}")]
     E2fsckFailed(Option<i32>),
-    #[cfg_attr(target_os = "linux", error("/usr/bin/resize2fs is unavailable"))]
+    #[cfg_attr(
+        target_os = "linux",
+        error(
+            "resize2fs is unavailable; install your distribution's e2fsprogs package (cw looks in /usr/sbin and /usr/bin)"
+        )
+    )]
     #[cfg_attr(
         target_os = "macos",
         error(

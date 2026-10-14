@@ -242,7 +242,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib repositories::tests::integration:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "GitHub repository discovery matrix" "$logfile" 8
+  assert_passed_count "GitHub repository discovery matrix" "$logfile" 9
 
   logfile="$RUN_DIR/kind-credential-effective-acl.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
