@@ -1475,7 +1475,10 @@ async fn wait_for_output(
     session_id: &str,
     minimum_offset: u64,
 ) -> v1::SessionRecord {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // Output is persisted as the session writes it, with no deadline of its
+    // own; on a loaded host that can take longer than it does alone. The
+    // bound only catches a hang.
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let session = get_session(client, session_id).await;
             if session.output_end_offset >= minimum_offset {
