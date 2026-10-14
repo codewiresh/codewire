@@ -1441,6 +1441,74 @@ mod tests {
         }
     }
 
+    /// A Stop while the supervisor still waits for its daemon binary ends it
+    /// with the trap's status and starts no daemon. Without its traps first, a
+    /// non-PID-1 supervisor died of the signal, and as PID 1 it dropped the
+    /// signal until the Pod's termination grace ran out (#2667).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_workspace_supervisor_stops_while_waiting_for_its_daemon() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
+
+        for (signal, expected_status) in [("-TERM", 143), ("-INT", 130)] {
+            let command = super::workspace::managed_workspace_supervisor_command(
+                "",
+                "printf 'waiting\\n'; while :; do sleep 0.1; done;",
+                "printf started",
+            );
+            let child = tokio::process::Command::new("/bin/sh")
+                .args(["-c", &command])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .process_group(0)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let mut fixture = SupervisorFixture {
+                group: child.id().unwrap(),
+                child,
+                drained: false,
+            };
+            let mut stdout = BufReader::new(fixture.child.stdout.take().unwrap());
+            let mut waiting = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                stdout.read_line(&mut waiting),
+            )
+            .await
+            .expect("supervisor waits for its daemon")
+            .unwrap();
+            assert_eq!(waiting, "waiting\n");
+            assert!(
+                tokio::process::Command::new("/bin/kill")
+                    .args([signal, &fixture.group.to_string()])
+                    .env_clear()
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+            );
+            let mut rest = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                stdout.read_to_string(&mut rest),
+            )
+            .await
+            .expect("supervisor output reaches EOF")
+            .unwrap();
+            let status =
+                tokio::time::timeout(std::time::Duration::from_secs(3), fixture.child.wait())
+                    .await
+                    .expect("supervisor stops")
+                    .unwrap();
+            fixture.drained = true;
+            assert_eq!(status.code(), Some(expected_status));
+            assert_eq!(rest, "");
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn custom_workspace_supervisor_restarts_a_failed_daemon() {
