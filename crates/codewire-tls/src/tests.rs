@@ -15,6 +15,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use super::*;
+use crate::connect::AbsoluteNames;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -487,6 +488,209 @@ async fn connect_transport_refuses_plaintext_servers_and_other_origins() {
         "verified\n"
     );
     server.stop().await;
+}
+
+/// The workspace-binding host a Kind daemon dials: four dots, below the
+/// Pod's `ndots:5`, so a relative lookup tries the search list first.
+const BINDING_HOST: &str =
+    "codewire-orchestration-workspace-binding.codewire-e2e.svc.cluster.local";
+
+/// The system resolver as a static musl `cw` sees it in a Kind Sandbox Pod
+/// on a Tailscale workstation (#2701): `ndots:5`, the Pod's search list, and
+/// the node's inherited `example.invalid`, whose lookups answer SERVFAIL. musl
+/// gives up the whole lookup on that answer; glibc would move on.
+#[derive(Clone, Default)]
+struct PodResolver {
+    /// Every name the connector asked for.
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Every DNS query those names produced.
+    queries: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl PodResolver {
+    const SEARCH: [&str; 4] = [
+        "dev-sandboxes.svc.cluster.local",
+        "svc.cluster.local",
+        "cluster.local",
+        "example.invalid",
+    ];
+
+    /// One query: an address, NXDOMAIN (`None`) or SERVFAIL (`Err`).
+    fn query(&self, name: &str) -> std::io::Result<Option<std::net::SocketAddr>> {
+        self.queries.lock().unwrap().push(name.to_owned());
+        if name.ends_with(".example.invalid") {
+            Err(std::io::Error::other("SERVFAIL"))
+        } else if name == BINDING_HOST {
+            Ok(Some(([127, 0, 0, 1], 0).into()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn lookup(&self, name: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        self.asked.lock().unwrap().push(name.to_owned());
+        let (name, search) = match name.strip_suffix('.') {
+            Some(absolute) => (absolute, false),
+            None => (name, name.matches('.').count() < 5),
+        };
+        let candidates = Self::SEARCH
+            .iter()
+            .filter(|_| search)
+            .map(|domain| format!("{name}.{domain}"))
+            .chain([name.to_owned()]);
+        for candidate in candidates {
+            // A SERVFAIL ends the lookup, as in musl.
+            if let Some(address) = self.query(&candidate)? {
+                return Ok(vec![address]);
+            }
+        }
+        Err(std::io::ErrorKind::NotFound.into())
+    }
+
+    fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+
+    fn queries(&self) -> Vec<String> {
+        self.queries.lock().unwrap().clone()
+    }
+}
+
+impl tonic::codegen::Service<hyper_util::client::legacy::connect::dns::Name> for PodResolver {
+    type Response = std::vec::IntoIter<std::net::SocketAddr>;
+    type Error = std::io::Error;
+    type Future = std::future::Ready<std::io::Result<Self::Response>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, name: hyper_util::client::legacy::connect::dns::Name) -> Self::Future {
+        std::future::ready(self.lookup(name.as_str()).map(Vec::into_iter))
+    }
+}
+
+#[tokio::test]
+async fn absolute_names_skip_a_search_domain_that_answers_servfail() {
+    use tonic::codegen::Service as _;
+    let name = || BINDING_HOST.parse().unwrap();
+
+    // As given, the lookup fails the way musl failed on the workstation.
+    let mut relative = PodResolver::default();
+    let error = relative.call(name()).await.unwrap_err();
+    assert_eq!(error.to_string(), "SERVFAIL");
+    assert_eq!(
+        relative.queries().last().unwrap(),
+        &format!("{BINDING_HOST}.example.invalid")
+    );
+    assert!(!relative.queries().contains(&BINDING_HOST.to_owned()));
+
+    // As an absolute name, it is one query for exactly the endpoint.
+    let resolver = PodResolver::default();
+    let mut absolute = AbsoluteNames(resolver.clone());
+    std::future::poll_fn(|cx| absolute.poll_ready(cx))
+        .await
+        .unwrap();
+    let addresses: Vec<_> = absolute.call(name()).await.unwrap().collect();
+    assert_eq!(addresses, [std::net::SocketAddr::from(([127, 0, 0, 1], 0))]);
+    assert_eq!(resolver.asked(), [format!("{BINDING_HOST}.")]);
+    assert_eq!(resolver.queries(), [BINDING_HOST]);
+
+    // Single-label and already absolute names are looked up as given.
+    for host in ["localhost", "codewire.test.", "codewire-orchestration"] {
+        let resolver = PodResolver::default();
+        let _ = AbsoluteNames(resolver.clone())
+            .call(host.parse().unwrap())
+            .await;
+        assert_eq!(resolver.asked(), [host]);
+    }
+}
+
+/// The TLS server name and the HTTP authority a connection presented.
+#[derive(Clone, Debug)]
+struct PresentedNames(Option<String>);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsListener>>
+    for PresentedNames
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, TlsListener>) -> Self {
+        Self(stream.io().get_ref().1.server_name().map(str::to_owned))
+    }
+}
+
+#[tokio::test]
+async fn the_binding_origin_is_looked_up_absolute_but_verified_and_addressed_as_configured() {
+    let ca = Ca::new();
+    // The leaf names the origin's host without a dot, as cert-manager issues
+    // orchestration's internal leaf.
+    let files = Files::new(&ca, BINDING_HOST);
+    let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = socket.local_addr().unwrap().port();
+    let listener = TlsListener::new(socket, files.identity.clone()).unwrap();
+    let app = Router::new().route(
+        "/",
+        route_get(
+            |axum::extract::ConnectInfo(PresentedNames(sni)): axum::extract::ConnectInfo<
+                PresentedNames,
+            >,
+             headers: http::HeaderMap| async move {
+                format!(
+                    "sni={} host={}",
+                    sni.unwrap_or_default(),
+                    headers
+                        .get(http::header::HOST)
+                        .and_then(|host| host.to_str().ok())
+                        .unwrap_or_default()
+                )
+            },
+        ),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<PresentedNames>(),
+        )
+        .await
+    });
+
+    let origin = format!("https://{BINDING_HOST}:{port}");
+    // HTTP/1.1 like the daemon's binding client, so the authority is a Host
+    // header.
+    let transport = ConnectOriginTransport::for_origin(&origin, &files.roots)
+        .unwrap()
+        .http1_only();
+    let resolver = PodResolver::default();
+    let request = {
+        use http_body_util::BodyExt as _;
+        http::Request::get(format!("{origin}/"))
+            .body(
+                http_body_util::Empty::<bytes::Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed(),
+            )
+            .unwrap()
+    };
+    let response = tokio::time::timeout(
+        TEST_TIMEOUT,
+        transport.send_resolving(resolver.clone(), request),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let body = {
+        use http_body_util::BodyExt as _;
+        response.into_body().collect().await.unwrap().to_bytes()
+    };
+    assert_eq!(
+        String::from_utf8(body.to_vec()).unwrap(),
+        format!("sni={BINDING_HOST} host={BINDING_HOST}:{port}")
+    );
+    assert_eq!(resolver.asked(), [format!("{BINDING_HOST}.")]);
+    assert_eq!(resolver.queries(), [BINDING_HOST]);
+    server.abort();
 }
 
 #[tokio::test]
