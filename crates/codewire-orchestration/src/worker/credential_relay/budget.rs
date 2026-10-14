@@ -20,8 +20,12 @@ pub(super) const STREAM_BUDGET_BYTES: usize = 2 * CREDENTIAL_BRIDGE_MAX_GRPC_MES
 /// so one that stalls still leaves the other room for a largest frame.
 pub(super) const ENVIRONMENT_BUDGET_BYTES: usize = 3 * CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
 /// A frame that makes no progress for this long, waiting for budget or for
-/// its receiver, ends its epoch. The relay then starts a fresh one.
+/// its receiver, ends its epoch. The relay then starts a fresh one. No frame
+/// waits longer than an SSH request may live; one whose deadline passes while
+/// it waits is still forwarded, and the broker refuses that request alone.
 pub(super) const STALL_TIMEOUT: Duration = Duration::from_secs(30);
+const _: () =
+    assert!(STALL_TIMEOUT.as_millis() <= codewire_daemon_proto::ssh::MAX_DEADLINE.as_millis());
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Limits {
