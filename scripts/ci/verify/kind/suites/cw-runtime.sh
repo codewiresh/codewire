@@ -259,6 +259,8 @@ cw_runtime_managed_resume_continues() {
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
   log "checking that a managed conversation continues across Stop/Start in environment $environment"
   wait_kind_credential_environment "$environment" running
+  # A source change is refused until setup finishes.
+  wait_kind_credential_setup_complete "$environment"
   update="$(kind_credential_cli env --platform update "$environment" \
     --profile "platform:$profile" --yes --output json)"
   operation="$(jq -er '.operation_generation |
