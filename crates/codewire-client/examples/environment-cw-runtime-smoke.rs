@@ -81,8 +81,9 @@ mod linux {
     const STORE: &str = "/home/codewire/.local/share/codewire/cli";
 
     pub(super) async fn main() -> anyhow::Result<()> {
+        let back_to_back = super::platform_managed::back_to_back_count()?;
         if std::env::var("SMOKE_CW_MANAGED_AGENTS").as_deref() == Ok("only") {
-            return managed_only().await;
+            return managed_only(back_to_back).await;
         }
         let inputs = Inputs::open().context("admit all original journey inputs")?;
         let client = inputs
@@ -110,6 +111,10 @@ mod linux {
             }
             _ => anyhow::bail!("managed Kind mode must be absent or exactly1"),
         };
+        ensure!(
+            back_to_back.is_none() || managed.is_some(),
+            "back-to-back MESSAGEs need the managed Kind mode"
+        );
         let original_images = OriginalImages {
             support: &image,
             workspace: &inputs.a.identity,
@@ -243,7 +248,9 @@ mod linux {
         // replaced during a mutation. Ready includes held kernel identities.
         let mut submitted = Vec::new();
         let mut stage = "baseline";
-        let result = tokio::time::timeout(JOURNEY_BUDGET, async {
+        let budget = JOURNEY_BUDGET
+            + super::platform_managed::BACK_TO_BACK_ALLOWANCE * back_to_back.unwrap_or(0);
+        let result = tokio::time::timeout(budget, async {
             let baseline = next_event(&mut events_rx).await?;
             validate_probe(&baseline, 0, "ready", "baseline", None, &original_images, None)?;
             ensure!(baseline.managed.len() == if managed.is_some() { 9 } else { 0 },
@@ -342,6 +349,11 @@ mod linux {
             if let Some(journey) = &mut managed {
                 stage = "managed-controls-and-revocation";
                 journey.controls(&client).await?;
+                if let Some(count) = back_to_back {
+                    stage = "managed-back-to-back-messages";
+                    journey.back_to_back(&client, 0, count).await?;
+                    stage = "managed-controls-and-revocation";
+                }
                 for (variable, prefix, worker) in MANAGED_CREDENTIALS {
                     let name = managed_credential(variable, prefix)?;
                     inputs.cli_json::<serde_json::Value>(&[
@@ -1343,8 +1355,9 @@ mod linux {
     /// retained Kind cluster (`make kind-test SUITES=cw-managed-agents`). It
     /// runs against whatever daemon image the environment's Pod reports, so it
     /// admits no release producers and claims no CW update: launch, steer and
-    /// interrupt, revoked-provider denial, known-clean Stop, explicit Restart.
-    async fn managed_only() -> anyhow::Result<()> {
+    /// interrupt, back-to-back MESSAGEs when selected, revoked-provider denial,
+    /// known-clean Stop, explicit Restart.
+    async fn managed_only(back_to_back: Option<u32>) -> anyhow::Result<()> {
         let access = Access::open().context("admit the managed journey inputs")?;
         let client = access
             .client()
@@ -1360,7 +1373,9 @@ mod linux {
             .as_option()
             .context("runtime status omitted the daemon image identity")?
             .clone();
-        tokio::time::timeout(JOURNEY_BUDGET, async {
+        let budget = JOURNEY_BUDGET
+            + super::platform_managed::BACK_TO_BACK_ALLOWANCE * back_to_back.unwrap_or(0);
+        tokio::time::timeout(budget, async {
             let mut journey = super::platform_managed::Journey::launch(
                 &client,
                 &access.org,
@@ -1373,6 +1388,9 @@ mod linux {
             journey.begin_continuity(&client).await?;
             journey.checkpoint(&client, "managed-only").await?;
             journey.controls(&client).await?;
+            if let Some(count) = back_to_back {
+                journey.back_to_back(&client, 0, count).await?;
+            }
             for (variable, prefix, worker) in MANAGED_CREDENTIALS {
                 let name = managed_credential(variable, prefix)?;
                 access

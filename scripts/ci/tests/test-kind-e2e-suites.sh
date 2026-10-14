@@ -2563,10 +2563,20 @@ for shard_contract in \
   grep -Fq "$shard_contract" <<<"$edge_kind_block" ||
     fail "Kind shard matrix is missing: $shard_contract"
 done
-# Edge static verification runs once, in the edge leg; the browser host
-# dependencies belong only to the dashboard leg.
-grep -Fq "contains(needs.verification-selection.outputs.selection, '|edge_kind|') && matrix.shard.slug == 'edge' }}" \
-  <<<"$edge_kind_block" || fail 'Edge static verification is not pinned to the edge shard'
+# Edge static verification needs no cluster: it runs once, in tooling, so an
+# edge-only selection starts no Kind leg. The browser host dependencies belong
+# only to the dashboard leg.
+tooling_block="$(awk '
+  $0 == "  tooling:" { selected=1; next }
+  selected && /^  [a-z][a-z-]*:$/ { exit }
+  selected { print }
+' "$ROOT/.gitea/workflows/ci.yaml")"
+grep -Fq "contains(needs.verification-selection.outputs.selection, '|edge_kind|') }}" \
+  <<<"$(grep -A1 -F 'name: Run Edge static verification' <<<"$tooling_block")" ||
+  fail 'Edge static verification does not run in tooling for an edge selection'
+if grep -Fq 'run-product-verification.sh edge' <<<"$edge_kind_block"; then
+  fail 'Edge static verification moved back into a Kind shard'
+fi
 [ "$(grep -Fc "matrix.shard.slug == 'dashboard'" <<<"$edge_kind_block")" -eq 3 ] ||
   fail 'browser host dependencies and the failure upload are not pinned to the dashboard shard'
 # Sandbox supply-chain provenance requires a live product workspace: every

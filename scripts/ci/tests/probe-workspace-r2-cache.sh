@@ -147,6 +147,7 @@ native_phase native-denied "$common,name=$native_name" "$synthetic_credentials"
 for phase in cw-control cw-edit; do
   new_builder "$phase" "$original_credentials"
   workspace_cache_compiler_args
+  workspace_cache_apt_mirror_args
   context="$ROOT"
   if [[ "$phase" == cw-edit ]]; then
     python3 "$probe_tool" mutate "$ROOT" "$report" "$source_backup"
@@ -175,7 +176,7 @@ for phase in cw-control cw-edit; do
       "$docker_bin" buildx build --builder "$builder" --progress plain --pull --platform linux/arm64 \
       --cache-from "$common,name=$architecture/workspace/experiments/$seed_id" \
       --cache-to "$common,name=$architecture/workspace/experiments/$seed_id/probes/$nonce/$phase-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" \
-      "${compiler_args[@]}" --build-arg BASE_IMAGE_REF=scratch \
+      "${compiler_args[@]}" "${apt_mirror_args[@]}" --build-arg BASE_IMAGE_REF=scratch \
       --file "$context/images/workspace/Dockerfile" --target cw-builder-arm64 \
       --output "type=local,dest=$work/$phase-output" "$context" || status=$?
   fi
@@ -198,13 +199,14 @@ done
 
 new_builder tools "$original_credentials"
 workspace_cache_compiler_args
+workspace_cache_apt_mirror_args
 base_layout="$work/base.oci"
 workspace_cache_logged_command "$report/tools/base-build.log" \
   "$docker_bin" buildx build --builder "$builder" --progress plain --pull \
   --cache-from "$common,name=$architecture/base/experiments/$seed_id" \
   --cache-to "$common,name=$architecture/base/experiments/$seed_id/probes/$nonce/tools-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" \
   --metadata-file "$report/tools/base-metadata.json" --output "type=oci,dest=$base_layout,tar=false" \
-  --file "$work/contexts/tools/images/base/Dockerfile" "$work/contexts/tools/images/base"
+  "${apt_mirror_args[@]}" --file "$work/contexts/tools/images/base/Dockerfile" "$work/contexts/tools/images/base"
 base_digest="$(jq -er '.["containerimage.digest"] | select(test("^sha256:[0-9a-f]{64}$"))' "$report/tools/base-metadata.json")"
 image_tag="codewire-cache-probe:$nonce"
 status=0
@@ -219,7 +221,7 @@ workspace_cache_logged_command "$report/tools/build.log" \
   --cache-to "$common,name=$architecture/workspace/experiments/$seed_id/probes/$nonce/tools-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" \
   --no-cache-filter workspace-floating-tools \
   --build-context "codewire-verified-base=oci-layout://$base_layout@$base_digest" \
-  --build-arg BASE_IMAGE_REF=codewire-verified-base "${compiler_args[@]}" \
+  --build-arg BASE_IMAGE_REF=codewire-verified-base "${compiler_args[@]}" "${apt_mirror_args[@]}" \
   --label dev.codewire.promotable=false --tag "$image_tag" --load \
   --file "$work/contexts/tools/images/workspace/Dockerfile" "$work/contexts/tools" || status=$?
 printf '%s\n' "$status" >"$report/tools/status"

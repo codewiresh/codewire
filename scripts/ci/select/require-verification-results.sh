@@ -42,13 +42,13 @@ require_group_result tooling \
   "${VERIFICATION_TOOLING_EXPECTED:-missing}" \
   "${VERIFICATION_TOOLING_RESULT:-missing}"
 require_group_result rust-compile \
-  "${VERIFICATION_RUST_TRANSPORT_EXPECTED:-missing}" \
+  "${VERIFICATION_RUST_COMPILE_EXPECTED:-missing}" \
   "${VERIFICATION_RUST_COMPILE_RESULT:-missing}"
 require_group_result rust-packages \
-  "${VERIFICATION_RUST_TRANSPORT_EXPECTED:-missing}" \
+  "${VERIFICATION_RUST_SHARDS_EXPECTED:-missing}" \
   "${VERIFICATION_RUST_PACKAGES_RESULT:-missing}"
 require_group_result rust-features \
-  "${VERIFICATION_RUST_TRANSPORT_EXPECTED:-missing}" \
+  "${VERIFICATION_RUST_SHARDS_EXPECTED:-missing}" \
   "${VERIFICATION_RUST_FEATURES_RESULT:-missing}"
 require_group_result rust-transport \
   "${VERIFICATION_RUST_TRANSPORT_EXPECTED:-missing}" \
