@@ -1350,6 +1350,24 @@ mod tests {
         }
     }
 
+    /// Kubernetes starts container PID 1 with default signal dispositions, but
+    /// a test may inherit SIGINT ignored, as every job a non-interactive
+    /// shell starts in the background does (the preflight lanes), and a shell
+    /// cannot trap a signal that was ignored on entry. Give the supervisor
+    /// the dispositions its container has.
+    #[cfg(unix)]
+    fn container_signal_dispositions(command: &mut tokio::process::Command) {
+        // SAFETY: signal(2) is async-signal-safe, and it changes only the
+        // forked child's own dispositions before exec.
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                Ok(())
+            });
+        }
+    }
+
     /// The fixture is not namespace PID 1: killing its shell alone would leave
     /// the synthetic daemon alive on assertion panic or timeout. Keep its own
     /// process group until every output pipe has closed and the shell is reaped.
@@ -1387,16 +1405,17 @@ mod tests {
                 "",
                 "sh -c 'trap \"printf stopped; exit 0\" TERM; printf \"ready\\n\"; while :; do sleep 0.1; done'",
             );
-            let child = tokio::process::Command::new("/bin/sh")
+            let mut supervisor = tokio::process::Command::new("/bin/sh");
+            supervisor
                 .args(["-c", &command])
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
                 .process_group(0)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap();
+                .kill_on_drop(true);
+            container_signal_dispositions(&mut supervisor);
+            let child = supervisor.spawn().unwrap();
             let mut fixture = SupervisorFixture {
                 group: child.id().unwrap(),
                 child,
@@ -1456,16 +1475,17 @@ mod tests {
                 "printf 'waiting\\n'; while :; do sleep 0.1; done;",
                 "printf started",
             );
-            let child = tokio::process::Command::new("/bin/sh")
+            let mut supervisor = tokio::process::Command::new("/bin/sh");
+            supervisor
                 .args(["-c", &command])
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
                 .process_group(0)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap();
+                .kill_on_drop(true);
+            container_signal_dispositions(&mut supervisor);
+            let child = supervisor.spawn().unwrap();
             let mut fixture = SupervisorFixture {
                 group: child.id().unwrap(),
                 child,
