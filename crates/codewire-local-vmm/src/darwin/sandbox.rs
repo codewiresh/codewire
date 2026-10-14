@@ -213,8 +213,7 @@ mod tests {
     #[test]
     fn egress_broker_profile_admits_only_tcp_dials_and_dns() {
         const CHILD_MARKER: &str = "CODEWIRE_TEST_DARWIN_EGRESS_BROKER";
-        if let Some(port) = std::env::var_os(CHILD_MARKER) {
-            let port: u16 = port.to_str().unwrap().parse().unwrap();
+        if std::env::var_os(CHILD_MARKER).is_some() {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let (held, mut peer) = UnixStream::pair().unwrap();
             confine_egress_broker().unwrap();
@@ -228,7 +227,8 @@ mod tests {
             let mut marker = [0_u8; 1];
             peer.read_exact(&mut marker).unwrap();
 
-            let dns = std::net::UdpSocket::bind(("0.0.0.0", port)).unwrap();
+            let dns = std::net::UdpSocket::bind(("0.0.0.0", 0)).unwrap();
+            announce_udp_port(&dns);
             dns.send_to(b"query", "127.0.0.1:53").unwrap();
             let refused = dns.send_to(b"query", "127.0.0.1:9").unwrap_err();
             assert_eq!(refused.raw_os_error(), Some(libc::EPERM));
@@ -265,8 +265,7 @@ mod tests {
     #[test]
     fn mesh_transport_profile_admits_only_tcp_dials_and_direct_udp() {
         const CHILD_MARKER: &str = "CODEWIRE_TEST_DARWIN_MESH_TRANSPORT";
-        if let Some(port) = std::env::var_os(CHILD_MARKER) {
-            let port: u16 = port.to_str().unwrap().parse().unwrap();
+        if std::env::var_os(CHILD_MARKER).is_some() {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             confine_mesh_transport().unwrap();
 
@@ -276,7 +275,8 @@ mod tests {
             let mut byte = [0_u8; 1];
             peer.read_exact(&mut byte).unwrap();
 
-            let udp = std::net::UdpSocket::bind(("0.0.0.0", port)).unwrap();
+            let udp = std::net::UdpSocket::bind(("0.0.0.0", 0)).unwrap();
+            announce_udp_port(&udp);
             udp.send_to(b"stun", "127.0.0.1:3478").unwrap();
             udp.send_to(b"wireguard", "127.0.0.1:41641").unwrap();
             udp.set_read_timeout(Some(std::time::Duration::from_secs(10)))
@@ -346,23 +346,48 @@ mod tests {
     /// Run one confined test child and keep sending a "reply" datagram to the
     /// UDP port named in its marker until it exits; only inbound UDP lets
     /// the child see it.
+    const UDP_PORT_LINE: &str = "codewire-test-udp-port=";
+
+    /// The confined child binds its UDP socket to port 0 (a port picked
+    /// beforehand could be taken in between) and reports the port on its
+    /// stdout, a descriptor it already holds.
+    fn announce_udp_port(socket: &std::net::UdpSocket) {
+        println!("{UDP_PORT_LINE}{}", socket.local_addr().unwrap().port());
+    }
+
+    /// Runs one test as a confined child and sends `reply` to the UDP port
+    /// it reports until it exits.
     fn run_child_receiving_udp(test: &str, marker: &str) -> std::process::ExitStatus {
-        let port = std::net::UdpSocket::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        use std::io::BufRead as _;
+
         let mut child = crate::test_child(&mut std::process::Command::new(
             std::env::current_exe().unwrap(),
         ))
         .arg("--exact")
         .arg(test)
         .arg("--nocapture")
-        .env(marker, port.to_string())
+        .env(marker, "1")
+        .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (port_sender, port_receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                match line.strip_prefix(UDP_PORT_LINE) {
+                    Some(port) => {
+                        let _ = port_sender.send(port.parse::<u16>().unwrap());
+                    }
+                    None => println!("{line}"),
+                }
+            }
+        });
         let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut port = None;
         loop {
             if let Some(status) = child.try_wait().unwrap() {
                 return status;
@@ -372,7 +397,10 @@ mod tests {
                 child.wait().unwrap();
                 panic!("the confined probe {test} did not finish");
             }
-            let _ = sender.send_to(b"reply", ("127.0.0.1", port));
+            port = port.or_else(|| port_receiver.try_recv().ok());
+            if let Some(port) = port {
+                let _ = sender.send_to(b"reply", ("127.0.0.1", port));
+            }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
