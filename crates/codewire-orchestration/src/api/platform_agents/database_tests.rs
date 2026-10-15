@@ -1906,6 +1906,14 @@ database_case!(
                 .phase
                 == ManagedPhase::Unknown
         );
+        // An unknown Resume ended its conversation; a plain Stop never
+        // becomes its cleanup (#2782).
+        ensure!(
+            f.journal
+                .unknown_active_request(&facts2, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
         resume_refusal(
             f.journal
                 .resume_predecessor(&facts2, &m.session_id, m.driver_id)
@@ -1996,6 +2004,95 @@ database_case!(
             .journal
             .admit_resume(facts2, &f.user, resume(&m, POD, 1), predecessor)
             .await?)?;
+    }
+);
+database_case!(
+    db_a_blocked_conversation_names_its_request_and_the_way_out,
+    f,
+    {
+        // #2782: while a conversation's request has not settled, only that
+        // request's cleanup may follow; anything else is refused definitely,
+        // naming the request and the way out, not as a plain conflict.
+        let blocked = |result: AppResult<Admission>, needles: &[&str]| -> Result<()> {
+            match result {
+                Err(AppError::Coded { code, detail, .. })
+                    if code == "platform_agent_request_refused"
+                        && needles.iter().all(|n| detail.contains(n)) =>
+                {
+                    Ok(())
+                }
+                Err(other) => anyhow::bail!("expected a named refusal {needles:?}, got {other:?}"),
+                Ok(_) => anyhow::bail!("expected a named refusal {needles:?}, got an admission"),
+            }
+        };
+        let m = f.launch().await?;
+        // Nothing unsettled: a plain Stop links nothing.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
+        let first = control(&m, ManagedAction::Message);
+        let (_, owner) = f.admit(first.clone()).await?;
+        let id = first.request_id.to_string();
+        // Still in progress: a plain Stop does not take it over.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
+        blocked(
+            f.journal
+                .admit(
+                    f.facts.clone(),
+                    &f.user,
+                    control(&m, ManagedAction::Message),
+                )
+                .await,
+            &["message", &id, "still in progress", "try again shortly"],
+        )?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        f.journal
+            .mark_unknown(issued, "platform-agent-dispatch-unknown")
+            .await?;
+        for action in [
+            ManagedAction::Message,
+            ManagedAction::Restart,
+            ManagedAction::Stop,
+        ] {
+            blocked(
+                f.journal
+                    .admit(f.facts.clone(), &f.user, control(&m, action))
+                    .await,
+                &[
+                    &format!("message {id}'s outcome is unknown"),
+                    &format!("run `cw stop {ENV} {}`", m.session_id),
+                    &format!("then `cw restart {ENV} {}`", m.session_id),
+                ],
+            )?;
+        }
+        // A plain Stop is that request's cleanup: orchestration links it, and
+        // the linked Stop is admitted. Its repeat keeps the first link.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                == Some(first.request_id)
+        );
+        let stop = cleanup(&first, first.expected_launch_generation);
+        own(f
+            .journal
+            .admit(f.facts.clone(), &f.user, stop.clone())
+            .await?)?;
+        ensure!(
+            f.journal
+                .saved_mutation(&f.facts, &f.user, stop.request_id)
+                .await?
+                .and_then(|saved| saved.cleanup_of_request_id)
+                == Some(first.request_id)
+        );
     }
 );
 database_case!(
