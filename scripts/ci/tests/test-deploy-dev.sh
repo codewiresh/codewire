@@ -96,6 +96,11 @@ grep -Fq "if: \${{ always() }}" <<<"$selection_job" ||
   fail "untrusted deployed-source candidate is not cleaned up unconditionally"
 grep -Fq "rm -f -- \"\$RUNNER_TEMP/codewire-deployed-source-candidate.json\"" \
   <<<"$selection_job" || fail "untrusted deployed-source candidate cleanup is missing"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -Fq 'baseline_committed_at: ${{ steps.deployed-age.outputs.committed_at }}' <<<"$selection_job" ||
+  fail "deploy selection does not expose when Dev's running commit was made"
+grep -Fq "committed_at=\"\$(git show -s --format=%ct \"\$BASELINE_SHA\" 2>/dev/null)\"" <<<"$selection_job" ||
+  fail "Dev's running commit age is not read from the validated baseline"
 for output in deploy_dev reason matched_categories \
   dashboard_image_state daemon_image_state derp_image_state services_image_state mesh_image_state \
   baseline_sha head_sha head_tree ci_plan_sha256 ci_policy_sha256 baseline_valid; do
@@ -105,8 +110,12 @@ for output in deploy_dev reason matched_categories \
 done
 
 [[ "$(grep -Fc "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}" \
-  "$WORKFLOW")" -eq 3 ]] ||
-  fail "all-unaffected or superseded selection does not skip both runtime builds and publication"
+  "$WORKFLOW")" -eq 2 ]] ||
+  fail "all-unaffected or superseded selection does not skip both runtime builds"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -Fxq "    if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' && needs.build-service-images.outputs.stopped != 'true' && needs.build-daemon-image.outputs.stopped != 'true' }}" \
+  "$WORKFLOW" ||
+  fail "publication does not skip an unselected, superseded or stopped delivery"
 # shellcheck disable=SC2016 # Match the literal workflow expression.
 grep -Fq '      superseded: ${{ steps.canonical.outputs.superseded }}' <<<"$selection_job" ||
   fail "deploy selection does not expose whether its commit was superseded"
@@ -183,8 +192,19 @@ assert_build_half() {
     fail "$half half exceeds the protected runner lifetime"
   grep -Fxq '    needs: [deploy-selection]' <<<"$job" ||
     fail "$half half does not depend only on the trusted selection"
-  grep -Fxq "        run: scripts/ci/images/build-push-runtime-images.sh $half" <<<"$job" ||
+  grep -A2 -Fx '        run: |' <<<"$job" | grep -Fxq '          scripts/ci/deploy/delivery-superseded.sh run -- \' ||
+    fail "$half half build does not stop when main moves past it"
+  grep -Fxq "            scripts/ci/images/build-push-runtime-images.sh $half" <<<"$job" ||
     fail "$half half does not use the bounded shared-builder entrypoint"
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  grep -Fxq "      stopped: \${{ steps.start-check.outputs.stop == 'true' || steps.build.outputs.stop == 'true' }}" \
+    <<<"$job" || fail "$half half does not report a stop to publication"
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  [[ "$(grep -Fxc "        if: \${{ steps.start-check.outputs.stop != 'true' }}" <<<"$job")" -eq 2 ]] ||
+    fail "$half half does not skip its cache and build after a stop at its start"
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  [[ "$(grep -Fxc '          CODEWIRE_DEPLOYED_SOURCE_COMMITTED_AT: ${{ needs.deploy-selection.outputs.baseline_committed_at }}' <<<"$job")" -eq 2 ]] ||
+    fail "$half half does not bound its stops by Dev's running commit age"
   if grep -Eq 'OPENBAO_GHCR_|publish-image-to-|sign-runtime-image-set|dispatch-deploy-dev' <<<"$job"; then
     fail "$half half publishes, signs or dispatches outside the publishing job"
   fi
@@ -212,11 +232,14 @@ assert_build_half() {
   if grep -Fq 'scripts/ci/setup/fetch-openbao-sccache-r2-protected-credentials.sh' <<<"$job"; then
     fail "$half half fetches its cache credential outside the fail-open selector"
   fi
-  [[ "$(grep -E '^      - name: ' <<<"$job" | sed -n '1,3p')" == "$(printf '%s\n' \
+  [[ "$(grep -E '^      - name: ' <<<"$job" | sed -n '1,4p')" == "$(printf '%s\n' \
+      '      - name: Stop when main has moved past this delivery' \
       '      - name: Select the protected R2 compiler cache' \
       "      - name: $step" \
       '      - name: Remove the protected R2 compiler-cache credential')" ]] ||
-    fail "$half half does not select its cache credential before, and remove it right after, the build"
+    fail "$half half does not check supersession first, then select its cache credential before, and remove it right after, the build"
+  grep -Fxq '        run: scripts/ci/deploy/delivery-superseded.sh check' <<<"$job" ||
+    fail "$half half does not check supersession before it builds"
   # shellcheck disable=SC2016 # Match the literal workflow expression.
   awk '
     /^      - name: / { capture = ($0 == "      - name: Remove the protected R2 compiler-cache credential") }
@@ -274,6 +297,18 @@ done
 if grep -Eq 'steps\.build\.outputs|imagetools inspect|build-push-runtime-images|build-push-image' <<<"$publish_job"; then
   fail "publication resolves or rebuilds a candidate instead of taking its build job's digest"
 fi
+# The publisher's only stop point precedes all publication and signing, so a
+# stop never leaves a partially signed set.
+[[ "$(grep -Fc 'scripts/ci/deploy/delivery-superseded.sh' <<<"$publish_job")" -eq 1 ]] ||
+  fail "publication checks supersession other than once, before it signs"
+[[ "$(grep -E '^      - name: ' <<<"$publish_job" | sed -n '1p')" == \
+  '      - name: Stop when main has moved past this delivery' ]] ||
+  fail "publication does not check supersession before any publication"
+grep -Fxq '        run: scripts/ci/deploy/delivery-superseded.sh check' <<<"$publish_job" ||
+  fail "publication supersession check is not the plain check"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+[[ "$(grep -Fxc "        if: \${{ steps.publish-check.outputs.stop != 'true' }}" <<<"$publish_job")" -eq 5 ]] ||
+  fail "a stopped publication still publishes, signs, dispatches or mirrors"
 [[ "$(grep -Fc 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$publish_job")" -eq 2 ]] ||
   fail "runtime workflow does not sign the Harbor set and GHCR mirror exactly once each"
 [[ "$(grep -Fc '          CODEWIRE_DEPLOY_BASELINE_SHA:' <<<"$publish_job")" -eq 2 ]] ||

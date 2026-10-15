@@ -39,6 +39,7 @@ jobs:
       ci_policy_sha256: ${{ steps.select.outputs.ci_policy_sha256 }}
       baseline_valid: ${{ steps.select.outputs.baseline_valid }}
       dev_release_tree_state: ${{ steps.select.outputs.dev_release_tree_state }}
+      baseline_committed_at: ${{ steps.deployed-age.outputs.committed_at }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -97,6 +98,23 @@ jobs:
             --head "$GITHUB_SHA" \
             --head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
 
+      # A running delivery stops when main moves past it only while Dev's
+      # running commit is younger than 45 minutes (delivery-superseded.sh).
+      # Unknown stays empty, and an empty age never stops a delivery.
+      - name: Record when Dev's running commit was made
+        id: deployed-age
+        env:
+          BASELINE_SHA: ${{ steps.select.outputs.baseline_sha }}
+          BASELINE_VALID: ${{ steps.select.outputs.baseline_valid }}
+        run: |
+          set -euo pipefail
+          committed_at=''
+          if [[ "$BASELINE_VALID" == true && "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            committed_at="$(git show -s --format=%ct "$BASELINE_SHA" 2>/dev/null)" || committed_at=''
+          fi
+          [[ "$committed_at" =~ ^[1-9][0-9]*$ ]] || committed_at=''
+          echo "committed_at=$committed_at" >> "$GITHUB_OUTPUT"
+
       - name: Remove untrusted deployed-source candidate
         if: ${{ always() }}
         run: rm -f -- "$RUNNER_TEMP/codewire-deployed-source-candidate.json"
@@ -123,24 +141,37 @@ jobs:
       services_built_from: ${{ steps.build.outputs.services_built_from }}
       mesh_candidate_ref: ${{ steps.build.outputs.mesh_candidate_ref }}
       mesh_built_from: ${{ steps.build.outputs.mesh_built_from }}
+      stopped: ${{ steps.start-check.outputs.stop == 'true' || steps.build.outputs.stop == 'true' }}
     env:
       OPENBAO_ROLE: codewire-source-dev-publisher
       OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
+      # Stop before any work when main has moved past this delivery; the newer
+      # commit's queued run delivers it (delivery-superseded.sh).
+      - name: Stop when main has moved past this delivery
+        id: start-check
+        env:
+          CODEWIRE_DEPLOYED_SOURCE_COMMITTED_AT: ${{ needs.deploy-selection.outputs.baseline_committed_at }}
+        run: scripts/ci/deploy/delivery-superseded.sh check
+
       # The protected R2 compiler cache is best effort: when this job cannot
       # obtain its protected credential, the selector chooses the job-local
       # cache, and run-rust-build.sh compiles locally on any R2 outage.
       - name: Select the protected R2 compiler cache
         id: compiler-cache
+        if: ${{ steps.start-check.outputs.stop != 'true' }}
         run: |
           scripts/ci/setup/select-protected-rust-cache.sh \
             "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
 
+      # The build stops when main moves past this delivery while Dev is fresh.
       - name: Build and push the service runtime images
         id: build
+        if: ${{ steps.start-check.outputs.stop != 'true' }}
         env:
+          CODEWIRE_DEPLOYED_SOURCE_COMMITTED_AT: ${{ needs.deploy-selection.outputs.baseline_committed_at }}
           CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
           SCCACHE_BUCKET: example-ci-cache-protected
           SCCACHE_ENDPOINT: https://00000000000000000000000000000000.r2.cloudflarestorage.com
@@ -157,7 +188,9 @@ jobs:
           CODEWIRE_IMAGE_STATE_DERP: ${{ needs.deploy-selection.outputs.derp_image_state }}
           CODEWIRE_IMAGE_STATE_SERVICES: ${{ needs.deploy-selection.outputs.services_image_state }}
           CODEWIRE_IMAGE_STATE_MESH: ${{ needs.deploy-selection.outputs.mesh_image_state }}
-        run: scripts/ci/images/build-push-runtime-images.sh services
+        run: |
+          scripts/ci/deploy/delivery-superseded.sh run -- \
+            scripts/ci/images/build-push-runtime-images.sh services
 
       - name: Remove the protected R2 compiler-cache credential
         if: ${{ always() }}
@@ -176,24 +209,37 @@ jobs:
     outputs:
       daemon_candidate_ref: ${{ steps.build.outputs.daemon_candidate_ref }}
       daemon_built_from: ${{ steps.build.outputs.daemon_built_from }}
+      stopped: ${{ steps.start-check.outputs.stop == 'true' || steps.build.outputs.stop == 'true' }}
     env:
       OPENBAO_ROLE: codewire-source-dev-publisher
       OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
+      # Stop before any work when main has moved past this delivery; the newer
+      # commit's queued run delivers it (delivery-superseded.sh).
+      - name: Stop when main has moved past this delivery
+        id: start-check
+        env:
+          CODEWIRE_DEPLOYED_SOURCE_COMMITTED_AT: ${{ needs.deploy-selection.outputs.baseline_committed_at }}
+        run: scripts/ci/deploy/delivery-superseded.sh check
+
       # The protected R2 compiler cache is best effort: when this job cannot
       # obtain its protected credential, the selector chooses the job-local
       # cache, and run-rust-build.sh compiles locally on any R2 outage.
       - name: Select the protected R2 compiler cache
         id: compiler-cache
+        if: ${{ steps.start-check.outputs.stop != 'true' }}
         run: |
           scripts/ci/setup/select-protected-rust-cache.sh \
             "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
 
+      # The build stops when main moves past this delivery while Dev is fresh.
       - name: Build and push the daemon runtime image
         id: build
+        if: ${{ steps.start-check.outputs.stop != 'true' }}
         env:
+          CODEWIRE_DEPLOYED_SOURCE_COMMITTED_AT: ${{ needs.deploy-selection.outputs.baseline_committed_at }}
           CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
           SCCACHE_BUCKET: example-ci-cache-protected
           SCCACHE_ENDPOINT: https://00000000000000000000000000000000.r2.cloudflarestorage.com
@@ -203,7 +249,9 @@ jobs:
           CODEWIRE_RUNTIME_CARRY_FORWARD: '0'
           CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
           CODEWIRE_IMAGE_STATE_DAEMON: ${{ needs.deploy-selection.outputs.daemon_image_state }}
-        run: scripts/ci/images/build-push-runtime-images.sh daemon
+        run: |
+          scripts/ci/deploy/delivery-superseded.sh run -- \
+            scripts/ci/images/build-push-runtime-images.sh daemon
 
       - name: Remove the protected R2 compiler-cache credential
         if: ${{ always() }}
@@ -218,7 +266,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 45
     needs: [deploy-selection, build-service-images, build-daemon-image]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' && needs.build-service-images.outputs.stopped != 'true' && needs.build-daemon-image.outputs.stopped != 'true' }}
     env:
       OPENBAO_ROLE: codewire-source-dev-publisher
       OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
@@ -227,10 +275,19 @@ jobs:
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
+      # The last stop point: once signing starts, the set is signed and
+      # dispatched, so a stop never leaves a partially signed set.
+      - name: Stop when main has moved past this delivery
+        id: publish-check
+        env:
+          CODEWIRE_DEPLOYED_SOURCE_COMMITTED_AT: ${{ needs.deploy-selection.outputs.baseline_committed_at }}
+        run: scripts/ci/deploy/delivery-superseded.sh check
+
       # Each candidate is the exact digest its build job's Bake pushed, passed
       # through this run's job outputs. Publication confirms that each
       # source-SHA tag names that digest; it never takes a digest from a tag.
       - name: Publish the complete runtime set to Harbor without rebuilding
+        if: ${{ steps.publish-check.outputs.stop != 'true' }}
         run: |
           set -euo pipefail
           bundle="${RUNNER_TEMP:?}/codewire-dev-image-bundle.json"
@@ -254,6 +311,7 @@ jobs:
           scripts/ci/images/publish-image-to-harbor.sh --pinned-defaults
 
       - name: Sign the exact runtime set
+        if: ${{ steps.publish-check.outputs.stop != 'true' }}
         env:
           CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
           CODEWIRE_BUILT_FROM_DASHBOARD: ${{ needs.build-service-images.outputs.dashboard_built_from }}
@@ -274,6 +332,7 @@ jobs:
       # commit Dev should run and Dev never moves backwards. Anything else
       # stops here, after publication and before dispatch.
       - name: Require a canonical main commit that moves Dev forward
+        if: ${{ steps.publish-check.outputs.stop != 'true' }}
         env:
           DEPLOYED_SOURCE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
           DEPLOYED_SOURCE_VALID: ${{ needs.deploy-selection.outputs.baseline_valid }}
@@ -301,6 +360,7 @@ jobs:
           echo "main is now ${canonical_main_sha}; delivering its ancestor ${GITHUB_SHA}, which descends from deployed ${DEPLOYED_SOURCE_SHA}"
 
       - name: Dispatch only the canonical source SHA
+        if: ${{ steps.publish-check.outputs.stop != 'true' }}
         # The step above admitted this exact commit of canonical main.
         run: scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"
 
@@ -308,6 +368,7 @@ jobs:
       # so an unreachable ghcr.io must never block or fail delivery.
       - name: Mirror the runtime set to GHCR without gating delivery
         id: ghcr-mirror
+        if: ${{ steps.publish-check.outputs.stop != 'true' }}
         continue-on-error: true
         run: |
           scripts/ci/images/publish-image-to-ghcr.sh \

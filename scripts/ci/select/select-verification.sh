@@ -1677,6 +1677,11 @@ if [ "$event_selected" = false ]; then
         select_token release
         recognized=true
         ;;
+      # Dev delivery's supersession stop runs only in Deploy Dev.
+      scripts/ci/tests/test-delivery-superseded.sh)
+        select_token deploy
+        recognized=true
+        ;;
       Dockerfile|docker-bake.hcl|apps/*/Dockerfile*|deployments/docker/*|\
       scripts/ci/images/build-kind-images.sh|\
       scripts/ci/images/run-rust-build.sh|scripts/ci/tests/test-run-rust-build.sh)
