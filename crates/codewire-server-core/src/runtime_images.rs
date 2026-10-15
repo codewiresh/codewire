@@ -31,12 +31,9 @@ pub const DEFAULT_DAEMON_IMAGE: &str = "registry.example.invalid/codewire/daemon
 /// so the daemon of an existing Sandbox. A Start re-pins a Sandbox's daemon
 /// only from an image in one of these, compared exactly, never by suffix. Add
 /// a repository here before deployments render from it.
-pub const SUPPORT_IMAGE_REPOSITORIES: [&str; 2] = [
+pub const SUPPORT_IMAGE_REPOSITORIES: [&str; 1] = [
     // Harbor, Dev and Production.
     "registry.example.invalid/codewire/daemon",
-    // The Forgejo registry: Dev candidate smokes and the checked-in
-    // Production overlay.
-    "git.example.invalid/codewire/daemon",
 ];
 
 #[cfg(test)]

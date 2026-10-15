@@ -21,7 +21,7 @@ fn bridge_opts() -> TemplateOpts {
     TemplateOpts {
         name: "tmpl-golden-bridge".into(),
         image: "ghcr.io/codewiresh/workspace:golden".into(),
-        support_image: "git.example.invalid/codewire/daemon:golden".into(),
+        support_image: "registry.example.invalid/codewire/daemon:golden".into(),
         runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
         environment_id: ENV.into(),
         organization_id: "org-golden-bridge".into(),
