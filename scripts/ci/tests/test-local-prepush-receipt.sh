@@ -261,13 +261,101 @@ verify_other_receipt() {
 assert_reason worktree-mismatch \
   verify_other_receipt
 
-new_base="$(
-  printf 'test: synthetic newer canonical base\n' |
-    git -C "$repo" commit-tree "${base}^{tree}" -p "$base"
+# A newer canonical main commit on top of the receipt's base, writing one path
+# without touching the worktree.
+newer_main() {
+  local parent="$1" path="$2" index blob tree
+  index="$TMP/newer-main.index"
+  GIT_INDEX_FILE="$index" git -C "$repo" read-tree "$parent"
+  blob="$(printf 'newer main: %s\n' "$path" | git -C "$repo" hash-object -w --stdin)"
+  GIT_INDEX_FILE="$index" git -C "$repo" update-index --add --cacheinfo "100644,$blob,$path"
+  tree="$(GIT_INDEX_FILE="$index" git -C "$repo" write-tree)"
+  rm -f "$index"
+  printf 'test: newer main touching %s\n' "$path" |
+    git -C "$repo" commit-tree "$tree" -p "$parent"
+}
+
+# Main moves while a long check runs. Newer commits that touch none of the
+# change's paths are not in the checked tree, so the receipt still holds and
+# names the base it was checked against.
+outside_base="$(newer_main "$(newer_main "$base" docs/elsewhere.md)" docs/later.md)"
+git -C "$repo" update-ref refs/remotes/origin/main "$outside_base"
+moved_output="$(verify_merge_receipt)" || {
+  printf '%s\n' "$moved_output" >&2
+  fail 'main moving outside the change rejected the receipt'
+}
+grep -Fxq 'reason=main-moved-outside-change' <<<"$moved_output" ||
+  fail 'a moved-main acceptance did not say so'
+grep -Fxq "verified_base=$base" <<<"$moved_output" ||
+  fail 'a moved-main acceptance did not name the checked base'
+grep -Fxq 'scope=merge' <<<"$moved_output" || fail 'a moved-main acceptance lost its scope'
+grep -Fxq 'scope=merge' <<<"$(verify_receipt)" ||
+  fail 'a feature push rejected merge evidence after main moved outside the change'
+# A direct main update names its exact base; main moving is never tolerated.
+explicit_moved_verify() {
+  (cd "$repo" && "$helper" verify --head "$head" --base "$outside_base" --remote-name origin)
+}
+assert_reason source-mismatch explicit_moved_verify
+
+# A newer commit touching the change's own path needs the check again.
+git -C "$repo" update-ref refs/remotes/origin/main "$(newer_main "$outside_base" docs/feature.md)"
+assert_reason main-moved-into-change verify_merge_receipt
+
+# A main that did not move forward from the receipt's base (rewritten
+# history) is a source mismatch, as before.
+unrelated_base="$(
+  printf 'test: unrelated canonical history\n' |
+    git -C "$repo" commit-tree "${base}^{tree}"
 )"
-git -C "$repo" update-ref refs/remotes/origin/main "$new_base"
+git -C "$repo" update-ref refs/remotes/origin/main "$unrelated_base"
 assert_reason source-mismatch verify_merge_receipt
+
+# A receipt for a different branch tree stays rejected whether or not main
+# moved: it is exact only for the commit and tree it recorded.
+other_head="$(
+  printf 'test: another branch tree\n' |
+    git -C "$repo" commit-tree "$(newer_main "$head" docs/other-branch.md)^{tree}" -p "$head"
+)"
+other_head_path="$(cd "$repo" && "$helper" path --scope merge --head "$other_head" --remote-name origin)"
+cp "$backup" "$other_head_path"
+chmod 0600 "$other_head_path"
+verify_other_head() {
+  (cd "$repo" && "$helper" verify --head "$other_head" --remote-name origin --accept-scope merge)
+}
+git -C "$repo" update-ref refs/remotes/origin/main "$outside_base"
+assert_reason source-mismatch verify_other_head
 git -C "$repo" update-ref refs/remotes/origin/main "$base"
+assert_reason source-mismatch verify_other_head
+rm -f "$other_head_path"
+
+# A tampered receipt is still rejected after main moved.
+git -C "$repo" update-ref refs/remotes/origin/main "$outside_base"
+rewrite_receipt 'document["plan"]["selection"] = "|valid:v3|complete|"'
+assert_reason plan-mismatch verify_merge_receipt
+restore_receipt
+git -C "$repo" update-ref refs/remotes/origin/main "$base"
+
+# Checks that compare the change with its base read the proto tree from the
+# base: a newer proto change overlaps any proto change, not just the same file.
+# -B: importing the helper must not leave bytecode in the fixture worktree.
+python3 -B - "$helper" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("receipt", sys.argv[1])
+receipt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(receipt)
+overlaps = receipt.main_moved_into_change
+assert overlaps({"docs/a.md"}, {"docs/a.md"})
+assert not overlaps({"docs/a.md"}, {"docs/b.md"})
+assert overlaps({"proto/codewire/a.proto"}, {"proto/codewire/b.proto"})
+assert overlaps(
+    {"scripts/checks/contracts/proto-breaking-preimages.sha256"},
+    {"proto/codewire/b.proto"},
+)
+assert not overlaps({"proto/codewire/a.proto"}, {"crates/codewire-proto/src/lib.rs"})
+assert not overlaps({"docs/a.md"}, {"proto/codewire/b.proto"})
+PY
 
 restore_receipt
 verify_merge_receipt >/dev/null

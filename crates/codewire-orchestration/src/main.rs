@@ -491,6 +491,12 @@ async fn main() -> anyhow::Result<()> {
         environment_daemon_endpoints,
         // Shared session secret for daemon tokens and preview authorization.
         session_secret: cfg.session_secret.clone(),
+        terminal_ticket_replays: std::sync::Arc::new(
+            codewire_orchestration::api::terminal::TerminalTicketReplayCache::default(),
+        ),
+        org_slugs: std::sync::Arc::new(codewire_orchestration::api::preview::OrgSlugCache::new(
+            std::time::Duration::from_secs(5),
+        )),
         sandbox_cfg: ctx.sandbox_cfg.clone(),
         confidential_storage_flags,
         environment_logs,

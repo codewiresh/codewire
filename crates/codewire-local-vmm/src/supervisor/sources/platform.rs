@@ -119,6 +119,31 @@ pub(in crate::supervisor) fn managed_clients(
     Ok(Some(clients))
 }
 
+/// The clients a platform-profile environment configures for one start: its
+/// pinned clients, with GitHub only while the creator's connection is usable
+/// at this start. Every personal profile pins GitHub, so its names are always
+/// reserved, but the guest is configured for it exactly when the platform
+/// would authorize it now, as a hosted Sandbox decides at its start. The
+/// platform is asked (`github_connected`) only when GitHub is pinned. An
+/// unanswered question (`None`) omits GitHub for this start; it never
+/// fabricates it and never fails the start.
+pub(in crate::supervisor) async fn clients_for_start<F>(
+    pinned: ManagedCredentialClients,
+    github_connected: impl FnOnce() -> F,
+) -> ManagedCredentialClients
+where
+    F: std::future::Future<Output = Option<bool>>,
+{
+    if !pinned.contains(codewire_access::ManagedCredentialClient::GitHub) {
+        return pinned;
+    }
+    if github_connected().await == Some(true) {
+        pinned
+    } else {
+        pinned.without_github()
+    }
+}
+
 pub(super) fn reserved_keys(
     authority: &PlatformSourceAuthority,
 ) -> Result<BTreeSet<String>, SupervisorError> {

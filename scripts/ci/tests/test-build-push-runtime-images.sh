@@ -53,7 +53,7 @@ if [ "${1:-} ${2:-} ${3:-}" = 'buildx imagetools create' ]; then
 fi
 if [ "${1:-} ${2:-} ${3:-}" = 'image inspect --format' ]; then
   case "${4:-}" in
-    *dev.codewire.build.profile*) printf '%s\n' release ;;
+    *dev.codewire.build.profile*) printf '%s\n' "${FAKE_PROFILE:-runtime}" ;;
     *dev.codewire.promotable*) printf '%s\n' true ;;
     *org.opencontainers.image.revision*)
       reference="${5:-}"
@@ -168,6 +168,18 @@ for invalid in '' all dashboard 'services daemon'; do
 done
 [[ ! -s "$work/invalid-build.log" && ! -s "$work/invalid-output" ]] ||
   fail "an invalid runtime group reached a build"
+
+# Runtime images build the thin-LTO runtime profile. A candidate labeled with
+# any other profile, including the CLI's full-LTO release, is refused.
+for wrong in release ci; do
+  if run_group daemon "$work/profile-$wrong-output" "$work/profile-$wrong-docker.log" \
+      "$work/profile-$wrong-build.log" 43 FAKE_PROFILE="$wrong" \
+      >"$work/profile-$wrong.stdout" 2>"$work/profile-$wrong.stderr"; then
+    fail "a $wrong-profile runtime candidate was accepted"
+  fi
+  grep -Fq 'did not preserve its exact release identity' "$work/profile-$wrong.stderr" ||
+    fail "the $wrong-profile rejection was not attributable"
+done
 
 # A failed protected build, including a registry 503, stops the wrapper at
 # that image: no retry, and no later image is built.

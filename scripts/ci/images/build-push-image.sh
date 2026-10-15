@@ -829,9 +829,9 @@ if [ "$build_runtime_set" = 1 ]; then
     DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
-      CODEWIRE_RUST_PROFILE=release \
+      CODEWIRE_RUST_PROFILE=runtime \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
-      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
+      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" runtime "$cw_selected_source_dir" "$cw_image_work" -- \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
         "${bake_targets[@]}"
 
@@ -913,9 +913,9 @@ else
     DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
-      CODEWIRE_RUST_PROFILE=release \
+      CODEWIRE_RUST_PROFILE=runtime \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
-      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
+      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" runtime "$cw_selected_source_dir" "$cw_image_work" -- \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
         "$product_bake_target"
     jq -e --arg target "$product_bake_target" '
