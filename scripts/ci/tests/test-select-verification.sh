@@ -1343,6 +1343,8 @@ run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy security security_js" scripts/dev/dashboard-watch.py
 run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
   "$policy security security_js" scripts/dev/macos-cli.py scripts/dev/test-macos-cli.py
+run_present_paths_case macos_command_owner pull_request refs/pull/2064/head false \
+  "$policy security security_js" scripts/dev/macos-command-owner.py
 run_present_paths_case macos_formatter_developer_tool pull_request refs/pull/2064/head false \
   "$policy security security_js" scripts/dev/macos-ext4-tool.py scripts/dev/test-macos-ext4-tool.py
 run_present_paths_case macos_git_developer_tool pull_request refs/pull/2064/head false \

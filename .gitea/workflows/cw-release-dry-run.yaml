@@ -39,8 +39,8 @@ on:
       - 'scripts/dev/linux-local-runtime.py'
       - 'scripts/dev/macos-local-runtime.py'
       - 'scripts/dev/macos-ext4-tool.py'
+      - 'scripts/dev/macos-command-owner.py'
       - 'scripts/dev/macos-git-tool.py'
-      - 'scripts/dev/macos-cli.py'
       - '.gitea/workflows/cli-release.yaml'
       - '.gitea/workflows/cw-release-dry-run.yaml'
   workflow_dispatch:
