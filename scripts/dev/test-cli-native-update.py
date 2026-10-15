@@ -42,6 +42,9 @@ from unittest import mock
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
+# The synthetic rustc identities follow the repository pin, so a toolchain bump
+# does not leave this suite asserting a retired channel.
+PINNED_RUSTC_CHANNEL = re.search(r'channel\s*=\s*"([^"]+)"', (ROOT / "rust-toolchain.toml").read_text()).group(1)
 MAX_JSON = 64 * 1024
 MAX_EXE = 256 * 1024 * 1024
 MAX_PACK = MAX_EXE + 16 * 1024 + 24
@@ -1040,7 +1043,7 @@ def contract_tests(producer=None, image=None):
         # Deliberately not an executable: header/build-record parser evidence only.
         record = {"package_version":version, "target":producer.RUNTIME_TARGET,
                   "source_revision":"d"*40, "source_tree_sha256":"c"*64,
-                  "rustc":"rustc 1.93.0 synthetic parser fixture"}
+                  "rustc":f"rustc {PINNED_RUSTC_CHANNEL} synthetic parser fixture"}
         record.update(changes)
         data = bytearray(max(4096, producer.MIN_EXECUTABLE))
         data[:7] = b"\x7fELF\x02\x01\x01"
@@ -1434,7 +1437,7 @@ def contract_tests(producer=None, image=None):
 
         def test_rehashed_false_metadata_cannot_override_compiled_identity(self):
             for changes in ({"package_version":"1.0.1"}, {"source_revision":"e"*40},
-                            {"source_tree_sha256":"e"*64}, {"rustc":"rustc 1.93.0 wrong"},
+                            {"source_tree_sha256":"e"*64}, {"rustc":f"rustc {PINNED_RUSTC_CHANNEL} wrong"},
                             {"target":"x86_64-unknown-linux-gnu"}, {"protocol_version":2},
                             {"record_version":2}, {"schema_version":True}, {"extra":"unknown"}):
                 with self.subTest(changes=changes), tempfile.TemporaryDirectory() as name:
@@ -1645,7 +1648,7 @@ def contract_tests(producer=None, image=None):
 
         def test_pair_refuses_same_bytes_or_version_or_consumer_source(self):
             first = {"sha256":"a"*64,"package_version":"1.0.0","target":producer.RUNTIME_TARGET,
-                     "source_tree_sha256":"c"*64,"rustc":"rustc 1.93.0 fixture"}
+                     "source_tree_sha256":"c"*64,"rustc":f"rustc {PINNED_RUSTC_CHANNEL} fixture"}
             second = dict(first,sha256="b"*64,package_version="1.0.1")
             pair(mock.Mock(identity=first),mock.Mock(identity=second))
             for field in ("sha256","package_version","target","source_tree_sha256","rustc"):
