@@ -217,6 +217,7 @@ async fn a_platform_start_asks_the_connector_for_the_creators_github_connection(
             Arc::new(BrokerLeaseAuditLog::default()),
             LocalSshOperationRuntime::new(None),
             connector,
+            Arc::new(crate::broker_log::BrokerLog::disabled()),
         )
     };
     let selected = || binding(directory.path().join("explicit-platform-config")).into_proto();
@@ -301,6 +302,7 @@ async fn a_hung_platform_question_ends_at_its_deadline() {
         Arc::new(BrokerLeaseAuditLog::default()),
         LocalSshOperationRuntime::new(None),
         Some(Arc::new(Hung)),
+        Arc::new(crate::broker_log::BrokerLog::disabled()),
     );
     let environment = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
     assert_eq!(PLATFORM_GITHUB_STATE_DEADLINE, Duration::from_secs(15));
@@ -372,6 +374,7 @@ async fn the_platform_question_refuses_an_environment_with_a_local_binding() {
         Arc::new(BrokerLeaseAuditLog::default()),
         LocalSshOperationRuntime::new(None),
         Some(Arc::new(GitHubState(Some(true)))),
+        Arc::new(crate::broker_log::BrokerLog::disabled()),
     );
     let selected = || binding(directory.path().join("explicit-platform-config")).into_proto();
     assert!(
