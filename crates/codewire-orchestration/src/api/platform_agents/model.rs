@@ -457,11 +457,12 @@ impl ManagedReceipt {
         }
         // A refusal leaves nothing running: refused before any effect, a
         // Resume refused before issue for a plain reason, or an issued launch
-        // whose projection was denied before its agent ran.
+        // or Resume whose projection was denied before its agent ran (a
+        // Resume's adoption is then undone, #2769).
         let refusal = match self.reason_code.as_str() {
             "refused-before-issue" => true,
             "denied-before-run" => {
-                m.action == ManagedAction::Launch
+                matches!(m.action, ManagedAction::Launch | ManagedAction::Resume)
                     && matches!(self.lifecycle, ManagedLifecycle::Failed)
                     && self.exit_code.is_none()
             }
@@ -523,8 +524,10 @@ pub(super) fn conflict() -> AppError {
 pub(super) fn unavailable() -> AppError {
     AppError::ServiceUnavailable("platform managed journal is unavailable".into())
 }
-/// What the user is told when the target refused a Resume before issue for
-/// a plain reason (#2705). Nothing ran and nothing changed.
+/// What the user is told when the target refused a Resume for a plain
+/// reason: before issue (#2705), or after it when the environment refused
+/// the launch before the agent ran and the adoption was undone (#2769).
+/// Nothing ran and nothing changed.
 pub(super) fn resume_refusal_text(reason: &str) -> Option<&'static str> {
     Some(match reason {
         "resume-driver-alive" => {
@@ -538,12 +541,52 @@ pub(super) fn resume_refusal_text(reason: &str) -> Option<&'static str> {
             "the agent's credential changed since this conversation started; \
              start a new conversation"
         }
+        "denied-before-run" => {
+            "the environment refused its launch before the agent started; \
+             nothing ran, so send the message again"
+        }
         "resume-provider-not-admitted" => {
             "this environment's agent provider is not admitted for it; \
              start a new conversation"
         }
         _ => return None,
     })
+}
+/// A conversation whose last request has not settled admits only that
+/// request's cleanup. Anything else is refused definitely, before any
+/// effect, naming the request and the way out (#2782).
+pub(super) fn request_blocked(
+    action: ManagedAction,
+    request_id: Uuid,
+    unknown: bool,
+    environment: &str,
+    session_id: &str,
+) -> AppError {
+    let name = match action {
+        ManagedAction::Launch => "launch",
+        ManagedAction::Message => "message",
+        ManagedAction::Steer => "steer",
+        ManagedAction::Interrupt => "interrupt",
+        ManagedAction::Stop => "stop",
+        ManagedAction::Restart => "restart",
+        ManagedAction::Resume => "resume",
+    };
+    let detail = match (unknown, action) {
+        (false, _) => format!("{name} {request_id} is still in progress; try again shortly"),
+        (true, ManagedAction::Resume) => format!(
+            "{name} {request_id}'s outcome is unknown, so this conversation has ended; \
+             start a new conversation"
+        ),
+        (true, _) => format!(
+            "{name} {request_id}'s outcome is unknown; run `cw stop {environment} {session_id}`, \
+             then `cw restart {environment} {session_id}`"
+        ),
+    };
+    AppError::Coded {
+        status: axum::http::StatusCode::CONFLICT,
+        code: "platform_agent_request_refused",
+        detail: std::borrow::Cow::Owned(detail),
+    }
 }
 /// A Resume refused definitely, before any effect, with why in plain words.
 pub(super) fn resume_refused(detail: &'static str) -> AppError {

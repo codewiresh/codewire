@@ -446,9 +446,11 @@ async fn database_capture_selects_the_anthropic_form_of_the_pinned_credential() 
         seed_environment(&db).await?;
         let api_key = uuid::Uuid::new_v4().to_string();
         let subscription = uuid::Uuid::new_v4().to_string();
+        let sign_in = uuid::Uuid::new_v4().to_string();
         for (credential, kind, name) in [
             (api_key.as_str(), "api_key", "Synthetic Anthropic key"),
             (subscription.as_str(), "oauth", "Synthetic Claude subscription"),
+            (sign_in.as_str(), "claude_sign_in", "Synthetic Claude sign-in"),
         ] {
             sqlx::query(
                 "INSERT INTO platform_credentials \
@@ -465,13 +467,13 @@ async fn database_capture_selects_the_anthropic_form_of_the_pinned_credential() 
         let mut tx = db.pool.begin().await?;
         sqlx::query(
             "INSERT INTO platform_access_profiles(id,user_id,name,current_revision) \
-             VALUES ($1,$2,'synthetic',2)",
+             VALUES ($1,$2,'synthetic',3)",
         )
         .bind(PROFILE)
         .bind(CREATOR)
         .execute(&mut *tx)
         .await?;
-        for (revision, credential) in [(1_i64, &api_key), (2, &subscription)] {
+        for (revision, credential) in [(1_i64, &api_key), (2, &subscription), (3, &sign_in)] {
             sqlx::query(
                 "INSERT INTO platform_access_profile_revisions(profile_id,revision) VALUES ($1,$2)",
             )
@@ -565,6 +567,27 @@ async fn database_capture_selects_the_anthropic_form_of_the_pinned_credential() 
         }
         ensure!(
             token_environment.get("ANTHROPIC_BASE_URL").map(String::as_str)
+                == Some("http://127.0.0.1:38081/_codewire/anthropic")
+        );
+
+        // A Claude sign-in selects the sign-in form: the base URL alone, so
+        // Claude Code reads the login the daemon writes. Every Anthropic name
+        // stays reserved.
+        sqlx::query(
+            "UPDATE platform_environment_access_bindings SET profile_revision=3 WHERE environment_id=$1",
+        )
+        .bind(ENVIRONMENT)
+        .execute(&db.pool)
+        .await?;
+        let (sign_in_reserved, sign_in_clients, sign_in_environment) =
+            capture("sign-in").await?;
+        ensure!(sign_in_clients == "v2:44", "sign-in: {sign_in_clients}");
+        ensure!(sign_in_reserved == reserved);
+        for name in ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"] {
+            ensure!(!sign_in_environment.contains_key(name), "{name}");
+        }
+        ensure!(
+            sign_in_environment.get("ANTHROPIC_BASE_URL").map(String::as_str)
                 == Some("http://127.0.0.1:38081/_codewire/anthropic")
         );
 

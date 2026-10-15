@@ -414,19 +414,35 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
             with self.subTest(events=reordered):
                 self.assertNotEqual(self.rotation_proof(reordered).returncode, 0)
 
-    def admission_watch(self, events):
+    def admission_watch(self, events, relay=None):
         directory = tempfile.TemporaryDirectory(prefix="kind-admission-watch-")
         self.addCleanup(directory.cleanup)
         calls = Path(directory.name) / "calls"
+        relay_log = Path(directory.name) / "relay.log"
+        if relay is None:
+            relay = [self.relay_decision("credential_bridge_epoch_overlap")]
+        relay_log.write_text("".join(json.dumps(line) + "\n" for line in relay) + "not json\n")
         result = self.shell('''
+NS=codewire
 SANDBOX_NS=dev-sandboxes
 KIND_ADMISSION_WATCH_SECONDS=1
 sleep() { :; }
 kind_credential_fixture_events() { printf '%%s\\n' '%s'; }
-kubectl() { printf '%%s\\n' "$*" >> '%s'; }
-watch_kind_credential_fresh_admission '%s' workspace-pod /tmp/codewire-kind-fresh-admission-7
-''' % (json.dumps(events), calls, ENVIRONMENT))
+kubectl() {
+  case "$*" in
+    "-n codewire logs pod/relay-pod -c orchestration") cat '%s' ;;
+    *) printf '%%s\\n' "$*" >> '%s' ;;
+  esac
+}
+watch_kind_credential_fresh_admission '%s' workspace-pod relay-pod /tmp/codewire-kind-fresh-admission-7
+''' % (json.dumps(events), relay_log, calls, ENVIRONMENT))
         return result.returncode, calls.read_text() if calls.exists() else ""
+
+    @staticmethod
+    def relay_decision(event, environment=ENVIRONMENT):
+        return {"timestamp": "2026-10-15T14:02:26.072995Z", "level": "INFO",
+                "fields": {"event": event, "environment_id": environment},
+                "target": "codewire_orchestration::worker::credential_relay::epoch"}
 
     def test_the_admission_mark_follows_only_a_fresh_token_after_baseline(self):
         baseline = {"event": "provider_response", "scenario": "baseline", "attempt": 1,
@@ -441,6 +457,27 @@ watch_kind_credential_fresh_admission '%s' workspace-pod /tmp/codewire-kind-fres
                        [baseline, auth(environment=WORKSPACE_UID)], [auth()]):
             with self.subTest(events=events):
                 self.assertEqual(self.admission_watch(events), (1, ""))
+
+    def test_the_admission_mark_waits_for_the_relay_to_admit_its_successor(self):
+        # Run 14359: the broker authenticated the replaced workspace token, but
+        # the relay refused that successor until kubelet replaced its own token.
+        events = [{"event": "provider_response", "scenario": "baseline", "attempt": 1,
+                   "status": 200, "response_calls": 1, "refresh_calls": 0},
+                  {"event": "bridge_authenticated", "environment_id": ENVIRONMENT,
+                   "workspace_token_changed": True}]
+        overlap = self.relay_decision("credential_bridge_epoch_overlap")
+        refused = self.relay_decision("credential_bridge_successor_refused")
+        marked = (0, "-n dev-sandboxes exec workspace-pod -c workspace -- "
+                     "touch /tmp/codewire-kind-fresh-admission-7\n")
+        self.assertEqual(self.admission_watch(events, [refused, refused, overlap]), marked)
+        for relay in ([], [refused], [overlap, refused],
+                      [self.relay_decision("credential_bridge_epoch_admitted")],
+                      [self.relay_decision("credential_bridge_epoch_overlap", WORKSPACE_UID)],
+                      [refused, self.relay_decision("credential_bridge_epoch_overlap",
+                                                    WORKSPACE_UID)],
+                      [dict(overlap, target="codewire_orchestration::worker::other")]):
+            with self.subTest(relay=relay):
+                self.assertEqual(self.admission_watch(events, relay), (1, ""))
 
     def test_rotation_ends_at_an_admission_mark_or_else_past_the_epoch_bound(self):
         for changes in ({}, {"fresh_admission": False, "rotated_ms": 590000, "elapsed_ms": 600001}):
@@ -2604,6 +2641,12 @@ if mode == "ok":
 elif mode == "refused":
     print("Failed to authenticate. API Error: 401 private-claude-output-canary")
     sys.exit(1)
+elif mode == "withheld":
+    print("API Error: 403 Anthropic needs Reconnect private-claude-output-canary")
+    sys.exit(1)
+elif mode == "no-login":
+    print("Not logged in. Please run /login private-claude-output-canary")
+    sys.exit(1)
 elif mode == "refused-silent":
     sys.exit(1)
 elif mode == "refused-exit-zero":
@@ -2635,6 +2678,7 @@ class ClaudeSessionDriver(unittest.TestCase):
                     "CLAUDE_CODE_OAUTH_TOKEN": "codewire-managed"}
     API_KEY = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081/_codewire/anthropic",
                "ANTHROPIC_AUTH_TOKEN": "codewire-managed"}
+    SIGN_IN = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081/_codewire/anthropic"}
 
     def setUp(self):
         scratch = tempfile.TemporaryDirectory(prefix="kind-claude-session-")
@@ -2663,6 +2707,26 @@ class ClaudeSessionDriver(unittest.TestCase):
         return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "FAKE_CLAUDE_MODE": mode,
                 "FAKE_CLAUDE_RECORD": str(self.record), "HOME": str(self.user_home),
                 **(self.SUBSCRIPTION if projected is None else projected), **extra}
+
+    def write_login(self, refresh="codewire-managed-no-refresh-token-" + "a" * 32,
+                    marker=True, mode=0o600, login=True):
+        """The login the daemon delivers for the sign-in form, in the user's
+        own ~/.claude/.credentials.json, beside a key that is not Codewire's."""
+        directory = self.user_home / ".claude"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        document = {"mcpOAuth": {}}
+        if login:
+            document["claudeAiOauth"] = {
+                "accessToken": "sk-ant-oat01-CW_KIND_SYNTHETIC_SIGN_IN_ACCESS-000002",
+                "refreshToken": refresh, "expiresAt": 4_000_000_000_000,
+                "scopes": ["user:inference", "user:profile"], "subscriptionType": "max"}
+        if marker:
+            document["codewireManaged"] = 1
+        path = directory / ".credentials.json"
+        path.unlink(missing_ok=True)
+        path.write_text(json.dumps(document))
+        path.chmod(mode)
+        return path
 
     def write_claude_config(self, contents, mode=0o600):
         if self.claude_config.is_dir() and not self.claude_config.is_symlink():
@@ -2727,12 +2791,14 @@ class ClaudeSessionDriver(unittest.TestCase):
                 self.assertEqual(events, [{"event": "failed", "form": "subscription_token",
                                            "outcome": "success",
                                            "reason": "projection_values"}])
-        for name in self.SUBSCRIPTION:
+        for name, reason in (("ANTHROPIC_BASE_URL", "projection_missing"),
+                             # The base URL alone is the sign-in form's.
+                             ("CLAUDE_CODE_OAUTH_TOKEN", "projection_other_form")):
             with self.subTest(missing=name):
                 environ = self.environ()
                 del environ[name]
                 status, events, _ = self.main(["subscription_token", "success"], environ)
-                self.assertEqual(events[-1]["reason"], "projection_missing")
+                self.assertEqual(events[-1]["reason"], reason)
         # The other form's exact projection is named as such.
         status, events, _ = self.main(["subscription_token", "success"],
                                       self.environ(projected=self.API_KEY))
@@ -2740,6 +2806,69 @@ class ClaudeSessionDriver(unittest.TestCase):
         status, events, _ = self.main(["api_key", "success"], self.environ())
         self.assertEqual(events[-1]["reason"], "projection_other_form")
         self.assertEqual(self.calls(), [])
+
+    def test_the_sign_in_form_runs_with_the_session_home_and_its_delivered_login(self):
+        login = self.write_login()
+        before = login.read_bytes()
+        status, events, output = self.main(["sign_in", "success"],
+                                           self.environ(projected=self.SIGN_IN))
+        self.assertEqual(status, 0, output)
+        self.assertEqual(events, [
+            {"event": "claude_projection", "form": "sign_in", "source": "daemon_session"},
+            {"event": "claude_session", "form": "sign_in", "outcome": "success",
+             "client_version": "2.1.288"},
+            {"event": "complete", "form": "sign_in", "outcome": "success"},
+        ])
+        [call] = self.calls()
+        # The base URL alone; nothing that would outrank the saved login.
+        self.assertEqual(call["env"], {
+            **{name: self.SIGN_IN.get(name) for name in CLAUDE.NAMES},
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
+        # The session user's own home, where the login lives; the driver only
+        # read it.
+        self.assertEqual(call["home"], str(self.user_home))
+        self.assertNotEqual(call["cwd"], call["home"])
+        self.assertEqual(login.read_bytes(), before)
+        for private in ("CW_KIND_SYNTHETIC", "codewire-managed-no-refresh-token", "canary"):
+            self.assertNotIn(private, output)
+
+    def test_the_sign_in_form_needs_codewires_login_and_logged_out_needs_it_gone(self):
+        sign_in = self.environ(projected=self.SIGN_IN)
+        for prepare, outcome, reason in (
+                (lambda: None, "success", "login_missing"),
+                (lambda: self.write_login(login=False), "success", "login_missing"),
+                (lambda: self.write_login(), "logged_out", "login_kept"),
+                (lambda: self.write_login(refresh="users-own-refresh-token"), "success",
+                 "login_not_codewires"),
+                (lambda: self.write_login(marker=False), "success", "login_not_codewires"),
+                (lambda: self.write_login(mode=0o644), "success", "login_file")):
+            with self.subTest(reason=reason, outcome=outcome):
+                (self.user_home / ".claude/.credentials.json").unlink(missing_ok=True)
+                prepare()
+                status, events, output = self.main(["sign_in", outcome], sign_in)
+                self.assertEqual(status, 1)
+                self.assertEqual(events, [{"event": "failed", "form": "sign_in",
+                                           "outcome": outcome, "reason": reason}])
+                self.assertNotIn("CW_KIND_SYNTHETIC", output)
+        self.assertEqual(self.calls(), [])
+        # Once the daemon removed its login (other keys kept), Claude Code
+        # has none: it says so, or the broker withholds a request without one.
+        self.write_login(login=False, marker=False)
+        for mode, cause in (("no-login", "no_login"), ("withheld", "withheld")):
+            with self.subTest(mode=mode):
+                status, events, output = self.main(["sign_in", "logged_out"],
+                                                   self.environ(mode, projected=self.SIGN_IN))
+                self.assertEqual(status, 0, output)
+                self.assertEqual(events[1], {"event": "claude_session", "form": "sign_in",
+                                             "outcome": "logged_out",
+                                             "client_version": "2.1.288", "cause": cause})
+                self.assertNotIn("canary", output)
+        for mode, reason in (("ok", "refusal_not_reported"),
+                             ("refused-silent", "refusal_status_missing")):
+            with self.subTest(mode=mode):
+                status, events, _ = self.main(["sign_in", "logged_out"],
+                                              self.environ(mode, projected=self.SIGN_IN))
+                self.assertEqual((status, events[-1]["reason"]), (1, reason))
 
     def test_a_refused_token_must_be_reported_by_claude_code(self):
         status, events, output = self.main(["subscription_token", "refused"],
@@ -2762,11 +2891,26 @@ class ClaudeSessionDriver(unittest.TestCase):
         status, events, _ = self.main(["subscription_token", "success"], self.environ("refused"))
         self.assertEqual(events[-1]["reason"], "claude_exit")
 
+    def test_a_withheld_capability_must_be_reported_as_the_brokers_403(self):
+        status, events, output = self.main(["subscription_token", "withheld"],
+                                           self.environ("withheld"))
+        self.assertEqual(status, 0, output)
+        self.assertEqual(events[-1], {"event": "complete", "form": "subscription_token",
+                                      "outcome": "withheld"})
+        self.assertNotIn("canary", output)
+        # A provider 401 or a silent failure is not the broker withholding it.
+        for mode in ("refused", "refused-silent", "ok"):
+            with self.subTest(mode=mode):
+                status, events, _ = self.main(["subscription_token", "withheld"],
+                                              self.environ(mode))
+                self.assertEqual(status, 1)
+
     def test_a_synthetic_credential_anywhere_in_the_session_fails_before_claude(self):
         for name, value in (
                 ("UNRELATED", "prefix-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-suffix"),
                 ("UNRELATED", "sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123"),
                 ("UNRELATED", "sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123"),
+                ("UNRELATED", "sk-ant-oat01-CW_KIND_SYNTHETIC_SIGN_IN_ACCESS-000001"),
                 ("CW_KIND_SYNTHETIC_CLAUDE_TOKEN", "name")):
             with self.subTest(name=name, value=value):
                 status, events, output = self.main(["subscription_token", "success"],
@@ -2878,7 +3022,11 @@ class ClaudeSessionDriver(unittest.TestCase):
     def test_arguments_are_closed(self):
         for argv in ([], ["subscription_token"], ["oauth", "success"],
                      ["subscription_token", "maybe"],
-                     ["subscription_token", "success", "extra"]):
+                     ["subscription_token", "success", "extra"],
+                     # A sign-in is never refused by the fixture, and only a
+                     # sign-in can be logged out.
+                     ["sign_in", "refused"], ["api_key", "logged_out"],
+                     ["subscription_token", "logged_out"]):
             with self.subTest(argv=argv):
                 status, events, _ = self.main(argv, self.environ())
                 self.assertEqual(status, 1)
@@ -2965,7 +3113,8 @@ class ClaudeSessionHarness(unittest.TestCase):
 
     def test_claude_runs_in_a_daemon_session_and_passes_only_on_its_closed_events(self):
         for form, outcome in (("subscription_token", "success"), ("api_key", "success"),
-                              ("subscription_token", "refused")):
+                              ("subscription_token", "refused"), ("sign_in", "success"),
+                              ("sign_in", "logged_out")):
             with self.subTest(form=form, outcome=outcome):
                 result = self.claude_run(self.events(form, outcome), form=form,
                                          outcome=outcome)
@@ -2992,7 +3141,9 @@ class ClaudeSessionHarness(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for driver, form, outcome in (("/tmp/elsewhere.py", "subscription_token", "success"),
                                       (self.DRIVER, "oauth", "success"),
-                                      (self.DRIVER, "api_key", "maybe")):
+                                      (self.DRIVER, "api_key", "maybe"),
+                                      (self.DRIVER, "sign_in", "refused"),
+                                      (self.DRIVER, "api_key", "logged_out")):
             result = self.shell(
                 "kind_credential_cli() { echo unexpected-cli; return 97; }\n"
                 f"kind_credential_claude_run env-1 '{driver}' '{form}' '{outcome}'\n")
@@ -3068,7 +3219,10 @@ kind_credential_claude_stage workspace-pod
                 ("api_key", "v1:anthropic", True), ("api_key", "v2:14", True),
                 ("subscription_token", "v2:24", True), ("subscription_token", "v2:34", True),
                 ("api_key", "v2:24", False), ("subscription_token", "v1:anthropic", False),
-                ("subscription_token", "v2:3f", False), ("subscription_token", "", False)):
+                ("subscription_token", "v2:3f", False), ("subscription_token", "", False),
+                ("sign_in", "v2:44", True), ("sign_in", "v2:54", True),
+                ("sign_in", "v2:24", False), ("sign_in", "v2:45", False),
+                ("subscription_token", "v2:44", False), ("api_key", "v2:54", False)):
             with self.subTest(form=form, clients=clients):
                 result = self.shell(f"assert_kind_credential_claude_selection '{form}' "
                                     f"'{clients}'\n")
@@ -3152,7 +3306,8 @@ kind_credential_codex_request_count
         self.assertEqual(result.stdout, "")
 
     def test_claude_journey_uses_stdin_material_daemon_sessions_and_proves_recovery(self):
-        flow = HELPERS.read_text().split("kind_credential_claude_session() (", 1)[1]
+        flow = HELPERS.read_text().split("kind_credential_claude_session() (", 1)[1].split(
+            "\n)\n", 1)[0]
         self.assertLess(flow.index("set -E"), flow.index("kind_workspace_runtime_image"))
         self.assertIn('printf \'%s\' "$KIND_ANTHROPIC_API_KEY" |\n'
                       '    kind_credential_cli credentials --platform add anthropic', flow)
@@ -3207,6 +3362,181 @@ kind_credential_codex_request_count
             "deploy_agent_sandbox_and_smoke() {", 1)[1].split("\n}", 1)[0]
         self.assertLess(gate.index("kind_credential_native_smoke"),
                         gate.index("kind_credential_claude_session"))
+
+    def claude_login(self, output, status=0, mode="deliver", extra="3"):
+        directory = tempfile.TemporaryDirectory(prefix="kind-claude-login-")
+        self.addCleanup(directory.cleanup)
+        return self.shell('''
+RUN_DIR='%s'
+SANDBOX_NS=dev-sandboxes
+kind_credential_workspace() { [ "$1" = '%s' ] || return 97; printf 'workspace-pod\\n'; }
+kubectl() {
+  [ "$*" = '-n dev-sandboxes exec -i workspace-pod -c workspace -- python3 -B -u - %s%s' ] || return 99
+  cmp -s - "$ROOT/scripts/ci/verify/kind/claude_login.py" || return 98
+  printf '%%s' '%s'
+  return %d
+}
+kind_credential_claude_login '%s' %s %s
+''' % (directory.name, ENVIRONMENT, mode, " " + extra if extra else "", output, status,
+       ENVIRONMENT, mode, extra))
+
+    def test_claude_login_step_passes_only_on_its_own_completion(self):
+        delivered = '{"event":"delivered","generation":3}\n'
+        result = self.claude_login(delivered + '{"event":"complete","mode":"deliver"}\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"generation":3', result.stdout)
+        result = self.claude_login('{"event":"revoked_login_removed","unrelated":"kept"}\n'
+                                   '{"event":"complete","mode":"revoked"}\n',
+                                   mode="revoked", extra="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for output, status in (
+                (delivered + '{"event":"complete","mode":"deliver"}\n', 1),
+                (delivered + '{"event":"complete","mode":"logout"}\n', 0),
+                ('{"event":"failed","mode":"deliver","reason":"login_not_delivered"}\n'
+                 '{"event":"complete","mode":"deliver"}\n', 0),
+                ('{"event":"complete","mode":"deliver"}\n', 0),
+                ("not-json\n", 0),
+                ("", 0)):
+            with self.subTest(output=output, status=status):
+                result = self.claude_login(output, status)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("Claude Code login acceptance failed in mode deliver",
+                              result.stderr)
+
+    def test_the_latest_sign_in_token_is_the_fixtures_last_issue(self):
+        def latest(events):
+            return self.shell("kind_credential_fixture_events() { printf '%s\\n' "
+                              + shlex.quote(json.dumps(events)) + "; }\n"
+                              "kind_credential_claude_latest_token\n")
+        issued = [{"event": "claude_sign_in_token", "grant": "authorization_code",
+                   "generation": 4},
+                  {"event": "anthropic_response"},
+                  {"event": "claude_sign_in_token", "grant": "refresh_token", "generation": 5}]
+        result = latest(issued)
+        self.assertEqual((result.returncode, result.stdout), (0, "5 refresh_token\n"),
+                         result.stderr)
+        result = latest(issued[:2])
+        self.assertEqual(result.stdout, "4 authorization_code\n")
+        for events in ([], [{"event": "anthropic_response"}],
+                       [dict(issued[0], grant="password")], [dict(issued[0], generation="4")]):
+            with self.subTest(events=events):
+                self.assertNotEqual(latest(events).returncode, 0)
+
+    ROTATION_STUB = r"""
+RUN_DIR='{run_dir}'
+SANDBOX_NS=dev-sandboxes
+KIND_CLAUDE_ROTATION_READY_SECONDS=100
+sleep() {{ command sleep 0.02; }}
+kind_credential_workspace() {{ printf 'workspace-pod\n'; }}
+kubectl() {{
+  case "$*" in
+    "-n dev-sandboxes exec -i workspace-pod -c workspace -- python3 -B -u - rotation 3 "/tmp/codewire-kind-claude-rotation-*)
+      cmp -s - "$ROOT/scripts/ci/verify/kind/claude_login.py" || return 98
+      touch "$RUN_DIR/ready"
+      # The probe ends only after the reconnect.
+      for _ in $(seq 1 200); do [ -e "$RUN_DIR/reconnected" ] && break; command sleep 0.01; done
+      [ -e "$RUN_DIR/reconnected" ] || {{ printf '%s\n' '{{"event":"failed","mode":"rotation","reason":"rotation_not_delivered"}}'; return 1; }}
+      printf '%s\n' '{output}' '{{"event":"complete","mode":"rotation"}}' ;;
+    "-n dev-sandboxes exec workspace-pod -c workspace -- test -e /tmp/codewire-kind-claude-rotation-"*)
+      [ "{ready}" = yes ] && [ -e "$RUN_DIR/ready" ] ;;
+    *) echo "unexpected: $*" >&2; return 99 ;;
+  esac
+}}
+kind_credential_claude_connect() {{
+  [ "$*" = "kind-claude match reconnect" ] || return 96
+  [ -e "$RUN_DIR/ready" ] || return 95
+  touch "$RUN_DIR/reconnected"
+}}
+kind_credential_claude_rotation env-1 kind-claude 3
+"""
+
+    def rotation(self, output, ready="yes"):
+        directory = tempfile.TemporaryDirectory(prefix="kind-claude-rotation-")
+        self.addCleanup(directory.cleanup)
+        return self.shell(self.ROTATION_STUB.format(run_dir=directory.name, output=output,
+                                                    ready=ready))
+
+    def test_rotation_reconnects_only_after_the_first_turn_and_prints_the_adopted_generation(self):
+        adopted = {"event": "rotation_adopted", "previous": 3, "generation": 5,
+                   "first_turn": 3, "second_turn": 5, "restarted": False}
+        result = self.rotation(json.dumps(adopted))
+        self.assertEqual((result.returncode, result.stdout), (0, "5\n"), result.stderr)
+        for changed in ({"second_turn": 3}, {"generation": 3}, {"first_turn": 4},
+                        {"restarted": True}):
+            with self.subTest(changed=changed):
+                result = self.rotation(json.dumps(dict(adopted, **changed)))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("missing its adopted generation", result.stderr)
+        # A probe that never answers its first turn is never reconnected.
+        result = self.rotation(json.dumps(adopted), ready="no")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("never answered its first turn", result.stderr)
+
+    def test_claude_sign_in_journey_delivers_rotates_and_removes_the_login_in_order(self):
+        flow = HELPERS.read_text().split("kind_credential_claude_sign_in() (", 1)[1].split(
+            "\n)\n", 1)[0]
+        connect = HELPERS.read_text().split("kind_credential_claude_connect() {", 1)[1].split(
+            "\n}\n", 1)[0]
+        # The code is pasted on the CLI's stdin, after the printed URL's own
+        # state; it is never an argument. A reconnect only adds --yes.
+        self.assertIn('<"$fifo"', connect)
+        self.assertIn('connect claude --name "$name" "${confirm[@]}"', connect)
+        self.assertIn("reconnect) confirm=(--yes)", connect)
+        self.assertIn("printf '%s#%s\\n' \"$KIND_CLAUDE_SIGN_IN_CODE\" \"$state\" >&\"$writer\"",
+                      connect)
+        ordered = [
+            'kind_credential_claude_connect "$name" mismatch',
+            "grep -Fq 'not from this Claude sign-in'",
+            'kind_credential_claude_connect "$name" match',
+            'assert_kind_credential_claude_sign_in "$name" 1',
+            'latest="$(kind_credential_claude_latest_token)"',
+            'kind_credential_cli credentials --platform --profile "$profile" set anthropic "$name"',
+            'assert_kind_credential_claude_selection sign_in "$clients"',
+            'kind_credential_claude_login "$environment" deliver "$((exchanged + 1))"',
+            '[ "$(kind_credential_claude_latest_token)" = "$delivered refresh_token" ]',
+            'kind_credential_claude_run "$environment" "$driver" sign_in success',
+            'baseline="$(assert_kind_credential_anthropic_events "$baseline" sign_in 200)"',
+            'revision="$(assert_kind_credential_claude_sign_in "$name" 2)"',
+            'rotated="$(kind_credential_claude_rotation "$environment" "$name" "$delivered")"',
+            'kind_credential_claude_login "$environment" own-login',
+            'kind_credential_claude_login "$environment" logout',
+            'kind_credential_cli env --platform stop "$environment"',
+            'kind_credential_cli env --platform start "$environment"',
+            'kind_credential_claude_login "$environment" redelivered',
+            'kind_credential_cli credentials --platform revoke "$name"',
+            'kind_credential_claude_login "$environment" revoked',
+            'driver="$(kind_credential_claude_stage "$pod")"',
+            'kind_credential_claude_run "$environment" "$driver" sign_in logged_out',
+            'length == $baseline',
+            'kind_credential_cli env --platform rm "$environment"',
+            'kind_credential_cli credentials --platform --profile "$profile" delete --yes',
+            'kind_credential_cli credentials --platform delete "$name" --yes',
+        ]
+        positions = []
+        cursor = 0
+        for step in ordered:
+            cursor = flow.index(step, cursor)
+            positions.append(cursor)
+        self.assertEqual(positions, sorted(positions))
+        # Claude Code itself never runs through kubectl exec in the journey:
+        # the session driver is staged, and the login probe pins its source.
+        self.assertNotIn("claude_session.py", flow)
+        self.assertIn("prebuilt-release", flow.split("log ", 1)[0])
+        suite = (ROOT / "scripts/ci/verify/kind/suites/credential-journey.sh").read_text()
+        self.assertLess(suite.index("\n  kind_credential_claude_session\n"),
+                        suite.index("\n  kind_credential_claude_sign_in\n"))
+        gate = (ROOT / "scripts/ci/verify/kind/common.sh").read_text().split(
+            "deploy_agent_sandbox_and_smoke() {", 1)[1].split("\n}", 1)[0]
+        self.assertLess(gate.index("kind_credential_claude_session"),
+                        gate.index("kind_credential_claude_sign_in"))
+
+    def test_the_login_probe_is_staged_from_its_checked_in_source(self):
+        helpers = HELPERS.read_text()
+        self.assertIn('< "$ROOT/scripts/ci/verify/kind/claude_login.py"', helpers)
+        source = (ROOT / "scripts/ci/verify/kind/claude_login.py").read_text()
+        self.assertIn('READY = re.compile(r"/tmp/codewire-kind-claude-rotation-[0-9]{1,12}")',
+                      source)
+        self.assertIn('ready="/tmp/codewire-kind-claude-rotation-${RANDOM}${RANDOM}"', helpers)
 
 
 if __name__ == "__main__":

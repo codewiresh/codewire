@@ -312,6 +312,70 @@ impl ManagedJournal {
         user: &AuthUser,
         request_id: Uuid,
     ) -> AppResult<Option<ManagedMutation>> {
+        match self.saved_mutation(binding, user, request_id).await? {
+            Some(saved) if saved.action != ManagedAction::Resume => Err(conflict()),
+            saved => Ok(saved),
+        }
+    }
+    /// The unknown request a plain Stop of `session_id` in this Pod cleans
+    /// up (#2782): its conversation's active request, when its outcome is
+    /// unknown. A request still in progress, or a Resume, whose unknown
+    /// outcome ended the conversation, is not one.
+    pub async fn unknown_active_request(
+        &self,
+        binding: &CapturedBindingFacts,
+        user: &AuthUser,
+        session_id: &str,
+    ) -> AppResult<Option<Uuid>> {
+        let (j, b, u, session) = (
+            self.clone(),
+            binding.clone(),
+            user.clone(),
+            session_id.to_owned(),
+        );
+        owned(async move {
+            let mut tx = j.pool.begin().await.map_err(|_| unavailable())?;
+            lock_cw_runtime_operator_in(
+                &mut tx,
+                &u,
+                &b.organization_id,
+                &b.environment_id,
+                j.flags,
+            )
+            .await?;
+            let active: Option<(Option<Uuid>,)> = sqlx::query_as(
+                "SELECT active_request_id FROM environment_platform_agent_conversations \
+                  WHERE environment_id=$1 AND pod_uid=$2 AND session_id=$3",
+            )
+            .bind(&b.environment_id)
+            .bind(uuid(&b.pod_uid)?)
+            .bind(&session)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| unavailable())?;
+            let Some((Some(id),)) = active else {
+                tx.commit().await.map_err(|_| unavailable())?;
+                return Ok(None);
+            };
+            let request = load(&mut tx, id, false)
+                .await?
+                .ok_or_else(conflict)?
+                .decode()?;
+            tx.commit().await.map_err(|_| unavailable())?;
+            Ok((request.phase == ManagedPhase::Unknown
+                && request.mutation.action != ManagedAction::Resume)
+                .then_some(id))
+        })
+        .await
+    }
+    /// The saved request with this ID in this environment, if any; a
+    /// request of another environment conflicts.
+    pub async fn saved_mutation(
+        &self,
+        binding: &CapturedBindingFacts,
+        user: &AuthUser,
+        request_id: Uuid,
+    ) -> AppResult<Option<ManagedMutation>> {
         let (j, b, u) = (self.clone(), binding.clone(), user.clone());
         owned(async move {
             let mut tx = j.pool.begin().await.map_err(|_| unavailable())?;
@@ -333,11 +397,7 @@ impl ManagedJournal {
             {
                 return Err(conflict());
             }
-            let request = saved.decode()?;
-            if request.mutation.action != ManagedAction::Resume {
-                return Err(conflict());
-            }
-            Ok(Some(request.mutation))
+            Ok(Some(saved.decode()?.mutation))
         })
         .await
     }
@@ -463,6 +523,24 @@ impl ManagedJournal {
             let c = conversation(tx, b, m).await?.ok_or_else(conflict)?;
             if let Some(id) = c.active_request_id {
                 let original = load(tx, id, true).await?.ok_or_else(conflict)?.decode()?;
+                // Only that request's own cleanup may follow it (#2782).
+                if m.cleanup_of_request_id != Some(id) {
+                    // The name the person typed, when the environment has one.
+                    let environment: String = sqlx::query_scalar(
+                        "SELECT COALESCE(NULLIF(name, ''), id) FROM environments WHERE id=$1",
+                    )
+                    .bind(&b.environment_id)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_err(|_| unavailable())?;
+                    return Err(request_blocked(
+                        original.mutation.action,
+                        id,
+                        original.phase == ManagedPhase::Unknown,
+                        &environment,
+                        &m.session_id,
+                    ));
+                }
                 c.require_cleanup(b, m, &original)?;
                 if let Some(previous_id) = c.cleanup_request_id {
                     let previous = load(tx, previous_id, true)

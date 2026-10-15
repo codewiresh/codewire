@@ -146,7 +146,7 @@ impl OpenAiChatGptOAuthAdapter {
         })
     }
 
-    /// Parse the selected login for sealed delivery, the one listed direct
+    /// Parse the selected login for sealed delivery, a listed direct
     /// delivery exception. The lease must carry the dedicated Codex login
     /// permission; a proxied Responses lease never qualifies, nor the reverse.
     pub(crate) fn login_credential_from_lease<L: BrokerCredentialLease>(

@@ -214,9 +214,11 @@ where
 }
 
 /// The hosted workspace daemon: [`serve_grpc_with_incoming`] plus, on a hosted
-/// bridge while Codex is selected, the task that keeps Codex's own ChatGPT
-/// login in `codex_home` ([`crate::codex_home::login`]). The caller listens
-/// first and prepares `codex_home` before that.
+/// bridge, the tasks that keep the agents' own logins: Codex's ChatGPT login
+/// in `codex_home` while Codex is selected ([`crate::codex_home::login`]), and
+/// Claude Code's claude.ai login in the home's `~/.claude` while the Anthropic
+/// client is selected in its sign-in form ([`crate::claude_home::login`]). The
+/// caller listens first and prepares both homes before that.
 #[cfg(target_os = "linux")]
 pub async fn serve_hosted_grpc_with_incoming<I, IO, IE, F>(
     config: Config,
@@ -230,11 +232,11 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
-    let codex_login = HostedCodexLogin::from_env(codex_home)?;
+    let logins = HostedLogins::from_env(codex_home)?;
     serve(
         config,
         DaemonRuntimeState::ready(),
-        Some(codex_login),
+        Some(logins),
         None,
         None,
         incoming,
@@ -263,11 +265,11 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
-    let codex_login = HostedCodexLogin::from_env(codex_home)?;
+    let logins = HostedLogins::from_env(codex_home)?;
     serve(
         config,
         DaemonRuntimeState::ready(),
-        Some(codex_login),
+        Some(logins),
         None,
         Some((app_ports, pod_uid)),
         incoming,
@@ -276,29 +278,33 @@ where
     .await
 }
 
-/// Codex's home on a hosted daemon, and how often its delivered login is
-/// checked: the production period unless the Kind test deployment set
-/// [`crate::config::CODEX_LOGIN_CHECK_PERIOD_ENV`], already validated at startup.
+/// Codex's home on a hosted daemon, and how often the delivered agent logins
+/// are checked: the production period unless the Kind test deployment set
+/// [`crate::config::CODEX_LOGIN_CHECK_PERIOD_ENV`], already validated at
+/// startup. Claude Code's login lives in the configured home root.
 #[cfg(target_os = "linux")]
-struct HostedCodexLogin {
-    home: crate::codex_home::CodexHome,
+struct HostedLogins {
+    codex_home: crate::codex_home::CodexHome,
     check_period: std::time::Duration,
 }
 
 #[cfg(target_os = "linux")]
-impl HostedCodexLogin {
-    fn from_env(home: crate::codex_home::CodexHome) -> Result<Self> {
+impl HostedLogins {
+    fn from_env(codex_home: crate::codex_home::CodexHome) -> Result<Self> {
         let check_period = crate::config::codex_login_check_period(
             std::env::var_os(crate::config::CODEX_LOGIN_CHECK_PERIOD_ENV).as_deref(),
         )?;
-        Ok(Self { home, check_period })
+        Ok(Self {
+            codex_home,
+            check_period,
+        })
     }
 }
 
 #[cfg(target_os = "linux")]
-type CodexLoginHome = HostedCodexLogin;
+type AgentLogins = HostedLogins;
 #[cfg(not(target_os = "linux"))]
-type CodexLoginHome = std::convert::Infallible;
+type AgentLogins = std::convert::Infallible;
 
 #[cfg(target_os = "linux")]
 type HostControlBinding = crate::host_control::HostControlBinding;
@@ -308,7 +314,8 @@ type HostControlBinding = std::convert::Infallible;
 async fn serve<I, IO, IE, F>(
     config: Config,
     runtime_state: DaemonRuntimeState,
-    codex_home: Option<CodexLoginHome>,
+    // The hosted entry points' agent logins.
+    logins: Option<AgentLogins>,
     host_control_binding: Option<HostControlBinding>,
     // A bound daemon's application ports and its own Pod UID.
     bound: Option<(crate::app_ports::AppPortsSender, &str)>,
@@ -324,12 +331,17 @@ where
     config.validate_host()?;
     let (app_ports, pod_uid) = bound.unzip();
     #[cfg(target_os = "linux")]
-    let codex_login = codex_home.and_then(|login| {
-        crate::codex_home::login::hosted_writer(&config, login.home)
-            .map(|writer| (writer, login.check_period))
-    });
+    let (codex_login, claude_login) = match logins {
+        Some(logins) => (
+            crate::codex_home::login::hosted_writer(&config, logins.codex_home)
+                .map(|writer| (writer, logins.check_period)),
+            crate::claude_home::login::hosted_writer(&config)
+                .map(|writer| (writer, logins.check_period)),
+        ),
+        None => (None, None),
+    };
     #[cfg(not(target_os = "linux"))]
-    let _ = codex_home;
+    let _ = logins;
     let selected_ssh = config
         .managed_credential_clients
         .contains(codewire_access::ManagedCredentialClient::Ssh);
@@ -391,8 +403,8 @@ where
     let incoming = incoming
         .map(move |result| result.map(|io| ShutdownIo::new(io, Arc::clone(&incoming_shutdown))));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    // The third task: Codex's own login, beside gRPC and the guest ingress.
-    // It asks only over an admitted epoch and stops with the daemon.
+    // The agents' own logins, beside gRPC and the guest ingress. Each asks
+    // only over an admitted epoch and stops with the daemon.
     #[cfg(target_os = "linux")]
     let _codex_login =
         codex_login
@@ -400,6 +412,20 @@ where
             .map(|((writer, check_period), bridge)| {
                 AbortOnDropHandle::new(tokio::spawn(
                     crate::codex_home::login::run_codex_login_writer(
+                        writer,
+                        bridge,
+                        check_period,
+                        shutdown_rx.clone(),
+                    ),
+                ))
+            });
+    #[cfg(target_os = "linux")]
+    let _claude_login =
+        claude_login
+            .zip(bridge_owner.shared_bridge())
+            .map(|((writer, check_period), bridge)| {
+                AbortOnDropHandle::new(tokio::spawn(
+                    crate::claude_home::login::run_claude_login_writer(
                         writer,
                         bridge,
                         check_period,

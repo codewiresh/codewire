@@ -391,11 +391,11 @@ fn pool_images_must_be_digest_pinned_outside_diagnostic_runtimes() {
             ..pool_opts()
         },
         TemplateOpts {
-            support_image: "git.example.invalid/codewire/daemon:main-4b5b65d".into(),
+            support_image: "registry.example.invalid/codewire/daemon:main-4b5b65d".into(),
             ..pool_opts()
         },
         TemplateOpts {
-            support_image: "git.example.invalid/codewire/daemon@sha256:short".into(),
+            support_image: "registry.example.invalid/codewire/daemon@sha256:short".into(),
             ..pool_opts()
         },
         TemplateOpts {
@@ -412,7 +412,7 @@ fn pool_images_must_be_digest_pinned_outside_diagnostic_runtimes() {
     // A tag plus digest is pinned.
     let tag_and_digest = TemplateOpts {
         support_image: format!(
-            "git.example.invalid/codewire/daemon:main-4b5b65d@sha256:{}",
+            "registry.example.invalid/codewire/daemon:main-4b5b65d@sha256:{}",
             "5".repeat(64)
         ),
         ..pool_opts()

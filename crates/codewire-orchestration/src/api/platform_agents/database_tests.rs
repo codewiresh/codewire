@@ -1275,7 +1275,11 @@ database_case!(
 async fn db_migration39_fresh_upgrade_rollback_and_retained_evidence_refusal() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
-        let migrator = application_migrator();
+        // The fixture database carries every embedded migration. Return it to
+        // version 39 and prove only this boundary, so a later migration can
+        // neither enter this proof nor be undone by it.
+        application_migrator().undo(&db.pool, 39).await?;
+        let migrator = boundary39_migrator();
         let fresh = schema(&db.pool).await?;
         ensure!(fresh == SCHEMA39);
         println!("MEASURED_PLATFORM_MANAGED_SCHEMA39={fresh}");
@@ -1320,6 +1324,20 @@ async fn db_migration39_fresh_upgrade_rollback_and_retained_evidence_refusal() -
     }
     .await;
     db.finish(result).await
+}
+
+/// Embedded migrations 1..=39, up and down: the managed-agent boundary.
+fn boundary39_migrator() -> sqlx::migrate::Migrator {
+    sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            application_migrator()
+                .iter()
+                .filter(|m| m.version <= 39)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    }
 }
 
 async fn wait_blocker(pool: &PgPool, pid: i32) -> Result<()> {
@@ -1888,6 +1906,14 @@ database_case!(
                 .phase
                 == ManagedPhase::Unknown
         );
+        // An unknown Resume ended its conversation; a plain Stop never
+        // becomes its cleanup (#2782).
+        ensure!(
+            f.journal
+                .unknown_active_request(&facts2, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
         resume_refusal(
             f.journal
                 .resume_predecessor(&facts2, &m.session_id, m.driver_id)
@@ -1978,6 +2004,185 @@ database_case!(
             .journal
             .admit_resume(facts2, &f.user, resume(&m, POD, 1), predecessor)
             .await?)?;
+    }
+);
+database_case!(
+    db_a_blocked_conversation_names_its_request_and_the_way_out,
+    f,
+    {
+        // #2782: while a conversation's request has not settled, only that
+        // request's cleanup may follow; anything else is refused definitely,
+        // naming the request and the way out, not as a plain conflict.
+        let blocked = |result: AppResult<Admission>, needles: &[&str]| -> Result<()> {
+            match result {
+                Err(AppError::Coded { code, detail, .. })
+                    if code == "platform_agent_request_refused"
+                        && needles.iter().all(|n| detail.contains(n)) =>
+                {
+                    Ok(())
+                }
+                Err(other) => anyhow::bail!("expected a named refusal {needles:?}, got {other:?}"),
+                Ok(_) => anyhow::bail!("expected a named refusal {needles:?}, got an admission"),
+            }
+        };
+        let m = f.launch().await?;
+        // Nothing unsettled: a plain Stop links nothing.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
+        let first = control(&m, ManagedAction::Message);
+        let (_, owner) = f.admit(first.clone()).await?;
+        let id = first.request_id.to_string();
+        // Still in progress: a plain Stop does not take it over.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
+        blocked(
+            f.journal
+                .admit(
+                    f.facts.clone(),
+                    &f.user,
+                    control(&m, ManagedAction::Message),
+                )
+                .await,
+            &["message", &id, "still in progress", "try again shortly"],
+        )?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        f.journal
+            .mark_unknown(issued, "platform-agent-dispatch-unknown")
+            .await?;
+        for action in [
+            ManagedAction::Message,
+            ManagedAction::Restart,
+            ManagedAction::Stop,
+        ] {
+            blocked(
+                f.journal
+                    .admit(f.facts.clone(), &f.user, control(&m, action))
+                    .await,
+                &[
+                    &format!("message {id}'s outcome is unknown"),
+                    &format!("run `cw stop {ENV} {}`", m.session_id),
+                    &format!("then `cw restart {ENV} {}`", m.session_id),
+                ],
+            )?;
+        }
+        // A plain Stop is that request's cleanup: orchestration links it, and
+        // the linked Stop is admitted. Its repeat keeps the first link.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                == Some(first.request_id)
+        );
+        let stop = cleanup(&first, first.expected_launch_generation);
+        own(f
+            .journal
+            .admit(f.facts.clone(), &f.user, stop.clone())
+            .await?)?;
+        ensure!(
+            f.journal
+                .saved_mutation(&f.facts, &f.user, stop.request_id)
+                .await?
+                .and_then(|saved| saved.cleanup_of_request_id)
+                == Some(first.request_id)
+        );
+    }
+);
+database_case!(
+    db_resume_denied_before_run_is_refused_and_can_resume_again,
+    f,
+    {
+        // #2769: the environment refused the resumed agent's launch before it
+        // ran, and the target undid the adoption. The Resume is a definite
+        // refusal at the predecessor's generation, said plainly, and the
+        // next Resume continues from the same predecessor.
+        let m = f.launch().await?;
+        let facts2 = f.next_pod().await?;
+        let predecessor = f
+            .journal
+            .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+            .await?;
+        let r = resume(&m, POD, 1);
+        let (_, owner) = own(f
+            .journal
+            .admit_resume(facts2.clone(), &f.user, r.clone(), predecessor.clone())
+            .await?)?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        let mut denied = receipt(&r, &facts2, ManagedLifecycle::Failed);
+        denied.phase = ManagedPhase::Rejected;
+        denied.reason_code = "denied-before-run".into();
+        denied.launch_generation = r.expected_launch_generation;
+        denied.exit_code = None;
+        let saved = f.journal.settle(issued, denied).await?;
+        ensure!(saved.phase == ManagedPhase::Rejected);
+        ensure!(
+            crate::api::platform_agents::resume_rejection(&saved)
+                .is_some_and(|text| text.contains("send the message again"))
+        );
+        let (generation, active): (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT launch_generation,active_request_id FROM environment_platform_agent_conversations \
+             WHERE pod_uid=$1 AND session_id=$2",
+        )
+        .bind(Uuid::parse_str(POD2)?)
+        .bind(&m.session_id)
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(
+            generation == "1" && active.is_none(),
+            "{generation} {active:?}"
+        );
+        let unresolved: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM organization_mutation_leases WHERE state='resolution_required'",
+        )
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(unresolved == 0);
+        ensure!(
+            f.journal
+                .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+                .await?
+                == predecessor
+        );
+        let again = resume(&m, POD, 1);
+        let (_, owner) = own(f
+            .journal
+            .admit_resume(facts2.clone(), &f.user, again.clone(), predecessor)
+            .await?)?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        ensure!(
+            f.journal
+                .settle(issued, receipt(&again, &facts2, ManagedLifecycle::Running))
+                .await?
+                .phase
+                == ManagedPhase::Completed
+        );
+        // A denial is only a refusal when the agent provably never ran: a
+        // Running, exited or cleanup-unknown Resume, or one claiming the next
+        // generation, is not one.
+        for (lifecycle, exit_code, cleanup_unknown, generation) in [
+            (ManagedLifecycle::Running, None, false, 1),
+            (ManagedLifecycle::Failed, Some(1), false, 1),
+            (ManagedLifecycle::Failed, None, true, 1),
+            (ManagedLifecycle::Failed, None, false, 2),
+        ] {
+            let mut bad = receipt(&r, &facts2, lifecycle);
+            bad.phase = ManagedPhase::Rejected;
+            bad.reason_code = "denied-before-run".into();
+            bad.launch_generation = generation;
+            bad.exit_code = exit_code;
+            bad.cleanup_unknown = cleanup_unknown;
+            ensure!(
+                bad.validate_for(&r, &facts2).is_err(),
+                "{lifecycle:?} {exit_code:?} {cleanup_unknown} {generation}"
+            );
+        }
     }
 );
 database_case!(db_resume_repeat_is_answered_from_its_first_admission, f, {

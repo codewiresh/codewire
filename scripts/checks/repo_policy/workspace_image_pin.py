@@ -43,10 +43,6 @@ RECORDED_DIGESTS: dict[str, tuple[tuple[str, ...], str]] = {
         ("docs/",),
         "the historical confidential product proof",
     ),
-    "03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467": (
-        ("docs/plans/",),
-        "a historical plan record",
-    ),
 }
 
 

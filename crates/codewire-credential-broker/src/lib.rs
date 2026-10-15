@@ -10,6 +10,7 @@
 
 pub mod anthropic;
 mod bridge;
+mod claude_oauth;
 mod codex_oauth;
 pub mod github;
 pub mod github_app;
@@ -34,6 +35,10 @@ pub mod ssh_agent;
 pub mod timing;
 mod transparent;
 
+pub use claude_oauth::{
+    CanonicalClaudeOAuthBundle, ClaudeIssuedTokens, ClaudeOAuthImport, ClaudeOAuthMaterialError,
+    ClaudeProfile, ClaudeSubscriptionType, import_claude_tokens,
+};
 pub use codewire_access::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
 pub use codex_oauth::{
     CanonicalCodexOAuthBundle, CodexOAuthImport, CodexOAuthMaterialError, import_codex_tokens,

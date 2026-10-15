@@ -192,7 +192,7 @@ mod tests {
         TemplateOpts {
             name: "tmpl-golden-commodity".into(),
             image: "ghcr.io/codewiresh/workspace:golden".into(),
-            support_image: "git.example.invalid/codewire/daemon:golden".into(),
+            support_image: "registry.example.invalid/codewire/daemon:golden".into(),
             runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
             environment_id: "env-golden-commodity".into(),
             organization_id: "org-golden-commodity".into(),
@@ -1223,7 +1223,7 @@ mod tests {
             &TemplateOpts {
                 name: "tmpl-managed-daemon".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
-                support_image: "git.example.invalid/codewire/daemon:test".into(),
+                support_image: "registry.example.invalid/codewire/daemon:test".into(),
                 environment_id: "env-managed-daemon".into(),
                 daemon_auth_token: "managed-daemon-token".into(),
                 ..Default::default()
@@ -1257,7 +1257,7 @@ mod tests {
                 name: "tmpl-custom-daemon".into(),
                 image: "example.invalid/custom:golden".into(),
                 image_command: vec!["/bin/custom-entrypoint".into(), "--serve".into()],
-                support_image: "git.example.invalid/codewire/daemon:test".into(),
+                support_image: "registry.example.invalid/codewire/daemon:test".into(),
                 environment_id: "env-custom-daemon".into(),
                 daemon_auth_token: "custom-daemon-token".into(),
                 ..Default::default()
@@ -2174,7 +2174,7 @@ mod tests {
         let opts = TemplateOpts {
             name: "tmpl-confidential-auth".into(),
             image: "ghcr.io/codewiresh/workspace:golden".into(),
-            support_image: "git.example.invalid/codewire/daemon:test".into(),
+            support_image: "registry.example.invalid/codewire/daemon:test".into(),
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
             daemon_auth_token: "test-daemon-token".into(),
             kata_coco_init_data_enabled: true,
@@ -2261,7 +2261,7 @@ mod tests {
             &TemplateOpts {
                 name: "tmpl-kbs-egress".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
-                support_image: "git.example.invalid/codewire/daemon:test".into(),
+                support_image: "registry.example.invalid/codewire/daemon:test".into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 kata_coco_init_data_enabled: true,

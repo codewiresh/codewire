@@ -96,6 +96,9 @@ async fn connect_credential(
     match args.provider {
         CredentialConnectProviderArg::Codex => connect_codex(client, args).await,
         CredentialConnectProviderArg::Github => connect_github(client, args).await,
+        CredentialConnectProviderArg::Claude => anyhow::bail!(
+            "Claude sign-ins are stored only on the Codewire platform; connect one with --platform"
+        ),
     }
 }
 
@@ -874,6 +877,7 @@ fn authentication_kind_label(value: CredentialAuthKind) -> &'static str {
         CredentialAuthKind::AccessToken => "access_token",
         CredentialAuthKind::GitHubApp => "github_app",
         CredentialAuthKind::SshKey => "ssh_key",
+        CredentialAuthKind::ClaudeSignIn => "claude_sign_in",
     }
 }
 

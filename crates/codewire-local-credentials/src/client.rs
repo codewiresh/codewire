@@ -1713,6 +1713,7 @@ fn auth_kind_from_proto(value: i32) -> Result<CredentialAuthKind, Status> {
         Ok(CredentialAuthenticationKind::AccessToken) => Ok(CredentialAuthKind::AccessToken),
         Ok(CredentialAuthenticationKind::GithubApp) => Ok(CredentialAuthKind::GitHubApp),
         Ok(CredentialAuthenticationKind::SshKey) => Ok(CredentialAuthKind::SshKey),
+        Ok(CredentialAuthenticationKind::ClaudeSignIn) => Ok(CredentialAuthKind::ClaudeSignIn),
         Ok(CredentialAuthenticationKind::Unspecified) | Err(_) => Err(Status::data_loss(
             "local credential authority returned invalid metadata",
         )),

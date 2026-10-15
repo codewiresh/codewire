@@ -65,6 +65,12 @@ const (
 	// CredentialMutationServiceAddClaudeSubscriptionTokenCredentialProcedure is the fully-qualified
 	// name of the CredentialMutationService's AddClaudeSubscriptionTokenCredential RPC.
 	CredentialMutationServiceAddClaudeSubscriptionTokenCredentialProcedure = "/codewire.v1.CredentialMutationService/AddClaudeSubscriptionTokenCredential"
+	// CredentialMutationServiceStartClaudeSignInProcedure is the fully-qualified name of the
+	// CredentialMutationService's StartClaudeSignIn RPC.
+	CredentialMutationServiceStartClaudeSignInProcedure = "/codewire.v1.CredentialMutationService/StartClaudeSignIn"
+	// CredentialMutationServiceCompleteClaudeSignInProcedure is the fully-qualified name of the
+	// CredentialMutationService's CompleteClaudeSignIn RPC.
+	CredentialMutationServiceCompleteClaudeSignInProcedure = "/codewire.v1.CredentialMutationService/CompleteClaudeSignIn"
 	// CredentialMutationServiceRenameCredentialProcedure is the fully-qualified name of the
 	// CredentialMutationService's RenameCredential RPC.
 	CredentialMutationServiceRenameCredentialProcedure = "/codewire.v1.CredentialMutationService/RenameCredential"
@@ -324,6 +330,17 @@ type CredentialMutationServiceClient interface {
 	// organizations are denied. The token is never returned, and it is never
 	// delivered to a Sandbox: the credential broker injects it.
 	AddClaudeSubscriptionTokenCredential(context.Context, *connect.Request[v1.AddClaudeSubscriptionTokenCredentialRequest]) (*connect.Response[v1.AddClaudeSubscriptionTokenCredentialResponse], error)
+	// Claude sign-in: Claude Code's own claude.ai OAuth login, by pasted code.
+	// Start creates this sign-in's PKCE verifier and state and returns Claude's
+	// fixed authorize URL and an opaque handle; nothing is sent or stored. The
+	// person signs in in their browser and copies the `code#state` Claude
+	// shows. Complete checks that state against the handle, exchanges the code
+	// as Claude Code's public client, reads the plan from Claude's OAuth
+	// profile and stores the login as the anthropic provider's CLAUDE_SIGN_IN
+	// kind. It is personal: organization API keys and organizations are denied.
+	// No token is returned; the credential broker refreshes the login.
+	StartClaudeSignIn(context.Context, *connect.Request[v1.StartClaudeSignInRequest]) (*connect.Response[v1.StartClaudeSignInResponse], error)
+	CompleteClaudeSignIn(context.Context, *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error)
 	RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error)
 	RotateApiKeyCredential(context.Context, *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error)
 	GenerateSshCredential(context.Context, *connect.Request[v1.GenerateSshCredentialRequest]) (*connect.Response[v1.GenerateSshCredentialResponse], error)
@@ -373,6 +390,18 @@ func NewCredentialMutationServiceClient(httpClient connect.HTTPClient, baseURL s
 			connect.WithSchema(credentialMutationServiceMethods.ByName("AddClaudeSubscriptionTokenCredential")),
 			connect.WithClientOptions(opts...),
 		),
+		startClaudeSignIn: connect.NewClient[v1.StartClaudeSignInRequest, v1.StartClaudeSignInResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceStartClaudeSignInProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("StartClaudeSignIn")),
+			connect.WithClientOptions(opts...),
+		),
+		completeClaudeSignIn: connect.NewClient[v1.CompleteClaudeSignInRequest, v1.CompleteClaudeSignInResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceCompleteClaudeSignInProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("CompleteClaudeSignIn")),
+			connect.WithClientOptions(opts...),
+		),
 		renameCredential: connect.NewClient[v1.RenameCredentialRequest, v1.RenameCredentialResponse](
 			httpClient,
 			baseURL+CredentialMutationServiceRenameCredentialProcedure,
@@ -419,6 +448,8 @@ type credentialMutationServiceClient struct {
 	completeGithubAppAuthorization       *connect.Client[v1.CompleteGithubAppAuthorizationRequest, v1.CompleteGithubAppAuthorizationResponse]
 	addApiKeyCredential                  *connect.Client[v1.AddApiKeyCredentialRequest, v1.AddApiKeyCredentialResponse]
 	addClaudeSubscriptionTokenCredential *connect.Client[v1.AddClaudeSubscriptionTokenCredentialRequest, v1.AddClaudeSubscriptionTokenCredentialResponse]
+	startClaudeSignIn                    *connect.Client[v1.StartClaudeSignInRequest, v1.StartClaudeSignInResponse]
+	completeClaudeSignIn                 *connect.Client[v1.CompleteClaudeSignInRequest, v1.CompleteClaudeSignInResponse]
 	renameCredential                     *connect.Client[v1.RenameCredentialRequest, v1.RenameCredentialResponse]
 	rotateApiKeyCredential               *connect.Client[v1.RotateApiKeyCredentialRequest, v1.RotateApiKeyCredentialResponse]
 	generateSshCredential                *connect.Client[v1.GenerateSshCredentialRequest, v1.GenerateSshCredentialResponse]
@@ -452,6 +483,16 @@ func (c *credentialMutationServiceClient) AddApiKeyCredential(ctx context.Contex
 // codewire.v1.CredentialMutationService.AddClaudeSubscriptionTokenCredential.
 func (c *credentialMutationServiceClient) AddClaudeSubscriptionTokenCredential(ctx context.Context, req *connect.Request[v1.AddClaudeSubscriptionTokenCredentialRequest]) (*connect.Response[v1.AddClaudeSubscriptionTokenCredentialResponse], error) {
 	return c.addClaudeSubscriptionTokenCredential.CallUnary(ctx, req)
+}
+
+// StartClaudeSignIn calls codewire.v1.CredentialMutationService.StartClaudeSignIn.
+func (c *credentialMutationServiceClient) StartClaudeSignIn(ctx context.Context, req *connect.Request[v1.StartClaudeSignInRequest]) (*connect.Response[v1.StartClaudeSignInResponse], error) {
+	return c.startClaudeSignIn.CallUnary(ctx, req)
+}
+
+// CompleteClaudeSignIn calls codewire.v1.CredentialMutationService.CompleteClaudeSignIn.
+func (c *credentialMutationServiceClient) CompleteClaudeSignIn(ctx context.Context, req *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error) {
+	return c.completeClaudeSignIn.CallUnary(ctx, req)
 }
 
 // RenameCredential calls codewire.v1.CredentialMutationService.RenameCredential.
@@ -511,6 +552,17 @@ type CredentialMutationServiceHandler interface {
 	// organizations are denied. The token is never returned, and it is never
 	// delivered to a Sandbox: the credential broker injects it.
 	AddClaudeSubscriptionTokenCredential(context.Context, *connect.Request[v1.AddClaudeSubscriptionTokenCredentialRequest]) (*connect.Response[v1.AddClaudeSubscriptionTokenCredentialResponse], error)
+	// Claude sign-in: Claude Code's own claude.ai OAuth login, by pasted code.
+	// Start creates this sign-in's PKCE verifier and state and returns Claude's
+	// fixed authorize URL and an opaque handle; nothing is sent or stored. The
+	// person signs in in their browser and copies the `code#state` Claude
+	// shows. Complete checks that state against the handle, exchanges the code
+	// as Claude Code's public client, reads the plan from Claude's OAuth
+	// profile and stores the login as the anthropic provider's CLAUDE_SIGN_IN
+	// kind. It is personal: organization API keys and organizations are denied.
+	// No token is returned; the credential broker refreshes the login.
+	StartClaudeSignIn(context.Context, *connect.Request[v1.StartClaudeSignInRequest]) (*connect.Response[v1.StartClaudeSignInResponse], error)
+	CompleteClaudeSignIn(context.Context, *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error)
 	RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error)
 	RotateApiKeyCredential(context.Context, *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error)
 	GenerateSshCredential(context.Context, *connect.Request[v1.GenerateSshCredentialRequest]) (*connect.Response[v1.GenerateSshCredentialResponse], error)
@@ -554,6 +606,18 @@ func NewCredentialMutationServiceHandler(svc CredentialMutationServiceHandler, o
 		CredentialMutationServiceAddClaudeSubscriptionTokenCredentialProcedure,
 		svc.AddClaudeSubscriptionTokenCredential,
 		connect.WithSchema(credentialMutationServiceMethods.ByName("AddClaudeSubscriptionTokenCredential")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceStartClaudeSignInHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceStartClaudeSignInProcedure,
+		svc.StartClaudeSignIn,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("StartClaudeSignIn")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceCompleteClaudeSignInHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceCompleteClaudeSignInProcedure,
+		svc.CompleteClaudeSignIn,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("CompleteClaudeSignIn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	credentialMutationServiceRenameCredentialHandler := connect.NewUnaryHandler(
@@ -604,6 +668,10 @@ func NewCredentialMutationServiceHandler(svc CredentialMutationServiceHandler, o
 			credentialMutationServiceAddApiKeyCredentialHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceAddClaudeSubscriptionTokenCredentialProcedure:
 			credentialMutationServiceAddClaudeSubscriptionTokenCredentialHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceStartClaudeSignInProcedure:
+			credentialMutationServiceStartClaudeSignInHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceCompleteClaudeSignInProcedure:
+			credentialMutationServiceCompleteClaudeSignInHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceRenameCredentialProcedure:
 			credentialMutationServiceRenameCredentialHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceRotateApiKeyCredentialProcedure:
@@ -643,6 +711,14 @@ func (UnimplementedCredentialMutationServiceHandler) AddApiKeyCredential(context
 
 func (UnimplementedCredentialMutationServiceHandler) AddClaudeSubscriptionTokenCredential(context.Context, *connect.Request[v1.AddClaudeSubscriptionTokenCredentialRequest]) (*connect.Response[v1.AddClaudeSubscriptionTokenCredentialResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.AddClaudeSubscriptionTokenCredential is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) StartClaudeSignIn(context.Context, *connect.Request[v1.StartClaudeSignInRequest]) (*connect.Response[v1.StartClaudeSignInResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.StartClaudeSignIn is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) CompleteClaudeSignIn(context.Context, *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.CompleteClaudeSignIn is not implemented"))
 }
 
 func (UnimplementedCredentialMutationServiceHandler) RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error) {
