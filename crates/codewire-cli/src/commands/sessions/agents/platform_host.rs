@@ -109,6 +109,9 @@ struct Conversation {
     endpoint: Endpoint,
     session: codewire_client::EnvironmentSession,
     driver_id: String,
+    /// Continued here from an earlier Pod by this command: its driver is
+    /// already starting, so a Restart has nothing left to do.
+    resumed: bool,
 }
 fn request_id(value: Option<&str>) -> anyhow::Result<String> {
     let id = value
@@ -160,6 +163,74 @@ async fn capture(
 }
 impl Endpoint {
     async fn find(&self, reference: &str) -> anyhow::Result<codewire_client::EnvironmentSession> {
+        if let Some(session) = self.find_in_scope(reference).await? {
+            return Ok(session);
+        }
+        if self.earlier(reference).await?.is_some() {
+            anyhow::bail!(stopped_with_environment(&self.environment_id, reference));
+        }
+        anyhow::bail!("managed platform session {reference:?} was not found in the original scope")
+    }
+    /// [`Self::find`], continuing a conversation of an earlier Pod of this
+    /// environment here first (#2705), and whether it did. The platform
+    /// chooses that Pod, proves it gone and refuses plainly when the
+    /// conversation cannot continue.
+    async fn find_or_resume(
+        &self,
+        reference: &str,
+    ) -> anyhow::Result<(codewire_client::EnvironmentSession, bool)> {
+        if let Some(session) = self.find_in_scope(reference).await? {
+            return Ok((session, false));
+        }
+        let Some(earlier) = self.earlier(reference).await? else {
+            anyhow::bail!(
+                "managed platform session {reference:?} was not found in the original scope"
+            )
+        };
+        self.resume(reference, &earlier).await?;
+        let session = self
+            .find_in_scope(reference)
+            .await?
+            .context("the resumed managed conversation is not listed in the environment")?;
+        Ok((session, true))
+    }
+    async fn resume(
+        &self,
+        reference: &str,
+        earlier: &codewire_client::EnvironmentSession,
+    ) -> anyhow::Result<()> {
+        let driver_id = earlier
+            .session_id
+            .strip_prefix("session-")
+            .filter(|id| codewire_daemon_proto::platform_managed::valid_uuid(id))
+            .context("managed session has invalid identity")?;
+        anyhow::ensure!(
+            earlier.launch_generation > 0,
+            "managed session generation is unknown"
+        );
+        let control = rpc::EnvironmentAgentControl {
+            action: rpc::EnvironmentAgentAction::Resume.into(),
+            session_id: earlier.session_id.clone(),
+            driver_id: driver_id.into(),
+            expected_launch_generation: earlier.launch_generation,
+            ..Default::default()
+        };
+        eprintln!(
+            "Managed conversation {reference:?} stopped with its environment; resuming it here."
+        );
+        let id = request_id(None)?;
+        self.mutate(
+            &id,
+            rpc::mutate_environment_agent_request::Operation::Control(Box::new(control)),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+    async fn find_in_scope(
+        &self,
+        reference: &str,
+    ) -> anyhow::Result<Option<codewire_client::EnvironmentSession>> {
         let mut after = String::new();
         // Bounded complete pages. No name fallback after a canonical identity
         // mismatch, and no selection of a newer scope during pagination.
@@ -180,7 +251,7 @@ impl Endpoint {
                         session.launch_generation > 0,
                         "managed session generation is unknown"
                     );
-                    return Ok(session);
+                    return Ok(Some(session));
                 }
             }
             if response.next_after_session_id.is_empty() {
@@ -192,15 +263,15 @@ impl Endpoint {
             );
             after = response.next_after_session_id;
         }
-        if self.ended_with_environment(reference).await? {
-            anyhow::bail!(ended_with_environment(reference));
-        }
-        anyhow::bail!("managed platform session {reference:?} was not found in the original scope")
+        Ok(None)
     }
-    /// Whether `reference` names a managed conversation of an earlier
-    /// incarnation of this environment: the session list still shows it, but
-    /// the current scope does not, because a Stop/Start ended it (#2705).
-    async fn ended_with_environment(&self, reference: &str) -> anyhow::Result<bool> {
+    /// The managed conversation `reference` names in an earlier incarnation
+    /// of this environment: the session list still shows it, but the current
+    /// scope does not, because a Stop/Start ended its Pod (#2705).
+    async fn earlier(
+        &self,
+        reference: &str,
+    ) -> anyhow::Result<Option<codewire_client::EnvironmentSession>> {
         let sessions = self
             .client
             .list_sessions(codewire_client::ListSessionsRequest {
@@ -211,7 +282,7 @@ impl Endpoint {
             .await
             .map_err(display_client_error)?
             .sessions;
-        Ok(sessions.iter().any(|session| {
+        Ok(sessions.into_iter().find(|session| {
             (session.session_id == reference || session.name == reference)
                 && is_platform_driver(&session.command)
         }))
@@ -238,6 +309,18 @@ impl Endpoint {
         )?;
         let result = self.client.mutate_environment_agent(request).await;
         let response = result.map_err(|e| {
+            // Refused before admission: nothing was saved or started.
+            if resume_refused(&e.source) {
+                return anyhow::anyhow!("the conversation cannot continue: {}", e.source.message());
+            }
+            // Refused at admission, before anything was sent: a definite
+            // answer, never an uncertain outcome to observe (#2782).
+            if request_refused(&e.source) {
+                return anyhow::anyhow!(
+                    "request {id} was refused: {}; nothing was sent",
+                    e.source.message()
+                );
+            }
             anyhow::anyhow!(
                 "{e}; use cw env agent observe {} --request-id {id}; no retry was sent",
                 self.environment_id
@@ -269,8 +352,27 @@ async fn conversation(
     target: &EnvironmentSessionTarget,
     reference: &str,
 ) -> anyhow::Result<Conversation> {
+    conversation_with(target, reference, false).await
+}
+/// A conversation a new message or a restart continues: one of an earlier
+/// Pod of this environment is resumed here first (#2705).
+async fn resumed_conversation(
+    target: &EnvironmentSessionTarget,
+    reference: &str,
+) -> anyhow::Result<Conversation> {
+    conversation_with(target, reference, true).await
+}
+async fn conversation_with(
+    target: &EnvironmentSessionTarget,
+    reference: &str,
+    resume: bool,
+) -> anyhow::Result<Conversation> {
     let (endpoint, _) = capture(target).await?;
-    let session = endpoint.find(reference).await?;
+    let (session, resumed) = if resume {
+        endpoint.find_or_resume(reference).await?
+    } else {
+        (endpoint.find(reference).await?, false)
+    };
     let driver_id = session
         .session_id
         .strip_prefix("session-")
@@ -283,6 +385,7 @@ async fn conversation(
         driver_id: driver_id.into(),
         endpoint,
         session,
+        resumed,
     })
 }
 impl Conversation {
@@ -337,18 +440,31 @@ impl Conversation {
         }
     }
 }
+/// A Resume the platform refused before admitting it, with its reason.
+fn resume_refused(error: &codewire_client::ClientError) -> bool {
+    error.code() == codewire_client::ErrorCode::FailedPrecondition
+        && error.reason() == Some("PLATFORM_AGENT_RESUME_REFUSED")
+}
+/// A request the platform refused at admission because the conversation's
+/// last request has not settled; the reason names it and the way out.
+fn request_refused(error: &codewire_client::ClientError) -> bool {
+    error.code() == codewire_client::ErrorCode::FailedPrecondition
+        && error.reason() == Some("PLATFORM_AGENT_REQUEST_REFUSED")
+}
 /// The managed driver a platform Sandbox runs; the Sandbox is always Linux.
 fn is_platform_driver(command: &[String]) -> bool {
     command
         .get(1)
         .is_some_and(|arg| arg == "__platform-agent-driver")
 }
-/// Said plainly when a conversation, or a message in it, belongs to an
-/// earlier incarnation of the environment (#2705).
-fn ended_with_environment(reference: &str) -> String {
+/// Said when a conversation, or a message in it, belongs to an earlier Pod
+/// of the environment and is not continued in its current one (#2705). A new
+/// message or a restart resumes it here, or says plainly why it cannot.
+fn stopped_with_environment(environment: &str, reference: &str) -> String {
     format!(
-        "managed conversation {reference:?} ended when its environment stopped; \
-         start a new one with `cw run ENV --agent codex|claude`"
+        "managed conversation {reference:?} stopped with its environment; \
+         `cw msg {environment} {reference} TEXT` or `cw restart {environment} {reference}` \
+         continues it here"
     )
 }
 fn location_path(message: &str) -> anyhow::Result<PathBuf> {
@@ -520,7 +636,13 @@ pub(super) async fn message(
     steer: bool,
 ) -> anyhow::Result<()> {
     validate_text(text)?;
-    let conversation = conversation(&target, reference).await?;
+    // A new message continues a conversation its environment's Stop ended;
+    // a steer has no active turn to steer there.
+    let conversation = if steer {
+        conversation(&target, reference).await?
+    } else {
+        resumed_conversation(&target, reference).await?
+    };
     anyhow::ensure!(
         !conversation.session.cleanup_unknown,
         "managed cleanup is unknown; stop the original generation before sending another message"
@@ -605,7 +727,15 @@ pub(super) async fn action(
     args: &SessionTargetArgs,
     action: rpc::EnvironmentAgentAction,
 ) -> anyhow::Result<()> {
-    let conversation = conversation(&target, reference).await?;
+    let conversation = if action == rpc::EnvironmentAgentAction::Restart {
+        resumed_conversation(&target, reference).await?
+    } else {
+        conversation(&target, reference).await?
+    };
+    if conversation.resumed {
+        // Resuming started its driver: that was the restart.
+        return Ok(());
+    }
     anyhow::ensure!(
         action == rpc::EnvironmentAgentAction::Stop || !conversation.session.cleanup_unknown,
         "managed cleanup is unknown; stop the original generation before another action"
@@ -694,7 +824,21 @@ pub(in crate::commands::sessions) async fn control_session(
     cleanup_request: Option<uuid::Uuid>,
     action: rpc::EnvironmentAgentAction,
 ) -> anyhow::Result<EnvironmentSessionView> {
-    let conversation = conversation(&target, &session.session_id).await?;
+    let conversation = if action == rpc::EnvironmentAgentAction::Restart {
+        resumed_conversation(&target, &session.session_id).await?
+    } else {
+        conversation(&target, &session.session_id).await?
+    };
+    if conversation.resumed {
+        // Resuming started its driver in this Pod: that was the restart.
+        let mut view = session.clone();
+        view.launch_generation = conversation.session.launch_generation;
+        view.state =
+            platform_environment_session_state_name(conversation.session.state.as_known()).into();
+        view.cleanup_unknown = conversation.session.cleanup_unknown;
+        view.exit_code = conversation.session.exit_code;
+        return Ok(view);
+    }
     anyhow::ensure!(
         conversation.session.launch_generation == session.launch_generation
             && expected_generation.is_none_or(|g| g == session.launch_generation),
@@ -755,12 +899,16 @@ async fn await_location(
         "managed message index is invalid"
     );
     let deadline = Instant::now() + timeout;
+    // The message's own scope, until its conversation is found resumed in
+    // the environment's current Pod: that Pod then holds its record, at the
+    // message's own generation (#2705).
+    let mut scope = location.scope.clone();
     loop {
         let response = match client
             .read_environment_agent(rpc::ReadEnvironmentAgentRequest {
                 org_id: location.org_id.clone(),
                 environment_id: location.environment_id.clone(),
-                expected_scope: Some(location.scope.clone()).into(),
+                expected_scope: Some(scope.clone()).into(),
                 session_id: location.session_id.clone(),
                 driver_id: location.driver_id.clone(),
                 expected_launch_generation: location.launch_generation,
@@ -772,16 +920,18 @@ async fn await_location(
             .await
         {
             Ok(response) => response,
-            Err(error) => {
-                if incarnation_ended(location, client).await {
-                    anyhow::bail!(
-                        "managed message {} was sent before its environment stopped; {}",
-                        location.message_id,
-                        ended_with_environment(&location.session_id)
-                    );
+            Err(error) => match moved(location, &scope, client).await {
+                Moved::Resumed(current) => {
+                    scope = *current;
+                    continue;
                 }
-                return Err(error.into());
-            }
+                Moved::Stopped => anyhow::bail!(
+                    "managed message {} was sent before its environment stopped; {}",
+                    location.message_id,
+                    stopped_with_environment(&location.environment_id, &location.session_id)
+                ),
+                Moved::No => return Err(error.into()),
+            },
         };
         let value: Value = serde_json::from_slice(&response.record_json)?;
         let record: MessageRecord = serde_json::from_value(
@@ -807,14 +957,26 @@ async fn await_location(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
-/// Whether the message's original scope names an earlier Pod than the
-/// environment's current one. Any failure to tell answers no, so the original
-/// error is shown.
-async fn incarnation_ended(
+/// Where a message stands whose read in `scope` failed (#2705).
+enum Moved {
+    /// `scope` is the environment's current one, or that cannot be told: the
+    /// read's own error is the answer.
+    No,
+    /// `scope` names an earlier Pod, and orchestration lists the conversation
+    /// in the current Pod at a later generation than the message's: it was
+    /// resumed there, and is read in this scope.
+    Resumed(Box<rpc::EnvironmentAgentScope>),
+    /// `scope` names an earlier Pod, and the current Pod does not list the
+    /// conversation: it stopped with its environment and was not resumed.
+    Stopped,
+}
+/// Any failure to tell answers [`Moved::No`], so the read's own error is shown.
+async fn moved(
     location: &MessageLocation,
+    scope: &rpc::EnvironmentAgentScope,
     client: &codewire_client::CodewireClient,
-) -> bool {
-    let Ok(current) = client
+) -> Moved {
+    let Ok(info) = client
         .get_environment_agent_info(rpc::GetEnvironmentAgentInfoRequest {
             org_id: location.org_id.clone(),
             environment_id: location.environment_id.clone(),
@@ -822,7 +984,10 @@ async fn incarnation_ended(
         })
         .await
     else {
-        return false;
+        return Moved::No;
+    };
+    let Some(current) = info.scope.into_option() else {
+        return Moved::No;
     };
     let pod = |scope: &rpc::EnvironmentAgentScope| {
         scope
@@ -830,12 +995,22 @@ async fn incarnation_ended(
             .as_option()
             .map(|incarnation| incarnation.pod_uid.clone())
     };
-    match (
-        current.scope.as_option().and_then(pod),
-        pod(&location.scope),
-    ) {
-        (Some(current), Some(original)) => current != original,
-        _ => false,
+    match (pod(&current), pod(scope)) {
+        (Some(now), Some(then)) if now != then => {}
+        _ => return Moved::No,
+    }
+    let endpoint = Endpoint {
+        org_id: location.org_id.clone(),
+        environment_id: location.environment_id.clone(),
+        client: client.clone(),
+        scope: current,
+    };
+    match endpoint.find_in_scope(&location.session_id).await {
+        Ok(Some(session)) if session.launch_generation > location.launch_generation => {
+            Moved::Resumed(Box::new(endpoint.scope))
+        }
+        Ok(None) => Moved::Stopped,
+        Ok(Some(_)) | Err(_) => Moved::No,
     }
 }
 pub(super) async fn wait(

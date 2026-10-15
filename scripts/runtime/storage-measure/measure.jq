@@ -196,10 +196,10 @@ def teardown_stats:
       total_ms: (map(.total_ms) | stats)
     };
 
-# The recorded Longhorn v1 cold path on Dev (docs/plans/2026-09-29-fast-sandbox-starts.md).
+# The recorded Longhorn v1 cold path on Dev (2026-09-29-fast-sandbox-starts.md).
 def longhorn_v1_reference:
   {
-    source: "docs/plans/2026-09-29-fast-sandbox-starts.md (Dev, 2026-09-29, one traced start)",
+    source: "2026-09-29-fast-sandbox-starts.md (Dev, 2026-09-29, one traced start)",
     provision_ms: 3000,
     attach_ms: 10000
   };

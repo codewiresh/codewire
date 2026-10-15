@@ -5,18 +5,19 @@ package codewire.bridge.v1;
 // Frames shared by the private native and platform credential bridges. These
 // messages carry filtered HTTP bytes, recipient-encrypted application
 // projections, public SSH keys and signatures; they never carry plaintext
-// application values or provider credentials, with one listed direct delivery
-// exception: CodexLoginResponse seals the Sandbox creator's own personal Codex
-// ChatGPT access token, ID token and account ID to a recipient key held by the
-// workspace daemon (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
-// exceptions"). The refresh token is never carried. Relays see only
-// ciphertext.
+// application values or provider credentials, with two listed direct delivery
+// exceptions (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
+// exceptions"): CodexLoginResponse seals the Sandbox creator's own personal
+// Codex ChatGPT access token, ID token and account ID, and ClaudeLoginResponse
+// the creator's own personal Claude sign-in access token with its expiry,
+// scopes and plan, each to a recipient key held by the workspace daemon. A
+// refresh token is never carried. Relays see only ciphertext.
 message CredentialBridgeOpen {
   uint32 protocol_version = 1;
   string environment_id = 2;
   uint64 environment_generation = 3;
   // Optional operations the admitting host can serve on this epoch, such as
-  // "codex-login". A guest sends such an operation only when its epoch's Open
+  // "codex-login" or "claude-login". A guest sends such an operation only when its epoch's Open
   // lists it: an older host ends the epoch on an unknown frame. Only the host
   // that admits an epoch sets this; it confers no authority, which the broker
   // rederives for every request.
@@ -66,6 +67,7 @@ message CredentialBridgeHostMessage {
     EnvironmentProjectionResponse environment_projection = 6;
     CredentialSshResponse ssh = 7;
     CodexLoginResponse codex_login = 8;
+    ClaudeLoginResponse claude_login = 9;
   }
 }
 
@@ -100,6 +102,7 @@ message CredentialBridgeGuestMessage {
     EnvironmentProjectionRequest environment_projection = 4;
     CredentialSshRequest ssh = 5;
     CodexLoginRequest codex_login = 6;
+    ClaudeLoginRequest claude_login = 7;
   }
 }
 
@@ -212,6 +215,35 @@ message CodexLoginResponse {
     // Only DENIED (no deliverable login: an API key, a credential needing
     // Reconnect, a revoked, organization-owned or another user's credential,
     // or Codex not selected) or UNAVAILABLE (retry later).
+    CredentialBridgeFailureReason failure = 3;
+  }
+}
+
+// The workspace daemon asks for the Sandbox creator's personal Claude sign-in,
+// sealed to a fresh recipient key it holds, to write Claude Code's own
+// claude.ai login (`claudeAiOauth` in ~/.claude/.credentials.json). Sent only
+// on an epoch whose Open lists "claude-login". Like CodexLoginRequest, it names
+// no credential, owner or profile: the broker rederives the selected Anthropic
+// grant and delivers only an Active Claude sign-in owned by the creator,
+// selected by the creator's own confirmed profile.
+message ClaudeLoginRequest {
+  string request_id = 1;
+  bytes recipient_public_key = 2;
+  // At most 30 seconds after the request is made, never extended by a relay.
+  uint64 deadline_unix_ms = 3;
+}
+
+message ClaudeLoginResponse {
+  string request_id = 1;
+  oneof result {
+    // Recipient-sealed access token, its expiry, the granted scopes, the plan
+    // and rate-limit tier, and the refresh time. The plaintext format has no
+    // refresh-token field.
+    bytes sealed_login = 2 [debug_redact = true];
+    // Only DENIED (no deliverable sign-in: an API key, a Claude subscription
+    // token, a credential needing Reconnect, a revoked, organization-owned or
+    // another user's credential, or Anthropic not selected) or UNAVAILABLE
+    // (retry later).
     CredentialBridgeFailureReason failure = 3;
   }
 }

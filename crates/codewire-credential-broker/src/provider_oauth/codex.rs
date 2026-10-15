@@ -125,7 +125,7 @@ impl CodexDeviceLogin {
             Method::POST,
             &endpoint(CODEX_DEVICE_USERCODE_PATH),
             json_headers(),
-            body,
+            Zeroizing::new(body),
         )
         .await?;
         if status == StatusCode::NOT_FOUND {
@@ -173,7 +173,7 @@ impl CodexDeviceLogin {
         &self,
         pending: &PendingCodexDeviceLogin,
     ) -> Result<PollStep<ApprovedCode>, DeviceLoginError> {
-        let mut body = Zeroizing::new(
+        let body = Zeroizing::new(
             serde_json::to_vec(&PollRequest {
                 device_auth_id: pending.device_auth_id.expose(),
                 user_code: pending.challenge.user_code(),
@@ -185,7 +185,7 @@ impl CodexDeviceLogin {
             Method::POST,
             &endpoint(CODEX_DEVICE_TOKEN_PATH),
             json_headers(),
-            std::mem::take(&mut *body),
+            body,
         )
         .await?;
         // OpenAI answers 403 or 404 until the user approves the code.
@@ -197,7 +197,7 @@ impl CodexDeviceLogin {
     }
 
     async fn exchange(&self, approved: ApprovedCode) -> Result<TokenResponse, DeviceLoginError> {
-        let mut body = Zeroizing::new({
+        let body = Zeroizing::new({
             let mut form = url::form_urlencoded::Serializer::new(String::new());
             form.append_pair("grant_type", "authorization_code");
             form.append_pair("code", approved.authorization_code.expose());
@@ -217,7 +217,7 @@ impl CodexDeviceLogin {
                     HeaderValue::from_static("application/x-www-form-urlencoded"),
                 ),
             ]),
-            std::mem::take(&mut *body),
+            body,
         )
         .await?;
         if matches!(status, StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED) {

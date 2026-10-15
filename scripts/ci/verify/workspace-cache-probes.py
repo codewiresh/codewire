@@ -142,7 +142,7 @@ class HistoricalProducer:
             model = release.parse_canonical(retained["receipt"].data)
             if retained["receipt"].path != producer_root / "build.json" or set(model) != producer.RECEIPT_FIELDS \
                     or model["schema"] != producer.SCHEMA or model["status"] != "producer-admitted" \
-                    or model["target"] != producer.source.TARGET or model["profile"] != "release" \
+                    or model["target"] != producer.source.TARGET or model["profile"] != artifact.WORKSPACE_CW_PROFILE \
                     or model["claim"] != producer.CLAIM \
                     or any(model[key] is not False for key in ("cache_qualified", "image_qualified", "builder_ownership_verified")):
                 raise ValueError("historical producer authority differs")

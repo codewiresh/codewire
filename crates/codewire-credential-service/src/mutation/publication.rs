@@ -64,7 +64,7 @@ pub(super) async fn enroll(
             EnrollmentTarget::Create(name) => {
                 let registration = CredentialRegistration {
                     provider: ProviderId::parse(completed.provider()).expect("built-in provider"),
-                    authentication_kind: CredentialAuthKind::OAuth,
+                    authentication_kind: completed.authentication_kind(),
                     display_name: name,
                     account_hint,
                     expires_at_unix: None,

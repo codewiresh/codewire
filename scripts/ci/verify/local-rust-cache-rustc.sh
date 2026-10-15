@@ -12,7 +12,19 @@
 unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
 if [[ -x "${CODEWIRE_LOCAL_SCCACHE_BIN:-}" && -n "${CODEWIRE_LOCAL_SCCACHE_TMPDIR:-}" ]]; then
   export TMPDIR="$CODEWIRE_LOCAL_SCCACHE_TMPDIR"
-  exec "$CODEWIRE_LOCAL_SCCACHE_BIN" "$@"
+  restarts="${CODEWIRE_LOCAL_SCCACHE_RESTARTS:-}"
+  [[ -n "$restarts" ]] || exec "$CODEWIRE_LOCAL_SCCACHE_BIN" "$@"
+  before=''
+  { read -r before <"$restarts"; } 2>/dev/null
+  "$CODEWIRE_LOCAL_SCCACHE_BIN" "$@" && exit 0
+  status=$?
+  after=''
+  { read -r after <"$restarts"; } 2>/dev/null
+  # The hung server this compile waited on was stopped (#2753). sccache 0.17
+  # compiles locally only when its server had already started the compile; a
+  # request still waiting for the server's first answer fails. Compile it here.
+  [[ "$after" == "$before" ]] || exec "$@"
+  exit "$status"
 fi
 # The cache is best effort: without its selection, compile uncached.
 exec "$@"

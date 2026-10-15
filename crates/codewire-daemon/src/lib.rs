@@ -1,4 +1,6 @@
 pub mod access;
+#[cfg(target_os = "linux")]
+mod agent_login;
 pub mod app_ports;
 #[cfg(target_os = "linux")]
 pub mod claude_home;

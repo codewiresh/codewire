@@ -19,6 +19,7 @@ use platform_support::{
 };
 
 mod additions;
+mod claude;
 mod github;
 mod lifecycle;
 mod process_test_support;

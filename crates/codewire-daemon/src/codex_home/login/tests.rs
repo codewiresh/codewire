@@ -853,7 +853,7 @@ fn only_a_hosted_daemon_with_codex_selected_runs_the_writer() {
 #[test]
 fn checks_back_off_with_jitter_while_nothing_is_delivered() {
     let mut retry = Retry::new(CODEX_LOGIN_CHECK_PERIOD);
-    let mut ceiling = CODEX_LOGIN_RETRY_MIN;
+    let mut ceiling = LOGIN_RETRY_MIN;
     for _ in 0..12 {
         let delay = retry.after(CodexLoginSync::Unavailable);
         assert!(
@@ -874,7 +874,7 @@ fn checks_back_off_with_jitter_while_nothing_is_delivered() {
         assert!(delay >= CODEX_LOGIN_CHECK_PERIOD * 9 / 10 && delay <= CODEX_LOGIN_CHECK_PERIOD);
     }
     // A decision resets the backoff.
-    assert!(retry.after(CodexLoginSync::Unavailable) <= CODEX_LOGIN_RETRY_MIN);
+    assert!(retry.after(CodexLoginSync::Unavailable) <= LOGIN_RETRY_MIN);
 }
 
 #[test]
@@ -919,15 +919,13 @@ fn jwt_claims_decode_like_codex() {
 
 /// A scripted bridge for the task loop: answers in order, then `fallback`.
 struct Script {
-    answers: std::sync::Mutex<Vec<Result<OpenedCodexLogin, CodexLoginFailure>>>,
-    fallback: CodexLoginFailure,
+    answers: std::sync::Mutex<Vec<Result<OpenedCodexLogin, LoginFailure>>>,
+    fallback: LoginFailure,
     calls: std::sync::atomic::AtomicUsize,
 }
 
 impl CodexLoginSource for std::sync::Arc<Script> {
-    fn codex_login(
-        &self,
-    ) -> impl Future<Output = Result<OpenedCodexLogin, CodexLoginFailure>> + Send {
+    fn codex_login(&self) -> impl Future<Output = Result<OpenedCodexLogin, LoginFailure>> + Send {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut answers = self.answers.lock().unwrap();
         let next = if answers.is_empty() {
@@ -954,7 +952,7 @@ async fn the_task_checks_at_start_changes_nothing_without_the_capability_and_sto
     let fixture = Fixture::new();
     let script = std::sync::Arc::new(Script {
         answers: std::sync::Mutex::new(Vec::new()),
-        fallback: CodexLoginFailure::Unsupported,
+        fallback: LoginFailure::Unsupported,
         calls: Default::default(),
     });
     let (stop, stopped) = watch::channel(false);
@@ -979,7 +977,7 @@ async fn the_task_checks_at_start_changes_nothing_without_the_capability_and_sto
     // With the capability, the first check writes the login.
     let script = std::sync::Arc::new(Script {
         answers: std::sync::Mutex::new(vec![Ok(opened(CREDENTIAL, 1, unix_now() + 86_400))]),
-        fallback: CodexLoginFailure::Unavailable,
+        fallback: LoginFailure::Unavailable,
         calls: Default::default(),
     });
     let (stop, stopped) = watch::channel(false);
@@ -1000,4 +998,46 @@ async fn the_task_checks_at_start_changes_nothing_without_the_capability_and_sto
         proxy_config().starts_with(CODEX_MANAGED_CONFIG_HEADER),
         "the restored proxy config carries the ownership header"
     );
+}
+
+/// A start removes what a crash or a revocation left beside `auth.json`: a
+/// write in progress and a set-aside copy of Codewire's login. A set-aside
+/// file of the user's own stays, and so does Codex's own state.
+#[test]
+fn a_start_removes_leftover_temporaries_that_could_hold_a_token() {
+    let fixture = Fixture::new();
+    let mut writer = fixture.writer();
+    assert_eq!(
+        writer
+            .apply(delivery("cred-a", 1, T0 + 86_400), T0)
+            .unwrap(),
+        CodexLoginSync::Written
+    );
+    let delivered = fs::read(fixture.auth()).unwrap();
+    let sibling = |name: &str| fixture.home().root().join(name);
+    let leftover_new = format!(".auth.json.codewire.{}.new", "a".repeat(32));
+    let leftover_aside = format!(".auth.json.codewire.{}.aside", "b".repeat(32));
+    let users_aside = format!(".auth.json.codewire.{}.aside", "c".repeat(32));
+    for (name, bytes) in [
+        (&leftover_new, b"{\"partial".to_vec()),
+        (&leftover_aside, delivered.clone()),
+        (
+            &users_aside,
+            serde_json::to_vec(&json!({
+                "auth_mode": "chatgpt",
+                "tokens": {"refresh_token": "users-own-refresh"}
+            }))
+            .unwrap(),
+        ),
+    ] {
+        fs::write(sibling(name), bytes).unwrap();
+        fs::set_permissions(sibling(name), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert_eq!(fixture.writer().remove_leftovers().unwrap(), 2);
+    assert!(!sibling(&leftover_new).exists());
+    assert!(!sibling(&leftover_aside).exists());
+    assert!(sibling(&users_aside).exists());
+    assert!(sibling("history.jsonl").exists());
+    assert_eq!(fs::read(fixture.auth()).unwrap(), delivered);
+    assert_eq!(fixture.writer().remove_leftovers().unwrap(), 0);
 }

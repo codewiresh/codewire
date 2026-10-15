@@ -85,7 +85,7 @@ removes duplication without dropping a current contract assertion.
 
 The Rust tests `connect_mount`, `connect_auth`, and `connect_stream` are the
 wire contract for the shared Connect serving stack
-(`docs/plans/connect-rpc/03`): unary over both Connect codecs, Connect GET for
+(`connect-rpc/03`): unary over both Connect codecs, Connect GET for
 `NO_SIDE_EFFECTS` reads, the auth mount modes, and the 01 error model on the wire
 (`unauthenticated` / `permission_denied` / `invalid_argument` with
 `google.rpc.ErrorInfo` / `google.rpc.BadRequest` details, request id
@@ -97,6 +97,6 @@ a skip or an empty test count.
 
 While an area dual-serves REST and Connect, both answer from the same service
 layer and the area's Rust-owned suites must be green on both before clients flip
-(`docs/plans/connect-rpc/00-MASTER.md`, gate G4/G5). Per-service Connect
-suites (api-keys first, `docs/plans/connect-rpc/05`) build on
+(`connect-rpc/00-MASTER.md`, gate G4/G5). Per-service Connect
+suites (api-keys first, `connect-rpc/05`) build on
 the Rust shared harness rather than re-proving the serving stack.

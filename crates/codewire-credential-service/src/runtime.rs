@@ -24,6 +24,7 @@ use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticator, PlatformCredentialBridgeService,
 };
 use codewire_credential_broker::platform::keepalive::OAuthKeepAlive;
+use codewire_credential_broker::provider_oauth::claude::ClaudeSignIn;
 use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
 use codewire_credential_broker::provider_oauth::github::GitHubDeviceLogin;
 use codewire_credential_broker::{BrokerUpstreamTransport, ProviderHttpsTransport};
@@ -200,6 +201,7 @@ async fn run_connected(
         HttpProvider::CodexOAuth,
         HttpProvider::AnthropicApiKey,
         HttpProvider::AnthropicSubscriptionToken,
+        HttpProvider::AnthropicClaudeSignIn,
         HttpProvider::GitHubOAuth,
     ]))
     .await
@@ -235,6 +237,15 @@ async fn run_connected(
     let codex_login = CodexDeviceLogin::new(Arc::new(
         ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
             HttpProvider::CodexDeviceEnrollment,
+        ]))
+        .await
+        .map_err(|_| RuntimeError::Provider)?,
+    ));
+    // The Claude sign-in has its own family: Claude's token endpoint and the
+    // OAuth profile read only, never the Anthropic route.
+    let claude_sign_in = ClaudeSignIn::new(Arc::new(
+        ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
+            HttpProvider::ClaudeSignInEnrollment,
         ]))
         .await
         .map_err(|_| RuntimeError::Provider)?,
@@ -277,6 +288,7 @@ async fn run_connected(
         pool.clone(),
         store,
         codex_login,
+        claude_sign_in,
         github_login,
         github_app_authorization,
     ));

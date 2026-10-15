@@ -282,7 +282,7 @@ class HelperTests(unittest.TestCase):
                     if observation is not None:
                         raise observation
 
-                with mock.patch.object(helper, "STOP_SECONDS", 0), \
+                with mock.patch.object(helper.command_owner, "STOP_SECONDS", 0), \
                      mock.patch.object(helper.os, "killpg", side_effect=observe):
                     with self.assertRaises(helper.CleanupUnknown):
                         helper.stop_group(process)
@@ -300,7 +300,7 @@ class HelperTests(unittest.TestCase):
             elif process.returncode is not None:
                 raise ProcessLookupError
 
-        with mock.patch.object(helper, "STOP_SECONDS", 0), \
+        with mock.patch.object(helper.command_owner, "STOP_SECONDS", 0), \
              mock.patch.object(helper.os, "killpg", side_effect=observe):
             helper.stop_group(process)
         self.assertEqual(signals, [signal.SIGTERM, signal.SIGKILL])

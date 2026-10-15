@@ -9,6 +9,7 @@ use futures::StreamExt as _;
 use http::{HeaderMap, Method};
 use reqwest::redirect::Policy;
 
+use crate::provider_oauth::claude::{CLAUDE_PROFILE_PATH, CLAUDE_TOKEN_HOST, CLAUDE_TOKEN_PATH};
 use crate::provider_oauth::{
     CODEX_DEVICE_TOKEN_PATH, CODEX_DEVICE_USERCODE_PATH, GITHUB_ACCESS_TOKEN_PATH,
     GITHUB_DEVICE_CODE_PATH, OPENAI_AUTH_HOST, OPENAI_TOKEN_PATH,
@@ -177,8 +178,9 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let (method, target, headers, body) = request.into_parts();
         validate_target(&target, &method, &self.selected)?;
-        let is_refresh =
-            target.host_str() == Some(OPENAI_AUTH_HOST) && target.path() == OPENAI_TOKEN_PATH;
+        let is_refresh = (target.host_str() == Some(OPENAI_AUTH_HOST)
+            && target.path() == OPENAI_TOKEN_PATH)
+            || (target.host_str() == Some(CLAUDE_TOKEN_HOST) && target.path() == CLAUDE_TOKEN_PATH);
         let provider_host = provider_host(&target);
         let mut request = self
             .client
@@ -226,6 +228,7 @@ fn provider_host(target: &url::Url) -> &'static str {
         Some(CHATGPT_HOST) => CHATGPT_HOST,
         Some(OPENAI_AUTH_HOST) => OPENAI_AUTH_HOST,
         Some(ANTHROPIC_HOST) => ANTHROPIC_HOST,
+        Some(CLAUDE_TOKEN_HOST) => CLAUDE_TOKEN_HOST,
         Some(GITHUB_API_HOST) => GITHUB_API_HOST,
         Some(GITHUB_GIT_HOST) => GITHUB_GIT_HOST,
         _ => "other",
@@ -247,6 +250,10 @@ fn selected_hosts(
             HttpProvider::AnthropicApiKey | HttpProvider::AnthropicSubscriptionToken => {
                 &[ANTHROPIC_HOST][..]
             }
+            // The route, and the token endpoint for the broker's refresh.
+            HttpProvider::AnthropicClaudeSignIn => &[ANTHROPIC_HOST, CLAUDE_TOKEN_HOST][..],
+            // The code exchange and the one OAuth profile read.
+            HttpProvider::ClaudeSignInEnrollment => &[ANTHROPIC_HOST, CLAUDE_TOKEN_HOST][..],
             HttpProvider::GitHubOAuth => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
             HttpProvider::GitHubAppAuthorization => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
         })
@@ -284,9 +291,23 @@ fn validate_target(
                         )))
         }
         Some(ANTHROPIC_HOST) => {
-            (selected.contains(&HttpProvider::AnthropicApiKey)
-                || selected.contains(&HttpProvider::AnthropicSubscriptionToken))
-                && transparent_method(method)
+            ((selected.contains(&HttpProvider::AnthropicApiKey)
+                || selected.contains(&HttpProvider::AnthropicSubscriptionToken)
+                || selected.contains(&HttpProvider::AnthropicClaudeSignIn))
+                && transparent_method(method))
+                || (selected.contains(&HttpProvider::ClaudeSignInEnrollment)
+                    && method == Method::GET
+                    && target.path() == CLAUDE_PROFILE_PATH
+                    && target.query().is_none())
+        }
+        // Claude's token endpoint: the broker's refresh of a sign-in, and the
+        // enrollment's code exchange. Nothing else on this host.
+        Some(CLAUDE_TOKEN_HOST) => {
+            (selected.contains(&HttpProvider::AnthropicClaudeSignIn)
+                || selected.contains(&HttpProvider::ClaudeSignInEnrollment))
+                && method == Method::POST
+                && target.path() == CLAUDE_TOKEN_PATH
+                && target.query().is_none()
         }
         Some(GITHUB_API_HOST) => {
             (selected.contains(&HttpProvider::GitHubOAuth)
@@ -626,6 +647,96 @@ mod tests {
             (Method::POST, "https://api.anthropic.com:444/v1/messages"),
             (Method::POST, "https://user@api.anthropic.com/v1/messages"),
             (Method::POST, "https://api.openai.com/v1/responses"),
+        ] {
+            assert_eq!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &selected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_sign_in_transport_adds_only_claudes_token_endpoint() {
+        let selected = BTreeSet::from([HttpProvider::AnthropicClaudeSignIn]);
+        assert_eq!(
+            selected_hosts(&selected).unwrap(),
+            BTreeSet::from(["api.anthropic.com", "platform.claude.com"])
+        );
+        for (method, target) in [
+            (Method::POST, "https://api.anthropic.com/v1/messages"),
+            (Method::GET, "https://api.anthropic.com/api/oauth/usage"),
+            (Method::POST, "https://platform.claude.com/v1/oauth/token"),
+        ] {
+            assert!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &selected).is_ok(),
+                "{target}"
+            );
+        }
+        for (method, target) in [
+            (Method::GET, "https://platform.claude.com/v1/oauth/token"),
+            (
+                Method::POST,
+                "https://platform.claude.com/v1/oauth/token?next=evil",
+            ),
+            (Method::POST, "https://platform.claude.com/v1/oauth/revoke"),
+            (Method::POST, "https://platform.claude.com/oauth/authorize"),
+            (Method::POST, "https://claude.com/cai/oauth/authorize"),
+            (
+                Method::POST,
+                "https://platform.claude.com:444/v1/oauth/token",
+            ),
+            (Method::POST, "http://platform.claude.com/v1/oauth/token"),
+            (Method::OPTIONS, "https://api.anthropic.com/v1/messages"),
+        ] {
+            assert_eq!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &selected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+        // The other Anthropic forms never reach Claude's token endpoint.
+        for provider in [
+            HttpProvider::AnthropicApiKey,
+            HttpProvider::AnthropicSubscriptionToken,
+        ] {
+            assert_eq!(
+                validate_target(
+                    &url::Url::parse("https://platform.claude.com/v1/oauth/token").unwrap(),
+                    &Method::POST,
+                    &BTreeSet::from([provider]),
+                ),
+                Err(BrokerUpstreamError::DestinationDenied)
+            );
+        }
+    }
+
+    #[test]
+    fn claude_sign_in_enrollment_transport_has_only_the_exchange_and_profile_read() {
+        let selected = BTreeSet::from([HttpProvider::ClaudeSignInEnrollment]);
+        assert_eq!(
+            selected_hosts(&selected).unwrap(),
+            BTreeSet::from(["api.anthropic.com", "platform.claude.com"])
+        );
+        for (method, target) in [
+            (Method::POST, "https://platform.claude.com/v1/oauth/token"),
+            (Method::GET, "https://api.anthropic.com/api/oauth/profile"),
+        ] {
+            assert!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &selected).is_ok(),
+                "{target}"
+            );
+        }
+        for (method, target) in [
+            (Method::POST, "https://api.anthropic.com/v1/messages"),
+            (Method::GET, "https://api.anthropic.com/api/oauth/usage"),
+            (Method::POST, "https://api.anthropic.com/api/oauth/profile"),
+            (
+                Method::GET,
+                "https://api.anthropic.com/api/oauth/profile?account=x",
+            ),
+            (Method::GET, "https://platform.claude.com/v1/oauth/token"),
+            (Method::POST, "https://auth.openai.com/oauth/token"),
         ] {
             assert_eq!(
                 validate_target(&url::Url::parse(target).unwrap(), &method, &selected),

@@ -66,7 +66,7 @@ PARTS = {
         "host": False,
     },
     "e2fsprogs-macos": {
-        "files": ("scripts/dev/macos-ext4-tool.py", "scripts/dev/macos-cli.py"),
+        "files": ("scripts/dev/macos-ext4-tool.py", "scripts/dev/macos-command-owner.py"),
         "pins": (("sources", "e2fsprogs"),),
         # Exactly the files the runtime lock pins, so a record names only
         # blobs a release has published.
@@ -124,8 +124,8 @@ RUNTIME_INPUTS = (
     "scripts/dev/build-native-managed-agent.py",
     "scripts/dev/cw-runtime-image.py",
     "scripts/dev/macos-ext4-tool.py",
+    "scripts/dev/macos-command-owner.py",
     "scripts/dev/macos-git-tool.py",
-    "scripts/dev/macos-cli.py",
     ".gitea/workflows/cli-release.yaml",
     ".gitea/workflows/cw-release-dry-run.yaml",
 )

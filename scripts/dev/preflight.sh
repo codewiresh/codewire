@@ -293,14 +293,16 @@ fi
 
 # Push and merge qualification mirror pull-request CI without its Kind opt-in:
 # Kind is the author's `make kind-test` dev loop and a post-merge CI gate.
-# Only the explicit Kind and full escalations select it locally.
+# Only the explicit Kind and full escalations select it locally. Local
+# qualification always takes the complete selection, never hosted CI's quick
+# pull-request scope.
 selector_kind_opt_in=false
 if [ -z "$PREFLIGHT_SCOPE" ] \
     && { [ "$PREFLIGHT_MODE" = kind ] || [ "$PREFLIGHT_MODE" = full ]; }; then
   selector_kind_opt_in=true
 fi
 selector_output="$(
-  env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u VERIFICATION_PR_SCOPE \
     GITHUB_EVENT_NAME=pull_request \
     KIND_E2E_OPT_IN="${PREFLIGHT_KIND_OPT_IN:-$selector_kind_opt_in}" \
     "$SELECTOR" "$PREFLIGHT_CHANGED_PATHS"

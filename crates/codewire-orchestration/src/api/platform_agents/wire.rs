@@ -127,12 +127,16 @@ pub(super) fn public_scope(
     Ok(value)
 }
 
+/// The platform does not run noel yet; trusted hosts do.
+pub(super) const NOEL_REFUSAL: &str = "noel managed conversations are qualified only on trusted Linux hosts (`cw env create --local --type host`); the platform does not run noel yet";
+
 pub(super) fn agent(
     value: proto::EnvironmentAgentKind,
 ) -> AppResult<private::PlatformManagedAgent> {
     match value {
         proto::EnvironmentAgentKind::Codex => Ok(private::PlatformManagedAgent::Codex),
         proto::EnvironmentAgentKind::Claude => Ok(private::PlatformManagedAgent::Claude),
+        proto::EnvironmentAgentKind::Noel => Err(AppError::Precondition(NOEL_REFUSAL.into())),
         _ => Err(invalid()),
     }
 }
@@ -152,6 +156,7 @@ fn action(value: proto::EnvironmentAgentAction) -> AppResult<private::PlatformMa
         P::Interrupt => Ok(N::Interrupt),
         P::Stop => Ok(N::Stop),
         P::Restart => Ok(N::Restart),
+        P::Resume => Ok(N::Resume),
         _ => Err(invalid()),
     }
 }
@@ -205,6 +210,9 @@ pub(super) fn mutation(
                 expected_turn_id: value.expected_turn_id.clone(),
                 expected_active_message_id: value.expected_active_message_id.clone(),
                 cleanup_of_request_id: value.cleanup_of_request_id.clone(),
+                // A Resume's predecessor, agent and provider are never the
+                // client's: the control plane fills them before validation.
+                ..Default::default()
             })
         }
     };
@@ -213,8 +221,29 @@ pub(super) fn mutation(
         scope: Some(scope),
         operation: Some(operation),
     };
-    native::validate_mutation(&request).map_err(|_| invalid())?;
+    if !is_resume(&request) {
+        native::validate_mutation(&request).map_err(|_| invalid())?;
+    }
     Ok((incarnation, request))
+}
+
+pub(super) fn is_resume(request: &private::PlatformManagedMutationRequest) -> bool {
+    matches!(
+        &request.operation,
+        Some(private::platform_managed_mutation_request::Operation::Control(c))
+            if c.action == private::PlatformManagedAction::Resume as i32
+    )
+}
+
+/// A Stop that names no cleanup: if the conversation's last request has an
+/// unknown outcome, orchestration makes it that request's cleanup (#2782).
+pub(super) fn is_plain_stop(request: &private::PlatformManagedMutationRequest) -> bool {
+    matches!(
+        &request.operation,
+        Some(private::platform_managed_mutation_request::Operation::Control(c))
+            if c.action == private::PlatformManagedAction::Stop as i32
+                && c.cleanup_of_request_id.is_none()
+    )
 }
 
 pub(super) fn read(
@@ -308,4 +337,86 @@ pub(super) fn operation(
             .unwrap_or_default(),
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn launch(agent: buffa::EnumValue<proto::EnvironmentAgentKind>) -> AppResult<()> {
+        let incarnation = PlatformCwRuntimeIncarnation {
+            organization_id: "org".into(),
+            environment_id: "5d0c1a52-8b1e-4f43-9a8e-1f2b3c4d5e6f".into(),
+            environment_generation: 1,
+            namespace: "sandboxes".into(),
+            pod_name: "env-5d0c1a52".into(),
+            pod_uid: "6e1d2b63-9c2f-4054-ab9f-2a3c4d5e6f70".into(),
+            claim_uid: "7f2e3c74-ad30-4165-bca0-3b4d5e6f7081".into(),
+            sandbox_uid: "803f4d85-be41-4276-8db1-4c5e6f708192".into(),
+            workspace_pvc_uid: None,
+            binding_generation: 1,
+            projection_selection_sha256: Some("ab".repeat(32)),
+            managed_credential_clients:
+                codewire_access::ManagedCredentialClients::from_profile_slots(["codex"])
+                    .unwrap()
+                    .encode()
+                    .to_owned(),
+            binding_bound_at: chrono::DateTime::from_timestamp(1_760_000_000, 0).unwrap(),
+        };
+        // Codex and Claude launches carry their pinned provider, so the same
+        // request is valid for them and only the kind decides the outcome.
+        let pinned = match agent.as_known() {
+            Some(proto::EnvironmentAgentKind::Codex) => {
+                native::provider_version(private::PlatformManagedAgent::Codex)
+            }
+            Some(proto::EnvironmentAgentKind::Claude) => {
+                native::provider_version(private::PlatformManagedAgent::Claude)
+            }
+            _ => None,
+        };
+        let request = proto::MutateEnvironmentAgentRequest {
+            org_id: incarnation.organization_id.clone(),
+            environment_id: incarnation.environment_id.clone(),
+            request_id: "91405e96-cf52-4387-9ec2-5d6f708192a3".into(),
+            expected_scope: public_scope(&incarnation, vec![7; 32], 4096)
+                .unwrap()
+                .into(),
+            operation: Some(proto::mutate_environment_agent_request::Operation::Launch(
+                Box::new(proto::EnvironmentAgentLaunch {
+                    agent,
+                    model: "model".into(),
+                    working_dir: "/workspace".into(),
+                    name: "lead".into(),
+                    prompt: Some("hello".into()),
+                    expected_provider_sha256: vec![9; 32],
+                    expected_provider_size: 4096,
+                    expected_provider_version: pinned.unwrap_or("0.0.0").into(),
+                    ..Default::default()
+                }),
+            )),
+            ..Default::default()
+        };
+        mutation(&request).map(|_| ())
+    }
+
+    #[test]
+    fn a_noel_launch_is_refused_with_its_reason() {
+        launch(proto::EnvironmentAgentKind::Codex.into()).expect("the same Codex launch is valid");
+        match launch(proto::EnvironmentAgentKind::Noel.into()) {
+            Err(AppError::Precondition(reason)) => assert_eq!(reason, NOEL_REFUSAL),
+            other => panic!("expected the noel refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_agent_kind_stays_invalid() {
+        launch(proto::EnvironmentAgentKind::Claude.into())
+            .expect("the same Claude launch is valid");
+        match launch(buffa::EnumValue::Unknown(99)) {
+            Err(AppError::BadRequest(reason)) => {
+                assert_eq!(reason, "platform agent request metadata is invalid")
+            }
+            other => panic!("expected invalid metadata, got {other:?}"),
+        }
+    }
 }

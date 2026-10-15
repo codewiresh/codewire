@@ -40,7 +40,7 @@ pub(crate) struct Owner {
 fn status(error: Error) -> Status {
     match error {
         // Material-free and refused before any effect, so it says why.
-        Error::EarlierProvider(_) | Error::DeniedBeforeRun => {
+        Error::EarlierProvider(_) | Error::DeniedBeforeRun | Error::ResumeRefused(_) => {
             Status::failed_precondition(error.to_string())
         }
         _ => Status::failed_precondition("platform managed incarnation or outcome refused"),
@@ -248,9 +248,22 @@ impl Service {
         request: &v1::PlatformManagedMutationRequest,
         link: Option<&CleanupLink>,
     ) -> Result<(), Error> {
+        let session = match request.operation.as_ref() {
+            Some(v1::platform_managed_mutation_request::Operation::Control(c)) => {
+                Some(c.session_id.as_str())
+            }
+            _ => None,
+        };
         for old in books {
             let row = old.row()?;
             if !matches!(row.phase, 1 | 2 | 5) {
+                continue;
+            }
+            // An unresolved Resume bars only its own conversation (#2705):
+            // the platform ends that conversation, and no cleanup Stop can
+            // resolve a Resume, so it must not hold every other conversation
+            // and launch in this Pod.
+            if old.is_resume() && session != Some(row.session_id.as_str()) {
                 continue;
             }
             let root_id = row
@@ -310,6 +323,22 @@ impl Service {
                 )?;
                 ImagePin::admit(&self.inner.config, &origin)?;
                 ProviderPin::admit(agent, &provider)?;
+            }
+            v1::platform_managed_mutation_request::Operation::Control(c)
+                if c.action == v1::PlatformManagedAction::Resume as i32 =>
+            {
+                // The record must name exactly the earlier Pod the control
+                // plane proved absent, and the resumed origin is admitted as
+                // a launch's is (#2705).
+                let origin = resume_origin(scope, c)?;
+                ImagePin::admit(&self.inner.config, &origin)?;
+                ProviderPin::admit(origin.agent, &origin.provider)
+                    .map_err(|_| Error::ResumeRefused(super::PROVIDER_NOT_ADMITTED))?;
+                origin
+                    .agent
+                    .route(self.inner.config.managed_credential_clients)
+                    .ok_or(Error::Refused)?;
+                self.inner.engine.platform_resumable(scope, c).await?;
             }
             v1::platform_managed_mutation_request::Operation::Control(c) => {
                 if c.action == v1::PlatformManagedAction::Restart as i32 {
@@ -464,6 +493,17 @@ impl Owner {
             (!l.parent_session_id.is_empty()).then_some(l.expected_parent_launch_generation),
         )
     }
+    /// A Resume's origin in this Pod: this scope, the same driver, the
+    /// agent and the image's pinned provider. No parent: a child is never
+    /// resumed.
+    pub(crate) fn resume_origin(&self) -> Result<Origin, Error> {
+        let Some(v1::platform_managed_mutation_request::Operation::Control(c)) =
+            &self.request.operation
+        else {
+            return Err(Error::Refused);
+        };
+        resume_origin(self.request.scope.as_ref().ok_or(Error::Refused)?, c)
+    }
     pub(crate) fn release(&self) {
         if let Ok(mut active) = self.service.inner.active.lock() {
             active.remove(&self.request.request_id);
@@ -545,12 +585,18 @@ impl Owner {
                     row.cleanup_previous_cleanup_known = true;
                 }
             }
+            // A Resume refused before issue keeps its plain reason (#2705).
+            Err(Error::ResumeRefused(reason)) if row.phase == 1 && resume(&self.request) => {
+                row.phase = 4;
+                row.reason = reason.into();
+                row.cleanup_unknown = false;
+            }
             Err(_) if row.phase == 1 => {
                 row.phase = 4;
                 row.reason = "refused-before-issue".into();
                 row.cleanup_unknown = false;
             }
-            Err(Error::DeniedBeforeRun) if issued_launch(&self.request, &row) => {
+            Err(Error::DeniedBeforeRun) if issued_start(&self.request, &row) => {
                 row.phase = 4;
                 row.reason = "denied-before-run".into();
                 row.session_state = v1::SessionLifecycleState::Failed as i32;
@@ -607,48 +653,102 @@ fn admit_scope(tree: &files::Tree, scope: &v1::PlatformManagedScope) -> Result<(
     }
 }
 
-/// An issued launch: the only request a denial before its agent ran settles
-/// as refused.
-fn issued_launch(
+fn resume_origin(
+    scope: &v1::PlatformManagedScope,
+    c: &v1::PlatformManagedControl,
+) -> Result<Origin, Error> {
+    if c.action != v1::PlatformManagedAction::Resume as i32
+        || c.predecessor_pod_uid.is_empty()
+        || c.predecessor_pod_uid == scope.pod_uid
+    {
+        return Err(Error::Refused);
+    }
+    scope_origin(
+        scope,
+        &c.driver_id,
+        Agent::try_from(c.agent)?,
+        ProviderIdentity {
+            sha256: c
+                .expected_provider_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Refused)?,
+            size: c.expected_provider_size,
+            version: c.expected_provider_version.clone(),
+        },
+        None,
+    )
+}
+
+/// An issued launch, or an issued Resume whose adoption was undone (#2769):
+/// the only requests a denial before their agent ran settles as refused. A
+/// refused Resume keeps the predecessor's generation, as its row does.
+fn issued_start(
     request: &v1::PlatformManagedMutationRequest,
     row: &v1::PlatformManagedReceipt,
 ) -> bool {
     row.phase == 2
-        && matches!(
+        && (matches!(
             request.operation,
             Some(v1::platform_managed_mutation_request::Operation::Launch(_))
-        )
+        ) || resume(request))
 }
 
-/// The receipt of a launch refused before its claim wrote anything: the same
-/// row a launch refused before issue settles to, never stored.
+/// A Resume, whose plain refusals before issue carry their reason (#2705).
+fn resume(request: &v1::PlatformManagedMutationRequest) -> bool {
+    matches!(
+        &request.operation,
+        Some(v1::platform_managed_mutation_request::Operation::Control(c))
+            if c.action == v1::PlatformManagedAction::Resume as i32
+    )
+}
+
+/// The receipt of a launch or a Resume refused before its claim wrote
+/// anything: the same row one refused before issue settles to, never stored.
+/// A Resume refused here keeps its conversation resumable and may name its
+/// plain reason (#2705); a launch's reason is always `refused-before-issue`.
 fn refused_launch(
     request: &v1::PlatformManagedMutationRequest,
+    reason: &str,
 ) -> Option<v1::PlatformManagedReceipt> {
-    let Some(v1::platform_managed_mutation_request::Operation::Launch(launch)) =
-        request.operation.as_ref()
-    else {
+    if reason != "refused-before-issue" && !(resume(request) && wire::resume_refusal(reason)) {
         return None;
-    };
-    let message_id = match launch.prompt {
-        Some(_) => wire::platform_managed_initial_prompt_id(&request.request_id).ok()?,
-        None => String::new(),
+    }
+    let (driver_id, message_id, launch_generation) = match request.operation.as_ref()? {
+        v1::platform_managed_mutation_request::Operation::Launch(launch) => (
+            request.request_id.clone(),
+            match launch.prompt {
+                Some(_) => wire::platform_managed_initial_prompt_id(&request.request_id).ok()?,
+                None => String::new(),
+            },
+            1,
+        ),
+        v1::platform_managed_mutation_request::Operation::Control(c)
+            if c.action == v1::PlatformManagedAction::Resume as i32 =>
+        {
+            (
+                c.driver_id.clone(),
+                String::new(),
+                c.expected_launch_generation,
+            )
+        }
+        _ => return None,
     };
     let receipt = v1::PlatformManagedReceipt {
         request_id: request.request_id.clone(),
         scope: Some(request.scope.clone()?),
         fingerprint_sha256: wire::platform_managed_request_fingerprint(request).ok()?,
         phase: v1::PlatformManagedRequestPhase::Rejected as i32,
-        session_id: format!("session-{}", request.request_id),
-        driver_id: request.request_id.clone(),
+        session_id: format!("session-{driver_id}"),
+        driver_id,
         message_id,
-        launch_generation: 1,
+        launch_generation,
         session_state: v1::SessionLifecycleState::Unspecified as i32,
         exit_code: None,
         cleanup_unknown: false,
         pipe_acknowledged: false,
         native_acknowledged: false,
-        reason: "refused-before-issue".into(),
+        reason: reason.into(),
         cleanup_of_request_id: None,
         cleanup_previous_generation: 0,
         cleanup_previous_cleanup_known: false,
@@ -674,7 +774,7 @@ fn valid_settlement(
             r.launch_generation == 1 && r.state == S::Running as i32 && !pipe && !native
         }
         Some(v1::platform_managed_mutation_request::Operation::Control(c)) => {
-            let generation = if c.action == A::Restart as i32 {
+            let generation = if c.action == A::Restart as i32 || c.action == A::Resume as i32 {
                 c.expected_launch_generation.checked_add(1)
             } else {
                 Some(c.expected_launch_generation)
@@ -695,7 +795,7 @@ fn valid_settlement(
                         && !pipe
                         && !native
                 }
-                Ok(A::Restart) => r.state == S::Running as i32 && !pipe && !native,
+                Ok(A::Restart | A::Resume) => r.state == S::Running as i32 && !pipe && !native,
                 _ => false,
             }
         }
@@ -773,13 +873,17 @@ impl PlatformManagedService for Service {
         let request = r.into_inner();
         let (owner, row, dispatch) = match self.claim(request.clone()).await {
             Ok(claimed) => claimed,
-            // A refused claim wrote nothing and started nothing. For a launch,
-            // say so with a definite refusal instead of an error that leaves
-            // orchestration an unknown outcome and its deletion lease
-            // unresolved (#2705). A control keeps the error: a cleanup Stop's
-            // receipt must carry generations only its book can supply.
-            Err(error @ (Error::Refused | Error::EarlierProvider(_))) => {
-                return match refused_launch(&request) {
+            // A refused claim wrote nothing and started nothing. For a launch
+            // or a Resume, say so with a definite refusal instead of an error
+            // that leaves orchestration an unknown outcome and its deletion
+            // lease unresolved (#2705). Other controls keep the error: a
+            // cleanup Stop's receipt must carry generations only its book has.
+            Err(error @ (Error::Refused | Error::EarlierProvider(_) | Error::ResumeRefused(_))) => {
+                let reason = match &error {
+                    Error::ResumeRefused(reason) => reason,
+                    _ => "refused-before-issue",
+                };
+                return match refused_launch(&request, reason) {
                     Some(receipt) => Ok(Response::new(receipt)),
                     None => Err(status(error)),
                 };
@@ -1068,7 +1172,7 @@ mod tests {
     fn platform_service_refuses_a_launch_claim_definitely_and_a_control_claim_opaquely() {
         let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
         let mut request = launch(&scope);
-        let refused = refused_launch(&request).unwrap();
+        let refused = refused_launch(&request, "refused-before-issue").unwrap();
         assert_eq!(
             refused.phase,
             v1::PlatformManagedRequestPhase::Rejected as i32
@@ -1094,7 +1198,9 @@ mod tests {
             l.prompt = Some("fixture task".into());
         }
         assert_eq!(
-            refused_launch(&request).unwrap().message_id,
+            refused_launch(&request, "refused-before-issue")
+                .unwrap()
+                .message_id,
             wire::platform_managed_initial_prompt_id(&request.request_id).unwrap()
         );
         let driver = uuid::Uuid::new_v4().to_string();
@@ -1111,7 +1217,200 @@ mod tests {
                 },
             )),
         };
-        assert!(refused_launch(&control).is_none());
+        assert!(refused_launch(&control, "refused-before-issue").is_none());
+        // Only a Resume carries a plain reason, and only a closed one (#2705).
+        assert!(refused_launch(&request, "resume-driver-alive").is_none());
+    }
+
+    #[test]
+    fn platform_service_an_unknown_resume_bars_only_its_own_conversation() {
+        // #2705: an unknown Resume ends its conversation and no cleanup Stop
+        // can resolve it, so it must not hold the rest of the Pod's book.
+        let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
+        let control = |action: v1::PlatformManagedAction, driver: &str| {
+            let mut c = v1::PlatformManagedControl {
+                action: action as i32,
+                session_id: format!("session-{driver}"),
+                driver_id: driver.to_owned(),
+                expected_launch_generation: 3,
+                ..Default::default()
+            };
+            if action == v1::PlatformManagedAction::Resume {
+                c.predecessor_pod_uid = uuid::Uuid::new_v4().to_string();
+                c.agent = v1::PlatformManagedAgent::Codex as i32;
+                c.expected_provider_sha256 = vec![3; 32];
+                c.expected_provider_size = 1024;
+                c.expected_provider_version = "0.160.0".into();
+            }
+            if action == v1::PlatformManagedAction::Message {
+                c.text = "synthetic".into();
+            }
+            v1::PlatformManagedMutationRequest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                scope: Some(scope.clone()),
+                operation: Some(v1::platform_managed_mutation_request::Operation::Control(c)),
+            }
+        };
+        let unknown = |request: &v1::PlatformManagedMutationRequest, driver: &str| {
+            let row = v1::PlatformManagedReceipt {
+                request_id: request.request_id.clone(),
+                scope: request.scope.clone(),
+                fingerprint_sha256: wire::platform_managed_request_fingerprint(request).unwrap(),
+                phase: 5,
+                session_id: format!("session-{driver}"),
+                driver_id: driver.to_owned(),
+                message_id: match request.operation.as_ref() {
+                    Some(v1::platform_managed_mutation_request::Operation::Control(c))
+                        if matches!(c.action, 1..=3) =>
+                    {
+                        request.request_id.clone()
+                    }
+                    _ => String::new(),
+                },
+                launch_generation: 3,
+                cleanup_unknown: true,
+                reason: "issued-outcome-unknown".into(),
+                ..Default::default()
+            };
+            Stored::new(request, &row).unwrap()
+        };
+        let resumed = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let resume = control(v1::PlatformManagedAction::Resume, &resumed);
+        let books = [unknown(&resume, &resumed)];
+        // A new launch and another conversation's controls are admitted.
+        Service::enforce_barriers(&books, &launch(&scope), None).unwrap();
+        Service::enforce_barriers(
+            &books,
+            &control(v1::PlatformManagedAction::Message, &other),
+            None,
+        )
+        .unwrap();
+        // Its own conversation stays barred.
+        for action in [
+            v1::PlatformManagedAction::Message,
+            v1::PlatformManagedAction::Stop,
+            v1::PlatformManagedAction::Restart,
+            v1::PlatformManagedAction::Resume,
+        ] {
+            assert!(
+                Service::enforce_barriers(&books, &control(action, &resumed), None).is_err(),
+                "{action:?}"
+            );
+        }
+        // Any other unknown request still bars the whole Pod until its
+        // cleanup, as before.
+        let restart = control(v1::PlatformManagedAction::Restart, &other);
+        let books = [unknown(&restart, &other)];
+        assert!(Service::enforce_barriers(&books, &launch(&scope), None).is_err());
+        assert!(
+            Service::enforce_barriers(
+                &books,
+                &control(v1::PlatformManagedAction::Message, &resumed),
+                None
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn platform_service_refuses_a_resume_claim_with_its_plain_reason() {
+        let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
+        let driver = uuid::Uuid::new_v4().to_string();
+        let resume_request = v1::PlatformManagedMutationRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            scope: Some(scope),
+            operation: Some(v1::platform_managed_mutation_request::Operation::Control(
+                v1::PlatformManagedControl {
+                    action: v1::PlatformManagedAction::Resume as i32,
+                    session_id: format!("session-{driver}"),
+                    driver_id: driver.clone(),
+                    expected_launch_generation: 3,
+                    predecessor_pod_uid: uuid::Uuid::new_v4().to_string(),
+                    agent: v1::PlatformManagedAgent::Codex as i32,
+                    expected_provider_sha256: vec![3; 32],
+                    expected_provider_size: 1024,
+                    expected_provider_version: "0.160.0".into(),
+                    ..Default::default()
+                },
+            )),
+        };
+        assert!(resume(&resume_request));
+        for reason in wire::RESUME_REFUSALS
+            .into_iter()
+            .chain(["refused-before-issue"])
+        {
+            let refused = refused_launch(&resume_request, reason).unwrap();
+            assert_eq!(refused.reason, reason);
+            assert_eq!(
+                refused.phase,
+                v1::PlatformManagedRequestPhase::Rejected as i32
+            );
+            // A refused Resume keeps the predecessor's generation.
+            assert_eq!(refused.launch_generation, 3);
+            assert_eq!(refused.driver_id, driver);
+            assert!(!refused.cleanup_unknown);
+            wire::validate_receipt(&refused).unwrap();
+            if reason != "refused-before-issue" {
+                assert_eq!(
+                    status(Error::ResumeRefused(reason)).message(),
+                    format!("platform managed resume refused: {reason}")
+                );
+            }
+        }
+        for reason in ["", "denied-before-run", "resume-anything", "issued"] {
+            assert!(
+                refused_launch(&resume_request, reason).is_none(),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn platform_service_settles_an_issued_resume_denied_before_run_as_refused() {
+        // #2769: a Resume whose adoption was undone settles like a launch,
+        // at the predecessor's generation its row already carries.
+        let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
+        let driver = uuid::Uuid::new_v4().to_string();
+        let request = v1::PlatformManagedMutationRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            scope: Some(scope),
+            operation: Some(v1::platform_managed_mutation_request::Operation::Control(
+                v1::PlatformManagedControl {
+                    action: v1::PlatformManagedAction::Resume as i32,
+                    session_id: format!("session-{driver}"),
+                    driver_id: driver.clone(),
+                    expected_launch_generation: 3,
+                    predecessor_pod_uid: uuid::Uuid::new_v4().to_string(),
+                    agent: v1::PlatformManagedAgent::Codex as i32,
+                    expected_provider_sha256: vec![3; 32],
+                    expected_provider_size: 1024,
+                    expected_provider_version: "0.160.0".into(),
+                    ..Default::default()
+                },
+            )),
+        };
+        let mut row = v1::PlatformManagedReceipt {
+            request_id: request.request_id.clone(),
+            scope: request.scope.clone(),
+            fingerprint_sha256: wire::platform_managed_request_fingerprint(&request).unwrap(),
+            phase: 2,
+            session_id: format!("session-{driver}"),
+            driver_id: driver,
+            launch_generation: 3,
+            cleanup_unknown: true,
+            reason: "issued".into(),
+            ..Default::default()
+        };
+        assert!(issued_start(&request, &row));
+        row.phase = 1;
+        assert!(!issued_start(&request, &row));
+        row.phase = 4;
+        row.reason = "denied-before-run".into();
+        row.session_state = v1::SessionLifecycleState::Failed as i32;
+        row.cleanup_unknown = false;
+        wire::validate_receipt(&row).unwrap();
+        Stored::new(&request, &row).unwrap().row().unwrap();
     }
 
     #[test]
@@ -1119,15 +1418,15 @@ mod tests {
         let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
         let request = launch(&scope);
         let mut row = issued(&request).row().unwrap();
-        assert!(issued_launch(&request, &row));
+        assert!(issued_start(&request, &row));
         row.phase = 1;
-        assert!(!issued_launch(&request, &row));
+        assert!(!issued_start(&request, &row));
         row.phase = 2;
         let mut control = request.clone();
         control.operation = Some(v1::platform_managed_mutation_request::Operation::Control(
             v1::PlatformManagedControl::default(),
         ));
-        assert!(!issued_launch(&control, &row));
+        assert!(!issued_start(&control, &row));
         // The settled row is a valid private receipt.
         row.phase = 4;
         row.reason = "denied-before-run".into();

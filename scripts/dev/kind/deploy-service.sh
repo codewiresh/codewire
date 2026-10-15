@@ -14,6 +14,11 @@
 # synthetic fixture (/codewire-kind-fixtures/credential-service) that the
 # gate's fake credential mode runs, so both modes run the current source.
 #
+# idp, orchestration, billing, coordinator and mesh apply this tree's
+# migrations to the cluster's database when they start. Before restarting one,
+# scripts/dev/kind/database.sh backs the databases up when the tree carries new
+# migrations, and refuses when the database is ahead of the tree.
+#
 # Each deploy records on the Deployment that runs the binary the digest of the
 # source it was built from (scripts/dev/kind/service-sources.py) and the image
 # its Pods then run. KIND_DEPLOY_SKIP_CURRENT=1 (what `make kind-test` uses)
@@ -171,6 +176,13 @@ if [ "${KIND_DEPLOY_SKIP_CURRENT:-0}" = 1 ] && [ -n "$digest" ]; then
     exit 0
   fi
 fi
+# These apply this tree's migrations when they start. Back the cluster's
+# databases up before they upgrade them; refuse only a downgrade.
+case "$SERVICE" in
+  idp | orchestration | billing | coordinator | mesh)
+    "$ROOT/scripts/dev/kind/database.sh" prepare || exit 1
+    ;;
+esac
 if [ "$KIND_PROFILE" = 1 ]; then
   base="$(kind_profile_image_base "$image")" || exit $?
   current="$(docker image inspect --format '{{.Id}}' "$base")" \

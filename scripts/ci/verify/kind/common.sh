@@ -1130,10 +1130,11 @@ build_images_and_smokes() {
     prebuilt-ci)
       log "importing exact same-run CI artifacts without rebuilding"
       local group manifest
-      for group in workspace product smokes; do
+      for group in workspace product daemon smokes; do
         case "$group" in
           workspace) manifest="${CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256:?missing workspace producer digest}" ;;
           product) manifest="${CODEWIRE_KIND_PRODUCT_MANIFEST_SHA256:?missing product producer digest}" ;;
+          daemon) manifest="${CODEWIRE_KIND_DAEMON_MANIFEST_SHA256:?missing daemon producer digest}" ;;
           smokes) manifest="${CODEWIRE_KIND_SMOKES_MANIFEST_SHA256:?missing smoke producer digest}" ;;
         esac
         RUN_DIR="$RUN_DIR" EXPECTED_MANIFEST_SHA256="$manifest" \
@@ -1449,6 +1450,12 @@ kind_workspace_runtime_image() {
   local sealed_status=0
   validate_sealed_kind_images || sealed_status=$?
   [ "$sealed_status" -le 1 ] || return "$sealed_status"
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-ci ]; then
+    # The consumed workspace artifact selected either the exact-source build
+    # or the published pin pulled by digest; the helper proves either one.
+    python3 "$ROOT/scripts/ci/verify/kind-build-artifacts.py" workspace-image
+    return $?
+  fi
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
     python3 "$ROOT/scripts/ci/verify/workspace-image-artifact.py" reuse "$ROOT" \
       "$ROOT/.tmp/codewire-workspace-image-verification.json"
@@ -1531,7 +1538,7 @@ load_images_into_kind() {
 
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
     image="$(kind_workspace_runtime_image)" || return $?
-    log "loading the exact verified source workspace image into Kind"
+    log "loading the selected verified workspace image into Kind"
     kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
     wait_for_kind_api_after_image_load || return $?
   fi
@@ -1559,6 +1566,13 @@ load_images_into_kind() {
       # side-loaded name with imagePullPolicy Never. No registry credential is
       # copied into the nested cluster.
       docker image tag "$source" "$alias" || return $?
+      if [ "$alias" = "$KIND_WORKSPACE_LOCAL_IMAGE" ] \
+          && [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
+        # Only release-image runs use the approved workspace. Source and CI
+        # runs loaded their selected workspace above; importing this unused
+        # multi-gigabyte image cost each shard minutes.
+        continue
+      fi
       log "loading approved platform image into kind"
       kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias" || return $?
       wait_for_kind_api_after_image_load || return $?
@@ -2367,7 +2381,7 @@ edge_routing_probes() {
   fi
 }
 
-# Connect-RPC edge proofs (docs/plans/connect-rpc/03, WI-4 / D5):
+# Connect-RPC edge proofs (connect-rpc/03, WI-4 / D5):
 #   - a billing-owned Connect regex beats the /codewire\. orchestration
 #     fallback (the probe's PublicPing rule -> codewire-billing),
 #   - the fallback delivers every other Connect path to orchestration with
@@ -4158,6 +4172,7 @@ deploy_agent_sandbox_and_smoke() {
   deploy_agent_sandbox
   kind_credential_native_smoke
   kind_credential_claude_session
+  kind_credential_claude_sign_in
   workspace_service_smokes
   temporal_workflow_smoke
   mark_retained_cluster_prepared

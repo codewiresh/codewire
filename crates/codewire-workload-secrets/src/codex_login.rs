@@ -1,6 +1,6 @@
-//! Codewire's one listed direct delivery exception: the Sandbox creator's own
-//! personal Codex ChatGPT login, sealed to a fresh recipient key held by the
-//! workspace daemon, which writes it as Codex's `~/.codex/auth.json`. See
+//! One of Codewire's listed direct delivery exceptions: the Sandbox creator's
+//! own personal Codex ChatGPT login, sealed to a fresh recipient key held by
+//! the workspace daemon, which writes it as Codex's `~/.codex/auth.json`. See
 //! docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions".
 //!
 //! This is a transport codec, not authority. The broker decides delivery and
@@ -99,7 +99,8 @@ pub struct CodexLoginBinding {
 }
 
 impl CodexLoginBinding {
-    fn validate(&self) -> Result<(), CodexLoginError> {
+    /// Also the Claude login's binding (`claude_login.rs`).
+    pub(crate) fn validate(&self) -> Result<(), CodexLoginError> {
         if self.credential_id.is_empty()
             || self.credential_id.len() > MAX_CODEX_LOGIN_CREDENTIAL_ID_BYTES
             || !self.credential_id.bytes().all(|byte| {

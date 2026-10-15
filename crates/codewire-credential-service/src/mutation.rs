@@ -6,6 +6,7 @@
 //! API keys and explicitly imported SSH keys; provider material
 //! never enters response DTOs.
 
+mod claude;
 mod enrollment;
 mod github;
 mod github_app;
@@ -24,6 +25,7 @@ use codewire_access::{
 };
 use codewire_credential_broker::GitHubAppAuthorizationOwner;
 use codewire_credential_broker::provider_oauth::DeviceLoginError;
+use codewire_credential_broker::provider_oauth::claude::ClaudeSignIn;
 use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
 use codewire_credential_broker::provider_oauth::github::GitHubDeviceLogin;
 use codewire_platform_credentials::{
@@ -70,6 +72,10 @@ pub enum CredentialMutationError {
     GitHubAppNotConfigured,
     CleanupFailed,
     PublicationUnknown,
+    /// The pasted Claude code is malformed or from another sign-in.
+    ClaudeSignInCodeInvalid,
+    /// The Claude sign-in was started too long ago.
+    ClaudeSignInExpired,
 }
 
 type Error = CredentialMutationError;
@@ -78,6 +84,7 @@ struct Shared {
     pool: PgPool,
     store: Arc<PlatformCredentialStore>,
     codex_login: CodexDeviceLogin,
+    claude_sign_in: ClaudeSignIn,
     /// Present exactly when the GitHub App is configured.
     github_login: Option<GitHubDeviceLogin>,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
@@ -100,6 +107,7 @@ impl CredentialMutationOwner {
         pool: PgPool,
         store: Arc<PlatformCredentialStore>,
         codex_login: CodexDeviceLogin,
+        claude_sign_in: ClaudeSignIn,
         github_login: Option<GitHubDeviceLogin>,
         github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     ) -> Self {
@@ -108,6 +116,7 @@ impl CredentialMutationOwner {
                 pool,
                 store,
                 codex_login,
+                claude_sign_in,
                 github_login,
                 github_app_authorization,
             }),
@@ -408,7 +417,15 @@ async fn run_enrollment(
     replacement: Option<(CredentialId, u64)>,
     sender: &mpsc::Sender<Result<EnrollCodexResponse, Error>>,
 ) -> Result<(), Error> {
-    let target = enrollment_target(&shared, scope, "openai", name, replacement).await?;
+    let target = enrollment_target(
+        &shared,
+        scope,
+        "openai",
+        CredentialAuthKind::OAuth,
+        name,
+        replacement,
+    )
+    .await?;
     let pending = scope
         .wait(shared.codex_login.start())
         .await?
@@ -453,6 +470,7 @@ async fn enrollment_target(
     shared: &Shared,
     scope: &Scope,
     provider: &str,
+    authentication_kind: CredentialAuthKind,
     name: String,
     replacement: Option<(CredentialId, u64)>,
 ) -> Result<EnrollmentTarget, Error> {
@@ -467,7 +485,7 @@ async fn enrollment_target(
             .map_err(store_error)?;
         if record.metadata.display_name != name
             || record.metadata.provider.as_str() != provider
-            || record.metadata.authentication_kind != CredentialAuthKind::OAuth
+            || record.metadata.authentication_kind != authentication_kind
         {
             return Err(Error::InvalidInput);
         }

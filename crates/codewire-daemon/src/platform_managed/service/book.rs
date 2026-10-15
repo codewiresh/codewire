@@ -157,7 +157,9 @@ fn bounded_timestamp(s: &str) -> bool {
 pub(super) struct Stored {
     version: u32,
     receipt: Vec<u8>,
-    action: i32, //0 is Launch; no original prompt, text or launch projection.
+    // 0 is Launch; no original prompt, text or launch projection. 1-6 are
+    // the private control actions, 6 being Resume (#2705).
+    action: i32,
     restart: Option<RestartAdvance>,
 }
 impl Stored {
@@ -176,15 +178,20 @@ impl Stored {
             restart: None,
         })
     }
+    /// A Resume (#2705). Its open or unknown outcome ends its conversation,
+    /// and no cleanup Stop can resolve it.
+    pub(super) fn is_resume(&self) -> bool {
+        self.action == v1::PlatformManagedAction::Resume as i32
+    }
     pub(super) fn row(&self) -> Result<v1::PlatformManagedReceipt, Error> {
         let row = v1::PlatformManagedReceipt::decode(self.receipt.as_slice())
             .map_err(|_| Error::Refused)?;
         wire::validate_receipt(&row).map_err(|_| Error::Refused)?;
         if self.version != 1
-            || !(0..=5).contains(&self.action)
+            || !(0..=6).contains(&self.action)
             || (self.action == 0 && (row.driver_id != row.request_id || row.launch_generation != 1))
             || (matches!(self.action, 1..=3) && row.message_id != row.request_id)
-            || (matches!(self.action, 4..=5) && !row.message_id.is_empty())
+            || (matches!(self.action, 4..=6) && !row.message_id.is_empty())
             || (row.cleanup_of_request_id.is_some() && self.action != 4)
         {
             return Err(Error::Refused);
@@ -558,6 +565,49 @@ mod tests {
         row.phase = 5;
         row.reason = "issued-outcome-unknown".into();
         saved.set_row(&row);
+    }
+    #[test]
+    fn platform_book_reads_back_a_resume_in_every_phase() {
+        // #2705: a stored Resume is read back by issue, finish, observe and
+        // every later request's barrier check, so it must be a valid row.
+        let r = request(v1::PlatformManagedAction::Resume as i32, 4, None);
+        let mut row = v1::PlatformManagedReceipt {
+            request_id: r.request_id.clone(),
+            scope: r.scope.clone(),
+            fingerprint_sha256: "7".repeat(64),
+            phase: 1,
+            reason: "pending".into(),
+            session_id: "session-00000000-0000-4000-8000-000000000003".into(),
+            driver_id: "00000000-0000-4000-8000-000000000003".into(),
+            launch_generation: 4,
+            cleanup_unknown: true,
+            ..Default::default()
+        };
+        let mut stored = Stored::new(&r, &row).unwrap();
+        assert_eq!(stored.row().unwrap(), row);
+        for (phase, reason, generation, cleanup_unknown) in [
+            (2, "issued", 4, true),
+            (3, "settled", 5, false),
+            (4, "refused-before-issue", 4, false),
+            (4, "resume-driver-alive", 4, false),
+            (5, "issued-outcome-unknown", 4, true),
+        ] {
+            row.phase = phase;
+            row.reason = reason.into();
+            row.launch_generation = generation;
+            row.cleanup_unknown = cleanup_unknown;
+            stored.set_row(&row);
+            assert_eq!(stored.row().unwrap(), row, "{phase} {reason}");
+        }
+        // A Resume names no message, and no action past Resume is stored.
+        row.message_id = r.request_id.clone();
+        stored.set_row(&row);
+        assert!(stored.row().is_err());
+        row.message_id.clear();
+        let mut unknown = request(7, 4, None);
+        unknown.request_id = r.request_id.clone();
+        let stored = Stored::new(&unknown, &row).unwrap();
+        assert!(stored.row().is_err());
     }
     #[test]
     fn platform_book_completed_message_or_stop_lost_ack_cleanup_preserves_original_bytes() {
