@@ -580,6 +580,42 @@ async fn github_connection_state_is_read_as_the_creator_from_metadata_only() {
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::PermissionDenied);
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+    // A saved API key, or a login saved for another server, is refused before
+    // any request, as when a delegation opens.
+    for attack in ["api key", "saved server"] {
+        let server = MockServer::start().await;
+        let directory = tempfile::tempdir().unwrap();
+        saved(directory.path(), &server.uri(), "synthetic-access", true);
+        match attack {
+            "api key" => saved(
+                directory.path(),
+                &server.uri(),
+                "cw_synthetic-api-key",
+                true,
+            ),
+            _ => config::save_platform_config(
+                directory.path(),
+                &config::PlatformConfig {
+                    server_url: "https://different.invalid".into(),
+                    default_org: String::new(),
+                },
+            )
+            .unwrap(),
+        }
+        let error = NativePlatformCredentialConnector
+            .github_connected(
+                binding(directory.path(), &server.uri()),
+                Instant::now() + WAIT,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied, "{attack}");
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "{attack}"
+        );
+    }
 }
 
 fn keepalive_answer() -> DelegateCredentialsResponse {

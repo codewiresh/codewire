@@ -852,25 +852,63 @@ impl SupervisorCore {
 
     /// Ask the credential authority, which asks the platform as the pinned
     /// creator, whether that account's GitHub connection is usable now.
-    /// Material-free. `None` when it cannot answer at this start.
+    /// Material-free. `None` when it cannot answer at this start; the
+    /// supervisor's log then records why, as a closed reason only.
     async fn platform_github_connected(
         &mut self,
         environment: &EnvironmentRecord,
         generation: u64,
     ) -> Option<bool> {
+        match self.ask_platform_github(environment, generation).await {
+            Ok(connected) => Some(connected),
+            Err(reason) => {
+                if let Some(log) = &self.log {
+                    log.record(
+                        "platform_github_unanswered",
+                        &[
+                            ("environment", LogField::Id(environment.id)),
+                            ("reason", LogField::Name(reason)),
+                        ],
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    /// [`Self::platform_github_connected`]'s question, or the closed reason
+    /// it went unanswered: no platform binding, the pinned configuration,
+    /// the authority unreachable or past its bound, the platform refusing
+    /// the saved login (not the creator's, an API key, another server), or
+    /// the platform unavailable.
+    async fn ask_platform_github(
+        &mut self,
+        environment: &EnvironmentRecord,
+        generation: u64,
+    ) -> Result<bool, &'static str> {
         let mut binding =
             sources::platform::broker_binding(environment, &self.config.platform_config_dir)
-                .ok()??;
-        sources::platform::resolve_config_directory(&mut binding).ok()?;
-        let environment_id = access_environment_id(environment.id).ok()?;
-        let mut client = self.access_control_client().await.ok()?;
+                .map_err(|_| "binding_invalid")?
+                .ok_or("no_platform_binding")?;
+        sources::platform::resolve_config_directory(&mut binding)
+            .map_err(|_| "config_directory")?;
+        let environment_id = access_environment_id(environment.id).map_err(|_| "environment")?;
+        let mut client = self
+            .access_control_client()
+            .await
+            .map_err(|_| "authority_unreachable")?;
         tokio::time::timeout(
             PLATFORM_GITHUB_STATE_CALL_BOUND,
             client.platform_github_connected(&environment_id, generation, binding),
         )
         .await
-        .ok()?
-        .ok()
+        .map_err(|_| "timed_out")?
+        .map_err(|status| match status.code() {
+            tonic::Code::DeadlineExceeded => "timed_out",
+            tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => "login_refused",
+            tonic::Code::Unavailable => "unavailable",
+            _ => "failed",
+        })
     }
 
     /// Capture only client-slot metadata from the exact selected revision.
