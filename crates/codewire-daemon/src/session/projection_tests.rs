@@ -2,7 +2,7 @@ use std::future::pending;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::*;
@@ -56,7 +56,22 @@ fn frame(payload: v1::pty_message::Payload) -> Result<v1::PtyMessage, Status> {
 // Unlike tokio_stream::iter (which yields Pending after 32 items in the pinned
 // release), this finite fixture makes every queued frame immediately visible.
 // Only that condition promises input priority before projection is polled.
-struct ReadyFrames(std::vec::IntoIter<Result<v1::PtyMessage, Status>>);
+// It counts the frames read, so a test can see where reading stopped.
+struct ReadyFrames {
+    frames: std::vec::IntoIter<Result<v1::PtyMessage, Status>>,
+    read: Arc<AtomicUsize>,
+}
+
+impl ReadyFrames {
+    fn new(frames: Vec<Result<v1::PtyMessage, Status>>) -> (Self, Arc<AtomicUsize>) {
+        let read = Arc::new(AtomicUsize::new(0));
+        let frames = Self {
+            frames: frames.into_iter(),
+            read: read.clone(),
+        };
+        (frames, read)
+    }
+}
 
 impl Stream for ReadyFrames {
     type Item = Result<v1::PtyMessage, Status>;
@@ -65,7 +80,11 @@ impl Stream for ReadyFrames {
         mut self: std::pin::Pin<&mut Self>,
         _context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        std::task::Poll::Ready(self.0.next())
+        let next = self.frames.next();
+        if next.is_some() {
+            self.read.fetch_add(1, Ordering::SeqCst);
+        }
+        std::task::Poll::Ready(next)
     }
 }
 
@@ -248,7 +267,7 @@ async fn explicit_half_close_preserves_prelaunch_input_resize_and_normal_complet
         .await
         .unwrap();
     assert!(prelaunch.stdin_closed && prelaunch.stream_ended);
-    assert_eq!(prelaunch.bytes, 3);
+    assert_eq!(prelaunch.bytes, 3 + 2 * PRELAUNCH_PTY_CONTROL_COST);
     let (control, controls) = std_mpsc::channel();
     let (disconnected, disconnect) = oneshot::channel();
     forward_pty_control(stream, control, disconnected, prelaunch).await;
@@ -287,68 +306,240 @@ async fn half_close_keeps_original_projection_deadline_and_transport_failure_sti
     );
 }
 
+/// Polls `launch` once, as the runtime would, and reports whether it is
+/// still waiting for its projection.
+async fn still_waiting<F: Future + Unpin>(launch: &mut F) -> bool {
+    std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::pin::Pin::new(&mut *launch).poll(context).is_pending())
+    })
+    .await
+}
+
+/// A fast paste or `ssh -tt host < file` sends many keystroke-sized frames
+/// before the shell starts. The session reads them all at once, so none is
+/// left unread for HTTP/2's small DATA frame flood guard (#2822), waits for
+/// the launch instead of cancelling it (#2830), and then delivers every byte
+/// once, in order, ahead of the end of input.
 #[tokio::test]
-async fn prelaunch_control_and_byte_bounds_fail_closed_without_polling_projection() {
+async fn a_burst_before_launch_is_read_at_once_and_delivered_in_order() {
     use v1::pty_message::Payload;
-    let (output, _rx) = mpsc::channel(4);
-    for messages in [
-        vec![frame(Payload::Stdin(vec![
-            0;
-            MAX_PRELAUNCH_PTY_INPUT_BYTES + 1
-        ]))],
-        (0..=MAX_PRELAUNCH_PTY_CONTROLS)
-            .map(|_| {
-                frame(Payload::Resize(v1::ResizeRequest {
-                    width: 80,
-                    height: 24,
-                }))
-            })
-            .collect(),
+    const LINES: usize = 1200;
+    let lines: Vec<Vec<u8>> = (1..=LINES)
+        .map(|line| format!("echo {line}\n").into_bytes())
+        .collect();
+    let mut frames: Vec<_> = lines
+        .iter()
+        .map(|line| frame(Payload::Stdin(line.clone())))
+        .collect();
+    frames.push(frame(Payload::CloseStdin(())));
+    let (mut stream, read) = ReadyFrames::new(frames);
+    let (output, _responses) = mpsc::channel(4);
+    let (launched, launch_result) = oneshot::channel();
+    let prelaunch = {
+        let launch = await_pty_projection(
+            async move { launch_result.await.unwrap() },
+            &mut stream,
+            &output,
+        );
+        tokio::pin!(launch);
+        assert!(
+            still_waiting(&mut launch).await,
+            "early input ended the launch"
+        );
+        assert_eq!(
+            read.load(Ordering::SeqCst),
+            LINES + 1,
+            "input was left unread before the launch"
+        );
+        launched.send(Ok(())).unwrap();
+        tokio::time::timeout(TIMEOUT, launch)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    assert!(prelaunch.stdin_closed && prelaunch.stream_ended);
+    // Consecutive Stdin is held as one write.
+    assert_eq!(prelaunch.controls.len(), 2);
+    let (control, controls) = std_mpsc::channel();
+    let (disconnected, disconnect) = oneshot::channel();
+    forward_pty_control(stream, control, disconnected, prelaunch).await;
+    assert!(!disconnect.await.unwrap(), "half-close became cancellation");
+    let controls: Vec<_> = controls.into_iter().collect();
+    let delivered: Vec<u8> = controls
+        .iter()
+        .filter_map(|control| match control {
+            PtyControl::Stdin(data) => Some(data.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect();
+    assert_eq!(
+        delivered,
+        lines.concat(),
+        "input was lost, repeated or reordered"
+    );
+    assert!(matches!(
+        controls.as_slice(),
+        [PtyControl::Stdin(_), PtyControl::CloseStdin, ..]
+    ));
+}
+
+/// Once the launch is running, input is read as it arrives even while the
+/// terminal takes none of it, so more than a thousand small frames never
+/// wait unread in HTTP/2 (#2822); the terminal then receives them in order.
+#[tokio::test]
+async fn running_input_is_read_while_the_terminal_is_busy() {
+    use v1::pty_message::Payload;
+    const FRAMES: usize = 1500;
+    let mut frames: Vec<_> = (0..FRAMES)
+        .map(|index| frame(Payload::Stdin(vec![(index % 251) as u8])))
+        .collect();
+    frames.push(frame(Payload::Resize(v1::ResizeRequest {
+        width: 100,
+        height: 30,
+    })));
+    frames.push(frame(Payload::CloseStdin(())));
+    let (stream, read) = ReadyFrames::new(frames);
+    // Nothing takes input from the terminal writer's queue until the reader
+    // is done: a terminal whose process is not reading.
+    let (control, controls) = std_mpsc::channel();
+    let (disconnected, disconnect) = oneshot::channel();
+    tokio::time::timeout(
+        TIMEOUT,
+        forward_pty_control(stream, control, disconnected, PrelaunchPtyInput::default()),
+    )
+    .await
+    .expect("the reader waited on the terminal");
+    assert_eq!(read.load(Ordering::SeqCst), FRAMES + 2);
+    assert!(!disconnect.await.unwrap());
+    let controls: Vec<_> = controls.into_iter().collect();
+    let stdin: Vec<u8> = controls
+        .iter()
+        .filter_map(|control| match control {
+            PtyControl::Stdin(data) => Some(data.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect();
+    assert_eq!(
+        stdin,
+        (0..FRAMES)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>()
+    );
+    assert!(matches!(
+        &controls[FRAMES..],
+        [
+            PtyControl::Resize {
+                width: 100,
+                height: 30
+            },
+            PtyControl::CloseStdin,
+            PtyControl::CloseStdin
+        ]
+    ));
+}
+
+#[tokio::test]
+async fn prelaunch_bound_pauses_input_and_cancellation_still_ends_the_launch() {
+    use v1::pty_message::Payload;
+    let resize = || {
+        frame(Payload::Resize(v1::ResizeRequest {
+            width: 80,
+            height: 24,
+        }))
+    };
+    const SMALL: usize = 8;
+    for (messages, bound) in [
+        // Thousands of small frames are read before the bound stops reading.
+        (
+            (0..MAX_PRELAUNCH_PTY_INPUT_BYTES / SMALL + 10)
+                .map(|_| frame(Payload::Stdin(vec![b'x'; SMALL])))
+                .collect::<Vec<_>>(),
+            MAX_PRELAUNCH_PTY_INPUT_BYTES / SMALL,
+        ),
+        (
+            vec![
+                frame(Payload::Stdin(vec![0; MAX_PRELAUNCH_PTY_INPUT_BYTES])),
+                frame(Payload::Stdin(vec![1])),
+            ],
+            1,
+        ),
+        (
+            vec![
+                frame(Payload::Stdin(vec![0; MAX_PRELAUNCH_PTY_INPUT_BYTES + 1])),
+                frame(Payload::Stdin(vec![1])),
+            ],
+            1,
+        ),
+        (
+            (0..=MAX_PRELAUNCH_PTY_INPUT_BYTES / PRELAUNCH_PTY_CONTROL_COST)
+                .map(|_| resize())
+                .collect(),
+            MAX_PRELAUNCH_PTY_INPUT_BYTES / PRELAUNCH_PTY_CONTROL_COST,
+        ),
     ] {
-        let mut stream = ReadyFrames(messages.clone().into_iter());
+        let (mut stream, read) = ReadyFrames::new(messages);
         let polled = AtomicBool::new(false);
         let projection = std::future::poll_fn(|_| {
             polled.store(true, Ordering::SeqCst);
             std::task::Poll::<io::Result<()>>::Pending
         });
+        let (output, responses) = mpsc::channel(4);
+        let launch = await_pty_projection(projection, &mut stream, &output);
+        tokio::pin!(launch);
+        assert!(still_waiting(&mut launch).await);
+        assert_eq!(read.load(Ordering::SeqCst), bound);
         assert!(
-            await_pty_projection(projection, &mut stream, &output)
+            polled.load(Ordering::SeqCst),
+            "a full queue stopped the launch from progressing"
+        );
+        // A full queue no longer reads input, but a client that is gone
+        // still cancels the launch.
+        drop(responses);
+        assert!(
+            tokio::time::timeout(TIMEOUT, launch)
                 .await
+                .unwrap()
                 .is_err()
         );
-        assert!(!polled.load(Ordering::SeqCst));
-
-        // A temporarily Pending input permits projection progress, but never
-        // permits the prelaunch queue to exceed either cap when input resumes.
-        // Preserve the real cooperative iterator as an independent vector.
-        let mut stream = tokio_stream::iter(messages);
-        assert!(
-            await_pty_projection(pending(), &mut stream, &output)
-                .await
-                .is_err()
-        );
+        assert_eq!(read.load(Ordering::SeqCst), bound);
     }
-    let mut boundary = PrelaunchPtyInput::default();
-    boundary
-        .queue(frame(Payload::Stdin(vec![0; MAX_PRELAUNCH_PTY_INPUT_BYTES])).unwrap())
-        .unwrap();
-    for _ in 1..MAX_PRELAUNCH_PTY_CONTROLS {
-        boundary
-            .queue(
-                frame(Payload::Resize(v1::ResizeRequest {
-                    width: 80,
-                    height: 24,
-                }))
-                .unwrap(),
-            )
-            .unwrap();
+    let mut bytes = PrelaunchPtyInput::default();
+    bytes.queue(frame(Payload::Stdin(vec![0; MAX_PRELAUNCH_PTY_INPUT_BYTES - 1])).unwrap());
+    assert!(!bytes.is_full());
+    bytes.queue(frame(Payload::Stdin(vec![0])).unwrap());
+    assert!(bytes.is_full());
+    assert_eq!(bytes.controls.len(), 1, "consecutive Stdin is one write");
+    // Stdin never passes a resize or end of input, and none follows the end.
+    let mut ordered = PrelaunchPtyInput::default();
+    for payload in [
+        Payload::Stdin(b"a".to_vec()),
+        Payload::Resize(v1::ResizeRequest {
+            width: 90,
+            height: 20,
+        }),
+        Payload::Stdin(b"b".to_vec()),
+        Payload::Stdin(b"c".to_vec()),
+        Payload::CloseStdin(()),
+        Payload::Stdin(b"d".to_vec()),
+    ] {
+        ordered.queue(frame(payload).unwrap());
     }
-    assert_eq!(boundary.controls.len(), MAX_PRELAUNCH_PTY_CONTROLS);
-    assert!(
-        boundary
-            .queue(frame(Payload::Stdin(vec![1])).unwrap())
-            .is_err()
-    );
+    assert!(matches!(
+        ordered.controls.as_slice(),
+        [
+            PtyControl::Stdin(a),
+            PtyControl::Resize {
+                width: 90,
+                height: 20
+            },
+            PtyControl::Stdin(bc),
+            PtyControl::CloseStdin
+        ] if a == b"a" && bc == b"bc"
+    ));
 }
 
 #[tokio::test]

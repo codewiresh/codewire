@@ -65,6 +65,16 @@ grep -q "^sign-macos-helper: signed and notarized identifier=sh.codewire.vz-runn
   sha256sum "$work/signed/codewire-vz-runner" | cut -c1-64)$" "$work/success.out" || fail 'no completion line'
 pass
 
+# The helper the release signs is a Mach-O executable, which need not end in a
+# newline: its identifier and entitlements are still read back.
+mkdir -p "$work/unsigned-binary"
+printf '\317\372\355\376\014\000\000\001\000\000\000\000' >"$work/unsigned-binary/codewire-vz-runner"
+(cd "$work/caller" && "$SIGNER" "$STAND/bin/rcodesign" "$STAND/keys" "$work/unsigned-binary/codewire-vz-runner" \
+  "$ENTITLEMENTS" "$work/signed-binary") >"$work/binary.out" 2>&1 || fail "$(cat "$work/binary.out")"
+grep -q '^sign-macos-helper: signed and notarized identifier=sh.codewire.vz-runner ' "$work/binary.out" ||
+  fail 'a helper that does not end in a newline lost its identifier'
+pass
+
 # A log without the submission id still hands over the accepted helper.
 touch "$STAND/state/no-submission-id"
 sign "$work/signed-no-id" >"$work/no-id.out" 2>&1 || fail "$(cat "$work/no-id.out")"

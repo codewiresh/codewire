@@ -49,7 +49,9 @@ case "$command" in
     elif [ "$#" -eq 11 ] && [ "${*:1:7}" = "--pem-file $root/keys/developer-id.pem \
 --binary-identifier sh.codewire.vz-runner --for-notarization --code-signature-flags runtime" ] &&
       [ "$8" = --entitlements-xml-file ] && [ -f "$9" ]; then
-      { cat "${10}"; printf 'stand-in-identifier sh.codewire.vz-runner\n'
+      # A real helper is a Mach-O executable that need not end in a newline;
+      # the markers start on lines of their own so print-signature-info finds them.
+      { cat "${10}"; printf '\nstand-in-identifier sh.codewire.vz-runner\n'
         sed -n 's/.*<key>\([^<]*\)<\/key>.*/stand-in-entitlement \1/p' "$9"
         printf 'developer-id-signature\n'; } >"${11}"
     else
