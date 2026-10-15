@@ -8,8 +8,13 @@ fn clients(slots: &[&str]) -> ManagedCredentialClients {
 /// form it did not select; for GitHub the two `gh` names; and one Git
 /// configuration entry per rewritten GitHub URL form (see
 /// [`git_rewrite_entries`]). All but the first Git entry, and the `gh` names,
-/// are projected without being reserved.
-fn projected_names(selected: ManagedCredentialClients) -> BTreeSet<&'static str> {
+/// are projected without being reserved, as is a local VM's `CODEX_HOME` for
+/// an OpenAI-only selection: a VM refuses a declared `CODEX_HOME` whatever is
+/// selected, and the reserved names are bound into every selection digest.
+fn projected_names(
+    selected: ManagedCredentialClients,
+    placement: ManagedCredentialClientPlacement,
+) -> BTreeSet<&'static str> {
     const KEYS: [&str; 4] = [
         "GIT_CONFIG_KEY_0",
         "GIT_CONFIG_KEY_1",
@@ -38,6 +43,11 @@ fn projected_names(selected: ManagedCredentialClients) -> BTreeSet<&'static str>
     }
     if selected.contains(ManagedCredentialClient::GitHub) {
         names.extend(["GH_CONFIG_DIR", "GH_TOKEN"]);
+    }
+    if placement == ManagedCredentialClientPlacement::Native
+        && selected.managed_agent_client(ManagedAgent::Codex).is_some()
+    {
+        names.insert("CODEX_HOME");
     }
     let entries = git_rewrite_entries(selected);
     if entries > 0 {
@@ -360,18 +370,27 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
         );
         assert!(!config.config_toml().contains("env_key"));
 
+        // A local VM also configures its native Codex home for the OpenAI
+        // API-key route; a hosted `~/.codex` is left for the Codex slot.
         let openai = clients(&["openai"]).for_placement(placement);
-        assert!(openai.codex.is_none());
-        assert_eq!(
-            openai.environment,
-            BTreeMap::from([
-                (
-                    "OPENAI_BASE_URL".into(),
-                    "http://127.0.0.1:38081/_codewire/openai/v1".into()
-                ),
-                ("OPENAI_API_KEY".into(), "codewire-managed".into()),
-            ])
-        );
+        let mut expected = BTreeMap::from([
+            (
+                "OPENAI_BASE_URL".to_owned(),
+                "http://127.0.0.1:38081/_codewire/openai/v1".to_owned(),
+            ),
+            ("OPENAI_API_KEY".to_owned(), "codewire-managed".to_owned()),
+        ]);
+        match placement {
+            ManagedCredentialClientPlacement::Native => {
+                assert_eq!(
+                    openai.codex,
+                    CodexProviderProjection::for_managed_client(ManagedCredentialClient::OpenAi)
+                );
+                expected.insert("CODEX_HOME".into(), "/run/codewire-agent/codex".into());
+            }
+            ManagedCredentialClientPlacement::Platform => assert!(openai.codex.is_none()),
+        }
+        assert_eq!(openai.environment, expected);
         let anthropic = clients(&["anthropic"]).for_placement(placement);
         assert!(anthropic.codex.is_none());
         assert_eq!(
@@ -481,10 +500,7 @@ fn managed_client_projection_covers_all_owned_names_without_environment_lookup()
             // whatever is selected.
             let native_codex = placement == ManagedCredentialClientPlacement::Native
                 && selected.managed_agent_client(ManagedAgent::Codex).is_some();
-            let mut expected = projected_names(selected);
-            if native_codex {
-                expected.insert("CODEX_HOME");
-            }
+            let expected = projected_names(selected, placement);
             assert_eq!(
                 projection
                     .environment
@@ -580,7 +596,7 @@ fn anthropic_subscription_form_adds_16_canonical_encodings_and_keeps_the_api_key
                     .keys()
                     .map(String::as_str)
                     .collect::<BTreeSet<_>>(),
-                projected_names(subscription)
+                projected_names(subscription, placement)
             );
             for (name, value) in &reference.environment {
                 if !name.starts_with("ANTHROPIC_") && name != "CLAUDE_CODE_OAUTH_TOKEN" {
@@ -706,7 +722,7 @@ fn anthropic_sign_in_form_adds_16_encodings_and_projects_the_base_url_alone() {
                     .keys()
                     .map(String::as_str)
                     .collect::<BTreeSet<_>>(),
-                projected_names(sign_in)
+                projected_names(sign_in, placement)
             );
             assert_eq!(
                 projection.environment["ANTHROPIC_BASE_URL"],
