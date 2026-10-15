@@ -109,9 +109,20 @@ MARKER="$work/stopped.marker" CHILD_PID="$work/stopped.child" \
 [[ "$(cat "$work/stopped.output")" == stop=true ]] || fail "a stopped build did not report stop=true"
 [[ "$(cat "$work/stopped.marker" 2>/dev/null)" == cleaned ]] ||
   fail "a stopped build did not run its cleanup"
-if kill -0 "$(cat "$work/stopped.child")" 2>/dev/null; then
-  fail "a stopped build left a child process running"
-fi
+# The group's TERM reaches the child asynchronously, and a container without an
+# init leaves it a zombie that still answers kill -0. Give it a moment to exit
+# and count a zombie as gone.
+child_gone() {
+  local pid="$1" state
+  state="$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)" || return 0
+  [[ -z "$state" || "$state" == Z ]]
+}
+child="$(cat "$work/stopped.child")"
+for _ in $(seq 50); do
+  child_gone "$child" && break
+  sleep 0.1
+done
+child_gone "$child" || fail "a stopped build left a child process running"
 grep -Fq 'nothing from it is signed or dispatched' "$work/stopped.out" ||
   fail "a stopped build does not say what it skipped"
 
