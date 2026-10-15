@@ -153,8 +153,8 @@ pub(super) fn patch_sources(current: &ProjectSpec, args: &EnvUpdateArgs) -> Proj
 }
 
 fn platform_is_proven_unconfigured(error: &config::ConfigError) -> bool {
-    matches!(error, config::ConfigError::NoPlatformServer { source: Some(source) }
-        if matches!(source.as_ref(), config::ConfigError::ReadConfig { source, .. }
+    matches!(error, config::ConfigError::NoPlatformServer { cause: Some(cause) }
+        if matches!(cause.as_ref(), config::ConfigError::ReadConfig { source, .. }
             if source.kind() == std::io::ErrorKind::NotFound))
 }
 
