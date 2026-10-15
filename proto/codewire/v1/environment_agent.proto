@@ -43,6 +43,10 @@ enum EnvironmentAgentAction {
   ENVIRONMENT_AGENT_ACTION_INTERRUPT = 3;
   ENVIRONMENT_AGENT_ACTION_STOP = 4;
   ENVIRONMENT_AGENT_ACTION_RESTART = 5;
+  // A conversation of an earlier Pod of this environment continues in the
+  // captured Pod from its saved native session. The platform chooses the
+  // earlier Pod and proves it gone; nothing in flight is replayed.
+  ENVIRONMENT_AGENT_ACTION_RESUME = 6;
 }
 
 enum EnvironmentAgentPhase {

@@ -1405,6 +1405,11 @@ if [ "$event_selected" = false ]; then
         select_services
         recognized=true
         ;;
+      scripts/dev/workstation-cpu.sh)
+        # Owner-workstation CPU limits; neither CI nor Kind runs the helper.
+        select_token policy
+        recognized=true
+        ;;
       scripts/dev/kind/sync-local-secrets.sh)
         # The local credential bridge has a hermetic policy fixture and does
         # not provision or exercise a Kind cluster.

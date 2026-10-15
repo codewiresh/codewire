@@ -264,6 +264,7 @@ fn is_state_conflict_reason(reason: &str) -> bool {
             | "organization_deletion_stale_generation"
             | "organization_mutation_lease_conflict"
             | "organization_mutation_barrier_not_drained"
+            | "platform_agent_resume_refused"
     )
 }
 
@@ -428,6 +429,14 @@ mod tests {
                     StatusCode::CONFLICT,
                     "organization_write_blocked",
                     "organization deletion is in progress",
+                ),
+                ConnectCode::FailedPrecondition,
+            ),
+            (
+                coded(
+                    StatusCode::CONFLICT,
+                    "platform_agent_resume_refused",
+                    "the environment's previous Pod is still stopping; try again shortly",
                 ),
                 ConnectCode::FailedPrecondition,
             ),

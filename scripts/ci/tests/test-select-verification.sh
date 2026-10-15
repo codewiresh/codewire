@@ -275,6 +275,8 @@ run_paths_case openbao_secret_authority_policy pull_request refs/pull/20011/head
   scripts/ci/tests/test-sync-local-secrets.sh
 run_paths_case local_secret_sync_policy pull_request refs/pull/20012/head false \
   'policy policy_shell security security_js' scripts/dev/kind/sync-local-secrets.sh
+run_paths_case workstation_cpu_helper pull_request refs/pull/20016/head false \
+  'policy policy_shell security security_js' scripts/dev/workstation-cpu.sh docs/dev/AGENT-WORKFLOW.md
 run_paths_case kind_runtime_images_fixture pull_request refs/pull/20014/head false \
   'policy policy_shell security security_js' scripts/ci/tests/test-kind-runtime-images.sh
 run_paths_case kind_watch_github_app_fixture pull_request refs/pull/20015/head false \
@@ -1708,6 +1710,14 @@ integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
 # Database owns the destroy-hint regression. The activity-fencing lane must
 # retain its exact two tests instead of also selecting this ignored worker test.
 activity_fencing_block="$(sed -n '/^run_orchestration() {/,/^  start_orchestration$/p' "$integration_runner")"
+# The orchestration service and its smokes come from the wire contract's own
+# test build. A separate binary build compiled the crate one more time.
+orchestration_build_block="$(sed -n '/^build_selected_services() {/,/^}$/p' "$integration_runner")"
+grep -qF -- '--features kind-e2e --test wire_contract --no-run' <<<"$orchestration_build_block"
+if grep -Eq 'cargo_ci build .*-p codewire-orchestration' <<<"$orchestration_build_block"; then
+  echo 'services build the orchestration binaries apart from the wire contract test build' >&2
+  exit 1
+fi
 grep -qF "'worker::' -- --ignored" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek'" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure'" <<<"$activity_fencing_block"
@@ -2157,8 +2167,8 @@ awk '
   capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  workspace-image:" { exit }
   capture { print }
 ' "$WORKFLOW" > "$workspace_block"
-grep -qF '    timeout-minutes: 80' "$workspace_block" || {
-  echo 'workspace-image: cold-build ceiling must remain 80 minutes' >&2
+grep -qF '    timeout-minutes: 55' "$workspace_block" || {
+  echo 'workspace-image: cold-build ceiling must remain 55 minutes' >&2
   exit 1
 }
 

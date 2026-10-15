@@ -133,19 +133,39 @@ cw_runtime_managed_after_restart() {
     echo '::error::the managed-agent records from the first Pod did not list after Stop/Start' >&2
     return 1
   }
-  # A conversation from the first Pod ended with it: a message to it is
-  # refused plainly, not as a scope error (#2705). Nothing is sent.
-  local ended refused
-  ended="$(jq -er '[.[] | select(.command[1] == "__platform-agent-driver")][0].session_id' <<<"$listed")"
-  if refused="$(kind_credential_cli msg "$environment" "$ended" 'cw-runtime-after-restart' \
-    --output json 2>&1)"; then
-    echo '::error::a message to a conversation from the first Pod was accepted' >&2
-    return 1
-  fi
-  grep -Fq 'ended when its environment stopped' <<<"$refused" || {
-    echo '::error::a message to an ended conversation did not say it ended with the environment' >&2
+  # A top-level conversation from the first Pod continues in this one
+  # (#2705): a new message resumes it from its saved native session, at the
+  # next generation, and is delivered to its driver here. Nothing from the
+  # first Pod is replayed.
+  local earlier generation sent message resumed waited
+  # `cw list` shows a top-level conversation's parent as "".
+  earlier="$(jq -er '[.[] | select(.command[1] == "__platform-agent-driver"
+    and (.parent_session_id // "") == "")][0]' <<<"$listed")" || {
+    echo '::error::no top-level managed conversation from the first Pod listed after Stop/Start' >&2
     return 1
   }
+  generation="$(jq -er '.launch_generation' <<<"$earlier")"
+  sent="$(kind_credential_cli msg "$environment" "$(jq -er .session_id <<<"$earlier")" \
+    'Return the synthetic reply after Stop/Start.' --output json)" || {
+    echo '::error::a message to a conversation from the first Pod did not resume it' >&2
+    return 1
+  }
+  message="$(jq -er '(.messageId // .message_id)' <<<"$sent")"
+  # The journey may have revoked this agent's provider: an answered turn or
+  # the provider's own refusal both prove the resumed driver took the message.
+  waited="$(kind_credential_cli wait --message "$message" --timeout 5m --output json || true)"
+  jq -e '.state == "completed" or .state == "error"' <<<"$waited" >/dev/null || {
+    echo '::error::the message to the resumed conversation did not reach its driver' >&2
+    return 1
+  }
+  resumed="$(kind_credential_cli list "$environment" --output json | jq -er \
+    --arg id "$(jq -er .session_id <<<"$earlier")" '[.[] | select(.session_id == $id)][0].launch_generation')"
+  [ "$resumed" = "$((generation + 1))" ] || {
+    echo "::error::the resumed conversation is at generation ${resumed}, not $((generation + 1))" >&2
+    return 1
+  }
+  kind_credential_cli stop "$environment" "$(jq -er .session_id <<<"$earlier")" \
+    --output json >/dev/null
   launched="$(kind_credential_launch "$environment" --no-tty --detach --output json -- \
     sh -c 'printf cw-runtime-after-restart')"
   session="$(jq -er '.session_id | select(type == "string" and test("^session-[0-9a-f-]{36}$"))' \
@@ -213,6 +233,122 @@ retained_managed_workspace_image() {
   printf '%s\n' "$reference"
 }
 
+# The OpenAI API-key attempts the synthetic fixture has served so far.
+cw_runtime_openai_attempts() {
+  kind_credential_fixture_events | jq -er \
+    '[.[] | select(.event == "api_key_attempt" and .family == "openai")] | length'
+}
+
+# A conversation continues across Stop/Start (#2705): after the Start, a
+# message to the same session resumes it from its saved native session at
+# the next generation and gets the synthetic reply, its earlier message
+# keeps its state and generation, and the provider sees exactly one more
+# turn: nothing from before the Stop is replayed. Then back-to-back messages
+# to the resumed conversation, each once the one before it is final, all
+# complete; none ends unknown (#2782). It runs in an environment of its own
+# on the journey's profile: a resumed conversation is listed in its new
+# Pod, where the smoke's session inventory and the later Stop/Start check
+# must not find it.
+cw_runtime_managed_resume_continues() {
+  local profile="$1" workspace_image="$2" environment update operation pod
+  local launched session first generation before after listed sent message waited resumed
+  local back_to_back=20 round
+  environment="$(kind_credential_cli env --platform create --name "kind-cw-resume-${RANDOM}-${RANDOM}" \
+    --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
+    --no-network --yes --output json | jq -er '.id')"
+  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+  log "checking that a managed conversation continues across Stop/Start in environment $environment"
+  wait_kind_credential_environment "$environment" running
+  # A source change is refused until setup finishes.
+  wait_kind_credential_setup_complete "$environment"
+  update="$(kind_credential_cli env --platform update "$environment" \
+    --profile "platform:$profile" --yes --output json)"
+  operation="$(jq -er '.operation_generation |
+    if type == "number" and . > 0 and . == floor then .
+    else error("expected the acknowledged positive setup generation") end' <<<"$update")"
+  wait_kind_credential_environment "$environment" running
+  wait_kind_credential_restarted_workspace "$environment" "$operation" >/dev/null
+  wait_kind_credential_setup_complete "$environment"
+  launched="$(kind_credential_cli run "$environment" --name resume-check --agent codex \
+    --detach --output json --prompt 'Return the synthetic reply before Stop/Start.')"
+  session="$(jq -er '(.sessionId // .session_id)
+    | select(type == "string" and test("^session-[0-9a-f-]{36}$"))' <<<"$launched")"
+  first="$(jq -er '(.messageId // .message_id)' <<<"$launched")"
+  waited="$(kind_credential_cli wait --message "$first" --timeout 5m --output json)"
+  jq -e '.state == "completed" and ((.result // "") | contains("CWOPENAI"))' <<<"$waited" \
+    >/dev/null || {
+    echo '::error::the conversation did not answer before Stop/Start' >&2
+    return 1
+  }
+  listed="$(kind_credential_cli list "$environment" --output json)"
+  generation="$(jq -er --arg id "$session" \
+    '[.[] | select(.session_id == $id)][0].launch_generation' <<<"$listed")"
+  before="$(cw_runtime_openai_attempts)"
+  kind_credential_cli env --platform stop "$environment" --output json >/dev/null
+  wait_kind_credential_environment "$environment" stopped
+  kind_credential_cli env --platform start "$environment" --output json >/dev/null
+  wait_kind_credential_environment "$environment" running
+  # Start reads running before its setup finishes, and a message is refused
+  # until then ("environment runtime or setup is not ready").
+  wait_kind_credential_setup_complete "$environment"
+  sent="$(kind_credential_cli msg "$environment" "$session" \
+    'Return the synthetic reply after Stop/Start.' --output json)" || {
+    echo '::error::a message after Stop/Start did not resume the conversation and complete' >&2
+    return 1
+  }
+  message="$(jq -er '(.messageId // .message_id)' <<<"$sent")"
+  waited="$(kind_credential_cli wait --message "$message" --timeout 5m --output json)"
+  jq -e '.state == "completed" and ((.result // "") | contains("CWOPENAI"))' <<<"$waited" \
+    >/dev/null || {
+    echo '::error::the resumed conversation did not answer' >&2
+    return 1
+  }
+  resumed="$(kind_credential_cli list "$environment" --output json | jq -er --arg id "$session" \
+    '[.[] | select(.session_id == $id)][0].launch_generation')"
+  [ "$resumed" = "$((generation + 1))" ] || {
+    echo "::error::the resumed conversation is at generation ${resumed}, not $((generation + 1))" >&2
+    return 1
+  }
+  # The message from before the Stop is untouched, not run again.
+  kind_credential_cli wait --message "$first" --timeout 30s --output json | jq -e \
+    --argjson generation "$generation" \
+    '.state == "completed" and ((.platform_launch_generation // $generation) == $generation)' \
+    >/dev/null || {
+    echo '::error::the message from before Stop/Start changed' >&2
+    return 1
+  }
+  after="$(cw_runtime_openai_attempts)"
+  [ "$after" = "$((before + 1))" ] || {
+    echo "::error::the provider saw $((after - before)) calls for one resumed turn" >&2
+    return 1
+  }
+  # `cw msg` fails unless its request completed, so an unknown one stops here.
+  for ((round = 1; round <= back_to_back; round++)); do
+    sent="$(kind_credential_cli msg "$environment" "$session" \
+      "Return the synthetic reply, message ${round} of ${back_to_back} after Resume." \
+      --output json)" || {
+      echo "::error::back-to-back message ${round} of ${back_to_back} after Resume did not complete" >&2
+      return 1
+    }
+    message="$(jq -er '(.messageId // .message_id)' <<<"$sent")"
+    kind_credential_cli wait --message "$message" --timeout 2m --output json | jq -e \
+      '.state == "completed" and ((.result // "") | contains("CWOPENAI"))' >/dev/null || {
+      echo "::error::back-to-back message ${round} of ${back_to_back} after Resume did not answer" >&2
+      return 1
+    }
+  done
+  after="$(cw_runtime_openai_attempts)"
+  [ "$after" = "$((before + 1 + back_to_back))" ] || {
+    echo "::error::the provider saw $((after - before - 1)) calls for ${back_to_back} back-to-back turns" >&2
+    return 1
+  }
+  kind_credential_cli stop "$environment" "$session" --output json >/dev/null
+  pod="$(kind_credential_workspace "$environment")"
+  kind_credential_cli env --platform rm "$environment" --yes --output json >/dev/null
+  wait_kind_credential_environment "$environment" destroyed
+  kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s "pod/$pod"
+}
+
 # The managed-agent journey alone on a retained cluster without a named
 # profile (#2672): the same synthetic providers, profile and no-network
 # environment as the admitted journey, then the smoke in managed-only mode
@@ -246,6 +382,9 @@ run_retained_managed_agents_journey() {
   profile_name="kind-cw-profile-${RANDOM}-${RANDOM}"
   kind_credential_cli org set org_contract_1
   cw_runtime_add_managed_credentials "$credential_name" "$anthropic_name" "$profile_name"
+  # First, while the synthetic providers the smoke later revokes are valid,
+  # a conversation continues across Stop/Start in its own environment (#2705).
+  cw_runtime_managed_resume_continues "$profile_name" "$workspace_image"
   environment="$(kind_credential_cli env --platform create --name "$profile_name" \
     --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"

@@ -270,27 +270,23 @@ def pin_tool() -> Any:
 
 
 def workspace_source(head: str, base: str | None) -> tuple[str, str]:
-    """Choose the Kind workspace: the published pin unless the definition changed.
+    """Choose the Kind workspace: the published pin only when it is this tree's.
 
     The definition is the pin generator's identity of images/base and
-    images/workspace. With a base (the pull request base or the previous main
-    commit), only a change to that definition rebuilds from source; the pin is
-    then the image this tree deploys. Without one, the pin is used only when it
-    was built from exactly this tree's definition.
+    images/workspace. The pin is used only when it was built from exactly this
+    tree's definition. A definition unchanged from the base is not enough: the
+    pin is refreshed only after a definition change merges, so it can lag the
+    tree (#2803 left it two definitions behind, and Kind ran a workspace image
+    this tree does not deploy). The base is checked for form only.
     """
     if not HEX40.fullmatch(head) or (base is not None and not HEX40.fullmatch(base)):
         raise ArtifactError("workspace source selection needs full commit IDs")
     tool = pin_tool()
     try:
         pin = tool.read_pin(ROOT, head)
-        definition = tool.inputs_sha256(ROOT, head)
-        if base is None:
-            if definition == pin["inputs_sha256"]:
-                return "pinned", "the pin was built from this tree's workspace image definition"
-            return "source", "no base, and the pin was built from another workspace image definition"
-        if tool.inputs_sha256(ROOT, base) == definition:
-            return "pinned", f"the workspace image definition is unchanged from {base[:12]}"
-        return "source", f"the workspace image definition changed from {base[:12]}"
+        if tool.inputs_sha256(ROOT, head) == pin["inputs_sha256"]:
+            return "pinned", "the pin was built from this tree's workspace image definition"
+        return "source", "the pin was built from another workspace image definition"
     except tool.PinError as error:
         return "source", f"the pin could not be compared ({error})"
 

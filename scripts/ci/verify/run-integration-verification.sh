@@ -239,8 +239,6 @@ build_database_suites() {
     cargo test -p codewire-billing --lib --no-run
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-mesh --lib --no-run
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-orchestration --lib --no-run
 }
 
 database_lane_core() {
@@ -417,8 +415,10 @@ database_lane_orchestration() {
   assert_passed_count "public credential metadata matrix" "$logfile" 3
 
   logfile="$RUN_DIR/mesh-authorization-receiver.log"
+  # The orchestration batch already built this harness; a CI-profile build
+  # compiled the crate again for one test.
   DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-orchestration --lib \
+    cargo test --locked -p codewire-orchestration --lib \
       connect::mesh_authorization::tests::generated_mesh_authorization_service_enforces_the_canonical_matrix \
       -- --ignored --exact --nocapture | tee "$logfile"
   assert_passed_count "Mesh authorization receiver matrix" "$logfile" 1
@@ -511,7 +511,7 @@ database_lane_orchestration() {
     cargo test --locked -p codewire-orchestration --lib \
       'api::platform_agents::journal::database_tests::db_' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform managed agent journal matrix" "$logfile" 35
+  assert_passed_count "platform managed agent journal matrix" "$logfile" 39
 
   logfile="$RUN_DIR/environment-resize-admission.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -706,11 +706,7 @@ probe_connect_surface() {
 }
 
 build_selected_services() {
-  local packages=()
-  local orchestration_bins=(
-    --bin codewire-orchestration
-    --bin log-stream-smoke
-  )
+  local packages=() binary
   selected service_idp && packages+=( -p codewire-idp )
   selected service_coordinator && packages+=( -p codewire-coordinator )
   selected service_billing && packages+=( -p codewire-billing )
@@ -726,10 +722,19 @@ build_selected_services() {
     cargo_ci build --locked --profile ci "${packages[@]}"
   fi
   if selected service_orchestration; then
-    selected service_temporal && orchestration_bins+=( --bin temporal-smoke )
     cargo_ci build --locked --profile ci -p codewire-cli-bin --bin cw
-    cargo_ci build --locked --profile ci -p codewire-orchestration \
-      "${orchestration_bins[@]}" --features kind-e2e
+    # One build for the wire contract and the service: an integration test
+    # also builds every binary of its package, with the test's features, into
+    # the profile directory. A separate `cargo build` of the binaries resolves
+    # features without dev-dependencies and compiled the crate once more.
+    cargo_ci test --locked --profile ci -p codewire-orchestration \
+      --features kind-e2e --test wire_contract --no-run
+    for binary in codewire-orchestration log-stream-smoke temporal-smoke; do
+      [ -x "$CARGO_CI_DIR/$binary" ] || {
+        echo "::error::the orchestration test build produced no $binary"
+        return 1
+      }
+    done
   fi
 }
 
