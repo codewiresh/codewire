@@ -292,7 +292,7 @@ done
 # The Go tools cross-compile natively on the build platform, never under
 # emulation, still at @latest when the image is built.
 # shellcheck disable=SC2016 # Match the Dockerfile's literal variables.
-go_stage="$(sed -n '/^FROM --platform=$BUILDPLATFORM rust:1.93.0-bookworm@sha256:[0-9a-f]\{64\} AS workspace-floating-go$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
+go_stage="$(sed -n '/^FROM --platform=$BUILDPLATFORM rust:1.99.0-bookworm@sha256:[0-9a-f]\{64\} AS workspace-floating-go$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
 # shellcheck disable=SC2016
 for go_input in 'GOOS=linux GOARCH="$TARGETARCH" CGO_ENABLED=0' \
   '/usr/local/go/bin/go install golang.org/x/tools/gopls@latest' \

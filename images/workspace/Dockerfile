@@ -75,7 +75,7 @@ COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-ru
 # them under emulation. They still resolve @latest at image-build time (every
 # builder bypasses this stage's cache, like workspace-floating-tools), and the
 # build information Go embeds in each binary keeps them visible to the SBOM.
-FROM --platform=$BUILDPLATFORM rust:1.93.0-bookworm@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382 AS workspace-floating-go
+FROM --platform=$BUILDPLATFORM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS workspace-floating-go
 SHELL ["/bin/bash", "-c"]
 ARG BUILDARCH
 ARG TARGETARCH
