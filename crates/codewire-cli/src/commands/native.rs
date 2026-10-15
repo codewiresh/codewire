@@ -1746,7 +1746,7 @@ async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
 /// VM from it.
 async fn native_boot_client() -> anyhow::Result<NativeSupervisorClient> {
     let config = native_runtime_config()?;
-    connect_native_after_authority_admission(
+    let mut client = connect_native_after_authority_admission(
         || async { admit_existing_local_credential_authority().await },
         || async {
             codewire_local_vmm::supervisor_upgrade::connect_for_boot(&config)
@@ -1754,7 +1754,14 @@ async fn native_boot_client() -> anyhow::Result<NativeSupervisorClient> {
                 .map_err(anyhow::Error::from)
         },
     )
-    .await
+    .await?;
+    replace_older_local_credential_authority(async {
+        codewire_local_vmm::supervisor_upgrade::may_replace_older_authority(&mut client)
+            .await
+            .map_err(anyhow::Error::from)
+    })
+    .await?;
+    Ok(client)
 }
 
 async fn connect_native_after_authority_admission<T, A, AF, C, CF>(

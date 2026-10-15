@@ -34,7 +34,7 @@ use codewire_access::{
     EnvironmentId,
 };
 use codewire_local_credentials::{
-    AuthorityRuntimeConfig, EnvironmentBrokerRuntime as AuthorityBrokerRuntime,
+    AuthorityFeature, AuthorityRuntimeConfig, EnvironmentBrokerRuntime as AuthorityBrokerRuntime,
     LocalCredentialControlClient,
 };
 use futures::Stream;
@@ -135,6 +135,17 @@ const PLATFORM_GITHUB_STATE_CALL_BOUND: Duration = Duration::from_secs(20);
 const MAXIMUM_RUNNER_EVENTS: usize = 128;
 const DAEMON_VSOCK_PORT: u32 = 7777;
 const DEFAULT_OCI_ROOT_DISK_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+
+/// An authority older than the GitHub question still serves the VMs that ran
+/// across a cw update. It would ignore the question's `platform` and evaluate
+/// a local binding instead, so it is not asked and the start omits GitHub.
+fn platform_github_askable(authority_protocol: u32) -> Result<(), &'static str> {
+    if AuthorityFeature::PlatformGithub.served_by(authority_protocol) {
+        Ok(())
+    } else {
+        Err("authority_older")
+    }
+}
 
 async fn request_runner_shutdown_and_observe(
     client: &mut RunnerClient,
@@ -896,9 +907,9 @@ impl SupervisorCore {
 
     /// [`Self::platform_github_connected`]'s question, or the closed reason
     /// it went unanswered: no platform binding, the pinned configuration,
-    /// the authority unreachable or past its bound, the platform refusing
-    /// the saved login (not the creator's, an API key, another server), or
-    /// the platform unavailable.
+    /// the authority unreachable, older than the question or past its bound,
+    /// the platform refusing the saved login (not the creator's, an API key,
+    /// another server), or the platform unavailable.
     async fn ask_platform_github(
         &mut self,
         environment: &EnvironmentRecord,
@@ -915,6 +926,7 @@ impl SupervisorCore {
             .access_control_client()
             .await
             .map_err(|_| "authority_unreachable")?;
+        platform_github_askable(client.info().protocol_version)?;
         tokio::time::timeout(
             PLATFORM_GITHUB_STATE_CALL_BOUND,
             client.platform_github_connected(&environment_id, generation, binding),
@@ -16845,5 +16857,16 @@ mod retire_tests {
             .await
             .unwrap_err();
         assert_eq!(started.code(), tonic::Code::Unavailable);
+    }
+}
+
+#[cfg(test)]
+mod platform_github_tests {
+    use super::*;
+
+    #[test]
+    fn a_start_does_not_ask_an_authority_older_than_the_github_question() {
+        assert_eq!(platform_github_askable(15), Err("authority_older"));
+        assert_eq!(platform_github_askable(16), Ok(()));
     }
 }

@@ -18,9 +18,11 @@ use codewire_protected_store::ProtectedStoreError;
 
 use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 
-// Bump this whenever a detached authority must be replaced, including
-// behavior or provider-catalog changes that leave the wire layout intact.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 15;
+// Bump this for every change an older authority lacks, including behavior or
+// provider-catalog changes that leave the wire layout intact, with its
+// AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
+// serving until a boot command finds no local VM running and replaces it.
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 16;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -28,8 +30,36 @@ pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
 /// Every protocol in (minimum, current] needs a row, so a bump says what an
 /// older authority lacks; its test enforces that.
 #[cfg(test)]
-const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[];
+const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[(
+    16,
+    "EvaluateEnvironmentGrants answers a platform environment's GitHub question (#2850)",
+)];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
+
+/// An authority capability newer than the minimum protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityFeature {
+    /// `EvaluateEnvironmentGrants` with `platform`: whether a platform
+    /// environment's creator has GitHub connected. An older authority ignores
+    /// the field and evaluates a local binding instead.
+    PlatformGithub,
+}
+
+impl AuthorityFeature {
+    pub const ALL: [Self; 1] = [Self::PlatformGithub];
+
+    /// The protocol that introduced it.
+    pub const fn since(self) -> u32 {
+        match self {
+            Self::PlatformGithub => 16,
+        }
+    }
+
+    /// Whether an authority reporting `protocol` serves it.
+    pub const fn served_by(self, protocol: u32) -> bool {
+        protocol >= self.since()
+    }
+}
 const AUTHORITY_SOCKET_FILE: &str = "authority.sock";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -463,5 +493,26 @@ mod exit_status_tests {
             protocols, expected,
             "an authority protocol bump needs an AUTHORITY_PROTOCOL_CHANGES row"
         );
+    }
+
+    #[test]
+    fn every_authority_feature_is_newer_than_the_minimum_and_served_from_its_protocol() {
+        for feature in AuthorityFeature::ALL {
+            let since = feature.since();
+            assert!(
+                (MINIMUM_AUTHORITY_PROTOCOL_VERSION + 1..=AUTHORITY_PROTOCOL_VERSION)
+                    .contains(&since),
+                "{feature:?}"
+            );
+            assert!(
+                AUTHORITY_PROTOCOL_CHANGES
+                    .iter()
+                    .any(|(protocol, _)| *protocol == since),
+                "{feature:?}"
+            );
+            assert!(!feature.served_by(since - 1), "{feature:?}");
+            assert!(feature.served_by(since), "{feature:?}");
+            assert!(feature.served_by(AUTHORITY_PROTOCOL_VERSION), "{feature:?}");
+        }
     }
 }

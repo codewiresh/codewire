@@ -57,8 +57,8 @@ pub use service::serve_local_credential_authority;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use service::serve_os_local_credential_authority_with_process_spawners;
 pub use transport::{
-    AuthorityRuntimeConfig, AuthorityRuntimeError, MAXIMUM_SOCKET_PATH_BYTES, authority_exit_code,
-    check_socket_path,
+    AuthorityFeature, AuthorityRuntimeConfig, AuthorityRuntimeError, MAXIMUM_SOCKET_PATH_BYTES,
+    authority_exit_code, check_socket_path,
 };
 pub use workload_secret::{
     LocalLaunchSecretSelection, LocalSecretProject, ResolvedWorkloadSecretMetadata,

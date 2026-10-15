@@ -28,8 +28,8 @@ use super::*;
 use crate::control::v1;
 use crate::service::{serve_until, serve_until_with_process_spawners, serve_until_with_spawner};
 use crate::transport::{
-    AUTHORITY_PROTOCOL_VERSION, bind_owner_only, bind_owner_only_for_uid, current_uid,
-    owner_only_connector, remove_bound_socket,
+    AUTHORITY_PROTOCOL_VERSION, MINIMUM_AUTHORITY_PROTOCOL_VERSION, bind_owner_only,
+    bind_owner_only_for_uid, current_uid, owner_only_connector, remove_bound_socket,
 };
 
 const FIRST_MATERIAL: &[u8] = b"synthetic-oauth-material-alpha";
@@ -1672,7 +1672,9 @@ impl tonic::server::UnaryService<v1::GetAuthorityInfoRequest> for CompatibilityA
                 Err(tonic::Status::unavailable("synthetic info unavailable"))
             } else {
                 Ok(tonic::Response::new(v1::AuthorityInfo {
-                    protocol_version: AUTHORITY_PROTOCOL_VERSION - 1,
+                    // Below the supported range: an older authority within it
+                    // is admitted.
+                    protocol_version: MINIMUM_AUTHORITY_PROTOCOL_VERSION - 1,
                     protected_store_persistence: v1::ProtectedStorePersistence::ProcessLifetime
                         as i32,
                     protected_store_backend: String::new(),

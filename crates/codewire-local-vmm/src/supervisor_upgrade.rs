@@ -142,6 +142,29 @@ pub async fn refuse_while_older_serves(config: &NativeRuntimeConfig) -> Result<(
     Ok(())
 }
 
+/// Whether a boot command may replace a credential authority older than this
+/// cw: only once no VM `client`'s supervisor lists may run. Each running VM's
+/// broker belongs to the authority that started it, so while one may run, the
+/// older authority keeps serving.
+pub async fn may_replace_older_authority(
+    client: &mut NativeSupervisorClient,
+) -> Result<bool, TakeoverError> {
+    let environments = tokio::time::timeout(LIST_DEADLINE, client.list())
+        .await
+        .map_err(|_| failed(client, "listing its VMs did not answer in time".to_owned()))?
+        .map_err(|status| {
+            failed(
+                client,
+                format!("listing its VMs failed: {}", status.message()),
+            )
+        })?;
+    Ok(authority_replaceable(&environments))
+}
+
+fn authority_replaceable(environments: &[v1::Environment]) -> bool {
+    !environments.iter().any(vm_may_run)
+}
+
 async fn running_vms(client: &mut NativeSupervisorClient) -> Result<Vec<String>, String> {
     let environments = tokio::time::timeout(LIST_DEADLINE, client.list())
         .await
@@ -325,6 +348,24 @@ mod tests {
         ] {
             assert_eq!(vm_may_run(&listed), may_run, "{listed:?}");
         }
+    }
+
+    #[test]
+    fn an_older_authority_is_replaced_only_while_no_vm_may_run() {
+        use v1::EnvironmentState::{Error, Running, Stopped};
+        assert!(authority_replaceable(&[]));
+        assert!(authority_replaceable(&[
+            environment(Stopped, ""),
+            environment(Error, ""),
+        ]));
+        assert!(!authority_replaceable(&[
+            environment(Stopped, ""),
+            environment(Running, ""),
+        ]));
+        assert!(!authority_replaceable(&[environment(
+            Error,
+            "network_worker_exit"
+        )]));
     }
 
     #[test]
