@@ -124,9 +124,30 @@ struct StopInterrupt {
 
 struct SessionHandle {
     metadata: AsyncMutex<PersistedSession>,
+    /// Whether the session has a platform managed origin, which is set
+    /// when the session is created; a Resume only replaces one origin with
+    /// another. Input reads it here, never under `metadata`, which output
+    /// capture holds across its writes and fsyncs.
+    #[cfg(target_os = "linux")]
+    platform_managed: std::sync::atomic::AtomicBool,
     output_index: Mutex<Vec<OutputFrameIndex>>,
     operation: AsyncMutex<()>,
     launch_cancellation: watch::Sender<bool>,
+}
+
+impl SessionHandle {
+    fn new(metadata: PersistedSession, output_index: Vec<OutputFrameIndex>) -> Arc<Self> {
+        Arc::new(Self {
+            #[cfg(target_os = "linux")]
+            platform_managed: std::sync::atomic::AtomicBool::new(
+                metadata.platform_managed_origin.is_some(),
+            ),
+            metadata: AsyncMutex::new(metadata),
+            output_index: Mutex::new(output_index),
+            operation: AsyncMutex::new(()),
+            launch_cancellation: watch::channel(false).0,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -711,12 +732,7 @@ impl SessionEngine {
             cleanup_unknown: true,
             status_message: "session starting".into(),
         };
-        let handle = Arc::new(SessionHandle {
-            metadata: AsyncMutex::new(persisted),
-            output_index: Mutex::new(Vec::new()),
-            operation: AsyncMutex::new(()),
-            launch_cancellation: watch::channel(false).0,
-        });
+        let handle = SessionHandle::new(persisted, Vec::new());
         let _operation = handle.operation.lock().await;
         {
             let metadata = handle.metadata.lock().await;
@@ -1382,10 +1398,14 @@ impl SessionEngine {
         #[cfg(target_os = "linux")]
         {
             let retained = { lock(&self.inner.sessions).get(session_id).cloned() };
-            if let Some(handle) = retained {
-                // Origin is immutable once published. This also covers Attach
-                // input, which calls input directly rather than SendSessionInput.
-                refuse_platform_managed_bypass(&*handle.metadata.lock().await)?;
+            // This also covers Attach input, which calls input directly
+            // rather than SendSessionInput.
+            if retained.is_some_and(|handle| {
+                handle
+                    .platform_managed
+                    .load(std::sync::atomic::Ordering::Acquire)
+            }) {
+                return Err(platform_managed_bypass_refused());
             }
         }
         let control = lock(&self.inner.active)
@@ -1758,8 +1778,8 @@ impl SessionEngine {
                 ));
             }
         }
-        let handle = Arc::new(SessionHandle {
-            metadata: AsyncMutex::new(PersistedSession {
+        let handle = SessionHandle::new(
+            PersistedSession {
                 session_id: session_id.clone(),
                 control_origin: Some(request.origin()),
                 platform_managed_origin: None,
@@ -1787,11 +1807,9 @@ impl SessionEngine {
                 cleanup_confirmed: false,
                 cleanup_unknown: true,
                 status_message: "session starting".into(),
-            }),
-            output_index: Mutex::new(Vec::new()),
-            operation: AsyncMutex::new(()),
-            launch_cancellation: watch::channel(false).0,
-        });
+            },
+            Vec::new(),
+        );
         let _operation = handle.operation.lock().await;
         // Retention -> exact session operation -> grant/journal. This must
         // precede even pruning or directory creation, not only process spawn.
@@ -3260,12 +3278,7 @@ impl SessionEngineInner {
             if metadata_changed {
                 persist_metadata(&self.root, &metadata).await?;
             }
-            let handle = Arc::new(SessionHandle {
-                metadata: AsyncMutex::new(metadata),
-                output_index: Mutex::new(output_index),
-                operation: AsyncMutex::new(()),
-                launch_cancellation: watch::channel(false).0,
-            });
+            let handle = SessionHandle::new(metadata, output_index);
             compact_output(&self.root, &handle, &mut *handle.metadata.lock().await).await?;
             loaded.insert(session_id, handle);
         }
@@ -5120,12 +5133,7 @@ mod tests {
         persist_metadata(&engine.inner.root, &metadata)
             .await
             .unwrap();
-        let handle = Arc::new(SessionHandle {
-            metadata: AsyncMutex::new(metadata),
-            operation: AsyncMutex::new(()),
-            output_index: Mutex::new(Vec::new()),
-            launch_cancellation: watch::channel(false).0,
-        });
+        let handle = SessionHandle::new(metadata, Vec::new());
         lock(&engine.inner.sessions).insert(session_id, handle.clone());
         handle
     }
@@ -5473,6 +5481,50 @@ mod tests {
         engine.shutdown().await.unwrap();
     }
 
+    /// Output capture holds a session's metadata lock across its write,
+    /// fsync and metadata persist, which take seconds on a loaded disk. Input
+    /// must not wait for it: an attach gives each input 5 s, then ends the
+    /// browser terminal (#2829).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn input_reaches_the_pty_while_output_capture_holds_the_metadata_lock() {
+        let (temp, engine) = cancellation_engine().await;
+        let marker = temp.path().join("typed");
+        let record = engine
+            .launch(v1::LaunchSessionRequest {
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "IFS= read -r line; printf '%s' \"$line\" > \"$1\"; exec sleep 30".into(),
+                    "sh".into(),
+                    marker.to_string_lossy().into_owned(),
+                ],
+                pty: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let handle = engine.handle(&record.session_id).unwrap();
+        let capture = handle.metadata.lock().await;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            engine.input(&record.session_id, b"typed\n".to_vec()),
+        )
+        .await
+        .expect("input waited for output capture's metadata lock")
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&marker).is_ok_and(|value| value == "typed") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the shell read the typed line");
+        drop(capture);
+        engine.stop(&record.session_id).await.unwrap();
+        engine.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn recovered_starting_retains_cleanup_fence_and_legacy_default_is_false() {
         let (temp, engine) = cancellation_engine().await;
@@ -5656,6 +5708,10 @@ mod tests {
         };
         persist_metadata(root, &metadata).await.unwrap();
         SessionHandle {
+            #[cfg(target_os = "linux")]
+            platform_managed: std::sync::atomic::AtomicBool::new(
+                metadata.platform_managed_origin.is_some(),
+            ),
             metadata: AsyncMutex::new(metadata),
             output_index: Mutex::new(index),
             operation: AsyncMutex::new(()),
@@ -6244,4 +6300,4 @@ mod host_tests;
 #[path = "durable_session/platform_managed.rs"]
 mod platform_managed;
 #[cfg(target_os = "linux")]
-use platform_managed::refuse_platform_managed_bypass;
+use platform_managed::{platform_managed_bypass_refused, refuse_platform_managed_bypass};
