@@ -38,6 +38,7 @@ DOWNLOAD = (
 PRODUCERS = {
     "kind-workspace": "workspace",
     "kind-product": "product",
+    "kind-daemon": "daemon",
     "kind-smokes": "smokes",
 }
 # A superseded main run builds no Kind producer; main's newer run does.
@@ -45,6 +46,11 @@ PRODUCER_IF = (
     "${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' "
     "&& needs.verification-selection.outputs.superseded != 'true' "
     "&& contains(needs.verification-selection.outputs.selection, '|kind|') }}"
+)
+# A pinned workspace has no producer job: each shard writes its pin record.
+PINNED = "needs.verification-selection.outputs.kind_workspace_source == 'pinned'"
+WORKSPACE_PRODUCER_IF = PRODUCER_IF.removesuffix(" }}") + (
+    " && needs.verification-selection.outputs.kind_workspace_source != 'pinned' }}"
 )
 KIND_STEP_IF = (
     "${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' "
@@ -84,7 +90,8 @@ class WorkflowContractTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 job = self.jobs[job_name]
                 self.assertEqual(job["needs"], ["verification-selection"])
-                self.assertEqual(job["if"], PRODUCER_IF)
+                self.assertEqual(
+                    job["if"], WORKSPACE_PRODUCER_IF if job_name == "kind-workspace" else PRODUCER_IF)
                 expected_outputs = {
                     "artifact_name": "${{ steps.export.outputs.artifact_name }}",
                     "manifest_sha256": "${{ steps.export.outputs.manifest_sha256 }}",
@@ -143,6 +150,98 @@ class WorkflowContractTests(unittest.TestCase):
                 )
                 self.assertGreater(job["steps"].index(upload), export_index)
 
+    def test_service_and_daemon_images_build_on_separate_producers(self) -> None:
+        product = named_step(self.jobs["kind-product"], "Build exact CI-profile service images")
+        self.assertEqual(product["run"], "scripts/ci/images/build-kind-images.sh dashboard services mesh")
+        daemon = named_step(self.jobs["kind-daemon"], "Build exact CI-profile daemon image")
+        self.assertEqual(daemon["run"], "scripts/ci/images/build-kind-images.sh daemon")
+        for job_name in ("kind-product", "kind-daemon"):
+            with self.subTest(job=job_name):
+                job = self.jobs[job_name]
+                # A main push's Heavy jobs take the runners reserved for main.
+                self.assertEqual(job["runs-on"], "${{ github.event_name == 'push' && "
+                                 "github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}")
+                cache = named_step(job, "Select existing compiler cache")
+                clean = named_step(job, "Clean compiler cache credentials")
+                self.assertEqual(clean["if"], "${{ always() }}")
+                self.assertLess(job["steps"].index(cache), job["steps"].index(clean))
+                self.assertIs(job["steps"][-1], named_step(job, "Cancel the run after this failure"))
+
+    def test_kind_workspace_takes_the_pin_unless_the_definition_changed(self) -> None:
+        selection = self.jobs["verification-selection"]
+        self.assertEqual(
+            selection["outputs"]["kind_workspace_source"],
+            "${{ steps.kind-workspace.outputs.kind_workspace_source }}",
+        )
+        choose = next(step for step in selection["steps"] if step.get("id") == "kind-workspace")
+        self.assertIn("kind-build-artifacts.py workspace-source", choose["run"])
+        self.assertIn('--head "$GITHUB_SHA" --base "$base" --github-output', choose["run"])
+        self.assertEqual(choose["env"], {
+            "PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+            "PUSH_BEFORE_SHA": "${{ github.event.before }}",
+        })
+        for event, expected in (("pull_request", "pr-base"), ("push", "push-before"),
+                                ("workflow_dispatch", "")):
+            with self.subTest(event=event):
+                script = choose["run"].replace(
+                    "python3 -B scripts/ci/verify/kind-build-artifacts.py workspace-source",
+                    'printf "%s\\n"')
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-c", script],
+                    env={"PATH": os.environ["PATH"], "GITHUB_EVENT_NAME": event,
+                         "GITHUB_SHA": "head", "PR_BASE_SHA": "pr-base",
+                         "PUSH_BEFORE_SHA": "push-before"},
+                    capture_output=True, text=True, check=True,
+                )
+                self.assertEqual(result.stdout.splitlines(),
+                                 ["--head", "head", "--base", expected, "--github-output"])
+
+        # A pinned workspace dispatches no producer job; the job that runs
+        # always builds the exact source, with no per-step source condition.
+        job = self.jobs["kind-workspace"]
+        self.assertEqual(job["if"], WORKSPACE_PRODUCER_IF)
+        self.assertNotIn("CODEWIRE_KIND_WORKSPACE_SOURCE", job.get("env", {}))
+        for step in job["steps"]:
+            self.assertNotIn("CODEWIRE_KIND_WORKSPACE_SOURCE", step.get("if", ""))
+        build = named_step(job, "Build and verify exact source workspace")
+        self.assertEqual(build["run"], "scripts/ci/verify/verify-workspace-image.sh")
+        self.assertEqual(named_step(job, "Export verified workspace")["run"],
+                         'python3 -B scripts/ci/verify/kind-build-artifacts.py produce workspace '
+                         '"$RUNNER_TEMP/kind-workspace-out"')
+
+        # Each shard writes the pin record with the same producer, into the
+        # same private input directory a download would fill, and binds its
+        # own manifest digest; it downloads no workspace when pinned.
+        edge = self.jobs["edge-kind"]
+        record = named_step(edge, "Write the pinned workspace record")
+        self.assertEqual(record["id"], "pinned-workspace")
+        self.assertEqual(record["if"], KIND_STEP_IF.removesuffix(" }}") + " && " + PINNED + " }}")
+        self.assertEqual(record["env"], {"CODEWIRE_KIND_WORKSPACE_SOURCE": "pinned"})
+        self.assertEqual(record["run"],
+                         'python3 -B scripts/ci/verify/kind-build-artifacts.py produce workspace '
+                         '"$CODEWIRE_KIND_ARTIFACT_ROOT/workspace"')
+        guard = named_step(edge, "Require fresh artifact download directories outside the checkout")
+        gate = named_step(edge, "Run the shard Kind gate")
+        self.assertLess(edge["steps"].index(guard), edge["steps"].index(record))
+        self.assertLess(edge["steps"].index(record), edge["steps"].index(gate))
+        self.assertEqual(
+            gate["env"]["CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256"],
+            "${{ " + PINNED + " && steps.pinned-workspace.outputs.manifest_sha256 "
+            "|| needs.kind-workspace.outputs.manifest_sha256 }}",
+        )
+
+        # When Kind takes the pin, Container contract verification keeps the
+        # selected exact-source workspace build; it defers only to a Kind
+        # source build.
+        container = self.jobs["workspace-image"]
+        verify = named_step(container, "Build and inspect without publication")
+        self.assertIn(
+            "needs.verification-selection.outputs.workspace_image_selected == 'true' && "
+            "(!contains(needs.verification-selection.outputs.selection, '|kind|') || "
+            "needs.verification-selection.outputs.kind_workspace_source == 'pinned')",
+            verify["if"],
+        )
+
     def test_smoke_producer_installs_pinned_protoc_before_build(self) -> None:
         producer = self.jobs["kind-smokes"]
         install = named_step(producer, "Install pinned protoc for Rust compilation")
@@ -162,31 +261,40 @@ class WorkflowContractTests(unittest.TestCase):
         edge = self.jobs["edge-kind"]
         self.assertEqual(
             edge["needs"],
-            ["verification-selection", "kind-workspace", "kind-product", "kind-smokes"],
+            ["verification-selection", "kind-workspace", "kind-product", "kind-daemon", "kind-smokes"],
         )
         expected_if = (
             "${{ always() && needs.verification-selection.result == 'success' && "
             "needs.verification-selection.outputs.edge_kind_expected == 'true' && "
             "(needs.verification-selection.outputs.tested_tree_receipt == 'accepted' || "
             "!contains(needs.verification-selection.outputs.selection, '|kind|') || "
-            "(needs.kind-workspace.result == 'success' && "
+            "((needs.kind-workspace.result == 'success' || "
+            "(needs.verification-selection.outputs.kind_workspace_source == 'pinned' && "
+            "needs.kind-workspace.result == 'skipped')) && "
             "needs.kind-product.result == 'success' && "
+            "needs.kind-daemon.result == 'success' && "
             "needs.kind-smokes.result == 'success')) }}"
         )
         self.assertEqual(" ".join(edge["if"].split()), " ".join(expected_if.split()))
 
         def admitted(*, selection_ok: bool = True, expected: bool = True,
-                     receipt: bool = False, kind: bool = True,
-                     producer_results: tuple[str, str, str] = ("success",) * 3) -> bool:
+                     receipt: bool = False, kind: bool = True, pinned: bool = False,
+                     producer_results: tuple[str, ...] = ("success",) * 4) -> bool:
+            workspace, *others = producer_results
+            workspace_ok = workspace == "success" or (pinned and workspace == "skipped")
             return (selection_ok and expected
-                    and (receipt or not kind or all(item == "success" for item in producer_results)))
+                    and (receipt or not kind
+                         or (workspace_ok and all(item == "success" for item in others))))
 
-        self.assertTrue(admitted(kind=False, producer_results=("skipped",) * 3))
-        self.assertTrue(admitted(kind=True, producer_results=("success",) * 3))
-        self.assertFalse(admitted(kind=True, producer_results=("success", "failure", "success")))
-        self.assertFalse(admitted(kind=True, producer_results=("success", "skipped", "success")))
-        self.assertTrue(admitted(receipt=True, producer_results=("skipped",) * 3))
-        self.assertFalse(admitted(selection_ok=False, kind=False, producer_results=("skipped",) * 3))
+        self.assertTrue(admitted(kind=False, producer_results=("skipped",) * 4))
+        self.assertTrue(admitted(kind=True, producer_results=("success",) * 4))
+        self.assertFalse(admitted(kind=True, producer_results=("success", "failure", "success", "success")))
+        self.assertFalse(admitted(kind=True, producer_results=("success", "success", "skipped", "success")))
+        self.assertTrue(admitted(receipt=True, producer_results=("skipped",) * 4))
+        self.assertFalse(admitted(selection_ok=False, kind=False, producer_results=("skipped",) * 4))
+        self.assertTrue(admitted(pinned=True, producer_results=("skipped",) + ("success",) * 3))
+        self.assertFalse(admitted(pinned=False, producer_results=("skipped",) + ("success",) * 3))
+        self.assertFalse(admitted(pinned=True, producer_results=("failure",) + ("success",) * 3))
 
     def test_kind_consumer_selects_a_private_saved_profile(self) -> None:
         edge = self.jobs["edge-kind"]
@@ -198,6 +306,9 @@ class WorkflowContractTests(unittest.TestCase):
             "CODEWIRE_KIND_PROFILE_ROOT": "${{ runner.temp }}/kind-profiles",
             "KIND_SHARD_SUITES": "${{ matrix.shard.suites }}",
             "CODEWIRE_KIND_DASHBOARD_WORKERS": "${{ matrix.shard.playwright_workers }}",
+            "CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256": (
+                "${{ " + PINNED + " && steps.pinned-workspace.outputs.manifest_sha256 "
+                "|| needs.kind-workspace.outputs.manifest_sha256 }}"),
         })
         self.assertNotIn("CLUSTER", edge["env"],
                          "static fixtures must not inherit an uncreated profile")
@@ -208,6 +319,10 @@ class WorkflowContractTests(unittest.TestCase):
         # Forgejo resolves job-level env before the runner context exists.
         self.assertNotIn("CODEWIRE_KIND_ARTIFACT_ROOT", edge["env"])
         for job_name, group in PRODUCERS.items():
+            if group == "workspace":
+                # Bound by the gate step, from the shard's pin record when pinned.
+                self.assertNotIn("CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256", edge["env"])
+                continue
             self.assertEqual(
                 edge["env"][f"CODEWIRE_KIND_{group.upper()}_MANIFEST_SHA256"],
                 f"${{{{ needs.{job_name}.outputs.manifest_sha256 }}}}",
@@ -228,7 +343,7 @@ class WorkflowContractTests(unittest.TestCase):
 
         guard_index = edge["steps"].index(guard)
         downloads = action_steps(edge, DOWNLOAD)
-        self.assertEqual(len(downloads), 3)
+        self.assertEqual(len(downloads), 4)
         self.assertEqual(
             [step for step in edge["steps"]
              if "actions-download-artifact@" in step.get("uses", "")],
@@ -241,7 +356,11 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertEqual(len(matches), 1)
                 download = matches[0]
                 self.assertGreater(edge["steps"].index(download), guard_index)
-                self.assertEqual(download["if"], KIND_STEP_IF)
+                self.assertEqual(
+                    download["if"],
+                    KIND_STEP_IF.removesuffix(" }}")
+                    + " && needs.verification-selection.outputs.kind_workspace_source != 'pinned' }}"
+                    if group == "workspace" else KIND_STEP_IF)
                 self.assertEqual(
                     download["with"]["name"],
                     f"${{{{ needs.{job_name}.outputs.artifact_name }}}}",
@@ -337,11 +456,15 @@ class WorkflowContractTests(unittest.TestCase):
             edge["steps"].index(named_step(edge, "Delete the shard Kind cluster")),
         )
 
-        # Edge static verification runs once, in the edge leg; the locked
-        # browser host dependencies belong only to the dashboard leg.
+        # Edge static verification needs no cluster: it runs once, in tooling,
+        # so an edge-only selection starts no Kind leg. The locked browser
+        # host dependencies belong only to the dashboard leg.
+        self.assertNotIn(
+            "Run Edge static verification", [step.get("name") for step in edge["steps"]],
+        )
         self.assertIn(
-            "matrix.shard.slug == 'edge'",
-            named_step(edge, "Run Edge static verification")["if"],
+            "contains(needs.verification-selection.outputs.selection, '|edge_kind|')",
+            named_step(self.jobs["tooling"], "Run Edge static verification")["if"],
         )
         for step_name in ("Install locked dashboard browser-test dependencies",):
             self.assertIn(
@@ -879,6 +1002,7 @@ class CommonConsumerContractTests(unittest.TestCase):
                     case "$3" in
                       workspace) expected=workspace-digest ;;
                       product) expected=product-digest ;;
+                      daemon) expected=daemon-digest ;;
                       smokes) expected=smokes-digest ;;
                       *) return 95 ;;
                     esac
@@ -892,19 +1016,26 @@ class CommonConsumerContractTests(unittest.TestCase):
                     printf 'codewire-workspace:verified-fixture\n'
                     return 0
                   fi
+                  if [[ "$*" == "$ROOT/scripts/ci/verify/kind-build-artifacts.py workspace-image" ]]; then
+                    record "workspace-select $*"
+                    printf 'codewire-workspace:verified-fixture\n'
+                    return 0
+                  fi
                   return 93
                 }
 
                 export CODEWIRE_KIND_ARTIFACT_ROOT="$FIXTURE_ROOT/artifacts"
                 export CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256=workspace-digest
                 export CODEWIRE_KIND_PRODUCT_MANIFEST_SHA256=product-digest
+                export CODEWIRE_KIND_DAEMON_MANIFEST_SHA256=daemon-digest
                 export CODEWIRE_KIND_SMOKES_MANIFEST_SHA256=smokes-digest
 
                 : >"$CALLS"
                 CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-ci build_images_and_smokes
-                [[ "$(grep -c '^consume ' "$CALLS")" -eq 3 ]] || fail 'consumer omitted a group'
+                [[ "$(grep -c '^consume ' "$CALLS")" -eq 4 ]] || fail 'consumer omitted a group'
                 grep -Fxq "consume workspace $FIXTURE_ROOT/artifacts/workspace workspace-digest" "$CALLS"
                 grep -Fxq "consume product $FIXTURE_ROOT/artifacts/product product-digest" "$CALLS"
+                grep -Fxq "consume daemon $FIXTURE_ROOT/artifacts/daemon daemon-digest" "$CALLS"
                 grep -Fxq "consume smokes $FIXTURE_ROOT/artifacts/smokes smokes-digest" "$CALLS"
                 grep -Fxq 'dashboard codewire-dashboard:e2e' "$CALLS"
                 grep -Fxq prepare-support "$CALLS"
@@ -926,13 +1057,19 @@ class CommonConsumerContractTests(unittest.TestCase):
                 ! grep -Eq '^(dashboard|prepare-support|forbidden-host-)' "$CALLS"
 
                 validate_sealed_kind_images() { return 1; }
-                for mode in build-ci prebuilt-ci; do
-                  : >"$CALLS"
-                  workspace="$(CODEWIRE_KIND_PRODUCT_IMAGE_MODE="$mode" kind_workspace_runtime_image)"
-                  [[ "$workspace" == codewire-workspace:verified-fixture ]]
-                  grep -q '^workspace-reuse ' "$CALLS" ||
-                    fail "$mode skipped source workspace reuse"
-                done
+                : >"$CALLS"
+                workspace="$(CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci kind_workspace_runtime_image)"
+                [[ "$workspace" == codewire-workspace:verified-fixture ]]
+                grep -q '^workspace-reuse ' "$CALLS" ||
+                  fail "build-ci skipped source workspace reuse"
+                ! grep -q '^workspace-select ' "$CALLS"
+                # Prebuilt CI follows the consumed artifact: the exact-source
+                # receipt or the published pin, proven by the same helper.
+                : >"$CALLS"
+                workspace="$(CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-ci kind_workspace_runtime_image)"
+                [[ "$workspace" == codewire-workspace:verified-fixture ]]
+                grep -q '^workspace-select ' "$CALLS" ||
+                  fail "prebuilt-ci skipped the consumed workspace selection"
                 : >"$CALLS"
                 workspace="$(CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release kind_workspace_runtime_image)"
                 [[ "$workspace" == sealed-workspace:fixture ]]
@@ -951,6 +1088,30 @@ class CommonConsumerContractTests(unittest.TestCase):
                 CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release load_images_into_kind
                 ! grep -Fq 'codewire-workspace:verified-fixture' "$CALLS"
                 ! grep -q '^workspace-reuse ' "$CALLS"
+
+                # The five sealed platform images are proven in every mode, but
+                # the approved workspace is imported only where it runs: in
+                # release-image mode. CI and source runs load their own.
+                validate_sealed_kind_images() { return 0; }
+                docker() { record "docker $*"; }
+                for mode in build-ci prebuilt-ci prebuilt-release; do
+                  : >"$CALLS"
+                  CODEWIRE_KIND_PRODUCT_IMAGE_MODE="$mode" load_images_into_kind
+                  grep -Fxq "docker image tag $KIND_WORKSPACE_IMAGE $KIND_WORKSPACE_LOCAL_IMAGE" "$CALLS" ||
+                    fail "$mode did not prove the approved workspace"
+                  grep -Fxq "kind load docker-image --name codewire-e2e-ci $KIND_DIND_LOCAL_IMAGE" "$CALLS" ||
+                    fail "$mode skipped a sealed platform image"
+                  if [[ "$mode" == prebuilt-release ]]; then
+                    grep -Fxq "kind load docker-image --name codewire-e2e-ci $KIND_WORKSPACE_LOCAL_IMAGE" "$CALLS" ||
+                      fail 'release mode did not import its approved workspace'
+                  else
+                    ! grep -Fq "kind load docker-image --name codewire-e2e-ci $KIND_WORKSPACE_LOCAL_IMAGE" "$CALLS" ||
+                      fail "$mode imported the unused approved workspace"
+                    grep -Fxq 'kind load docker-image --name codewire-e2e-ci codewire-workspace:verified-fixture' "$CALLS" ||
+                      fail "$mode skipped its selected workspace"
+                  fi
+                done
+                validate_sealed_kind_images() { return 1; }
 
                 docker() {
                   record "docker $*"

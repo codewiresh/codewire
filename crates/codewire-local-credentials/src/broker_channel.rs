@@ -326,10 +326,13 @@ where
             operation: operation.clone(),
             route: route.clone(),
         };
-        // The Codex login permission names the one listed direct delivery
-        // exception, which only a hosted platform Sandbox may receive; a local
-        // broker never leases it, whatever the shared catalog grants.
-        if requested_permission == codewire_access::codex_login_permission() {
+        // The Codex and Claude login permissions name the listed direct
+        // delivery exceptions, which only a hosted platform Sandbox may
+        // receive; a local broker never leases them, whatever the shared
+        // catalog grants.
+        if requested_permission == codewire_access::codex_login_permission()
+            || requested_permission == codewire_access::claude_login_permission()
+        {
             return Err(BrokerLeaseChannelError::Denied);
         }
         let response = self
@@ -1833,10 +1836,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_channel_never_leases_the_codex_login_permission() {
+    async fn local_channel_never_leases_a_login_permission() {
         let temp = tempfile::tempdir().unwrap();
         let store = TestProtectedStore::default();
-        // The shared catalog grants every Codex selection the login permission.
+        // The shared catalog grants every Codex and Anthropic selection its
+        // login permission.
         let authority = Arc::new(
             LocalCredentialAuthority::open(
                 &temp.path().join("authority"),
@@ -1857,10 +1861,25 @@ mod tests {
                 ProtectedValue::from_slice(b"synthetic-openai-material").unwrap(),
             )
             .unwrap();
+        let anthropic = authority
+            .add_credential(
+                NewCredential {
+                    provider: ProviderId::parse("anthropic").unwrap(),
+                    authentication_kind: CredentialAuthKind::ApiKey,
+                    display_name: "synthetic anthropic".into(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                ProtectedValue::from_slice(b"synthetic-anthropic-material").unwrap(),
+            )
+            .unwrap();
         let profile = authority
             .create_profile(
                 AccessProfileName::parse("synthetic").unwrap(),
-                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+                BTreeMap::from([
+                    (CapabilitySlot::codex(), credential.metadata.id.clone()),
+                    (CapabilitySlot::anthropic(), anthropic.metadata.id.clone()),
+                ]),
             )
             .unwrap();
         let environment_id = EnvironmentId::parse(uuid::Uuid::new_v4().to_string()).unwrap();
@@ -1871,19 +1890,30 @@ mod tests {
                 profile_revision: profile.profile.revision,
             })
             .unwrap();
-        let login = codewire_access::codex_login_permission();
-        // The authority itself would admit it; the refusal is the channel's.
-        assert!(
-            authority
-                .lease_environment_credential_operation(&CredentialOperationLeaseRequest {
-                    environment_id: environment_id.clone(),
-                    environment_generation: 7,
-                    capability_slot: CapabilitySlot::codex(),
-                    operation: login.operation.clone(),
-                    route: login.route.clone(),
-                })
-                .is_ok()
-        );
+        let logins = [
+            (
+                CapabilitySlot::codex(),
+                codewire_access::codex_login_permission(),
+            ),
+            (
+                CapabilitySlot::anthropic(),
+                codewire_access::claude_login_permission(),
+            ),
+        ];
+        // The authority itself would admit them; the refusal is the channel's.
+        for (slot, login) in &logins {
+            assert!(
+                authority
+                    .lease_environment_credential_operation(&CredentialOperationLeaseRequest {
+                        environment_id: environment_id.clone(),
+                        environment_generation: 7,
+                        capability_slot: slot.clone(),
+                        operation: login.operation.clone(),
+                        route: login.route.clone(),
+                    })
+                    .is_ok()
+            );
+        }
 
         let (server_stream, client_stream) = UnixStream::pair().unwrap();
         let audit = Arc::new(BrokerLeaseAuditLog::default());
@@ -1912,17 +1942,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(
-            client
-                .lease_operation(
-                    Uuid::new_v4(),
-                    CapabilitySlot::codex(),
-                    login.operation,
-                    login.route,
-                )
-                .await,
-            Err(BrokerLeaseChannelError::Denied)
-        ));
+        for (slot, login) in logins {
+            assert!(matches!(
+                client
+                    .lease_operation(Uuid::new_v4(), slot, login.operation, login.route)
+                    .await,
+                Err(BrokerLeaseChannelError::Denied)
+            ));
+        }
         // Refused before any request reached the authority.
         assert!(audit.recent(8).await.is_empty());
         // The proxied permission on the same selection is unaffected.

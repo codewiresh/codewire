@@ -226,7 +226,7 @@ fn unbindable_and_unmanaged_runtimes_render_no_pool() {
 
     // A managed cluster pools only digest-pinned images.
     let tagged = SandboxWorkerCfg {
-        daemon_image: "git.example.invalid/codewire/daemon:main-4b5b65d-1783969421".into(),
+        daemon_image: "registry.example.invalid/codewire/daemon:main-4b5b65d-1783969421".into(),
         ..dev_cfg()
     };
     let error = render_configured_warm_pool(&tagged, shape, 2).unwrap_err();

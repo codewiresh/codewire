@@ -205,7 +205,7 @@ RUST_BIN_DIR="$ROOT/target/ci"
 
 # ── Rust orchestration (consumers + loops) ──────────────────────────────
 # CONNECT_TESTING_SURFACE mounts the Connect conformance probe
-# (docs/plans/connect-rpc/03, D8) — dev/CI/kind surfaces only.
+# (connect-rpc/03, D8) — dev/CI/kind surfaces only.
 DATABASE_URL="$DATABASE_URL" SESSION_SECRET="$SESSION_SECRET" NATS_URL="$NATS_URL" \
 ORCHESTRATION_PORT="$ORCH_PORT" \
 TEMPORAL_HOST_PORT="${TEMPORAL_HOST_PORT:-}" \

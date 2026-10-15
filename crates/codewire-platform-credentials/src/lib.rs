@@ -49,6 +49,7 @@ mod model;
 mod profiles;
 mod refresh;
 mod store;
+mod transient;
 
 pub use material_cache::{
     EpochMaterialCache, MATERIAL_REUSE_TTL, MAX_REUSED_MATERIAL_BYTES, MAX_REUSED_MATERIALS,
@@ -56,14 +57,15 @@ pub use material_cache::{
 pub use model::{CredentialRecord, CredentialRegistration, CredentialVersion};
 pub use profiles::{PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError};
 pub use refresh::{
-    OAuthKeepAliveCandidate, OAuthRefreshAttemptInfo, OAuthRefreshState, PreparedOAuthRefresh,
-    PreparedOAuthRefreshResult, StartedOAuthRefresh,
+    OAuthKeepAliveCandidate, OAuthKeepAliveForm, OAuthRefreshAttemptInfo, OAuthRefreshState,
+    PreparedOAuthRefresh, PreparedOAuthRefreshResult, StartedOAuthRefresh,
 };
 pub use store::{
     CredentialMetadataReader, OwnedCredentials, PlatformCredentialStore,
     PreparedCredentialCreation, PreparedCredentialReplacement, active_github_connection,
     owned_credentials_and_github_connection,
 };
+pub use transient::{MAX_SEALED_TRANSIENT_TEXT_BYTES, MAX_TRANSIENT_VALUE_BYTES};
 
 /// Closed, value-blind errors. SQL/provider errors are deliberately discarded:
 /// neither their messages nor their source chains are safe output contracts.

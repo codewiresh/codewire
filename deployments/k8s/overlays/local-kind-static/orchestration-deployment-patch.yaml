@@ -46,7 +46,7 @@
       value: temporal-frontend.temporal-system.svc.cluster.local:7233
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
       value: ""
-    # Mount the Connect conformance probe (docs/plans/connect-rpc/03 D8)
+    # Mount the Connect conformance probe (connect-rpc/03 D8)
     # — local-kind/e2e manifests only, never base or production.
     - name: CONNECT_TESTING_SURFACE
       value: "1"

@@ -148,9 +148,14 @@ async fn login_answers_are_a_bounded_login_denied_or_unavailable() {
     for (result, expected) in cases {
         let (output, mut receiver) = mpsc::channel(1);
         let request_id = Uuid::new_v4().to_string();
-        send_codex_login_response(&FakeSender { output }, request_id.clone(), result)
-            .await
-            .unwrap();
+        send_login_response(
+            &FakeSender { output },
+            LoginKind::Codex,
+            request_id.clone(),
+            result,
+        )
+        .await
+        .unwrap();
         let Payload::CodexLogin(response) = receive(&mut receiver).await else {
             panic!("typed Codex login response");
         };

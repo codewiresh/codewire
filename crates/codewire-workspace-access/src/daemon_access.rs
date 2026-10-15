@@ -24,10 +24,10 @@ use crate::host_key::generate_ed25519_key;
 use crate::scp::DaemonScpRunner;
 use crate::sftp::DaemonSftpRunner;
 use crate::ssh::{
-    DaemonBackedSshRunner, DaemonSessionStart, SshChannelOutput, SshSessionInput, SshSessionOutput,
-    SshSessionRunner, SshSessionRunnerError, WorkspaceSshHandler, workspace_ssh_server_config,
+    DaemonBackedSshRunner, DaemonSessionStart, SshChannelOutput, SshSession, SshSessionInput,
+    SshSessionKey, SshSessionOutput, SshSessionRunner, SshSessionRunnerError, WorkspaceSshHandler,
+    workspace_ssh_server_config,
 };
-use russh::ChannelId;
 
 const HOST_KEY_PREFIX: &str = "ssh_host_ed25519_g";
 const HOST_KEY_MODE: u32 = 0o400;
@@ -208,30 +208,29 @@ impl<R> AccessGatedSshRunner<R> {
 impl<R: SshSessionRunner> SshSessionRunner for AccessGatedSshRunner<R> {
     async fn start_session(
         &self,
-        channel: ChannelId,
+        key: SshSessionKey,
         start: DaemonSessionStart,
         output: SshChannelOutput,
-    ) -> Result<(), SshSessionRunnerError> {
+    ) -> Result<Box<dyn SshSession>, SshSessionRunnerError> {
         if !*self.ready.borrow() {
             tracing::warn!("refused an SSH session: workspace access is not ready");
             output
                 .send(SshSessionOutput::Error(ACCESS_NOT_READY.into()))
                 .await?;
-            return output.send(SshSessionOutput::Exit(1)).await;
+            output.send(SshSessionOutput::Exit(1)).await?;
+            return Ok(Box::new(RefusedSession));
         }
-        self.inner.start_session(channel, start, output).await
+        self.inner.start_session(key, start, output).await
     }
+}
 
-    async fn session_input(
-        &self,
-        channel: ChannelId,
-        input: SshSessionInput,
-    ) -> Result<(), SshSessionRunnerError> {
-        self.inner.session_input(channel, input).await
-    }
+/// A session refused before it started a process: its input goes nowhere.
+struct RefusedSession;
 
-    async fn close_session(&self, channel: ChannelId) -> Result<(), SshSessionRunnerError> {
-        self.inner.close_session(channel).await
+#[async_trait]
+impl SshSession for RefusedSession {
+    async fn send(&mut self, _input: SshSessionInput) -> Result<(), SshSessionRunnerError> {
+        Ok(())
     }
 }
 
@@ -276,12 +275,20 @@ impl DaemonSshRunners {
             Some(self.scp.clone()),
         )
         .with_exec_shell(self.exec_shell.clone());
+        let connection = handler.connection_id();
+        tracing::info!(connection, peer, "workspace SSH connection opened");
         match server::run_stream(config, stream, handler).await {
-            Ok(session) => {
-                let _ = session.await;
-            }
+            Ok(session) => match session.await {
+                Ok(()) => tracing::info!(connection, peer, "workspace SSH connection closed"),
+                Err(error) => tracing::info!(
+                    connection,
+                    peer,
+                    error = %error,
+                    "workspace SSH connection ended"
+                ),
+            },
             Err(error) => {
-                tracing::warn!(peer, error = %error, "workspace SSH handshake failed");
+                tracing::warn!(connection, peer, error = %error, "workspace SSH handshake failed");
             }
         }
     }

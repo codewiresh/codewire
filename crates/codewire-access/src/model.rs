@@ -45,11 +45,11 @@ impl Owner {
         matches!(self, Self::Organization(_))
     }
 
-    /// OAuth logins (Codex ChatGPT, GitHub and the Claude subscription token)
-    /// are personal: an organization may hold API keys and SSH keys, but never
-    /// an OAuth credential.
+    /// OAuth logins (Codex ChatGPT, GitHub, the Claude subscription token and
+    /// the Claude sign-in) are personal: an organization may hold API keys and
+    /// SSH keys, but never an OAuth credential.
     pub fn may_hold(&self, kind: CredentialAuthKind) -> bool {
-        !(self.is_organization() && kind == CredentialAuthKind::OAuth)
+        !(self.is_organization() && kind.is_personal_login())
     }
 }
 
@@ -61,6 +61,19 @@ pub enum CredentialAuthKind {
     AccessToken,
     GitHubApp,
     SshKey,
+    /// Claude Code's own claude.ai sign-in for the Anthropic provider: an
+    /// OAuth access token with a rotating refresh token, enrolled by
+    /// Codewire. It is its own kind, not a form sniffed from material, so it
+    /// is never confused with the pasted Claude subscription token, which is
+    /// the provider's `OAuth` kind and has no refresh.
+    ClaudeSignIn,
+}
+
+impl CredentialAuthKind {
+    /// A person's own provider login, which only that person may hold.
+    pub fn is_personal_login(self) -> bool {
+        matches!(self, Self::OAuth | Self::ClaudeSignIn)
+    }
 }
 
 /// Public registration information, derived from validated private material by
@@ -270,6 +283,10 @@ pub enum HttpProvider {
     /// `claude setup-token`, pasted by its owner. It has no refresh; the broker
     /// injects it as a bearer and never delivers it to a Sandbox.
     AnthropicSubscriptionToken,
+    /// The Anthropic slot's Claude sign-in: Claude Code's own claude.ai OAuth
+    /// login. The broker injects its access token as a bearer and refreshes it
+    /// at Claude's token endpoint; the refresh token never leaves Codewire.
+    AnthropicClaudeSignIn,
     GitHubOAuth,
     /// Isolated GitHub App user-to-server authorization only. This is never
     /// selected by a Sandbox profile or exposed as a managed client route.
@@ -280,6 +297,11 @@ pub enum HttpProvider {
     /// a Sandbox route; the Codex bridge keeps `CodexOAuth`.
     #[serde(skip)]
     CodexDeviceEnrollment,
+    /// Codewire's Claude sign-in enrollment: Claude's token endpoint and the
+    /// OAuth profile read only. Never profile-selected and never a Sandbox
+    /// route; the Anthropic route keeps `AnthropicClaudeSignIn`.
+    #[serde(skip)]
+    ClaudeSignInEnrollment,
 }
 
 impl HttpProvider {
@@ -290,7 +312,9 @@ impl HttpProvider {
             Self::OpenAiApiKey | Self::CodexOAuth => {
                 &["CODEX_HOME", "OPENAI_BASE_URL", "OPENAI_API_KEY"]
             }
-            Self::AnthropicApiKey | Self::AnthropicSubscriptionToken => &[
+            Self::AnthropicApiKey
+            | Self::AnthropicSubscriptionToken
+            | Self::AnthropicClaudeSignIn => &[
                 "ANTHROPIC_BASE_URL",
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_AUTH_TOKEN",
@@ -303,7 +327,9 @@ impl HttpProvider {
                 "GH_ENTERPRISE_TOKEN",
                 "GITHUB_ENTERPRISE_TOKEN",
             ],
-            Self::GitHubAppAuthorization | Self::CodexDeviceEnrollment => &[],
+            Self::GitHubAppAuthorization
+            | Self::CodexDeviceEnrollment
+            | Self::ClaudeSignInEnrollment => &[],
         }
     }
 
@@ -314,9 +340,11 @@ impl HttpProvider {
             Self::CodexOAuth => "codex-oauth",
             Self::AnthropicApiKey => "anthropic-api-key",
             Self::AnthropicSubscriptionToken => "anthropic-subscription-token",
+            Self::AnthropicClaudeSignIn => "anthropic-claude-sign-in",
             Self::GitHubOAuth => "github-oauth",
             Self::GitHubAppAuthorization => "github-app-authorization",
             Self::CodexDeviceEnrollment => "codex-device-enrollment",
+            Self::ClaudeSignInEnrollment => "claude-sign-in-enrollment",
         }
     }
 
@@ -330,6 +358,7 @@ impl HttpProvider {
             "codex-oauth" => Some(Self::CodexOAuth),
             "anthropic-api-key" => Some(Self::AnthropicApiKey),
             "anthropic-subscription-token" => Some(Self::AnthropicSubscriptionToken),
+            "anthropic-claude-sign-in" => Some(Self::AnthropicClaudeSignIn),
             "github-oauth" => Some(Self::GitHubOAuth),
             _ => None,
         }
@@ -348,6 +377,9 @@ impl HttpProvider {
             ("anthropic", "anthropic", CredentialAuthKind::ApiKey) => Some(Self::AnthropicApiKey),
             ("anthropic", "anthropic", CredentialAuthKind::OAuth) => {
                 Some(Self::AnthropicSubscriptionToken)
+            }
+            ("anthropic", "anthropic", CredentialAuthKind::ClaudeSignIn) => {
+                Some(Self::AnthropicClaudeSignIn)
             }
             ("github", "github", CredentialAuthKind::OAuth) => Some(Self::GitHubOAuth),
             _ => None,

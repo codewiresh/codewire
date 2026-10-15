@@ -1290,7 +1290,7 @@ fn build_settings_data_at(
             oauth_provider: match form {
                 "codex" => "codex",
                 "github" => "github",
-                "openai" | "anthropic" | "claude" | "ssh" => "",
+                "openai" | "anthropic" | "claude" | "claude-sign-in" | "ssh" => "",
                 _ => unreachable!("credential_form returns a closed form"),
             },
             authentication: authentication_label(form),
@@ -1583,7 +1583,9 @@ pub(crate) fn credential_slot(credential: &Credential) -> Result<&'static str, C
 
 /// The closed provider/authentication form a credential takes, which names
 /// its labels and actions: `claude` is a Claude subscription token, the
-/// anthropic provider's OAuth kind, pasted from `claude setup-token`.
+/// anthropic provider's OAuth kind, pasted from `claude setup-token`;
+/// `claude-sign-in` is Claude Code's own claude.ai login, which Codewire
+/// refreshes.
 pub(crate) fn credential_form(credential: &Credential) -> Result<&'static str, ConnectError> {
     match (credential.provider.as_str(), credential.authentication_kind) {
         ("openai", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("codex"),
@@ -1591,6 +1593,9 @@ pub(crate) fn credential_form(credential: &Credential) -> Result<&'static str, C
         ("github", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("github"),
         ("anthropic", kind) if kind == CredentialAuthenticationKind::ApiKey => Ok("anthropic"),
         ("anthropic", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("claude"),
+        ("anthropic", kind) if kind == CredentialAuthenticationKind::ClaudeSignIn => {
+            Ok("claude-sign-in")
+        }
         ("ssh", kind) if kind == CredentialAuthenticationKind::SshKey => Ok("ssh"),
         _ => Err(invalid_metadata()),
     }
@@ -1598,7 +1603,7 @@ pub(crate) fn credential_form(credential: &Credential) -> Result<&'static str, C
 
 fn form_slot(form: &'static str) -> &'static str {
     match form {
-        "claude" => "anthropic",
+        "claude" | "claude-sign-in" => "anthropic",
         form => form,
     }
 }
@@ -1666,6 +1671,7 @@ fn attention_notice(form: &str) -> &'static str {
         "openai" => "OpenAI API key needs replacing",
         "anthropic" => "Anthropic API key needs replacing",
         "claude" => "Claude subscription token needs replacing",
+        "claude-sign-in" => "Claude sign-in needs Reconnect",
         "ssh" => "SSH key needs replacing",
         _ => unreachable!("closed form"),
     }
@@ -1676,7 +1682,7 @@ fn provider_label(form: &str) -> &'static str {
         "codex" => "OpenAI Codex",
         "openai" => "OpenAI API",
         "github" => "GitHub",
-        "anthropic" | "claude" => "Anthropic",
+        "anthropic" | "claude" | "claude-sign-in" => "Anthropic",
         "ssh" => "SSH",
         _ => unreachable!("closed form"),
     }
@@ -1687,6 +1693,7 @@ fn authentication_label(form: &str) -> &'static str {
         "codex" | "github" => "OAuth",
         "openai" | "anthropic" => "API key",
         "claude" => "Claude subscription token",
+        "claude-sign-in" => "Claude sign-in",
         "ssh" => "SSH key",
         _ => unreachable!("closed form"),
     }
@@ -1837,6 +1844,37 @@ mod tests {
             revocation_generation: 1,
             ..Default::default()
         }
+    }
+
+    /// A Claude sign-in fills the Anthropic slot as its own form: labelled,
+    /// never offered a subscription token's Replace token or a device
+    /// Reconnect, and named in a profile's attention when it needs Reconnect.
+    #[test]
+    fn a_claude_sign_in_reads_as_its_own_anthropic_form() {
+        let sign_in_id = "00000000-0000-4000-8000-000000000011";
+        let mut sign_in = credential(
+            sign_in_id,
+            "Work Claude",
+            "anthropic",
+            CredentialAuthenticationKind::ClaudeSignIn,
+        );
+        sign_in.account_hint = Some("person@example.test".into());
+        assert_eq!(credential_form(&sign_in).unwrap(), "claude-sign-in");
+        assert_eq!(credential_slot(&sign_in).unwrap(), "anthropic");
+        let data = build_settings_data(vec![sign_in.clone()], Vec::new()).unwrap();
+        let row = &data.credentials[0];
+        assert_eq!(row.provider, "Anthropic");
+        assert_eq!(row.authentication, "Claude sign-in");
+        assert_eq!(row.account_hint, "person@example.test");
+        assert!(!row.subscription_token && !row.oauth && !row.api_key);
+        assert_eq!(data.choices.anthropic.len(), 1);
+        sign_in.status = CredentialStatus::RefreshFailed.into();
+        let data = build_settings_data(vec![sign_in], Vec::new()).unwrap();
+        assert_eq!(data.credentials[0].status, "Reconnect needed");
+        assert_eq!(
+            attention_notice("claude-sign-in"),
+            "Claude sign-in needs Reconnect"
+        );
     }
 
     #[test]

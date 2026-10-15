@@ -145,7 +145,7 @@
             "command": [
               "sh",
               "-c",
-              "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group; while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; shutdown() { kill -TERM \"$daemon_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; }; trap 'shutdown; exit 143' TERM; trap 'shutdown; exit 130' INT; wait \"$daemon_pid\"; status=$?; trap - TERM INT; exit \"$status\""
+              "daemon_pid=; shutdown() { daemon_pid=\"${daemon_pid:-$!}\"; kill -TERM \"$daemon_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; }; trap 'shutdown; exit 143' TERM; trap 'shutdown; exit 130' INT; user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group; while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; wait \"$daemon_pid\"; status=$?; trap - TERM INT; exit \"$status\""
             ],
             "env": [
               {
@@ -345,7 +345,7 @@
           {
             "image": {
               "pullPolicy": "IfNotPresent",
-              "reference": "git.example.invalid/codewire/daemon:golden"
+              "reference": "registry.example.invalid/codewire/daemon:golden"
             },
             "name": "codewire-bin"
           },

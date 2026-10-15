@@ -1,8 +1,9 @@
-//! Claude Code's first-run onboarding and workspace trust in a hosted Sandbox.
+//! Claude Code's first-run onboarding and workspace trust in a hosted Sandbox,
+//! and, in its sign-in form, Claude Code's own login ([`login`]).
 //!
-//! While the Anthropic client is selected, in either form (API key or Claude
-//! subscription token), Claude Code already has Codewire's managed
-//! credential, yet on a fresh home it opens its first-run "Select login
+//! While the Anthropic client is selected, in any form (API key, Claude
+//! subscription token or Claude sign-in), Claude Code already has Codewire's
+//! managed credential, yet on a fresh home it opens its first-run "Select login
 //! method" picker, because its `~/.claude.json` does not record onboarding,
 //! and then asks whether you trust the folder. Before it listens, the hosted
 //! daemon therefore sets [`CLAUDE_ONBOARDING_KEYS`] to `true` in that file and
@@ -33,6 +34,10 @@
 //! local VM's guest daemon runs as root and keeps the user's home in an
 //! overlay, and does not write it.
 //!
+//! Before it listens, the daemon also removes Codewire's `claudeAiOauth` from
+//! `~/.claude/.credentials.json` unless the sign-in form is selected; the
+//! user's own login there is never touched.
+//!
 //! Only [`ClaudeOnboardingSync`] states are logged, never file contents.
 
 use std::io;
@@ -42,6 +47,13 @@ use codewire_access::{ManagedCredentialClient, ManagedCredentialClients};
 use serde_json::{Map, Value};
 
 use crate::private_files::{Entry, PrivateDirectory};
+
+pub mod login;
+pub use login::{
+    CLAUDE_CONFIG_DIR_NAME, CLAUDE_CREDENTIALS_FILE_NAME, CLAUDE_LOGIN_KEY, CLAUDE_LOGIN_LAPSE,
+    CLAUDE_LOGIN_STATE_DIRECTORY, CLAUDE_MANAGED_MARKER, CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX,
+    ClaudeLoginDelivery, ClaudeLoginSync, ClaudeLoginWriter,
+};
 
 /// Claude Code's global configuration file in the user's home.
 pub const CLAUDE_CONFIG_FILE_NAME: &str = ".claude.json";
@@ -96,7 +108,7 @@ impl ClaudeHome {
     }
 
     /// Mark Claude Code's onboarding complete and the workspace trusted while
-    /// the served `clients` select the Anthropic client, in either form.
+    /// the served `clients` select the Anthropic client, in any form.
     pub fn sync(&self, clients: ManagedCredentialClients) -> io::Result<ClaudeOnboardingSync> {
         if !clients.contains(ManagedCredentialClient::Anthropic) {
             return Ok(ClaudeOnboardingSync::NotSelected);
@@ -145,9 +157,10 @@ impl ClaudeHome {
         })
     }
 
-    /// [`Self::sync`] before the daemon listens. A failure is logged and
-    /// never stops the daemon: without the keys Claude Code only shows its
-    /// login picker once.
+    /// [`Self::sync`] before the daemon listens, and, unless the sign-in
+    /// form is selected, removal of Codewire's Claude login. A failure is
+    /// logged and never stops the daemon: without the keys Claude Code only
+    /// shows its login picker once.
     pub fn prepare(&self, clients: ManagedCredentialClients) {
         match self.sync(clients) {
             Ok(outcome) => {
@@ -157,6 +170,17 @@ impl ClaudeHome {
                 error_kind = ?error.kind(),
                 "hosted Claude Code home unavailable; onboarding was not marked"
             ),
+        }
+        if !clients.anthropic_sign_in() {
+            match self.remove_codewire_login() {
+                Ok(removal) => {
+                    tracing::info!(claude_login = ?removal, "hosted Claude login cleared");
+                }
+                Err(error) => tracing::warn!(
+                    error_kind = ?error.kind(),
+                    "hosted Claude login could not be cleared"
+                ),
+            }
         }
     }
 }
@@ -229,14 +253,16 @@ mod tests {
     }
 
     /// The Anthropic client in each form, as a binding serves it.
-    fn anthropic_forms() -> [ManagedCredentialClients; 4] {
+    fn anthropic_forms() -> [ManagedCredentialClients; 6] {
         [
             clients(&["anthropic"]),
             clients(&["anthropic"])
                 .with_anthropic_subscription_token()
                 .unwrap(),
+            clients(&["anthropic"]).with_anthropic_sign_in().unwrap(),
             ManagedCredentialClients::decode("v1:codex,openai,anthropic,ssh").unwrap(),
             ManagedCredentialClients::decode("v2:3f").unwrap(),
+            ManagedCredentialClients::decode("v2:5f").unwrap(),
         ]
     }
 

@@ -250,7 +250,7 @@ class KindBuildArtifactTests(unittest.TestCase):
 
     def test_product_bytes_are_validated_before_docker_load(self):
         images = {name: {"id": "sha256:" + str(index) * 64}
-                  for index, name in enumerate(artifact.PRODUCT_IMAGES, 1)}
+                  for index, name in enumerate(artifact.GROUP_IMAGES["product"], 1)}
         self.write_artifact("product", {artifact.IMAGE_ARCHIVE: b"image archive"}, images=images)
         (self.directory / artifact.IMAGE_ARCHIVE).write_bytes(b"corrupt")
         with mock.patch.object(artifact, "run") as command:
@@ -260,7 +260,7 @@ class KindBuildArtifactTests(unittest.TestCase):
 
     def test_product_import_rechecks_all_recorded_image_identities(self):
         images = {name: {"id": "sha256:" + str(index) * 64}
-                  for index, name in enumerate(artifact.PRODUCT_IMAGES, 1)}
+                  for index, name in enumerate(artifact.GROUP_IMAGES["product"], 1)}
         self.write_artifact("product", {artifact.IMAGE_ARCHIVE: b"image archive"}, images=images)
 
         def inspect(reference):
@@ -283,7 +283,7 @@ class KindBuildArtifactTests(unittest.TestCase):
 
     def test_product_import_rejects_changed_revision(self):
         images = {name: {"id": "sha256:" + str(index) * 64}
-                  for index, name in enumerate(artifact.PRODUCT_IMAGES, 1)}
+                  for index, name in enumerate(artifact.GROUP_IMAGES["product"], 1)}
         self.write_artifact("product", {artifact.IMAGE_ARCHIVE: b"image archive"}, images=images)
 
         def inspect(reference):
@@ -300,6 +300,42 @@ class KindBuildArtifactTests(unittest.TestCase):
                 mock.patch.object(artifact, "inspect_image", side_effect=inspect), \
                 self.assertRaises(artifact.ArtifactError):
             artifact.consume("product", self.directory)
+
+    def test_daemon_group_carries_only_the_daemon_image(self):
+        self.assertEqual(artifact.GROUP_IMAGES["daemon"], ("codewire-daemon:e2e",))
+        self.assertNotIn("codewire-daemon:e2e", artifact.GROUP_IMAGES["product"])
+        # The local profile seal still archives all four product images.
+        self.assertEqual(set(artifact.PRODUCT_IMAGES),
+                         set(artifact.GROUP_IMAGES["product"]) | set(artifact.GROUP_IMAGES["daemon"]))
+        images = {"codewire-daemon:e2e": {"id": "sha256:" + "4" * 64}}
+        self.write_artifact("daemon", {artifact.IMAGE_ARCHIVE: b"daemon archive"}, images=images)
+
+        def inspect(reference):
+            return {
+                "Id": images[reference]["id"], "Os": "linux", "Architecture": "amd64",
+                "Config": {"Labels": {
+                    "dev.codewire.build.profile": "ci",
+                    "dev.codewire.promotable": "false",
+                    "org.opencontainers.image.revision": "a" * 40,
+                }},
+            }
+
+        with mock.patch.object(artifact, "run") as command, \
+                mock.patch.object(artifact, "inspect_image", side_effect=inspect):
+            artifact.consume("daemon", self.directory)
+        command.assert_called_once_with(
+            artifact.docker(), "load", "--input", str(self.directory / artifact.IMAGE_ARCHIVE),
+            capture=False,
+        )
+
+    def test_daemon_group_rejects_the_service_image_set(self):
+        images = {name: {"id": "sha256:" + str(index) * 64}
+                  for index, name in enumerate(artifact.GROUP_IMAGES["product"], 1)}
+        self.write_artifact("daemon", {artifact.IMAGE_ARCHIVE: b"archive"}, images=images)
+        with mock.patch.object(artifact, "run"), \
+                mock.patch.object(artifact, "inspect_image"), \
+                self.assertRaisesRegex(artifact.ArtifactError, "daemon image set differs"):
+            artifact.consume("daemon", self.directory)
 
     def test_workspace_receipt_validation_follows_archive_hash_and_load(self):
         source_archive = self.base / "source.oci.tar"
@@ -579,6 +615,219 @@ class KindBuildArtifactTests(unittest.TestCase):
             artifact.require_directory(existing, create=True)
         with self.assertRaises(artifact.ArtifactError):
             artifact.require_directory(ROOT, create=False)
+
+
+PIN_DIGEST = "sha256:" + "e" * 64
+PIN_IMAGE = "ghcr.io/codewiresh/workspace@" + PIN_DIGEST
+PIN_SOURCE = "5" * 40
+PIN_INPUTS = "6" * 64
+PINNED_ID = "sha256:" + "7" * 64
+
+
+class FakePinTool:
+    """The workspace-image-pin.py surface the Kind artifact helper uses."""
+
+    class PinError(Exception):
+        pass
+
+    def __init__(self, definitions=None, pin_inputs=PIN_INPUTS, error=None):
+        self.definitions = definitions or {}
+        self.pin = {"digest": PIN_DIGEST, "source_sha": PIN_SOURCE,
+                    "inputs_sha256": pin_inputs, "agents": {}, "previous_digests": []}
+        self.error = error
+
+    def read_pin(self, root, commit):
+        if self.error:
+            raise self.PinError(self.error)
+        return self.pin
+
+    def inputs_sha256(self, root, commit):
+        if commit not in self.definitions:
+            raise self.PinError(f"{commit} has no workspace image definition")
+        return self.definitions[commit]
+
+    def field(self, pin, name):
+        return {"public-image": "ghcr.io/codewiresh/workspace@" + pin["digest"]}[name]
+
+
+def pinned_inspect(reference, *, revision=PIN_SOURCE, digests=(PIN_IMAGE,), image_id=PINNED_ID,
+                   architecture="amd64"):
+    return {
+        "Id": image_id, "Os": "linux", "Architecture": architecture,
+        "RepoDigests": list(digests),
+        "Config": {"Labels": {"org.opencontainers.image.revision": revision}},
+    }
+
+
+class PinnedWorkspaceTests(unittest.TestCase):
+    HEAD = "a" * 40
+    BASE = "b" * 40
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name)
+        self.checkout = self.base / "checkout"
+        self.checkout.mkdir()
+        self.directory = self.base / "artifact"
+        for patcher in (
+            mock.patch.object(artifact, "ROOT", self.checkout),
+            mock.patch.object(artifact, "identity", side_effect=self._identity),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _identity(self, group):
+        return {"repository": "codewire/codewire", "run_id": "42", "run_attempt": "1",
+                "head": self.HEAD, "tree": "c" * 40, "platform": "linux/amd64",
+                "profile": "workspace-verify"}
+
+    def use_pin(self, tool):
+        patcher = mock.patch.object(artifact, "pin_tool", return_value=tool)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_only_a_pin_built_from_this_definition_is_used(self):
+        for base in (self.BASE, None):
+            self.use_pin(FakePinTool({self.HEAD: PIN_INPUTS, self.BASE: PIN_INPUTS}))
+            self.assertEqual(artifact.workspace_source(self.HEAD, base)[0], "pinned")
+
+    def test_a_pin_that_lags_an_unchanged_definition_rebuilds_from_source(self):
+        # The definition is unchanged from the base, but the pin was built from
+        # an older one: Kind must not run an image this tree does not deploy.
+        self.use_pin(FakePinTool({self.HEAD: "1" * 64, self.BASE: "1" * 64}))
+        self.assertEqual(artifact.workspace_source(self.HEAD, self.BASE),
+                         ("source", "the pin was built from another workspace image definition"))
+
+    def test_changed_definition_rebuilds_from_source(self):
+        self.use_pin(FakePinTool({self.HEAD: "1" * 64, self.BASE: PIN_INPUTS}))
+        self.assertEqual(artifact.workspace_source(self.HEAD, self.BASE)[0], "source")
+        self.use_pin(FakePinTool({self.HEAD: "1" * 64}))
+        self.assertEqual(artifact.workspace_source(self.HEAD, None)[0], "source")
+
+    def test_unreadable_pin_falls_back_to_source(self):
+        self.use_pin(FakePinTool({self.HEAD: PIN_INPUTS}, error="invalid pin"))
+        self.assertEqual(artifact.workspace_source(self.HEAD, self.BASE)[0], "source")
+        with self.assertRaises(artifact.ArtifactError):
+            artifact.workspace_source("HEAD", None)
+
+    def test_source_mode_is_closed(self):
+        self.assertEqual(artifact.workspace_source_mode({}), "source")
+        self.assertEqual(artifact.workspace_source_mode({"CODEWIRE_KIND_WORKSPACE_SOURCE": "pinned"}), "pinned")
+        with self.assertRaises(artifact.ArtifactError):
+            artifact.workspace_source_mode({"CODEWIRE_KIND_WORKSPACE_SOURCE": "latest"})
+
+    def produce_pinned(self):
+        output = self.base / "github-output"
+        environment = {"GITHUB_OUTPUT": str(output), "CODEWIRE_KIND_WORKSPACE_SOURCE": "pinned"}
+        with mock.patch.dict(os.environ, environment), \
+                mock.patch.object(artifact, "run") as command, \
+                mock.patch.object(artifact, "workspace_reuse") as reuse:
+            result = artifact.produce("workspace", self.directory)
+        command.assert_not_called()
+        reuse.assert_not_called()
+        return result
+
+    def test_pinned_producer_exports_only_the_pin_record(self):
+        self.use_pin(FakePinTool())
+        result = self.produce_pinned()
+        self.assertEqual({entry.name for entry in self.directory.iterdir()},
+                         {artifact.WORKSPACE_PIN, artifact.MANIFEST})
+        record = json.loads((self.directory / artifact.WORKSPACE_PIN).read_text())
+        self.assertEqual(record, {
+            "schema": artifact.WORKSPACE_PIN_SCHEMA, "image": PIN_IMAGE, "digest": PIN_DIGEST,
+            "source_sha": PIN_SOURCE, "inputs_sha256": PIN_INPUTS,
+        })
+        manifest = json.loads((self.directory / artifact.MANIFEST).read_text())
+        self.assertEqual(set(manifest["files"]), {artifact.WORKSPACE_PIN})
+        self.assertEqual(manifest["files"][artifact.WORKSPACE_PIN]["mode"], 0o600)
+        self.assertEqual(hashlib.sha256((self.directory / artifact.MANIFEST).read_bytes()).hexdigest(),
+                         result["manifest_sha256"])
+
+    def consume_pinned(self, inspect=pinned_inspect, pull_failures=0):
+        calls = []
+
+        def command(*args, **kwargs):
+            calls.append(args)
+            if args[1] == "pull" and sum(call[1] == "pull" for call in calls) <= pull_failures:
+                raise artifact.subprocess.CalledProcessError(1, args)
+            return ""
+
+        os.environ["EXPECTED_MANIFEST_SHA256"] = hashlib.sha256(
+            (self.directory / artifact.MANIFEST).read_bytes()).hexdigest()
+        self.addCleanup(os.environ.pop, "EXPECTED_MANIFEST_SHA256", None)
+        with mock.patch.object(artifact, "run", side_effect=command), \
+                mock.patch.object(artifact, "inspect_image", side_effect=inspect), \
+                mock.patch.object(artifact.time, "sleep"):
+            artifact.consume("workspace", self.directory)
+        return calls
+
+    def test_pinned_consumer_pulls_by_digest_and_records_its_alias(self):
+        self.use_pin(FakePinTool())
+        self.produce_pinned()
+        calls = self.consume_pinned(pull_failures=1)
+        alias = artifact.PINNED_WORKSPACE_ALIAS + "7" * 64
+        self.assertEqual(calls, [
+            (artifact.docker(), "pull", "--platform", "linux/amd64", PIN_IMAGE),
+            (artifact.docker(), "pull", "--platform", "linux/amd64", PIN_IMAGE),
+            (artifact.docker(), "image", "tag", PINNED_ID, alias),
+        ])
+        selection = json.loads((self.checkout / artifact.WORKSPACE_SELECTION).read_text())
+        self.assertEqual(selection, {
+            "schema": artifact.WORKSPACE_SELECTION_SCHEMA, "mode": "pinned", "image": alias,
+            "image_id": PINNED_ID, "reference": PIN_IMAGE, "source_sha": PIN_SOURCE,
+        })
+        with mock.patch.object(artifact, "inspect_image", side_effect=pinned_inspect), \
+                mock.patch.object(artifact, "workspace_reuse") as reuse:
+            self.assertEqual(artifact.workspace_runtime_image(), alias)
+        reuse.assert_not_called()
+
+    def test_pinned_consumer_rejects_an_image_that_is_not_the_pin(self):
+        cases = {
+            "revision": lambda ref: pinned_inspect(ref, revision="9" * 40),
+            "digest": lambda ref: pinned_inspect(ref, digests=("ghcr.io/codewiresh/workspace@sha256:" + "8" * 64,)),
+            "architecture": lambda ref: pinned_inspect(ref, architecture="arm64"),
+        }
+        for name, inspect in cases.items():
+            with self.subTest(case=name):
+                if self.directory.exists():
+                    for child in self.directory.iterdir():
+                        child.unlink()
+                    self.directory.rmdir()
+                self.use_pin(FakePinTool())
+                self.produce_pinned()
+                with self.assertRaisesRegex(artifact.ArtifactError, "not the published pin"):
+                    self.consume_pinned(inspect=inspect)
+                self.assertFalse((self.checkout / artifact.WORKSPACE_SELECTION).exists())
+
+    def test_pinned_record_must_match_the_checkout_pin_before_any_pull(self):
+        self.use_pin(FakePinTool())
+        self.produce_pinned()
+        other = FakePinTool()
+        other.pin = dict(other.pin, digest="sha256:" + "d" * 64)
+        self.use_pin(other)
+        with self.assertRaisesRegex(artifact.ArtifactError, "differs from the checkout"):
+            self.consume_pinned()
+
+    def test_runtime_image_without_pinned_selection_uses_the_source_receipt(self):
+        receipt = self.checkout / ".tmp/codewire-workspace-image-verification.json"
+        with mock.patch.object(artifact, "workspace_reuse", return_value="source-alias") as reuse:
+            self.assertEqual(artifact.workspace_runtime_image(), "source-alias")
+            artifact.write_workspace_selection({"mode": "source"})
+            self.assertEqual(artifact.workspace_runtime_image(), "source-alias")
+        self.assertEqual(reuse.call_args_list, [mock.call(receipt), mock.call(receipt)])
+
+    def test_runtime_image_rejects_a_changed_pinned_alias(self):
+        self.use_pin(FakePinTool())
+        alias = artifact.PINNED_WORKSPACE_ALIAS + "7" * 64
+        artifact.write_workspace_selection({
+            "mode": "pinned", "image": alias, "image_id": PINNED_ID,
+            "reference": PIN_IMAGE, "source_sha": PIN_SOURCE,
+        })
+        with mock.patch.object(artifact, "inspect_image",
+                               side_effect=lambda ref: pinned_inspect(ref, image_id="sha256:" + "3" * 64)), \
+                self.assertRaisesRegex(artifact.ArtifactError, "names another image"):
+            artifact.workspace_runtime_image()
 
 
 if __name__ == "__main__":

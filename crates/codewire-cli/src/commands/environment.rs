@@ -1262,16 +1262,7 @@ async fn handle_unified_environment_list(
             args.state.as_deref(),
             args.all,
         );
-        let mut entries = Vec::with_capacity(filtered.len());
-        for environment in filtered {
-            let daemon_health = environment_client
-                .get_environment_daemon_status(&org_id, &environment.id)
-                .await
-                .map(|status| status.state)
-                .unwrap_or_else(|_| "unavailable".to_string());
-            entries.push((environment, daemon_health));
-        }
-        entries
+        platform_environment_daemon_health(&environment_client, &org_id, filtered).await
     } else {
         Vec::new()
     };
@@ -1950,6 +1941,35 @@ async fn resolve_unified_environment_target(
         Some((id, _)) => Ok(UnifiedEnvironmentTarget::Platform(id)),
         None => anyhow::bail!("environment {target_ref:?} not found"),
     }
+}
+
+/// The platform answers daemon status only for a running Sandbox; every other
+/// state is refused and shown as unavailable. Asking only running rows keeps
+/// the output and stops `cw env list --all` from slowing down and collecting
+/// errors as the history of destroyed environments grows.
+pub(crate) fn environment_has_daemon(environment: &Environment) -> bool {
+    environment.state == "running"
+}
+
+pub(crate) async fn platform_environment_daemon_health(
+    client: &EnvironmentClient,
+    org_id: &str,
+    environments: Vec<Environment>,
+) -> Vec<(Environment, String)> {
+    let mut entries = Vec::with_capacity(environments.len());
+    for environment in environments {
+        let daemon_health = if environment_has_daemon(&environment) {
+            client
+                .get_environment_daemon_status(org_id, &environment.id)
+                .await
+                .map(|status| status.state)
+                .unwrap_or_else(|_| "unavailable".to_string())
+        } else {
+            "unavailable".to_string()
+        };
+        entries.push((environment, daemon_health));
+    }
+    entries
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]

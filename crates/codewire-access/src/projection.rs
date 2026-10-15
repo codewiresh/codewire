@@ -123,8 +123,9 @@ pub const MANAGED_NO_PROXY: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
 pub const NO_PROXY_NAMES: [&str; 2] = ["NO_PROXY", "no_proxy"];
 
 /// Stock clients configured by selected profile slots, not credential auth
-/// kinds. The Anthropic client alone has two forms: see
-/// [`ManagedCredentialClients::with_anthropic_subscription_token`].
+/// kinds. The Anthropic client alone has three forms: the API key, and see
+/// [`ManagedCredentialClients::with_anthropic_subscription_token`] and
+/// [`ManagedCredentialClients::with_anthropic_sign_in`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagedCredentialClient {
     Codex,
@@ -228,8 +229,11 @@ const MANAGED_CLIENT_ENCODINGS: [&str; 32] = [
 /// The Anthropic client's subscription-token form, valid only with the
 /// Anthropic client itself. It is never set from slot names alone.
 const ANTHROPIC_SUBSCRIPTION_TOKEN_BIT: u8 = 32;
+/// The Anthropic client's sign-in form, under the same rule, and never with
+/// the subscription-token form.
+const ANTHROPIC_SIGN_IN_BIT: u8 = 64;
 /// Every bit a selection may set.
-const ALL_CLIENT_BITS: u8 = 63;
+const ALL_CLIENT_BITS: u8 = 127;
 
 /// The 16 selections with the Anthropic client in its subscription-token form,
 /// in the same finite v2 hexadecimal bitset. Every earlier encoding keeps its
@@ -239,19 +243,24 @@ const ANTHROPIC_SUBSCRIPTION_ENCODINGS: [&str; 16] = [
     "v2:36", "v2:37", "v2:3c", "v2:3d", "v2:3e", "v2:3f",
 ];
 
-/// Index into [`ANTHROPIC_SUBSCRIPTION_ENCODINGS`] of a selection with both
-/// the Anthropic and subscription-token bits: the four other client bits.
-const fn anthropic_subscription_index(bits: u8) -> usize {
+/// The 16 selections with the Anthropic client in its sign-in form, in the
+/// same bitset and field.
+const ANTHROPIC_SIGN_IN_ENCODINGS: [&str; 16] = [
+    "v2:44", "v2:45", "v2:46", "v2:47", "v2:4c", "v2:4d", "v2:4e", "v2:4f", "v2:54", "v2:55",
+    "v2:56", "v2:57", "v2:5c", "v2:5d", "v2:5e", "v2:5f",
+];
+
+/// Index into [`ANTHROPIC_SUBSCRIPTION_ENCODINGS`] or
+/// [`ANTHROPIC_SIGN_IN_ENCODINGS`] of a selection with the Anthropic client in
+/// that form: the four other client bits.
+const fn anthropic_form_index(bits: u8) -> usize {
     ((bits & 0b0000_0011) | ((bits & 0b0001_1000) >> 1)) as usize
 }
 
-/// Inverse of [`anthropic_subscription_index`].
-const fn anthropic_subscription_bits(index: usize) -> u8 {
+/// Inverse of [`anthropic_form_index`] for the form bit `form`.
+const fn anthropic_form_bits(form: u8, index: usize) -> u8 {
     let index = index as u8;
-    ManagedCredentialClient::Anthropic.bit()
-        | ANTHROPIC_SUBSCRIPTION_TOKEN_BIT
-        | (index & 0b0011)
-        | ((index & 0b1100) << 1)
+    ManagedCredentialClient::Anthropic.bit() | form | (index & 0b0011) | ((index & 0b1100) << 1)
 }
 
 /// Material-free stock-client selection. This is not a grant, a credential,
@@ -294,7 +303,7 @@ impl ManagedCredentialClients {
     /// whose kind never changes; it is client configuration, not authority.
     /// Selections without the Anthropic client are rejected.
     pub fn with_anthropic_subscription_token(self) -> Result<Self, ProjectionError> {
-        if !self.contains(ManagedCredentialClient::Anthropic) {
+        if !self.contains(ManagedCredentialClient::Anthropic) || self.anthropic_sign_in() {
             return Err(ProjectionError::InvalidManagedClientSelection);
         }
         Ok(Self(self.0 | ANTHROPIC_SUBSCRIPTION_TOKEN_BIT))
@@ -305,16 +314,38 @@ impl ManagedCredentialClients {
         self.0 & ANTHROPIC_SUBSCRIPTION_TOKEN_BIT != 0
     }
 
-    /// One of 48 canonical tokens for private bootstrap metadata. Empty
+    /// The same selection with its Anthropic client in the sign-in form: the
+    /// bound profile revision's Anthropic slot holds a Claude sign-in, which
+    /// the workspace daemon writes as Claude Code's own login (a listed direct
+    /// delivery exception). Derived like
+    /// [`Self::with_anthropic_subscription_token`], and never combined with
+    /// it.
+    pub fn with_anthropic_sign_in(self) -> Result<Self, ProjectionError> {
+        if !self.contains(ManagedCredentialClient::Anthropic) || self.anthropic_subscription_token()
+        {
+            return Err(ProjectionError::InvalidManagedClientSelection);
+        }
+        Ok(Self(self.0 | ANTHROPIC_SIGN_IN_BIT))
+    }
+
+    /// Whether the Anthropic client uses its sign-in form.
+    pub fn anthropic_sign_in(self) -> bool {
+        self.0 & ANTHROPIC_SIGN_IN_BIT != 0
+    }
+
+    /// One of 64 canonical tokens for private bootstrap metadata. Empty
     /// selection is explicit; unversioned or reordered forms are not aliases.
     pub fn encode(self) -> &'static str {
         debug_assert!(
             self.0 & !ALL_CLIENT_BITS == 0
-                && (!self.anthropic_subscription_token()
+                && (!(self.anthropic_subscription_token() || self.anthropic_sign_in())
                     || self.contains(ManagedCredentialClient::Anthropic))
+                && !(self.anthropic_subscription_token() && self.anthropic_sign_in())
         );
         if self.anthropic_subscription_token() {
-            ANTHROPIC_SUBSCRIPTION_ENCODINGS[anthropic_subscription_index(self.0)]
+            ANTHROPIC_SUBSCRIPTION_ENCODINGS[anthropic_form_index(self.0)]
+        } else if self.anthropic_sign_in() {
+            ANTHROPIC_SIGN_IN_ENCODINGS[anthropic_form_index(self.0)]
         } else {
             MANAGED_CLIENT_ENCODINGS[usize::from(self.0)]
         }
@@ -328,11 +359,18 @@ impl ManagedCredentialClients {
         {
             return Ok(Self(bits as u8));
         }
-        ANTHROPIC_SUBSCRIPTION_ENCODINGS
-            .iter()
-            .position(|candidate| *candidate == value)
-            .map(|index| Self(anthropic_subscription_bits(index)))
-            .ok_or(ProjectionError::InvalidManagedClientSelection)
+        let form = |encodings: &[&str; 16], bit| {
+            encodings
+                .iter()
+                .position(|candidate| *candidate == value)
+                .map(|index| Self(anthropic_form_bits(bit, index)))
+        };
+        form(
+            &ANTHROPIC_SUBSCRIPTION_ENCODINGS,
+            ANTHROPIC_SUBSCRIPTION_TOKEN_BIT,
+        )
+        .or_else(|| form(&ANTHROPIC_SIGN_IN_ENCODINGS, ANTHROPIC_SIGN_IN_BIT))
+        .ok_or(ProjectionError::InvalidManagedClientSelection)
     }
 
     pub fn contains(self, client: ManagedCredentialClient) -> bool {
@@ -486,6 +524,14 @@ impl ManagedCredentialClients {
                 // owner's Claude subscription token. The token itself never
                 // enters the Sandbox.
                 environment.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "codewire-managed".into());
+            } else if self.anthropic_sign_in() {
+                // The sign-in form projects the base URL alone. Claude Code
+                // reads its own claude.ai login, which the workspace daemon
+                // writes (a listed direct delivery exception), and sends its
+                // OAuth form to the managed route, where the broker replaces
+                // the bearer with the same or a fresher token. Every other
+                // Anthropic name stays reserved: each would outrank the
+                // delivered login.
             } else {
                 // The API-key form: a bearer the broker replaces with the
                 // selected API key.

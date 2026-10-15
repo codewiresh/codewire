@@ -153,8 +153,8 @@ impl BrokerLeaseProvider for SmokeAuthority {
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError> {
         Ok(())
     }
-    // Direct Codex-login, SSH, projections and GitHub refresh retain the
-    // trait's denied defaults. No HTTP endpoint can invoke those operations.
+    // Direct Codex and Claude logins, SSH, projections and GitHub refresh
+    // retain the trait's denied defaults. No HTTP endpoint can invoke those operations.
 }
 
 struct State {
@@ -870,6 +870,10 @@ mod tests {
         let leases = &fixture.state.authority;
         assert!(matches!(
             leases.lease_codex_login(Uuid::new_v4()).await,
+            Err(BrokerLeaseError::Denied)
+        ));
+        assert!(matches!(
+            leases.lease_claude_login(Uuid::new_v4()).await,
             Err(BrokerLeaseError::Denied)
         ));
         assert!(matches!(

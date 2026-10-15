@@ -604,3 +604,96 @@ async fn keepalive_rotates_an_idle_github_app_connection_and_leaves_raw_tokens()
     .await;
     f.finish(result).await
 }
+
+/// An idle Claude sign-in is refreshed once its material is the Claude age
+/// old, or sooner at half its refresh token's lifetime; one whose refresh
+/// token already expired is never sent. A Claude subscription token, which has
+/// no refresh, is never selected or read.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn keepalive_refreshes_idle_claude_sign_ins_and_never_reads_a_setup_token() -> Result<()> {
+    use super::claude_sign_in::{SyntheticClaude, sign_in_material, sign_in_registration};
+    let mut f = KeepAliveFixture::create().await?;
+    let result = async {
+        let provider = SyntheticClaude::default();
+        let keepalive = f.replica(Arc::new(provider.clone()), None).await?;
+        let sign_in = |name: &str, material: ProtectedValue| {
+            let store = f.store.clone();
+            let owner = f.owner.clone();
+            let registration = sign_in_registration(name);
+            async move { store.create(&owner, registration, &material).await }
+        };
+        // Eight days idle, with a fresh access token: due by age.
+        let aged = sign_in("Aged", sign_in_material("aged", 7_200, 8 * DAY, None)).await?;
+        // Three days idle with a four-day refresh token: due at half of it.
+        let short = sign_in(
+            "Short",
+            sign_in_material("short", 7_200, 3 * DAY, Some(4 * DAY)),
+        )
+        .await?;
+        // One day idle: not due.
+        let fresh = sign_in("Fresh", sign_in_material("fresh", 7_200, DAY, None)).await?;
+        // Its refresh token expired a day ago: it can never be renewed.
+        let lapsed = sign_in(
+            "Lapsed",
+            sign_in_material("lapsed", 7_200, 2 * DAY, Some(DAY)),
+        )
+        .await?;
+        let setup_token = f
+            .store
+            .create(
+                &f.owner,
+                CredentialRegistration {
+                    provider: ProviderId::parse("anthropic")?,
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: "Setup token".into(),
+                    account_hint: None,
+                    expires_at_unix: Some(unix_now()? + 30 * DAY),
+                },
+                &value(b"sk-ant-oat01-synthetic-keepalive-setup-token"),
+            )
+            .await?;
+        for record in [&aged, &short, &fresh, &lapsed, &setup_token] {
+            f.age(record, 9).await?;
+        }
+
+        let sweep = keepalive.sweep().await;
+        ensure!(
+            sweep.refreshed == 2
+                && sweep.failed == 0
+                && sweep.not_due == 2
+                && sweep.material_reads == 4
+                && sweep.complete,
+            "unexpected sweep {sweep:?}"
+        );
+        let mut presented: Vec<String> = provider
+            .presented
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request["refresh_token"].as_str().unwrap().to_owned())
+            .collect();
+        presented.sort();
+        ensure!(
+            presented == ["synthetic-refresh-aged", "synthetic-refresh-short"],
+            "{presented:?}"
+        );
+        for refreshed in [&aged, &short] {
+            ensure!(advanced(refreshed, &f.current(&f.owner, refreshed).await?));
+        }
+        for untouched in [&fresh, &lapsed, &setup_token] {
+            ensure!(f.current(&f.owner, untouched).await?.version == untouched.version);
+        }
+        // Decisions are cached per exact version: nothing is read again.
+        let unwraps = f.kek.unwrap_calls.load(Ordering::SeqCst);
+        let again = keepalive.sweep().await;
+        ensure!(
+            again.refreshed == 0 && again.material_reads == 0,
+            "{again:?}"
+        );
+        ensure!(f.kek.unwrap_calls.load(Ordering::SeqCst) == unwraps);
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}

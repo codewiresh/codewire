@@ -41,7 +41,10 @@ COPY --from=build-zig /zig.tar.xz /tmp/zig.tar.xz
 COPY images/workspace/debian.sources /etc/apt/sources.list.d/debian.sources
 COPY images/base/apt-transport.conf /etc/apt/apt.conf.d/80-codewire-transport
 COPY --chmod=0755 images/base/apt-get-with-retry /usr/local/sbin/apt-get-with-retry
-RUN rm -f /etc/apt/sources.list && \
+# Every apt-get-with-retry RUN mounts the optional CI snapshot-cache secret and
+# removes /var/lib/apt/lists, whose file names would carry the cache host.
+RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
+    rm -f /etc/apt/sources.list && \
     apt-get-with-retry update && \
     grep -RqsF 'snapshot.debian.org/archive/debian/20251208T000000Z/' /etc/apt/sources.list.d && \
     ! grep -RqsE '(deb|security)\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d && \
@@ -142,7 +145,8 @@ FROM ${BASE_IMAGE_REF} AS stock-ssh-fixture
 SHELL ["/bin/bash", "-c"]
 USER root
 ARG TARGETARCH
-RUN set -euo pipefail; \
+RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
+    set -euo pipefail; \
     test "$(dpkg --print-architecture)" = "$TARGETARCH"; \
     grep -RqsF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' /etc/apt/sources.list.d; \
     ! grep -RqsE '(archive|security|ports)\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d; \
@@ -150,6 +154,7 @@ RUN set -euo pipefail; \
     install -d -m 0755 /packages /out; \
     cd /packages; \
     apt-get-with-retry download openssh-server=1:9.6p1-3ubuntu13.18 libwrap0=7.6.q-33; \
+    rm -rf /var/lib/apt/lists/*; \
     packages=(*.deb); test "${#packages[@]}" = 2; \
     for package in "${packages[@]}"; do \
       identity="$(dpkg-deb --show --showformat='${Package} ${Version} ${Architecture}' "$package")"; \
@@ -202,7 +207,8 @@ ENV GOPATH="/home/codewire/go"
 
 # Codex's Linux sandbox runs commands through the system bubblewrap on PATH;
 # without it Codex warns at startup and falls back to its bundled copy.
-RUN apt-get-with-retry update && apt-get-with-retry install -y --no-install-recommends \
+RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
+    apt-get-with-retry update && apt-get-with-retry install -y --no-install-recommends \
       bubblewrap=0.9.0-1ubuntu0.1 \
       file gdb pipx pkg-config protobuf-compiler python3-full python3-venv strace && \
     rm -rf /var/lib/apt/lists/*

@@ -73,6 +73,81 @@ pub fn provider_version(a: v1::PlatformManagedAgent) -> Option<&'static str> {
         _ => None,
     }
 }
+/// The marker on a daemon's refusal of platform managed info when the
+/// Sandbox's image carries other agent clients than the daemon pins. An older
+/// Sandbox keeps its image while its daemon follows the current release, so
+/// this is a normal state its owner must be told about.
+pub const STALE_IMAGE_MARKER: &str = "platform managed image clients: ";
+
+/// One agent whose image client differs from the daemon's pin: the version the
+/// image carries (`None` when it has none) and the version the daemon pins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleImageClient {
+    pub agent: v1::PlatformManagedAgent,
+    pub installed: Option<String>,
+    pub pinned: String,
+}
+
+fn agent_name(agent: v1::PlatformManagedAgent) -> Option<&'static str> {
+    match agent {
+        v1::PlatformManagedAgent::Codex => Some("codex"),
+        v1::PlatformManagedAgent::Claude => Some("claude"),
+        _ => None,
+    }
+}
+
+/// A version an image or a pin may name: short, and only version characters.
+pub fn valid_client_version(value: &str) -> bool {
+    (1..=32).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
+}
+
+/// The refusal message: the marker, then `agent=installed/pinned` per agent,
+/// with `none` for a client the image lacks. `None` for an invalid entry.
+pub fn stale_image_message(stale: &[StaleImageClient]) -> Option<String> {
+    let mut parts = Vec::with_capacity(stale.len());
+    for client in stale {
+        let name = agent_name(client.agent)?;
+        let installed = client.installed.as_deref().unwrap_or("none");
+        if !valid_client_version(installed) || !valid_client_version(&client.pinned) {
+            return None;
+        }
+        parts.push(format!("{name}={installed}/{}", client.pinned));
+    }
+    (!parts.is_empty()).then(|| format!("{STALE_IMAGE_MARKER}{}", parts.join(" ")))
+}
+
+/// Decodes a daemon's refusal strictly: the marker, then one or two known
+/// agents, each once, each with valid versions. Anything else is `None`, so a
+/// caller never repeats arbitrary daemon text.
+pub fn stale_image_clients(message: &str) -> Option<Vec<StaleImageClient>> {
+    let rest = message.strip_prefix(STALE_IMAGE_MARKER)?;
+    let mut clients: Vec<StaleImageClient> = Vec::new();
+    for part in rest.split(' ') {
+        let (name, versions) = part.split_once('=')?;
+        let (installed, pinned) = versions.split_once('/')?;
+        let agent = match name {
+            "codex" => v1::PlatformManagedAgent::Codex,
+            "claude" => v1::PlatformManagedAgent::Claude,
+            _ => return None,
+        };
+        if clients.iter().any(|client| client.agent == agent)
+            || !valid_client_version(installed)
+            || !valid_client_version(pinned)
+        {
+            return None;
+        }
+        clients.push(StaleImageClient {
+            agent,
+            installed: (installed != "none").then(|| installed.to_owned()),
+            pinned: pinned.to_owned(),
+        });
+    }
+    (!clients.is_empty()).then_some(clients)
+}
+
 pub fn validate_mutation(r: &v1::PlatformManagedMutationRequest) -> Result<(), &'static str> {
     use v1::platform_managed_mutation_request::Operation;
     if !valid_uuid(&r.request_id) || r.encoded_len() > REQUEST_BYTES {
@@ -107,6 +182,26 @@ pub fn validate_mutation(r: &v1::PlatformManagedMutationRequest) -> Result<(), &
         }
         Operation::Control(c) => {
             use v1::PlatformManagedAction as A;
+            let resume = c.action == A::Resume as i32;
+            let resume_fields = if resume {
+                let scope = r.scope.as_ref().ok_or("missing platform scope")?;
+                let agent = v1::PlatformManagedAgent::try_from(c.agent)
+                    .map_err(|_| "invalid platform agent")?;
+                valid_uuid(&c.predecessor_pod_uid)
+                    && c.predecessor_pod_uid != scope.pod_uid
+                    && provider_version(agent) == Some(c.expected_provider_version.as_str())
+                    && hash(&c.expected_provider_sha256)
+                    && (4..=PROVIDER_BYTES).contains(&c.expected_provider_size)
+            } else {
+                c.predecessor_pod_uid.is_empty()
+                    && c.agent == 0
+                    && c.expected_provider_sha256.is_empty()
+                    && c.expected_provider_size == 0
+                    && c.expected_provider_version.is_empty()
+            };
+            if !resume_fields {
+                return Err("invalid platform resume");
+            }
             if !valid_uuid(&c.driver_id)
                 || c.session_id != format!("session-{}", c.driver_id)
                 || c.expected_launch_generation == 0
@@ -137,7 +232,7 @@ pub fn validate_mutation(r: &v1::PlatformManagedMutationRequest) -> Result<(), &
                         && c.reply_to.is_none()
                         && c.expected_active_message_id.is_some()
                 }
-                Ok(A::Stop | A::Restart) => {
+                Ok(A::Stop | A::Restart | A::Resume) => {
                     c.text.is_empty()
                         && c.reply_to.is_none()
                         && c.expected_turn_id.is_none()
@@ -211,6 +306,19 @@ pub fn validate_read(r: &v1::PlatformManagedReadRequest) -> Result<(), &'static 
     }
 }
 
+/// The plain reasons a Resume is refused before issue (#2705). Each names a
+/// condition only, never a path, value, child error or provider output.
+pub const RESUME_REFUSALS: [&str; 4] = [
+    "resume-driver-alive",
+    "resume-working-directory-missing",
+    "resume-credential-changed",
+    "resume-provider-not-admitted",
+];
+
+pub fn resume_refusal(reason: &str) -> bool {
+    RESUME_REFUSALS.contains(&reason)
+}
+
 /// Exact private response grammar. Reasons describe ownership state only and
 /// never carry child errors, commands, credentials or provider output.
 pub fn validate_receipt(r: &v1::PlatformManagedReceipt) -> Result<(), &'static str> {
@@ -219,12 +327,15 @@ pub fn validate_receipt(r: &v1::PlatformManagedReceipt) -> Result<(), &'static s
         1 => r.reason == "pending",
         2 => r.reason == "issued",
         3 => r.reason == "settled",
-        // Refused before any effect, or an issued launch refused before its
-        // agent ran, with cleanup confirmed.
-        4 => matches!(
-            r.reason.as_str(),
-            "refused-before-issue" | "denied-before-run"
-        ),
+        // Refused before any effect, possibly with a Resume's plain reason, or
+        // an issued launch refused before its agent ran, with cleanup
+        // confirmed.
+        4 => {
+            matches!(
+                r.reason.as_str(),
+                "refused-before-issue" | "denied-before-run"
+            ) || resume_refusal(&r.reason)
+        }
         5 => matches!(
             r.reason.as_str(),
             "issued-outcome-unknown" | "target-owner-lost"
@@ -272,6 +383,44 @@ pub fn validate_receipt(r: &v1::PlatformManagedReceipt) -> Result<(), &'static s
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_image_clients_round_trip_and_refuse_anything_else() {
+        use super::{StaleImageClient, stale_image_clients, stale_image_message};
+        use crate::daemon::v1::PlatformManagedAgent as A;
+        let stale = vec![
+            StaleImageClient {
+                agent: A::Codex,
+                installed: Some("0.157.0".into()),
+                pinned: "0.160.0".into(),
+            },
+            StaleImageClient {
+                agent: A::Claude,
+                installed: None,
+                pinned: "2.1.288".into(),
+            },
+        ];
+        let message = stale_image_message(&stale).unwrap();
+        assert_eq!(
+            message,
+            "platform managed image clients: codex=0.157.0/0.160.0 claude=none/2.1.288"
+        );
+        assert_eq!(stale_image_clients(&message).unwrap(), stale);
+        for refused in [
+            "",
+            "platform managed incarnation or outcome refused",
+            "platform managed image clients: ",
+            "platform managed image clients: codex=0.157.0",
+            "platform managed image clients: codex=0.157.0/0.160.0 codex=1/2",
+            "platform managed image clients: gemini=1/2",
+            "platform managed image clients: codex=0.157.0;rm/0.160.0",
+            "platform managed image clients: codex=0.157.0/0.160.0  claude=1/2",
+            "platform managed image clients: codex=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1",
+        ] {
+            assert_eq!(stale_image_clients(refused), None, "{refused}");
+        }
+        assert_eq!(stale_image_message(&[]), None);
+    }
+
     use super::*;
     fn request() -> v1::PlatformManagedMutationRequest {
         v1::PlatformManagedMutationRequest {
@@ -296,6 +445,7 @@ mod tests {
                     expected_turn_id: None,
                     expected_active_message_id: None,
                     cleanup_of_request_id: None,
+                    ..Default::default()
                 },
             )),
         }
@@ -375,6 +525,39 @@ mod tests {
         assert!(validate_receipt(&row).is_ok());
         row.session_id.push('x');
         assert!(validate_receipt(&row).is_err());
+    }
+    #[test]
+    fn platform_wire_resume_refusal_reasons_are_closed_and_rejected_only() {
+        let request = request();
+        let mut row = v1::PlatformManagedReceipt {
+            request_id: request.request_id.clone(),
+            scope: request.scope.clone(),
+            fingerprint_sha256: platform_managed_request_fingerprint(&request).unwrap(),
+            phase: 4,
+            session_id: "session-00000000-0000-4000-8000-000000000004".into(),
+            driver_id: "00000000-0000-4000-8000-000000000004".into(),
+            launch_generation: 7,
+            ..Default::default()
+        };
+        for reason in RESUME_REFUSALS {
+            row.phase = 4;
+            row.reason = reason.into();
+            row.cleanup_unknown = false;
+            assert!(validate_receipt(&row).is_ok(), "{reason}");
+            // A refusal confirms nothing ran; any other phase is refused.
+            row.cleanup_unknown = true;
+            assert!(validate_receipt(&row).is_err(), "{reason}");
+            row.cleanup_unknown = false;
+            for phase in [1, 2, 3, 5] {
+                row.phase = phase;
+                assert!(validate_receipt(&row).is_err(), "{reason} {phase}");
+            }
+        }
+        row.phase = 4;
+        for reason in ["resume-", "resume-anything", "resume-driver-alive "] {
+            row.reason = reason.into();
+            assert!(validate_receipt(&row).is_err(), "{reason}");
+        }
     }
     #[test]
     fn platform_wire_cleanup_link_is_stop_only_canonical_and_never_self_or_empty() {

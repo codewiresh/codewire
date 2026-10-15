@@ -294,7 +294,7 @@ spec:
                 name: codewire-billing
                 port:
                   name: http
-          # D8 probe routing proof (docs/plans/connect-rpc/03 WI-4): both
+          # D8 probe routing proof (connect-rpc/03 WI-4): both
           # binaries mount codewire.testing.v1.PingService; routing
           # PublicPing to billing proves a billing-owned Connect regex
           # beats the /codewire\. orchestration fallback (D5 ordering).
@@ -306,7 +306,7 @@ spec:
                 port:
                   name: http
 ---
-# Connect-RPC path routing (docs/plans/connect-rpc/03, D5) — the local twin
+# Connect-RPC path routing (connect-rpc/03, D5) — the local twin
 # of base's codewire-connect Ingress. The D8 probe's billing routing
 # proof lives in the codewire-billing-local Ingress above (production
 # topology: billing-owned Connect rules ride the billing regex Ingress);

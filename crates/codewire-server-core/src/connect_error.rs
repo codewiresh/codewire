@@ -1,5 +1,5 @@
 //! Connect renderer for [`AppError`] — the second renderer of the shared
-//! error type (`docs/plans/connect-rpc/01-error-model.md`, D6).
+//! error type (`connect-rpc/01-error-model.md`, D6).
 //!
 //! This module is deliberately **transport-agnostic**: connect-rust is not
 //! in the workspace yet (03 WI-1 pins it), so it defines the canonical
@@ -264,6 +264,8 @@ fn is_state_conflict_reason(reason: &str) -> bool {
             | "organization_deletion_stale_generation"
             | "organization_mutation_lease_conflict"
             | "organization_mutation_barrier_not_drained"
+            | "platform_agent_resume_refused"
+            | "platform_agent_request_refused"
     )
 }
 
@@ -428,6 +430,23 @@ mod tests {
                     StatusCode::CONFLICT,
                     "organization_write_blocked",
                     "organization deletion is in progress",
+                ),
+                ConnectCode::FailedPrecondition,
+            ),
+            (
+                coded(
+                    StatusCode::CONFLICT,
+                    "platform_agent_resume_refused",
+                    "the environment's previous Pod is still stopping; try again shortly",
+                ),
+                ConnectCode::FailedPrecondition,
+            ),
+            (
+                coded(
+                    StatusCode::CONFLICT,
+                    "platform_agent_request_refused",
+                    "message 00000000-0000-4000-8000-000000000001 is still in progress; \
+                     try again shortly",
                 ),
                 ConnectCode::FailedPrecondition,
             ),

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exchange the current Forgejo job OIDC token for the support publisher's
 # OpenBao role and write the native arm64 BuildKit node's mutual-TLS client
-# tuple (infra docs/runbooks/ci-arm64-builder.md) into a private directory:
+# tuple (infra runbooks/ci-arm64-builder.md) into a private directory:
 # ca.crt, client.crt and client.key, each mode 0600. Nothing is printed. The
 # caller owns the directory and shreds it when its builds end.
 set -euo pipefail

@@ -14,6 +14,7 @@ class EnvironmentAgentKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     ENVIRONMENT_AGENT_KIND_UNSPECIFIED: _ClassVar[EnvironmentAgentKind]
     ENVIRONMENT_AGENT_KIND_CODEX: _ClassVar[EnvironmentAgentKind]
     ENVIRONMENT_AGENT_KIND_CLAUDE: _ClassVar[EnvironmentAgentKind]
+    ENVIRONMENT_AGENT_KIND_NOEL: _ClassVar[EnvironmentAgentKind]
 
 class EnvironmentAgentAction(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -23,6 +24,7 @@ class EnvironmentAgentAction(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     ENVIRONMENT_AGENT_ACTION_INTERRUPT: _ClassVar[EnvironmentAgentAction]
     ENVIRONMENT_AGENT_ACTION_STOP: _ClassVar[EnvironmentAgentAction]
     ENVIRONMENT_AGENT_ACTION_RESTART: _ClassVar[EnvironmentAgentAction]
+    ENVIRONMENT_AGENT_ACTION_RESUME: _ClassVar[EnvironmentAgentAction]
 
 class EnvironmentAgentPhase(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -41,12 +43,14 @@ class EnvironmentAgentRecordKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapp
 ENVIRONMENT_AGENT_KIND_UNSPECIFIED: EnvironmentAgentKind
 ENVIRONMENT_AGENT_KIND_CODEX: EnvironmentAgentKind
 ENVIRONMENT_AGENT_KIND_CLAUDE: EnvironmentAgentKind
+ENVIRONMENT_AGENT_KIND_NOEL: EnvironmentAgentKind
 ENVIRONMENT_AGENT_ACTION_UNSPECIFIED: EnvironmentAgentAction
 ENVIRONMENT_AGENT_ACTION_MESSAGE: EnvironmentAgentAction
 ENVIRONMENT_AGENT_ACTION_STEER: EnvironmentAgentAction
 ENVIRONMENT_AGENT_ACTION_INTERRUPT: EnvironmentAgentAction
 ENVIRONMENT_AGENT_ACTION_STOP: EnvironmentAgentAction
 ENVIRONMENT_AGENT_ACTION_RESTART: EnvironmentAgentAction
+ENVIRONMENT_AGENT_ACTION_RESUME: EnvironmentAgentAction
 ENVIRONMENT_AGENT_PHASE_UNSPECIFIED: EnvironmentAgentPhase
 ENVIRONMENT_AGENT_PHASE_ADMITTED: EnvironmentAgentPhase
 ENVIRONMENT_AGENT_PHASE_ISSUED: EnvironmentAgentPhase
