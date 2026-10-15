@@ -2713,6 +2713,7 @@ grep -Fq 'did not become ready within 60 seconds after image import' \
 deploy_agent_sandbox() { record deploy-agent; }
 kind_credential_native_smoke() { record credential-native; }
 kind_credential_claude_session() { record credential-claude; }
+kind_credential_claude_sign_in() { record credential-claude-sign-in; }
 workspace_service_smokes() { record workspace-services; }
 temporal_workflow_smoke() { record temporal-workflow; }
 mark_retained_cluster_prepared() { record prepared-marker; }
@@ -2722,6 +2723,7 @@ cat >"$FIXTURE/want-prepared-order" <<'EOF'
 deploy-agent
 credential-native
 credential-claude
+credential-claude-sign-in
 workspace-services
 temporal-workflow
 prepared-marker

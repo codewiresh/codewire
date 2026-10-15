@@ -1311,7 +1311,7 @@ sdk_tooling_paths="$TMP/sdk-tooling.paths"
 printf '%s\n' \
   Makefile \
   libs/sdk-go/client.go \
-  docs/plans/connect-rpc/13-rest-sunset-and-openapi-removal.md > "$sdk_tooling_paths"
+  docs/dev/CONTRACT-TESTING.md > "$sdk_tooling_paths"
 sdk_tooling_log="$TMP/sdk-tooling-tools.log"
 sdk_tooling_output="$({
   cd "$repo"

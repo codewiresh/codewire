@@ -68,8 +68,10 @@ pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES: usize = 64;
 /// response headers. The relay copies them into the daemon's Open, and the
 /// daemon sends an optional operation only when listed, so an older broker or
 /// relay is never sent a frame that would end its epoch.
-pub const PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES: &[&str] =
-    &[codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN];
+pub const PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES: &[&str] = &[
+    codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
+    codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+];
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_BUFFER: usize = 32;
 

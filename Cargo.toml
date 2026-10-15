@@ -175,7 +175,7 @@ tonic-prost-build = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-vsock = "=0.7.2"
 
-# Connect-RPC (client-facing contract; docs/plans/connect-rpc/). Pre-1.0 —
+# Connect-RPC (client-facing contract; codewire/plans:connect-rpc/). Pre-1.0 —
 # pinned exact on purpose; bump deliberately, never via `cargo update`.
 connectrpc = "=0.9.1"
 connectrpc-build = "=0.9.0"
@@ -189,7 +189,7 @@ buffa-types = { version = "=0.9.1", features = ["json"] }
 # Phase 0 design discussion identified as the canonical Rust analog of
 # huma+chi.
 # http2 is deliberate: Connect/gRPC h2c prior-knowledge on the service
-# listeners (docs/plans/connect-rpc/03-connect-server-infrastructure.md D2).
+# listeners (codewire/plans:connect-rpc/03-connect-server-infrastructure.md D2).
 axum = { version = "0.8", features = ["macros", "json", "http2"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "request-id", "cors", "catch-panic"] }

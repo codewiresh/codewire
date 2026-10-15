@@ -260,14 +260,13 @@ The **control plane** (`codewire`) accepts API requests, manages environment lif
 
 ## Status
 
-Codewire is pre-1.0. The OSS surface is stable enough to run and contribute against but breaking changes can land between releases. Architectural direction and current work tracked in [docs/plans/](docs/plans/) and on the issue tracker.
+Codewire is pre-1.0. The OSS surface is stable enough to run and contribute against but breaking changes can land between releases. Architectural direction and current work are tracked on the issue tracker.
 
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — stable architecture summary
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) — canonical terms
 - [docs/dev/CODEWIRE-APP-GUIDE.md](docs/dev/CODEWIRE-APP-GUIDE.md) — internal engineering guide
-- [docs/plans/](docs/plans/) — design proposals + in-flight architecture work
 
 ## Security
 

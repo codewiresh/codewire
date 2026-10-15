@@ -202,6 +202,17 @@ impl ProjectionRecipient {
     ) -> Result<crate::OpenedCodexLogin, crate::CodexLoginError> {
         crate::codex_login::open(&self.0, ciphertext, expected, now_unix_ms)
     }
+
+    /// Open one Claude login sealed for this recipient, consuming it even on
+    /// failure. Neither a Codex login nor a projection opens as one.
+    pub fn open_claude_login(
+        self,
+        ciphertext: &[u8],
+        expected: &crate::CodexLoginContext,
+        now_unix_ms: u64,
+    ) -> Result<crate::OpenedClaudeLogin, crate::ClaudeLoginError> {
+        crate::claude_login::open(&self.0, ciphertext, expected, now_unix_ms)
+    }
 }
 
 impl fmt::Debug for ProjectionRecipient {

@@ -111,6 +111,33 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
+    /// Begin a Claude sign-in: Claude's authorize URL and the opaque handle
+    /// the caller keeps private and returns to
+    /// [`Self::complete_claude_sign_in`].
+    pub async fn start_claude_sign_in(
+        &self,
+        request: StartClaudeSignInRequest,
+    ) -> Result<StartClaudeSignInResponse, ClientError> {
+        self.credential_mutations
+            .start_claude_sign_in_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    /// Submit the pasted `code#state` of a started Claude sign-in. The reply
+    /// contains only committed metadata; no token is returned.
+    pub async fn complete_claude_sign_in(
+        &self,
+        request: CompleteClaudeSignInRequest,
+    ) -> Result<CompleteClaudeSignInResponse, ClientError> {
+        self.credential_mutations
+            .complete_claude_sign_in_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     pub async fn list_credentials(
         &self,
         request: ListCredentialsRequest,
