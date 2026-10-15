@@ -527,6 +527,65 @@ async fn full_output_window_still_services_input_resize_and_render_acks() {
     assert!(h.daemon_output.is_closed());
 }
 
+/// Daemon output keeps being read while the browser has not acknowledged
+/// its window, so a keystroke's small output frames never wait unread in
+/// HTTP/2, whose flood guard would end the daemon connection and every
+/// attachment on it (#2822). Acknowledgements then release it in order.
+#[tokio::test]
+async fn daemon_output_is_read_while_the_browser_window_is_full() {
+    const OUTPUTS: u64 = 1000;
+    let mut h = harness(false, Duration::from_secs(1));
+    for offset in 0..OUTPUTS {
+        timeout(
+            Duration::from_secs(1),
+            h.daemon_output.send(Ok(output(offset, b"x"))),
+        )
+        .await
+        .expect("the relay stopped reading daemon output")
+        .unwrap();
+    }
+    let mut next = 0;
+    while next < OUTPUTS {
+        let upto = (next + WINDOW_FRAMES as u64).min(OUTPUTS);
+        for offset in next..upto {
+            assert_eq!(rendered(&mut h).await["offset"], offset.to_string());
+        }
+        assert!(h.rendered.try_recv().is_err());
+        next = upto;
+        send(&h.browser, json!({"type":"ack","offset": next.to_string()})).await;
+    }
+    h.browser.send(Ok(Message::Close(None))).await.unwrap();
+    assert_eq!(h.task.await.unwrap(), End::PeerClosed);
+}
+
+/// What the relay reads ahead of the browser window is bounded: at the bound
+/// it stops reading, and flow control pauses the daemon.
+#[tokio::test]
+async fn daemon_output_read_ahead_is_bounded() {
+    let h = harness(false, Duration::from_secs(1));
+    let data = vec![b'x'; CHUNK_BYTES];
+    let mut sent = 0u64;
+    while timeout(
+        Duration::from_millis(200),
+        h.daemon_output
+            .send(Ok(output(sent * CHUNK_BYTES as u64, &data))),
+    )
+    .await
+    .is_ok()
+    {
+        sent += 1;
+        assert!(sent < 1000, "the relay read daemon output without bound");
+    }
+    // The harness channel holds 128 messages the relay has not read.
+    let read = sent - 128;
+    let window = (WINDOW_BYTES as usize / CHUNK_BYTES) as u64;
+    let read_ahead = (DAEMON_BACKLOG_BYTES / CHUNK_BYTES) as u64;
+    assert!(read > window, "nothing was read ahead of the window");
+    assert!(read <= window + read_ahead + 1, "{read} messages read");
+    h.browser.send(Ok(Message::Close(None))).await.unwrap();
+    assert_eq!(h.task.await.unwrap(), End::PeerClosed);
+}
+
 #[tokio::test]
 async fn stalled_browser_write_does_not_duplicate_output_or_starve_control_c() {
     let mut h = harness(true, Duration::from_millis(100));

@@ -208,7 +208,15 @@ where
                 // Aborting this task drops the daemon session's response
                 // stream, which the daemon takes as the client leaving.
                 let output = AbortOnDropHandle::new(tokio::spawn(async move {
-                    let _ = forward_exec_daemon_outputs(key, &mut session, output).await;
+                    if let Ok(code) = forward_daemon_outputs(
+                        &mut session,
+                        &output,
+                        "workspace exec session ended without an exit status",
+                    )
+                    .await
+                    {
+                        log_session_exit(key, code);
+                    }
                 }));
                 Ok(Box::new(DaemonExecSshSession {
                     input,
@@ -223,7 +231,15 @@ where
                     .map_err(SshSessionRunnerError::from)?;
                 let input = session.input_handle();
                 let output = AbortOnDropHandle::new(tokio::spawn(async move {
-                    let _ = forward_pty_daemon_outputs(key, &mut session, output).await;
+                    if let Ok(code) = forward_daemon_outputs(
+                        &mut session,
+                        &output,
+                        "workspace PTY session ended without an exit status",
+                    )
+                    .await
+                    {
+                        log_session_exit(key, code);
+                    }
                 }));
                 Ok(Box::new(DaemonPtySshSession {
                     input,
@@ -284,87 +300,190 @@ impl From<DaemonClientError> for SshSessionRunnerError {
     }
 }
 
-async fn forward_exec_daemon_outputs(
-    key: SshSessionKey,
-    session: &mut crate::daemon::ExecDaemonSession,
-    output: SshChannelOutput,
-) -> Result<(), SshSessionRunnerError> {
-    loop {
-        match session.next_output().await {
-            Ok(Some(daemon_output)) => {
-                let ssh_output = ssh_output_from_daemon(daemon_output);
-                let exit = match ssh_output {
-                    SshSessionOutput::Exit(code) => Some(code),
-                    _ => None,
-                };
-                output.send(ssh_output).await?;
-                if let Some(code) = exit {
-                    log_session_exit(key, code);
-                    return Ok(());
-                }
-            }
-            Ok(None) => {
-                let error = SshSessionRunnerError(
-                    "workspace exec session ended without an exit status".into(),
-                );
-                output
-                    .send(SshSessionOutput::Error(error.to_string()))
-                    .await?;
-                output.send(SshSessionOutput::Exit(1)).await?;
-                return Err(error);
-            }
-            Err(err) => {
-                output
-                    .send(SshSessionOutput::Error(format!(
-                        "workspace session failed: {err}"
-                    )))
-                    .await?;
-                output.send(SshSessionOutput::Exit(1)).await?;
-                return Err(SshSessionRunnerError::from(err));
-            }
-        }
+/// Daemon output a session has read and its SSH channel has not taken yet.
+const MAX_PENDING_SSH_OUTPUT: usize = 1024 * 1024;
+/// Most output handed to the SSH channel in one write.
+const MAX_COALESCED_SSH_OUTPUT: usize = 32 * 1024;
+
+/// A daemon session's output stream.
+#[async_trait]
+trait DaemonOutputStream: Send {
+    async fn next_output(&mut self) -> Result<Option<DaemonSessionOutput>, DaemonClientError>;
+}
+
+#[async_trait]
+impl DaemonOutputStream for crate::daemon::ExecDaemonSession {
+    async fn next_output(&mut self) -> Result<Option<DaemonSessionOutput>, DaemonClientError> {
+        crate::daemon::ExecDaemonSession::next_output(self).await
     }
 }
 
-async fn forward_pty_daemon_outputs(
-    key: SshSessionKey,
-    session: &mut crate::daemon::PtyDaemonSession,
-    output: SshChannelOutput,
-) -> Result<(), SshSessionRunnerError> {
-    loop {
-        match session.next_output().await {
-            Ok(Some(daemon_output)) => {
-                let ssh_output = ssh_output_from_daemon(daemon_output);
-                let exit = match ssh_output {
-                    SshSessionOutput::Exit(code) => Some(code),
-                    _ => None,
-                };
-                output.send(ssh_output).await?;
-                if let Some(code) = exit {
-                    log_session_exit(key, code);
-                    return Ok(());
+#[async_trait]
+impl DaemonOutputStream for crate::daemon::PtyDaemonSession {
+    async fn next_output(&mut self) -> Result<Option<DaemonSessionOutput>, DaemonClientError> {
+        crate::daemon::PtyDaemonSession::next_output(self).await
+    }
+}
+
+/// Where a session's output goes: its SSH channel.
+#[async_trait]
+trait SshOutputSink: Send + Sync {
+    async fn send(&self, output: SshSessionOutput) -> Result<(), SshSessionRunnerError>;
+}
+
+#[async_trait]
+impl SshOutputSink for SshChannelOutput {
+    async fn send(&self, output: SshSessionOutput) -> Result<(), SshSessionRunnerError> {
+        SshChannelOutput::send(self, output).await
+    }
+}
+
+/// Output read from the daemon and not yet sent to the channel, in order.
+/// Consecutive stdout, and consecutive stderr, is joined into one write.
+#[derive(Default)]
+struct PendingSshOutput {
+    outputs: std::collections::VecDeque<SshSessionOutput>,
+    bytes: usize,
+}
+
+impl PendingSshOutput {
+    fn push(&mut self, output: SshSessionOutput) {
+        let len = ssh_output_len(&output);
+        self.bytes = self.bytes.saturating_add(len);
+        match (self.outputs.back_mut(), output) {
+            (Some(SshSessionOutput::Stdout(held)), SshSessionOutput::Stdout(data))
+            | (Some(SshSessionOutput::Stderr(held)), SshSessionOutput::Stderr(data))
+                if held.len() + data.len() <= MAX_COALESCED_SSH_OUTPUT =>
+            {
+                held.extend_from_slice(&data);
+            }
+            (_, output) => self.outputs.push_back(output),
+        }
+    }
+
+    fn pop(&mut self) -> Option<SshSessionOutput> {
+        let output = self.outputs.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(ssh_output_len(&output));
+        Some(output)
+    }
+}
+
+fn ssh_output_len(output: &SshSessionOutput) -> usize {
+    match output {
+        SshSessionOutput::Stdout(data) | SshSessionOutput::Stderr(data) => data.len(),
+        SshSessionOutput::Error(error) => error.len(),
+        SshSessionOutput::Exit(_) => 0,
+    }
+}
+
+/// Forward a daemon session's output to its SSH channel, in order, ending
+/// with its exit status, which it returns. A stream that fails or ends
+/// without one ends the channel with an error message and exit status 1, and
+/// is returned as the error.
+///
+/// The daemon stream is read as output arrives, into at most
+/// [`MAX_PENDING_SSH_OUTPUT`] bytes, while the channel takes it. The channel
+/// can wait: russh serves its handle from the connection's one session task,
+/// which also delivers the client's input and waits while a channel's input
+/// queue is full. Output left unread meanwhile would sit in HTTP/2 as small
+/// DATA frames, which the daemon connection's flood guard counts until it
+/// ends the connection and every session on it (#2822).
+async fn forward_daemon_outputs<D, O>(
+    session: &mut D,
+    output: &O,
+    ended_without_exit: &str,
+) -> Result<i32, SshSessionRunnerError>
+where
+    D: DaemonOutputStream,
+    O: SshOutputSink,
+{
+    let pending = std::sync::Mutex::new(PendingSshOutput::default());
+    let queued = tokio::sync::Notify::new();
+    let room = tokio::sync::Notify::new();
+    let push = |output| {
+        pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(output);
+        queued.notify_one();
+    };
+    // Reads the daemon stream to its end: its exit status, or a failure
+    // that becomes an error message and exit status 1.
+    let read = async {
+        loop {
+            loop {
+                let more = room.notified();
+                if pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .bytes
+                    < MAX_PENDING_SSH_OUTPUT
+                {
+                    break;
+                }
+                more.await;
+            }
+            match session.next_output().await {
+                Ok(Some(daemon_output)) => {
+                    let ssh_output = ssh_output_from_daemon(daemon_output);
+                    let exit = matches!(ssh_output, SshSessionOutput::Exit(_));
+                    push(ssh_output);
+                    if exit {
+                        return Ok(());
+                    }
+                }
+                Ok(None) => {
+                    let error = SshSessionRunnerError(ended_without_exit.into());
+                    push(SshSessionOutput::Error(error.to_string()));
+                    push(SshSessionOutput::Exit(1));
+                    return Err(error);
+                }
+                Err(err) => {
+                    push(SshSessionOutput::Error(format!(
+                        "workspace session failed: {err}"
+                    )));
+                    push(SshSessionOutput::Exit(1));
+                    return Err(SshSessionRunnerError::from(err));
                 }
             }
-            Ok(None) => {
-                let error = SshSessionRunnerError(
-                    "workspace PTY session ended without an exit status".into(),
-                );
-                output
-                    .send(SshSessionOutput::Error(error.to_string()))
-                    .await?;
-                output.send(SshSessionOutput::Exit(1)).await?;
-                return Err(error);
-            }
-            Err(err) => {
-                output
-                    .send(SshSessionOutput::Error(format!(
-                        "workspace session failed: {err}"
-                    )))
-                    .await?;
-                output.send(SshSessionOutput::Exit(1)).await?;
-                return Err(SshSessionRunnerError::from(err));
+        }
+    };
+    // Sends what was read, in order, through the exit status.
+    let write = async {
+        loop {
+            let next = loop {
+                let more = queued.notified();
+                let next = pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pop();
+                match next {
+                    Some(next) => break next,
+                    None => more.await,
+                }
+            };
+            room.notify_one();
+            let exit = match next {
+                SshSessionOutput::Exit(code) => Some(code),
+                _ => None,
+            };
+            output.send(next).await?;
+            if let Some(code) = exit {
+                return Ok::<_, SshSessionRunnerError>(code);
             }
         }
+    };
+    tokio::pin!(read, write);
+    let mut stream = None;
+    let code = loop {
+        tokio::select! {
+            sent = &mut write => break sent?,
+            result = &mut read, if stream.is_none() => stream = Some(result),
+        }
+    };
+    match stream {
+        Some(Err(error)) => Err(error),
+        _ => Ok(code),
     }
 }
 
@@ -449,6 +568,12 @@ fn exit_code_to_u32(code: i32) -> u32 {
 /// reads the queue only as fast as the process takes its input, so a process
 /// that is not reading its stdin pauses the connection's reads: bounded
 /// backpressure down to TCP, with no data buffered beyond the queue.
+///
+/// Stdin already queued behind the message the pump takes travels with it,
+/// as one message of up to [`MAX_COALESCED_STDIN`] bytes. A burst of small
+/// writes, such as keystrokes or a paste, then reaches the daemon in a few
+/// large HTTP/2 DATA frames rather than many small ones, which the daemon
+/// connection's flood guard would count against it (#2822).
 async fn pump_session_input(
     key: SshSessionKey,
     mut channel: Channel<server::Msg>,
@@ -459,24 +584,24 @@ async fn pump_session_input(
     // runs; the rest of its input is read and dropped so the channel never
     // stalls the connection.
     let mut accepting = true;
+    // A message taken while coalescing that did not join the Stdin before
+    // it; it is the next one handled, so input keeps its order.
+    let mut held = None;
     let reason = loop {
-        let input = match channel.wait().await {
-            Some(ChannelMsg::Data { data }) => SshSessionInput::Stdin(data.to_vec()),
-            Some(ChannelMsg::Eof) => SshSessionInput::CloseStdin,
-            Some(ChannelMsg::WindowChange {
-                col_width,
-                row_height,
-                ..
-            }) => SshSessionInput::Resize {
-                width: pty_dimension_to_i32(col_width),
-                height: pty_dimension_to_i32(row_height),
-            },
-            Some(ChannelMsg::Close) => break "the client closed the channel",
-            None => break "the connection ended",
-            Some(_) => continue,
+        let step = match held.take() {
+            Some(step) => step,
+            None => channel_step(channel.wait().await),
+        };
+        let mut input = match step {
+            ChannelStep::Input(input) => input,
+            ChannelStep::Skip => continue,
+            ChannelStep::End(reason) => break reason,
         };
         if !accepting {
             continue;
+        }
+        if let SshSessionInput::Stdin(data) = &mut input {
+            held = coalesce_queued_stdin(&mut channel, data);
         }
         // Input the client sent before closing is still delivered while the
         // process takes it; only a wait on a process that is not reading
@@ -498,6 +623,65 @@ async fn pump_session_input(
         reason,
         "workspace SSH session ended"
     );
+}
+
+/// Most Stdin the input pump hands its session in one message.
+const MAX_COALESCED_STDIN: usize = 32 * 1024;
+
+/// What one channel message is to its process session.
+enum ChannelStep {
+    Input(SshSessionInput),
+    Skip,
+    End(&'static str),
+}
+
+fn channel_step(message: Option<ChannelMsg>) -> ChannelStep {
+    match message {
+        Some(ChannelMsg::Data { data }) => {
+            ChannelStep::Input(SshSessionInput::Stdin(data.to_vec()))
+        }
+        Some(ChannelMsg::Eof) => ChannelStep::Input(SshSessionInput::CloseStdin),
+        Some(ChannelMsg::WindowChange {
+            col_width,
+            row_height,
+            ..
+        }) => ChannelStep::Input(SshSessionInput::Resize {
+            width: pty_dimension_to_i32(col_width),
+            height: pty_dimension_to_i32(row_height),
+        }),
+        Some(ChannelMsg::Close) => ChannelStep::End("the client closed the channel"),
+        None => ChannelStep::End("the connection ended"),
+        Some(_) => ChannelStep::Skip,
+    }
+}
+
+/// Append the Stdin already queued on `channel` to `data`, without waiting,
+/// up to [`MAX_COALESCED_STDIN`] bytes. Coalescing stops at the first
+/// message that is not Stdin, or that would not fit, and returns it to be
+/// handled next: Stdin never passes a resize or end of input.
+fn coalesce_queued_stdin(
+    channel: &mut Channel<server::Msg>,
+    data: &mut Vec<u8>,
+) -> Option<ChannelStep> {
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    while data.len() < MAX_COALESCED_STDIN {
+        // Channel::wait is a queue receive: dropping it unfinished loses
+        // nothing.
+        let message = match std::pin::pin!(channel.wait()).poll(&mut context) {
+            std::task::Poll::Ready(message) => message,
+            std::task::Poll::Pending => return None,
+        };
+        match channel_step(message) {
+            ChannelStep::Input(SshSessionInput::Stdin(more))
+                if data.len() + more.len() <= MAX_COALESCED_STDIN =>
+            {
+                data.extend_from_slice(&more);
+            }
+            ChannelStep::Skip => {}
+            step => return Some(step),
+        }
+    }
+    None
 }
 
 #[derive(Debug, Error)]
@@ -2293,11 +2477,18 @@ mod tests {
         .await;
         let connection = events[0].0;
         assert_eq!(stdin_of(&events, connection), sent);
-        assert_eq!(
-            count_inputs(&events),
-            301,
-            "300 stdin messages and EOF, in order"
-        );
+        // Queued stdin may travel together; EOF still comes last.
+        assert!(count_inputs(&events) <= 301);
+        assert!(matches!(
+            events.last(),
+            Some((
+                _,
+                RunnerEvent::Input {
+                    input: SshSessionInput::CloseStdin,
+                    ..
+                }
+            ))
+        ));
 
         stop_client_and_server(client, server_task).await;
     }
@@ -2331,18 +2522,280 @@ mod tests {
             }
         }
 
+        let resizes = expected
+            .iter()
+            .filter(|input| matches!(input, SshSessionInput::Resize { .. }))
+            .count();
         let events = wait_for_recorded(&runner, "every keystroke and resize", |events| {
-            count_inputs(events) >= expected.len()
+            inputs_of(events)
+                .iter()
+                .filter(|input| matches!(input, SshSessionInput::Resize { .. }))
+                .count()
+                == resizes
+                && events
+                    .first()
+                    .is_some_and(|(connection, _)| stdin_of(events, *connection).len() == 300)
         })
         .await;
-        let inputs: Vec<_> = events
+        assert_eq!(joined(&inputs_of(&events)), joined(&expected));
+
+        stop_client_and_server(client, server_task).await;
+    }
+
+    /// A daemon session's output stream with every output ready at once,
+    /// counting the outputs read.
+    struct ReadyDaemonOutputs {
+        outputs: std::vec::IntoIter<DaemonSessionOutput>,
+        read: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl DaemonOutputStream for ReadyDaemonOutputs {
+        async fn next_output(&mut self) -> Result<Option<DaemonSessionOutput>, DaemonClientError> {
+            let next = self.outputs.next();
+            if next.is_some() {
+                self.read.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(next)
+        }
+    }
+
+    /// An SSH channel that takes output only while its gate has permits.
+    struct GatedSink {
+        gate: Arc<tokio::sync::Semaphore>,
+        sent: std::sync::Mutex<Vec<SshSessionOutput>>,
+    }
+
+    #[async_trait]
+    impl SshOutputSink for GatedSink {
+        async fn send(&self, output: SshSessionOutput) -> Result<(), SshSessionRunnerError> {
+            self.gate.acquire().await.unwrap().forget();
+            self.sent.lock().unwrap().push(output);
+            Ok(())
+        }
+    }
+
+    /// Run the output forwarder over `outputs` into a channel that takes
+    /// nothing yet; returns the forwarder, the read count and the channel.
+    fn forward_into_waiting_channel(
+        outputs: Vec<DaemonSessionOutput>,
+    ) -> (
+        tokio::task::JoinHandle<Result<i32, SshSessionRunnerError>>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<GatedSink>,
+    ) {
+        let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink = Arc::new(GatedSink {
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            sent: Default::default(),
+        });
+        let mut session = ReadyDaemonOutputs {
+            outputs: outputs.into_iter(),
+            read: read.clone(),
+        };
+        let forward = tokio::spawn({
+            let sink = sink.clone();
+            async move { forward_daemon_outputs(&mut session, &*sink, "ended").await }
+        });
+        (forward, read, sink)
+    }
+
+    async fn settle(read: &std::sync::atomic::AtomicUsize) -> usize {
+        let mut last = usize::MAX;
+        loop {
+            sleep(Duration::from_millis(50)).await;
+            let now = read.load(Ordering::SeqCst);
+            if now == last {
+                return now;
+            }
+            last = now;
+        }
+    }
+
+    /// Daemon output keeps being read while the SSH channel takes none of
+    /// it, so more than a thousand small output frames never wait unread in
+    /// HTTP/2, whose flood guard would end the daemon connection (#2822). The
+    /// channel then gets every byte once, in order, in a few joined writes,
+    /// and the exit status last.
+    #[tokio::test]
+    async fn daemon_output_is_read_while_the_ssh_channel_waits() {
+        const FRAMES: usize = 1500;
+        let mut outputs: Vec<_> = (0..FRAMES)
+            .map(|index| DaemonSessionOutput::Stdout(vec![(index % 251) as u8]))
+            .collect();
+        outputs.push(DaemonSessionOutput::Exit(0));
+        let (forward, read, sink) = forward_into_waiting_channel(outputs);
+        assert_eq!(settle(&read).await, FRAMES + 1);
+        assert!(sink.sent.lock().unwrap().is_empty());
+
+        sink.gate
+            .add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
+        let code = timeout(Duration::from_secs(5), forward)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(code, 0);
+        let sent = sink.sent.lock().unwrap();
+        let stdout: Vec<u8> = sent
+            .iter()
+            .filter_map(|output| match output {
+                SshSessionOutput::Stdout(data) => Some(data.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(
+            stdout,
+            (0..FRAMES)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(sent.last(), Some(&SshSessionOutput::Exit(0)));
+        assert!(sent.len() <= 3, "{} channel writes", sent.len());
+    }
+
+    /// The pending output is bounded: at the bound the forwarder stops
+    /// reading until the channel takes output, and a stream that ends without
+    /// an exit status still ends the channel with an error and status 1.
+    #[tokio::test]
+    async fn pending_daemon_output_is_bounded() {
+        const CHUNK: usize = 64 * 1024;
+        const CHUNKS: usize = 20;
+        let outputs = (0..CHUNKS)
+            .map(|index| DaemonSessionOutput::Stdout(vec![index as u8; CHUNK]))
+            .collect();
+        let (forward, read, sink) = forward_into_waiting_channel(outputs);
+        // The writer holds one chunk; the queue holds the bound.
+        assert_eq!(settle(&read).await, MAX_PENDING_SSH_OUTPUT / CHUNK + 1);
+
+        sink.gate
+            .add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
+        let error = timeout(Duration::from_secs(5), forward)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.to_string(), "ended");
+        assert_eq!(read.load(Ordering::SeqCst), CHUNKS);
+        let sent = sink.sent.lock().unwrap();
+        let stdout: Vec<u8> = sent
+            .iter()
+            .filter_map(|output| match output {
+                SshSessionOutput::Stdout(data) => Some(data.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(
+            stdout,
+            (0..CHUNKS)
+                .flat_map(|index| vec![index as u8; CHUNK])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            &sent[sent.len() - 2..],
+            [
+                SshSessionOutput::Error("ended".into()),
+                SshSessionOutput::Exit(1)
+            ]
+        );
+    }
+
+    fn inputs_of(events: &[(u64, RunnerEvent)]) -> Vec<SshSessionInput> {
+        events
             .iter()
             .filter_map(|(_, event)| match event {
                 RunnerEvent::Input { input, .. } => Some(input.clone()),
                 _ => None,
             })
-            .collect();
-        assert_eq!(inputs, expected);
+            .collect()
+    }
+
+    /// `inputs` with each run of consecutive Stdin joined, as the pump may
+    /// join it: what a process sees, in order.
+    fn joined(inputs: &[SshSessionInput]) -> Vec<SshSessionInput> {
+        let mut joined: Vec<SshSessionInput> = Vec::new();
+        for input in inputs {
+            match (joined.last_mut(), input) {
+                (Some(SshSessionInput::Stdin(held)), SshSessionInput::Stdin(data)) => {
+                    held.extend_from_slice(data);
+                }
+                _ => joined.push(input.clone()),
+            }
+        }
+        joined
+    }
+
+    /// Keystrokes queued while the session is not taking input travel
+    /// together, in fewer, larger messages: a burst reaches the daemon as a
+    /// few HTTP/2 DATA frames rather than one per keystroke, which the
+    /// connection's flood guard would count against it (#2822). Stdin never
+    /// passes a resize or EOF, and no message exceeds the coalescing limit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn russh_handler_coalesces_backlogged_keystrokes_in_order() {
+        const KEYS: u32 = 1200;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let runner = Arc::new(RecordingRunner::gated(gate.clone()));
+        let (addr, server_task) =
+            spawn_test_gateway_with_config(runner.clone(), workspace_ssh_server_config(), 1).await;
+        let client = authenticated_client(addr).await;
+        let channel = client.channel_open_session().await.unwrap();
+        channel
+            .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+            .await
+            .unwrap();
+        channel.request_shell(true).await.unwrap();
+        let mut expected = Vec::new();
+        for index in 0..KEYS {
+            let key = vec![b'a' + (index % 26) as u8];
+            expected.push(SshSessionInput::Stdin(key.clone()));
+            timeout(Duration::from_secs(5), channel.data_bytes(key))
+                .await
+                .expect("keystroke accepted")
+                .unwrap();
+            if index % 100 == 99 {
+                let width = 80 + index;
+                expected.push(SshSessionInput::Resize {
+                    width: i32::try_from(width).unwrap(),
+                    height: 24,
+                });
+                channel.window_change(width, 24, 0, 0).await.unwrap();
+            }
+        }
+        expected.push(SshSessionInput::CloseStdin);
+        channel.eof().await.unwrap();
+
+        gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
+        let events = wait_for_recorded(&runner, "every keystroke, resize and EOF", |events| {
+            events.iter().any(|(_, event)| {
+                matches!(
+                    event,
+                    RunnerEvent::Input {
+                        input: SshSessionInput::CloseStdin,
+                        ..
+                    }
+                )
+            })
+        })
+        .await;
+        let inputs = inputs_of(&events);
+        assert_eq!(joined(&inputs), joined(&expected));
+        let longest = inputs
+            .iter()
+            .filter_map(|input| match input {
+                SshSessionInput::Stdin(data) => Some(data.len()),
+                _ => None,
+            })
+            .max()
+            .unwrap();
+        assert!(
+            (50..=MAX_COALESCED_STDIN).contains(&longest),
+            "queued keystrokes were not coalesced: the longest input was {longest} bytes"
+        );
+        assert!(inputs.len() < expected.len());
 
         stop_client_and_server(client, server_task).await;
     }

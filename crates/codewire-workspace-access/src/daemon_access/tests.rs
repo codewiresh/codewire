@@ -590,6 +590,115 @@ async fn an_interactive_shell_answers_hundreds_of_lines() {
     let _ = daemon.shutdown.send(true);
 }
 
+/// Every answer `R<100000 + line>` on `screen`, in the order they appear.
+fn answers(screen: &str) -> Vec<u32> {
+    screen
+        .match_indices('R')
+        .filter_map(|(at, _)| screen.get(at + 1..at + 7)?.parse::<u32>().ok())
+        .filter(|value| (100_001..200_000).contains(value))
+        .map(|value| value - 100_000)
+        .collect()
+}
+
+/// Type `lines` one message each into an interactive shell, as a fast paste
+/// or `ssh -tt host < file` does, and read the screen until the shell exits.
+/// `before` is typed first, at once, without waiting for the prompt when
+/// `at_prompt` is false.
+async fn type_burst(
+    client: &client::Handle<AcceptAllKeys>,
+    before: &str,
+    lines: u32,
+    at_prompt: bool,
+) -> String {
+    let channel = client.channel_open_session().await.unwrap();
+    channel
+        .request_pty(true, "xterm", 120, 40, 0, 0, &[])
+        .await
+        .unwrap();
+    channel
+        .exec(true, b"exec /bin/sh -i".to_vec())
+        .await
+        .unwrap();
+    let (mut reader, writer) = channel.split();
+    let (prompted, prompt) = tokio::sync::oneshot::channel::<()>();
+    let typing = async move {
+        if at_prompt {
+            let _ = prompt.await;
+        }
+        if !before.is_empty() {
+            writer.data_bytes(before.as_bytes().to_vec()).await.unwrap();
+        }
+        for line in 1..=lines {
+            writer
+                .data_bytes(format!("echo R$((100000+{line}))\n").into_bytes())
+                .await
+                .unwrap();
+        }
+        writer.data_bytes(b"exit\n".to_vec()).await.unwrap();
+        writer
+    };
+    let screen = async {
+        let mut prompted = Some(prompted);
+        let mut screen = Vec::new();
+        while let Some(message) = reader.wait().await {
+            match message {
+                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                    screen.extend_from_slice(&data);
+                    if let Some(prompted) = prompted.take() {
+                        let _ = prompted.send(());
+                    }
+                }
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        String::from_utf8_lossy(&screen).into_owned()
+    };
+    let (_writer, screen) = timeout(Duration::from_secs(90), async {
+        tokio::join!(typing, screen)
+    })
+    .await
+    .expect("the shell answered every line and exited");
+    screen
+}
+
+/// A burst of more than a thousand small input messages, typed while the
+/// shell is busy and not reading its terminal, keeps the session: every
+/// line is answered once, in order (#2822).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_burst_typed_while_the_shell_is_busy_is_answered_in_order() {
+    const LINES: u32 = 1200;
+    let daemon = spawn_daemon_ssh().await;
+    let client = connect(daemon.ssh).await;
+    let screen = type_burst(&client, "sleep 2\n", LINES, true).await;
+    assert!(
+        !screen.contains("workspace session failed"),
+        "the session failed: {}",
+        &screen[screen.len().saturating_sub(400)..]
+    );
+    assert_eq!(answers(&screen), (1..=LINES).collect::<Vec<_>>());
+    let _ = daemon.shutdown.send(true);
+}
+
+/// Lines typed before the shell has started, as `ssh -tt host < file`
+/// sends them at connect, wait for the shell instead of cancelling its
+/// launch (#2830).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lines_typed_before_the_shell_starts_are_answered_in_order() {
+    const LINES: u32 = 250;
+    let daemon = spawn_daemon_ssh().await;
+    let client = connect(daemon.ssh).await;
+    let screen = type_burst(&client, "", LINES, false).await;
+    assert!(
+        !screen.contains("environment launch denied or expired")
+            && !screen.contains("workspace session failed"),
+        "the session failed: {}",
+        &screen[screen.len().saturating_sub(400)..]
+    );
+    assert_eq!(answers(&screen), (1..=LINES).collect::<Vec<_>>());
+    let _ = daemon.shutdown.send(true);
+}
+
 #[cfg(target_os = "linux")]
 mod process_lifetime {
     use super::*;
