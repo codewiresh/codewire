@@ -6402,6 +6402,47 @@ mod tests {
     }
 
     #[test]
+    fn an_openai_only_vm_projects_the_api_key_codex_route_and_switches_back() {
+        let temporary = TempDir::new().unwrap();
+        let codex_home = temporary.path().join("codex");
+        fs::create_dir(&codex_home).unwrap();
+        fs::set_permissions(&codex_home, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut plan = test_workspace_plan();
+        plan.identity.uid = unsafe { libc::geteuid() };
+        plan.identity.gid = unsafe { libc::getegid() };
+        let config = codex_home.join(codewire_access::CODEX_CONFIG_FILE_NAME);
+        let openai =
+            codewire_access::ManagedCredentialClients::from_profile_slots(["openai"]).unwrap();
+        // The bytes a hosted managed Codex agent's private home gets for the
+        // OpenAI API-key route.
+        let api = codewire_access::CodexProviderProjection::for_openai_api_loopback_port(
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+        )
+        .unwrap()
+        .into_config_toml();
+        prepare_codex_projection_at(&codex_home, &plan, openai).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), api.as_bytes());
+        assert!(!codex_home.join("auth.json").exists());
+
+        // Selecting a Codex slot later switches the home to the Codex route.
+        let codex =
+            codewire_access::ManagedCredentialClients::from_profile_slots(["codex", "openai"])
+                .unwrap();
+        prepare_codex_projection_at(&codex_home, &plan, codex).unwrap();
+        assert_eq!(
+            fs::read(&config).unwrap(),
+            codewire_access::CodexProviderProjection::for_loopback_port(
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+            )
+            .unwrap()
+            .into_config_toml()
+            .as_bytes()
+        );
+        prepare_codex_projection_at(&codex_home, &plan, Default::default()).unwrap();
+        assert!(!config.exists());
+    }
+
+    #[test]
     fn codex_projection_converges_without_following_guest_config_symlinks() {
         let temporary = TempDir::new().unwrap();
         let codex_home = temporary.path().join("codex");
