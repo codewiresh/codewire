@@ -258,6 +258,13 @@ sandbox once the conversation has resumed there. Until then it says that the
 conversation stopped with its environment and that `cw msg` or `cw restart`
 continues it.
 
+If the environment refuses the resumed agent's launch before it starts,
+for example because the launch's window expired or the secret service was
+briefly unavailable, nothing ran: `cw msg` says so, and sending the message
+again resumes the conversation. A change to the environment's selected
+credentials or secret sources is different: it ends the conversation, as
+below.
+
 A conversation waits, and `cw msg` says to try again shortly, while:
 
 - the sandbox's previous Pod is still stopping;

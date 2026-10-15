@@ -30,7 +30,7 @@ codewire.localhost {
 	}
 
 	# Connect-RPC routes: /{package}.{Service}/{Method}
-	# (docs/plans/connect-rpc/03, D5). Routing is per-Service because
+	# (codewire/plans:connect-rpc/03, D5). Routing is per-Service because
 	# packages span binaries. Billing-owned Services are matched before the
 	# orchestration fallback.
 	handle /codewire.internal.v1.MeshCoordinatorService/* {

@@ -507,6 +507,64 @@ async fn projection_cancellation_and_original_request_deadline_release_no_late_v
 
 #[tokio::test]
 #[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn projection_refuses_once_its_selected_project_is_deleted() -> Result<()> {
+    // #2769: deleting the selected secret project refuses the next
+    // projection before any material is read, rather than projecting
+    // without it. A launch or Resume then is denied before its agent runs.
+    let f = Fixture::create().await?;
+    let result = async {
+        grant_projection(&f).await?;
+        let project = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO secret_projects(id,org_id,name) VALUES($1,$2,'development')")
+            .bind(&project)
+            .bind(&f.scope.organization)
+            .execute(&f.db.pool)
+            .await?;
+        sources(
+            &f,
+            json!({"project":format!("platform:id:{project}")}),
+            json!({}),
+            false,
+        )
+        .await?;
+        let project_path = format!("/projects/{}/{project}", f.scope.organization);
+        put(&f, &project_path, "PROJECT_ONLY", b"project-value").await?;
+        let provider = Arc::new(ObservedProvider::default());
+        let authority = admitted(&f, provider.clone()).await?;
+        let (message, recipient, context) = request(&authority)?;
+        let sealed = authority.project_environment(message).await?;
+        let values = recipient.open(&sealed, &context, now_ms())?;
+        ensure!(
+            values.entries().collect::<BTreeMap<_, _>>()
+                == BTreeMap::from([("PROJECT_ONLY", "project-value")])
+        );
+        let unwrapped = provider.calls.load(Ordering::SeqCst);
+        // The project and its keys are gone; the environment still selects it.
+        sqlx::query("DELETE FROM tenant_secrets WHERE path=$1")
+            .bind(&project_path)
+            .execute(&f.db.pool)
+            .await?;
+        sqlx::query("DELETE FROM secret_projects WHERE id=$1")
+            .bind(&project)
+            .execute(&f.db.pool)
+            .await?;
+        let (message, _, _) = request(&authority)?;
+        ensure!(
+            authority.project_environment(message).await.is_err(),
+            "a deleted selected project was projected"
+        );
+        ensure!(
+            provider.calls.load(Ordering::SeqCst) == unwrapped,
+            "a refused projection unwrapped material"
+        );
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
 async fn projection_metadata_rejects_foreign_projects_and_retired_or_local_selectors() -> Result<()>
 {
     let f = Fixture::create().await?;

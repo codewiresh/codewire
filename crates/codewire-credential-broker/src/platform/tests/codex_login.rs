@@ -1,4 +1,4 @@
-//! The delivery predicate of the one listed direct delivery exception, the
+//! The delivery predicate of a listed direct delivery exception, the
 //! Sandbox creator's personal Codex login, against real restricted
 //! PostgreSQL and a synthetic runtime authority, KEK and provider. No
 //! Kubernetes, OpenBao, provider network or real credential.

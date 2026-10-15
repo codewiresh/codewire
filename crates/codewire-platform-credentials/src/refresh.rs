@@ -9,8 +9,8 @@
 use std::fmt;
 
 use codewire_access::{
-    CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CredentialId, CredentialStatus, Owner, OwnerId,
-    ProviderId,
+    CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CredentialAuthKind, CredentialId,
+    CredentialStatus, Owner, OwnerId, ProviderId,
 };
 use codewire_protected_store::ProtectedValue;
 use codewire_protected_store::secret_envelope::{
@@ -19,6 +19,7 @@ use codewire_protected_store::secret_envelope::{
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::model::auth_kind;
 use crate::store::{
     MaterialRow, PreparedMaterial, check_owner, compare_version, database_error, delete_material,
     generation, insert_material, load_record, provider_call, require_oauth_refresh,
@@ -62,12 +63,22 @@ pub struct OAuthKeepAliveCandidate {
     pub owner: Owner,
     pub id: CredentialId,
     pub provider: ProviderId,
+    pub authentication_kind: CredentialAuthKind,
     pub version: CredentialVersion,
 }
 
-/// Bounds for one keep-alive page. Providers are closed by the caller.
+/// One rotating credential form the keep-alive owner selects, with the age
+/// after which its material is refreshed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OAuthKeepAliveForm {
+    pub provider: ProviderId,
+    pub authentication_kind: CredentialAuthKind,
+    pub min_age_seconds: u64,
+}
+
+/// Bounds for one keep-alive page. Forms are closed by the caller.
 const MAX_KEEPALIVE_PAGE: u32 = 1000;
-const MAX_KEEPALIVE_PROVIDERS: usize = 8;
+const MAX_KEEPALIVE_FORMS: usize = 8;
 
 impl OAuthRefreshState {
     fn parse(value: &str) -> Result<Self, Error> {
@@ -179,12 +190,15 @@ impl StartedOAuthRefresh {
 }
 
 impl PlatformCredentialStore {
-    /// Select active, unexpired OAuth credentials of a live owner whose current
-    /// material may be at least `min_age_seconds` old for its provider. The
-    /// pairs name each provider once with its keep-alive age. Results are
-    /// ordered by ID after `after`, at most `limit` rows, and never include a
-    /// credential with a live reservation or a started, staged or unknown
-    /// attempt: those belong to their current owner or to recovery.
+    /// Select active, unexpired rotating credentials of a live owner whose
+    /// current material may be at least its form's `min_age_seconds` old.
+    /// `forms` names each provider and authentication kind once; only the
+    /// refreshing OAuth kinds (`oauth`, `claude_sign_in`) are accepted, and a
+    /// form selects exactly its own kind, so naming the Anthropic sign-in
+    /// never selects a Claude subscription token. Results are ordered by ID
+    /// after `after`, at most `limit` rows, and never include a credential
+    /// with a live reservation or a started, staged or unknown attempt: those
+    /// belong to their current owner or to recovery.
     ///
     /// Only a commit receipt for exactly the current generation dates the
     /// material (its reservation began just after the material's own refresh
@@ -194,34 +208,42 @@ impl PlatformCredentialStore {
     /// old one. No material, DEK or KEK provider is touched here.
     pub async fn oauth_keepalive_candidates(
         &self,
-        providers: &[(ProviderId, u64)],
+        forms: &[OAuthKeepAliveForm],
         after: Option<&CredentialId>,
         limit: u32,
     ) -> Result<Vec<OAuthKeepAliveCandidate>, Error> {
-        if providers.is_empty()
-            || providers.len() > MAX_KEEPALIVE_PROVIDERS
+        if forms.is_empty()
+            || forms.len() > MAX_KEEPALIVE_FORMS
             || limit == 0
             || limit > MAX_KEEPALIVE_PAGE
         {
             return Err(Error::InvalidInput);
         }
-        let mut names = Vec::with_capacity(providers.len());
-        let mut ages = Vec::with_capacity(providers.len());
-        for (provider, age) in providers {
-            if names.contains(&provider.as_str()) {
+        let mut names = Vec::with_capacity(forms.len());
+        let mut kinds = Vec::with_capacity(forms.len());
+        let mut ages = Vec::with_capacity(forms.len());
+        for form in forms {
+            if !matches!(
+                form.authentication_kind,
+                CredentialAuthKind::OAuth | CredentialAuthKind::ClaudeSignIn
+            ) || names.iter().zip(&kinds).any(|(name, kind)| {
+                *name == form.provider.as_str() && *kind == auth_kind(form.authentication_kind)
+            }) {
                 return Err(Error::InvalidInput);
             }
-            names.push(provider.as_str());
-            ages.push(i64::try_from(*age).map_err(|_| Error::InvalidInput)?);
+            names.push(form.provider.as_str());
+            kinds.push(auth_kind(form.authentication_kind));
+            ages.push(i64::try_from(form.min_age_seconds).map_err(|_| Error::InvalidInput)?);
         }
         let rows: Vec<KeepAliveRow> = sqlx::query_as(
-            "SELECT c.id, c.user_id, c.organization_id, c.provider, \
+            "SELECT c.id, c.user_id, c.organization_id, c.provider, c.authentication_kind, \
              c.revocation_generation, c.material_generation \
              FROM platform_credentials c \
-             JOIN unnest($1::text[], $2::bigint[]) AS k(provider, min_age_seconds) \
-               ON k.provider = c.provider \
+             JOIN unnest($1::text[], $2::text[], $5::bigint[]) \
+               AS k(provider, authentication_kind, min_age_seconds) \
+               ON k.provider = c.provider AND k.authentication_kind = c.authentication_kind \
              LEFT JOIN platform_credential_refresh_attempts a ON a.credential_id = c.id \
-             WHERE c.status = 'active' AND c.authentication_kind = 'oauth' \
+             WHERE c.status = 'active' \
                AND (c.expires_at_unix IS NULL \
                     OR c.expires_at_unix > extract(epoch FROM clock_timestamp())) \
                AND ((c.user_id IS NOT NULL \
@@ -241,9 +263,10 @@ impl PlatformCredentialStore {
              ORDER BY c.id LIMIT $4",
         )
         .bind(&names)
-        .bind(&ages)
+        .bind(&kinds)
         .bind(after.map(CredentialId::as_str))
         .bind(i64::from(limit))
+        .bind(&ages)
         .fetch_all(self.pool())
         .await
         .map_err(database_error)?;
@@ -624,6 +647,7 @@ struct KeepAliveRow {
     user_id: Option<String>,
     organization_id: Option<String>,
     provider: String,
+    authentication_kind: String,
     revocation_generation: i64,
     material_generation: i64,
 }
@@ -648,6 +672,7 @@ impl KeepAliveRow {
             owner,
             id: CredentialId::parse(self.id).map_err(|_| Error::CorruptRecord)?,
             provider: ProviderId::parse(self.provider).map_err(|_| Error::CorruptRecord)?,
+            authentication_kind: crate::model::parse_auth_kind(&self.authentication_kind)?,
             version,
         })
     }

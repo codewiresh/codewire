@@ -203,6 +203,7 @@ const KEEPALIVE_ENABLED: &str = "CREDENTIAL_OAUTH_KEEPALIVE_ENABLED";
 const KEEPALIVE_INTERVAL: &str = "CREDENTIAL_OAUTH_KEEPALIVE_INTERVAL_SECONDS";
 const KEEPALIVE_CODEX_AGE: &str = "CREDENTIAL_OAUTH_KEEPALIVE_CODEX_AGE_SECONDS";
 const KEEPALIVE_GITHUB_AGE: &str = "CREDENTIAL_OAUTH_KEEPALIVE_GITHUB_AGE_SECONDS";
+const KEEPALIVE_CLAUDE_AGE: &str = "CREDENTIAL_OAUTH_KEEPALIVE_CLAUDE_AGE_SECONDS";
 
 /// Optional OAuth keep-alive inputs. It is enabled with the broker defaults
 /// unless `CREDENTIAL_OAUTH_KEEPALIVE_ENABLED=false`. A present value must be
@@ -234,6 +235,7 @@ pub(super) fn oauth_keepalive_config(
         interval: seconds(KEEPALIVE_INTERVAL, defaults.interval)?,
         codex_age: seconds(KEEPALIVE_CODEX_AGE, defaults.codex_age)?,
         github_age: seconds(KEEPALIVE_GITHUB_AGE, defaults.github_age)?,
+        claude_age: seconds(KEEPALIVE_CLAUDE_AGE, defaults.claude_age)?,
     }
     .validate()
     .map_err(|error| {
@@ -241,6 +243,7 @@ pub(super) fn oauth_keepalive_config(
             OAuthKeepAliveConfigError::Interval => KEEPALIVE_INTERVAL,
             OAuthKeepAliveConfigError::CodexAge => KEEPALIVE_CODEX_AGE,
             OAuthKeepAliveConfigError::GitHubAge => KEEPALIVE_GITHUB_AGE,
+            OAuthKeepAliveConfigError::ClaudeAge => KEEPALIVE_CLAUDE_AGE,
         })
     })?;
     Ok(enabled.then_some(config))
@@ -546,12 +549,14 @@ mod tests {
                 (KEEPALIVE_INTERVAL, "15"),
                 (KEEPALIVE_CODEX_AGE, "60"),
                 (KEEPALIVE_GITHUB_AGE, "120"),
+                (KEEPALIVE_CLAUDE_AGE, "180"),
             ]))
             .unwrap(),
             Some(OAuthKeepAliveConfig {
                 interval: Duration::from_secs(15),
                 codex_age: Duration::from_secs(60),
                 github_age: Duration::from_secs(120),
+                claude_age: Duration::from_secs(180),
             })
         );
         for (name, value) in [
@@ -568,6 +573,8 @@ mod tests {
             (KEEPALIVE_CODEX_AGE, "691201"),
             (KEEPALIVE_GITHUB_AGE, "7776001"),
             (KEEPALIVE_GITHUB_AGE, "99999999999"),
+            (KEEPALIVE_CLAUDE_AGE, "59"),
+            (KEEPALIVE_CLAUDE_AGE, "691201"),
         ] {
             assert_eq!(
                 CredentialServiceConfig::from_lookup(lookup(&[(name, value)]))

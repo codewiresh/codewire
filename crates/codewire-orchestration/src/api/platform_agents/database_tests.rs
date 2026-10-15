@@ -1275,7 +1275,11 @@ database_case!(
 async fn db_migration39_fresh_upgrade_rollback_and_retained_evidence_refusal() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
-        let migrator = application_migrator();
+        // The fixture database carries every embedded migration. Return it to
+        // version 39 and prove only this boundary, so a later migration can
+        // neither enter this proof nor be undone by it.
+        application_migrator().undo(&db.pool, 39).await?;
+        let migrator = boundary39_migrator();
         let fresh = schema(&db.pool).await?;
         ensure!(fresh == SCHEMA39);
         println!("MEASURED_PLATFORM_MANAGED_SCHEMA39={fresh}");
@@ -1320,6 +1324,20 @@ async fn db_migration39_fresh_upgrade_rollback_and_retained_evidence_refusal() -
     }
     .await;
     db.finish(result).await
+}
+
+/// Embedded migrations 1..=39, up and down: the managed-agent boundary.
+fn boundary39_migrator() -> sqlx::migrate::Migrator {
+    sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            application_migrator()
+                .iter()
+                .filter(|m| m.version <= 39)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    }
 }
 
 async fn wait_blocker(pool: &PgPool, pid: i32) -> Result<()> {
@@ -1978,6 +1996,96 @@ database_case!(
             .journal
             .admit_resume(facts2, &f.user, resume(&m, POD, 1), predecessor)
             .await?)?;
+    }
+);
+database_case!(
+    db_resume_denied_before_run_is_refused_and_can_resume_again,
+    f,
+    {
+        // #2769: the environment refused the resumed agent's launch before it
+        // ran, and the target undid the adoption. The Resume is a definite
+        // refusal at the predecessor's generation, said plainly, and the
+        // next Resume continues from the same predecessor.
+        let m = f.launch().await?;
+        let facts2 = f.next_pod().await?;
+        let predecessor = f
+            .journal
+            .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+            .await?;
+        let r = resume(&m, POD, 1);
+        let (_, owner) = own(f
+            .journal
+            .admit_resume(facts2.clone(), &f.user, r.clone(), predecessor.clone())
+            .await?)?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        let mut denied = receipt(&r, &facts2, ManagedLifecycle::Failed);
+        denied.phase = ManagedPhase::Rejected;
+        denied.reason_code = "denied-before-run".into();
+        denied.launch_generation = r.expected_launch_generation;
+        denied.exit_code = None;
+        let saved = f.journal.settle(issued, denied).await?;
+        ensure!(saved.phase == ManagedPhase::Rejected);
+        ensure!(
+            crate::api::platform_agents::resume_rejection(&saved)
+                .is_some_and(|text| text.contains("send the message again"))
+        );
+        let (generation, active): (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT launch_generation,active_request_id FROM environment_platform_agent_conversations \
+             WHERE pod_uid=$1 AND session_id=$2",
+        )
+        .bind(Uuid::parse_str(POD2)?)
+        .bind(&m.session_id)
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(
+            generation == "1" && active.is_none(),
+            "{generation} {active:?}"
+        );
+        let unresolved: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM organization_mutation_leases WHERE state='resolution_required'",
+        )
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(unresolved == 0);
+        ensure!(
+            f.journal
+                .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+                .await?
+                == predecessor
+        );
+        let again = resume(&m, POD, 1);
+        let (_, owner) = own(f
+            .journal
+            .admit_resume(facts2.clone(), &f.user, again.clone(), predecessor)
+            .await?)?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        ensure!(
+            f.journal
+                .settle(issued, receipt(&again, &facts2, ManagedLifecycle::Running))
+                .await?
+                .phase
+                == ManagedPhase::Completed
+        );
+        // A denial is only a refusal when the agent provably never ran: a
+        // Running, exited or cleanup-unknown Resume, or one claiming the next
+        // generation, is not one.
+        for (lifecycle, exit_code, cleanup_unknown, generation) in [
+            (ManagedLifecycle::Running, None, false, 1),
+            (ManagedLifecycle::Failed, Some(1), false, 1),
+            (ManagedLifecycle::Failed, None, true, 1),
+            (ManagedLifecycle::Failed, None, false, 2),
+        ] {
+            let mut bad = receipt(&r, &facts2, lifecycle);
+            bad.phase = ManagedPhase::Rejected;
+            bad.reason_code = "denied-before-run".into();
+            bad.launch_generation = generation;
+            bad.exit_code = exit_code;
+            bad.cleanup_unknown = cleanup_unknown;
+            ensure!(
+                bad.validate_for(&r, &facts2).is_err(),
+                "{lifecycle:?} {exit_code:?} {cleanup_unknown} {generation}"
+            );
+        }
     }
 );
 database_case!(db_resume_repeat_is_answered_from_its_first_admission, f, {

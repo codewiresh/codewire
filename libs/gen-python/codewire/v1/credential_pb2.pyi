@@ -15,6 +15,7 @@ class CredentialAuthenticationKind(int, metaclass=_enum_type_wrapper.EnumTypeWra
     CREDENTIAL_AUTHENTICATION_KIND_ACCESS_TOKEN: _ClassVar[CredentialAuthenticationKind]
     CREDENTIAL_AUTHENTICATION_KIND_GITHUB_APP: _ClassVar[CredentialAuthenticationKind]
     CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY: _ClassVar[CredentialAuthenticationKind]
+    CREDENTIAL_AUTHENTICATION_KIND_CLAUDE_SIGN_IN: _ClassVar[CredentialAuthenticationKind]
 
 class CredentialStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -36,6 +37,7 @@ CREDENTIAL_AUTHENTICATION_KIND_API_KEY: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_ACCESS_TOKEN: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_GITHUB_APP: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY: CredentialAuthenticationKind
+CREDENTIAL_AUTHENTICATION_KIND_CLAUDE_SIGN_IN: CredentialAuthenticationKind
 CREDENTIAL_STATUS_UNSPECIFIED: CredentialStatus
 CREDENTIAL_STATUS_ACTIVE: CredentialStatus
 CREDENTIAL_STATUS_REVOKED: CredentialStatus
@@ -233,6 +235,40 @@ class AddClaudeSubscriptionTokenCredentialRequest(_message.Message):
     def __init__(self, name: _Optional[str] = ..., token: _Optional[bytes] = ..., credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ...) -> None: ...
 
 class AddClaudeSubscriptionTokenCredentialResponse(_message.Message):
+    __slots__ = ("credential",)
+    CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    credential: Credential
+    def __init__(self, credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
+
+class StartClaudeSignInRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class StartClaudeSignInResponse(_message.Message):
+    __slots__ = ("authorize_url", "sign_in", "expires_at_unix")
+    AUTHORIZE_URL_FIELD_NUMBER: _ClassVar[int]
+    SIGN_IN_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_AT_UNIX_FIELD_NUMBER: _ClassVar[int]
+    authorize_url: str
+    sign_in: str
+    expires_at_unix: int
+    def __init__(self, authorize_url: _Optional[str] = ..., sign_in: _Optional[str] = ..., expires_at_unix: _Optional[int] = ...) -> None: ...
+
+class CompleteClaudeSignInRequest(_message.Message):
+    __slots__ = ("name", "sign_in", "authorization_code", "credential_id", "expected_revocation_generation")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    SIGN_IN_FIELD_NUMBER: _ClassVar[int]
+    AUTHORIZATION_CODE_FIELD_NUMBER: _ClassVar[int]
+    CREDENTIAL_ID_FIELD_NUMBER: _ClassVar[int]
+    EXPECTED_REVOCATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    sign_in: str
+    authorization_code: bytes
+    credential_id: str
+    expected_revocation_generation: int
+    def __init__(self, name: _Optional[str] = ..., sign_in: _Optional[str] = ..., authorization_code: _Optional[bytes] = ..., credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ...) -> None: ...
+
+class CompleteClaudeSignInResponse(_message.Message):
     __slots__ = ("credential",)
     CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
     credential: Credential

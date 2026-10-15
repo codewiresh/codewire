@@ -2,7 +2,7 @@
 
 This is Codewire's canonical authentication policy. The architectural decision
 and migration evidence live in
-`docs/plans/connect-rpc/15-auth-policy.md`; product and client code should link
+`codewire/plans:connect-rpc/15-auth-policy.md`; product and client code should link
 here instead of restating or extending the credential model.
 
 Codewire issues four authentication credential flavors: three user-facing and
@@ -193,7 +193,7 @@ substitute a token issued for another purpose. They are
 tokens, not another Codewire user bearer flavor.
 
 The credential relay is orchestration (design §4 of
-`docs/plans/2026-10-06-daemon-hosted-access.md`): only the
+`codewire/plans:2026-10-06-daemon-hosted-access.md`): only the
 `codewire-orchestration` ServiceAccount may present the relay audience, and the
 broker additionally requires the relay Pod to be in its own namespace. The
 broker takes the environment from the workspace Pod's live binding, never from

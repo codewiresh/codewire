@@ -56,7 +56,15 @@ async fn run(
         scope.check()?;
         EnrollmentTarget::CreateGithubAccount
     } else {
-        enrollment_target(&shared, scope, "github", name, replacement).await?
+        enrollment_target(
+            &shared,
+            scope,
+            "github",
+            CredentialAuthKind::OAuth,
+            name,
+            replacement,
+        )
+        .await?
     };
     if !matches!(target, EnrollmentTarget::Reconnect(_)) {
         ensure_github_unconnected(&shared, scope).await?;

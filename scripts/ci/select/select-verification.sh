@@ -1405,6 +1405,11 @@ if [ "$event_selected" = false ]; then
         select_services
         recognized=true
         ;;
+      scripts/dev/workstation-cpu.sh)
+        # Owner-workstation CPU limits; neither CI nor Kind runs the helper.
+        select_token policy
+        recognized=true
+        ;;
       scripts/dev/kind/sync-local-secrets.sh)
         # The local credential bridge has a hermetic policy fixture and does
         # not provision or exercise a Kind cluster.
@@ -1570,6 +1575,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-kind-e2e-*.sh|scripts/ci/tests/test-kind-forwards.sh|\
       scripts/ci/tests/test-kind-trust-roots.sh|\
       scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-codex-login.py|\
+      scripts/ci/tests/test-kind-claude-login.py|\
       scripts/ci/tests/test-kind-credentials.py|scripts/ci/tests/test-kind-cluster-profiles.py|\
       scripts/ci/tests/test-kind-dev-profile.py|scripts/ci/tests/test-kind-profile-artifacts.py|\
       scripts/ci/tests/test-kind-cw-runtime.py|scripts/ci/tests/test-kind-cw-runtime-probe.py|\

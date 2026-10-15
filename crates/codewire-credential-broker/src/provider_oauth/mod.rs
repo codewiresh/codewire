@@ -1,4 +1,5 @@
-//! Codewire's own OAuth device logins for provider credential enrollment.
+//! Codewire's own OAuth logins for provider credential enrollment: the Codex
+//! and GitHub device logins, and the Claude sign-in by pasted code.
 //!
 //! Each flow runs over a [`BrokerUpstreamTransport`]: production uses the
 //! pinned, allowlisted provider HTTPS transport, and the Kind fixture an
@@ -8,6 +9,7 @@
 //! Provider material exists only in zeroizing memory until the caller moves it
 //! into its protected store.
 
+pub mod claude;
 pub mod codex;
 pub mod github;
 
@@ -222,12 +224,19 @@ pub(crate) async fn call(
     method: Method,
     target: &str,
     headers: HeaderMap,
-    body: Vec<u8>,
+    mut body: Zeroizing<Vec<u8>>,
 ) -> Result<(StatusCode, Zeroizing<Vec<u8>>), DeviceLoginError> {
     let target = Url::parse(target).map_err(|_| DeviceLoginError::InvalidResponse)?;
     tokio::time::timeout(REQUEST_TIMEOUT, async {
+        // The body stays zeroizing up to the transport, which owns it from
+        // here, as for a token refresh.
         let response = upstream
-            .execute(BrokerUpstreamRequest::new(method, target, headers, body))
+            .execute(BrokerUpstreamRequest::new(
+                method,
+                target,
+                headers,
+                std::mem::take(&mut *body),
+            ))
             .await
             .map_err(|_| DeviceLoginError::Unavailable)?;
         let (status, _headers, mut body) = response.into_parts();

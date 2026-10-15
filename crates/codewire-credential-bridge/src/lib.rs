@@ -1,6 +1,6 @@
 //! HTTP/credential-frame bridge shared by local and platform ingress, with
 //! separate typed operations for launcher ciphertext, selected SSH signing and
-//! the sealed Codex login (the one listed direct delivery exception).
+//! the sealed Codex and Claude logins (the listed direct delivery exceptions).
 //!
 //! This crate does not authenticate peers, authorize credentials, bind listeners,
 //! or access provider material. The consumer authenticates its transport and
@@ -43,9 +43,9 @@ pub use http_ingress::{
     ClassifiedHttpRequest, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
     classify_http_request,
 };
-mod codex_login;
-pub use codex_login::{CODEX_LOGIN_REQUEST_LIFETIME, CodexLoginFailure};
-use codex_login::{PendingCodexLogin, fail_codex_logins, take_codex_logins};
+mod login;
+pub use login::{LOGIN_REQUEST_LIFETIME, LoginFailure};
+use login::{LoginCapabilities, PendingLogin, fail_logins, take_logins};
 mod projection;
 pub use projection::RelayedEnvironmentProjection;
 use projection::{PendingProjection, fail_projections, take_projections};
@@ -103,19 +103,19 @@ struct BridgeState {
     pending: BTreeMap<String, PendingResponse>,
     projections: BTreeMap<String, PendingProjection>,
     ssh: BTreeMap<String, PendingSsh>,
-    codex_logins: BTreeMap<String, PendingCodexLogin>,
+    logins: BTreeMap<String, PendingLogin>,
 }
 
 impl BridgeState {
     fn in_flight(&self) -> usize {
-        self.pending.len() + self.projections.len() + self.ssh.len() + self.codex_logins.len()
+        self.pending.len() + self.projections.len() + self.ssh.len() + self.logins.len()
     }
 
     fn contains_request(&self, request_id: &str) -> bool {
         self.pending.contains_key(request_id)
             || self.projections.contains_key(request_id)
             || self.ssh.contains_key(request_id)
-            || self.codex_logins.contains_key(request_id)
+            || self.logins.contains_key(request_id)
     }
 
     /// The active or draining host of `epoch`: either may still answer, and
@@ -133,7 +133,7 @@ impl BridgeState {
             pending: take_pending(self, |pending| pending.epoch == epoch),
             projections: take_projections(self, epoch),
             ssh: take_ssh(self, epoch),
-            codex_logins: take_codex_logins(self, epoch),
+            logins: take_logins(self, epoch),
         }
     }
 
@@ -145,9 +145,7 @@ impl BridgeState {
                 .into_values()
                 .collect(),
             ssh: std::mem::take(&mut self.ssh).into_values().collect(),
-            codex_logins: std::mem::take(&mut self.codex_logins)
-                .into_values()
-                .collect(),
+            logins: std::mem::take(&mut self.logins).into_values().collect(),
         }
     }
 }
@@ -158,7 +156,7 @@ struct LostRequests {
     pending: Vec<PendingResponse>,
     projections: Vec<PendingProjection>,
     ssh: Vec<PendingSsh>,
-    codex_logins: Vec<PendingCodexLogin>,
+    logins: Vec<PendingLogin>,
 }
 
 impl LostRequests {
@@ -166,7 +164,7 @@ impl LostRequests {
         fail_pending(self.pending, BridgeFailure::Unavailable);
         fail_projections(self.projections);
         fail_ssh(self.ssh);
-        fail_codex_logins(self.codex_logins);
+        fail_logins(self.logins);
     }
 }
 
@@ -189,8 +187,8 @@ struct ActiveHost {
     epoch: u64,
     output: GuestOutput,
     cancel: oneshot::Sender<()>,
-    /// The host's Open listed "codex-login" for this epoch.
-    codex_login: bool,
+    /// The logins the host's Open listed for this epoch.
+    logins: LoginCapabilities,
 }
 
 struct PendingResponse {
@@ -282,7 +280,7 @@ impl CredentialBridge {
                 pending: BTreeMap::new(),
                 projections: BTreeMap::new(),
                 ssh: BTreeMap::new(),
-                codex_logins: BTreeMap::new(),
+                logins: BTreeMap::new(),
             })),
             host_admitted: Arc::new(Notify::new()),
         })
@@ -475,6 +473,9 @@ impl CredentialBridge {
             Some(Payload::CodexLogin(response)) => {
                 self.apply_codex_login_response(epoch, response).await
             }
+            Some(Payload::ClaudeLogin(response)) => {
+                self.apply_claude_login_response(epoch, response).await
+            }
             Some(Payload::Open(_)) | None => Err(invalid_host_frame()),
         }
     }
@@ -601,7 +602,7 @@ impl CredentialBridge {
                     return;
                 }
                 drop(pending.response.take());
-            } else if let Some(pending) = state.codex_logins.get_mut(request_id) {
+            } else if let Some(pending) = state.logins.get_mut(request_id) {
                 if pending.epoch != epoch || pending.response.is_none() {
                     return;
                 }
@@ -677,9 +678,7 @@ impl PreparedBridgeConnection {
         {
             return Err(invalid_host_frame());
         }
-        let codex_login = capabilities.iter().any(|capability| {
-            capability == codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN
-        });
+        let logins = LoginCapabilities::from_open(capabilities);
         let (cancel, cancelled) = oneshot::channel();
         let mut draining = None;
         let (epoch, closed, lost) = {
@@ -698,7 +697,7 @@ impl PreparedBridgeConnection {
                 epoch,
                 output: self.output.clone(),
                 cancel,
-                codex_login,
+                logins,
             });
             match (replacement, replaced) {
                 (EpochReplacement::Drain, Some(replaced)) => {

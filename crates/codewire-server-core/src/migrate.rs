@@ -45,6 +45,7 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     mod authority_stamp_removal;
+    mod claude_sign_in;
     mod github_cli_oauth_retirement;
     mod github_singleton;
     mod owner_sources;
@@ -64,10 +65,12 @@ mod tests {
 
     use super::*;
 
-    // Bind only after the disposable boundary fixture measures canonical
-    // SSH37, CW journal38 and the metadata-only managed-agent journal39.
+    // Measured by the Claude sign-in fixture on disposable PostgreSQL after
+    // migration 41's constraint change. The data-only migration 40 left the
+    // managed-agent journal39 value
+    // (9c5febb69fa7d930c3b4528cda06cf84521162cc51ed7c912959159a28be78fc).
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "9c5febb69fa7d930c3b4528cda06cf84521162cc51ed7c912959159a28be78fc";
+        "6a6a17eb52120fa37b56eef07bff233eed562ddd5f9dc755191381bbf77e3401";
     // Independently accepted canonical main ec60908a, through SSH host keys37.
     const ACCEPTED_SSH_HOST_KEY_SCHEMA_FINGERPRINT: &str =
         "88dff060b2dbf35cf0b6464bce13c682c6e13b48ba6d3f80970fb2dfe997c7eb";
@@ -5276,6 +5279,9 @@ mod tests {
         }
         if version > 39 {
             github_cli_oauth_retirement::assert_accepted_history39()?;
+        }
+        if version > 40 {
+            claude_sign_in::assert_accepted_history40()?;
         }
         if version > PLATFORM_BINDING_CONSENT_VERSION {
             let consent = MIGRATOR
