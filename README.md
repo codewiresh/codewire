@@ -175,8 +175,8 @@ created after it.
   host, empty, as the mount point (its parent must exist). A symlink or a file
   at the path, or a missing parent, stays shared, and create says so.
 - Inside the VM a kept folder is a mount point: its contents can be deleted,
-  but the folder itself cannot be removed or renamed (`rm -rf node_modules`
-  empties it and then reports that it is busy).
+  but the folder itself cannot be removed or renamed. `rm -rf node_modules`
+  and `cargo clean` empty it, then report that it is busy.
 - If the host deletes or replaces a kept folder while the VM runs, for example
   with `cargo clean` or `rm -rf node_modules` on the host, the guest binds it
   again within about a second (and recreates the empty host folder). Files the
