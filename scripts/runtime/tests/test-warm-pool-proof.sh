@@ -106,4 +106,34 @@ grep -qF 'FIRST_SSH_TRANSPORT="${FIRST_SSH_TRANSPORT:-direct_udp}"' "$PROOF" ||
 [[ "$(grep -cF 'start_first_ssh "$id" "$started"' "$PROOF")" -eq 2 ]] ||
   fail 'hits and the off-shape create do not both time the first SSH from the create'
 grep -qF 'TARGET_FIRST_SSH_P50_MS=5000' "$PROOF" || fail 'no first-SSH p50 target'
+# A first SSH that finishes after readiness is still recorded. The recorder
+# must wait for the timer in the shell that started it: inside $(...) the wait
+# returned at once and a slow first SSH was reported as none within 120 s.
+timer_dir="$(mktemp -d)"
+trap 'rm -rf -- "$timer_dir"' EXIT
+{
+  awk '/^finish_first_ssh\(\) \{/,/^\}/' "$PROOF"
+  awk '/^record_first_ssh\(\) \{/,/^\}/' "$PROOF"
+} >"$timer_dir/functions.sh"
+grep -q '^record_first_ssh() {' "$timer_dir/functions.sh" || fail 'first-SSH recorder was not extracted'
+recorded="$(
+  TMPDIR_PROOF="$timer_dir" FIRST_SSH_TRANSPORT=direct_udp FIRST_SSH_TIMEOUT_SECONDS=120 bash -c '
+    set -euo pipefail
+    log() { printf "LOG %s\n" "$*"; }
+    fail() { printf "FAIL %s\n" "$*"; }
+    source "$1"
+    SAMPLES=()
+    (sleep 1; printf "4321\n") >"$TMPDIR_PROOF/first-ssh-env-1" &
+    FIRST_SSH_PID=$!
+    record_first_ssh "hit 1" env-1 SAMPLES
+    printf "SAMPLES %s\n" "${SAMPLES[*]}"
+  ' bash "$timer_dir/functions.sh"
+)"
+grep -qx 'LOG hit 1: first SSH over direct_udp 4321 ms after the create (client side)' <<<"$recorded" ||
+  fail "a first SSH that finished after readiness was not recorded: $recorded"
+grep -qx 'SAMPLES 4321' <<<"$recorded" || fail "a slow first SSH was left out of the samples: $recorded"
+if grep -q '^FAIL' <<<"$recorded"; then
+  fail "a slow first SSH was reported as none: $recorded"
+fi
 printf 'warm pool proof tests: OK\n'
+
