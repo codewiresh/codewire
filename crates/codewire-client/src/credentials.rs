@@ -16,6 +16,22 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
+    /// The installations of the authenticated owner's GitHub App connection
+    /// that have not yet granted what Codewire needs, checked live (#2712).
+    /// Login, installation ID and account kind only.
+    pub async fn list_github_pending_permissions(
+        &self,
+    ) -> Result<ListGithubPendingPermissionsResponse, ClientError> {
+        self.github_repositories
+            .list_github_pending_permissions_with_options(
+                ListGithubPendingPermissionsRequest::default(),
+                self.auth_options().await?,
+            )
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     /// Rename the exact observed identity without changing its material or bindings.
     pub async fn rename_credential(
         &self,
@@ -90,6 +106,33 @@ impl CodewireClient {
                 request,
                 self.auth_options().await?,
             )
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    /// Begin a Claude sign-in: Claude's authorize URL and the opaque handle
+    /// the caller keeps private and returns to
+    /// [`Self::complete_claude_sign_in`].
+    pub async fn start_claude_sign_in(
+        &self,
+        request: StartClaudeSignInRequest,
+    ) -> Result<StartClaudeSignInResponse, ClientError> {
+        self.credential_mutations
+            .start_claude_sign_in_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    /// Submit the pasted `code#state` of a started Claude sign-in. The reply
+    /// contains only committed metadata; no token is returned.
+    pub async fn complete_claude_sign_in(
+        &self,
+        request: CompleteClaudeSignInRequest,
+    ) -> Result<CompleteClaudeSignInResponse, ClientError> {
+        self.credential_mutations
+            .complete_claude_sign_in_with_options(request, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)
@@ -191,7 +234,7 @@ impl CodewireClient {
         &self,
         request: EnrollGithubRequest,
         mut on_challenge: impl FnMut(GithubDeviceChallenge) -> bool,
-    ) -> Result<Credential, ClientError> {
+    ) -> Result<GithubEnrollment, ClientError> {
         let options = self
             .auth_options()
             .await?
@@ -209,7 +252,8 @@ impl CodewireClient {
                 Err(error) if challenged => return Err(github_enrollment_terminal_error(error)),
                 Err(_) => return Err(github_enrollment_unknown()),
             };
-            match message.to_owned_message().event {
+            let message = message.to_owned_message();
+            match message.event {
                 Some(enroll_github_response::Event::Challenge(challenge)) if !challenged => {
                     if !valid_github_challenge(&challenge) || !on_challenge(*challenge) {
                         return Err(github_enrollment_unknown());
@@ -224,12 +268,24 @@ impl CodewireClient {
                     {
                         return Err(github_enrollment_unknown());
                     }
-                    return Ok(*credential);
+                    return Ok(GithubEnrollment {
+                        credential: *credential,
+                        pending_permissions: message.pending_permissions,
+                    });
                 }
                 _ => return Err(github_enrollment_unknown()),
             }
         }
     }
+}
+
+/// A committed GitHub connection, and the GitHub App installations that have
+/// not yet granted the permissions Codewire needs. Those are reported once,
+/// at connect time, and never stored.
+#[derive(Debug)]
+pub struct GithubEnrollment {
+    pub credential: Credential,
+    pub pending_permissions: Vec<GithubAppPendingPermissions>,
 }
 
 fn valid_github_challenge(challenge: &GithubDeviceChallenge) -> bool {
@@ -659,6 +715,12 @@ mod tests {
                     ..Default::default()
                 },
             ))),
+            pending_permissions: vec![GithubAppPendingPermissions {
+                account: "octo-org".into(),
+                installation_id: 43,
+                account_kind: GithubAppAccountKind::Organization.into(),
+                ..Default::default()
+            }],
             ..Default::default()
         }));
         stream_at(
@@ -684,8 +746,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(challenges, 1);
-        assert_eq!(result.id, "stored-github-id");
-        assert_eq!(result.revocation_generation, 9_007_199_254_740_993);
+        assert_eq!(result.credential.id, "stored-github-id");
+        assert_eq!(
+            result.credential.revocation_generation,
+            9_007_199_254_740_993
+        );
+        assert_eq!(
+            result.pending_permissions,
+            [GithubAppPendingPermissions {
+                account: "octo-org".into(),
+                installation_id: 43,
+                account_kind: GithubAppAccountKind::Organization.into(),
+                ..Default::default()
+            }]
+        );
         server.verify().await;
     }
 

@@ -56,6 +56,18 @@ pub enum SessionClientError {
     MissingCapability { capability: &'static str },
 }
 
+impl SessionClientError {
+    /// Why the daemon will never start the session again, when it refused a
+    /// restart for a reason that cannot change. `None` for every other
+    /// failure: a later attempt may be admitted.
+    pub fn never_restarts(&self) -> Option<crate::NeverRestarts> {
+        match self {
+            Self::Status(status) => crate::NeverRestarts::of(status),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionClient {
     inner: v1::daemon_service_client::DaemonServiceClient<Channel>,
@@ -1343,6 +1355,14 @@ impl CredentialBridgeResponseSender {
             .await
     }
 
+    pub async fn send_claude_login(
+        &self,
+        response: bridge_v1::ClaudeLoginResponse,
+    ) -> Result<(), SessionClientError> {
+        self.send(bridge_v1::credential_bridge_host_message::Payload::ClaudeLogin(response))
+            .await
+    }
+
     pub async fn send_response_start(
         &self,
         response: bridge_v1::CredentialBridgeResponseStart,
@@ -1406,10 +1426,13 @@ impl CredentialBridgeResponseSender {
 fn validate_credential_bridge_guest_message(
     message: &bridge_v1::CredentialBridgeGuestMessage,
 ) -> Result<(), SessionClientError> {
+    // A malformed frame ends the epoch. The deadline is the request's own:
+    // its handler refuses an out-of-range one with a typed failure, and the
+    // epoch keeps serving every other request (#2763).
     if let Some(bridge_v1::credential_bridge_guest_message::Payload::Ssh(request)) =
         &message.payload
     {
-        ssh::validate_request(request).map_err(SessionClientError::Status)?;
+        ssh::validate_request_shape(request).map_err(SessionClientError::Status)?;
     }
     Ok(())
 }

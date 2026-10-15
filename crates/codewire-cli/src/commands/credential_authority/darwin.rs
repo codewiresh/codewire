@@ -11,8 +11,9 @@
 //! keeps only its authority channel as descriptor 3, gets an empty
 //! environment, a new session, no core files and umask 077, and exits with
 //! the authority (Darwin has no parent-death signal; the child watches its
-//! parent itself). A repository executor also pipes stderr, so its authority
-//! can stop its whole process group and observe every descendant exit.
+//! parent itself). Its stderr is a pipe the authority drains: a broker keeps
+//! the tail in its broker log (#2763), and a repository executor's lets the
+//! authority stop its whole process group and observe every descendant exit.
 
 use std::ffi::{CString, OsStr, OsString};
 use std::io;
@@ -291,7 +292,8 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
             .current_dir(&self.authority_root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // The authority keeps the tail of this pipe for its broker log.
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         for provider in &config.http_providers {
             command.arg("--http-provider").arg(provider.as_str());
@@ -522,14 +524,18 @@ mod tests {
         assert_eq!(lines[4], "0077");
         assert_eq!(lines[5], "channel", "the authority channel is descriptor 3");
         assert_eq!(
-            lines[6],
-            root.to_str().unwrap(),
-            "no other descriptor survives and stderr is not a pipe"
+            lines[6], "stderr-pipe",
+            "stderr is the pipe whose tail the authority keeps in its broker log"
         );
-        assert!(lines[7].starts_with(&format!(
+        assert_eq!(
+            lines[7],
+            root.to_str().unwrap(),
+            "no other descriptor survives"
+        );
+        assert!(lines[8].starts_with(&format!(
             "__local-credential-broker --authority-fd 3 --environment-id {environment} "
         )));
-        assert!(lines[7].ends_with(&format!(
+        assert!(lines[8].ends_with(&format!(
             "--protected-store file --protected-store-directory {}/protected-v1 --http-provider openai-api-key",
             root.display()
         )));
@@ -544,7 +550,7 @@ mod tests {
         let mut child = LocalBrokerProcessSpawner::spawn(&spawner, &platform, peer).unwrap();
         assert!(child.wait().await.unwrap().success());
         let lines = observed(&root);
-        assert!(lines[7].ends_with(&format!(
+        assert!(lines[8].ends_with(&format!(
             "--protected-store file --protected-store-directory {}/protected-v1 --platform-delegated",
             root.display()
         )));

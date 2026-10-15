@@ -59,12 +59,13 @@ full local cluster workflow.
 
 ### Local sandbox environment (CLI)
 
-On Linux/x86_64, the native developer preview runs Cloud Hypervisor directly
-through KVM. It requires usable `/dev/kvm` and `/dev/vhost-vsock` devices plus
-the reviewed Cloud Hypervisor v53, Linux 6.18.48 LTS, and Codewire guest-root
-artifacts under `~/.cache/codewire/local-vmm-v1/artifacts` with the sibling lock at
-`~/.cache/codewire/local-vmm-v1/artifacts.lock.json`. The preview never
-downloads or substitutes those artifacts at runtime.
+On Linux/x86_64, local VMs run Cloud Hypervisor directly through KVM. A
+release's `cw` installs its pinned runtime (Cloud Hypervisor v53, the Linux
+6.18.48 guest kernel, the Codewire guest root and the in-VM `cw`) with
+`cw setup --local`, checking every file against the digests it carries. The
+host needs usable `/dev/kvm` and `/dev/vhost-vsock`, Linux 6.2 or later with
+Landlock, and e2fsprogs. See [Local VMs on Linux](docs/dev/LINUX-LOCAL-VMS.md)
+for the requirements, managed agents and troubleshooting.
 
 On an Apple Silicon Mac, local VMs run under Virtualization.framework through
 the signed `codewire-vz-runner` helper instead of Cloud Hypervisor, with the
@@ -259,14 +260,13 @@ The **control plane** (`codewire`) accepts API requests, manages environment lif
 
 ## Status
 
-Codewire is pre-1.0. The OSS surface is stable enough to run and contribute against but breaking changes can land between releases. Architectural direction and current work tracked in [docs/plans/](docs/plans/) and on the issue tracker.
+Codewire is pre-1.0. The OSS surface is stable enough to run and contribute against but breaking changes can land between releases. Architectural direction and current work are tracked on the issue tracker.
 
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — stable architecture summary
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) — canonical terms
 - [docs/dev/CODEWIRE-APP-GUIDE.md](docs/dev/CODEWIRE-APP-GUIDE.md) — internal engineering guide
-- [docs/plans/](docs/plans/) — design proposals + in-flight architecture work
 
 ## Security
 

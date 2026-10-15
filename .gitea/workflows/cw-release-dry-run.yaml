@@ -3,16 +3,19 @@ name: cw four-target dry run
 # The macOS cw links Apple frameworks, so pull requests only compile it
 # (ci.yaml) and only the protected mac-runner runner links it. Every change to
 # the cw on main is therefore built and assembled here exactly as a release
-# is (cli-release.yaml): the macOS pair natively on the Mac, the Linux pair
-# beside the unsigned four-target delivery, which is verified. Nothing is
-# signed or published, and no job holds a credential.
+# is (cli-release.yaml): the macOS pair natively on the Mac, through the
+# release's macOS signing job with an rcodesign stand-in in place of Apple
+# signing and notarization, and the Linux pair beside the unsigned four-target
+# delivery, which is verified. Nothing is signed or published, and no job
+# holds a credential.
 #
 # The macOS arm64 cw embeds the local VM runtime (#2539). When one of the
 # runtime's inputs changed (local_runtime_parts.py RUNTIME_INPUTS), or on
 # dispatch, the runtime is built as a release builds it but only from cached
-# slow parts, and the delivery embeds it. Otherwise each side only checks its
-# slow parts are cached. A missing part is a warning: the next release builds
-# it.
+# slow parts, and the delivery embeds it. The Linux side also builds the
+# Linux x86_64 target (#2733), the linux fragment, which the delivery does not
+# embed yet. Otherwise each side only checks its slow parts are cached. A
+# missing part is a warning: the next release builds it.
 
 on:
   push:
@@ -26,11 +29,14 @@ on:
       - 'proto/**'
       - 'images/cw-runtime/**'
       - 'scripts/ci/release/**'
+      - 'scripts/ci/tests/fixtures/rcodesign-stand-in.sh'
       - 'scripts/ci/select/**'
       - 'scripts/ci/verify/build-local-vmm-initramfs.sh'
       - 'scripts/ci/verify/build-linux-vmm-kernel.py'
       - 'scripts/ci/verify/linux-vmm-kernel/**'
+      - 'scripts/dev/build-native-managed-agent.py'
       - 'scripts/dev/cw-runtime-image.py'
+      - 'scripts/dev/linux-local-runtime.py'
       - 'scripts/dev/macos-local-runtime.py'
       - 'scripts/dev/macos-ext4-tool.py'
       - 'scripts/dev/macos-git-tool.py'
@@ -56,6 +62,15 @@ env:
   ZIG_VERSION: 0.15.2
   ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
   CARGO_ZIGBUILD_VERSION: 0.23.0
+  # The release's exact rcodesign pin (cli-release.yaml).
+  RCODESIGN_VERSION: 0.29.0
+  RCODESIGN_X86_64_LINUX_SHA256: dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002
+  # Cargo fetches git dependencies (noeljackson/av, tauri-apps/wry and
+  # others) from github.com. Without a bound, a stalled connection holds
+  # the job until its deadline (#2691). This bound fails a stalled connect,
+  # TLS handshake or transfer in 20 s, and cargo logs and retries it.
+  CARGO_HTTP_TIMEOUT: '20'
+  CARGO_NET_RETRY: '5'
   DRY_RUN_VERSION: v0.0.0
 
 jobs:
@@ -98,6 +113,13 @@ jobs:
     needs: [protected-main, superseded]
     if: needs.superseded.outputs.superseded == 'false'
     runs-on: ci-protected
+    # A wedged step must not hold this workflow's one-at-a-time queue until
+    # the runner's 330-minute limit (run 13161 waited 5.5 h on a git fetch).
+    # Each job's limit is about three times its recent successful runs:
+    # Linux side 9.6-9.8 min before it built the x86_64 guest root and both
+    # cw runtimes (#2733), which build-native-managed-agent.py bounds at
+    # 20 min each; macOS 18.9-22.2 min, assembly 30.4-31.9 min.
+    timeout-minutes: 75
     outputs:
       mode: ${{ steps.select.outputs.mode }}
       present: ${{ steps.build.outputs.present }}
@@ -129,8 +151,8 @@ jobs:
         if: steps.select.outputs.mode == 'full'
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
-          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -146,7 +168,8 @@ jobs:
           mkdir -m 0700 "$work" "$work/tmp"
           status=0
           TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}" \
-            scripts/ci/release/build-local-runtime.sh linux --output "$work/linux" || status=$?
+            scripts/ci/release/build-local-runtime.sh linux --source-sha "$GITHUB_SHA" \
+            --version "$DRY_RUN_VERSION" --output "$work/linux" || status=$?
           case "$status" in
             0) ;;
             4) echo '::warning::A slow runtime part is not cached; the next release builds it. This dry run embeds no runtime.'
@@ -186,9 +209,12 @@ jobs:
     needs: [protected-main, superseded, build-runtime-linux]
     if: needs.superseded.outputs.superseded == 'false'
     runs-on: macos-arm64
+    timeout-minutes: 60
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
       runtime: ${{ steps.runtime.outputs.present }}
+      # The one local runtime document every cw embeds (#2733).
+      document_sha256: ${{ steps.runtime.outputs.document_sha256 }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -197,8 +223,8 @@ jobs:
       - name: Install protoc (pinned)
         run: |
           set -euo pipefail
-          curl -fsSL -o "$HOME/protoc.zip" "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip"
-          echo "193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2  $HOME/protoc.zip" | shasum -a 256 -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip" \
+            193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2 "$HOME/protoc.zip"
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q "$HOME/protoc.zip" -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -228,7 +254,9 @@ jobs:
             --source-sha "$GITHUB_SHA" --output "$work/macos" || status=$?
           case "$status" in
             0) echo "CW_RELEASE_LOCAL_RUNTIME_DIR=$work/macos/runtime" >> "$GITHUB_ENV"
-               echo 'present=true' >> "$GITHUB_OUTPUT" ;;
+               echo 'present=true' >> "$GITHUB_OUTPUT"
+               printf 'document_sha256=%s\n' \
+                 "$(shasum -a 256 "$work/macos/runtime/local-runtime.json" | cut -c1-64)" >> "$GITHUB_OUTPUT" ;;
             4) echo '::warning::A slow runtime part is not cached; the next release builds it. This dry run embeds no runtime.' ;;
             *) exit "$status" ;;
           esac
@@ -263,10 +291,75 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  assemble:
-    name: Assemble and verify the unsigned four-target delivery
+  sign-darwin:
+    # The release's macOS signing job with the recording rcodesign stand-in
+    # and synthetic keys (scripts/ci/tests/fixtures/rcodesign-stand-in.sh).
+    # It signs nothing, holds no credential and reaches no Apple service, but
+    # proves the release's pinned rcodesign still installs, sign-macos-cw.sh
+    # still runs, and the assembly packages exactly the pair it hands over.
+    name: Sign the macOS pair with the rcodesign stand-in (never signs)
     needs: [protected-main, build-darwin]
     runs-on: ci-protected
+    timeout-minutes: 20
+    outputs:
+      darwin_sums_sha256: ${{ steps.sign.outputs.darwin_sums_sha256 }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Receive the macOS pair
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-dry-run-darwin-${{ github.run_id }}
+          path: dist-darwin
+
+      - name: Verify the received macOS pair is the built pair
+        env:
+          UNSIGNED_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$UNSIGNED_SUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$UNSIGNED_SUMS_SHA256" ]
+          (cd dist-darwin && sha256sum --check SHA256SUMS)
+
+      - name: Install rcodesign (pinned)
+        run: |
+          set -euo pipefail
+          archive="apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl"
+          scripts/ci/release/fetch-pinned.sh \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${archive}.tar.gz" \
+            "$RCODESIGN_X86_64_LINUX_SHA256" rcodesign.tar.gz
+          mkdir -m 0700 .rcodesign
+          tar -xzf rcodesign.tar.gz -C .rcodesign --strip-components=1 "${archive}/rcodesign"
+          .rcodesign/rcodesign --version
+
+      - name: Sign the macOS pair with the rcodesign stand-in
+        id: sign
+        run: |
+          set -euo pipefail
+          stand_in="$(mktemp -d "${RUNNER_TEMP:?}/codewire-rcodesign-stand-in.XXXXXX")"
+          scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$stand_in"
+          scripts/ci/release/sign-macos-cw.sh "$stand_in/bin/rcodesign" "$stand_in/keys" \
+            dist-darwin dist-darwin-signed "$DRY_RUN_VERSION"
+          # Two signatures, each verified and read, then one notarization.
+          [ "$(cut -d' ' -f1 "$stand_in/calls" | tr '\n' ' ')" = \
+            'sign sign verify print-signature-info verify print-signature-info encode-app-store-connect-api-key notary-submit ' ]
+          (cd dist-darwin-signed && sha256sum --check SHA256SUMS)
+          printf 'darwin_sums_sha256=%s\n' \
+            "$(sha256sum dist-darwin-signed/SHA256SUMS | cut -c1-64)" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the stand-in-signed macOS pair to the assembly
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-dry-run-darwin-signed-${{ github.run_id }}
+          path: dist-darwin-signed/
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble:
+    name: Assemble and verify the unsigned four-target delivery
+    needs: [protected-main, build-darwin, sign-darwin]
+    runs-on: ci-protected
+    timeout-minutes: 90
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -278,8 +371,8 @@ jobs:
       - name: Install protoc (pinned)
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
-          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -289,31 +382,39 @@ jobs:
         run: |
           set -euo pipefail
           zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          curl -fsSLo zig.tar.xz "$zig_url"
-          echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "$zig_url" "$ZIG_X86_64_LINUX_SHA256" zig.tar.xz
           tar -xf zig.tar.xz
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
 
           cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
 
-      - name: Receive the macOS pair
+      - name: Receive the stand-in-signed macOS pair
         uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
-          name: cw-dry-run-darwin-${{ github.run_id }}
+          name: cw-dry-run-darwin-signed-${{ github.run_id }}
           path: dist-darwin
 
-      - name: Verify the received macOS pair is the built pair
+      - name: Verify the received macOS pair is the stand-in-signed pair
         env:
-          DARWIN_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}
+          DARWIN_SUMS_SHA256: ${{ needs.sign-darwin.outputs.darwin_sums_sha256 }}
+          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}
         run: |
           set -euo pipefail
           [[ "$DARWIN_SUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]
           (cd dist-darwin && sha256sum --check SHA256SUMS)
+          # The runtime the Linux cws embed is exactly the one the macOS job packed.
+          if [ -n "$DOCUMENT_SHA256" ]; then
+            [[ "$DOCUMENT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [ "$(sha256sum dist-darwin/local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]
+          else
+            [ ! -e dist-darwin/local-runtime ]
+          fi
 
       - name: Package and verify the unsigned delivery
         env:
           RUNTIME: ${{ needs.build-darwin.outputs.runtime }}
+          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}
         run: |
           set -euo pipefail
           CW_RELEASE_BUILD_CMD='cargo zigbuild' \
@@ -325,9 +426,9 @@ jobs:
           [ "$(find dist/cw-release/delivery/identities -name '*.json' | wc -l)" -eq 4 ]
           verified="$(python3 scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned)"
           grep -Fx "cw-release: verified targets=4 version=$DRY_RUN_VERSION runtime_equal=true signed=false" <<<"$verified"
-          # The macOS arm64 cw embeds the runtime exactly when one was built.
+          # Every cw embeds the one runtime exactly when one was built.
           if [ "$RUNTIME" = true ]; then
-            grep -q '^cw-release: local runtime document_sha256=' <<<"$verified"
+            grep -q "^cw-release: local runtime document_sha256=$DOCUMENT_SHA256 " <<<"$verified"
           else
             [ ! -e dist/cw-release/delivery/local-runtime ]
           fi

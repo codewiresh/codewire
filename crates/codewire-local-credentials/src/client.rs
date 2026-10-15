@@ -197,10 +197,32 @@ impl LocalCredentialClient {
             Err(_) => return Err(AuthorityRuntimeError::InvalidPrivatePath),
         }
         if !socket_exists(config)? {
-            return Ok(None);
+            return Self::connect_legacy(config).await;
         }
         match Self::connect(config).await {
             Err(AuthorityRuntimeError::Connect) if endpoint_refuses(config) => Ok(None),
+            result => result.map(Some),
+        }
+    }
+
+    /// An authority that a cw from before #2745 started still listens in the
+    /// credential root until it exits; use it while it runs. A new authority
+    /// starts only once it is gone, and removes its endpoint.
+    async fn connect_legacy(
+        config: &AuthorityRuntimeConfig,
+    ) -> Result<Option<Self>, AuthorityRuntimeError> {
+        let legacy = AuthorityRuntimeConfig {
+            socket_dir: config.root.clone(),
+            ..config.clone()
+        };
+        // No authority could bind a path over the limit.
+        if crate::transport::check_socket_path(&legacy.socket()).is_err()
+            || !socket_exists(&legacy)?
+        {
+            return Ok(None);
+        }
+        match Self::connect(&legacy).await {
+            Err(AuthorityRuntimeError::Connect) if endpoint_refuses(&legacy) => Ok(None),
             result => result.map(Some),
         }
     }
@@ -226,6 +248,8 @@ impl LocalCredentialClient {
                 Err(AuthorityRuntimeError::Connect) if endpoint_refuses(config) => {}
                 result => return result,
             }
+        } else if let Some(client) = Self::connect_legacy(config).await? {
+            return Ok(client);
         }
 
         let mut child = spawn(config)?;
@@ -1708,6 +1732,7 @@ fn auth_kind_from_proto(value: i32) -> Result<CredentialAuthKind, Status> {
         Ok(CredentialAuthenticationKind::AccessToken) => Ok(CredentialAuthKind::AccessToken),
         Ok(CredentialAuthenticationKind::GithubApp) => Ok(CredentialAuthKind::GitHubApp),
         Ok(CredentialAuthenticationKind::SshKey) => Ok(CredentialAuthKind::SshKey),
+        Ok(CredentialAuthenticationKind::ClaudeSignIn) => Ok(CredentialAuthKind::ClaudeSignIn),
         Ok(CredentialAuthenticationKind::Unspecified) | Err(_) => Err(Status::data_loss(
             "local credential authority returned invalid metadata",
         )),

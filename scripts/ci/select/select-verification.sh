@@ -17,6 +17,13 @@ Pull requests run Kind for a Kind-relevant path with explicit opt-in. Changes
 to direct in-cluster fixture owners select their mandatory Kind proof directly.
 Set VERIFICATION_REQUEST for product workflow_dispatch to a family token or
 all. The separate Manual diagnostics workflow uses rust-stack or go-tailnet.
+
+VERIFICATION_PR_SCOPE=quick (hosted pull-request CI only) reduces a classified
+pull request to the quick families: policy, its shell domain, and compiling
+every Rust target, plus Kind when opted in. The ci-full label keeps the
+selection a push to main would make for the same paths, Kind included.
+Unset or full keeps the complete pull-request selection that local merge
+qualification runs.
 EOF
 }
 
@@ -285,8 +292,25 @@ truthy() {
   esac
 }
 
+pr_scope="${VERIFICATION_PR_SCOPE:-full}"
+case "$pr_scope" in
+  quick|full) ;;
+  *)
+    echo "selector: unsupported pull-request scope '${pr_scope}'" >&2
+    exit 2
+    ;;
+esac
+
+# The ci-full label asks a pull request for the verification a push to main
+# would run for the same paths, Kind included.
+pr_ci_full=false
+if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ] \
+    && grep -Eq '"name"[[:space:]]*:[[:space:]]*"ci-full"' "$GITHUB_EVENT_PATH"; then
+  pr_ci_full=true
+fi
+
 pr_kind_opt_in=false
-if truthy "${KIND_E2E_OPT_IN:-}"; then
+if truthy "${KIND_E2E_OPT_IN:-}" || [ "$pr_ci_full" = true ]; then
   pr_kind_opt_in=true
 elif [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then
   if grep -Eiq '(\[kind-e2e\]|\[run-kind-e2e\]|"name"[[:space:]]*:[[:space:]]*"kind-e2e")' \
@@ -432,6 +456,7 @@ if [ "$event_selected" = false ]; then
       scripts/dev/macos-ext4-tool.py|scripts/dev/test-macos-ext4-tool.py|\
       scripts/dev/macos-git-tool.py|scripts/dev/test-macos-git-tool.py|\
       scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
+      scripts/dev/linux-local-runtime.py|scripts/dev/test-linux-local-runtime.py|\
       scripts/dev/macos-app-sandbox-canary.py|scripts/dev/test-macos-app-sandbox-canary.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/dev/pre-push.sh|scripts/dev/preflight-push.sh|\
@@ -475,9 +500,11 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-kind-watch-github-app.sh|\
       scripts/ci/tests/fixtures/cargo-cache-df.sh|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
+      scripts/ci/tests/test-integration-lane.py|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
+      scripts/ci/tests/test-local-rust-cache.sh|\
       scripts/ci/tests/test-darwin-cross-check.sh|\
       scripts/ci/tests/test-ci-runner-image-contract.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
@@ -541,7 +568,7 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      scripts/ci/verify/run-integration-verification.sh)
+      scripts/ci/verify/run-integration-verification.sh|scripts/ci/verify/integration-lane.py)
         # This file owns database execution and every service's integration
         # harness. Its changes must qualify both executable families.
         select_token policy
@@ -908,7 +935,7 @@ if [ "$event_selected" = false ]; then
         select_token rust_pkg_codewire_cli_bin
         recognized=true
         ;;
-      scripts/dev/test-cli-native-managed.py|scripts/dev/test-cli-native-update.py|scripts/ci/tests/test-native-managed-update-entrypoint.py|scripts/dev/build-native-managed-agent.py)
+      scripts/dev/test-cli-native-managed.py|scripts/dev/test-cli-native-update.py|scripts/ci/tests/test-native-managed-update-entrypoint.py|scripts/dev/build-native-managed-agent.py|scripts/dev/native_socket_dir.py)
         select_token rust
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_cli_bin
@@ -1073,6 +1100,7 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/dev/test-cli-local-vm-macos.py|scripts/dev/test-cli-local-vm-docker-macos.py|\
+      scripts/dev/test-cli-local-vm-inputs-macos.py|\
       scripts/dev/test-local-vm-hostile-guest-macos.py|scripts/dev/hostile-guest-probe.py|\
       scripts/dev/test-local-vm-hostile-guest.py)
         # Developer-only local VM journeys and the hostile-guest battery: they
@@ -1377,6 +1405,11 @@ if [ "$event_selected" = false ]; then
         select_services
         recognized=true
         ;;
+      scripts/dev/workstation-cpu.sh)
+        # Owner-workstation CPU limits; neither CI nor Kind runs the helper.
+        select_token policy
+        recognized=true
+        ;;
       scripts/dev/kind/sync-local-secrets.sh)
         # The local credential bridge has a hermetic policy fixture and does
         # not provision or exercise a Kind cluster.
@@ -1395,7 +1428,7 @@ if [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
-      scripts/runtime/*apikey*|docs/runbooks/connect-apikey-lifecycle-smoke.md)
+      scripts/runtime/*apikey*)
         select_token service_apikey_smoke
         recognized=true
         ;;
@@ -1542,6 +1575,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-kind-e2e-*.sh|scripts/ci/tests/test-kind-forwards.sh|\
       scripts/ci/tests/test-kind-trust-roots.sh|\
       scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-codex-login.py|\
+      scripts/ci/tests/test-kind-claude-login.py|\
       scripts/ci/tests/test-kind-credentials.py|scripts/ci/tests/test-kind-cluster-profiles.py|\
       scripts/ci/tests/test-kind-dev-profile.py|scripts/ci/tests/test-kind-profile-artifacts.py|\
       scripts/ci/tests/test-kind-cw-runtime.py|scripts/ci/tests/test-kind-cw-runtime-probe.py|\
@@ -1726,21 +1760,26 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/mirror-github.sh|\
       scripts/ci/release/package-cw-release.sh|scripts/ci/release/publish-cw-release.sh|\
       scripts/ci/release/cw_release.py|scripts/ci/release/cw_release_r2.py|\
-      scripts/ci/release/sign-cw-release.sh|\
+      scripts/ci/release/sign-cw-release.sh|scripts/ci/release/sign-macos-cw.sh|\
       scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/setup/fetch-openbao-release-signing-key.sh|\
+      scripts/ci/setup/fetch-openbao-macos-signing.sh|\
       scripts/ci/tests/cw_release_fixtures.py|scripts/ci/tests/test-cli-release-workflow.py|\
       scripts/ci/tests/test-cw-release-delivery.py|scripts/ci/tests/test-cw-release-r2.py|\
       scripts/ci/tests/test-package-cw-release.py|\
       scripts/ci/release/local_runtime_parts.py|scripts/ci/release/local_runtime_sources.py|\
       scripts/ci/release/local-runtime-sources.json|scripts/ci/release/build-runtime-kernel.sh|\
       scripts/ci/release/build-local-runtime.sh|\
+      scripts/ci/release/fetch-pinned.sh|scripts/ci/tests/test-fetch-pinned.sh|\
       scripts/ci/release/build-runtime-guest-root.sh|scripts/ci/release/runtime-container.sh|\
+      scripts/ci/release/build-runtime-cw.sh|\
       scripts/ci/tests/test-local-runtime-parts.py|\
       scripts/ci/release/dry-run-superseded.sh|scripts/ci/tests/test-dry-run-superseded.sh|\
       scripts/ci/tests/test-cw-install.py|\
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-release-signing-key.sh|\
+      scripts/ci/tests/test-fetch-openbao-macos-signing.sh|scripts/ci/tests/test-sign-macos-cw.sh|\
+      scripts/ci/tests/fixtures/rcodesign-stand-in.sh|\
       scripts/ci/tests/test-copy-image-to-ghcr.sh|\
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\
       scripts/ci/tests/test-publish-image-to-ghcr.sh|\
@@ -1902,10 +1941,50 @@ if token_selected policy; then
 fi
 
 # Kind takes over an hour. A pull request runs it only when opted in
-# ([kind-e2e] in its title or body, or the kind-e2e label); pushes to main and
-# dispatched runs keep it as the post-merge gate.
+# ([kind-e2e] in its title or body, or the kind-e2e or ci-full label); pushes
+# to main and dispatched runs keep it as the post-merge gate.
 if [ "$event" = pull_request ] && [ "$pr_kind_opt_in" != true ]; then
   unset 'selected[kind]' 'selected[edge_kind]'
+fi
+
+# The local mode describes what merge qualification needs for this change, so
+# it comes from the complete selection, before any hosted quick reduction.
+required_local_mode=default
+if [ "$classification" = unclassified ] \
+  || [ "$classification" = release ] \
+  || { [ "$classification" = requested ] && [ "${VERIFICATION_REQUEST:-policy}" = all ]; }; then
+  required_local_mode=full
+elif [ "$kind_relevant" = true ] || token_selected kind; then
+  required_local_mode=kind
+elif token_selected database || token_selected service_integration; then
+  required_local_mode=integration
+fi
+
+# Hosted pull-request CI runs only the quick families by default: every pull
+# request already ran its complete selection in local merge qualification, and
+# a push to main runs it again after merge. Policy, its shell domain and
+# compiling every Rust target stay; Kind stays when opted in. pr_quick marks
+# the reduced selection so dispatch ignores artifact facts and the run emits no
+# exact-tree receipt main could reuse. The ci-full label keeps the complete
+# selection. An unclassified path keeps it too: the selector cannot tell what
+# such a change affects, so it fails closed as it does everywhere else.
+if [ "$event" = pull_request ] && [ "$pr_scope" = quick ] \
+    && [ "$pr_ci_full" != true ] && [ "$classification" != unclassified ]; then
+  declare -A quick=([policy]=1 [policy_shell]=1 [policy_shell_omittable]=1
+    [edge_kind]=1 [kind]=1)
+  # The fast-compile token set: the selections that run the rust-compile job
+  # on main (see emit-verification-matrices.sh).
+  for token in rust rust_curated_locks transport transport_derp_contract; do
+    if token_selected "$token"; then
+      select_token rust_compile
+      quick[rust_compile]=1
+      break
+    fi
+  done
+  for token in "${!selected[@]}"; do
+    [ "${quick[$token]:-}" = 1 ] || unset "selected[$token]"
+  done
+  select_token pr_quick
 fi
 
 for token in "${!selected[@]}"; do
@@ -1918,17 +1997,6 @@ while IFS= read -r token; do
   selection="${selection}${token}|"
 done < "$tokens_tmp"
 selection="${selection}complete|"
-
-required_local_mode=default
-if [ "$classification" = unclassified ] \
-  || [ "$classification" = release ] \
-  || { [ "$classification" = requested ] && [ "${VERIFICATION_REQUEST:-policy}" = all ]; }; then
-  required_local_mode=full
-elif [ "$kind_relevant" = true ] || token_selected kind; then
-  required_local_mode=kind
-elif token_selected database || token_selected service_integration; then
-  required_local_mode=integration
-fi
 
 emit_outputs() {
   printf 'selector_version=%s\n' "$selector_version"

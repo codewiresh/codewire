@@ -1476,6 +1476,100 @@ async fn claude_subscription_token_has_no_refresh_and_only_its_owner_replaces_it
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn claude_sign_in_is_a_personal_anthropic_login_that_refreshes() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let owner = db.user("claude-sign-in-owner").await?;
+        let org = db.organization("claude-sign-in-org").await?;
+        let provider = Arc::new(SyntheticKek::default());
+        let (pool, _) = db.broker_pool().await?;
+        let store = codewire_platform_credentials::PlatformCredentialStore::new(
+            pool.clone(),
+            provider.clone(),
+            builtin_provider_catalog(),
+        );
+        let sign_in = |provider: &str| codewire_platform_credentials::CredentialRegistration {
+            provider: ProviderId::parse(provider).expect("built-in provider"),
+            account_hint: Some("person@example.test".into()),
+            ..registration("Claude", Kind::ClaudeSignIn)
+        };
+        // Only the Anthropic provider has this kind, and only a person holds
+        // one; both are refused before any KEK work.
+        ensure!(
+            store.create(&owner, sign_in("openai"), &value(OLD_VALUE)).await
+                == Err(Error::UnsupportedCredential)
+        );
+        ensure!(
+            store.create(&org, sign_in("anthropic"), &value(OLD_VALUE)).await
+                == Err(Error::UnsupportedCredential)
+        );
+        ensure!(provider.generate_calls.load(Ordering::SeqCst) == 0);
+
+        let login = store
+            .create(&owner, sign_in("anthropic"), &value(OLD_VALUE))
+            .await?;
+        ensure!(login.metadata.authentication_kind == Kind::ClaudeSignIn);
+        ensure!(store.record(&owner, &login.metadata.id).await? == login);
+
+        // Unlike a Claude subscription token, it refreshes in place: the
+        // identity, name and hint stay and the material rotates.
+        let refreshed = store
+            .publish_oauth_refresh(&owner, &login.metadata.id, login.version, &value(NEW_VALUE))
+            .await?;
+        ensure!(refreshed.metadata.id == login.metadata.id);
+        ensure!(refreshed.metadata.authentication_kind == Kind::ClaudeSignIn);
+        ensure!(refreshed.metadata.account_hint == login.metadata.account_hint);
+        ensure!(
+            refreshed.version.material_generation == login.version.material_generation + 1
+        );
+        ensure!(
+            store
+                .read_for_broker(&owner, &login.metadata.id, refreshed.version)
+                .await?
+                .expose_secret()
+                == NEW_VALUE
+        );
+
+        // The schema holds the same rule for any writer: the kind belongs to
+        // a person's Anthropic credential only.
+        let key = store
+            .create(&owner, registration("OpenAI key", Kind::ApiKey), &value(OLD_VALUE))
+            .await?;
+        let org_key = store
+            .create(&org, registration("Shared key", Kind::ApiKey), &value(OLD_VALUE))
+            .await?;
+        for id in [&key.metadata.id, &org_key.metadata.id] {
+            ensure!(
+                sqlx::query(
+                    "UPDATE platform_credentials SET authentication_kind='claude_sign_in' WHERE id=$1"
+                )
+                .bind(id.as_str())
+                .execute(&db.pool)
+                .await
+                .is_err()
+            );
+        }
+        sqlx::query("UPDATE platform_credentials SET provider='anthropic' WHERE id=$1")
+            .bind(org_key.metadata.id.as_str())
+            .execute(&db.pool)
+            .await?;
+        ensure!(
+            sqlx::query(
+                "UPDATE platform_credentials SET authentication_kind='claude_sign_in' WHERE id=$1"
+            )
+            .bind(org_key.metadata.id.as_str())
+            .execute(&db.pool)
+            .await
+            .is_err()
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn organizations_hold_api_keys_and_ssh_but_never_register_or_reconnect_oauth() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {

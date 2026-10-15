@@ -14,6 +14,7 @@ fn capture() -> ProjectionCapture {
         profile_slots_overflow: false,
         github_connected: true,
         anthropic_subscription_token: false,
+        anthropic_sign_in: false,
     }
 }
 
@@ -308,6 +309,54 @@ fn a_claude_subscription_token_selects_the_anthropic_subscription_form_only() {
     let (mut project, mut captured) = selected_profile();
     captured.profile_slots = vec!["anthropic".into()];
     captured.anthropic_subscription_token = true;
+    project
+        .environment
+        .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "must-not-appear".into());
+    assert!(captured.selection(&project, "synthetic-org", 7).is_err());
+}
+
+#[test]
+fn a_claude_sign_in_selects_the_anthropic_sign_in_form_only() {
+    for (slots, encoded) in [
+        (vec!["anthropic"], "v2:44"),
+        (vec!["codex", "anthropic"], "v2:45"),
+        (vec!["anthropic", "github"], "v2:54"),
+        (
+            vec!["codex", "openai", "anthropic", "github", "ssh"],
+            "v2:5f",
+        ),
+    ] {
+        let (project, mut captured) = selected_profile();
+        captured.profile_slots = slots.into_iter().map(str::to_owned).collect();
+        let api_key = captured
+            .selection(&project, "synthetic-org", 7)
+            .unwrap()
+            .unwrap();
+        captured.anthropic_sign_in = true;
+        let sign_in = captured
+            .selection(&project, "synthetic-org", 7)
+            .unwrap()
+            .unwrap();
+        let clients = captured.managed_credential_clients(&project).unwrap();
+        assert_eq!(clients.encode(), encoded);
+        assert!(clients.anthropic_sign_in() && !clients.anthropic_subscription_token());
+        assert_eq!(sign_in.reserved_keys, api_key.reserved_keys);
+        assert_eq!(sign_in.sha256().unwrap(), api_key.sha256().unwrap());
+    }
+    // Without an Anthropic slot it is not a selection, and one slot never
+    // holds both forms.
+    let (project, mut captured) = selected_profile();
+    captured.anthropic_sign_in = true;
+    assert!(captured.managed_credential_clients(&project).is_err());
+    let (project, mut captured) = selected_profile();
+    captured.profile_slots = vec!["anthropic".into()];
+    captured.anthropic_sign_in = true;
+    captured.anthropic_subscription_token = true;
+    assert!(captured.managed_credential_clients(&project).is_err());
+    // A declared Claude token still collides: it would outrank the login.
+    let (mut project, mut captured) = selected_profile();
+    captured.profile_slots = vec!["anthropic".into()];
+    captured.anthropic_sign_in = true;
     project
         .environment
         .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "must-not-appear".into());

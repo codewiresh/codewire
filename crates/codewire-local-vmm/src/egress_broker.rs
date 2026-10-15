@@ -2,8 +2,9 @@
 //!
 //! The runner supplies one already-connected AF_UNIX stream containing a
 //! generation-bound bootstrap record, an exact confinement admission after
-//! process capture, and then the authenticated broker IPC. The process accepts
-//! no configuration from files or environment variables.
+//! process capture, and then the authenticated admission session of the broker
+//! IPC. The other IPC sessions (#2638) are inherited at fixed descriptors. The
+//! process accepts no configuration from files or environment variables.
 
 use std::io::{self, Read as _, Write as _};
 use std::os::fd::{FromRawFd as _, RawFd};
@@ -13,7 +14,7 @@ use std::time::Duration;
 
 use codewire_egress_broker::adapters::{SystemDnsResolver, SystemTcpConnector};
 use codewire_egress_broker::ipc::{
-    BROKER_IPC_KEY_LEN, BrokerIpcBinding, BrokerIpcKey, serve_broker_ipc,
+    BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS, BrokerIpcBinding, BrokerIpcKey, serve_broker_ipc,
 };
 use codewire_egress_broker::{PolicyEgressBroker, SystemBrokerClock};
 use codewire_egress_policy::{CompiledPolicy, RouteClass};
@@ -30,6 +31,11 @@ use crate::linux::confinement::{
 pub const EGRESS_BROKER_BOOTSTRAP_FD: RawFd = 4;
 /// The runner's one-way host-address control socket (#2614).
 pub const EGRESS_BROKER_HOST_ADDRESSES_FD: RawFd = 5;
+/// IPC sessions after the admission session (#2638) are inherited at this
+/// descriptor and the ones after it, in session order.
+pub const EGRESS_BROKER_FIRST_SESSION_FD: RawFd = 6;
+/// Inherited IPC sessions: every session but the bootstrap stream's.
+pub const EGRESS_BROKER_INHERITED_SESSIONS: usize = BROKER_IPC_SESSIONS - 1;
 pub const EGRESS_BROKER_PREPARED_MESSAGE: &[u8] = b"CWEBB1 prepared\n";
 pub const EGRESS_BROKER_CONFINE_MESSAGE: &[u8] = b"CWEBB1 confine\n";
 pub const EGRESS_BROKER_READY_MESSAGE: &[u8] = b"CWEBB1 ready\n";
@@ -360,6 +366,16 @@ pub async fn run_inherited_egress_broker(
 ) -> Result<(), EgressBrokerProcessError> {
     let mut bootstrap = inherited_std_unix_stream(EGRESS_BROKER_BOOTSTRAP_FD)?;
     let control = inherited_std_unix_stream(EGRESS_BROKER_HOST_ADDRESSES_FD)?;
+    let sessions = (0..EGRESS_BROKER_INHERITED_SESSIONS)
+        .map(|index| {
+            let session =
+                inherited_std_unix_stream(EGRESS_BROKER_FIRST_SESSION_FD + index as RawFd)?;
+            session
+                .set_nonblocking(true)
+                .map_err(|_| EgressBrokerProcessError::InheritedDescriptor)?;
+            Ok(session)
+        })
+        .collect::<Result<Vec<_>, EgressBrokerProcessError>>()?;
     bootstrap
         .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
         .map_err(|_| EgressBrokerProcessError::BootstrapIo)?;
@@ -434,6 +450,14 @@ pub async fn run_inherited_egress_broker(
 
     let mut stream = tokio::net::UnixStream::from_std(bootstrap)
         .map_err(|_| EgressBrokerProcessError::BootstrapIo)?;
+    // The bootstrap stream becomes the admission session, then the rest.
+    let mut streams = Vec::with_capacity(BROKER_IPC_SESSIONS);
+    for session in sessions {
+        streams.push(
+            tokio::net::UnixStream::from_std(session)
+                .map_err(|_| EgressBrokerProcessError::InheritedDescriptor)?,
+        );
+    }
     stream
         .write_all(EGRESS_BROKER_READY_MESSAGE)
         .await
@@ -442,6 +466,7 @@ pub async fn run_inherited_egress_broker(
         .flush()
         .await
         .map_err(|_| EgressBrokerProcessError::StatusIo)?;
+    streams.insert(0, stream);
     let updated = Arc::clone(&broker);
     let updates = async move {
         loop {
@@ -453,7 +478,7 @@ pub async fn run_inherited_egress_broker(
     };
     // A malformed update or a closed control socket fails the broker closed.
     tokio::select! {
-        served = serve_broker_ipc(stream, decoded.binding, decoded.key, broker) => {
+        served = serve_broker_ipc(streams, decoded.binding, decoded.key, broker) => {
             served.map_err(|_| EgressBrokerProcessError::Protocol)
         }
         _ = updates => Err(EgressBrokerProcessError::HostAddresses),

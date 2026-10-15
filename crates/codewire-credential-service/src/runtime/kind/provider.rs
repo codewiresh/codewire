@@ -52,6 +52,15 @@ pub(super) fn github_app_callback_url(public_origin: &str) -> String {
 }
 pub(super) const GITHUB_APP_USER_TOKEN: &str = "ghu_kind_synthetic_user_token_1234567890";
 const GITHUB_APP_UNINSTALLED_USER_TOKEN: &str = "ghu_kind_synthetic_uninstalled_user_1234567890";
+/// A login whose installations still have the grant from before the App asked
+/// for write access: its own and an organization's. Connect succeeds, sends
+/// the person to accept on the first and names the second.
+const GITHUB_APP_LIMITED_USER_TOKEN: &str = "ghu_kind_synthetic_limited_user_token_1234567890";
+/// A login whose installation listing answers its connect (which reads
+/// `/user` first) and fails every later live status read (#2712): the page
+/// must then show nothing and still render.
+const GITHUB_APP_UNRELIABLE_USER_TOKEN: &str =
+    "ghu_kind_synthetic_unreliable_user_token_1234567890";
 pub(super) const GITHUB_APP_REFRESHED_USER_TOKEN: &str =
     "ghu_kind_synthetic_refreshed_user_token_1234567890";
 const GITHUB_APP_INITIAL_REFRESH_TOKEN: &str =
@@ -76,6 +85,17 @@ pub(super) const KIND_CLAUDE_SUBSCRIPTION_TOKEN: &str =
 /// credential Active until its owner replaces it.
 pub(super) const KIND_CLAUDE_REFUSED_TOKEN: &str =
     "sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef";
+/// The one code the fixture's Claude token endpoint redeems for a sign-in.
+/// The journey pastes it after `#` and the state of the authorize URL the CLI
+/// prints, exactly as a person pastes what Claude shows.
+pub(super) const KIND_CLAUDE_SIGN_IN_CODE: &str = "kind-synthetic-claude-sign-in-code";
+const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLAUDE_MANUAL_REDIRECT_URL: &str = "https://platform.claude.com/oauth/code/callback";
+const CLAUDE_SIGN_IN_SCOPES: &str = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins";
+/// A sign-in's first access token expires within the broker's five-minute
+/// refresh window, so its first use refreshes it; rotated ones last 8 hours.
+const CLAUDE_SIGN_IN_FIRST_LIFETIME: u64 = 301;
+const CLAUDE_SIGN_IN_LIFETIME: u64 = 28_800;
 /// The Sandbox's projected value. Reaching the provider means the broker did
 /// not replace it, so it is always rejected.
 const ANTHROPIC_PLACEHOLDER: &str = "codewire-managed";
@@ -172,6 +192,7 @@ impl Scenario {
 enum AnthropicKind {
     ApiKey,
     SubscriptionToken,
+    SignIn,
 }
 
 impl AnthropicKind {
@@ -179,8 +200,20 @@ impl AnthropicKind {
         match self {
             Self::ApiKey => "api_key",
             Self::SubscriptionToken => "subscription_token",
+            Self::SignIn => "sign_in",
         }
     }
+}
+
+/// The fixture's synthetic Claude sign-in tokens of one generation. Each code
+/// exchange or refresh issues the next generation; only the latest is valid,
+/// so a stale or replayed token is refused like a rotated one.
+fn claude_sign_in_access(generation: u64) -> String {
+    format!("sk-ant-oat01-CW_KIND_SYNTHETIC_SIGN_IN_ACCESS-{generation:06}")
+}
+
+fn claude_sign_in_refresh(generation: u64) -> String {
+    format!("sk-ant-ort01-CW_KIND_SYNTHETIC_SIGN_IN_REFRESH-{generation:06}")
 }
 
 /// One admitted Anthropic request: the form and real synthetic credential it
@@ -254,6 +287,12 @@ struct Counters {
     github_refreshed_upload_packs: u64,
     anthropic_calls: u64,
     anthropic_rejections: u64,
+    /// The latest Claude sign-in token generation issued; 0 before any.
+    claude_sign_in_generation: u64,
+    claude_sign_in_refreshes: u64,
+    /// Set by `/user` for the unreliable login; its next installation
+    /// listing, connect's, answers.
+    github_unreliable_listing: bool,
 }
 
 #[derive(Clone)]
@@ -390,6 +429,26 @@ impl SyntheticProvider {
                 "token_type": "bearer",
             }));
         }
+        if body
+            == self
+                .github_app_exchange_body("kind-synthetic-code-limited")
+                .as_bytes()
+        {
+            return json_response(json!({
+                "access_token": GITHUB_APP_LIMITED_USER_TOKEN,
+                "token_type": "bearer",
+            }));
+        }
+        if body
+            == self
+                .github_app_exchange_body("kind-synthetic-code-unreliable")
+                .as_bytes()
+        {
+            return json_response(json!({
+                "access_token": GITHUB_APP_UNRELIABLE_USER_TOKEN,
+                "token_type": "bearer",
+            }));
+        }
         if body != github_app_refresh_body().as_bytes() {
             return Err(BrokerUpstreamError::Protocol);
         }
@@ -420,6 +479,14 @@ impl SyntheticProvider {
         if !body.is_empty() || !github_app_api_headers(headers) {
             return Err(BrokerUpstreamError::Protocol);
         }
+        if headers.get("authorization").is_some_and(|value| {
+            value == format!("Bearer {GITHUB_APP_UNRELIABLE_USER_TOKEN}").as_str()
+        }) {
+            self.0
+                .lock()
+                .map_err(|_| BrokerUpstreamError::Protocol)?
+                .github_unreliable_listing = true;
+        }
         json_response(json!({"id": 7, "login": "synthetic-user"}))
     }
 
@@ -435,13 +502,57 @@ impl SyntheticProvider {
         {
             return Err(BrokerUpstreamError::Protocol);
         }
-        if headers.get("authorization").is_some_and(|value| {
-            value == format!("Bearer {GITHUB_APP_UNINSTALLED_USER_TOKEN}").as_str()
-        }) {
+        let bearer = |token: &str| {
+            headers
+                .get("authorization")
+                .is_some_and(|value| value == format!("Bearer {token}").as_str())
+        };
+        if bearer(GITHUB_APP_UNINSTALLED_USER_TOKEN) {
             return json_response(json!({"installations": []}));
         }
+        let account = json!({"login": "synthetic-user", "type": "User"});
+        if bearer(GITHUB_APP_UNRELIABLE_USER_TOKEN) {
+            let connecting = std::mem::take(
+                &mut self
+                    .0
+                    .lock()
+                    .map_err(|_| BrokerUpstreamError::Protocol)?
+                    .github_unreliable_listing,
+            );
+            if !connecting {
+                return Ok(BrokerUpstreamResponse::new(
+                    StatusCode::BAD_GATEWAY,
+                    HeaderMap::from_iter([(
+                        http::header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )]),
+                    Box::pin(futures::stream::once(async { Ok(b"{}".to_vec().into()) })),
+                ));
+            }
+            return json_response(json!({
+                "installations": [{"id": 41, "app_slug": GITHUB_APP_SLUG, "account": account,
+                    "repository_selection": "selected",
+                    "permissions": {"contents": "read", "metadata": "read"}}],
+            }));
+        }
+        if bearer(GITHUB_APP_LIMITED_USER_TOKEN) {
+            // The same installation before its owner accepted write access,
+            // and an organization's installation in the same state.
+            let earlier = json!({"contents": "read", "metadata": "read"});
+            return json_response(json!({
+                "installations": [
+                    {"id": 41, "app_slug": GITHUB_APP_SLUG, "account": account,
+                        "repository_selection": "selected", "permissions": earlier.clone()},
+                    {"id": 42, "app_slug": GITHUB_APP_SLUG,
+                        "account": {"login": "synthetic-works", "type": "Organization"},
+                        "repository_selection": "selected", "permissions": earlier},
+                ],
+            }));
+        }
         json_response(json!({
-            "installations": [{"id": 41, "app_slug": GITHUB_APP_SLUG}],
+            "installations": [{"id": 41, "app_slug": GITHUB_APP_SLUG, "account": account,
+                "repository_selection": "selected",
+                "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read"}}],
         }))
     }
 
@@ -551,6 +662,142 @@ impl SyntheticProvider {
         }
     }
 
+    /// `Bearer` and the latest sign-in access token, once one was issued.
+    fn current_claude_sign_in_bearer(&self) -> Option<String> {
+        let generation = self.0.lock().ok()?.claude_sign_in_generation;
+        (generation > 0).then(|| format!("Bearer {}", claude_sign_in_access(generation)))
+    }
+
+    /// An OAuth bearer must carry the provider's OAuth beta, once.
+    fn require_oauth_beta(headers: &HeaderMap) -> Result<(), AnthropicRejection> {
+        let mut betas = headers.get_all("anthropic-beta").iter();
+        let beta = betas.next().and_then(|value| value.to_str().ok());
+        if betas.next().is_some()
+            || !beta.is_some_and(|beta| {
+                beta.split(',')
+                    .any(|token| token.trim() == ANTHROPIC_OAUTH_BETA)
+            })
+        {
+            return Err(AnthropicRejection::OAuthBeta);
+        }
+        Ok(())
+    }
+
+    /// Claude's token endpoint as Codewire uses it: the sign-in's code
+    /// exchange (the fixed code, Claude Code's client and manual redirect, a
+    /// verifier and the state), or a refresh presenting exactly the latest
+    /// refresh token with the scopes it was granted. Each issues the next
+    /// generation; anything else is the provider's `invalid_grant`. Only the
+    /// closed grant and generation are logged.
+    fn claude_token(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let (status, answer) = self.claude_token_answer(headers, body)?;
+        json_status_response(status, &answer)
+    }
+
+    /// [`Self::claude_token`]'s status and JSON body.
+    fn claude_token_answer(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<(StatusCode, Value), BrokerUpstreamError> {
+        if !exact_single(headers, "content-type", "application/json") || body.len() > 64 * 1024 {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let request: Value =
+            serde_json::from_slice(body).map_err(|_| BrokerUpstreamError::Protocol)?;
+        let text = |field: &str| request.get(field).and_then(Value::as_str);
+        let random = |field: &str| {
+            text(field).is_some_and(|value| {
+                value.len() == 43
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+        };
+        let mut counters = self.0.lock().map_err(|_| BrokerUpstreamError::Protocol)?;
+        let current = counters.claude_sign_in_generation;
+        let grant = text("grant_type");
+        let accepted = text("client_id") == Some(CLAUDE_CLIENT_ID)
+            && match grant {
+                Some("authorization_code") => {
+                    text("code") == Some(KIND_CLAUDE_SIGN_IN_CODE)
+                        && text("redirect_uri") == Some(CLAUDE_MANUAL_REDIRECT_URL)
+                        && random("code_verifier")
+                        && random("state")
+                }
+                Some("refresh_token") => {
+                    current > 0
+                        && text("refresh_token") == Some(claude_sign_in_refresh(current).as_str())
+                        && text("scope") == Some(CLAUDE_SIGN_IN_SCOPES)
+                }
+                _ => false,
+            };
+        if !accepted {
+            tracing::info!(target: TARGET, event = "claude_sign_in_refused",
+                grant = if grant == Some("refresh_token") { "refresh_token" } else { "authorization_code" },
+                "claude_sign_in_refused");
+            drop(counters);
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                json!({"error": "invalid_grant", "error_description": "Synthetic Kind refusal"}),
+            ));
+        }
+        let generation = increment(current)?;
+        counters.claude_sign_in_generation = generation;
+        let lifetime = if grant == Some("refresh_token") {
+            counters.claude_sign_in_refreshes = increment(counters.claude_sign_in_refreshes)?;
+            CLAUDE_SIGN_IN_LIFETIME
+        } else {
+            CLAUDE_SIGN_IN_FIRST_LIFETIME
+        };
+        let refreshes = counters.claude_sign_in_refreshes;
+        drop(counters);
+        tracing::info!(target: TARGET, event = "claude_sign_in_token",
+            grant = if grant == Some("refresh_token") { "refresh_token" } else { "authorization_code" },
+            generation, claude_sign_in_refreshes = refreshes, "claude_sign_in_token");
+        Ok((
+            StatusCode::OK,
+            json!({
+                "token_type": "Bearer",
+                "access_token": claude_sign_in_access(generation),
+                "refresh_token": claude_sign_in_refresh(generation),
+                "expires_in": lifetime,
+                "scope": CLAUDE_SIGN_IN_SCOPES,
+            }),
+        ))
+    }
+
+    /// Claude's OAuth profile, read once by the sign-in with its new access
+    /// token: a Max plan with a fixed public tier and email.
+    fn claude_profile(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        json_response(self.claude_profile_answer(headers)?)
+    }
+
+    /// [`Self::claude_profile`]'s JSON body.
+    fn claude_profile_answer(&self, headers: &HeaderMap) -> Result<Value, BrokerUpstreamError> {
+        let expected = self
+            .current_claude_sign_in_bearer()
+            .ok_or(BrokerUpstreamError::Protocol)?;
+        if !exact_single(headers, "authorization", &expected) {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        tracing::info!(target: TARGET, event = "claude_profile", "claude_profile");
+        Ok(json!({
+            "account": {"uuid": "kind-synthetic-claude-account",
+                        "email": "kind-claude@example.test"},
+            "organization": {"uuid": "kind-synthetic-claude-organization",
+                             "organization_type": "claude_max",
+                             "rate_limit_tier": "default_claude_max_20x"},
+        }))
+    }
+
     fn admit_anthropic(
         &self,
         method: &Method,
@@ -576,9 +823,18 @@ impl SyntheticProvider {
         }) {
             return Err(AnthropicRejection::Placeholder);
         }
+        let sign_in = self.current_claude_sign_in_bearer();
         let (kind, refused) = match (authorization.as_slice(), api_key.as_slice()) {
             ([], [key]) if key.as_bytes() == KIND_ANTHROPIC_API_KEY.as_bytes() => {
                 (AnthropicKind::ApiKey, false)
+            }
+            ([bearer], [])
+                if sign_in
+                    .as_deref()
+                    .is_some_and(|sign_in| bearer.as_bytes() == sign_in.as_bytes()) =>
+            {
+                Self::require_oauth_beta(headers)?;
+                (AnthropicKind::SignIn, false)
             }
             ([bearer], [])
                 if [KIND_CLAUDE_SUBSCRIPTION_TOKEN, KIND_CLAUDE_REFUSED_TOKEN]
@@ -767,6 +1023,22 @@ impl BrokerUpstreamTransport for SyntheticProvider {
         &self,
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        // Claude's token endpoint and OAuth profile (the sign-in's exchange,
+        // profile read and refresh) are the fixture's own routes, not a
+        // transparent-route call it lacks.
+        let (method, target) = request.destination();
+        if (*method == Method::POST
+            && target.as_str() == "https://platform.claude.com/v1/oauth/token")
+            || (*method == Method::GET
+                && target.as_str() == "https://api.anthropic.com/api/oauth/profile")
+        {
+            let (method, _, headers, body) = request.into_parts();
+            return if method == Method::POST {
+                self.claude_token(&headers, &body)
+            } else {
+                self.claude_profile(&headers)
+            };
+        }
         // A stock client's other calls on a transparent route (#2536), such
         // as Codex's model list, reach here too. They neither count toward a
         // schedule nor fail as a transport error, which would end the bridge
@@ -875,7 +1147,11 @@ impl SyntheticProvider {
         method: &Method,
         headers: &HeaderMap,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
-        if !unserved_credential(host, headers) {
+        if !unserved_credential(
+            host,
+            headers,
+            self.current_claude_sign_in_bearer().as_deref(),
+        ) {
             return Err(BrokerUpstreamError::Protocol);
         }
         let method = match *method {
@@ -896,7 +1172,11 @@ impl SyntheticProvider {
 /// The request carries exactly one credential this fixture issued for that
 /// host, the account it expects, and nothing a guest could have supplied.
 #[cfg(feature = "kind-e2e")]
-fn unserved_credential(host: SyntheticProviderHost, headers: &HeaderMap) -> bool {
+fn unserved_credential(
+    host: SyntheticProviderHost,
+    headers: &HeaderMap,
+    claude_sign_in: Option<&str>,
+) -> bool {
     if ["cookie", "proxy-authorization", "host"]
         .iter()
         .any(|name| headers.contains_key(*name))
@@ -928,9 +1208,13 @@ fn unserved_credential(host: SyntheticProviderHost, headers: &HeaderMap) -> bool
             ([], [key]) => [KIND_ANTHROPIC_API_KEY, ANTHROPIC_API_KEY]
                 .iter()
                 .any(|expected| key.as_bytes() == expected.as_bytes()),
-            ([bearer], []) => [KIND_CLAUDE_SUBSCRIPTION_TOKEN, KIND_CLAUDE_REFUSED_TOKEN]
-                .iter()
-                .any(|token| bearer.as_bytes() == format!("Bearer {token}").as_bytes()),
+            ([bearer], []) => {
+                [KIND_CLAUDE_SUBSCRIPTION_TOKEN, KIND_CLAUDE_REFUSED_TOKEN]
+                    .iter()
+                    .any(|token| bearer.as_bytes() == format!("Bearer {token}").as_bytes())
+                    || claude_sign_in
+                        .is_some_and(|expected| bearer.as_bytes() == expected.as_bytes())
+            }
             _ => false,
         },
     }
@@ -1200,6 +1484,8 @@ fn github_app_api_headers(headers: &HeaderMap) -> bool {
         GITHUB_APP_USER_TOKEN,
         GITHUB_APP_REFRESHED_USER_TOKEN,
         GITHUB_APP_UNINSTALLED_USER_TOKEN,
+        GITHUB_APP_LIMITED_USER_TOKEN,
+        GITHUB_APP_UNRELIABLE_USER_TOKEN,
     ]
     .iter()
     .any(|token| {
@@ -1236,6 +1522,21 @@ fn github_refreshed_app_git_authorization(headers: &HeaderMap) -> bool {
             .encode(format!("x-access-token:{GITHUB_APP_REFRESHED_USER_TOKEN}"))
     );
     value == HeaderValue::from_str(&authorization).expect("synthetic token")
+}
+
+fn json_status_response(
+    status: StatusCode,
+    value: &Value,
+) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| BrokerUpstreamError::Protocol)?;
+    Ok(BrokerUpstreamResponse::new(
+        status,
+        HeaderMap::from_iter([(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )]),
+        Box::pin(futures::stream::once(async move { Ok(bytes.into()) })),
+    ))
 }
 
 fn json_response(value: Value) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
@@ -2243,6 +2544,72 @@ mod tests {
             HeaderValue::from_str(&format!("Bearer {GITHUB_APP_UNINSTALLED_USER_TOKEN}")).unwrap(),
         )]);
         assert!(!github_bearer_authorization(&uninstalled));
+        // #2712: the full grant names nothing; the earlier grant connects and
+        // names its installation's settings page.
+        let full = owner
+            .complete(zeroize::Zeroizing::new(
+                GITHUB_APP_AUTHORIZATION_CODES[0].as_bytes().to_vec(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            full.reach()
+                .iter()
+                .all(|installation| installation.pending_permissions.is_none())
+        );
+        let limited = owner
+            .complete(zeroize::Zeroizing::new(
+                b"kind-synthetic-code-limited".to_vec(),
+            ))
+            .await
+            .unwrap();
+        let pending = limited.reach()[0].pending_permissions.as_ref().unwrap();
+        assert_eq!(
+            pending.settings_url(&limited.reach()[0].account).as_deref(),
+            Some("https://github.com/settings/installations/41")
+        );
+        let pending = limited.reach()[1].pending_permissions.as_ref().unwrap();
+        assert_eq!(
+            pending.settings_url(&limited.reach()[1].account).as_deref(),
+            Some("https://github.com/organizations/synthetic-works/settings/installations/42")
+        );
+        // The live status reads the stored connection the same way.
+        assert_eq!(
+            owner
+                .pending_permissions(GITHUB_APP_LIMITED_USER_TOKEN.as_bytes())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            owner
+                .pending_permissions(GITHUB_APP_USER_TOKEN.as_bytes())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // The unreliable login connects, then every live read fails.
+        let unreliable = owner
+            .complete(zeroize::Zeroizing::new(
+                b"kind-synthetic-code-unreliable".to_vec(),
+            ))
+            .await
+            .unwrap();
+        assert!(unreliable.reach()[0].pending_permissions.is_some());
+        for _ in 0..2 {
+            assert_eq!(
+                owner
+                    .pending_permissions(GITHUB_APP_UNRELIABLE_USER_TOKEN.as_bytes())
+                    .await,
+                Err(codewire_credential_broker::GitHubAppStatusError::Unavailable)
+            );
+        }
+        let limited = HeaderMap::from_iter([(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {GITHUB_APP_LIMITED_USER_TOKEN}")).unwrap(),
+        )]);
+        assert!(!github_bearer_authorization(&limited));
     }
 
     fn body(marker: &str) -> Vec<u8> {
@@ -2292,11 +2659,15 @@ mod tests {
                     HeaderValue::from_static("claude-code-20250219"),
                 );
             }
-            AnthropicKind::SubscriptionToken => {
+            AnthropicKind::SubscriptionToken | AnthropicKind::SignIn => {
+                let token = if kind == AnthropicKind::SignIn {
+                    claude_sign_in_access(1)
+                } else {
+                    KIND_CLAUDE_SUBSCRIPTION_TOKEN.to_owned()
+                };
                 headers.insert(
                     "authorization",
-                    HeaderValue::from_str(&format!("Bearer {KIND_CLAUDE_SUBSCRIPTION_TOKEN}"))
-                        .unwrap(),
+                    HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
                 );
                 headers.insert(
                     "anthropic-beta",
@@ -2350,6 +2721,99 @@ mod tests {
         let result = tracing::subscriber::with_default(subscriber, operation);
         let text = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
         (result, text)
+    }
+
+    fn claude_token_request(body: Value) -> Result<(StatusCode, Value), BrokerUpstreamError> {
+        let provider = SyntheticProvider::new();
+        claude_token_with(&provider, body)
+    }
+
+    fn claude_token_with(
+        provider: &SyntheticProvider,
+        body: Value,
+    ) -> Result<(StatusCode, Value), BrokerUpstreamError> {
+        let headers = HeaderMap::from_iter([(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )]);
+        provider.claude_token_answer(&headers, &serde_json::to_vec(&body).unwrap())
+    }
+
+    fn sign_in_exchange() -> Value {
+        json!({"grant_type": "authorization_code", "code": KIND_CLAUDE_SIGN_IN_CODE,
+               "redirect_uri": CLAUDE_MANUAL_REDIRECT_URL, "client_id": CLAUDE_CLIENT_ID,
+               "code_verifier": "v".repeat(43), "state": "s".repeat(43)})
+    }
+
+    /// The synthetic Claude: the fixed code is exchanged for a first, nearly
+    /// expired token; only the latest refresh token rotates, with exactly the
+    /// granted scopes; a rotated or replayed token is refused, and the
+    /// Anthropic route accepts only the latest access token as a sign-in.
+    #[test]
+    fn claude_sign_in_exchanges_rotates_and_refuses_stale_tokens() {
+        let provider = SyntheticProvider::new();
+        let (status, first) = claude_token_with(&provider, sign_in_exchange()).unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["access_token"], claude_sign_in_access(1));
+        assert_eq!(first["expires_in"], CLAUDE_SIGN_IN_FIRST_LIFETIME);
+        assert_eq!(first["scope"], CLAUDE_SIGN_IN_SCOPES);
+        let profile = provider
+            .claude_profile_answer(&HeaderMap::from_iter([(
+                http::header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", claude_sign_in_access(1))).unwrap(),
+            )]))
+            .unwrap();
+        assert_eq!(profile["organization"]["organization_type"], "claude_max");
+        let refresh = |token: String| {
+            json!({"grant_type": "refresh_token", "refresh_token": token,
+                   "client_id": CLAUDE_CLIENT_ID, "scope": CLAUDE_SIGN_IN_SCOPES})
+        };
+        let (status, second) =
+            claude_token_with(&provider, refresh(claude_sign_in_refresh(1))).unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(second["access_token"], claude_sign_in_access(2));
+        assert_eq!(second["expires_in"], CLAUDE_SIGN_IN_LIFETIME);
+        // The rotated refresh token is spent, and so is the old access token.
+        let (status, refused) =
+            claude_token_with(&provider, refresh(claude_sign_in_refresh(1))).unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(refused["error"], "invalid_grant");
+        let mut stale = anthropic_headers(AnthropicKind::SignIn);
+        assert!(
+            provider
+                .admit_anthropic(&Method::POST, &messages(), &stale, &anthropic_body(true))
+                .is_err()
+        );
+        stale.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {}", claude_sign_in_access(2))).unwrap(),
+        );
+        let admitted = provider
+            .admit_anthropic(&Method::POST, &messages(), &stale, &anthropic_body(true))
+            .unwrap();
+        assert_eq!(admitted.kind, AnthropicKind::SignIn);
+        // Without the OAuth beta the sign-in is refused.
+        stale.remove("anthropic-beta");
+        assert!(
+            provider
+                .admit_anthropic(&Method::POST, &messages(), &stale, &anthropic_body(true))
+                .is_err()
+        );
+        // A wrong code, client, redirect or verifier shape is refused.
+        for (field, value) in [
+            ("code", json!("other")),
+            ("client_id", json!("other")),
+            ("redirect_uri", json!("https://example.test/callback")),
+            ("code_verifier", json!("short")),
+            ("state", json!("s".repeat(44))),
+        ] {
+            let mut body = sign_in_exchange();
+            body[field] = value;
+            assert_eq!(
+                claude_token_request(body).unwrap().0,
+                StatusCode::BAD_REQUEST
+            );
+        }
     }
 
     /// The refused token is answered as a real provider answers an expired

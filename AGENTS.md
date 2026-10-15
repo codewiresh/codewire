@@ -152,6 +152,15 @@ invalidates a trust boundary, remove or defer that slice before spending the
 expensive gate. Keep the main checkout clean, investigate unexpected dirt before
 changing it, and reconcile `origin/main` immediately before landing.
 
+## Plans
+
+Plans, proposals, handoffs, goals and design history live in the sibling
+`codewire/private-docs` repository, checked out at `../private-docs`
+(`/home/user/src/codewire/private-docs` on the owner workstation), not in
+this repository. Write new plans there as `YYYY-MM-DD-<slug>.md`, commit and
+push them to its `main`, and link them from issues by path. Stable,
+shipped-behavior documentation stays under `docs/`.
+
 ## Worktree and artifact lifecycle
 
 On the owner workstation, keep the canonical checkout at
@@ -208,6 +217,10 @@ Hosted CI confirms after merge; it is not a merge gate. The exception is a
 hosted-only claim (such as scheduling, credentials, permissions, cache, or
 timing) that lacks equivalent accepted exact local/read-only evidence. Every
 `main` run finishes: never cancel one by hand, and fix forward when it fails.
+Pull-request CI runs only the quick checks (selection, policy, compiling every
+Rust target); `main` runs the full verification after merge. Label the pull
+request `ci-full` to run that full verification, Kind included, on the pull
+request when such a hosted-only claim needs it.
 
 Local and hosted policy checks share one checked-in core. Never maintain a
 separate local subset; preserve capability-selected expensive checks. A failing
@@ -327,7 +340,7 @@ weakening of the required local hardware gate.
   secret source authorizes ordinary child-visible environment projection under
   the original names; selecting a credential profile authorizes its typed
   proxy, signer, or executor, never raw provider material except the listed
-  direct delivery exception. Never infer the category from a key name or
+  direct delivery exceptions. Never infer the category from a key name or
   value. Profiles contain provider identities only, not secret mappings or
   exposure policies. Reuse the owning environment operation identity; do not
   create a separate secret generation.
@@ -343,15 +356,23 @@ weakening of the required local hardware gate.
 - Direct delivery of provider material into a sandbox is allowed only where the
   proxy cannot work, with owner approval, listed with its reason in
   docs/dev/SECRETS-AND-CREDENTIALS.md "Direct delivery exceptions" and cited at
-  the delivering code. The only exception is the Sandbox creator's own personal
-  Codex ChatGPT access token and ID token, written as Codex's
-  `~/.codex/auth.json` with a non-empty placeholder refresh token, because
-  Codex enables `/usage`, analytics and account routing only with its own
-  login. Refresh tokens, API keys, GitHub and SSH material and
+  the delivering code. The only exceptions are the Sandbox creator's own
+  personal sign-ins for Codex and Claude Code: the Codex ChatGPT access token
+  and ID token, written as Codex's `~/.codex/auth.json`, and the Claude access
+  token, written as Claude Code's `~/.claude/.credentials.json`
+  (`claudeAiOauth`), each with a non-empty placeholder refresh token, because
+  each agent enables `/usage` and its plan and account features only with its
+  own login. The Claude token carries exactly the six scopes Claude Code's
+  own login has (`user:inference`, `user:profile`,
+  `user:sessions:claude_code`, `user:mcp_servers`, `user:file_upload`,
+  `user:plugins`) and never a scope beyond them; the owner accepted that on
+  2026-10-14 so Claude Code in a Sandbox behaves like their own login.
+  Refresh tokens, API keys, Claude setup tokens, GitHub and SSH material and
   organization-owned credentials are never delivered. A delivered token is a
-  bearer token for the creator's ChatGPT account, usable from anywhere, and
-  stays valid at the provider until its `exp`; every process in the Sandbox,
-  and anyone who can open the Sandbox's terminal, can read it.
+  bearer token for the creator's account, usable from anywhere, and stays
+  valid at the provider until it expires (about 8 hours for Claude); every
+  process in the Sandbox, and anyone who can open the Sandbox's terminal, can
+  read it.
 - A hosted platform broker bridge epoch may reuse one authority decision (its
   runtime session and derived grants, never material) for at most 60 seconds,
   and releases nothing under an older one. Only epoch admission creates it, and
@@ -364,9 +385,10 @@ weakening of the required local hardware gate.
   organization, environment, binding, personal-credential confirmation or Pod
   lineage change within 60 seconds. Decrypted provider material may be reused
   only within one bridge epoch (hosted or owner-local delegation), for at most
-  two minutes, for exactly the record that lease admitted. Codex login delivery,
-  owner-local delegation leases, SSH signing, OAuth refresh admission and
-  keep-alive, and environment projection keep full per-call authority checks.
+  two minutes, for exactly the record that lease admitted. Codex and Claude
+  login delivery, owner-local delegation leases, SSH signing, OAuth refresh
+  admission and keep-alive, and environment projection keep full per-call
+  authority checks.
   SSH signing, OAuth keep-alive refresh and direct delivery never reuse
   material; an on-demand OAuth refresh uses the request's own lease, whose exact
   generation refresh admission rechecks. Do not add a process-wide or persistent

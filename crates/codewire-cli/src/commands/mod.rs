@@ -509,6 +509,8 @@ pub(crate) enum CredentialConnectProviderArg {
     #[value(help = credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE)]
     Codex,
     Github,
+    #[value(help = credential_input::CLAUDE_SIGN_IN_GUIDANCE)]
+    Claude,
 }
 
 #[derive(Debug, Args)]
@@ -771,7 +773,7 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) parent: Option<String>,
     #[arg(
         long,
-        value_parser = ["codex", "claude", "kimi"],
+        value_parser = ["codex", "claude", "kimi", "noel"],
         conflicts_with = "command",
         help = "Launch a managed agent conversation instead of a command"
     )]
@@ -779,7 +781,7 @@ pub(crate) struct EnvironmentRunArgs {
     #[arg(
         long,
         requires = "agent",
-        help = "Agent model; defaults to the agent's own default"
+        help = "Agent model; Codex and Claude default to their own, noel requires PROVIDER/ID"
     )]
     pub(crate) model: Option<String>,
     #[arg(

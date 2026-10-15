@@ -473,7 +473,8 @@ pub(super) async fn run(
     let model = args
         .model
         .clone()
-        .unwrap_or_else(|| agent.default_model().into());
+        .or_else(|| agent.default_model().map(str::to_owned))
+        .context("--model is required for this agent")?;
     validate_token("model", &model)?;
     let effort = agent_effort(agent, args.effort.as_deref())?;
     if let Some(prompt) = &args.prompt {

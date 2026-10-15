@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""package-cw-release.sh carries the local VM runtime the macOS cw embeds (#2539).
+"""package-cw-release.sh carries the local VM runtime every release cw embeds (#2539, #2733).
 
 The real packaging script runs twice, as the release workflow runs it: once as
 the Mac job (the darwin pair, embedding the runtime) and once as the Linux job
@@ -39,7 +39,15 @@ data = fx.executable(target, os.environ["CODEWIRE_VERSION"], revision=os.environ
                      tree=os.environ["CODEWIRE_SOURCE_TREE_SHA256"], embedded=embedded)
 (out / "cw").write_bytes(data)
 (out / "cw").chmod(0o755)
-(out / "cw.d").write_text(f"{{out / 'cw'}}: {{Path.cwd() / 'crates/demo/src/lib.rs'}}\\n")
+# As Cargo does for include_bytes!, dep-info names the embedded document.
+inputs = [str(Path.cwd() / "crates/demo/src/lib.rs")]
+if runtime:
+    inputs.append(runtime)
+    if os.environ.get("FAKE_CARGO_RUNTIME_SIBLING"):
+        inputs.append(str(Path(runtime).parent / "blobs"))
+    if os.environ.get("FAKE_CARGO_TAMPER_RUNTIME"):
+        Path(runtime).write_bytes(embedded + b" ")
+(out / "cw.d").write_text(f"{{out / 'cw'}}: {{' '.join(inputs)}}\\n")
 '''
 
 FAKE_RUSTC = f'''#!/bin/sh
@@ -87,27 +95,33 @@ class PackageTest(unittest.TestCase):
     def asset(self, dist, target):
         return (self.base / dist / release.asset_name(fx.VERSION, target)).read_bytes()
 
-    def test_the_macos_cw_embeds_the_runtime_and_the_delivery_carries_it(self):
+    def test_every_cw_embeds_the_runtime_and_the_delivery_carries_it(self):
         mac = self.package("mac", "aarch64-apple-darwin x86_64-apple-darwin",
                            CW_RELEASE_LOCAL_RUNTIME_DIR=str(self.runtime),
-                           CODEWIRE_LOCAL_RUNTIME="/ambient/must/not/reach/other/targets.json")
+                           CODEWIRE_LOCAL_RUNTIME="/ambient/must/not/reach/any/target.json")
         self.assertEqual(mac.returncode, 0, mac.stderr)
-        self.assertEqual(release.embedded_local_runtime(self.asset("mac", "aarch64-apple-darwin")), self.document)
-        self.assertIsNone(release.embedded_local_runtime(self.asset("mac", "x86_64-apple-darwin")))
+        for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            self.assertEqual(release.embedded_local_runtime(self.asset("mac", target)), self.document)
         staged = self.base / "mac/local-runtime"
         self.assertEqual((staged / release.LOCAL_RUNTIME_NAME).read_bytes(), self.document)
         self.assertEqual(sorted(path.name for path in (staged / "blobs/sha256").iterdir()),
                          sorted(path.name for path in (self.runtime / "blobs/sha256").iterdir()))
 
+        # The Linux job embeds the imported runtime in the cws it builds.
         linux = self.package("full", "x86_64-unknown-linux-musl aarch64-unknown-linux-gnu",
                              CW_RELEASE_IMPORT_DIR=str(self.base / "mac"))
         self.assertEqual(linux.returncode, 0, linux.stderr)
+        self.assertIn(f"cw-release: local runtime document_sha256={fx.digest(self.document)} blobs=21",
+                      linux.stdout.splitlines())
+        for target in ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-gnu"):
+            self.assertIn(f"cw-release: admitted target={target}", linux.stdout)
+            self.assertEqual(release.embedded_local_runtime(self.asset("full", target)), self.document)
         self.assertFalse((self.base / "full/local-runtime").exists())
         verified = subprocess.run([sys.executable, str(ROOT / "scripts/ci/release/cw_release.py"), "verify",
                                    "--dist", str(self.base / "full"), "--unsigned"],
                                   capture_output=True, text=True)
         self.assertEqual(verified.returncode, 0, verified.stderr)
-        self.assertIn(f"cw-release: local runtime document_sha256={fx.digest(self.document)} blobs=12",
+        self.assertIn(f"cw-release: local runtime document_sha256={fx.digest(self.document)} blobs=21",
                       verified.stdout.splitlines())
         self.assertIn(f"cw-release: verified targets=4 version={fx.VERSION} runtime_equal=true signed=false",
                       verified.stdout.splitlines())
@@ -128,13 +142,35 @@ class PackageTest(unittest.TestCase):
             (other / "blobs/sha256" / name).write_bytes(data)
         for label, targets, extra in (
                 ("relative", "aarch64-apple-darwin", {"CW_RELEASE_LOCAL_RUNTIME_DIR": "runtime"}),
-                ("no-macos-arm64", "x86_64-apple-darwin", {"CW_RELEASE_LOCAL_RUNTIME_DIR": str(self.runtime)}),
                 ("other-revision", "aarch64-apple-darwin", {"CW_RELEASE_LOCAL_RUNTIME_DIR": str(other)})):
             with self.subTest(case=label):
                 result = self.package(f"refused-{label}", targets, **extra)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("package-cw-release:", result.stderr)
                 self.assertFalse((self.base / f"target-refused-{label}").exists(), "a build ran")
+
+    def runtime_copy(self, name):
+        copy = self.base / name
+        shutil.copytree(self.runtime, copy)
+        return copy
+
+    def test_admission_accepts_only_the_verified_runtime_document(self):
+        # A cw's dep-info names the runtime document outside the repository;
+        # admission accepts exactly that file with the verified bytes.
+        mac = self.package("admit-mac", "aarch64-apple-darwin", CW_RELEASE_LOCAL_RUNTIME_DIR=str(self.runtime))
+        self.assertEqual(mac.returncode, 0, mac.stderr)
+        self.assertIn("cw-release: admitted target=aarch64-apple-darwin", mac.stdout)
+        for label, extra, reason in (
+                ("sibling", {"FAKE_CARGO_RUNTIME_SIBLING": "1"}, "compiled inputs outside the repository"),
+                ("tampered", {"FAKE_CARGO_TAMPER_RUNTIME": "1"}, "embedded input changed after it was verified")):
+            with self.subTest(case=label):
+                runtime = self.runtime_copy(f"runtime-{label}")
+                result = self.package(f"admit-{label}", "aarch64-apple-darwin",
+                                      CW_RELEASE_LOCAL_RUNTIME_DIR=str(runtime), **extra)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"cw-release: REJECT {reason}", result.stderr)
+                self.assertFalse((self.base / f"admit-{label}" / release.asset_name(
+                    fx.VERSION, "aarch64-apple-darwin")).exists())
 
     def test_a_runtime_both_imported_and_given_is_refused(self):
         mac = self.package("mac-twice", "aarch64-apple-darwin x86_64-apple-darwin",

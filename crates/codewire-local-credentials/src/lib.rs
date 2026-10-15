@@ -11,6 +11,7 @@
 //! own that material-bearing authority.
 
 mod broker_channel;
+mod broker_log;
 mod broker_process;
 mod client;
 mod control;
@@ -55,7 +56,10 @@ pub use repository::{
 pub use service::serve_local_credential_authority;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use service::serve_os_local_credential_authority_with_process_spawners;
-pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError, authority_exit_code};
+pub use transport::{
+    AuthorityRuntimeConfig, AuthorityRuntimeError, MAXIMUM_SOCKET_PATH_BYTES, authority_exit_code,
+    check_socket_path,
+};
 pub use workload_secret::{
     LocalLaunchSecretSelection, LocalSecretProject, ResolvedWorkloadSecretMetadata,
     WorkloadSecretMetadata, WorkloadSecretSelection, WorkloadSecretSource,
@@ -740,14 +744,14 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 .ok_or_else(|| AccessError::ProviderUnavailable {
                     provider: input.provider.clone(),
                 })?;
-        // A Claude subscription token (Anthropic OAuth) is a platform
-        // credential only, whatever the shared catalog admits. The native
-        // client projection has no subscription form.
-        // TODO(native-claude-subscription-form): admit it locally once native
+        // A Claude subscription token (Anthropic OAuth) and a Claude sign-in
+        // are platform credentials only, whatever the shared catalog admits.
+        // The native client projection has neither form.
+        // TODO(native-claude-subscription-form): admit them locally once native
         // VMs project Claude Code's subscription mode.
         if !provider.supports_authentication_kind(input.authentication_kind)
             || (input.provider.as_str() == "anthropic"
-                && input.authentication_kind == CredentialAuthKind::OAuth)
+                && input.authentication_kind != CredentialAuthKind::ApiKey)
         {
             return Err(AccessError::UnsupportedAuthenticationKind {
                 provider: input.provider,
@@ -3925,6 +3929,7 @@ fn auth_kind_to_str(kind: CredentialAuthKind) -> &'static str {
         CredentialAuthKind::AccessToken => "access_token",
         CredentialAuthKind::GitHubApp => "github_app",
         CredentialAuthKind::SshKey => "ssh_key",
+        CredentialAuthKind::ClaudeSignIn => "claude_sign_in",
     }
 }
 
@@ -3935,6 +3940,7 @@ fn parse_auth_kind(value: &str) -> Result<CredentialAuthKind, LocalCredentialErr
         "access_token" => Ok(CredentialAuthKind::AccessToken),
         "github_app" => Ok(CredentialAuthKind::GitHubApp),
         "ssh_key" => Ok(CredentialAuthKind::SshKey),
+        "claude_sign_in" => Ok(CredentialAuthKind::ClaudeSignIn),
         _ => Err(LocalCredentialError::CorruptMetadata),
     }
 }

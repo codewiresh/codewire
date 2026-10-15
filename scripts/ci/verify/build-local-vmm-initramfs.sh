@@ -25,6 +25,12 @@ readonly ARM64_RUNC_SHA256='ca70e7dbd6616ca782a59b5d3ac86909123fdaa9fa3f89dcf290
 # and exact aports commit 1e823a60eb85606954b3a5af5f8e5bbd1ea680cf:
 # https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/busybox-static-1.37.0-r30.apk
 readonly ARM64_BUSYBOX_SHA256='198f6f675a49ac734082e054b823d3e2e947180ca2f632852ae1c09e950fd676'
+# bin/busybox.static from the same Alpine v3.23 busybox-static 1.37.0-r30 for
+# x86_64. The signed APK has SHA-256
+# bb30365b954f531938a33de18173342185844828863121d7e821115d2f7f29c9 and the same
+# aports commit:
+# https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/busybox-static-1.37.0-r30.apk
+readonly X86_64_BUSYBOX_SHA256='82bbbabec12a985ae58810cfe975c3399264dc888aa592d8e460732bdd30a8dd'
 
 usage() {
   printf '%s\n' \
@@ -47,8 +53,8 @@ usage() {
     'after comparison. --verify-root applies the same proof and adds static' \
     'target-architecture BusyBox and official runc 1.5.1 binaries. Exact' \
     'lowercase SHA-256 values must be supplied; runc must match the built-in' \
-    'reviewed release digest. Arm64 BusyBox must also match its built-in' \
-    'reviewed Alpine package payload digest.' \
+    'reviewed release digest. BusyBox must also match the built-in reviewed' \
+    'Alpine package payload digest for the target.' \
     'cw is supplied separately through the pinned read-only runtime disk.' \
     '--workload-network-fixture is allowed only with --verify-root and adds the' \
     'fixed opt-in developer client to both independent builds. This is not a' \
@@ -125,6 +131,14 @@ require_exact_toolchain() {
 validate_target() {
   case "$TARGET" in
     "$DEFAULT_TARGET"|"$ARM64_TARGET") ;;
+    *) die "unsupported static guest target: $TARGET" ;;
+  esac
+}
+
+required_busybox_sha256() {
+  case "$TARGET" in
+    "$DEFAULT_TARGET") printf '%s\n' "$X86_64_BUSYBOX_SHA256" ;;
+    "$ARM64_TARGET") printf '%s\n' "$ARM64_BUSYBOX_SHA256" ;;
     *) die "unsupported static guest target: $TARGET" ;;
   esac
 }
@@ -229,9 +243,8 @@ verify_reproducible() {
       die "--busybox-sha256 must be exactly 64 lowercase hexadecimal characters"
     [[ "$(sha256sum "$root_busybox" | awk '{print $1}')" == "$root_busybox_sha256" ]] ||
       die "BusyBox digest differs from --busybox-sha256"
-    if [[ "$TARGET" == "$ARM64_TARGET" && "$root_busybox_sha256" != "$ARM64_BUSYBOX_SHA256" ]]; then
-      die 'BusyBox digest is not the reviewed Alpine arm64 static payload digest'
-    fi
+    [[ "$root_busybox_sha256" == "$(required_busybox_sha256)" ]] ||
+      die "BusyBox digest is not the reviewed Alpine static payload digest for $TARGET"
     verify_static_elf BusyBox "$root_busybox" "$TARGET"
     root_runc="$(absolute_existing_file runc "$root_runc")"
     [[ "$root_runc_sha256" =~ ^[0-9a-f]{64}$ ]] ||

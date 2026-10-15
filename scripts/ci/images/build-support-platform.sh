@@ -8,7 +8,7 @@
 #
 # linux/amd64 builds on the job's own pinned BuildKit container. linux/arm64
 # builds natively on the protected arm64 BuildKit node (infra
-# docs/runbooks/ci-arm64-builder.md), reached over mutual TLS with the client
+# runbooks/ci-arm64-builder.md), reached over mutual TLS with the client
 # certificate this job's support-publisher role reads from OpenBao. If that
 # certificate cannot be read or the node does not answer as linux/arm64, the
 # build fails: it never falls back to emulation, which cannot finish in time.

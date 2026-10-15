@@ -1,11 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty, server};
+use russh::{Channel, ChannelId, ChannelMsg, MethodKind, MethodSet, Pty, server};
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::daemon::{
     DaemonClient, DaemonClientError, DaemonSessionOutput, ExecDaemonSessionInput, ExecSessionInput,
@@ -17,6 +21,13 @@ use crate::sftp::DaemonSftpRunner;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "ssh/stock_credentials.rs"]
 mod stock_credentials;
+
+/// How often the server asks a silent client whether it is still there, and
+/// how many unanswered asks end the connection. A client that vanished
+/// without closing its connection is noticed within about a minute, and its
+/// sessions end with it.
+pub const WORKSPACE_SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+pub const WORKSPACE_SSH_KEEPALIVE_MAX: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshSessionRequest {
@@ -54,6 +65,15 @@ pub enum SshSessionOutput {
     Error(String),
 }
 
+/// One process session's place: the SSH connection that started it and its
+/// channel there. russh numbers channels per connection from the same
+/// start, so a channel id alone names a session on every connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SshSessionKey {
+    pub connection: u64,
+    pub channel: ChannelId,
+}
+
 #[derive(Clone)]
 pub struct SshChannelOutput {
     channel: ChannelId,
@@ -76,20 +96,26 @@ pub struct SshSessionRunnerError(pub String);
 
 #[async_trait]
 pub trait SshSessionRunner: Send + Sync + 'static {
+    /// Start the process of one exec or shell request. The returned session
+    /// owns the process: its connection's input pump holds it, and dropping
+    /// it ends the process.
     async fn start_session(
         &self,
-        channel: ChannelId,
+        key: SshSessionKey,
         start: DaemonSessionStart,
         output: SshChannelOutput,
-    ) -> Result<(), SshSessionRunnerError>;
+    ) -> Result<Box<dyn SshSession>, SshSessionRunnerError>;
+}
 
-    async fn session_input(
-        &self,
-        channel: ChannelId,
-        input: SshSessionInput,
-    ) -> Result<(), SshSessionRunnerError>;
-
-    async fn close_session(&self, channel: ChannelId) -> Result<(), SshSessionRunnerError>;
+/// A running process session, owned by its SSH channel. Dropping it ends the
+/// process: the daemon signals the process group of a command that is still
+/// running.
+#[async_trait]
+pub trait SshSession: Send + 'static {
+    /// Deliver one piece of input in order. This waits while the process is
+    /// not reading its stdin, and that wait is the backpressure that pauses
+    /// the SSH connection.
+    async fn send(&mut self, input: SshSessionInput) -> Result<(), SshSessionRunnerError>;
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -149,12 +175,6 @@ where
 
 pub struct DaemonBackedSshRunner<C> {
     client: C,
-    sessions: tokio::sync::Mutex<HashMap<ChannelId, DaemonRunningSession>>,
-}
-
-enum DaemonRunningSession {
-    Exec(ExecDaemonSessionInput),
-    Pty(PtyDaemonSessionInput),
 }
 
 impl<C> DaemonBackedSshRunner<C>
@@ -162,10 +182,7 @@ where
     C: DaemonClient,
 {
     pub fn new(client: C) -> Self {
-        Self {
-            client,
-            sessions: tokio::sync::Mutex::new(HashMap::new()),
-        }
+        Self { client }
     }
 }
 
@@ -176,10 +193,10 @@ where
 {
     async fn start_session(
         &self,
-        channel: ChannelId,
+        key: SshSessionKey,
         start: DaemonSessionStart,
         output: SshChannelOutput,
-    ) -> Result<(), SshSessionRunnerError> {
+    ) -> Result<Box<dyn SshSession>, SshSessionRunnerError> {
         match start {
             DaemonSessionStart::Exec(start) => {
                 let mut session = self
@@ -188,13 +205,15 @@ where
                     .await
                     .map_err(SshSessionRunnerError::from)?;
                 let input = session.input_handle();
-                tokio::spawn(async move {
-                    let _ = forward_exec_daemon_outputs(&mut session, output).await;
-                });
-                self.sessions
-                    .lock()
-                    .await
-                    .insert(channel, DaemonRunningSession::Exec(input));
+                // Aborting this task drops the daemon session's response
+                // stream, which the daemon takes as the client leaving.
+                let output = AbortOnDropHandle::new(tokio::spawn(async move {
+                    let _ = forward_exec_daemon_outputs(key, &mut session, output).await;
+                }));
+                Ok(Box::new(DaemonExecSshSession {
+                    input,
+                    _output: output,
+                }))
             }
             DaemonSessionStart::Pty(start) => {
                 let mut session = self
@@ -203,67 +222,59 @@ where
                     .await
                     .map_err(SshSessionRunnerError::from)?;
                 let input = session.input_handle();
-                tokio::spawn(async move {
-                    let _ = forward_pty_daemon_outputs(&mut session, output).await;
-                });
-                self.sessions
-                    .lock()
-                    .await
-                    .insert(channel, DaemonRunningSession::Pty(input));
+                let output = AbortOnDropHandle::new(tokio::spawn(async move {
+                    let _ = forward_pty_daemon_outputs(key, &mut session, output).await;
+                }));
+                Ok(Box::new(DaemonPtySshSession {
+                    input,
+                    _output: output,
+                }))
             }
         }
-        Ok(())
-    }
-
-    async fn session_input(
-        &self,
-        channel: ChannelId,
-        input: SshSessionInput,
-    ) -> Result<(), SshSessionRunnerError> {
-        let session = self.sessions.lock().await.get(&channel).cloned();
-        match (session, input) {
-            (Some(DaemonRunningSession::Exec(session)), SshSessionInput::Stdin(data)) => session
-                .send_input(ExecSessionInput::Stdin(data))
-                .await
-                .map_err(SshSessionRunnerError::from),
-            (Some(DaemonRunningSession::Exec(session)), SshSessionInput::CloseStdin) => session
-                .send_input(ExecSessionInput::CloseStdin)
-                .await
-                .map_err(SshSessionRunnerError::from),
-            (Some(DaemonRunningSession::Exec(_)), SshSessionInput::Resize { .. }) => Ok(()),
-            (Some(DaemonRunningSession::Pty(session)), SshSessionInput::Stdin(data)) => session
-                .send_input(PtySessionInput::Stdin(data))
-                .await
-                .map_err(SshSessionRunnerError::from),
-            (Some(DaemonRunningSession::Pty(session)), SshSessionInput::CloseStdin) => session
-                .send_input(PtySessionInput::CloseStdin)
-                .await
-                .map_err(SshSessionRunnerError::from),
-            (
-                Some(DaemonRunningSession::Pty(session)),
-                SshSessionInput::Resize { width, height },
-            ) => session
-                .send_input(PtySessionInput::Resize { width, height })
-                .await
-                .map_err(SshSessionRunnerError::from),
-            (None, _) => Err(SshSessionRunnerError(format!(
-                "unknown SSH channel {channel}"
-            ))),
-        }
-    }
-
-    async fn close_session(&self, channel: ChannelId) -> Result<(), SshSessionRunnerError> {
-        self.sessions.lock().await.remove(&channel);
-        Ok(())
     }
 }
 
-impl Clone for DaemonRunningSession {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Exec(session) => Self::Exec(session.clone()),
-            Self::Pty(session) => Self::Pty(session.clone()),
-        }
+/// A daemon exec session held by its SSH channel. Dropping it closes both of
+/// the daemon session's streams.
+struct DaemonExecSshSession {
+    input: ExecDaemonSessionInput,
+    _output: AbortOnDropHandle<()>,
+}
+
+#[async_trait]
+impl SshSession for DaemonExecSshSession {
+    async fn send(&mut self, input: SshSessionInput) -> Result<(), SshSessionRunnerError> {
+        let input = match input {
+            SshSessionInput::Stdin(data) => ExecSessionInput::Stdin(data),
+            SshSessionInput::CloseStdin => ExecSessionInput::CloseStdin,
+            SshSessionInput::Resize { .. } => return Ok(()),
+        };
+        self.input
+            .send_input(input)
+            .await
+            .map_err(SshSessionRunnerError::from)
+    }
+}
+
+/// A daemon PTY session held by its SSH channel. Dropping it closes both of
+/// the daemon session's streams.
+struct DaemonPtySshSession {
+    input: PtyDaemonSessionInput,
+    _output: AbortOnDropHandle<()>,
+}
+
+#[async_trait]
+impl SshSession for DaemonPtySshSession {
+    async fn send(&mut self, input: SshSessionInput) -> Result<(), SshSessionRunnerError> {
+        let input = match input {
+            SshSessionInput::Stdin(data) => PtySessionInput::Stdin(data),
+            SshSessionInput::CloseStdin => PtySessionInput::CloseStdin,
+            SshSessionInput::Resize { width, height } => PtySessionInput::Resize { width, height },
+        };
+        self.input
+            .send_input(input)
+            .await
+            .map_err(SshSessionRunnerError::from)
     }
 }
 
@@ -274,6 +285,7 @@ impl From<DaemonClientError> for SshSessionRunnerError {
 }
 
 async fn forward_exec_daemon_outputs(
+    key: SshSessionKey,
     session: &mut crate::daemon::ExecDaemonSession,
     output: SshChannelOutput,
 ) -> Result<(), SshSessionRunnerError> {
@@ -281,9 +293,13 @@ async fn forward_exec_daemon_outputs(
         match session.next_output().await {
             Ok(Some(daemon_output)) => {
                 let ssh_output = ssh_output_from_daemon(daemon_output);
-                let is_exit = matches!(ssh_output, SshSessionOutput::Exit(_));
+                let exit = match ssh_output {
+                    SshSessionOutput::Exit(code) => Some(code),
+                    _ => None,
+                };
                 output.send(ssh_output).await?;
-                if is_exit {
+                if let Some(code) = exit {
+                    log_session_exit(key, code);
                     return Ok(());
                 }
             }
@@ -311,6 +327,7 @@ async fn forward_exec_daemon_outputs(
 }
 
 async fn forward_pty_daemon_outputs(
+    key: SshSessionKey,
     session: &mut crate::daemon::PtyDaemonSession,
     output: SshChannelOutput,
 ) -> Result<(), SshSessionRunnerError> {
@@ -318,9 +335,13 @@ async fn forward_pty_daemon_outputs(
         match session.next_output().await {
             Ok(Some(daemon_output)) => {
                 let ssh_output = ssh_output_from_daemon(daemon_output);
-                let is_exit = matches!(ssh_output, SshSessionOutput::Exit(_));
+                let exit = match ssh_output {
+                    SshSessionOutput::Exit(code) => Some(code),
+                    _ => None,
+                };
                 output.send(ssh_output).await?;
-                if is_exit {
+                if let Some(code) = exit {
+                    log_session_exit(key, code);
                     return Ok(());
                 }
             }
@@ -345,6 +366,15 @@ async fn forward_pty_daemon_outputs(
             }
         }
     }
+}
+
+fn log_session_exit(key: SshSessionKey, code: i32) {
+    tracing::info!(
+        connection = key.connection,
+        channel = %key.channel,
+        exit_code = code,
+        "workspace SSH session exited"
+    );
 }
 
 fn ssh_output_from_daemon(output: DaemonSessionOutput) -> SshSessionOutput {
@@ -409,6 +439,65 @@ pub async fn send_ssh_session_output(
 
 fn exit_code_to_u32(code: i32) -> u32 {
     u32::try_from(code).unwrap_or(1)
+}
+
+/// Deliver a process channel's input to its session, in the order the client
+/// sent it, until the channel or its connection ends; then end the session.
+///
+/// russh queues every message for a channel (a bounded queue) before it hands
+/// the message to the handler, and waits when that queue is full. This pump
+/// reads the queue only as fast as the process takes its input, so a process
+/// that is not reading its stdin pauses the connection's reads: bounded
+/// backpressure down to TCP, with no data buffered beyond the queue.
+async fn pump_session_input(
+    key: SshSessionKey,
+    mut channel: Channel<server::Msg>,
+    mut session: Box<dyn SshSession>,
+    ended: CancellationToken,
+) {
+    // A process that closed its stdin, or whose input stream ended, still
+    // runs; the rest of its input is read and dropped so the channel never
+    // stalls the connection.
+    let mut accepting = true;
+    let reason = loop {
+        let input = match channel.wait().await {
+            Some(ChannelMsg::Data { data }) => SshSessionInput::Stdin(data.to_vec()),
+            Some(ChannelMsg::Eof) => SshSessionInput::CloseStdin,
+            Some(ChannelMsg::WindowChange {
+                col_width,
+                row_height,
+                ..
+            }) => SshSessionInput::Resize {
+                width: pty_dimension_to_i32(col_width),
+                height: pty_dimension_to_i32(row_height),
+            },
+            Some(ChannelMsg::Close) => break "the client closed the channel",
+            None => break "the connection ended",
+            Some(_) => continue,
+        };
+        if !accepting {
+            continue;
+        }
+        // Input the client sent before closing is still delivered while the
+        // process takes it; only a wait on a process that is not reading
+        // ends early, when the channel or connection ends.
+        tokio::select! {
+            biased;
+            sent = session.send(input) => {
+                if sent.is_err() {
+                    accepting = false;
+                }
+            }
+            () = ended.cancelled() => break "the channel or connection ended while input waited",
+        }
+    };
+    drop(session);
+    tracing::info!(
+        connection = key.connection,
+        channel = %key.channel,
+        reason,
+        "workspace SSH session ended"
+    );
 }
 
 #[derive(Debug, Error)]
@@ -497,14 +586,22 @@ where
     }
 }
 
+/// Connection ids for logs and session keys; unique within the process.
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
+
+/// One SSH connection's handler. It owns the connection's sessions: they end
+/// when their channel closes or when the connection ends, for any reason,
+/// because russh drops the handler then.
 pub struct WorkspaceSshHandler<R> {
     runner: Arc<R>,
     sftp: Option<Arc<dyn SftpSubsystemRunner>>,
     scp: Option<Arc<dyn ScpProtocolRunnerBridge>>,
     exec_shell: Option<String>,
+    connection: u64,
+    /// Cancelled when the connection ends; each process channel holds a
+    /// child token.
+    ended: CancellationToken,
     channels: HashMap<ChannelId, SshChannelState>,
-    file_protocol_channels: HashSet<ChannelId>,
-    sftp_channels: HashSet<ChannelId>,
 }
 
 impl<R> WorkspaceSshHandler<R>
@@ -529,9 +626,9 @@ where
             sftp,
             scp,
             exec_shell: None,
+            connection: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
+            ended: CancellationToken::new(),
             channels: HashMap::new(),
-            file_protocol_channels: HashSet::new(),
-            sftp_channels: HashSet::new(),
         }
     }
 
@@ -544,61 +641,103 @@ where
         self
     }
 
+    /// This connection's id in session keys and logs.
+    pub fn connection_id(&self) -> u64 {
+        self.connection
+    }
+
+    /// Take an opened channel that no request has started yet.
+    fn take_pending(&mut self, channel: ChannelId) -> Option<PendingChannel> {
+        match self.channels.remove(&channel) {
+            Some(SshChannelState::Pending(pending)) => Some(pending),
+            Some(other) => {
+                self.channels.insert(channel, other);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn pending_mut(&mut self, channel: ChannelId) -> Option<&mut PendingChannel> {
+        match self.channels.get_mut(&channel) {
+            Some(SshChannelState::Pending(pending)) => Some(pending),
+            _ => None,
+        }
+    }
+
     async fn start_channel_session(
         &mut self,
         channel: ChannelId,
         command: Vec<String>,
         session: &mut server::Session,
     ) -> Result<(), WorkspaceSshError> {
-        let Some(state) = self.channels.get(&channel) else {
+        let Some(pending) = self.take_pending(channel) else {
             session.channel_failure(channel)?;
             return Err(WorkspaceSshError::UnknownChannel(channel));
         };
 
+        let pty = pending.pty.is_some();
         let start = build_daemon_session_start(SshSessionRequest {
             command,
             working_dir: String::new(),
-            env: state.env.clone(),
-            pty: state.pty.clone(),
+            env: pending.env,
+            pty: pending.pty,
         });
+        let key = SshSessionKey {
+            connection: self.connection,
+            channel,
+        };
         let output = SshChannelOutput::new(channel, session.handle());
-        if let Err(err) = self.runner.start_session(channel, start, output).await {
-            session.channel_failure(channel)?;
-            return Err(WorkspaceSshError::Runner(err));
-        }
-        if let Some(state) = self.channels.get_mut(&channel) {
-            state.started = true;
-        }
+        let process = match self.runner.start_session(key, start, output).await {
+            Ok(process) => process,
+            Err(err) => {
+                session.channel_failure(channel)?;
+                return Err(WorkspaceSshError::Runner(err));
+            }
+        };
+        tracing::info!(
+            connection = key.connection,
+            channel = %key.channel,
+            pty,
+            "workspace SSH session started"
+        );
+        let ended = self.ended.child_token();
+        tokio::spawn(pump_session_input(
+            key,
+            pending.channel,
+            process,
+            ended.clone(),
+        ));
+        self.channels
+            .insert(channel, SshChannelState::Process { ended });
         session.channel_success(channel)?;
         Ok(())
     }
+}
 
-    async fn send_input(
-        &self,
-        channel: ChannelId,
-        input: SshSessionInput,
-    ) -> Result<(), WorkspaceSshError> {
-        self.runner.session_input(channel, input).await?;
-        Ok(())
+impl<R> Drop for WorkspaceSshHandler<R> {
+    fn drop(&mut self) {
+        // russh drops the handler when the connection ends, however it ends:
+        // closed, reset, idle, or keepalive timeout. End every session.
+        self.ended.cancel();
     }
 }
 
-struct SshChannelState {
-    channel: Option<Channel<server::Msg>>,
+enum SshChannelState {
+    /// Opened, and collecting its environment and terminal until a request
+    /// starts it. russh queues the channel's messages, including any early
+    /// input, until its process takes the channel.
+    Pending(PendingChannel),
+    /// Runs a process. Its input pump owns the channel and the session.
+    Process { ended: CancellationToken },
+    /// Served by SFTP or SCP, which read the channel themselves.
+    FileProtocol { sftp: bool },
+}
+
+struct PendingChannel {
+    channel: Channel<server::Msg>,
     env: Vec<String>,
     pty: Option<SshPtyRequest>,
-    started: bool,
-}
-
-impl SshChannelState {
-    fn new(channel: Channel<server::Msg>) -> Self {
-        Self {
-            channel: Some(channel),
-            env: Vec::new(),
-            pty: None,
-            started: false,
-        }
-    }
 }
 
 pub fn workspace_ssh_server_config() -> server::Config {
@@ -609,6 +748,8 @@ pub fn workspace_ssh_server_config() -> server::Config {
 
 pub fn apply_workspace_ssh_policy(config: &mut server::Config) {
     config.methods = workspace_ssh_auth_methods();
+    config.keepalive_interval = Some(WORKSPACE_SSH_KEEPALIVE_INTERVAL);
+    config.keepalive_max = WORKSPACE_SSH_KEEPALIVE_MAX;
 }
 
 pub fn workspace_ssh_auth_methods() -> MethodSet {
@@ -686,8 +827,14 @@ where
         reply: server::ChannelOpenHandle,
         _session: &mut server::Session,
     ) -> Result<(), Self::Error> {
-        self.channels
-            .insert(channel.id(), SshChannelState::new(channel));
+        self.channels.insert(
+            channel.id(),
+            SshChannelState::Pending(PendingChannel {
+                channel,
+                env: Vec::new(),
+                pty: None,
+            }),
+        );
         reply.accept().await;
         Ok(())
     }
@@ -723,11 +870,11 @@ where
         _modes: &[(Pty, u32)],
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
-        let Some(state) = self.channels.get_mut(&channel) else {
+        let Some(pending) = self.pending_mut(channel) else {
             session.channel_failure(channel)?;
             return Err(WorkspaceSshError::UnknownChannel(channel));
         };
-        state.pty = Some(SshPtyRequest {
+        pending.pty = Some(SshPtyRequest {
             term: term.into(),
             width: col_width,
             height: row_height,
@@ -743,11 +890,13 @@ where
         variable_value: &str,
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
-        let Some(state) = self.channels.get_mut(&channel) else {
+        let Some(pending) = self.pending_mut(channel) else {
             session.channel_failure(channel)?;
             return Err(WorkspaceSshError::UnknownChannel(channel));
         };
-        state.env.push(format!("{variable_name}={variable_value}"));
+        pending
+            .env
+            .push(format!("{variable_name}={variable_value}"));
         session.channel_success(channel)?;
         Ok(())
     }
@@ -779,18 +928,15 @@ where
                 session.channel_failure(channel)?;
                 return Ok(());
             };
-            let Some(mut state) = self.channels.remove(&channel) else {
+            let Some(pending) = self.take_pending(channel) else {
                 session.channel_failure(channel)?;
                 return Err(WorkspaceSshError::UnknownChannel(channel));
             };
-            let Some(ssh_channel) = state.channel.take() else {
-                session.channel_failure(channel)?;
-                return Err(WorkspaceSshError::UnknownChannel(channel));
-            };
-            self.file_protocol_channels.insert(channel);
+            self.channels
+                .insert(channel, SshChannelState::FileProtocol { sftp: false });
             session.channel_success(channel)?;
             tokio::spawn(async move {
-                let _ = scp.start_scp_bridge(command, ssh_channel).await;
+                let _ = scp.start_scp_bridge(command, pending.channel).await;
             });
             return Ok(());
         }
@@ -820,35 +966,21 @@ where
             session.channel_failure(channel)?;
             return Ok(());
         };
-        let Some(mut state) = self.channels.remove(&channel) else {
+        let Some(pending) = self.take_pending(channel) else {
             session.channel_failure(channel)?;
             return Err(WorkspaceSshError::UnknownChannel(channel));
         };
-        let Some(ssh_channel) = state.channel.take() else {
-            session.channel_failure(channel)?;
-            return Err(WorkspaceSshError::UnknownChannel(channel));
-        };
-        self.file_protocol_channels.insert(channel);
-        self.sftp_channels.insert(channel);
+        self.channels
+            .insert(channel, SshChannelState::FileProtocol { sftp: true });
         session.channel_success(channel)?;
         tokio::spawn(async move {
-            let _ = sftp.start_sftp(ssh_channel).await;
+            let _ = sftp.start_sftp(pending.channel).await;
         });
         Ok(())
     }
 
-    async fn data(
-        &mut self,
-        channel: ChannelId,
-        data: &[u8],
-        _session: &mut server::Session,
-    ) -> Result<(), Self::Error> {
-        if self.file_protocol_channels.contains(&channel) {
-            return Ok(());
-        }
-        self.send_input(channel, SshSessionInput::Stdin(data.to_vec()))
-            .await
-    }
+    // Channel data needs no handler: russh queues it on the channel, where
+    // the process's input pump, SFTP or SCP reads it in order.
 
     async fn channel_eof(
         &mut self,
@@ -857,15 +989,14 @@ where
     ) -> Result<(), Self::Error> {
         // An SFTP client sends EOF once it is done, which is when sshd's
         // sftp-server exits 0. OpenSSH reports a subsystem channel closed
-        // without an exit status as status -1, and scp then fails.
-        if self.sftp_channels.remove(&channel) {
+        // without an exit status as status -1, and scp then fails. A process
+        // channel's EOF reaches its pump in order, after its input.
+        if let Some(SshChannelState::FileProtocol { sftp }) = self.channels.get_mut(&channel)
+            && std::mem::take(sftp)
+        {
             session.exit_status_request(channel, 0)?;
-            return Ok(());
         }
-        if self.file_protocol_channels.contains(&channel) {
-            return Ok(());
-        }
-        self.send_input(channel, SshSessionInput::CloseStdin).await
+        Ok(())
     }
 
     async fn channel_close(
@@ -873,13 +1004,10 @@ where
         channel: ChannelId,
         _session: &mut server::Session,
     ) -> Result<(), Self::Error> {
-        self.sftp_channels.remove(&channel);
-        if self.file_protocol_channels.remove(&channel) {
-            return Ok(());
-        }
-        let state = self.channels.remove(&channel);
-        if state.map(|state| state.started).unwrap_or(false) {
-            self.runner.close_session(channel).await?;
+        if let Some(SshChannelState::Process { ended }) = self.channels.remove(&channel) {
+            // The pump also reads the close in order; this ends a session
+            // whose pump is waiting on a process that is not reading.
+            ended.cancel();
         }
         Ok(())
     }
@@ -893,20 +1021,21 @@ where
         _pix_height: u32,
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
-        let resize = SshSessionInput::Resize {
-            width: pty_dimension_to_i32(col_width),
-            height: pty_dimension_to_i32(row_height),
-        };
-        let Some(state) = self.channels.get_mut(&channel) else {
-            session.channel_failure(channel)?;
-            return Err(WorkspaceSshError::UnknownChannel(channel));
-        };
-        if let Some(pty) = state.pty.as_mut() {
-            pty.width = col_width;
-            pty.height = row_height;
-        }
-        if state.started {
-            self.send_input(channel, resize).await?;
+        match self.channels.get_mut(&channel) {
+            // Not started: the process starts at this size.
+            Some(SshChannelState::Pending(pending)) => {
+                if let Some(pty) = pending.pty.as_mut() {
+                    pty.width = col_width;
+                    pty.height = row_height;
+                }
+            }
+            // Started: the resize reaches the pump in order, after earlier
+            // input.
+            Some(SshChannelState::Process { .. }) => {}
+            Some(SshChannelState::FileProtocol { .. }) | None => {
+                session.channel_failure(channel)?;
+                return Err(WorkspaceSshError::UnknownChannel(channel));
+            }
         }
         session.channel_success(channel)?;
         Ok(())
@@ -973,79 +1102,112 @@ mod tests {
             channel: ChannelId,
             input: SshSessionInput,
         },
-        Close {
+        Ended {
             channel: ChannelId,
         },
     }
 
+    type RecordedEvents = Arc<std::sync::Mutex<Vec<(u64, RunnerEvent)>>>;
+
+    /// Records each session's start, input and end with its connection.
+    /// With a gate, each input waits for one permit first: a process that
+    /// reads its stdin only when the test lets it.
     #[derive(Default)]
     struct RecordingRunner {
-        events: Mutex<Vec<RunnerEvent>>,
+        events: RecordedEvents,
+        gate: Option<Arc<tokio::sync::Semaphore>>,
+    }
+
+    impl RecordingRunner {
+        fn gated(gate: Arc<tokio::sync::Semaphore>) -> Self {
+            Self {
+                events: Default::default(),
+                gate: Some(gate),
+            }
+        }
+    }
+
+    struct RecordingSession {
+        key: SshSessionKey,
+        events: RecordedEvents,
+        gate: Option<Arc<tokio::sync::Semaphore>>,
     }
 
     #[async_trait]
     impl SshSessionRunner for RecordingRunner {
         async fn start_session(
             &self,
-            channel: ChannelId,
+            key: SshSessionKey,
             start: DaemonSessionStart,
             _output: SshChannelOutput,
-        ) -> Result<(), SshSessionRunnerError> {
-            self.events
-                .lock()
-                .await
-                .push(RunnerEvent::Start { channel, start });
+        ) -> Result<Box<dyn SshSession>, SshSessionRunnerError> {
+            self.events.lock().unwrap().push((
+                key.connection,
+                RunnerEvent::Start {
+                    channel: key.channel,
+                    start,
+                },
+            ));
+            Ok(Box::new(RecordingSession {
+                key,
+                events: self.events.clone(),
+                gate: self.gate.clone(),
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl SshSession for RecordingSession {
+        async fn send(&mut self, input: SshSessionInput) -> Result<(), SshSessionRunnerError> {
+            if let Some(gate) = &self.gate {
+                gate.acquire().await.unwrap().forget();
+            }
+            self.events.lock().unwrap().push((
+                self.key.connection,
+                RunnerEvent::Input {
+                    channel: self.key.channel,
+                    input,
+                },
+            ));
             Ok(())
         }
+    }
 
-        async fn session_input(
-            &self,
-            channel: ChannelId,
-            input: SshSessionInput,
-        ) -> Result<(), SshSessionRunnerError> {
-            self.events
-                .lock()
-                .await
-                .push(RunnerEvent::Input { channel, input });
-            Ok(())
-        }
-
-        async fn close_session(&self, channel: ChannelId) -> Result<(), SshSessionRunnerError> {
-            self.events
-                .lock()
-                .await
-                .push(RunnerEvent::Close { channel });
-            Ok(())
+    impl Drop for RecordingSession {
+        fn drop(&mut self) {
+            self.events.lock().unwrap().push((
+                self.key.connection,
+                RunnerEvent::Ended {
+                    channel: self.key.channel,
+                },
+            ));
         }
     }
 
     struct CompletingRunner;
 
+    struct NoInput;
+
+    #[async_trait]
+    impl SshSession for NoInput {
+        async fn send(&mut self, _input: SshSessionInput) -> Result<(), SshSessionRunnerError> {
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl SshSessionRunner for CompletingRunner {
         async fn start_session(
             &self,
-            _channel: ChannelId,
+            _key: SshSessionKey,
             _start: DaemonSessionStart,
             output: SshChannelOutput,
-        ) -> Result<(), SshSessionRunnerError> {
+        ) -> Result<Box<dyn SshSession>, SshSessionRunnerError> {
             output
                 .send(SshSessionOutput::Stdout(b"openssh-ok\n".to_vec()))
                 .await?;
             output.send(SshSessionOutput::Exit(0)).await?;
-            Ok(())
-        }
-
-        async fn session_input(
-            &self,
-            _channel: ChannelId,
-            _input: SshSessionInput,
-        ) -> Result<(), SshSessionRunnerError> {
-            Ok(())
-        }
-
-        async fn close_session(&self, _channel: ChannelId) -> Result<(), SshSessionRunnerError> {
-            Ok(())
+            Ok(Box::new(NoInput))
         }
     }
 
@@ -1245,7 +1407,13 @@ mod tests {
     }
 
     async fn runner_events(runner: &RecordingRunner) -> Vec<RunnerEvent> {
-        runner.events.lock().await.clone()
+        runner
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, event)| event.clone())
+            .collect()
     }
 
     async fn wait_for_runner_events(runner: &RecordingRunner, count: usize) -> Vec<RunnerEvent> {
@@ -1935,6 +2103,485 @@ mod tests {
         );
 
         stop_client_and_server(client, server_task).await;
+    }
+
+    /// A gateway serving `connections` connections with `config`, each through
+    /// its own handler on the shared `runner`.
+    async fn spawn_test_gateway_with_config<R>(
+        runner: Arc<R>,
+        config: server::Config,
+        connections: usize,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>)
+    where
+        R: SshSessionRunner,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut config = config;
+        config.keys.push(test_host_key());
+        let config = Arc::new(config);
+        let task = tokio::spawn(async move {
+            let mut served = Vec::new();
+            for _ in 0..connections {
+                let (stream, _) = listener.accept().await.unwrap();
+                let config = config.clone();
+                let runner = runner.clone();
+                served.push(tokio::spawn(async move {
+                    let session =
+                        server::run_stream(config, stream, WorkspaceSshHandler::new(runner))
+                            .await
+                            .unwrap();
+                    let _ = session.await;
+                }));
+            }
+            for connection in served {
+                let _ = connection.await;
+            }
+        });
+        (addr, task)
+    }
+
+    /// A TCP relay in front of `target` for one connection. Freezing it stops
+    /// both directions but keeps both sockets open: a client that went
+    /// silent without closing its connection. Aborting it closes both.
+    async fn spawn_relay(
+        target: SocketAddr,
+    ) -> (
+        SocketAddr,
+        tokio::sync::watch::Sender<bool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (frozen, frozen_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            let (client, _) = listener.accept().await.unwrap();
+            let server = tokio::net::TcpStream::connect(target).await.unwrap();
+            let (client_rx, client_tx) = client.into_split();
+            let (server_rx, server_tx) = server.into_split();
+            let up = relay_half(client_rx, server_tx, frozen_rx.clone());
+            let down = relay_half(server_rx, client_tx, frozen_rx);
+            let _ = tokio::join!(up, down);
+        });
+        (addr, frozen, task)
+    }
+
+    async fn relay_half(
+        mut from: tokio::net::tcp::OwnedReadHalf,
+        mut to: tokio::net::tcp::OwnedWriteHalf,
+        mut frozen: tokio::sync::watch::Receiver<bool>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let read = tokio::select! {
+                _ = frozen.wait_for(|frozen| *frozen) => None,
+                read = from.read(&mut buffer) => Some(read),
+            };
+            match read {
+                // Frozen: hold both halves open and silent.
+                None => std::future::pending::<()>().await,
+                Some(Ok(0) | Err(_)) => return,
+                Some(Ok(read)) => {
+                    if to.write_all(&buffer[..read]).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn authenticated_client_over(
+        stream: tokio::net::TcpStream,
+    ) -> client::Handle<AcceptAllKeys> {
+        let mut handle = client::connect_stream(test_client_config(), stream, AcceptAllKeys)
+            .await
+            .unwrap();
+        let authenticated = handle
+            .authenticate_none("codewire")
+            .await
+            .map(|result| matches!(result, client::AuthResult::Success))
+            .unwrap_or(false);
+        assert!(authenticated, "none-auth should be accepted");
+        handle
+    }
+
+    fn recorded(runner: &RecordingRunner) -> Vec<(u64, RunnerEvent)> {
+        runner.events.lock().unwrap().clone()
+    }
+
+    async fn wait_for_recorded<F>(
+        runner: &RecordingRunner,
+        what: &str,
+        done: F,
+    ) -> Vec<(u64, RunnerEvent)>
+    where
+        F: Fn(&[(u64, RunnerEvent)]) -> bool,
+    {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let events = recorded(runner);
+                if done(&events) {
+                    return events;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("runner did not see {what}: {:?}", recorded(runner).len()))
+    }
+
+    fn stdin_of(events: &[(u64, RunnerEvent)], connection: u64) -> Vec<u8> {
+        events
+            .iter()
+            .filter(|(owner, _)| *owner == connection)
+            .filter_map(|(_, event)| match event {
+                RunnerEvent::Input {
+                    input: SshSessionInput::Stdin(data),
+                    ..
+                } => Some(data.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    fn count_inputs(events: &[(u64, RunnerEvent)]) -> usize {
+        events
+            .iter()
+            .filter(|(_, event)| matches!(event, RunnerEvent::Input { .. }))
+            .count()
+    }
+
+    fn ended(events: &[(u64, RunnerEvent)], channel: ChannelId) -> bool {
+        events
+            .iter()
+            .any(|(_, event)| *event == RunnerEvent::Ended { channel })
+    }
+
+    /// russh queues 100 messages per channel before it stops reading the
+    /// connection; the exec session's input must keep flowing past that.
+    #[tokio::test]
+    async fn russh_handler_delivers_exec_input_beyond_the_channel_queue() {
+        let (runner, addr, server_task) = spawn_test_gateway().await;
+        let client = authenticated_client(addr).await;
+        let channel = client.channel_open_session().await.unwrap();
+        channel.exec(true, b"cat".to_vec()).await.unwrap();
+        let mut sent = Vec::new();
+        for index in 0..300 {
+            let line = format!("line {index}\n").into_bytes();
+            sent.extend_from_slice(&line);
+            timeout(Duration::from_secs(5), channel.data_bytes(line))
+                .await
+                .expect("input message accepted")
+                .unwrap();
+        }
+        channel.eof().await.unwrap();
+
+        let events = wait_for_recorded(&runner, "300 inputs and EOF", |events| {
+            events.iter().any(|(_, event)| {
+                matches!(
+                    event,
+                    RunnerEvent::Input {
+                        input: SshSessionInput::CloseStdin,
+                        ..
+                    }
+                )
+            })
+        })
+        .await;
+        let connection = events[0].0;
+        assert_eq!(stdin_of(&events, connection), sent);
+        assert_eq!(
+            count_inputs(&events),
+            301,
+            "300 stdin messages and EOF, in order"
+        );
+
+        stop_client_and_server(client, server_task).await;
+    }
+
+    /// The same for an interactive terminal: every keystroke and resize.
+    #[tokio::test]
+    async fn russh_handler_delivers_pty_keystrokes_beyond_the_channel_queue() {
+        let (runner, addr, server_task) = spawn_test_gateway().await;
+        let client = authenticated_client(addr).await;
+        let channel = client.channel_open_session().await.unwrap();
+        channel
+            .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+            .await
+            .unwrap();
+        channel.request_shell(true).await.unwrap();
+        let mut expected = Vec::new();
+        for index in 0..300u32 {
+            let key = vec![b'a' + (index % 26) as u8];
+            expected.push(SshSessionInput::Stdin(key.clone()));
+            timeout(Duration::from_secs(5), channel.data_bytes(key))
+                .await
+                .expect("keystroke accepted")
+                .unwrap();
+            if index % 6 == 0 {
+                let width = 80 + index;
+                expected.push(SshSessionInput::Resize {
+                    width: i32::try_from(width).unwrap(),
+                    height: 24,
+                });
+                channel.window_change(width, 24, 0, 0).await.unwrap();
+            }
+        }
+
+        let events = wait_for_recorded(&runner, "every keystroke and resize", |events| {
+            count_inputs(events) >= expected.len()
+        })
+        .await;
+        let inputs: Vec<_> = events
+            .iter()
+            .filter_map(|(_, event)| match event {
+                RunnerEvent::Input { input, .. } => Some(input.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inputs, expected);
+
+        stop_client_and_server(client, server_task).await;
+    }
+
+    /// A process that is not reading its stdin pauses the connection: the
+    /// client cannot send more than russh's bounded queue and window, and
+    /// nothing is lost or reordered once the process reads again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn russh_handler_backpressures_input_to_a_process_that_is_not_reading() {
+        const MESSAGES: usize = 400;
+        const MESSAGE: usize = 32 * 1024;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let runner = Arc::new(RecordingRunner::gated(gate.clone()));
+        let (addr, server_task) =
+            spawn_test_gateway_with_config(runner.clone(), workspace_ssh_server_config(), 1).await;
+        let client = authenticated_client(addr).await;
+        let channel = client.channel_open_session().await.unwrap();
+        channel.exec(true, b"cat > upload".to_vec()).await.unwrap();
+        let payload: Vec<u8> = (0..MESSAGES * MESSAGE)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let (reader, writer) = channel.split();
+        let sender = {
+            let payload = payload.clone();
+            tokio::spawn(async move {
+                writer.data(&payload[..]).await.unwrap();
+                writer.eof().await.unwrap();
+                writer
+            })
+        };
+
+        sleep(Duration::from_secs(1)).await;
+        assert!(
+            !sender.is_finished(),
+            "the client sent {} MiB to a process that read nothing",
+            MESSAGES * MESSAGE / (1024 * 1024)
+        );
+        assert_eq!(count_inputs(&recorded(&runner)), 0);
+
+        gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
+        let writer = timeout(Duration::from_secs(20), sender)
+            .await
+            .expect("the client finished once the process read")
+            .unwrap();
+        let events = wait_for_recorded(&runner, "the whole upload and EOF", |events| {
+            events.iter().any(|(_, event)| {
+                matches!(
+                    event,
+                    RunnerEvent::Input {
+                        input: SshSessionInput::CloseStdin,
+                        ..
+                    }
+                )
+            })
+        })
+        .await;
+        assert_eq!(stdin_of(&events, events[0].0), payload);
+
+        drop((reader, writer));
+        stop_client_and_server(client, server_task).await;
+    }
+
+    /// A session ends when its channel closes, and the connection keeps
+    /// serving other channels.
+    #[tokio::test]
+    async fn russh_handler_ends_a_session_when_its_channel_closes() {
+        let (runner, addr, server_task) = spawn_test_gateway().await;
+        let client = authenticated_client(addr).await;
+        let first = client.channel_open_session().await.unwrap();
+        first.exec(true, b"sleep 600".to_vec()).await.unwrap();
+        first.close().await.unwrap();
+        wait_for_recorded(&runner, "the closed channel's session end", |events| {
+            ended(events, first.id())
+        })
+        .await;
+
+        let second = client.channel_open_session().await.unwrap();
+        second.exec(true, b"true".to_vec()).await.unwrap();
+        second.data_bytes(b"still served".to_vec()).await.unwrap();
+        let events = wait_for_recorded(&runner, "the second channel's input", |events| {
+            count_inputs(events) == 1
+        })
+        .await;
+        assert!(!ended(&events, second.id()));
+
+        stop_client_and_server(client, server_task).await;
+    }
+
+    /// A connection that closes, even while its process is not reading,
+    /// ends every session it started.
+    #[tokio::test]
+    async fn russh_handler_ends_sessions_when_the_connection_closes() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let runner = Arc::new(RecordingRunner::gated(gate));
+        let (addr, server_task) =
+            spawn_test_gateway_with_config(runner.clone(), workspace_ssh_server_config(), 1).await;
+        let (relay, _frozen, relay_task) = spawn_relay(addr).await;
+        let client =
+            authenticated_client_over(tokio::net::TcpStream::connect(relay).await.unwrap()).await;
+        let channel = client.channel_open_session().await.unwrap();
+        channel.exec(true, b"cat > f".to_vec()).await.unwrap();
+        // The pump now waits on a process that reads nothing.
+        channel.data_bytes(b"unread".to_vec()).await.unwrap();
+        wait_for_recorded(&runner, "the session start", |events| !events.is_empty()).await;
+
+        relay_task.abort();
+        wait_for_recorded(&runner, "the session end", |events| {
+            ended(events, channel.id())
+        })
+        .await;
+        timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("the server connection ended")
+            .unwrap();
+    }
+
+    /// A client that goes silent without closing its connection is noticed
+    /// by keepalive, and its sessions end.
+    #[tokio::test]
+    async fn russh_handler_ends_sessions_of_a_client_that_went_silent() {
+        let runner = Arc::new(RecordingRunner::default());
+        let mut config = workspace_ssh_server_config();
+        config.keepalive_interval = Some(Duration::from_millis(200));
+        config.keepalive_max = 2;
+        let (addr, server_task) = spawn_test_gateway_with_config(runner.clone(), config, 1).await;
+        let (relay, frozen, _relay_task) = spawn_relay(addr).await;
+        let client =
+            authenticated_client_over(tokio::net::TcpStream::connect(relay).await.unwrap()).await;
+        let channel = client.channel_open_session().await.unwrap();
+        channel.exec(true, b"sleep 600".to_vec()).await.unwrap();
+        wait_for_recorded(&runner, "the session start", |events| !events.is_empty()).await;
+
+        frozen.send(true).unwrap();
+        wait_for_recorded(&runner, "the silent client's session end", |events| {
+            ended(events, channel.id())
+        })
+        .await;
+        timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("the server gave up on the silent client")
+            .unwrap();
+    }
+
+    /// russh numbers channels per connection, so two connections' first
+    /// channels share an id. Each connection's input reaches only its own
+    /// session, and closing one leaves the other running.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn russh_handler_keeps_concurrent_connections_sessions_apart() {
+        let runner = Arc::new(RecordingRunner::default());
+        let (addr, server_task) =
+            spawn_test_gateway_with_config(runner.clone(), workspace_ssh_server_config(), 2).await;
+        let first = authenticated_client(addr).await;
+        let second = authenticated_client(addr).await;
+        let a = first.channel_open_session().await.unwrap();
+        a.exec(true, b"cat > a".to_vec()).await.unwrap();
+        wait_for_recorded(&runner, "the first start", |events| events.len() == 1).await;
+        let b = second.channel_open_session().await.unwrap();
+        b.exec(true, b"cat > b".to_vec()).await.unwrap();
+        let starts = wait_for_recorded(&runner, "both starts", |events| events.len() == 2).await;
+        let (a_connection, b_connection) = (starts[0].0, starts[1].0);
+        assert_ne!(a_connection, b_connection);
+        let channels: Vec<_> = starts
+            .iter()
+            .map(|(_, event)| match event {
+                RunnerEvent::Start { channel, .. } => *channel,
+                other => panic!("expected a start, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(channels[0], channels[1], "both first channels share an id");
+
+        for round in 0..50 {
+            a.data_bytes(format!("a{round};").into_bytes())
+                .await
+                .unwrap();
+            b.data_bytes(format!("b{round};").into_bytes())
+                .await
+                .unwrap();
+        }
+        a.close().await.unwrap();
+        wait_for_recorded(&runner, "the first session end", |events| {
+            events.iter().any(|(owner, event)| {
+                *owner == a_connection && matches!(event, RunnerEvent::Ended { .. })
+            })
+        })
+        .await;
+        b.data_bytes(b"after".to_vec()).await.unwrap();
+        b.eof().await.unwrap();
+        let events = wait_for_recorded(&runner, "the second session's EOF", |events| {
+            events.iter().any(|(owner, event)| {
+                *owner == b_connection
+                    && matches!(
+                        event,
+                        RunnerEvent::Input {
+                            input: SshSessionInput::CloseStdin,
+                            ..
+                        }
+                    )
+            })
+        })
+        .await;
+        let expected = |prefix: &str| -> Vec<u8> {
+            (0..50)
+                .map(|round| format!("{prefix}{round};"))
+                .collect::<String>()
+                .into_bytes()
+        };
+        assert_eq!(stdin_of(&events, a_connection), expected("a"));
+        let mut b_expected = expected("b");
+        b_expected.extend_from_slice(b"after");
+        assert_eq!(stdin_of(&events, b_connection), b_expected);
+        assert!(
+            !events.iter().any(|(owner, event)| {
+                *owner == b_connection && matches!(event, RunnerEvent::Ended { .. })
+            }),
+            "closing the first connection's channel ended the second's session"
+        );
+
+        let _ = first
+            .disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await;
+        let _ = second
+            .disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await;
+        timeout(Duration::from_secs(5), server_task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn workspace_ssh_server_config_notices_a_silent_client_within_a_minute() {
+        let config = workspace_ssh_server_config();
+        assert_eq!(
+            config.keepalive_interval,
+            Some(WORKSPACE_SSH_KEEPALIVE_INTERVAL)
+        );
+        assert_eq!(config.keepalive_max, WORKSPACE_SSH_KEEPALIVE_MAX);
+        let unanswered = u32::try_from(WORKSPACE_SSH_KEEPALIVE_MAX + 1).unwrap();
+        assert!(WORKSPACE_SSH_KEEPALIVE_INTERVAL * unanswered <= Duration::from_secs(60));
     }
 
     #[tokio::test]

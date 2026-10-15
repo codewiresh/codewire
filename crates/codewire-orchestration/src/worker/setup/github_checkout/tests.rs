@@ -17,6 +17,9 @@ fn clean_source_and_exact_loopback_rewrite_are_separate_arguments() {
     for source in [
         "https://github.com/Owner/app",
         "https://github.com/Owner/app.git",
+        "git://github.com/Owner/app.git",
+        "git@github.com:Owner/app.git",
+        "ssh://git@github.com/Owner/app",
     ] {
         let repo = repository(source);
         let plan = commands(std::slice::from_ref(&repo), selected())
@@ -35,9 +38,10 @@ fn clean_source_and_exact_loopback_rewrite_are_separate_arguments() {
                 "/workspace/app"
             ]
         );
+        let path = codewire_project::github_repository_path(source).unwrap().0;
+        assert!(path.starts_with("Owner/app"));
         assert!(plan.clone.contains(&format!(
-            "url.http://127.0.0.1:38081/_codewire/github/{}.insteadOf={source}",
-            source.strip_prefix("https://github.com/").unwrap()
+            "url.http://127.0.0.1:38081/_codewire/github/{path}.insteadOf={source}"
         )));
         assert_eq!(repo.url, source);
         assert!(plan.checkout.is_none());
@@ -46,22 +50,33 @@ fn clean_source_and_exact_loopback_rewrite_are_separate_arguments() {
 
 #[test]
 fn missing_selection_never_downgrades_github_but_explicit_unselected_preserves_public_checkout() {
-    let repo = repository("https://github.com/owner/app.git");
-    assert!(commands(std::slice::from_ref(&repo), None).is_err());
-    for clients in [
-        ManagedCredentialClients::default(),
-        ManagedCredentialClients::from_profile_slots(["ssh"]).unwrap(),
+    for source in [
+        "https://github.com/owner/app.git",
+        "git@github.com:owner/app.git",
     ] {
-        assert!(commands(std::slice::from_ref(&repo), Some(clients)).unwrap()[0].is_none());
+        let repo = repository(source);
+        assert!(commands(std::slice::from_ref(&repo), None).is_err());
+        for clients in [
+            ManagedCredentialClients::default(),
+            ManagedCredentialClients::from_profile_slots(["ssh"]).unwrap(),
+        ] {
+            assert!(commands(std::slice::from_ref(&repo), Some(clients)).unwrap()[0].is_none());
+        }
     }
 }
 
+/// Other hosts, and other SSH spellings of github.com, are never the GitHub
+/// connection's: they keep their existing checkout, which for SSH needs the
+/// key (`ssh_checkout`).
 #[test]
-fn other_services_and_ssh_keep_their_existing_checkout() {
+fn other_services_and_other_ssh_sources_keep_their_existing_checkout() {
     for source in [
         "https://gitlab.com/owner/app.git",
-        "git@github.com:owner/app.git",
-        "ssh://git@github.com/owner/app.git",
+        "git@gitlab.com:owner/app.git",
+        "ssh://git@gitlab.com/owner/app.git",
+        "git://gitlab.com/owner/app.git",
+        "ssh://git@github.com:2222/owner/app.git",
+        "deploy@github.com:owner/app.git",
     ] {
         assert!(commands(&[repository(source)], selected()).unwrap()[0].is_none());
         assert!(commands(&[repository(source)], None).unwrap()[0].is_none());
@@ -277,7 +292,7 @@ mod git {
             .unwrap()
     }
 
-    async fn run(redirect: bool) {
+    async fn run(redirect: bool, source: &str) {
         let root = tempfile::tempdir().unwrap();
         let upstream = root.path().join("owner/app.git");
         let output = git()
@@ -314,7 +329,7 @@ mod git {
             .with_state(fixture.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let destination = root.path().join("checkout");
-        let mut repo = repository("https://github.com/owner/app.git");
+        let mut repo = repository(source);
         repo.mount_path = destination.to_str().unwrap().into();
         repo.branch = "main".into();
         let plan = commands(&[repo], selected()).unwrap().remove(0).unwrap();
@@ -357,7 +372,7 @@ mod git {
                 .args(["config", "--get", "remote.origin.url"])
                 .output()
                 .unwrap();
-            assert_eq!(origin.stdout, b"https://github.com/owner/app.git\n");
+            assert_eq!(origin.stdout, format!("{source}\n").as_bytes());
             let config = std::fs::read_to_string(destination.join(".git/config")).unwrap();
             assert!(!config.contains("127.0.0.1"));
             assert!(!config.contains("insteadOf"));
@@ -386,13 +401,23 @@ mod git {
         server.abort();
     }
 
+    /// Every GitHub form reaches the same bridge path, and the origin keeps
+    /// the form the user wrote.
     #[tokio::test]
     async fn real_git_fetches_through_bridge_with_ambient_inputs_cleared_and_clean_origin() {
-        run(false).await;
+        for source in [
+            "https://github.com/owner/app.git",
+            "git://github.com/owner/app.git",
+            "git@github.com:owner/app.git",
+            "ssh://git@github.com/owner/app.git",
+        ] {
+            run(false, source).await;
+        }
     }
 
     #[tokio::test]
     async fn real_git_rejects_redirects_without_following_them() {
-        run(true).await;
+        run(true, "https://github.com/owner/app.git").await;
+        run(true, "git@github.com:owner/app.git").await;
     }
 }

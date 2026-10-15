@@ -10,7 +10,40 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/credential.proto.
  */
 export const file_codewire_v1_credential: GenFile = /*@__PURE__*/
-  fileDesc("Chxjb2Rld2lyZS92MS9jcmVkZW50aWFsLnByb3RvEgtjb2Rld2lyZS52MSJSCh1MaXN0R2l0aHViUmVwb3NpdG9yaWVzUmVxdWVzdBIRCglwYWdlX3NpemUYAyABKAUSEgoKcGFnZV90b2tlbhgEIAEoCUoECAEQAkoECAIQAyKfAQoQR2l0aHViUmVwb3NpdG9yeRIVCg1yZXBvc2l0b3J5X2lkGAEgASgJEhEKCWZ1bGxfbmFtZRgCIAEoCRIWCg5kZWZhdWx0X2JyYW5jaBgDIAEoCRIRCgljbG9uZV91cmwYBCABKAkSEgoKaXNfcHJpdmF0ZRgFIAEoCBIQCghhcmNoaXZlZBgGIAEoCBIQCghkaXNhYmxlZBgHIAEoCCJuCh5MaXN0R2l0aHViUmVwb3NpdG9yaWVzUmVzcG9uc2USMwoMcmVwb3NpdG9yaWVzGAEgAygLMh0uY29kZXdpcmUudjEuR2l0aHViUmVwb3NpdG9yeRIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAki3wIKCkNyZWRlbnRpYWwSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIQCghwcm92aWRlchgDIAEoCRJGChNhdXRoZW50aWNhdGlvbl9raW5kGAQgASgOMikuY29kZXdpcmUudjEuQ3JlZGVudGlhbEF1dGhlbnRpY2F0aW9uS2luZBIZCgxhY2NvdW50X2hpbnQYBSABKAlIAIgBARItCgZzdGF0dXMYBiABKA4yHS5jb2Rld2lyZS52MS5DcmVkZW50aWFsU3RhdHVzEhwKD2V4cGlyZXNfYXRfdW5peBgHIAEoBEgBiAEBEh0KFXJldm9jYXRpb25fZ2VuZXJhdGlvbhgIIAEoBBIxCg5zc2hfcHVibGljX2tleRgJIAEoCzIZLmNvZGV3aXJlLnYxLlNzaFB1YmxpY0tleUIPCg1fYWNjb3VudF9oaW50QhIKEF9leHBpcmVzX2F0X3VuaXgiNAoMU3NoUHVibGljS2V5Eg8KB29wZW5zc2gYASABKAkSEwoLZmluZ2VycHJpbnQYAiABKAkiXgocR2VuZXJhdGVTc2hDcmVkZW50aWFsUmVxdWVzdBIMCgRuYW1lGAEgASgJEhwKD2V4cGlyZXNfYXRfdW5peBgCIAEoBEgAiAEBQhIKEF9leHBpcmVzX2F0X3VuaXgiTAodR2VuZXJhdGVTc2hDcmVkZW50aWFsUmVzcG9uc2USKwoKY3JlZGVudGlhbBgBIAEoCzIXLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWwioAEKF0FkZFNzaENyZWRlbnRpYWxSZXF1ZXN0EgwKBG5hbWUYASABKAkSGAoLcHJpdmF0ZV9rZXkYAiABKAxCA4ABARIcCgpwYXNzcGhyYXNlGAMgASgMQgOAAQFIAIgBARIcCg9leHBpcmVzX2F0X3VuaXgYBCABKARIAYgBAUINCgtfcGFzc3BocmFzZUISChBfZXhwaXJlc19hdF91bml4IkcKGEFkZFNzaENyZWRlbnRpYWxSZXNwb25zZRIrCgpjcmVkZW50aWFsGAEgASgLMhcuY29kZXdpcmUudjEuQ3JlZGVudGlhbCI/ChZMaXN0Q3JlZGVudGlhbHNSZXF1ZXN0EhEKCXBhZ2Vfc2l6ZRgBIAEoBRISCgpwYWdlX3Rva2VuGAIgASgJImAKF0xpc3RDcmVkZW50aWFsc1Jlc3BvbnNlEiwKC2NyZWRlbnRpYWxzGAEgAygLMhcuY29kZXdpcmUudjEuQ3JlZGVudGlhbBIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiSwoUR2V0Q3JlZGVudGlhbFJlcXVlc3QSFwoNY3JlZGVudGlhbF9pZBgBIAEoCUgAEg4KBG5hbWUYAiABKAlIAEIKCghzZWxlY3RvciJEChVHZXRDcmVkZW50aWFsUmVzcG9uc2USKwoKY3JlZGVudGlhbBgBIAEoCzIXLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWwioAEKEkVucm9sbENvZGV4UmVxdWVzdBIMCgRuYW1lGAEgASgJEhoKDWNyZWRlbnRpYWxfaWQYAiABKAlIAIgBARIrCh5leHBlY3RlZF9yZXZvY2F0aW9uX2dlbmVyYXRpb24YAyABKARIAYgBAUIQCg5fY3JlZGVudGlhbF9pZEIhCh9fZXhwZWN0ZWRfcmV2b2NhdGlvbl9nZW5lcmF0aW9uIqEBChNFbnJvbGxHaXRodWJSZXF1ZXN0EgwKBG5hbWUYASABKAkSGgoNY3JlZGVudGlhbF9pZBgCIAEoCUgAiAEBEisKHmV4cGVjdGVkX3Jldm9jYXRpb25fZ2VuZXJhdGlvbhgDIAEoBEgBiAEBQhAKDl9jcmVkZW50aWFsX2lkQiEKH19leHBlY3RlZF9yZXZvY2F0aW9uX2dlbmVyYXRpb24iggEKGkFkZEFwaUtleUNyZWRlbnRpYWxSZXF1ZXN0EhAKCHByb3ZpZGVyGAEgASgJEgwKBG5hbWUYAiABKAkSEgoFdmFsdWUYAyABKAxCA4ABARIcCg9leHBpcmVzX2F0X3VuaXgYBCABKARIAIgBAUISChBfZXhwaXJlc19hdF91bml4IkoKG0FkZEFwaUtleUNyZWRlbnRpYWxSZXNwb25zZRIrCgpjcmVkZW50aWFsGAEgASgLMhcuY29kZXdpcmUudjEuQ3JlZGVudGlhbCLNAQorQWRkQ2xhdWRlU3Vic2NyaXB0aW9uVG9rZW5DcmVkZW50aWFsUmVxdWVzdBIMCgRuYW1lGAEgASgJEhIKBXRva2VuGAIgASgMQgOAAQESGgoNY3JlZGVudGlhbF9pZBgDIAEoCUgAiAEBEisKHmV4cGVjdGVkX3Jldm9jYXRpb25fZ2VuZXJhdGlvbhgEIAEoBEgBiAEBQhAKDl9jcmVkZW50aWFsX2lkQiEKH19leHBlY3RlZF9yZXZvY2F0aW9uX2dlbmVyYXRpb24iWwosQWRkQ2xhdWRlU3Vic2NyaXB0aW9uVG9rZW5DcmVkZW50aWFsUmVzcG9uc2USKwoKY3JlZGVudGlhbBgBIAEoCzIXLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWwifQoXUmVuYW1lQ3JlZGVudGlhbFJlcXVlc3QSFQoNY3JlZGVudGlhbF9pZBgBIAEoCRImCh5leHBlY3RlZF9yZXZvY2F0aW9uX2dlbmVyYXRpb24YAiABKAQSFQoNZXhwZWN0ZWRfbmFtZRgDIAEoCRIMCgRuYW1lGAQgASgJIkcKGFJlbmFtZUNyZWRlbnRpYWxSZXNwb25zZRIrCgpjcmVkZW50aWFsGAEgASgLMhcuY29kZXdpcmUudjEuQ3JlZGVudGlhbCKkAQodUm90YXRlQXBpS2V5Q3JlZGVudGlhbFJlcXVlc3QSFQoNY3JlZGVudGlhbF9pZBgBIAEoCRImCh5leHBlY3RlZF9yZXZvY2F0aW9uX2dlbmVyYXRpb24YAiABKAQSEgoFdmFsdWUYAyABKAxCA4ABARIcCg9leHBpcmVzX2F0X3VuaXgYBCABKARIAIgBAUISChBfZXhwaXJlc19hdF91bml4Ik0KHlJvdGF0ZUFwaUtleUNyZWRlbnRpYWxSZXNwb25zZRIrCgpjcmVkZW50aWFsGAEgASgLMhcuY29kZXdpcmUudjEuQ3JlZGVudGlhbCJhChRDb2RleERldmljZUNoYWxsZW5nZRIYChB2ZXJpZmljYXRpb25fdXJsGAEgASgJEhYKCXVzZXJfY29kZRgCIAEoCUIDgAEBEhcKD2V4cGlyZXNfYXRfdW5peBgDIAEoBCKFAQoTRW5yb2xsQ29kZXhSZXNwb25zZRI2CgljaGFsbGVuZ2UYASABKAsyIS5jb2Rld2lyZS52MS5Db2RleERldmljZUNoYWxsZW5nZUgAEi0KCmNyZWRlbnRpYWwYAiABKAsyFy5jb2Rld2lyZS52MS5DcmVkZW50aWFsSABCBwoFZXZlbnQiYgoVR2l0aHViRGV2aWNlQ2hhbGxlbmdlEhgKEHZlcmlmaWNhdGlvbl91cmwYASABKAkSFgoJdXNlcl9jb2RlGAIgASgJQgOAAQESFwoPZXhwaXJlc19hdF91bml4GAMgASgEIocBChRFbnJvbGxHaXRodWJSZXNwb25zZRI3CgljaGFsbGVuZ2UYASABKAsyIi5jb2Rld2lyZS52MS5HaXRodWJEZXZpY2VDaGFsbGVuZ2VIABItCgpjcmVkZW50aWFsGAIgASgLMhcuY29kZXdpcmUudjEuQ3JlZGVudGlhbEgAQgcKBWV2ZW50IrgBCiVDb21wbGV0ZUdpdGh1YkFwcEF1dGhvcml6YXRpb25SZXF1ZXN0EhEKBGNvZGUYASABKAxCA4ABARIaCg1jcmVkZW50aWFsX2lkGAIgASgJSACIAQESKwoeZXhwZWN0ZWRfcmV2b2NhdGlvbl9nZW5lcmF0aW9uGAMgASgESAGIAQFCEAoOX2NyZWRlbnRpYWxfaWRCIQofX2V4cGVjdGVkX3Jldm9jYXRpb25fZ2VuZXJhdGlvbiJVCiZDb21wbGV0ZUdpdGh1YkFwcEF1dGhvcml6YXRpb25SZXNwb25zZRIrCgpjcmVkZW50aWFsGAEgASgLMhcuY29kZXdpcmUudjEuQ3JlZGVudGlhbCJYChdSZXZva2VDcmVkZW50aWFsUmVxdWVzdBIVCg1jcmVkZW50aWFsX2lkGAEgASgJEiYKHmV4cGVjdGVkX3Jldm9jYXRpb25fZ2VuZXJhdGlvbhgCIAEoBCJHChhSZXZva2VDcmVkZW50aWFsUmVzcG9uc2USKwoKY3JlZGVudGlhbBgBIAEoCzIXLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWwiWAoXRGVsZXRlQ3JlZGVudGlhbFJlcXVlc3QSFQoNY3JlZGVudGlhbF9pZBgBIAEoCRImCh5leHBlY3RlZF9yZXZvY2F0aW9uX2dlbmVyYXRpb24YAiABKAQiGgoYRGVsZXRlQ3JlZGVudGlhbFJlc3BvbnNlKrACChxDcmVkZW50aWFsQXV0aGVudGljYXRpb25LaW5kEi4KKkNSRURFTlRJQUxfQVVUSEVOVElDQVRJT05fS0lORF9VTlNQRUNJRklFRBAAEigKJENSRURFTlRJQUxfQVVUSEVOVElDQVRJT05fS0lORF9PQVVUSBABEioKJkNSRURFTlRJQUxfQVVUSEVOVElDQVRJT05fS0lORF9BUElfS0VZEAISLworQ1JFREVOVElBTF9BVVRIRU5USUNBVElPTl9LSU5EX0FDQ0VTU19UT0tFThADEi0KKUNSRURFTlRJQUxfQVVUSEVOVElDQVRJT05fS0lORF9HSVRIVUJfQVBQEAQSKgomQ1JFREVOVElBTF9BVVRIRU5USUNBVElPTl9LSU5EX1NTSF9LRVkQByq3AQoQQ3JlZGVudGlhbFN0YXR1cxIhCh1DUkVERU5USUFMX1NUQVRVU19VTlNQRUNJRklFRBAAEhwKGENSRURFTlRJQUxfU1RBVFVTX0FDVElWRRABEh0KGUNSRURFTlRJQUxfU1RBVFVTX1JFVk9LRUQQAhIdChlDUkVERU5USUFMX1NUQVRVU19FWFBJUkVEEAMSJAogQ1JFREVOVElBTF9TVEFUVVNfUkVGUkVTSF9GQUlMRUQQBDLTAQoRQ3JlZGVudGlhbFNlcnZpY2USYQoPTGlzdENyZWRlbnRpYWxzEiMuY29kZXdpcmUudjEuTGlzdENyZWRlbnRpYWxzUmVxdWVzdBokLmNvZGV3aXJlLnYxLkxpc3RDcmVkZW50aWFsc1Jlc3BvbnNlIgOQAgESWwoNR2V0Q3JlZGVudGlhbBIhLmNvZGV3aXJlLnYxLkdldENyZWRlbnRpYWxSZXF1ZXN0GiIuY29kZXdpcmUudjEuR2V0Q3JlZGVudGlhbFJlc3BvbnNlIgOQAgEykQEKF0dpdGh1YlJlcG9zaXRvcnlTZXJ2aWNlEnYKFkxpc3RHaXRodWJSZXBvc2l0b3JpZXMSKi5jb2Rld2lyZS52MS5MaXN0R2l0aHViUmVwb3NpdG9yaWVzUmVxdWVzdBorLmNvZGV3aXJlLnYxLkxpc3RHaXRodWJSZXBvc2l0b3JpZXNSZXNwb25zZSIDkAIBMsEJChlDcmVkZW50aWFsTXV0YXRpb25TZXJ2aWNlElIKC0Vucm9sbENvZGV4Eh8uY29kZXdpcmUudjEuRW5yb2xsQ29kZXhSZXF1ZXN0GiAuY29kZXdpcmUudjEuRW5yb2xsQ29kZXhSZXNwb25zZTABElUKDEVucm9sbEdpdGh1YhIgLmNvZGV3aXJlLnYxLkVucm9sbEdpdGh1YlJlcXVlc3QaIS5jb2Rld2lyZS52MS5FbnJvbGxHaXRodWJSZXNwb25zZTABEokBCh5Db21wbGV0ZUdpdGh1YkFwcEF1dGhvcml6YXRpb24SMi5jb2Rld2lyZS52MS5Db21wbGV0ZUdpdGh1YkFwcEF1dGhvcml6YXRpb25SZXF1ZXN0GjMuY29kZXdpcmUudjEuQ29tcGxldGVHaXRodWJBcHBBdXRob3JpemF0aW9uUmVzcG9uc2USaAoTQWRkQXBpS2V5Q3JlZGVudGlhbBInLmNvZGV3aXJlLnYxLkFkZEFwaUtleUNyZWRlbnRpYWxSZXF1ZXN0GiguY29kZXdpcmUudjEuQWRkQXBpS2V5Q3JlZGVudGlhbFJlc3BvbnNlEpsBCiRBZGRDbGF1ZGVTdWJzY3JpcHRpb25Ub2tlbkNyZWRlbnRpYWwSOC5jb2Rld2lyZS52MS5BZGRDbGF1ZGVTdWJzY3JpcHRpb25Ub2tlbkNyZWRlbnRpYWxSZXF1ZXN0GjkuY29kZXdpcmUudjEuQWRkQ2xhdWRlU3Vic2NyaXB0aW9uVG9rZW5DcmVkZW50aWFsUmVzcG9uc2USXwoQUmVuYW1lQ3JlZGVudGlhbBIkLmNvZGV3aXJlLnYxLlJlbmFtZUNyZWRlbnRpYWxSZXF1ZXN0GiUuY29kZXdpcmUudjEuUmVuYW1lQ3JlZGVudGlhbFJlc3BvbnNlEnEKFlJvdGF0ZUFwaUtleUNyZWRlbnRpYWwSKi5jb2Rld2lyZS52MS5Sb3RhdGVBcGlLZXlDcmVkZW50aWFsUmVxdWVzdBorLmNvZGV3aXJlLnYxLlJvdGF0ZUFwaUtleUNyZWRlbnRpYWxSZXNwb25zZRJuChVHZW5lcmF0ZVNzaENyZWRlbnRpYWwSKS5jb2Rld2lyZS52MS5HZW5lcmF0ZVNzaENyZWRlbnRpYWxSZXF1ZXN0GiouY29kZXdpcmUudjEuR2VuZXJhdGVTc2hDcmVkZW50aWFsUmVzcG9uc2USXwoQQWRkU3NoQ3JlZGVudGlhbBIkLmNvZGV3aXJlLnYxLkFkZFNzaENyZWRlbnRpYWxSZXF1ZXN0GiUuY29kZXdpcmUudjEuQWRkU3NoQ3JlZGVudGlhbFJlc3BvbnNlEl8KEFJldm9rZUNyZWRlbnRpYWwSJC5jb2Rld2lyZS52MS5SZXZva2VDcmVkZW50aWFsUmVxdWVzdBolLmNvZGV3aXJlLnYxLlJldm9rZUNyZWRlbnRpYWxSZXNwb25zZRJfChBEZWxldGVDcmVkZW50aWFsEiQuY29kZXdpcmUudjEuRGVsZXRlQ3JlZGVudGlhbFJlcXVlc3QaJS5jb2Rld2lyZS52MS5EZWxldGVDcmVkZW50aWFsUmVzcG9uc2VCsgEKD2NvbS5jb2Rld2lyZS52MUIPQ3JlZGVudGlhbFByb3RvUAFaQWdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS92MTtjb2Rld2lyZXYxogIDQ1hYqgILQ29kZXdpcmUuVjHKAgtDb2Rld2lyZVxWMeICF0NvZGV3aXJlXFYxXEdQQk1ldGFkYXRh6gIMQ29kZXdpcmU6OlYxYgZwcm90bzM");
+  fileDesc("Chxjb2Rld2lyZS92MS9jcmVkZW50aWFsLnByb3RvEgtjb2Rld2lyZS52MSIlCiNMaXN0R2l0aHViUGVuZGluZ1Blcm1pc3Npb25zUmVxdWVzdCJtCiRMaXN0R2l0aHViUGVuZGluZ1Blcm1pc3Npb25zUmVzcG9uc2USRQoTcGVuZGluZ19wZXJtaXNzaW9ucxgBIAMoCzIoLmNvZGV3aXJlLnYxLkdpdGh1YkFwcFBlbmRpbmdQZXJtaXNzaW9ucyJSCh1MaXN0R2l0aHViUmVwb3NpdG9yaWVzUmVxdWVzdBIRCglwYWdlX3NpemUYAyABKAUSEgoKcGFnZV90b2tlbhgEIAEoCUoECAEQAkoECAIQAyKfAQoQR2l0aHViUmVwb3NpdG9yeRIVCg1yZXBvc2l0b3J5X2lkGAEgASgJEhEKCWZ1bGxfbmFtZRgCIAEoCRIWCg5kZWZhdWx0X2JyYW5jaBgDIAEoCRIRCgljbG9uZV91cmwYBCABKAkSEgoKaXNfcHJpdmF0ZRgFIAEoCBIQCghhcmNoaXZlZBgGIAEoCBIQCghkaXNhYmxlZBgHIAEoCCJuCh5MaXN0R2l0aHViUmVwb3NpdG9yaWVzUmVzcG9uc2USMwoMcmVwb3NpdG9yaWVzGAEgAygLMh0uY29kZXdpcmUudjEuR2l0aHViUmVwb3NpdG9yeRIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAki3wIKCkNyZWRlbnRpYWwSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIQCghwcm92aWRlchgDIAEoCRJGChNhdXRoZW50aWNhdGlvbl9raW5kGAQgASgOMikuY29kZXdpcmUudjEuQ3JlZGVudGlhbEF1dGhlbnRpY2F0aW9uS2luZBIZCgxhY2NvdW50X2hpbnQYBSABKAlIAIgBARItCgZzdGF0dXMYBiABKA4yHS5jb2Rld2lyZS52MS5DcmVkZW50aWFsU3RhdHVzEhwKD2V4cGlyZXNfYXRfdW5peBgHIAEoBEgBiAEBEh0KFXJldm9jYXRpb25fZ2VuZXJhdGlvbhgIIAEoBBIxCg5zc2hfcHVibGljX2tleRgJIAEoCzIZLmNvZGV3aXJlLnYxLlNzaFB1YmxpY0tleUIPCg1fYWNjb3VudF9oaW50QhIKEF9leHBpcmVzX2F0X3VuaXgiNAoMU3NoUHVibGljS2V5Eg8KB29wZW5zc2gYASABKAkSEwoLZmluZ2VycHJpbnQYAiABKAkiXgocR2VuZXJhdGVTc2hDcmVkZW50aWFsUmVxdWVzdBIMCgRuYW1lGAEgASgJEhwKD2V4cGlyZXNfYXRfdW5peBgCIAEoBEgAiAEBQhIKEF9leHBpcmVzX2F0X3VuaXgiTAodR2VuZXJhdGVTc2hDcmVkZW50aWFsUmVzcG9uc2USKwoKY3JlZGVudGlhbBgBIAEoCzIXLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWwioAEKF0FkZFNzaENyZWRlbnRpYWxSZXF1ZXN0EgwKBG5hbWUYASABKAkSGAoLcHJpdmF0ZV9rZXkYAiABKAxCA4ABARIcCgpwYXNzcGhyYXNlGAMgASgMQgOAAQFIAIgBARIcCg9leHBpcmVzX2F0X3VuaXgYBCABKARIAYgBAUINCgtfcGFzc3BocmFzZUISChBfZXhwaXJlc19hdF91bml4IkcKGEFkZFNzaENyZWRlbnRpYWxSZXNwb25zZRIrCgpjcmVkZW50aWFsGAEgASgLMhcuY29kZXdpcmUudjEuQ3JlZGVudGlhbCI/ChZMaXN0Q3JlZGVudGlhbHNSZXF1ZXN0EhEKCXBhZ2Vfc2l6ZRgBIAEoBRISCgpwYWdlX3Rva2VuGAIgASgJImAKF0xpc3RDcmVkZW50aWFsc1Jlc3BvbnNlEiwKC2NyZWRlbnRpYWxzGAEgAygLMhcuY29kZXdpcmUudjEuQ3JlZGVudGlhbBIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiSwoUR2V0Q3JlZGVudGlhbFJlcXVlc3QSFwoNY3JlZGVudGlhbF9pZBgBIAEoCUgAEg4KBG5hbWUYAiABKAlIAEIKCghzZWxlY3RvciJEChVHZXRDcmVkZW50aWFsUmVzcG9uc2USKwoKY3JlZGVudGlhbBgBIAEoCzIXLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWwioAEKEkVucm9sbENvZGV4UmVxdWVzdBIMCgRuYW1lGAEgASgJEhoKDWNyZWRlbnRpYWxfaWQYAiABKAlIAIgBARIrCh5leHBlY3RlZF9yZXZvY2F0aW9uX2dlbmVyYXRpb24YAyABKARIAYgBAUIQCg5fY3JlZGVudGlhbF9pZEIhCh9fZXhwZWN0ZWRfcmV2b2NhdGlvbl9nZW5lcmF0aW9uIqEBChNFbnJvbGxHaXRodWJSZXF1ZXN0EgwKBG5hbWUYASABKAkSGgoNY3JlZGVudGlhbF9pZBgCIAEoCUgAiAEBEisKHmV4cGVjdGVkX3Jldm9jYXRpb25fZ2VuZXJhdGlvbhgDIAEoBEgBiAEBQhAKDl9jcmVkZW50aWFsX2lkQiEKH19leHBlY3RlZF9yZXZvY2F0aW9uX2dlbmVyYXRpb24iggEKGkFkZEFwaUtleUNyZWRlbnRpYWxSZXF1ZXN0EhAKCHByb3ZpZGVyGAEgASgJEgwKBG5hbWUYAiABKAkSEgoFdmFsdWUYAyABKAxCA4ABARIcCg9leHBpcmVzX2F0X3VuaXgYBCABKARIAIgBAUISChBfZXhwaXJlc19hdF91bml4IkoKG0FkZEFwaUtleUNyZWRlbnRpYWxSZXNwb25zZRIrCgpjcmVkZW50aWFsGAEgASgLMhcuY29kZXdpcmUudjEuQ3JlZGVudGlhbCLNAQorQWRkQ2xhdWRlU3Vic2NyaXB0aW9uVG9rZW5DcmVkZW50aWFsUmVxdWVzdBIMCgRuYW1lGAEgASgJEhIKBXRva2VuGAIgASgMQgOAAQESGgoNY3JlZGVudGlhbF9pZBgDIAEoCUgAiAEBEisKHmV4cGVjdGVkX3Jldm9jYXRpb25fZ2VuZXJhdGlvbhgEIAEoBEgBiAEBQhAKDl9jcmVkZW50aWFsX2lkQiEKH19leHBlY3RlZF9yZXZvY2F0aW9uX2dlbmVyYXRpb24iWwosQWRkQ2xhdWRlU3Vic2NyaXB0aW9uVG9rZW5DcmVkZW50aWFsUmVzcG9uc2USKwoKY3JlZGVudGlhbBgBIAEoCzIXLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWwiGgoYU3RhcnRDbGF1ZGVTaWduSW5SZXF1ZXN0ImEKGVN0YXJ0Q2xhdWRlU2lnbkluUmVzcG9uc2USFQoNYXV0aG9yaXplX3VybBgBIAEoCRIUCgdzaWduX2luGAIgASgJQgOAAQESFwoPZXhwaXJlc19hdF91bml4GAMgASgEIuABChtDb21wbGV0ZUNsYXVkZVNpZ25JblJlcXVlc3QSDAoEbmFtZRgBIAEoCRIUCgdzaWduX2luGAIgASgJQgOAAQESHwoSYXV0aG9yaXphdGlvbl9jb2RlGAMgASgMQgOAAQESGgoNY3JlZGVudGlhbF9pZBgEIAEoCUgAiAEBEisKHmV4cGVjdGVkX3Jldm9jYXRpb25fZ2VuZXJhdGlvbhgFIAEoBEgBiAEBQhAKDl9jcmVkZW50aWFsX2lkQiEKH19leHBlY3RlZF9yZXZvY2F0aW9uX2dlbmVyYXRpb24iSwocQ29tcGxldGVDbGF1ZGVTaWduSW5SZXNwb25zZRIrCgpjcmVkZW50aWFsGAEgASgLMhcuY29kZXdpcmUudjEuQ3JlZGVudGlhbCJ9ChdSZW5hbWVDcmVkZW50aWFsUmVxdWVzdBIVCg1jcmVkZW50aWFsX2lkGAEgASgJEiYKHmV4cGVjdGVkX3Jldm9jYXRpb25fZ2VuZXJhdGlvbhgCIAEoBBIVCg1leHBlY3RlZF9uYW1lGAMgASgJEgwKBG5hbWUYBCABKAkiRwoYUmVuYW1lQ3JlZGVudGlhbFJlc3BvbnNlEisKCmNyZWRlbnRpYWwYASABKAsyFy5jb2Rld2lyZS52MS5DcmVkZW50aWFsIqQBCh1Sb3RhdGVBcGlLZXlDcmVkZW50aWFsUmVxdWVzdBIVCg1jcmVkZW50aWFsX2lkGAEgASgJEiYKHmV4cGVjdGVkX3Jldm9jYXRpb25fZ2VuZXJhdGlvbhgCIAEoBBISCgV2YWx1ZRgDIAEoDEIDgAEBEhwKD2V4cGlyZXNfYXRfdW5peBgEIAEoBEgAiAEBQhIKEF9leHBpcmVzX2F0X3VuaXgiTQoeUm90YXRlQXBpS2V5Q3JlZGVudGlhbFJlc3BvbnNlEisKCmNyZWRlbnRpYWwYASABKAsyFy5jb2Rld2lyZS52MS5DcmVkZW50aWFsImEKFENvZGV4RGV2aWNlQ2hhbGxlbmdlEhgKEHZlcmlmaWNhdGlvbl91cmwYASABKAkSFgoJdXNlcl9jb2RlGAIgASgJQgOAAQESFwoPZXhwaXJlc19hdF91bml4GAMgASgEIoUBChNFbnJvbGxDb2RleFJlc3BvbnNlEjYKCWNoYWxsZW5nZRgBIAEoCzIhLmNvZGV3aXJlLnYxLkNvZGV4RGV2aWNlQ2hhbGxlbmdlSAASLQoKY3JlZGVudGlhbBgCIAEoCzIXLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWxIAEIHCgVldmVudCJiChVHaXRodWJEZXZpY2VDaGFsbGVuZ2USGAoQdmVyaWZpY2F0aW9uX3VybBgBIAEoCRIWCgl1c2VyX2NvZGUYAiABKAlCA4ABARIXCg9leHBpcmVzX2F0X3VuaXgYAyABKAQizgEKFEVucm9sbEdpdGh1YlJlc3BvbnNlEjcKCWNoYWxsZW5nZRgBIAEoCzIiLmNvZGV3aXJlLnYxLkdpdGh1YkRldmljZUNoYWxsZW5nZUgAEi0KCmNyZWRlbnRpYWwYAiABKAsyFy5jb2Rld2lyZS52MS5DcmVkZW50aWFsSAASRQoTcGVuZGluZ19wZXJtaXNzaW9ucxgDIAMoCzIoLmNvZGV3aXJlLnYxLkdpdGh1YkFwcFBlbmRpbmdQZXJtaXNzaW9uc0IHCgVldmVudCKAAQobR2l0aHViQXBwUGVuZGluZ1Blcm1pc3Npb25zEg8KB2FjY291bnQYASABKAkSFwoPaW5zdGFsbGF0aW9uX2lkGAIgASgEEjcKDGFjY291bnRfa2luZBgDIAEoDjIhLmNvZGV3aXJlLnYxLkdpdGh1YkFwcEFjY291bnRLaW5kIrgBCiVDb21wbGV0ZUdpdGh1YkFwcEF1dGhvcml6YXRpb25SZXF1ZXN0EhEKBGNvZGUYASABKAxCA4ABARIaCg1jcmVkZW50aWFsX2lkGAIgASgJSACIAQESKwoeZXhwZWN0ZWRfcmV2b2NhdGlvbl9nZW5lcmF0aW9uGAMgASgESAGIAQFCEAoOX2NyZWRlbnRpYWxfaWRCIQofX2V4cGVjdGVkX3Jldm9jYXRpb25fZ2VuZXJhdGlvbiKcAQomQ29tcGxldGVHaXRodWJBcHBBdXRob3JpemF0aW9uUmVzcG9uc2USKwoKY3JlZGVudGlhbBgBIAEoCzIXLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWwSRQoTcGVuZGluZ19wZXJtaXNzaW9ucxgCIAMoCzIoLmNvZGV3aXJlLnYxLkdpdGh1YkFwcFBlbmRpbmdQZXJtaXNzaW9ucyJYChdSZXZva2VDcmVkZW50aWFsUmVxdWVzdBIVCg1jcmVkZW50aWFsX2lkGAEgASgJEiYKHmV4cGVjdGVkX3Jldm9jYXRpb25fZ2VuZXJhdGlvbhgCIAEoBCJHChhSZXZva2VDcmVkZW50aWFsUmVzcG9uc2USKwoKY3JlZGVudGlhbBgBIAEoCzIXLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWwiWAoXRGVsZXRlQ3JlZGVudGlhbFJlcXVlc3QSFQoNY3JlZGVudGlhbF9pZBgBIAEoCRImCh5leHBlY3RlZF9yZXZvY2F0aW9uX2dlbmVyYXRpb24YAiABKAQiGgoYRGVsZXRlQ3JlZGVudGlhbFJlc3BvbnNlKuMCChxDcmVkZW50aWFsQXV0aGVudGljYXRpb25LaW5kEi4KKkNSRURFTlRJQUxfQVVUSEVOVElDQVRJT05fS0lORF9VTlNQRUNJRklFRBAAEigKJENSRURFTlRJQUxfQVVUSEVOVElDQVRJT05fS0lORF9PQVVUSBABEioKJkNSRURFTlRJQUxfQVVUSEVOVElDQVRJT05fS0lORF9BUElfS0VZEAISLworQ1JFREVOVElBTF9BVVRIRU5USUNBVElPTl9LSU5EX0FDQ0VTU19UT0tFThADEi0KKUNSRURFTlRJQUxfQVVUSEVOVElDQVRJT05fS0lORF9HSVRIVUJfQVBQEAQSKgomQ1JFREVOVElBTF9BVVRIRU5USUNBVElPTl9LSU5EX1NTSF9LRVkQBxIxCi1DUkVERU5USUFMX0FVVEhFTlRJQ0FUSU9OX0tJTkRfQ0xBVURFX1NJR05fSU4QCCq3AQoQQ3JlZGVudGlhbFN0YXR1cxIhCh1DUkVERU5USUFMX1NUQVRVU19VTlNQRUNJRklFRBAAEhwKGENSRURFTlRJQUxfU1RBVFVTX0FDVElWRRABEh0KGUNSRURFTlRJQUxfU1RBVFVTX1JFVk9LRUQQAhIdChlDUkVERU5USUFMX1NUQVRVU19FWFBJUkVEEAMSJAogQ1JFREVOVElBTF9TVEFUVVNfUkVGUkVTSF9GQUlMRUQQBCqzAQoUR2l0aHViQXBwQWNjb3VudEtpbmQSJwojR0lUSFVCX0FQUF9BQ0NPVU5UX0tJTkRfVU5TUEVDSUZJRUQQABIgChxHSVRIVUJfQVBQX0FDQ09VTlRfS0lORF9VU0VSEAESKAokR0lUSFVCX0FQUF9BQ0NPVU5UX0tJTkRfT1JHQU5JWkFUSU9OEAISJgoiR0lUSFVCX0FQUF9BQ0NPVU5UX0tJTkRfRU5URVJQUklTRRADMtMBChFDcmVkZW50aWFsU2VydmljZRJhCg9MaXN0Q3JlZGVudGlhbHMSIy5jb2Rld2lyZS52MS5MaXN0Q3JlZGVudGlhbHNSZXF1ZXN0GiQuY29kZXdpcmUudjEuTGlzdENyZWRlbnRpYWxzUmVzcG9uc2UiA5ACARJbCg1HZXRDcmVkZW50aWFsEiEuY29kZXdpcmUudjEuR2V0Q3JlZGVudGlhbFJlcXVlc3QaIi5jb2Rld2lyZS52MS5HZXRDcmVkZW50aWFsUmVzcG9uc2UiA5ACATKcAgoXR2l0aHViUmVwb3NpdG9yeVNlcnZpY2USdgoWTGlzdEdpdGh1YlJlcG9zaXRvcmllcxIqLmNvZGV3aXJlLnYxLkxpc3RHaXRodWJSZXBvc2l0b3JpZXNSZXF1ZXN0GisuY29kZXdpcmUudjEuTGlzdEdpdGh1YlJlcG9zaXRvcmllc1Jlc3BvbnNlIgOQAgESiAEKHExpc3RHaXRodWJQZW5kaW5nUGVybWlzc2lvbnMSMC5jb2Rld2lyZS52MS5MaXN0R2l0aHViUGVuZGluZ1Blcm1pc3Npb25zUmVxdWVzdBoxLmNvZGV3aXJlLnYxLkxpc3RHaXRodWJQZW5kaW5nUGVybWlzc2lvbnNSZXNwb25zZSIDkAIBMpILChlDcmVkZW50aWFsTXV0YXRpb25TZXJ2aWNlElIKC0Vucm9sbENvZGV4Eh8uY29kZXdpcmUudjEuRW5yb2xsQ29kZXhSZXF1ZXN0GiAuY29kZXdpcmUudjEuRW5yb2xsQ29kZXhSZXNwb25zZTABElUKDEVucm9sbEdpdGh1YhIgLmNvZGV3aXJlLnYxLkVucm9sbEdpdGh1YlJlcXVlc3QaIS5jb2Rld2lyZS52MS5FbnJvbGxHaXRodWJSZXNwb25zZTABEokBCh5Db21wbGV0ZUdpdGh1YkFwcEF1dGhvcml6YXRpb24SMi5jb2Rld2lyZS52MS5Db21wbGV0ZUdpdGh1YkFwcEF1dGhvcml6YXRpb25SZXF1ZXN0GjMuY29kZXdpcmUudjEuQ29tcGxldGVHaXRodWJBcHBBdXRob3JpemF0aW9uUmVzcG9uc2USaAoTQWRkQXBpS2V5Q3JlZGVudGlhbBInLmNvZGV3aXJlLnYxLkFkZEFwaUtleUNyZWRlbnRpYWxSZXF1ZXN0GiguY29kZXdpcmUudjEuQWRkQXBpS2V5Q3JlZGVudGlhbFJlc3BvbnNlEpsBCiRBZGRDbGF1ZGVTdWJzY3JpcHRpb25Ub2tlbkNyZWRlbnRpYWwSOC5jb2Rld2lyZS52MS5BZGRDbGF1ZGVTdWJzY3JpcHRpb25Ub2tlbkNyZWRlbnRpYWxSZXF1ZXN0GjkuY29kZXdpcmUudjEuQWRkQ2xhdWRlU3Vic2NyaXB0aW9uVG9rZW5DcmVkZW50aWFsUmVzcG9uc2USYgoRU3RhcnRDbGF1ZGVTaWduSW4SJS5jb2Rld2lyZS52MS5TdGFydENsYXVkZVNpZ25JblJlcXVlc3QaJi5jb2Rld2lyZS52MS5TdGFydENsYXVkZVNpZ25JblJlc3BvbnNlEmsKFENvbXBsZXRlQ2xhdWRlU2lnbkluEiguY29kZXdpcmUudjEuQ29tcGxldGVDbGF1ZGVTaWduSW5SZXF1ZXN0GikuY29kZXdpcmUudjEuQ29tcGxldGVDbGF1ZGVTaWduSW5SZXNwb25zZRJfChBSZW5hbWVDcmVkZW50aWFsEiQuY29kZXdpcmUudjEuUmVuYW1lQ3JlZGVudGlhbFJlcXVlc3QaJS5jb2Rld2lyZS52MS5SZW5hbWVDcmVkZW50aWFsUmVzcG9uc2UScQoWUm90YXRlQXBpS2V5Q3JlZGVudGlhbBIqLmNvZGV3aXJlLnYxLlJvdGF0ZUFwaUtleUNyZWRlbnRpYWxSZXF1ZXN0GisuY29kZXdpcmUudjEuUm90YXRlQXBpS2V5Q3JlZGVudGlhbFJlc3BvbnNlEm4KFUdlbmVyYXRlU3NoQ3JlZGVudGlhbBIpLmNvZGV3aXJlLnYxLkdlbmVyYXRlU3NoQ3JlZGVudGlhbFJlcXVlc3QaKi5jb2Rld2lyZS52MS5HZW5lcmF0ZVNzaENyZWRlbnRpYWxSZXNwb25zZRJfChBBZGRTc2hDcmVkZW50aWFsEiQuY29kZXdpcmUudjEuQWRkU3NoQ3JlZGVudGlhbFJlcXVlc3QaJS5jb2Rld2lyZS52MS5BZGRTc2hDcmVkZW50aWFsUmVzcG9uc2USXwoQUmV2b2tlQ3JlZGVudGlhbBIkLmNvZGV3aXJlLnYxLlJldm9rZUNyZWRlbnRpYWxSZXF1ZXN0GiUuY29kZXdpcmUudjEuUmV2b2tlQ3JlZGVudGlhbFJlc3BvbnNlEl8KEERlbGV0ZUNyZWRlbnRpYWwSJC5jb2Rld2lyZS52MS5EZWxldGVDcmVkZW50aWFsUmVxdWVzdBolLmNvZGV3aXJlLnYxLkRlbGV0ZUNyZWRlbnRpYWxSZXNwb25zZUKyAQoPY29tLmNvZGV3aXJlLnYxQg9DcmVkZW50aWFsUHJvdG9QAVpBZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL3YxO2NvZGV3aXJldjGiAgNDWFiqAgtDb2Rld2lyZS5WMcoCC0NvZGV3aXJlXFYx4gIXQ29kZXdpcmVcVjFcR1BCTWV0YWRhdGHqAgxDb2Rld2lyZTo6VjFiBnByb3RvMw");
+
+/**
+ * @generated from message codewire.v1.ListGithubPendingPermissionsRequest
+ */
+export type ListGithubPendingPermissionsRequest = Message<"codewire.v1.ListGithubPendingPermissionsRequest"> & {
+};
+
+/**
+ * Describes the message codewire.v1.ListGithubPendingPermissionsRequest.
+ * Use `create(ListGithubPendingPermissionsRequestSchema)` to create a new message.
+ */
+export const ListGithubPendingPermissionsRequestSchema: GenMessage<ListGithubPendingPermissionsRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential, 0);
+
+/**
+ * Empty when every installation has granted what Codewire needs. Never a
+ * token, permission set or provider response.
+ *
+ * @generated from message codewire.v1.ListGithubPendingPermissionsResponse
+ */
+export type ListGithubPendingPermissionsResponse = Message<"codewire.v1.ListGithubPendingPermissionsResponse"> & {
+  /**
+   * @generated from field: repeated codewire.v1.GithubAppPendingPermissions pending_permissions = 1;
+   */
+  pendingPermissions: GithubAppPendingPermissions[];
+};
+
+/**
+ * Describes the message codewire.v1.ListGithubPendingPermissionsResponse.
+ * Use `create(ListGithubPendingPermissionsResponseSchema)` to create a new message.
+ */
+export const ListGithubPendingPermissionsResponseSchema: GenMessage<ListGithubPendingPermissionsResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential, 1);
 
 /**
  * @generated from message codewire.v1.ListGithubRepositoriesRequest
@@ -37,7 +70,7 @@ export type ListGithubRepositoriesRequest = Message<"codewire.v1.ListGithubRepos
  * Use `create(ListGithubRepositoriesRequestSchema)` to create a new message.
  */
 export const ListGithubRepositoriesRequestSchema: GenMessage<ListGithubRepositoriesRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 0);
+  messageDesc(file_codewire_v1_credential, 2);
 
 /**
  * Allowlisted metadata only, never raw provider JSON, tokens, arbitrary clone
@@ -88,7 +121,7 @@ export type GithubRepository = Message<"codewire.v1.GithubRepository"> & {
  * Use `create(GithubRepositorySchema)` to create a new message.
  */
 export const GithubRepositorySchema: GenMessage<GithubRepository> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 1);
+  messageDesc(file_codewire_v1_credential, 3);
 
 /**
  * @generated from message codewire.v1.ListGithubRepositoriesResponse
@@ -110,7 +143,7 @@ export type ListGithubRepositoriesResponse = Message<"codewire.v1.ListGithubRepo
  * Use `create(ListGithubRepositoriesResponseSchema)` to create a new message.
  */
 export const ListGithubRepositoriesResponseSchema: GenMessage<ListGithubRepositoriesResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 2);
+  messageDesc(file_codewire_v1_credential, 4);
 
 /**
  * Metadata only. The owner is the authenticated account and placement is
@@ -175,7 +208,7 @@ export type Credential = Message<"codewire.v1.Credential"> & {
  * Use `create(CredentialSchema)` to create a new message.
  */
 export const CredentialSchema: GenMessage<Credential> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 3);
+  messageDesc(file_codewire_v1_credential, 5);
 
 /**
  * @generated from message codewire.v1.SshPublicKey
@@ -197,7 +230,7 @@ export type SshPublicKey = Message<"codewire.v1.SshPublicKey"> & {
  * Use `create(SshPublicKeySchema)` to create a new message.
  */
 export const SshPublicKeySchema: GenMessage<SshPublicKey> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 4);
+  messageDesc(file_codewire_v1_credential, 6);
 
 /**
  * The authority generates an Ed25519 identity and protects its private key.
@@ -222,7 +255,7 @@ export type GenerateSshCredentialRequest = Message<"codewire.v1.GenerateSshCrede
  * Use `create(GenerateSshCredentialRequestSchema)` to create a new message.
  */
 export const GenerateSshCredentialRequestSchema: GenMessage<GenerateSshCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 5);
+  messageDesc(file_codewire_v1_credential, 7);
 
 /**
  * @generated from message codewire.v1.GenerateSshCredentialResponse
@@ -239,7 +272,7 @@ export type GenerateSshCredentialResponse = Message<"codewire.v1.GenerateSshCred
  * Use `create(GenerateSshCredentialResponseSchema)` to create a new message.
  */
 export const GenerateSshCredentialResponseSchema: GenMessage<GenerateSshCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 6);
+  messageDesc(file_codewire_v1_credential, 8);
 
 /**
  * Explicit write-only OpenSSH import; no paths or ambient agent discovery.
@@ -273,7 +306,7 @@ export type AddSshCredentialRequest = Message<"codewire.v1.AddSshCredentialReque
  * Use `create(AddSshCredentialRequestSchema)` to create a new message.
  */
 export const AddSshCredentialRequestSchema: GenMessage<AddSshCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 7);
+  messageDesc(file_codewire_v1_credential, 9);
 
 /**
  * @generated from message codewire.v1.AddSshCredentialResponse
@@ -290,7 +323,7 @@ export type AddSshCredentialResponse = Message<"codewire.v1.AddSshCredentialResp
  * Use `create(AddSshCredentialResponseSchema)` to create a new message.
  */
 export const AddSshCredentialResponseSchema: GenMessage<AddSshCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 8);
+  messageDesc(file_codewire_v1_credential, 10);
 
 /**
  * @generated from message codewire.v1.ListCredentialsRequest
@@ -312,7 +345,7 @@ export type ListCredentialsRequest = Message<"codewire.v1.ListCredentialsRequest
  * Use `create(ListCredentialsRequestSchema)` to create a new message.
  */
 export const ListCredentialsRequestSchema: GenMessage<ListCredentialsRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 9);
+  messageDesc(file_codewire_v1_credential, 11);
 
 /**
  * @generated from message codewire.v1.ListCredentialsResponse
@@ -334,7 +367,7 @@ export type ListCredentialsResponse = Message<"codewire.v1.ListCredentialsRespon
  * Use `create(ListCredentialsResponseSchema)` to create a new message.
  */
 export const ListCredentialsResponseSchema: GenMessage<ListCredentialsResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 10);
+  messageDesc(file_codewire_v1_credential, 12);
 
 /**
  * @generated from message codewire.v1.GetCredentialRequest
@@ -365,7 +398,7 @@ export type GetCredentialRequest = Message<"codewire.v1.GetCredentialRequest"> &
  * Use `create(GetCredentialRequestSchema)` to create a new message.
  */
 export const GetCredentialRequestSchema: GenMessage<GetCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 11);
+  messageDesc(file_codewire_v1_credential, 13);
 
 /**
  * @generated from message codewire.v1.GetCredentialResponse
@@ -382,7 +415,7 @@ export type GetCredentialResponse = Message<"codewire.v1.GetCredentialResponse">
  * Use `create(GetCredentialResponseSchema)` to create a new message.
  */
 export const GetCredentialResponseSchema: GenMessage<GetCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 12);
+  messageDesc(file_codewire_v1_credential, 14);
 
 /**
  * @generated from message codewire.v1.EnrollCodexRequest
@@ -414,7 +447,7 @@ export type EnrollCodexRequest = Message<"codewire.v1.EnrollCodexRequest"> & {
  * Use `create(EnrollCodexRequestSchema)` to create a new message.
  */
 export const EnrollCodexRequestSchema: GenMessage<EnrollCodexRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 13);
+  messageDesc(file_codewire_v1_credential, 15);
 
 /**
  * @generated from message codewire.v1.EnrollGithubRequest
@@ -446,7 +479,7 @@ export type EnrollGithubRequest = Message<"codewire.v1.EnrollGithubRequest"> & {
  * Use `create(EnrollGithubRequestSchema)` to create a new message.
  */
 export const EnrollGithubRequestSchema: GenMessage<EnrollGithubRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 14);
+  messageDesc(file_codewire_v1_credential, 16);
 
 /**
  * Explicit write-only API-key enrollment. Only openai and anthropic are
@@ -481,7 +514,7 @@ export type AddApiKeyCredentialRequest = Message<"codewire.v1.AddApiKeyCredentia
  * Use `create(AddApiKeyCredentialRequestSchema)` to create a new message.
  */
 export const AddApiKeyCredentialRequestSchema: GenMessage<AddApiKeyCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 15);
+  messageDesc(file_codewire_v1_credential, 17);
 
 /**
  * @generated from message codewire.v1.AddApiKeyCredentialResponse
@@ -498,7 +531,7 @@ export type AddApiKeyCredentialResponse = Message<"codewire.v1.AddApiKeyCredenti
  * Use `create(AddApiKeyCredentialResponseSchema)` to create a new message.
  */
 export const AddApiKeyCredentialResponseSchema: GenMessage<AddApiKeyCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 16);
+  messageDesc(file_codewire_v1_credential, 18);
 
 /**
  * Shape is checked only: a bounded token without whitespace. No provider call
@@ -537,7 +570,7 @@ export type AddClaudeSubscriptionTokenCredentialRequest = Message<"codewire.v1.A
  * Use `create(AddClaudeSubscriptionTokenCredentialRequestSchema)` to create a new message.
  */
 export const AddClaudeSubscriptionTokenCredentialRequestSchema: GenMessage<AddClaudeSubscriptionTokenCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 17);
+  messageDesc(file_codewire_v1_credential, 19);
 
 /**
  * @generated from message codewire.v1.AddClaudeSubscriptionTokenCredentialResponse
@@ -554,7 +587,120 @@ export type AddClaudeSubscriptionTokenCredentialResponse = Message<"codewire.v1.
  * Use `create(AddClaudeSubscriptionTokenCredentialResponseSchema)` to create a new message.
  */
 export const AddClaudeSubscriptionTokenCredentialResponseSchema: GenMessage<AddClaudeSubscriptionTokenCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 18);
+  messageDesc(file_codewire_v1_credential, 20);
+
+/**
+ * @generated from message codewire.v1.StartClaudeSignInRequest
+ */
+export type StartClaudeSignInRequest = Message<"codewire.v1.StartClaudeSignInRequest"> & {
+};
+
+/**
+ * Describes the message codewire.v1.StartClaudeSignInRequest.
+ * Use `create(StartClaudeSignInRequestSchema)` to create a new message.
+ */
+export const StartClaudeSignInRequestSchema: GenMessage<StartClaudeSignInRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential, 21);
+
+/**
+ * @generated from message codewire.v1.StartClaudeSignInResponse
+ */
+export type StartClaudeSignInResponse = Message<"codewire.v1.StartClaudeSignInResponse"> & {
+  /**
+   * Always Claude's claude.ai authorize page with this sign-in's PKCE
+   * challenge and state, never a caller-selected URL.
+   *
+   * @generated from field: string authorize_url = 1;
+   */
+  authorizeUrl: string;
+
+  /**
+   * Opaque. It carries this sign-in's PKCE verifier and state, sealed by the
+   * credential service and bound to the person who started it and its issue
+   * time, so either replica can complete it and no other person's Complete,
+   * altered handle or expired handle opens it. The client that started the
+   * sign-in keeps it private (never in a URL, log or page) and returns it
+   * unchanged to CompleteClaudeSignIn.
+   *
+   * @generated from field: string sign_in = 2;
+   */
+  signIn: string;
+
+  /**
+   * The handle is refused at Complete from this time.
+   *
+   * @generated from field: uint64 expires_at_unix = 3;
+   */
+  expiresAtUnix: bigint;
+};
+
+/**
+ * Describes the message codewire.v1.StartClaudeSignInResponse.
+ * Use `create(StartClaudeSignInResponseSchema)` to create a new message.
+ */
+export const StartClaudeSignInResponseSchema: GenMessage<StartClaudeSignInResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential, 22);
+
+/**
+ * Both reconnect fields must be present together, with a positive
+ * generation, the existing credential's exact name and a Claude sign-in at
+ * that generation; reconnect keeps its identity and profile bindings. Absence
+ * means create-only, never an implicit upsert.
+ *
+ * @generated from message codewire.v1.CompleteClaudeSignInRequest
+ */
+export type CompleteClaudeSignInRequest = Message<"codewire.v1.CompleteClaudeSignInRequest"> & {
+  /**
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * @generated from field: string sign_in = 2;
+   */
+  signIn: string;
+
+  /**
+   * Exactly what Claude showed after sign-in: `code#state`.
+   *
+   * @generated from field: bytes authorization_code = 3;
+   */
+  authorizationCode: Uint8Array;
+
+  /**
+   * @generated from field: optional string credential_id = 4;
+   */
+  credentialId?: string | undefined;
+
+  /**
+   * @generated from field: optional uint64 expected_revocation_generation = 5;
+   */
+  expectedRevocationGeneration?: bigint | undefined;
+};
+
+/**
+ * Describes the message codewire.v1.CompleteClaudeSignInRequest.
+ * Use `create(CompleteClaudeSignInRequestSchema)` to create a new message.
+ */
+export const CompleteClaudeSignInRequestSchema: GenMessage<CompleteClaudeSignInRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential, 23);
+
+/**
+ * @generated from message codewire.v1.CompleteClaudeSignInResponse
+ */
+export type CompleteClaudeSignInResponse = Message<"codewire.v1.CompleteClaudeSignInResponse"> & {
+  /**
+   * @generated from field: codewire.v1.Credential credential = 1;
+   */
+  credential?: Credential | undefined;
+};
+
+/**
+ * Describes the message codewire.v1.CompleteClaudeSignInResponse.
+ * Use `create(CompleteClaudeSignInResponseSchema)` to create a new message.
+ */
+export const CompleteClaudeSignInResponseSchema: GenMessage<CompleteClaudeSignInResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential, 24);
 
 /**
  * Metadata-only rename: preserve identity, material, generations and bindings.
@@ -589,7 +735,7 @@ export type RenameCredentialRequest = Message<"codewire.v1.RenameCredentialReque
  * Use `create(RenameCredentialRequestSchema)` to create a new message.
  */
 export const RenameCredentialRequestSchema: GenMessage<RenameCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 19);
+  messageDesc(file_codewire_v1_credential, 25);
 
 /**
  * @generated from message codewire.v1.RenameCredentialResponse
@@ -606,7 +752,7 @@ export type RenameCredentialResponse = Message<"codewire.v1.RenameCredentialResp
  * Use `create(RenameCredentialResponseSchema)` to create a new message.
  */
 export const RenameCredentialResponseSchema: GenMessage<RenameCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 20);
+  messageDesc(file_codewire_v1_credential, 26);
 
 /**
  * Explicit owner-requested OpenAI/Anthropic API-key replacement, not refresh.
@@ -643,7 +789,7 @@ export type RotateApiKeyCredentialRequest = Message<"codewire.v1.RotateApiKeyCre
  * Use `create(RotateApiKeyCredentialRequestSchema)` to create a new message.
  */
 export const RotateApiKeyCredentialRequestSchema: GenMessage<RotateApiKeyCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 21);
+  messageDesc(file_codewire_v1_credential, 27);
 
 /**
  * @generated from message codewire.v1.RotateApiKeyCredentialResponse
@@ -660,7 +806,7 @@ export type RotateApiKeyCredentialResponse = Message<"codewire.v1.RotateApiKeyCr
  * Use `create(RotateApiKeyCredentialResponseSchema)` to create a new message.
  */
 export const RotateApiKeyCredentialResponseSchema: GenMessage<RotateApiKeyCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 22);
+  messageDesc(file_codewire_v1_credential, 28);
 
 /**
  * The only provider prompt information exposed by enrollment. The one-time
@@ -693,7 +839,7 @@ export type CodexDeviceChallenge = Message<"codewire.v1.CodexDeviceChallenge"> &
  * Use `create(CodexDeviceChallengeSchema)` to create a new message.
  */
 export const CodexDeviceChallengeSchema: GenMessage<CodexDeviceChallenge> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 23);
+  messageDesc(file_codewire_v1_credential, 29);
 
 /**
  * @generated from message codewire.v1.EnrollCodexResponse
@@ -722,7 +868,7 @@ export type EnrollCodexResponse = Message<"codewire.v1.EnrollCodexResponse"> & {
  * Use `create(EnrollCodexResponseSchema)` to create a new message.
  */
 export const EnrollCodexResponseSchema: GenMessage<EnrollCodexResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 24);
+  messageDesc(file_codewire_v1_credential, 30);
 
 /**
  * @generated from message codewire.v1.GithubDeviceChallenge
@@ -753,7 +899,7 @@ export type GithubDeviceChallenge = Message<"codewire.v1.GithubDeviceChallenge">
  * Use `create(GithubDeviceChallengeSchema)` to create a new message.
  */
 export const GithubDeviceChallengeSchema: GenMessage<GithubDeviceChallenge> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 25);
+  messageDesc(file_codewire_v1_credential, 31);
 
 /**
  * @generated from message codewire.v1.EnrollGithubResponse
@@ -775,6 +921,14 @@ export type EnrollGithubResponse = Message<"codewire.v1.EnrollGithubResponse"> &
     value: Credential;
     case: "credential";
   } | { case: undefined; value?: undefined };
+
+  /**
+   * Only with `credential`: installations still short of the permissions
+   * Codewire needs at connect time. Never stored.
+   *
+   * @generated from field: repeated codewire.v1.GithubAppPendingPermissions pending_permissions = 3;
+   */
+  pendingPermissions: GithubAppPendingPermissions[];
 };
 
 /**
@@ -782,7 +936,41 @@ export type EnrollGithubResponse = Message<"codewire.v1.EnrollGithubResponse"> &
  * Use `create(EnrollGithubResponseSchema)` to create a new message.
  */
 export const EnrollGithubResponseSchema: GenMessage<EnrollGithubResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 26);
+  messageDesc(file_codewire_v1_credential, 32);
+
+/**
+ * An installation of the Codewire GitHub App that has not granted every
+ * permission Codewire needs (contents and pull requests: write; metadata:
+ * read), usually because its owner has not yet accepted the App's updated
+ * permission request. Public installation metadata only.
+ *
+ * @generated from message codewire.v1.GithubAppPendingPermissions
+ */
+export type GithubAppPendingPermissions = Message<"codewire.v1.GithubAppPendingPermissions"> & {
+  /**
+   * The user, organization or enterprise login the App is installed on.
+   *
+   * @generated from field: string account = 1;
+   */
+  account: string;
+
+  /**
+   * @generated from field: uint64 installation_id = 2;
+   */
+  installationId: bigint;
+
+  /**
+   * @generated from field: codewire.v1.GithubAppAccountKind account_kind = 3;
+   */
+  accountKind: GithubAppAccountKind;
+};
+
+/**
+ * Describes the message codewire.v1.GithubAppPendingPermissions.
+ * Use `create(GithubAppPendingPermissionsSchema)` to create a new message.
+ */
+export const GithubAppPendingPermissionsSchema: GenMessage<GithubAppPendingPermissions> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential, 33);
 
 /**
  * @generated from message codewire.v1.CompleteGithubAppAuthorizationRequest
@@ -815,7 +1003,7 @@ export type CompleteGithubAppAuthorizationRequest = Message<"codewire.v1.Complet
  * Use `create(CompleteGithubAppAuthorizationRequestSchema)` to create a new message.
  */
 export const CompleteGithubAppAuthorizationRequestSchema: GenMessage<CompleteGithubAppAuthorizationRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 27);
+  messageDesc(file_codewire_v1_credential, 34);
 
 /**
  * @generated from message codewire.v1.CompleteGithubAppAuthorizationResponse
@@ -825,6 +1013,14 @@ export type CompleteGithubAppAuthorizationResponse = Message<"codewire.v1.Comple
    * @generated from field: codewire.v1.Credential credential = 1;
    */
   credential?: Credential | undefined;
+
+  /**
+   * Installations still short of the permissions Codewire needs at connect
+   * time. Never stored.
+   *
+   * @generated from field: repeated codewire.v1.GithubAppPendingPermissions pending_permissions = 2;
+   */
+  pendingPermissions: GithubAppPendingPermissions[];
 };
 
 /**
@@ -832,7 +1028,7 @@ export type CompleteGithubAppAuthorizationResponse = Message<"codewire.v1.Comple
  * Use `create(CompleteGithubAppAuthorizationResponseSchema)` to create a new message.
  */
 export const CompleteGithubAppAuthorizationResponseSchema: GenMessage<CompleteGithubAppAuthorizationResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 28);
+  messageDesc(file_codewire_v1_credential, 35);
 
 /**
  * @generated from message codewire.v1.RevokeCredentialRequest
@@ -854,7 +1050,7 @@ export type RevokeCredentialRequest = Message<"codewire.v1.RevokeCredentialReque
  * Use `create(RevokeCredentialRequestSchema)` to create a new message.
  */
 export const RevokeCredentialRequestSchema: GenMessage<RevokeCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 29);
+  messageDesc(file_codewire_v1_credential, 36);
 
 /**
  * @generated from message codewire.v1.RevokeCredentialResponse
@@ -871,7 +1067,7 @@ export type RevokeCredentialResponse = Message<"codewire.v1.RevokeCredentialResp
  * Use `create(RevokeCredentialResponseSchema)` to create a new message.
  */
 export const RevokeCredentialResponseSchema: GenMessage<RevokeCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 30);
+  messageDesc(file_codewire_v1_credential, 37);
 
 /**
  * @generated from message codewire.v1.DeleteCredentialRequest
@@ -893,7 +1089,7 @@ export type DeleteCredentialRequest = Message<"codewire.v1.DeleteCredentialReque
  * Use `create(DeleteCredentialRequestSchema)` to create a new message.
  */
 export const DeleteCredentialRequestSchema: GenMessage<DeleteCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 31);
+  messageDesc(file_codewire_v1_credential, 38);
 
 /**
  * Only revoked, unreferenced records can be deleted. This removes Codewire
@@ -909,7 +1105,7 @@ export type DeleteCredentialResponse = Message<"codewire.v1.DeleteCredentialResp
  * Use `create(DeleteCredentialResponseSchema)` to create a new message.
  */
 export const DeleteCredentialResponseSchema: GenMessage<DeleteCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential, 32);
+  messageDesc(file_codewire_v1_credential, 39);
 
 /**
  * @generated from enum codewire.v1.CredentialAuthenticationKind
@@ -944,6 +1140,15 @@ export enum CredentialAuthenticationKind {
    * @generated from enum value: CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY = 7;
    */
   SSH_KEY = 7,
+
+  /**
+   * Claude Code's own claude.ai sign-in for the anthropic provider: a personal
+   * OAuth login whose refresh token Codewire rotates. Distinct from the pasted
+   * Claude subscription token, which is the provider's OAUTH kind.
+   *
+   * @generated from enum value: CREDENTIAL_AUTHENTICATION_KIND_CLAUDE_SIGN_IN = 8;
+   */
+  CLAUDE_SIGN_IN = 8,
 }
 
 /**
@@ -989,6 +1194,40 @@ export const CredentialStatusSchema: GenEnum<CredentialStatus> = /*@__PURE__*/
   enumDesc(file_codewire_v1_credential, 1);
 
 /**
+ * @generated from enum codewire.v1.GithubAppAccountKind
+ */
+export enum GithubAppAccountKind {
+  /**
+   * @generated from enum value: GITHUB_APP_ACCOUNT_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: GITHUB_APP_ACCOUNT_KIND_USER = 1;
+   */
+  USER = 1,
+
+  /**
+   * @generated from enum value: GITHUB_APP_ACCOUNT_KIND_ORGANIZATION = 2;
+   */
+  ORGANIZATION = 2,
+
+  /**
+   * Accepted in the enterprise's own GitHub settings; there is no
+   * per-installation page to link.
+   *
+   * @generated from enum value: GITHUB_APP_ACCOUNT_KIND_ENTERPRISE = 3;
+   */
+  ENTERPRISE = 3,
+}
+
+/**
+ * Describes the enum codewire.v1.GithubAppAccountKind.
+ */
+export const GithubAppAccountKindSchema: GenEnum<GithubAppAccountKind> = /*@__PURE__*/
+  enumDesc(file_codewire_v1_credential, 2);
+
+/**
  * Personal platform credential metadata, served by orchestration without a
  * material store or KEK provider. Account sessions and scoped OAuth are allowed;
  * organization API keys are not. Authentication determines the owner.
@@ -1032,6 +1271,20 @@ export const GithubRepositoryService: GenService<{
     methodKind: "unary";
     input: typeof ListGithubRepositoriesRequestSchema;
     output: typeof ListGithubRepositoriesResponseSchema;
+  },
+  /**
+   * The installations of the Codewire GitHub App that have not yet granted
+   * what Codewire needs, checked live with the same authenticated owner's
+   * own active GitHub connection, under the same authority as
+   * ListGithubRepositories. Like discovery, it may renew an expiring App
+   * token first. Answers login, installation ID and account kind only.
+   *
+   * @generated from rpc codewire.v1.GithubRepositoryService.ListGithubPendingPermissions
+   */
+  listGithubPendingPermissions: {
+    methodKind: "unary";
+    input: typeof ListGithubPendingPermissionsRequestSchema;
+    output: typeof ListGithubPendingPermissionsResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_v1_credential, 1);
@@ -1108,6 +1361,32 @@ export const CredentialMutationService: GenService<{
     methodKind: "unary";
     input: typeof AddClaudeSubscriptionTokenCredentialRequestSchema;
     output: typeof AddClaudeSubscriptionTokenCredentialResponseSchema;
+  },
+  /**
+   * Claude sign-in: Claude Code's own claude.ai OAuth login, by pasted code.
+   * Start creates this sign-in's PKCE verifier and state and returns Claude's
+   * fixed authorize URL and an opaque handle; nothing is sent or stored. The
+   * person signs in in their browser and copies the `code#state` Claude
+   * shows. Complete checks that state against the handle, exchanges the code
+   * as Claude Code's public client, reads the plan from Claude's OAuth
+   * profile and stores the login as the anthropic provider's CLAUDE_SIGN_IN
+   * kind. It is personal: organization API keys and organizations are denied.
+   * No token is returned; the credential broker refreshes the login.
+   *
+   * @generated from rpc codewire.v1.CredentialMutationService.StartClaudeSignIn
+   */
+  startClaudeSignIn: {
+    methodKind: "unary";
+    input: typeof StartClaudeSignInRequestSchema;
+    output: typeof StartClaudeSignInResponseSchema;
+  },
+  /**
+   * @generated from rpc codewire.v1.CredentialMutationService.CompleteClaudeSignIn
+   */
+  completeClaudeSignIn: {
+    methodKind: "unary";
+    input: typeof CompleteClaudeSignInRequestSchema;
+    output: typeof CompleteClaudeSignInResponseSchema;
   },
   /**
    * @generated from rpc codewire.v1.CredentialMutationService.RenameCredential

@@ -73,7 +73,7 @@ impl AppBuilder {
     }
 
     /// Mounts a Connect-RPC router into the application
-    /// (`docs/plans/connect-rpc/03-connect-server-infrastructure.md` D1).
+    /// (`connect-rpc/03-connect-server-infrastructure.md` D1).
     ///
     /// Each registered Connect service is served at
     /// `/{package}.{Service}/{Method}` behind the standard middleware stack

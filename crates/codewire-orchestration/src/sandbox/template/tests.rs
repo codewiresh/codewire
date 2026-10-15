@@ -192,7 +192,7 @@ mod tests {
         TemplateOpts {
             name: "tmpl-golden-commodity".into(),
             image: "ghcr.io/codewiresh/workspace:golden".into(),
-            support_image: "git.example.invalid/codewire/daemon:golden".into(),
+            support_image: "registry.example.invalid/codewire/daemon:golden".into(),
             runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
             environment_id: "env-golden-commodity".into(),
             organization_id: "org-golden-commodity".into(),
@@ -1223,7 +1223,7 @@ mod tests {
             &TemplateOpts {
                 name: "tmpl-managed-daemon".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
-                support_image: "git.example.invalid/codewire/daemon:test".into(),
+                support_image: "registry.example.invalid/codewire/daemon:test".into(),
                 environment_id: "env-managed-daemon".into(),
                 daemon_auth_token: "managed-daemon-token".into(),
                 ..Default::default()
@@ -1257,7 +1257,7 @@ mod tests {
                 name: "tmpl-custom-daemon".into(),
                 image: "example.invalid/custom:golden".into(),
                 image_command: vec!["/bin/custom-entrypoint".into(), "--serve".into()],
-                support_image: "git.example.invalid/codewire/daemon:test".into(),
+                support_image: "registry.example.invalid/codewire/daemon:test".into(),
                 environment_id: "env-custom-daemon".into(),
                 daemon_auth_token: "custom-daemon-token".into(),
                 ..Default::default()
@@ -1350,6 +1350,24 @@ mod tests {
         }
     }
 
+    /// Kubernetes starts container PID 1 with default signal dispositions, but
+    /// a test may inherit SIGINT ignored, as every job a non-interactive
+    /// shell starts in the background does (the preflight lanes), and a shell
+    /// cannot trap a signal that was ignored on entry. Give the supervisor
+    /// the dispositions its container has.
+    #[cfg(unix)]
+    fn container_signal_dispositions(command: &mut tokio::process::Command) {
+        // SAFETY: signal(2) is async-signal-safe, and it changes only the
+        // forked child's own dispositions before exec.
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                Ok(())
+            });
+        }
+    }
+
     /// The fixture is not namespace PID 1: killing its shell alone would leave
     /// the synthetic daemon alive on assertion panic or timeout. Keep its own
     /// process group until every output pipe has closed and the shell is reaped.
@@ -1387,16 +1405,17 @@ mod tests {
                 "",
                 "sh -c 'trap \"printf stopped; exit 0\" TERM; printf \"ready\\n\"; while :; do sleep 0.1; done'",
             );
-            let child = tokio::process::Command::new("/bin/sh")
+            let mut supervisor = tokio::process::Command::new("/bin/sh");
+            supervisor
                 .args(["-c", &command])
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
                 .process_group(0)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap();
+                .kill_on_drop(true);
+            container_signal_dispositions(&mut supervisor);
+            let child = supervisor.spawn().unwrap();
             let mut fixture = SupervisorFixture {
                 group: child.id().unwrap(),
                 child,
@@ -1438,6 +1457,75 @@ mod tests {
             fixture.drained = true;
             assert_eq!(status.code(), Some(expected_status));
             assert_eq!(stopped, "stopped");
+        }
+    }
+
+    /// A Stop while the supervisor still waits for its daemon binary ends it
+    /// with the trap's status and starts no daemon. Without its traps first, a
+    /// non-PID-1 supervisor died of the signal, and as PID 1 it dropped the
+    /// signal until the Pod's termination grace ran out (#2667).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_workspace_supervisor_stops_while_waiting_for_its_daemon() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
+
+        for (signal, expected_status) in [("-TERM", 143), ("-INT", 130)] {
+            let command = super::workspace::managed_workspace_supervisor_command(
+                "",
+                "printf 'waiting\\n'; while :; do sleep 0.1; done;",
+                "printf started",
+            );
+            let mut supervisor = tokio::process::Command::new("/bin/sh");
+            supervisor
+                .args(["-c", &command])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .process_group(0)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true);
+            container_signal_dispositions(&mut supervisor);
+            let child = supervisor.spawn().unwrap();
+            let mut fixture = SupervisorFixture {
+                group: child.id().unwrap(),
+                child,
+                drained: false,
+            };
+            let mut stdout = BufReader::new(fixture.child.stdout.take().unwrap());
+            let mut waiting = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                stdout.read_line(&mut waiting),
+            )
+            .await
+            .expect("supervisor waits for its daemon")
+            .unwrap();
+            assert_eq!(waiting, "waiting\n");
+            assert!(
+                tokio::process::Command::new("/bin/kill")
+                    .args([signal, &fixture.group.to_string()])
+                    .env_clear()
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+            );
+            let mut rest = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                stdout.read_to_string(&mut rest),
+            )
+            .await
+            .expect("supervisor output reaches EOF")
+            .unwrap();
+            let status =
+                tokio::time::timeout(std::time::Duration::from_secs(3), fixture.child.wait())
+                    .await
+                    .expect("supervisor stops")
+                    .unwrap();
+            fixture.drained = true;
+            assert_eq!(status.code(), Some(expected_status));
+            assert_eq!(rest, "");
         }
     }
 
@@ -2086,7 +2174,7 @@ mod tests {
         let opts = TemplateOpts {
             name: "tmpl-confidential-auth".into(),
             image: "ghcr.io/codewiresh/workspace:golden".into(),
-            support_image: "git.example.invalid/codewire/daemon:test".into(),
+            support_image: "registry.example.invalid/codewire/daemon:test".into(),
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
             daemon_auth_token: "test-daemon-token".into(),
             kata_coco_init_data_enabled: true,
@@ -2173,7 +2261,7 @@ mod tests {
             &TemplateOpts {
                 name: "tmpl-kbs-egress".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
-                support_image: "git.example.invalid/codewire/daemon:test".into(),
+                support_image: "registry.example.invalid/codewire/daemon:test".into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 kata_coco_init_data_enabled: true,

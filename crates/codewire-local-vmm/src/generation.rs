@@ -143,12 +143,6 @@ pub(crate) fn ensure_root_generation(
 }
 
 fn format_ext4(disk: &Path, seed_directory: Option<&Path>) -> Result<(), GenerationError> {
-    #[cfg(target_os = "linux")]
-    let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
-        .into_iter()
-        .find(|candidate| Path::new(candidate).is_file())
-        .ok_or(GenerationError::MkfsUnavailable)?;
-    #[cfg(target_os = "macos")]
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(GenerationError::MkfsUnavailable)?;
     #[cfg(target_os = "macos")]
     let config = crate::host::mke2fs_config().ok_or(GenerationError::MkfsUnavailable)?;
@@ -162,7 +156,7 @@ fn format_ext4(disk: &Path, seed_directory: Option<&Path>) -> Result<(), Generat
         }
     }
     let mut command = Command::new(mkfs);
-    command.args([
+    command.args(crate::host::EXT4_FORMAT).args([
         OsStr::new("-q"),
         OsStr::new("-F"),
         OsStr::new("-m"),
@@ -231,7 +225,9 @@ pub enum GenerationError {
     },
     #[cfg_attr(
         target_os = "linux",
-        error("mkfs.ext4 is required for root generation preparation")
+        error(
+            "mkfs.ext4 is required for root generation preparation; install your distribution's e2fsprogs package (cw looks in /usr/sbin and /usr/bin)"
+        )
     )]
     #[cfg_attr(
         target_os = "macos",

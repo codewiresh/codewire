@@ -13,6 +13,7 @@ mod provider;
 
 use super::*;
 use codewire_credential_broker::GitHubAppAuthorizationConfig;
+use codewire_credential_broker::provider_oauth::claude::ClaudeSignIn;
 use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
 use codewire_credential_broker::provider_oauth::github::GitHubDeviceLogin;
 use codewire_platform_credentials::PlatformCredentialStore;
@@ -83,6 +84,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             Arc::new(provider.clone()),
         );
         let codex_login = CodexDeviceLogin::new(Arc::new(provider.clone()));
+        let claude_sign_in = ClaudeSignIn::new(Arc::new(provider.clone()));
         let store = Arc::new(PlatformCredentialStore::new(
             pool.clone(),
             crate::authority::TimedKekProvider::wrap(Arc::new(TestKekProvider)),
@@ -116,6 +118,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             pool.clone(),
             store.clone(),
             codex_login,
+            claude_sign_in,
             Some(github_login),
             Some(github_app_authorization.clone()),
         ));

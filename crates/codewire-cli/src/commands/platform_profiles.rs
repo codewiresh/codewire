@@ -142,6 +142,8 @@ fn platform_authentication_kind(
         Ok(CredentialAuthKind::GitHubApp)
     } else if credential.authentication_kind == Kind::SshKey {
         Ok(CredentialAuthKind::SshKey)
+    } else if credential.authentication_kind == Kind::ClaudeSignIn {
+        Ok(CredentialAuthKind::ClaudeSignIn)
     } else {
         anyhow::bail!("platform returned an unsupported credential authentication kind")
     }

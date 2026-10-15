@@ -20,8 +20,9 @@ Each case's outcome is judged: `pass`; `bypass`, which fails the run;
 `review`, a reachable path that may still authenticate, which is reported and
 fails the run until its finding is recorded in ACCEPTED_REVIEWS; `broken`,
 the network path no longer serving after a burst, which fails the run;
-`degraded`, the VM's own DNS answering again only after a delay, which is
-reported; or `info`, recorded only. Allowed controls must succeed first, or
+`degraded`, the VM's own DNS answering again only after a delay or an
+external test name never resolving, which is reported; or `info`, recorded
+only. Allowed controls must succeed first, or
 the run is invalid.
 """
 import argparse
@@ -47,13 +48,23 @@ EXPECTED_INTERFACES = {"workload": "cw0 lo", "docker": "eth0 lo"}
 
 def judge(case, outcome, detail, where="workload"):
     """(verdict, reason) for one probe result."""
+    if case == "control-docker-publish-inside":
+        return ("pass", "allowed traffic works") if outcome == "answered" else \
+            ("invalid", "the in-VM Docker port did not answer")
     if case.startswith("control-"):
         kind = case.rsplit("-", 1)[-1]
         if case.startswith("control-after-") and kind == "dns":
             if outcome != "resolved":
                 return "broken", f"DNS did not answer within {detail} s of the burst"
+            if float(detail) > 10:
+                return "broken", f"DNS answered again only after {detail} s"
             return ("pass", "") if float(detail) < 1 else \
                 ("degraded", f"DNS answered again after {detail} s (this VM only)")
+        if case.startswith("control-after-") and kind == "http":
+            if outcome != "answered":
+                return "broken", f"the network path did not serve within {detail} s of the burst"
+            return ("pass", "allowed traffic works") if float(detail) <= 10 else \
+                ("broken", f"the network path served again only after {detail} s")
         ok = (outcome == "resolved" if kind == "dns" or case.startswith("control-dns-") else
               outcome == "connected" if kind == "tcp" or case.startswith("control-tcp-") else
               outcome == "answered" if kind == "http" or case.startswith("control-http-") else
@@ -67,7 +78,8 @@ def judge(case, outcome, detail, where="workload"):
     if case.startswith("concurrency-"):
         ok = outcome in {"handshake", "resolved"}
         return ("pass", "") if ok else ("broken", "a pending dial stopped other traffic (#2638)")
-    if case.startswith("info-") or case == "done" or case.endswith("-burst"):
+    if (case.startswith(("info-", "tcp-connect-burst")) or case == "done"
+            or case.endswith("-burst")):
         return "info", ""
     if case == "raw-icmp-socket":
         if outcome in {"EPERM", "EACCES"}:
@@ -85,6 +97,18 @@ def judge(case, outcome, detail, where="workload"):
         if outcome == "unknown":
             return "invalid", detail
         return ("pass", "") if outcome in NOT_CONNECTED else ("bypass", f"TCP {outcome}")
+    if case.startswith("dns-alternating-answers"):
+        if outcome == "refused":
+            return "degraded", "example.com resolved but neither rbndr.us name did (#2711)"
+        if outcome == "unresolved":
+            return "degraded", "DNS did not answer during the series"
+        return ("bypass", f"a private answer reached the guest: {detail}") if outcome == "private-seen" else ("pass", "")
+    if case.startswith("host-docker-publish"):
+        return ("pass", "") if outcome in NOT_CONNECTED else ("bypass", "a guest Docker -p port reached the host")
+    if case == "port-owner-second-refused":
+        return ("pass", "") if outcome == "refused" else ("bypass", "a second environment took an owned host port")
+    if case == "port-owner-handover":
+        return ("pass", "") if outcome == "published" else ("broken", f"a released host port was not available: {detail}")
     if case.startswith("dns-"):
         return ("pass", "") if outcome == "unresolved" else ("bypass", f"resolved to a protected address: {detail}")
     if case == "interfaces":
@@ -118,8 +142,8 @@ def results(output, where):
     return rows
 
 
-def host_addresses():
-    """This machine's own IPv4 addresses and its default gateway."""
+def host_addresses(gateway=True):
+    """This machine's own IPv4 addresses and, unless gateway is False, its default gateway."""
     addresses = set()
     if sys.platform == "darwin":
         listed = subprocess.run(["/sbin/ifconfig"], capture_output=True, text=True, check=True).stdout
@@ -130,7 +154,7 @@ def host_addresses():
         route = subprocess.run(["/sbin/route", "-n", "get", "default"], capture_output=True, text=True).stdout
         for line in route.splitlines():
             key, _, value = line.strip().partition(": ")
-            if key == "gateway" and value.count(".") == 3:
+            if gateway and key == "gateway" and value.count(".") == 3:
                 addresses.add(value)
     else:
         listed = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, check=True).stdout
@@ -141,7 +165,7 @@ def host_addresses():
         route = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True).stdout
         for line in route.splitlines():
             fields = line.split()
-            if "via" in fields:
+            if gateway and "via" in fields:
                 addresses.add(fields[fields.index("via") + 1])
     return sorted(address for address in addresses if not address.startswith("127."))
 

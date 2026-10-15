@@ -54,7 +54,7 @@ export FAKE_DOCKER_ARGS="$work/docker-args"
 export FAKE_DOCKER_ATTEMPTS="$work/docker-attempts"
 export FAKE_DOCKER_CHECKS="$work/docker-checks"
 export FAKE_STDIN_PREFIX="$work/stdin"
-TEST_REF="docker://git.example.invalid/codewire/daemon@sha256:$(printf 'a%.0s' {1..64})"
+TEST_REF="docker://registry.example.invalid/codewire/daemon@sha256:$(printf 'a%.0s' {1..64})"
 readonly TEST_REF
 "$RUNNER" --check >"$work/check.out"
 grep -qxF 'SKOPEO_RUNTIME_READY' "$work/check.out" ||
@@ -130,13 +130,23 @@ if grep -Fq "$network_retry_secret" "$network_retry_output"; then
   fail 'private stdin reached transient registry output'
 fi
 
+# Five bounded attempts (#2691): four failures still recover.
 rm -f "$FAKE_DOCKER_ATTEMPTS"
-if FAKE_NETWORK_FAILURES=3 SKOPEO_NETWORK_RETRY_DELAY_SECONDS=0 \
+FAKE_NETWORK_FAILURES=4 SKOPEO_NETWORK_RETRY_DELAY_SECONDS=0 \
+  "$RUNNER" login ghcr.io >"$work/network-late.out" 2>&1 ||
+  fail 'registry recovery stopped before its fifth attempt'
+[[ "$(cat "$FAKE_DOCKER_ATTEMPTS")" == 5 ]] ||
+  fail 'late registry recovery did not use five attempts'
+grep -Fq '[skopeo-network] transient registry connectivity; retrying operation in 0s (5/5)' \
+  "$work/network-late.out" || fail 'registry retries do not report their delay and bound'
+
+rm -f "$FAKE_DOCKER_ATTEMPTS"
+if FAKE_NETWORK_FAILURES=5 SKOPEO_NETWORK_RETRY_DELAY_SECONDS=0 \
   "$RUNNER" login ghcr.io >"$work/network-exhausted.out" 2>&1; then
   fail 'exhausted registry retries were accepted'
 fi
-[[ "$(cat "$FAKE_DOCKER_ATTEMPTS")" == 3 ]] ||
-  fail 'registry recovery exceeded three bounded attempts'
+[[ "$(cat "$FAKE_DOCKER_ATTEMPTS")" == 5 ]] ||
+  fail 'registry recovery exceeded five bounded attempts'
 grep -qxF '[skopeo-network] class=transient-exhausted' \
   <(grep -F '[skopeo-network] class=transient-exhausted' "$work/network-exhausted.out") ||
   fail 'exhausted registry connectivity lacks its fixed marker'

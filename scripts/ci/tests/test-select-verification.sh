@@ -21,6 +21,9 @@ cleanup() {
   rm -rf "$TMP"
 }
 trap cleanup EXIT
+# Only hosted pull-request CI sets the quick scope; every fixture below that
+# needs it names it explicitly.
+unset VERIFICATION_PR_SCOPE
 
 selection_value() {
   sed -n 's/^selection=//p' <<<"$1"
@@ -272,6 +275,8 @@ run_paths_case openbao_secret_authority_policy pull_request refs/pull/20011/head
   scripts/ci/tests/test-sync-local-secrets.sh
 run_paths_case local_secret_sync_policy pull_request refs/pull/20012/head false \
   'policy policy_shell security security_js' scripts/dev/kind/sync-local-secrets.sh
+run_paths_case workstation_cpu_helper pull_request refs/pull/20016/head false \
+  'policy policy_shell security security_js' scripts/dev/workstation-cpu.sh docs/dev/AGENT-WORKFLOW.md
 run_paths_case kind_runtime_images_fixture pull_request refs/pull/20014/head false \
   'policy policy_shell security security_js' scripts/ci/tests/test-kind-runtime-images.sh
 run_paths_case kind_watch_github_app_fixture pull_request refs/pull/20015/head false \
@@ -380,6 +385,11 @@ run_paths_case release pull_request refs/pull/3/head false \
   install.sh
 # Presence matters: an unlisted existing script selects unknown/full, while
 # deleted scripts deliberately remain policy-only. Prove each new owner path.
+run_present_paths_case bounded_external_downloads \
+  pull_request refs/pull/2691/head false \
+  'go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
+  scripts/ci/release/fetch-pinned.sh \
+  scripts/ci/tests/test-fetch-pinned.sh
 run_present_paths_case public_installer_test \
   pull_request refs/pull/952/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
@@ -632,6 +642,10 @@ run_paths_case rust_toolchain_guard pull_request refs/pull/506/head false \
   .gitea/workflows/rust-latest-canary.yaml \
   scripts/ci/verify/check-rust-toolchain.sh \
   scripts/ci/tests/test-rust-toolchain.sh
+run_paths_case local_rust_cache_helper pull_request refs/pull/2753/head false \
+  'policy security security_js' \
+  scripts/ci/verify/local-rust-cache.sh \
+  scripts/ci/tests/test-local-rust-cache.sh
 run_paths_case application_migration pull_request refs/pull/6/head false \
   'database policy rust rust_pkg_codewire_server_core service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   crates/codewire-server-core/migrations/0001_baseline.sql
@@ -725,7 +739,7 @@ for profile_input in src/access_profiles.rs src/connect/access_profiles.rs tests
 done
 run_paths_case credential_kind_fixtures pull_request refs/pull/721/head false \
   'policy security security_js' scripts/ci/tests/test-kind-codex-session.py scripts/ci/tests/test-kind-codex-login.py \
-  scripts/ci/tests/test-kind-credentials.py
+  scripts/ci/tests/test-kind-claude-login.py scripts/ci/tests/test-kind-credentials.py
 run_paths_case orchestration_wire_contract pull_request refs/pull/71/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/tests/wire_contract.rs \
@@ -766,6 +780,11 @@ run_paths_case retired_connectcore_deletion pull_request refs/pull/83/head false
 run_paths_case integration_service_harness pull_request refs/pull/831/head false \
   'database policy security security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   scripts/ci/verify/run-integration-verification.sh
+# The integration lane lock and service-ownership helper (#2755) is part of
+# the same harness.
+run_present_paths_case integration_lane_lock pull_request refs/pull/2755/head false \
+  'database policy security security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  scripts/ci/verify/integration-lane.py
 run_paths_case temporal_service pull_request refs/pull/84/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
   crates/codewire-orchestration/src/worker/create.rs
@@ -1140,6 +1159,9 @@ run_paths_case cli_native_managed_journey pull_request refs/pull/2255/head false
 run_paths_case cli_native_update_journey pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/test-cli-native-update.py
+run_paths_case cli_native_socket_dir_helper pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/native_socket_dir.py
 run_paths_case cli_native_update_entrypoint_regression pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/ci/tests/test-native-managed-update-entrypoint.py
@@ -1157,7 +1179,10 @@ run_paths_case cw_release_delivery_shell pull_request refs/pull/2255/head false 
   scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh \
   scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh \
   scripts/ci/setup/fetch-openbao-release-signing-key.sh \
-  scripts/ci/tests/test-fetch-openbao-release-signing-key.sh
+  scripts/ci/tests/test-fetch-openbao-release-signing-key.sh \
+  scripts/ci/release/sign-macos-cw.sh scripts/ci/setup/fetch-openbao-macos-signing.sh \
+  scripts/ci/tests/test-fetch-openbao-macos-signing.sh scripts/ci/tests/test-sign-macos-cw.sh \
+  scripts/ci/tests/fixtures/rcodesign-stand-in.sh
 run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \
@@ -1167,7 +1192,7 @@ run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false 
   scripts/ci/release/build-runtime-kernel.sh scripts/ci/tests/test-local-runtime-parts.py \
   scripts/ci/release/build-local-runtime.sh scripts/ci/release/build-runtime-guest-root.sh \
   scripts/ci/release/runtime-container.sh scripts/ci/release/dry-run-superseded.sh \
-  scripts/ci/tests/test-dry-run-superseded.sh
+  scripts/ci/tests/test-dry-run-superseded.sh scripts/ci/release/build-runtime-cw.sh
 # The published workspace pin selects every consumer that compiles it; its
 # tool and post-publish proposal select the release proofs that run them.
 run_paths_case workspace_image_pin pull_request refs/pull/2255/head false \
@@ -1295,13 +1320,6 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
   docs/dev/DERP-STUN.md \
   docs/dev/KIND-E2E.md \
   docs/dev/LOCAL-DEV.md \
-  docs/dev/MESH-PROD-OPS.md \
-  docs/dev/SANDBOX-CAPACITY-OPS.md \
-  docs/dev/TAILNET-PARITY-HARNESS.md \
-  docs/runbooks/kata-dev-runtime-validation.md \
-  docs/runbooks/runtime-coco-trustee-test-resource.md \
-  docs/runbooks/runtime-dev-commodity-smoke.md \
-  docs/runbooks/rust-release-candidate-staging.md \
   libs/sdk-go/local.go \
   libs/sdk-go/local_files.go \
   libs/sdk-python/codewire/__init__.py \
@@ -1328,6 +1346,8 @@ run_present_paths_case macos_git_developer_tool pull_request refs/pull/2064/head
   "$policy security security_js" scripts/dev/macos-git-tool.py scripts/dev/test-macos-git-tool.py
 run_present_paths_case macos_local_runtime_installer pull_request refs/pull/2064/head false \
   "$policy security security_js" Makefile scripts/dev/macos-local-runtime.py scripts/dev/test-macos-local-runtime.py
+run_present_paths_case linux_local_runtime_packer pull_request refs/pull/2733/head false \
+  "$policy security security_js" scripts/dev/linux-local-runtime.py scripts/dev/test-linux-local-runtime.py
 run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pull/2064/head false \
   'policy security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs
@@ -1354,6 +1374,7 @@ run_present_paths_case mesh_ingress_protocol_unknown pull_request refs/pull/1902
 run_present_paths_case macos_local_vm_journeys pull_request refs/pull/20660/head false \
   'policy security security_js' \
   scripts/dev/test-cli-local-vm-macos.py scripts/dev/test-cli-local-vm-docker-macos.py \
+  scripts/dev/test-cli-local-vm-inputs-macos.py \
   scripts/dev/test-local-vm-hostile-guest-macos.py scripts/dev/hostile-guest-probe.py \
   scripts/dev/test-local-vm-hostile-guest.py
 run_present_paths_case macos_local_vm_journey_unknown pull_request refs/pull/20661/head false \
@@ -1682,6 +1703,14 @@ integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
 # Database owns the destroy-hint regression. The activity-fencing lane must
 # retain its exact two tests instead of also selecting this ignored worker test.
 activity_fencing_block="$(sed -n '/^run_orchestration() {/,/^  start_orchestration$/p' "$integration_runner")"
+# The orchestration service and its smokes come from the wire contract's own
+# test build. A separate binary build compiled the crate one more time.
+orchestration_build_block="$(sed -n '/^build_selected_services() {/,/^}$/p' "$integration_runner")"
+grep -qF -- '--features kind-e2e --test wire_contract --no-run' <<<"$orchestration_build_block"
+if grep -Eq 'cargo_ci build .*-p codewire-orchestration' <<<"$orchestration_build_block"; then
+  echo 'services build the orchestration binaries apart from the wire contract test build' >&2
+  exit 1
+fi
 grep -qF "'worker::' -- --ignored" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek'" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure'" <<<"$activity_fencing_block"
@@ -1696,7 +1725,7 @@ grep -qF -- '-- --ignored --exact --nocapture' <<<"$destroy_hint_block"
 grep -qF 'assert_passed_count "environment destroy template hint matrix" "$logfile" 1' <<<"$destroy_hint_block"
 grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
 grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 43' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 49' "$integration_runner"
 grep -qF -- '--features platform,ssh-agent --lib platform::tests::ssh::' "$integration_runner"
 grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
@@ -1705,13 +1734,13 @@ grep -qF 'cargo test --locked -p codewire-credential-service' "$integration_runn
 grep -qF -- '--skip tests::database::projection::' "$integration_runner"
 grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 6' "$integration_runner"
 grep -qF -- '--lib tests::database::projection::' "$integration_runner"
-grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 12' "$integration_runner"
+grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 13' "$integration_runner"
 grep -qF -- '--lib delegation::authority::tests::' "$integration_runner"
 grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfile" 7' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"
 grep -qF 'assert_passed_count "public access profile restricted API matrix" "$logfile" 8' "$integration_runner"
 grep -qF 'assert_passed_count "public credential metadata matrix" "$logfile" 3' "$integration_runner"
-grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 27' "$integration_runner"
+grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 28' "$integration_runner"
 grep -qF -- '--lib runtime::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
 grep -qF 'assert_passed_count "isolated credential runtime matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- '--lib runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority' "$integration_runner"
@@ -1720,10 +1749,10 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 89' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 90' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
 grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
-grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 23' "$integration_runner"
+grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 24' "$integration_runner"
 grep -qF 'assert_passed_count "platform access profile matrix" "$logfile" 15' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-platform-credentials --test owner_sources' "$integration_runner"
 grep -qF 'assert_passed_count "platform owner-source authority matrix" "$logfile" 5' "$integration_runner"
@@ -1882,9 +1911,9 @@ grep -qF 'if selected transport_pkg_codewire_local_vmm; then' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 [[ "$(grep -cFx '    scripts/ci/verify/check-darwin-cross.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh")" == 1 ]]
-grep -qF 'exec "$zigbuild_bin" check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
+grep -qF 'exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
   "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
-grep -qF -- '--target aarch64-apple-darwin' \
+grep -qF -- '--target aarch64-apple-darwin -- -D warnings' \
   "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
 grep -qF 'scripts/ci/verify/build-local-vmm-initramfs.sh --verify' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
@@ -2010,9 +2039,9 @@ workspace-image|Container contract verification|heavy|workspace_image
 policy|Policy verification|heavy|policy
 standard|Standard verification|heavy|standard
 tooling|Tooling / delivery contract verification|heavy|tooling
-rust-compile|Compile every Rust target|heavy|rust_transport
-rust-packages|Rust / transport packages|heavy|rust_transport
-rust-features|Rust / transport feature graphs|heavy|rust_transport
+rust-compile|Compile every Rust target|heavy|rust_compile
+rust-packages|Rust / transport packages|heavy|rust_shards
+rust-features|Rust / transport feature graphs|heavy|rust_shards
 rust-transport|Rust / transport verification|heavy|rust_transport
 database|Database verification|heavy|database
 services-control|Service control-plane verification|heavy|services_control
@@ -2047,7 +2076,17 @@ grep -qF "trusted_dispatch_selector='.trusted-ci-policy/scripts/ci/select/emit-v
   "$selection_block"
 grep -qF 'run every group so candidate code cannot omit required work' \
   "$selection_block"
-for expectation_name in policy standard tooling rust_transport database \
+grep -qF 'policy standard tooling rust_compile rust_shards rust_transport database' "$selection_block" || {
+  echo 'the dispatch bootstrap does not run the compile and shard groups' >&2
+  exit 1
+}
+# shellcheck disable=SC2016 # Match the literal Actions expression.
+grep -qxF '      rust_shards_expected: ${{ steps.dispatch.outputs.rust_shards_expected || steps.dispatch.outputs.rust_transport_expected }}' \
+  "$selection_block" || {
+  echo 'rust_shards_expected must fall back to the Rust group for an older trusted base' >&2
+  exit 1
+}
+for expectation_name in policy standard tooling rust_compile rust_transport database \
     services_control services_runtime edge_kind cw_release_assets workspace_image; do
   grep -qF "${expectation_name}_expected: \${{ steps.dispatch.outputs.${expectation_name}_expected }}" \
     "$selection_block"
@@ -2165,9 +2204,8 @@ for job_id in policy standard tooling rust-compile rust-packages rust-features r
   fi
 done
 
-# rust_transport_expected also covers curated locks and the desktop artifact.
-# Each shard runs only for a rust or transport selection, like rust-transport,
-# and otherwise succeeds without work so the aggregator still sees success.
+# The shards are dispatched by rust_shards_expected, exactly the rust or
+# transport selection their run step requires.
 for job_id in rust-packages rust-features; do
   block="$TMP/${job_id}.yaml"
   run_guard="$(awk '/^      - name: Run the Rust .* shard$/ { getline; print; exit }' "$block")"
@@ -2195,7 +2233,7 @@ cancelling = {
     "cw-release-assets", "workspace-image", "policy", "standard", "tooling",
     "rust-compile", "rust-packages", "rust-features", "rust-transport",
     "database", "services-control", "services-runtime", "kind-workspace",
-    "kind-product", "kind-smokes", "edge-kind",
+    "kind-product", "kind-daemon", "kind-smokes", "edge-kind",
 }
 exempt = {
     "verification-selection", "required-verification",
@@ -2397,8 +2435,8 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fxc "    runs-on: ${HEAVY_RUNS_ON}" "$WORKFLOW")" -eq 18 ]] || {
-  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe, each selecting the main-first Heavy label' >&2
+[[ "$(grep -Fxc "    runs-on: ${HEAVY_RUNS_ON}" "$WORKFLOW")" -eq 19 ]] || {
+  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), four parallel Kind producers, one opted-in measurement matrix and its post-measurement probe, each selecting the main-first Heavy label' >&2
   exit 1
 }
 if grep -Eq '^ *runs-on: ci-heavy(-main)?$' "$WORKFLOW"; then
@@ -2418,6 +2456,7 @@ for output in selector_version classification selection required_local_mode \
     cw_package_state cw_package_selected desktop_package_state \
     desktop_package_selected workspace_image_state workspace_image_selected \
     workspace_cache_experiment workspace_cache_measurement_matrix \
+    kind_workspace_source \
     tested_tree_receipt tested_tree_reason \
     tested_tree_pr tested_tree_head tested_tree_run; do
   grep -qF "      ${output}:" "$selection_block" || {
@@ -2488,8 +2527,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 20 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, three Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
+if [ "$top_level_jobs" != 21 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, four Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -2524,6 +2563,22 @@ if grep -qF 'apple-darwin' <(grep -F 'CW_RELEASE_TARGETS=' "$cw_block"); then
   exit 1
 fi
 grep -qF 'scripts/ci/release/package-cw-release.sh v0.0.0-ci' "$cw_block"
+# The Linux pair builds side by side in one Cargo invocation with the build
+# environment package-cw-release.sh uses, so packaging finds both fresh. A
+# change to that environment must update the CI build too.
+grep -qF -- '--target x86_64-unknown-linux-musl --target aarch64-unknown-linux-gnu' "$cw_block"
+for cw_build_env in 'env -u CODEWIRE_LOCAL_RUNTIME' 'CODEWIRE_VERSION=' \
+    'CODEWIRE_SOURCE_REVISION=' 'CODEWIRE_SOURCE_TREE_SHA256='; do
+  grep -qF -- "$cw_build_env" "$cw_block" \
+    && grep -qF -- "$cw_build_env" "$ROOT/scripts/ci/release/package-cw-release.sh" || {
+    echo "CI's Linux pair build and package-cw-release.sh differ in $cw_build_env" >&2
+    exit 1
+  }
+done
+[ "$(grep -c '^    CODEWIRE_[A-Z0-9_]*=' "$ROOT/scripts/ci/release/package-cw-release.sh")" -eq 3 ] || {
+  echo 'package-cw-release.sh builds with a different environment; update the CI Linux pair build' >&2
+  exit 1
+}
 jq -e '
   .artifacts.cw_cli_release_assets.release_targets == [
     "x86_64-unknown-linux-musl",
@@ -2920,7 +2975,12 @@ if rg -n 'run-integration-verification\.sh services([^_-]|$)|"\$INTEGRATION_RUNN
 fi
 
 edge_kind_block="$TMP/edge-kind.yaml"
-grep -qF 'run: scripts/ci/verify/run-product-verification.sh edge' "$edge_kind_block"
+# Static edge checks run in tooling, so an edge-only selection starts no Kind leg.
+grep -qF 'run: scripts/ci/verify/run-product-verification.sh edge' "$TMP/tooling.yaml"
+if grep -qF 'run-product-verification.sh edge' "$edge_kind_block"; then
+  echo 'edge-kind: static edge checks moved back into a Kind shard' >&2
+  exit 1
+fi
 grep -qF 'scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"' "$edge_kind_block"
 edge_fixture_runner="$TMP/edge-fixture-runner.sh"
 awk '
@@ -2930,12 +2990,99 @@ awk '
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$edge_fixture_runner"
 for edge_fixture_command in \
     '  scripts/ci/tests/test-kind-e2e-suites.sh' \
-    '  python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py'; do
+    '  run_kind_cw_runtime_probe_fixture'; do
   [ "$(grep -cFx "$edge_fixture_command" "$edge_fixture_runner")" -eq 1 ] || {
     echo "shared edge route must invoke the owning fixture once: $edge_fixture_command" >&2
     exit 1
   }
 done
+# The probe fixture runs as the workspace user: directly for a developer, and
+# through a privilege drop where the hosted job is root. Execute the checked-in
+# helper against a stub tree for both identities.
+probe_fixture_runner="$TMP/probe-fixture-runner.sh"
+awk '
+  /^run_kind_cw_runtime_probe_fixture\(\) \{/ { capture = 1 }
+  capture { print }
+  capture && $0 == "}" { exit }
+' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$probe_fixture_runner"
+[ "$(grep -cF 'python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py' "$probe_fixture_runner")" -eq 2 ] || {
+  echo 'probe fixture helper must run the owning fixture on both identity paths' >&2
+  exit 1
+}
+# Hosted, the copy sits in a fresh directory under the filesystem root: the
+# probe refuses any group- or world-writable ancestor, such as /tmp.
+grep -Fxq '  local parent="${1:-/}"' "$probe_fixture_runner" || {
+  echo 'hosted probe fixture must copy the tree directly under the filesystem root' >&2
+  exit 1
+}
+probe_fixture_tree="$TMP/probe-fixture-tree"
+mkdir -p "$probe_fixture_tree/bin" "$probe_fixture_tree/scripts/ci/tests"
+git -C "$probe_fixture_tree" init -q
+printf 'fixture\n' > "$probe_fixture_tree/scripts/ci/tests/test-kind-cw-runtime-probe.py"
+git -C "$probe_fixture_tree" add -A
+git -C "$probe_fixture_tree" -c user.name=fixture -c user.email=fixture@example.invalid \
+  commit -q -m fixture
+for probe_tool in id python3 chown setpriv; do
+  cat > "$probe_fixture_tree/bin/$probe_tool" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+tool="$(basename "$0")"
+case "$tool" in
+  id) printf '%s\n' "$PROBE_FIXTURE_UID"; exit 0 ;;
+  python3)
+    printf 'python3 cwd=%s uid=%s args=%s\n' "$PWD" "${PROBE_FIXTURE_DROPPED:-direct}" "$*" >> "$PROBE_FIXTURE_CALLS"
+    [ -d .tmp ] || [ "${PROBE_FIXTURE_DROPPED:-direct}" = direct ]
+    exit "${PROBE_FIXTURE_STATUS:-0}" ;;
+  chown) printf 'chown %s\n' "$*" >> "$PROBE_FIXTURE_CALLS"; exit 0 ;;
+  setpriv)
+    printf 'setpriv %s %s %s\n' "$1" "$2" "$3" >> "$PROBE_FIXTURE_CALLS"
+    shift 3
+    PROBE_FIXTURE_DROPPED=1000 exec "$@" ;;
+esac
+SH
+  chmod +x "$probe_fixture_tree/bin/$probe_tool"
+done
+run_probe_fixture_case() {
+  local uid="$1" status="$2"
+  : > "$TMP/probe-fixture-calls"
+  (
+    cd "$probe_fixture_tree"
+    env PATH="$probe_fixture_tree/bin:$PATH" PROBE_FIXTURE_UID="$uid" PROBE_FIXTURE_STATUS="$status" \
+      PROBE_FIXTURE_CALLS="$TMP/probe-fixture-calls" \
+      bash -euo pipefail -c 'source "$1"; run_kind_cw_runtime_probe_fixture "$2"' _ "$probe_fixture_runner" "$TMP"
+  )
+}
+run_probe_fixture_case 1000 0
+[ "$(cat "$TMP/probe-fixture-calls")" = "python3 cwd=$probe_fixture_tree uid=direct args=-B scripts/ci/tests/test-kind-cw-runtime-probe.py" ] || {
+  echo 'workspace-user probe fixture must run directly in the checkout' >&2
+  exit 1
+}
+run_probe_fixture_case 0 0
+grep -Eq '^chown -R 1000:1000 .*/codewire-cw-probe-fixture\.[A-Za-z0-9]+/tree$' "$TMP/probe-fixture-calls" || {
+  echo 'root probe fixture must own a private copy as the workspace user' >&2
+  exit 1
+}
+grep -Fxq 'setpriv --reuid=1000 --regid=1000 --clear-groups' "$TMP/probe-fixture-calls" || {
+  echo 'root probe fixture must drop to the workspace user' >&2
+  exit 1
+}
+grep -Eq '^python3 cwd=.*/codewire-cw-probe-fixture\.[A-Za-z0-9]+/tree uid=1000 args=-B scripts/ci/tests/test-kind-cw-runtime-probe.py$' \
+  "$TMP/probe-fixture-calls" || {
+  echo 'root probe fixture must run the committed copy as the workspace user' >&2
+  exit 1
+}
+if run_probe_fixture_case 0 7; then
+  echo 'root probe fixture accepted a failed fixture' >&2
+  exit 1
+fi
+if run_probe_fixture_case 1000 7; then
+  echo 'workspace-user probe fixture accepted a failed fixture' >&2
+  exit 1
+fi
+[ -z "$(find "$TMP" -maxdepth 1 -name 'codewire-cw-probe-fixture.*' -print -quit)" ] || {
+  echo 'root probe fixture left its private copy behind' >&2
+  exit 1
+}
 
 if grep -qF '    name: Manual diagnostics' "$WORKFLOW" \
   || grep -qF '  diagnostics:' "$WORKFLOW" \
@@ -3011,7 +3158,8 @@ for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT
   }
 done
 for expected in VERIFICATION_POLICY_EXPECTED VERIFICATION_STANDARD_EXPECTED \
-    VERIFICATION_TOOLING_EXPECTED VERIFICATION_RUST_TRANSPORT_EXPECTED \
+    VERIFICATION_TOOLING_EXPECTED VERIFICATION_RUST_COMPILE_EXPECTED \
+    VERIFICATION_RUST_SHARDS_EXPECTED VERIFICATION_RUST_TRANSPORT_EXPECTED \
     VERIFICATION_DATABASE_EXPECTED VERIFICATION_SERVICES_CONTROL_EXPECTED \
     VERIFICATION_SERVICES_RUNTIME_EXPECTED VERIFICATION_EDGE_KIND_EXPECTED \
     VERIFICATION_CW_RELEASE_ASSETS_EXPECTED VERIFICATION_WORKSPACE_IMAGE_EXPECTED; do
@@ -3030,6 +3178,12 @@ for receipt_input in VERIFICATION_TESTED_TREE_RECEIPT \
 done
 grep -qF 'name: Emit exact-head verification receipt' "$required_block"
 grep -qF 'run: scripts/ci/receipts/emit-verification-receipt.py' "$required_block"
+# shellcheck disable=SC2016 # Match the literal Actions expression.
+grep -A12 -F 'name: Emit exact-head verification receipt' "$required_block" \
+  | grep -qF 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' || {
+  echo 'the receipt step cannot see whether its run was a quick selection' >&2
+  exit 1
+}
 for receipt_input in CODEWIRE_PR_NUMBER CODEWIRE_BASE_COMMIT \
     CODEWIRE_HEAD_COMMIT CODEWIRE_HEAD_TREE; do
   grep -qF "${receipt_input}:" "$required_block" || {
@@ -3082,10 +3236,65 @@ policy_steps() {
   echo 'a policy core part has no steps' >&2
   exit 1
 }
-[ "$(policy_function run_policy_core | sed '1d;$d')" = $'  run_policy_core_one\n  run_policy_core_two' ] || {
+[ "$(policy_function run_policy_core | grep -Eo 'run_policy_core_(one|two)' | LC_ALL=C sort | paste -sd' ')" \
+    = 'run_policy_core_one run_policy_core_two' ] || {
   echo 'policy core is not exactly its two parts' >&2
   exit 1
 }
+# CI's policy core runs both parts side by side and fails when either fails,
+# including a failure in the middle of a part. Part one here passes only if
+# part two starts while it runs, so a serial aggregate fails this fixture.
+policy_core_fixture() {
+  local dir="$1" one="$2" two="$3"
+  bash -c '
+    set -euo pipefail
+    dir="$1" one_mode="$3" two_mode="$4"
+    eval "$2"
+    run_policy_core_one() { (
+      for _ in $(seq 1 100); do
+        [ -e "$dir/two-started" ] && break
+        sleep 0.05
+      done
+      [ -e "$dir/two-started" ]
+      [ "$one_mode" = pass ] || false
+      echo one-finished
+    ) }
+    run_policy_core_two() { (
+      touch "$dir/two-started"
+      [ "$two_mode" = pass ] || false
+      echo two-finished
+    ) }
+    run_policy_core
+  ' policy-core-fixture "$dir" "$(policy_function run_policy_core)" "$one" "$two"
+}
+for policy_core_case in pass:pass:0 fail:pass:1 pass:fail:1 fail:fail:1; do
+  IFS=: read -r policy_one policy_two policy_expected <<<"$policy_core_case"
+  policy_core_dir="$(mktemp -d "$TMP/policy-core.XXXXXX")"
+  policy_core_status=0
+  policy_core_output="$(policy_core_fixture "$policy_core_dir" "$policy_one" "$policy_two" 2>&1)" \
+    || policy_core_status=$?
+  if [ "$policy_expected" = 0 ]; then
+    [ "$policy_core_status" -eq 0 ] \
+      && grep -qx one-finished <<<"$policy_core_output" \
+      && grep -qx two-finished <<<"$policy_core_output" || {
+      echo "policy core did not run its parts side by side: $policy_core_output" >&2
+      exit 1
+    }
+  else
+    [ "$policy_core_status" -ne 0 ] || {
+      echo "policy core passed with part one $policy_one and part two $policy_two" >&2
+      exit 1
+    }
+    if [ "$policy_one" = fail ] && grep -qx one-finished <<<"$policy_core_output"; then
+      echo 'a failed policy core part kept running past its failing step' >&2
+      exit 1
+    fi
+    if [ "$policy_two" = fail ] && grep -qx two-finished <<<"$policy_core_output"; then
+      echo 'a failed policy core part kept running past its failing step' >&2
+      exit 1
+    fi
+  fi
+done
 grep -qxF '  for part in $(policy_parts); do' <(policy_function run_policy) \
   && grep -qxF '    run_policy_part "$part"' <(policy_function run_policy) || {
   echo 'the policy family does not run the listed policy parts' >&2
@@ -3658,7 +3867,10 @@ dispatch_line="$(grep -n -m1 'name: Emit trusted capability dispatch decisions' 
   exit 1
 }
 producer_gate="    if: \${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}"
-[[ "$(grep -cxF -- "$producer_gate" "$WORKFLOW")" -eq 3 ]] || {
+# The workspace producer adds one clause: a pinned workspace has no producer.
+workspace_producer_gate="${producer_gate% \}\}} && needs.verification-selection.outputs.kind_workspace_source != 'pinned' }}"
+[[ "$(grep -cxF -- "$producer_gate" "$WORKFLOW")" -eq 3 &&
+  "$(grep -cxF -- "$workspace_producer_gate" "$WORKFLOW")" -eq 1 ]] || {
   echo 'a superseded main run still builds a Kind producer' >&2
   exit 1
 }
@@ -3711,6 +3923,559 @@ done
 [[ "$(superseded_case push refs/heads/main not-a-commit)" == failed ]] || {
   echo 'a malformed canonical main did not fail closed' >&2; exit 1; }
 
+# Hosted pull-request scope (owner decision 2026-10-14). Hosted pull-request
+# CI sets VERIFICATION_PR_SCOPE=quick and runs only the quick families unless
+# the pull request carries ci-full. Pushes, dispatches and local merge
+# qualification keep the complete selection.
+scope_event() {
+  # NAME TITLE LABEL... -> a pull_request event payload as Forgejo sends it
+  local name="$1" title="$2" labels='' label
+  shift 2
+  for label in "$@"; do
+    labels="${labels:+$labels,}{\"id\":7,\"name\":\"${label}\",\"color\":\"0366d6\"}"
+  done
+  printf '{"action":"labeled","number":7,"pull_request":{"number":7,"title":"%s","body":"","labels":[%s],"base":{"label":"main","ref":"main"},"head":{"label":"feature","ref":"feature"}},"repository":{"name":"codewire","full_name":"codewire/codewire"},"sender":{"login":"noel","full_name":"Noel"}}\n' \
+    "$title" "$labels" > "$TMP/${name}.event.json"
+  printf '%s\n' "$TMP/${name}.event.json"
+}
+
+scope_select() {
+  # EVENT SCOPE EVENT_PATH PATHS_FILE (SCOPE or EVENT_PATH may be empty)
+  local event="$1" scope="$2" event_path="$3" paths="$4" ref=refs/pull/7/head
+  local -a inputs=()
+  if [ "$event" = push ]; then ref=refs/heads/main; fi
+  if [ -n "$event_path" ]; then inputs+=("GITHUB_EVENT_PATH=$event_path"); fi
+  if [ -n "$scope" ]; then inputs+=("VERIFICATION_PR_SCOPE=$scope"); fi
+  env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u VERIFICATION_PR_SCOPE -u KIND_E2E_OPT_IN \
+    "${inputs[@]}" GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
+    "$SELECTOR" "$paths" </dev/null
+}
+
+kind_subset() {
+  selection_tokens "$(selection_value "$1")" | grep -Ex 'edge_kind|kind' | tr '\n' ' ' || true
+}
+
+no_labels="$(scope_event no_labels 'feat: change')"
+ci_full="$(scope_event ci_full 'feat: change' ci-full)"
+kind_label="$(scope_event kind_label 'feat: change' kind-e2e)"
+kind_marker="$(scope_event kind_marker 'feat: change [kind-e2e]')"
+lookalike="$(scope_event lookalike 'feat: ci-full is not a label' ci ci/r2-cache-canary ci-fuller)"
+
+# NAME|QUICK TOKENS (policy_shell_omittable implied)|PATHS (space separated)
+while IFS='|' read -r name quick_expected paths_list; do
+  paths="$TMP/scope-${name}.paths"
+  tr ' ' '\n' <<<"$paths_list" > "$paths"
+  push_output="$(scope_select push '' '' "$paths")"
+  pr_full_output="$(scope_select pull_request '' "$no_labels" "$paths")"
+  kinds="$(kind_subset "$push_output")"
+
+  # A push to main is unchanged: the workflow sets the quick scope on every
+  # event, and a push ignores it.
+  [ "$(scope_select push quick '' "$paths")" = "$push_output" ] || {
+    echo "${name}: the quick scope changed a push to main" >&2
+    exit 1
+  }
+  # Local merge qualification (no scope) keeps today's pull-request selection:
+  # what main selects, without Kind unless opted in.
+  push_tokens="$(selection_tokens "$(selection_value "$push_output")" | grep -Evx 'edge_kind|kind' || true)"
+  [ "$(selection_tokens "$(selection_value "$pr_full_output")")" = "$push_tokens" ] || {
+    echo "${name}: local merge qualification no longer selects main's families" >&2
+    exit 1
+  }
+  # A pull request without a label gets only the quick families.
+  quick_output="$(scope_select pull_request quick "$no_labels" "$paths")"
+  assert_tokens "${name}_quick" "$quick_expected pr_quick" "$quick_output"
+  assert_contract_field "${name}_quick" "$quick_output" required_local_mode \
+    "$(sed -n 's/^required_local_mode=//p' <<<"$pr_full_output")"
+  # Labels that only resemble ci-full, and ci-full in the title, stay quick.
+  [ "$(scope_select pull_request quick "$lookalike" "$paths")" = "$quick_output" ] || {
+    echo "${name}: a lookalike label or title escalated a quick pull request" >&2
+    exit 1
+  }
+  # ci-full gets exactly what a push to main selects, Kind included.
+  [ "$(scope_select pull_request quick "$ci_full" "$paths")" = "$push_output" ] || {
+    echo "${name}: ci-full does not select what a push to main does" >&2
+    scope_select pull_request quick "$ci_full" "$paths" >&2
+    exit 1
+  }
+  # kind-e2e (label or title marker) adds main's Kind selection to the quick
+  # families, as it adds Kind to the complete selection today.
+  for kind_event in "$kind_label" "$kind_marker"; do
+    assert_tokens "${name}_kind" "$quick_expected $kinds pr_quick" \
+      "$(scope_select pull_request quick "$kind_event" "$paths")"
+  done
+  # Without the hosted scope, a pull request keeps today's Kind opt-in.
+  assert_tokens "${name}_kind_complete" "$push_tokens $kinds" \
+    "$(scope_select pull_request '' "$kind_label" "$paths")"
+done <<'CASES'
+docs|policy|docs/dev/AGENT-WORKFLOW.md
+rust_cli|policy rust_compile|crates/codewire-cli/src/main.rs
+broker_database|policy rust_compile|crates/codewire-credential-broker/src/provider_enrollment.rs
+transport|policy rust_compile|crates/codewire-daemon/src/lib.rs
+dashboard_kind|policy rust_compile|crates/codewire-dashboard-web/src/lib.rs
+browser_spec|policy|apps/dashboard/e2e/sandbox-lifecycle.spec.ts
+release_shell|policy policy_shell|scripts/ci/release/package-cw-release.sh
+selector_policy|policy policy_shell rust_compile|scripts/ci/select/select-verification.sh .gitea/workflows/ci.yaml
+mixed|policy policy_shell rust_compile|docs/dev/CI-ARCHITECTURE.md crates/codewire-cli/src/main.rs scripts/ci/release/package-cw-release.sh
+CASES
+
+# The Kind cases above must really exercise Kind.
+for kind_case in dashboard_kind browser_spec; do
+  [ -n "$(kind_subset "$(scope_select push '' '' "$TMP/scope-${kind_case}.paths")")" ] || {
+    echo "${kind_case}: fixture no longer selects Kind on main" >&2
+    exit 1
+  }
+done
+
+# An unchanged pull request stays quick.
+: > "$TMP/scope-empty.paths"
+assert_tokens scope_unchanged 'policy pr_quick' \
+  "$(scope_select pull_request quick "$no_labels" "$TMP/scope-empty.paths")"
+
+# An unclassified path fails closed: the selector cannot tell what it affects,
+# so a quick pull request keeps today's complete pull-request selection (no
+# pr_quick, Kind still opt-in) and its run can vouch for main as before.
+printf 'unclassified-scope-fixture.bin\n' > "$TMP/scope-unclassified.paths"
+unclassified_quick="$(scope_select pull_request quick "$no_labels" "$TMP/scope-unclassified.paths" 2>/dev/null)"
+[ "$unclassified_quick" = "$(scope_select pull_request '' "$no_labels" "$TMP/scope-unclassified.paths" 2>/dev/null)" ] || {
+  echo 'an unclassified path on a quick pull request did not keep the complete selection' >&2
+  exit 1
+}
+assert_contract_field scope_unclassified "$unclassified_quick" classification unclassified
+assert_contract_field scope_unclassified "$unclassified_quick" required_local_mode full
+if grep -Fq '|pr_quick|' <<<"$unclassified_quick" || grep -Fq '|kind|' <<<"$unclassified_quick"; then
+  echo 'an unclassified quick pull request was reduced or ran Kind without opt-in' >&2
+  exit 1
+fi
+[ "$(scope_select pull_request quick "$ci_full" "$TMP/scope-unclassified.paths" 2>/dev/null)" \
+  = "$(scope_select push '' '' "$TMP/scope-unclassified.paths" 2>/dev/null)" ] || {
+  echo 'ci-full on an unclassified pull request differs from main' >&2
+  exit 1
+}
+
+# A malformed scope emits no machine-readable selection.
+if scope_select pull_request partial "$no_labels" "$TMP/scope-docs.paths" \
+    >"$TMP/scope-invalid.out" 2>"$TMP/scope-invalid.err"; then
+  echo 'selector accepted an unsupported pull-request scope' >&2
+  exit 1
+fi
+[ ! -s "$TMP/scope-invalid.out" ] && grep -Fq "unsupported pull-request scope 'partial'" "$TMP/scope-invalid.err"
+
+# Required verification passes a quick pull request with only its quick groups,
+# even when every artifact fact says affected, and still fails it when one of
+# them does not run.
+quick_dispatch_and_require() {
+  local selection="$1" missing="${2:-}" output="$TMP/scope-dispatch.out" group value job
+  local -a results=()
+  : > "$output"
+  VERIFICATION_SELECTION="$selection" VERIFICATION_TESTED_TREE_RECEIPT=fallback \
+    CW_PACKAGE_SELECTED=true DESKTOP_PACKAGE_SELECTED=true WORKSPACE_IMAGE_SELECTED=true \
+    GITHUB_OUTPUT="$output" "$ROOT/scripts/ci/select/emit-verification-matrices.sh"
+  local -a jobs
+  while IFS='=' read -r group value; do
+    group="${group%_expected}"
+    results+=("VERIFICATION_${group^^}_EXPECTED=$value")
+    jobs=("${group^^}")
+    if [ "$group" = rust_shards ]; then
+      jobs=(RUST_PACKAGES RUST_FEATURES)
+    fi
+    for job in "${jobs[@]}"; do
+      if [ "$value" = true ] && [ "$job" != "$missing" ]; then
+        results+=("VERIFICATION_${job}_RESULT=success")
+      else
+        results+=("VERIFICATION_${job}_RESULT=skipped")
+      fi
+    done
+  done < "$output"
+  env VERIFICATION_SELECTION="$selection" VERIFICATION_SELECTION_RESULT=success \
+    VERIFICATION_TESTED_TREE_RECEIPT=fallback "${results[@]}" \
+    "$ROOT/scripts/ci/select/require-verification-results.sh" >/dev/null 2>&1
+}
+for scope_case in rust_cli dashboard_kind release_shell selector_policy mixed; do
+  quick_selection="$(selection_value "$(scope_select pull_request quick "$no_labels" "$TMP/scope-${scope_case}.paths")")"
+  quick_dispatch_and_require "$quick_selection" || {
+    echo "${scope_case}: Required verification rejected a green quick pull request" >&2
+    exit 1
+  }
+  if grep -Fq '|rust_compile|' <<<"$quick_selection" \
+      && quick_dispatch_and_require "$quick_selection" RUST_COMPILE; then
+    echo "${scope_case}: Required verification accepted a quick run without its Rust compile" >&2
+    exit 1
+  fi
+done
+# The quick run carries no receipt for main to reuse; the complete one does.
+receipt_env=(GITHUB_EVENT_NAME=pull_request GITHUB_REPOSITORY=codewire/codewire
+  GITHUB_RUN_ID=501 GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb CODEWIRE_PR_NUMBER=7
+  CODEWIRE_BASE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  CODEWIRE_HEAD_COMMIT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  CODEWIRE_HEAD_TREE=cccccccccccccccccccccccccccccccccccccccc)
+receipt_for() {
+  env -i PATH="$PATH" "${receipt_env[@]}" VERIFICATION_SELECTION="$1" \
+    python3 -I -B "$ROOT/scripts/ci/receipts/emit-verification-receipt.py"
+}
+if receipt_for "$(selection_value "$(scope_select pull_request quick "$no_labels" "$TMP/scope-rust_cli.paths")")" \
+    | grep -Fq 'CODEWIRE_CI_VERIFICATION_RECEIPT='; then
+  echo 'a quick pull-request run emitted a receipt main could reuse' >&2
+  exit 1
+fi
+receipt_for "$(selection_value "$(scope_select pull_request quick "$ci_full" "$TMP/scope-rust_cli.paths")")" \
+  | grep -Fq 'CODEWIRE_CI_VERIFICATION_RECEIPT=' || {
+  echo 'a ci-full pull-request run did not emit its receipt' >&2
+  exit 1
+}
+
+# The workflow sets the scope for the selector, re-runs on label changes, and
+# local merge qualification strips the scope.
+python3 - "$WORKFLOW" <<'PY'
+import sys
+import yaml
+
+workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+triggers = workflow.get("on", workflow.get(True))
+types = set(triggers["pull_request"].get("types", []))
+wanted = {"opened", "synchronize", "reopened", "labeled", "unlabeled"}
+if types != wanted:
+    raise SystemExit(f"pull_request types {sorted(types)} != {sorted(wanted)}")
+steps = workflow["jobs"]["verification-selection"]["steps"]
+select = [step for step in steps if step.get("id") == "select"]
+if len(select) != 1 or select[0].get("env", {}).get("VERIFICATION_PR_SCOPE") != "quick":
+    raise SystemExit("the selection step does not request the quick pull-request scope")
+PY
+grep -qF 'env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u VERIFICATION_PR_SCOPE \' "$ROOT/scripts/dev/preflight.sh" || {
+  echo 'preflight can inherit the hosted quick scope' >&2
+  exit 1
+}
+grep -qF 'environment.pop("VERIFICATION_PR_SCOPE", None)' "$ROOT/scripts/ci/receipts/local-prepush-receipt.py" || {
+  echo 'the local receipt can inherit the hosted quick scope' >&2
+  exit 1
+}
+
+# A dispatched heavy job always has work, and selected work is always
+# dispatched: the emitter's decisions are evaluated against the workflow's own
+# step conditions, for realistic selections and for every token alone, with
+# policy, Kind, Edge or the quick marker, under every artifact fact.
+job_work_selections="$TMP/job-work-selections.txt"
+: > "$job_work_selections"
+for scope_case in docs rust_cli broker_database transport dashboard_kind browser_spec \
+    release_shell selector_policy mixed; do
+  for scope_event_name in push pull_request; do
+    if [ "$scope_event_name" = push ]; then
+      scope_output="$(scope_select push '' '' "$TMP/scope-${scope_case}.paths")"
+    else
+      scope_output="$(scope_select pull_request quick "$no_labels" "$TMP/scope-${scope_case}.paths")"
+    fi
+    selection_value "$scope_output" >> "$job_work_selections"
+  done
+done
+selection_value "$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
+  VERIFICATION_REQUEST=all "$SELECTOR")" >> "$job_work_selections"
+python3 -B - "$WORKFLOW" "$ROOT/scripts/ci/select/emit-verification-matrices.sh" \
+    "$job_work_selections" <<'PY'
+import itertools
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+import yaml
+
+workflow_path, emitter, realistic_path = sys.argv[1:4]
+workflow = yaml.safe_load(open(workflow_path, encoding="utf-8"))
+jobs = workflow["jobs"]
+
+# The steps that verify something. Every other step of a checked job must be
+# a named support step (setup, guard or cleanup), so a new step is classified
+# before this fixture accepts it.
+WORK = {
+    "cw-release-assets": {"Compile the macOS cw for both Mac targets", "Package Linux dry-run assets"},
+    "workspace-image": {
+        "Build and inspect without publication",
+        "Build and inspect the standalone dashboard image",
+        "Run iOS package tests in the pinned Swift image",
+    },
+    "policy": {"Run Policy"},
+    "standard": {
+        "Run Contracts", "Run Go support", "Run Web", "Run SDK Go",
+        "Run SDK TypeScript typecheck and unit suite", "Run SDK Python",
+    },
+    "tooling": {
+        "Run Shell policy", "Run API key smoke tooling", "Run Confidential runtime tooling",
+        "Run Dev smoke tooling", "Run Release provenance", "Run Deploy", "Run Security",
+        "Run Edge static verification",
+    },
+    "rust-compile": {"Compile every Rust target"},
+    "rust-packages": {"Run the Rust packages shard"},
+    "rust-features": {"Run the Rust features shard"},
+    "rust-transport": {
+        "Verify curated Rust image workspace locks", "Run selected Rust and transport",
+        "Run artifact-selected desktop package",
+    },
+    "database": {"Run Database"},
+    "services-control": {"Run Service integration"},
+    "services-runtime": {"Run Service integration"},
+    "kind-workspace": {"Build and verify exact source workspace"},
+    "kind-product": {"Build exact CI-profile service images"},
+    "kind-daemon": {"Build exact CI-profile daemon image"},
+    "kind-smokes": {"Build all host smoke and contract binaries"},
+    "edge-kind": {"Run the shard Kind gate"},
+}
+SUPPORT = {
+    "Reuse exact PR-head content verification", "Cancel the run after this failure",
+    "CW release assets not selected", "Container contracts not selected",
+    "Service control-plane integration not selected", "Service runtime-plane integration not selected",
+    "Resolve container contract scope", "Resolve service control-plane scope",
+    "Resolve service runtime-plane scope",
+    "Verify sealed Rust toolchain", "Verify sealed policy tools", "Verify sealed delivery-contract tools",
+    "Verify sealed producer tools", "Verify sealed producer tools and isolated Buildx load",
+    "Verify Rust cache capacity", "Verify Rust protobuf compiler", "Verify GPUI and Wry build prerequisites",
+    "Verify Kind runner tools", "Select best-effort shared Rust cache", "Select existing compiler cache",
+    "Select independent workspace caches", "Install pinned protobuf compiler",
+    "Install pinned protoc for Rust builds", "Install pinned protoc for Rust-backed standard checks",
+    "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",
+    "Install locked dashboard browser-test dependencies", "Set up pinned cross-build tools",
+    "Set up Go 1.26.9", "Set up Go 1.26.9 for security checks", "Set up Go 1.26.9 for DERP interop",
+    "Set up pinned Darwin C cross-check tools", "Prove isolated Buildx load contract",
+    "Prove labeled R2 backend compatibility", "Prepare selected workspace cache seed",
+    "Finalize selected workspace cache seed", "Clean workspace cache credentials",
+    "Clean compiler cache credentials", "Report and clean Rust cache", "Start integration Postgres",
+    "Wait for integration Postgres", "Stop integration Postgres",
+    "Require fresh artifact download directories outside the checkout",
+    "Download exact workspace producer output", "Download exact product producer output",
+    "Download exact smoke producer output", "Download exact daemon producer output",
+    "Write the pinned workspace record",
+    "Upload dashboard browser test results on failure",
+    "Delete the shard Kind cluster", "Export verified workspace", "Upload successful workspace output",
+    "Export non-promotable product images", "Upload successful product output",
+    "Export non-promotable daemon image", "Upload successful daemon output",
+    "Export only completed smoke executables", "Upload successful smoke output",
+}
+
+TOKEN_RE = re.compile(r"\s*(&&|\|\||==|!=|!|\(|\)|,|'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.-]*)")
+
+
+def tokenize(text):
+    tokens, position = [], 0
+    while position < len(text):
+        match = TOKEN_RE.match(text, position)
+        if not match:
+            if text[position:].strip() == "":
+                break
+            raise SystemExit(f"unsupported expression syntax at {text[position:]!r}")
+        tokens.append(match.group(1))
+        position = match.end()
+    return tokens
+
+
+def evaluate(expression, context):
+    text = expression.strip()
+    if text.startswith("${{") and text.endswith("}}"):
+        text = text[3:-2]
+    tokens = tokenize(text)
+    position = 0
+
+    def peek():
+        return tokens[position] if position < len(tokens) else None
+
+    def take(expected=None):
+        nonlocal position
+        token = peek()
+        if expected is not None and token != expected:
+            raise SystemExit(f"expected {expected!r}, found {token!r} in {expression!r}")
+        position += 1
+        return token
+
+    def truthy(value):
+        return value not in ("", False, None)
+
+    def primary():
+        token = take()
+        if token == "(":
+            value = disjunction()
+            take(")")
+            return value
+        if token == "!":
+            return not truthy(primary())
+        if token.startswith("'"):
+            return token[1:-1].replace("''", "'")
+        if peek() == "(":
+            take("(")
+            arguments = []
+            while peek() != ")":
+                arguments.append(disjunction())
+                if peek() == ",":
+                    take(",")
+            take(")")
+            if token == "contains":
+                return str(arguments[1]) in str(arguments[0])
+            if token in ("always", "success"):
+                return True
+            if token in ("failure", "cancelled"):
+                return False
+            raise SystemExit(f"unsupported function {token}")
+        return context.get(token, "")
+
+    def comparison():
+        left = primary()
+        while peek() in ("==", "!="):
+            operator = take()
+            right = primary()
+            left = (str(left) == str(right)) if operator == "==" else (str(left) != str(right))
+        return left
+
+    def conjunction():
+        value = comparison()
+        while peek() == "&&":
+            take()
+            right = comparison()
+            value = truthy(value) and truthy(right)
+        return value
+
+    def disjunction():
+        value = conjunction()
+        while peek() == "||":
+            take()
+            right = conjunction()
+            value = truthy(value) or truthy(right)
+        return value
+
+    result = disjunction()
+    if position != len(tokens):
+        raise SystemExit(f"trailing tokens in {expression!r}")
+    return truthy(result)
+
+
+def dispatch(selection, cw, desktop, workspace, kind_workspace="source"):
+    with tempfile.NamedTemporaryFile("r") as output:
+        environment = dict(
+            os.environ, VERIFICATION_SELECTION=selection, VERIFICATION_TESTED_TREE_RECEIPT="fallback",
+            CW_PACKAGE_SELECTED=cw, DESKTOP_PACKAGE_SELECTED=desktop,
+            WORKSPACE_IMAGE_SELECTED=workspace, VERIFICATION_SUPERSEDED="false",
+            KIND_WORKSPACE_SOURCE=kind_workspace,
+            GITHUB_OUTPUT=output.name,
+        )
+        subprocess.run([emitter], env=environment, check=True, stderr=subprocess.DEVNULL)
+        return dict(line.strip().split("=", 1) for line in open(output.name) if line.strip())
+
+
+scope_cache = {}
+
+
+def run_scope_step(step, context):
+    environment = {key: (str(value) if "${{" not in str(value) else context.get(
+        str(value).strip()[3:-2].strip(), "")) for key, value in step.get("env", {}).items()}
+    key = (step["run"], tuple(sorted(environment.items())))
+    if key not in scope_cache:
+        with tempfile.NamedTemporaryFile("r") as output:
+            subprocess.run(["bash", "-c", step["run"]], check=True,
+                           env=dict(PATH=os.environ["PATH"], GITHUB_OUTPUT=output.name, **environment))
+            scope_cache[key] = dict(line.strip().split("=", 1) for line in open(output.name) if line.strip())
+    return scope_cache[key]
+
+
+def legs(job):
+    matrix = job.get("strategy", {}).get("matrix")
+    if not matrix:
+        return [{}]
+    return [{"matrix.shard.slug": shard["slug"]} for shard in matrix["shard"]]
+
+
+def job_work(job_id, base_context):
+    """Per leg, the work steps that would run."""
+    job = jobs[job_id]
+    # Only scope steps whose outputs a later step condition reads are run.
+    read_ids = set(re.findall(r"steps\.([A-Za-z0-9_-]+)\.outputs\.",
+                              " ".join(str(step.get("if", "")) for step in job["steps"])))
+    result = []
+    for leg in legs(job):
+        context = dict(base_context, **leg)
+        ran = []
+        for step in job["steps"]:
+            name = step.get("name") or step.get("uses", "")
+            if "if" not in step or evaluate(step["if"], context):
+                if step.get("id") in read_ids and "run" in step:
+                    for key, value in run_scope_step(step, context).items():
+                        context[f"steps.{step['id']}.outputs.{key}"] = value
+                if name in WORK[job_id]:
+                    ran.append(name)
+        result.append(ran)
+    return result
+
+
+# Every step of a checked job is classified as work or support.
+for job_id, work in WORK.items():
+    names = {step.get("name") for step in jobs[job_id]["steps"] if "name" in step}
+    if not work <= names:
+        raise SystemExit(f"{job_id}: work steps no longer exist: {sorted(work - names)}")
+    unclassified = names - work - SUPPORT
+    if unclassified:
+        raise SystemExit(f"{job_id}: classify these steps as work or support: {sorted(unclassified)}")
+# Jobs whose work steps carry their own selection conditions must also not
+# leave selected work undispatched. The others (Kind builders, the compile)
+# run unconditionally once their job is dispatched.
+SELECTION_GATED = {
+    job_id for job_id, work in WORK.items()
+    if all(re.search(r"outputs\.selection|_selected|steps\.",
+                     str(step.get("if", "")))
+           for step in jobs[job_id]["steps"] if step.get("name") in work)
+}
+capability_jobs = {job_id for job_id, job in jobs.items()
+                   if re.search(r"outputs\.[a-z_]+_expected == 'true'", job.get("if", ""))}
+if capability_jobs - set(WORK):
+    raise SystemExit(f"capability jobs without work classification: {sorted(capability_jobs - set(WORK))}")
+
+realistic = [line.strip() for line in open(realistic_path) if line.strip()]
+universe = sorted({token for selection in realistic for token in selection.strip("|").split("|")}
+                  - {"valid:v3", "complete"} | {"ios", "pr_quick", "rust_compile", "rust_pkg_codewire_desktop",
+                                                "transport_derp_contract", "contracts_proto", "go_tailnet",
+                                                "security_go", "go_consumer_interop"})
+synthetic = set()
+for token in universe:
+    for extra in ((), ("policy", "policy_shell_omittable"), ("kind",), ("edge_kind",), ("pr_quick",)):
+        synthetic.add("|valid:v3|" + "|".join(sorted({token, *extra})) + "|complete|")
+synthetic.add("|valid:v3|complete|")
+checked = 0
+for selection in sorted(set(realistic) | synthetic):
+    quick = "|pr_quick|" in selection
+    for cw, desktop, workspace, kind_workspace in itertools.product(
+            ("true", "false"), ("true", "false"), ("true", "false"), ("source", "pinned")):
+        expected = dispatch(selection, cw, desktop, workspace, kind_workspace)
+        # A quick selection deliberately ignores artifact facts; its steps
+        # see what dispatch saw.
+        facts = ("false", "false", "false") if quick else (cw, desktop, workspace)
+        context = {
+            "needs.verification-selection.result": "success",
+            # A pinned workspace dispatches no Kind workspace job.
+            "needs.kind-workspace.result": "skipped" if kind_workspace == "pinned" else "success",
+            "needs.verification-selection.outputs.kind_workspace_source": kind_workspace,
+            "needs.kind-product.result": "success",
+            "needs.kind-daemon.result": "success",
+            "needs.kind-smokes.result": "success",
+            "needs.verification-selection.outputs.selection": selection,
+            "needs.verification-selection.outputs.tested_tree_receipt": "fallback",
+            "needs.verification-selection.outputs.superseded": "false",
+            "needs.verification-selection.outputs.workspace_cache_experiment": "false",
+            "needs.verification-selection.outputs.cw_package_selected": facts[0],
+            "needs.verification-selection.outputs.desktop_package_selected": facts[1],
+            "needs.verification-selection.outputs.workspace_image_selected": facts[2],
+        }
+        for name, value in expected.items():
+            context[f"needs.verification-selection.outputs.{name}"] = value
+        for job_id in WORK:
+            dispatched = evaluate(jobs[job_id]["if"], context)
+            work = job_work(job_id, context)
+            if dispatched and not all(work):
+                raise SystemExit(
+                    f"{job_id} would start with no work for {selection} "
+                    f"(cw={cw} desktop={desktop} workspace={workspace}): legs={work}")
+            if not dispatched and any(work) and job_id in SELECTION_GATED:
+                raise SystemExit(
+                    f"{job_id} has selected work but is not dispatched for {selection} "
+                    f"(cw={cw} desktop={desktop} workspace={workspace}): {work}")
+        checked += 1
+print(f"dispatched jobs always have work: {checked} selection and artifact combinations")
+PY
+
 echo 'select-verification fixtures: OK'
 
 # Preflight runs the fast compile for exactly the selections that make CI run
@@ -3722,5 +4487,9 @@ grep -qF "selected_any ${compile_tokens}" "$ROOT/scripts/ci/select/emit-verifica
 }
 grep -qF "selection_has_any ${compile_tokens}; then" "$ROOT/scripts/dev/preflight.sh" || {
   echo 'preflight fast compile drifted from the CI rust-compile selection' >&2
+  exit 1
+}
+grep -qF "for token in ${compile_tokens}; do" "$SELECTOR" || {
+  echo 'the quick pull-request compile drifted from the CI rust-compile selection' >&2
   exit 1
 }

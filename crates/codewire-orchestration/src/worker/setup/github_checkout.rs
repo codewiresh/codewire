@@ -16,6 +16,11 @@ pub(super) struct Commands {
 /// Validate the complete set before setup removes or launches any checkout.
 /// An explicit unselected profile preserves ordinary public/custom HTTPS; lost
 /// selection metadata must never silently downgrade a GitHub checkout.
+///
+/// A source in any GitHub form (`https://`, `git://`, `git@github.com:` or
+/// `ssh://git@github.com/`) has a managed command while GitHub is selected.
+/// Setup runs it unless the SSH key, which goes first, takes the source
+/// ([`super::ssh_checkout`]).
 pub(super) fn commands(
     repositories: &[Repo],
     clients: Option<ManagedCredentialClients>,
@@ -23,14 +28,17 @@ pub(super) fn commands(
     repositories
         .iter()
         .map(|repo| {
-            let url = url::Url::parse(&repo.url).ok();
-            let github = url.as_ref().is_some_and(|url| {
-                url.scheme() != "ssh"
-                    && url.host_str().is_some_and(|host| {
-                        host.trim_end_matches('.')
-                            .eq_ignore_ascii_case("github.com")
-                    })
-            });
+            let path = codewire_project::github_repository_path(&repo.url).map(|(path, _)| path);
+            // Any other github.com URL (plain HTTP, a port, userinfo, extra
+            // segments) fails instead of becoming an anonymous checkout.
+            let github = path.is_some()
+                || url::Url::parse(&repo.url).is_ok_and(|url| {
+                    url.scheme() != "ssh"
+                        && url.host_str().is_some_and(|host| {
+                            host.trim_end_matches('.')
+                                .eq_ignore_ascii_case("github.com")
+                        })
+                });
             if !github {
                 return Ok(None);
             }
@@ -40,30 +48,14 @@ pub(super) fn commands(
             if !clients.contains(ManagedCredentialClient::GitHub) {
                 return Ok(None);
             }
-            let path = repo
-                .url
-                .strip_prefix("https://github.com/")
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "managed GitHub checkout requires a canonical HTTPS repository URL"
-                    )
-                })?;
-            let (owner, repository) = path.split_once('/').ok_or_else(|| {
-                anyhow::anyhow!("managed GitHub checkout requires an owner and repository")
+            let path = path.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "managed GitHub checkout requires a canonical GitHub owner and repository"
+                )
             })?;
-            anyhow::ensure!(
-                [owner, repository].iter().all(|part| {
-                    !part.is_empty()
-                        && part.len() <= 128
-                        && !matches!(*part, "." | ".." | ".git")
-                        && part.bytes().all(|byte| {
-                            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-                        })
-                }),
-                "managed GitHub checkout requires a canonical owner and repository"
-            );
-            // Git stores the source argument in remote.origin.url. The exact
-            // command-local rewrite changes only this clone's network destination.
+            // Git stores the source argument, in the form the user wrote it,
+            // in remote.origin.url. The exact command-local rewrite changes
+            // only this clone's network destination.
             let bridge =
                 format!("http://127.0.0.1:{MANAGED_HTTP_PORT}{MANAGED_GITHUB_GIT_PREFIX}{path}");
             let mut clone = isolated_git();

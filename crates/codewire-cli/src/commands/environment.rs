@@ -1262,16 +1262,7 @@ async fn handle_unified_environment_list(
             args.state.as_deref(),
             args.all,
         );
-        let mut entries = Vec::with_capacity(filtered.len());
-        for environment in filtered {
-            let daemon_health = environment_client
-                .get_environment_daemon_status(&org_id, &environment.id)
-                .await
-                .map(|status| status.state)
-                .unwrap_or_else(|_| "unavailable".to_string());
-            entries.push((environment, daemon_health));
-        }
-        entries
+        platform_environment_daemon_health(&environment_client, &org_id, filtered).await
     } else {
         Vec::new()
     };
@@ -1950,6 +1941,35 @@ async fn resolve_unified_environment_target(
         Some((id, _)) => Ok(UnifiedEnvironmentTarget::Platform(id)),
         None => anyhow::bail!("environment {target_ref:?} not found"),
     }
+}
+
+/// The platform answers daemon status only for a running Sandbox; every other
+/// state is refused and shown as unavailable. Asking only running rows keeps
+/// the output and stops `cw env list --all` from slowing down and collecting
+/// errors as the history of destroyed environments grows.
+pub(crate) fn environment_has_daemon(environment: &Environment) -> bool {
+    environment.state == "running"
+}
+
+pub(crate) async fn platform_environment_daemon_health(
+    client: &EnvironmentClient,
+    org_id: &str,
+    environments: Vec<Environment>,
+) -> Vec<(Environment, String)> {
+    let mut entries = Vec::with_capacity(environments.len());
+    for environment in environments {
+        let daemon_health = if environment_has_daemon(&environment) {
+            client
+                .get_environment_daemon_status(org_id, &environment.id)
+                .await
+                .map(|status| status.state)
+                .unwrap_or_else(|_| "unavailable".to_string())
+        } else {
+            "unavailable".to_string()
+        };
+        entries.push((environment, daemon_health));
+    }
+    entries
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
@@ -2632,15 +2652,21 @@ pub(crate) fn collect_env_create_repos(
     Ok(inputs
         .into_iter()
         .zip(destinations)
-        .map(
-            |((source, branch, _), destination)| codewire_project::RepositorySpec {
+        .map(|((source, branch, _), destination)| {
+            // A github.com SSH source gets GitHub's published host keys;
+            // any other SSH source still needs pins from a project file,
+            // and validation says so.
+            let known_hosts =
+                codewire_project::canonical_repository_known_hosts(&source, Vec::new())
+                    .unwrap_or_default();
+            codewire_project::RepositorySpec {
                 source,
                 branch,
                 destination,
                 revision: String::new(),
-                known_hosts: Vec::new(),
-            },
-        )
+                known_hosts,
+            }
+        })
         .collect())
 }
 
@@ -2656,7 +2682,13 @@ pub(crate) fn parse_env_create_repo_spec(spec: &str) -> anyhow::Result<(String, 
         return Ok((repo_spec.to_string(), String::new(), mount_path));
     };
     let (url, branch_with_at) = repo_spec.split_at(idx);
-    if !url.contains('/') {
+    // The `@` of `git@host:` or of `ssh://git@host/` names the SSH user, not
+    // a branch: a branch follows a repository path.
+    let has_path = match url.split_once("://") {
+        Some((_, authority_and_path)) => authority_and_path.contains('/'),
+        None => url.contains('/'),
+    };
+    if !has_path {
         return Ok((repo_spec.to_string(), String::new(), mount_path));
     }
     let branch = &branch_with_at[1..];

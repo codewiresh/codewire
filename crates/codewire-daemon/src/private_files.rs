@@ -163,6 +163,45 @@ mod at {
             Ok(Some(Self(descriptor)))
         }
 
+        /// Open the directory `name` here, creating it with `mode` when it is
+        /// absent. `Ok(None)` when it is a symlink, not a directory, or not
+        /// the effective uid's: it is then left exactly as it is.
+        pub(crate) fn open_or_create_child(
+            &self,
+            name: &str,
+            mode: u32,
+        ) -> io::Result<Option<Self>> {
+            match rustix::fs::mkdirat(&self.0, name, Mode::from_raw_mode(mode)) {
+                Ok(()) => self.sync()?,
+                Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => return Err(error.into()),
+            }
+            self.open_child(name)
+        }
+
+        /// Open the existing directory `name` here. `Ok(None)` when it is a
+        /// symlink, not a directory, or not the effective uid's; `NotFound`
+        /// passes through.
+        pub(crate) fn open_child(&self, name: &str) -> io::Result<Option<Self>> {
+            let descriptor = match rustix::fs::openat(
+                &self.0,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(descriptor) => descriptor,
+                Err(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            let stat = rustix::fs::fstat(&descriptor)?;
+            if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
+                || stat.st_uid != rustix::process::geteuid().as_raw()
+            {
+                return Ok(None);
+            }
+            Ok(Some(Self(descriptor)))
+        }
+
         /// Make entries created, renamed or removed here durable.
         pub(crate) fn sync(&self) -> io::Result<()> {
             Ok(rustix::fs::fsync(&self.0)?)
@@ -259,6 +298,29 @@ mod at {
                 }
                 Err(error) => Err(error.into()),
             }
+        }
+
+        /// The names here that start with `prefix`, at most `limit` of them.
+        /// Names that are not UTF-8 are skipped.
+        pub(crate) fn names_with_prefix(
+            &self,
+            prefix: &str,
+            limit: usize,
+        ) -> io::Result<Vec<String>> {
+            let mut names = Vec::new();
+            for item in rustix::fs::Dir::read_from(&self.0)? {
+                let entry = item?;
+                let Ok(name) = entry.file_name().to_str() else {
+                    continue;
+                };
+                if name.starts_with(prefix) && name != "." && name != ".." {
+                    names.push(name.to_owned());
+                    if names.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            Ok(names)
         }
 
         /// Remove `name`; an absent name is not an error.

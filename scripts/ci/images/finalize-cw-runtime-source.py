@@ -46,6 +46,9 @@ TARGET_ROOT = Path("/tmp/cargo-target")
 CARGO_HOME = Path("/usr/local/cargo")
 WORK = Path("/out")
 PROFILES = {"ci": ("--profile", "ci"), "release": ("--release",)}
+# Fixed per profile so the recorded command stays exact. The ci profile is the
+# Kind daemon producer, which owns its whole worker; release keeps its bound.
+JOBS = {"ci": "8", "release": "2"}
 FILES = {"cw", "cw.d", "compile.log", "cw.oci.tar", "image.json", "runtime.pack", "cw-runtime.lock.json", "producer.json"}
 COMPILER_DEADLINE = 7200
 COMPLETION_FIELDS = {"command", "exit", "elapsed_seconds", "log", "log_sha256", "timed_out", "interrupted",
@@ -179,7 +182,7 @@ def command(profile):
     source.require(profile in PROFILES, "producer profile refused")
     return ["/usr/local/cargo/bin/cargo", "zigbuild", "--locked", *PROFILES[profile],
             "-p", "codewire-cli-bin", "--bin", "cw", "--target", source.TARGET,
-            "--manifest-path", "/src/Cargo.toml", "--target-dir", str(TARGET_ROOT), "--jobs", "2"]
+            "--manifest-path", "/src/Cargo.toml", "--target-dir", str(TARGET_ROOT), "--jobs", JOBS[profile]]
 
 
 def cargo_environment(model, directory):
@@ -195,7 +198,7 @@ def cargo_environment(model, directory):
     environment = {"PATH": "/usr/local/cargo/bin:/opt/zig:/opt/protoc/bin:/usr/bin:/bin",
                    "HOME": str(directory), "TMPDIR": str(directory), "CARGO_HOME": str(CARGO_HOME),
                    "RUSTUP_HOME": "/usr/local/rustup", "RUSTC": "/usr/local/cargo/bin/rustc",
-                   "PROTOC": "/opt/protoc/bin/protoc", "CARGO_INCREMENTAL": "0", "CARGO_BUILD_JOBS": "2",
+                   "PROTOC": "/opt/protoc/bin/protoc", "CARGO_INCREMENTAL": "0", "CARGO_BUILD_JOBS": JOBS[model["profile"]],
                    "PYTHONDONTWRITEBYTECODE": "1",
                    "LC_ALL": "C", "TZ": "UTC", **cache,
                    **release.build_environment(model["version"], model["source"]["revision"],

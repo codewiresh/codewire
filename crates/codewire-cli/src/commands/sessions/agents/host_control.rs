@@ -1,4 +1,5 @@
-//! Fixed target-owned record helper for authenticated member conversations.
+//! Fixed target-owned record helper for authenticated member conversations,
+//! and for the interrupt the host owner's own stop or restart sends first.
 //!
 //! This role never starts a provider or calls a daemon. The host daemon invokes
 //! its own retained image, supplies its saved environment identity and writes
@@ -166,7 +167,43 @@ enum Request {
         operation_id: String,
         instance_id: String,
     },
+    /// The host owner's own explicit stop or restart of a running
+    /// conversation, named by its session's driver command and admitted by
+    /// the conversation's binding to that session.
+    InterruptBeforeStop {
+        driver_id: String,
+        session_id: String,
+    },
+    AwaitInterruptBeforeStop {
+        driver_id: String,
+        session_id: String,
+        message_id: String,
+    },
+    /// The host daemon is stopping a running conversation because its whole
+    /// environment is being taken down.
+    PauseBeforeShutdown {
+        driver_id: String,
+        session_id: String,
+    },
+    /// Retention is about to remove a stopped conversation's session record.
+    RetireBeforePrune {
+        driver_id: String,
+        session_id: String,
+    },
+    /// The host owner's explicit stop of a conversation that is not running.
+    StopPaused {
+        driver_id: String,
+        session_id: String,
+    },
 }
+
+/// How long the stop interrupt waits for an active run to report its ID,
+/// which follows its start within milliseconds.
+const STOP_INTERRUPT_RUN_WAIT: Duration = Duration::from_secs(1);
+/// How long it waits for the interrupted message to end and its parent
+/// notification to be written before the host daemon stops the session.
+const STOP_INTERRUPT_SETTLE: Duration = Duration::from_secs(10);
+const STOP_INTERRUPT_POLL: Duration = Duration::from_millis(25);
 
 #[derive(clap::Parser)]
 struct Arguments {
@@ -303,13 +340,45 @@ impl DirectoryPin {
         Ok(())
     }
 }
+/// Pauses before each further read of a record that a writer is replacing.
+/// The path names the replaced file, unlinked, until the rename completes,
+/// which a loaded host can hold for tens of milliseconds.
+const REPLACED_RECORD_PAUSES: [Duration; 4] = [
+    Duration::from_millis(2),
+    Duration::from_millis(8),
+    Duration::from_millis(32),
+    Duration::from_millis(128),
+];
+/// Reads one complete owner-private managed record. A writer replaces a
+/// record by renaming a complete sibling over it (`write_private`), so a read
+/// that overlaps the rename holds the file being replaced. That read is
+/// discarded and the path read again, a bounded number of times. Every read
+/// makes every check, and none returns a file that changed while it was read.
 pub(super) fn private_record<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
     let directory = DirectoryPin::open(path.parent().context("managed record parent")?)?;
+    let mut pauses = REPLACED_RECORD_PAUSES.iter();
+    let bytes = loop {
+        if let Some(bytes) = read_record_once(path)? {
+            break bytes;
+        }
+        std::thread::sleep(*pauses.next().context("managed record changed")?);
+    };
+    directory.check()?;
+    serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid managed record"))
+}
+/// The bytes of the record `path` names, or `None` when a rename over it
+/// overlapped this read.
+fn read_record_once(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)?;
     let a = file.metadata()?;
+    // A rename over a file unlinks it, which changes its link count and change
+    // time but not what was written, then points the path at the new file.
+    if a.nlink() == 0 {
+        return Ok(None);
+    }
     ensure!(
         a.is_file()
             && a.uid() == euid()
@@ -318,32 +387,39 @@ pub(super) fn private_record<T: serde::de::DeserializeOwned>(path: &Path) -> any
             && a.len() <= MAX_RECORD_BYTES,
         "managed record is unsafe"
     );
-    fn stamp(m: &fs::Metadata) -> (u64, u64, u32, u32, u64, u64, i64, i64, i64, i64) {
+    type Written = (u64, u64, u32, u32, u64, i64, i64);
+    fn written(m: &fs::Metadata) -> Written {
         (
             m.dev(),
             m.ino(),
             m.uid(),
             m.mode(),
-            m.nlink(),
             m.len(),
             m.mtime(),
             m.mtime_nsec(),
-            m.ctime(),
-            m.ctime_nsec(),
         )
+    }
+    fn stamp(m: &fs::Metadata) -> (Written, u64, i64, i64) {
+        (written(m), m.nlink(), m.ctime(), m.ctime_nsec())
     }
     let mut bytes = Vec::new();
     (&mut file)
         .take(MAX_RECORD_BYTES + 1)
         .read_to_end(&mut bytes)?;
+    let held = file.metadata()?;
+    let named = fs::symlink_metadata(path)?;
+    if bytes.len() as u64 <= MAX_RECORD_BYTES
+        && stamp(&a) == stamp(&held)
+        && stamp(&a) == stamp(&named)
+    {
+        return Ok(Some(bytes));
+    }
+    let renamed = (named.dev(), named.ino()) != (a.dev(), a.ino());
     ensure!(
-        bytes.len() as u64 <= MAX_RECORD_BYTES
-            && stamp(&a) == stamp(&file.metadata()?)
-            && stamp(&a) == stamp(&fs::symlink_metadata(path)?),
+        written(&a) == written(&held) && (renamed || written(&a) == written(&named)),
         "managed record changed"
     );
-    directory.check()?;
-    serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid managed record"))
+    Ok(None)
 }
 fn marker(environment: &DriverEnvironment, driver: &str) -> anyhow::Result<Option<Marker>> {
     nonnil_id(driver)?;
@@ -835,5 +911,222 @@ fn handle(
                 resolve,
             )
         }
+        Request::InterruptBeforeStop {
+            driver_id,
+            session_id,
+        } => interrupt_before_stop(environment, &driver_id, &session_id),
+        Request::AwaitInterruptBeforeStop {
+            driver_id,
+            session_id,
+            message_id,
+        } => await_interrupt_before_stop(environment, &driver_id, &session_id, &message_id),
+        Request::PauseBeforeShutdown {
+            driver_id,
+            session_id,
+        } => pause_before_shutdown(environment, &driver_id, &session_id),
+        Request::RetireBeforePrune {
+            driver_id,
+            session_id,
+        } => resolve_paused(environment, &driver_id, &session_id, pause::RETIRED),
+        Request::StopPaused {
+            driver_id,
+            session_id,
+        } => resolve_paused(environment, &driver_id, &session_id, pause::STOPPED),
+    }
+}
+
+/// A conversation bound to the session the host daemon is stopping.
+fn bound_conversation(
+    environment: &DriverEnvironment,
+    driver: &str,
+    session: &str,
+) -> anyhow::Result<(PathBuf, AgentConfig)> {
+    nonnil_id(driver)?;
+    let dir = driver_dir(environment, driver)?;
+    let config: AgentConfig = private_record(&dir.join("config.json"))?;
+    config.validate(environment.id(), driver)?;
+    let binding: AgentBinding = private_record(&dir.join("binding.json"))?;
+    ensure!(
+        binding.driver_id == driver && binding.session_id == session,
+        "managed binding differs"
+    );
+    Ok((dir, config))
+}
+
+fn current_state(
+    dir: &Path,
+    driver: &str,
+    agent: AgentKind,
+) -> anyhow::Result<Option<DriverState>> {
+    let path = dir.join("state.json");
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+        Ok(_) => {
+            let state: DriverState = private_record(&path)?;
+            ensure!(
+                state.version == 1 && state.driver_id == driver && state.agent == agent,
+                "managed driver differs"
+            );
+            Ok(Some(state))
+        }
+    }
+}
+
+/// Records the interrupt an explicit stop or restart sends first: the fenced
+/// record `cw interrupt` makes, for the active message and its run. Only an
+/// agent that takes one gets one; for any other this answers at once and
+/// records nothing. The host daemon delivers it to the driver's input.
+///
+/// A run that has not reported its ID within the wait still gets the
+/// record, without a run: the driver refuses it, but it shows the stop was
+/// explicit, so the message is never paused and never resumed later. So does
+/// a run whose noel is starting again after a crash.
+fn interrupt_before_stop(
+    environment: &DriverEnvironment,
+    driver: &str,
+    session: &str,
+) -> anyhow::Result<Value> {
+    let (dir, config) = bound_conversation(environment, driver, session)?;
+    let agent = config.agent;
+    let nothing = || json!({"agent": agent, "interrupt": null});
+    if !agent.interrupts_before_stop() {
+        return Ok(nothing());
+    }
+    let deadline = Instant::now() + STOP_INTERRUPT_RUN_WAIT;
+    let (active, run) = loop {
+        let Some(state) = current_state(&dir, driver, agent)? else {
+            return Ok(nothing());
+        };
+        let Some(active) = state.active_message_id.filter(|_| {
+            matches!(state.phase, DriverPhase::Busy | DriverPhase::Starting)
+                && state.capabilities.interrupt
+        }) else {
+            return Ok(nothing());
+        };
+        match state.current_turn_id {
+            Some(run) => break (active, Some(run)),
+            None if Instant::now() < deadline => std::thread::sleep(STOP_INTERRUPT_POLL),
+            None => break (active, None),
+        }
+    };
+    let mut record = MessageRecord::new(driver, session, MessageAction::Interrupt, String::new());
+    record.id = stop_interrupt_id(&active);
+    record.expected_active_message_id = Some(active.clone());
+    record.expected_turn_id = run.clone();
+    let deliver = if create_message(&dir, &record)? {
+        true
+    } else {
+        // An earlier stop recorded it; deliver it again only if no driver
+        // has seen it yet.
+        let saved = load_message(&dir, &record.id)?;
+        ensure!(
+            saved.action == MessageAction::Interrupt
+                && saved.target_session_id == session
+                && saved.expected_active_message_id.as_deref() == Some(active.as_str()),
+            "stop interrupt differs"
+        );
+        saved.state == MessageState::Requested
+    };
+    Ok(
+        json!({"agent": agent, "interrupt": {"message_id": record.id,
+        "active_message_id": active, "run_id": run, "deliver": deliver}}),
+    )
+}
+
+/// Pauses the active run of a conversation whose whole environment the host
+/// daemon is taking down, before the daemon signals it: the message is
+/// paused and its parent's one notice queued. Only a run noel can resume is
+/// paused, and never one an explicit stop recorded its interrupt for; any
+/// other conversation answers at once and nothing is recorded.
+fn pause_before_shutdown(
+    environment: &DriverEnvironment,
+    driver: &str,
+    session: &str,
+) -> anyhow::Result<Value> {
+    let (dir, config) = bound_conversation(environment, driver, session)?;
+    let agent = config.agent;
+    let nothing = || json!({"agent": agent, "paused": null});
+    let Some(state) = current_state(&dir, driver, agent)? else {
+        return Ok(nothing());
+    };
+    let Some(active) = state
+        .active_message_id
+        .filter(|_| state.capabilities.resume)
+    else {
+        return Ok(nothing());
+    };
+    let binding: AgentBinding = private_record(&dir.join("binding.json"))?;
+    let record = pause::pause_message(environment, &dir, &config, &binding, &active)?;
+    if record.state != MessageState::Paused {
+        return Ok(nothing());
+    }
+    Ok(json!({"agent": agent, "paused": active}))
+}
+
+/// A stopped conversation's paused messages will not resume: retention is
+/// about to remove its session record, so it can never start again, or its
+/// owner explicitly stopped it, so its next start must not continue the
+/// run. Each paused message ends unknown, once, with `why`, and its parent
+/// hears of it once. Other messages, and conversations with none paused,
+/// are left as they are.
+fn resolve_paused(
+    environment: &DriverEnvironment,
+    driver: &str,
+    session: &str,
+    why: &str,
+) -> anyhow::Result<Value> {
+    let (dir, config) = bound_conversation(environment, driver, session)?;
+    if !pause::has_paused(&dir)? {
+        return Ok(json!({"agent": config.agent, "resolved": []}));
+    }
+    let binding: AgentBinding = private_record(&dir.join("binding.json"))?;
+    let resolved = pause::resolve_paused(environment, &dir, &config, &binding, why)?;
+    Ok(json!({"agent": config.agent, "resolved": resolved}))
+}
+
+/// Waits at most 10 s for a stop interrupt's message to end and, for a
+/// worker, for its parent notification to be written; it only reads. A
+/// refused interrupt ends the wait at once, as nothing else will end the run.
+fn await_interrupt_before_stop(
+    environment: &DriverEnvironment,
+    driver: &str,
+    session: &str,
+    message: &str,
+) -> anyhow::Result<Value> {
+    let (dir, config) = bound_conversation(environment, driver, session)?;
+    nonnil_id(message)?;
+    let interrupt = load_message(&dir, message)?;
+    let active = interrupt
+        .expected_active_message_id
+        .clone()
+        .context("stop interrupt names no message")?;
+    ensure!(
+        interrupt.action == MessageAction::Interrupt
+            && interrupt.target_session_id == session
+            && interrupt.id == stop_interrupt_id(&active),
+        "not a stop interrupt"
+    );
+    let deadline = Instant::now() + STOP_INTERRUPT_SETTLE;
+    loop {
+        let interrupt = load_message(&dir, message)?;
+        let run = load_message(&dir, &active)?;
+        // The driver sets a notification pending, then records how its
+        // delivery went; pending with a detail is where it rests.
+        let notification = run
+            .notification
+            .as_ref()
+            .filter(|n| n.state != NotificationState::Pending || n.detail.is_some())
+            .map(|n| n.state);
+        let settled =
+            run.state.is_terminal() && (config.parent.is_none() || notification.is_some());
+        let refused = interrupt.state.is_terminal() && !run.state.is_terminal();
+        if settled || refused || Instant::now() >= deadline {
+            return Ok(
+                json!({"settled": settled, "message_state": run.state.name(),
+                "interrupt_state": interrupt.state.name(), "notification_state": notification}),
+            );
+        }
+        std::thread::sleep(STOP_INTERRUPT_POLL);
     }
 }

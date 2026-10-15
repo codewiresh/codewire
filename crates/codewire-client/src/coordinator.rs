@@ -5,6 +5,7 @@
 //! construction, auth injection, protocol selection, TLS, and retry/setup
 //! policy; `codewire-tailnet` remains the packet and node-mechanics crate.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
@@ -19,6 +20,7 @@ use codewire_proto::codewire::internal::v1::{
     coordinate_response, mesh_coordinator_service_coordinate_request,
     mesh_coordinator_service_coordinate_response,
 };
+use codewire_tailnet::dns::absolute_dns_name;
 use codewire_tailnet::node::Node;
 use connectrpc::Protocol;
 use connectrpc::client::{
@@ -80,6 +82,25 @@ impl CoordinatorWireProtocol {
         match self {
             Self::DirectConnect => Protocol::Connect,
             Self::PublicEdgeGrpc => Protocol::Grpc,
+        }
+    }
+}
+
+/// How a TLS dial looks up the coordinator URL's host. TLS verification and
+/// the HTTP authority use the host as configured either way.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostLookup {
+    AsConfigured,
+    /// As an absolute DNS name, so no resolver search domain is tried
+    /// (#2701, see [`codewire_tailnet::dns`]).
+    Absolute,
+}
+
+impl HostLookup {
+    fn name(self, host: &str) -> Cow<'_, str> {
+        match self {
+            Self::AsConfigured => Cow::Borrowed(host),
+            Self::Absolute => absolute_dns_name(host),
         }
     }
 }
@@ -320,6 +341,7 @@ impl CoordinatorPeerSession {
             CoordinatorWireProtocol::DirectConnect,
             None,
             setup_timeout,
+            HostLookup::AsConfigured,
         )
         .await
     }
@@ -358,14 +380,18 @@ impl CoordinatorPeerSession {
             CoordinatorWireProtocol::PublicEdgeGrpc,
             None,
             setup_timeout,
+            HostLookup::AsConfigured,
         )
         .await
     }
 
-    /// Dial the public coordinator edge trusting the WebPKI roots plus
-    /// `extra_roots`, for an edge served by a deployment-owned authority
-    /// (a local cluster). No extra root changes nothing.
-    pub async fn connect_public_edge_grpc_with_extra_roots(
+    /// Dial the public coordinator edge from a Sandbox daemon. It trusts the
+    /// WebPKI roots plus `extra_roots`, for an edge served by a
+    /// deployment-owned authority (a local cluster); no extra root changes
+    /// nothing. It looks up the URL's host as an absolute DNS name, so the
+    /// Pod resolver's search domains are never tried (#2701); TLS
+    /// verification and the HTTP authority keep the host as configured.
+    pub async fn connect_public_edge_grpc_absolute(
         url: &str,
         bearer_token: &str,
         identity: PrimaryCoordinateIdentity,
@@ -385,6 +411,7 @@ impl CoordinatorPeerSession {
             CoordinatorWireProtocol::PublicEdgeGrpc,
             Some(coordinator_tls_config_with_roots(roots)?),
             setup_timeout,
+            HostLookup::Absolute,
         )
         .await
     }
@@ -408,6 +435,7 @@ impl CoordinatorPeerSession {
             CoordinatorWireProtocol::DirectConnect,
             Some(tls_config),
             COORDINATOR_SETUP_TIMEOUT,
+            HostLookup::AsConfigured,
         )
         .await
     }
@@ -432,6 +460,7 @@ impl CoordinatorPeerSession {
             CoordinatorWireProtocol::PublicEdgeGrpc,
             Some(tls_config),
             COORDINATOR_SETUP_TIMEOUT,
+            HostLookup::AsConfigured,
         )
         .await
     }
@@ -443,10 +472,11 @@ impl CoordinatorPeerSession {
         protocol: CoordinatorWireProtocol,
         tls_config: Option<Arc<rustls::ClientConfig>>,
         setup_timeout: Duration,
+        lookup: HostLookup,
     ) -> Result<Self, Error> {
         tokio::time::timeout(
             setup_timeout,
-            Self::connect_inner(url, bearer_token, identity, protocol, tls_config),
+            Self::connect_inner(url, bearer_token, identity, protocol, tls_config, lookup),
         )
         .await
         .map_err(|_| Error::SetupTimeout(setup_timeout))?
@@ -458,6 +488,7 @@ impl CoordinatorPeerSession {
         identity: PrimaryCoordinateIdentity,
         protocol: CoordinatorWireProtocol,
         tls_config: Option<Arc<rustls::ClientConfig>>,
+        lookup: HostLookup,
     ) -> Result<Self, Error> {
         let base_uri = coordinator_origin(url)?;
         let scheme = base_uri
@@ -471,7 +502,7 @@ impl CoordinatorPeerSession {
                 http2_builder()
                     .connect_with_connector(
                         tower::service_fn(move |uri| {
-                            connect_ring_tls(uri, Arc::clone(&tls_config))
+                            connect_ring_tls(uri, Arc::clone(&tls_config), lookup)
                         }),
                         base_uri.clone(),
                     )
@@ -842,7 +873,11 @@ impl MeshCoordinatorPeerSession {
                             http2_builder()
                                 .connect_with_connector(
                                     tower::service_fn(move |uri| {
-                                        connect_ring_tls(uri, Arc::clone(&tls_config))
+                                        connect_ring_tls(
+                                            uri,
+                                            Arc::clone(&tls_config),
+                                            HostLookup::AsConfigured,
+                                        )
                                     }),
                                     base_uri.clone(),
                                 )
@@ -1117,6 +1152,7 @@ fn coordinator_tls_config_with_roots(
 async fn connect_ring_tls(
     uri: http::Uri,
     config: Arc<rustls::ClientConfig>,
+    lookup: HostLookup,
 ) -> Result<
     hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
     io::Error,
@@ -1126,7 +1162,8 @@ async fn connect_ring_tls(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TLS URI has no host"))?
         .to_owned();
     let port = uri.port_u16().unwrap_or(443);
-    let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+    let tcp = tokio::net::TcpStream::connect((lookup.name(&host).as_ref(), port)).await?;
+    // The server name comes from the URI, never from the looked-up name.
     finish_ring_tls(&uri, config, tcp).await
 }
 
@@ -1614,6 +1651,17 @@ mod tests {
             CoordinatorWireProtocol::PublicEdgeGrpc.connectrpc(),
             Protocol::Grpc
         );
+    }
+
+    #[test]
+    fn only_the_sandbox_dial_looks_up_the_coordinator_as_an_absolute_name() {
+        let host = "ingress-nginx-controller.ingress-nginx.svc.cluster.local";
+        assert_eq!(
+            HostLookup::Absolute.name(host),
+            "ingress-nginx-controller.ingress-nginx.svc.cluster.local."
+        );
+        assert_eq!(HostLookup::AsConfigured.name(host), host);
+        assert_eq!(HostLookup::Absolute.name("localhost"), "localhost");
     }
 
     #[test]

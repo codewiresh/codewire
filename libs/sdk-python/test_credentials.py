@@ -51,6 +51,16 @@ class CredentialFixture:
             clone_url="https://github.com/owner/private.git", is_private=True,
         )], next_page_token="opaque-next")
 
+    def list_github_pending_permissions(self, request, ctx):
+        self.record("ListGithubPendingPermissions", request, ctx)
+        return pb.ListGithubPendingPermissionsResponse(pending_permissions=[
+            pb.GithubAppPendingPermissions(account="octo-org", installation_id=43,
+                                           account_kind=pb.GITHUB_APP_ACCOUNT_KIND_ORGANIZATION),
+            pb.GithubAppPendingPermissions(account="octo-ent", installation_id=MAXIMUM,
+                                           account_kind=pb.GITHUB_APP_ACCOUNT_KIND_ENTERPRISE),
+            pb.GithubAppPendingPermissions(account="unknown", installation_id=1),
+        ])
+
     def get_credential(self, request, ctx):
         self.record("GetCredential", request, ctx)
         if request.credential_id == "missing":
@@ -83,6 +93,8 @@ class CredentialFixture:
     complete_github_app_authorization = unsupported_mutation
     add_api_key_credential = unsupported_mutation
     add_claude_subscription_token_credential = unsupported_mutation
+    start_claude_sign_in = unsupported_mutation
+    complete_claude_sign_in = unsupported_mutation
     rename_credential = unsupported_mutation
     rotate_api_key_credential = unsupported_mutation
     generate_ssh_credential = unsupported_mutation
@@ -161,6 +173,14 @@ class CredentialsTestCase(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.cw.credentials.list_github_repositories(**kwargs)
         self.assertEqual(len(self.fixture.calls),1)
+
+    def test_pending_permissions_keep_login_id_and_kind_only(self):
+        pending = self.cw.credentials.list_github_pending_permissions()
+        self.assertEqual(pending, [
+            {"account": "octo-org", "installation_id": 43, "account_kind": "organization"},
+            {"account": "octo-ent", "installation_id": MAXIMUM, "account_kind": "enterprise"},
+        ])
+        self.assertEqual(self.paths, ["/codewire.v1.GithubRepositoryService/ListGithubPendingPermissions"])
 
     def test_ssh_metadata_preserves_public_registration_data(self):
         value = self.cw.credentials.get_by_name("ssh")

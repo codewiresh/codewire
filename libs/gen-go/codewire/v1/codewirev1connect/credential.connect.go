@@ -47,6 +47,9 @@ const (
 	// GithubRepositoryServiceListGithubRepositoriesProcedure is the fully-qualified name of the
 	// GithubRepositoryService's ListGithubRepositories RPC.
 	GithubRepositoryServiceListGithubRepositoriesProcedure = "/codewire.v1.GithubRepositoryService/ListGithubRepositories"
+	// GithubRepositoryServiceListGithubPendingPermissionsProcedure is the fully-qualified name of the
+	// GithubRepositoryService's ListGithubPendingPermissions RPC.
+	GithubRepositoryServiceListGithubPendingPermissionsProcedure = "/codewire.v1.GithubRepositoryService/ListGithubPendingPermissions"
 	// CredentialMutationServiceEnrollCodexProcedure is the fully-qualified name of the
 	// CredentialMutationService's EnrollCodex RPC.
 	CredentialMutationServiceEnrollCodexProcedure = "/codewire.v1.CredentialMutationService/EnrollCodex"
@@ -62,6 +65,12 @@ const (
 	// CredentialMutationServiceAddClaudeSubscriptionTokenCredentialProcedure is the fully-qualified
 	// name of the CredentialMutationService's AddClaudeSubscriptionTokenCredential RPC.
 	CredentialMutationServiceAddClaudeSubscriptionTokenCredentialProcedure = "/codewire.v1.CredentialMutationService/AddClaudeSubscriptionTokenCredential"
+	// CredentialMutationServiceStartClaudeSignInProcedure is the fully-qualified name of the
+	// CredentialMutationService's StartClaudeSignIn RPC.
+	CredentialMutationServiceStartClaudeSignInProcedure = "/codewire.v1.CredentialMutationService/StartClaudeSignIn"
+	// CredentialMutationServiceCompleteClaudeSignInProcedure is the fully-qualified name of the
+	// CredentialMutationService's CompleteClaudeSignIn RPC.
+	CredentialMutationServiceCompleteClaudeSignInProcedure = "/codewire.v1.CredentialMutationService/CompleteClaudeSignIn"
 	// CredentialMutationServiceRenameCredentialProcedure is the fully-qualified name of the
 	// CredentialMutationService's RenameCredential RPC.
 	CredentialMutationServiceRenameCredentialProcedure = "/codewire.v1.CredentialMutationService/RenameCredential"
@@ -185,6 +194,12 @@ func (UnimplementedCredentialServiceHandler) GetCredential(context.Context, *con
 // GithubRepositoryServiceClient is a client for the codewire.v1.GithubRepositoryService service.
 type GithubRepositoryServiceClient interface {
 	ListGithubRepositories(context.Context, *connect.Request[v1.ListGithubRepositoriesRequest]) (*connect.Response[v1.ListGithubRepositoriesResponse], error)
+	// The installations of the Codewire GitHub App that have not yet granted
+	// what Codewire needs, checked live with the same authenticated owner's
+	// own active GitHub connection, under the same authority as
+	// ListGithubRepositories. Like discovery, it may renew an expiring App
+	// token first. Answers login, installation ID and account kind only.
+	ListGithubPendingPermissions(context.Context, *connect.Request[v1.ListGithubPendingPermissionsRequest]) (*connect.Response[v1.ListGithubPendingPermissionsResponse], error)
 }
 
 // NewGithubRepositoryServiceClient constructs a client for the codewire.v1.GithubRepositoryService
@@ -205,12 +220,20 @@ func NewGithubRepositoryServiceClient(httpClient connect.HTTPClient, baseURL str
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
+		listGithubPendingPermissions: connect.NewClient[v1.ListGithubPendingPermissionsRequest, v1.ListGithubPendingPermissionsResponse](
+			httpClient,
+			baseURL+GithubRepositoryServiceListGithubPendingPermissionsProcedure,
+			connect.WithSchema(githubRepositoryServiceMethods.ByName("ListGithubPendingPermissions")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // githubRepositoryServiceClient implements GithubRepositoryServiceClient.
 type githubRepositoryServiceClient struct {
-	listGithubRepositories *connect.Client[v1.ListGithubRepositoriesRequest, v1.ListGithubRepositoriesResponse]
+	listGithubRepositories       *connect.Client[v1.ListGithubRepositoriesRequest, v1.ListGithubRepositoriesResponse]
+	listGithubPendingPermissions *connect.Client[v1.ListGithubPendingPermissionsRequest, v1.ListGithubPendingPermissionsResponse]
 }
 
 // ListGithubRepositories calls codewire.v1.GithubRepositoryService.ListGithubRepositories.
@@ -218,10 +241,22 @@ func (c *githubRepositoryServiceClient) ListGithubRepositories(ctx context.Conte
 	return c.listGithubRepositories.CallUnary(ctx, req)
 }
 
+// ListGithubPendingPermissions calls
+// codewire.v1.GithubRepositoryService.ListGithubPendingPermissions.
+func (c *githubRepositoryServiceClient) ListGithubPendingPermissions(ctx context.Context, req *connect.Request[v1.ListGithubPendingPermissionsRequest]) (*connect.Response[v1.ListGithubPendingPermissionsResponse], error) {
+	return c.listGithubPendingPermissions.CallUnary(ctx, req)
+}
+
 // GithubRepositoryServiceHandler is an implementation of the codewire.v1.GithubRepositoryService
 // service.
 type GithubRepositoryServiceHandler interface {
 	ListGithubRepositories(context.Context, *connect.Request[v1.ListGithubRepositoriesRequest]) (*connect.Response[v1.ListGithubRepositoriesResponse], error)
+	// The installations of the Codewire GitHub App that have not yet granted
+	// what Codewire needs, checked live with the same authenticated owner's
+	// own active GitHub connection, under the same authority as
+	// ListGithubRepositories. Like discovery, it may renew an expiring App
+	// token first. Answers login, installation ID and account kind only.
+	ListGithubPendingPermissions(context.Context, *connect.Request[v1.ListGithubPendingPermissionsRequest]) (*connect.Response[v1.ListGithubPendingPermissionsResponse], error)
 }
 
 // NewGithubRepositoryServiceHandler builds an HTTP handler from the service implementation. It
@@ -238,10 +273,19 @@ func NewGithubRepositoryServiceHandler(svc GithubRepositoryServiceHandler, opts 
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
+	githubRepositoryServiceListGithubPendingPermissionsHandler := connect.NewUnaryHandler(
+		GithubRepositoryServiceListGithubPendingPermissionsProcedure,
+		svc.ListGithubPendingPermissions,
+		connect.WithSchema(githubRepositoryServiceMethods.ByName("ListGithubPendingPermissions")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.v1.GithubRepositoryService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case GithubRepositoryServiceListGithubRepositoriesProcedure:
 			githubRepositoryServiceListGithubRepositoriesHandler.ServeHTTP(w, r)
+		case GithubRepositoryServiceListGithubPendingPermissionsProcedure:
+			githubRepositoryServiceListGithubPendingPermissionsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -253,6 +297,10 @@ type UnimplementedGithubRepositoryServiceHandler struct{}
 
 func (UnimplementedGithubRepositoryServiceHandler) ListGithubRepositories(context.Context, *connect.Request[v1.ListGithubRepositoriesRequest]) (*connect.Response[v1.ListGithubRepositoriesResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.GithubRepositoryService.ListGithubRepositories is not implemented"))
+}
+
+func (UnimplementedGithubRepositoryServiceHandler) ListGithubPendingPermissions(context.Context, *connect.Request[v1.ListGithubPendingPermissionsRequest]) (*connect.Response[v1.ListGithubPendingPermissionsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.GithubRepositoryService.ListGithubPendingPermissions is not implemented"))
 }
 
 // CredentialMutationServiceClient is a client for the codewire.v1.CredentialMutationService
@@ -282,6 +330,17 @@ type CredentialMutationServiceClient interface {
 	// organizations are denied. The token is never returned, and it is never
 	// delivered to a Sandbox: the credential broker injects it.
 	AddClaudeSubscriptionTokenCredential(context.Context, *connect.Request[v1.AddClaudeSubscriptionTokenCredentialRequest]) (*connect.Response[v1.AddClaudeSubscriptionTokenCredentialResponse], error)
+	// Claude sign-in: Claude Code's own claude.ai OAuth login, by pasted code.
+	// Start creates this sign-in's PKCE verifier and state and returns Claude's
+	// fixed authorize URL and an opaque handle; nothing is sent or stored. The
+	// person signs in in their browser and copies the `code#state` Claude
+	// shows. Complete checks that state against the handle, exchanges the code
+	// as Claude Code's public client, reads the plan from Claude's OAuth
+	// profile and stores the login as the anthropic provider's CLAUDE_SIGN_IN
+	// kind. It is personal: organization API keys and organizations are denied.
+	// No token is returned; the credential broker refreshes the login.
+	StartClaudeSignIn(context.Context, *connect.Request[v1.StartClaudeSignInRequest]) (*connect.Response[v1.StartClaudeSignInResponse], error)
+	CompleteClaudeSignIn(context.Context, *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error)
 	RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error)
 	RotateApiKeyCredential(context.Context, *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error)
 	GenerateSshCredential(context.Context, *connect.Request[v1.GenerateSshCredentialRequest]) (*connect.Response[v1.GenerateSshCredentialResponse], error)
@@ -331,6 +390,18 @@ func NewCredentialMutationServiceClient(httpClient connect.HTTPClient, baseURL s
 			connect.WithSchema(credentialMutationServiceMethods.ByName("AddClaudeSubscriptionTokenCredential")),
 			connect.WithClientOptions(opts...),
 		),
+		startClaudeSignIn: connect.NewClient[v1.StartClaudeSignInRequest, v1.StartClaudeSignInResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceStartClaudeSignInProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("StartClaudeSignIn")),
+			connect.WithClientOptions(opts...),
+		),
+		completeClaudeSignIn: connect.NewClient[v1.CompleteClaudeSignInRequest, v1.CompleteClaudeSignInResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceCompleteClaudeSignInProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("CompleteClaudeSignIn")),
+			connect.WithClientOptions(opts...),
+		),
 		renameCredential: connect.NewClient[v1.RenameCredentialRequest, v1.RenameCredentialResponse](
 			httpClient,
 			baseURL+CredentialMutationServiceRenameCredentialProcedure,
@@ -377,6 +448,8 @@ type credentialMutationServiceClient struct {
 	completeGithubAppAuthorization       *connect.Client[v1.CompleteGithubAppAuthorizationRequest, v1.CompleteGithubAppAuthorizationResponse]
 	addApiKeyCredential                  *connect.Client[v1.AddApiKeyCredentialRequest, v1.AddApiKeyCredentialResponse]
 	addClaudeSubscriptionTokenCredential *connect.Client[v1.AddClaudeSubscriptionTokenCredentialRequest, v1.AddClaudeSubscriptionTokenCredentialResponse]
+	startClaudeSignIn                    *connect.Client[v1.StartClaudeSignInRequest, v1.StartClaudeSignInResponse]
+	completeClaudeSignIn                 *connect.Client[v1.CompleteClaudeSignInRequest, v1.CompleteClaudeSignInResponse]
 	renameCredential                     *connect.Client[v1.RenameCredentialRequest, v1.RenameCredentialResponse]
 	rotateApiKeyCredential               *connect.Client[v1.RotateApiKeyCredentialRequest, v1.RotateApiKeyCredentialResponse]
 	generateSshCredential                *connect.Client[v1.GenerateSshCredentialRequest, v1.GenerateSshCredentialResponse]
@@ -410,6 +483,16 @@ func (c *credentialMutationServiceClient) AddApiKeyCredential(ctx context.Contex
 // codewire.v1.CredentialMutationService.AddClaudeSubscriptionTokenCredential.
 func (c *credentialMutationServiceClient) AddClaudeSubscriptionTokenCredential(ctx context.Context, req *connect.Request[v1.AddClaudeSubscriptionTokenCredentialRequest]) (*connect.Response[v1.AddClaudeSubscriptionTokenCredentialResponse], error) {
 	return c.addClaudeSubscriptionTokenCredential.CallUnary(ctx, req)
+}
+
+// StartClaudeSignIn calls codewire.v1.CredentialMutationService.StartClaudeSignIn.
+func (c *credentialMutationServiceClient) StartClaudeSignIn(ctx context.Context, req *connect.Request[v1.StartClaudeSignInRequest]) (*connect.Response[v1.StartClaudeSignInResponse], error) {
+	return c.startClaudeSignIn.CallUnary(ctx, req)
+}
+
+// CompleteClaudeSignIn calls codewire.v1.CredentialMutationService.CompleteClaudeSignIn.
+func (c *credentialMutationServiceClient) CompleteClaudeSignIn(ctx context.Context, req *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error) {
+	return c.completeClaudeSignIn.CallUnary(ctx, req)
 }
 
 // RenameCredential calls codewire.v1.CredentialMutationService.RenameCredential.
@@ -469,6 +552,17 @@ type CredentialMutationServiceHandler interface {
 	// organizations are denied. The token is never returned, and it is never
 	// delivered to a Sandbox: the credential broker injects it.
 	AddClaudeSubscriptionTokenCredential(context.Context, *connect.Request[v1.AddClaudeSubscriptionTokenCredentialRequest]) (*connect.Response[v1.AddClaudeSubscriptionTokenCredentialResponse], error)
+	// Claude sign-in: Claude Code's own claude.ai OAuth login, by pasted code.
+	// Start creates this sign-in's PKCE verifier and state and returns Claude's
+	// fixed authorize URL and an opaque handle; nothing is sent or stored. The
+	// person signs in in their browser and copies the `code#state` Claude
+	// shows. Complete checks that state against the handle, exchanges the code
+	// as Claude Code's public client, reads the plan from Claude's OAuth
+	// profile and stores the login as the anthropic provider's CLAUDE_SIGN_IN
+	// kind. It is personal: organization API keys and organizations are denied.
+	// No token is returned; the credential broker refreshes the login.
+	StartClaudeSignIn(context.Context, *connect.Request[v1.StartClaudeSignInRequest]) (*connect.Response[v1.StartClaudeSignInResponse], error)
+	CompleteClaudeSignIn(context.Context, *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error)
 	RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error)
 	RotateApiKeyCredential(context.Context, *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error)
 	GenerateSshCredential(context.Context, *connect.Request[v1.GenerateSshCredentialRequest]) (*connect.Response[v1.GenerateSshCredentialResponse], error)
@@ -512,6 +606,18 @@ func NewCredentialMutationServiceHandler(svc CredentialMutationServiceHandler, o
 		CredentialMutationServiceAddClaudeSubscriptionTokenCredentialProcedure,
 		svc.AddClaudeSubscriptionTokenCredential,
 		connect.WithSchema(credentialMutationServiceMethods.ByName("AddClaudeSubscriptionTokenCredential")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceStartClaudeSignInHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceStartClaudeSignInProcedure,
+		svc.StartClaudeSignIn,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("StartClaudeSignIn")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceCompleteClaudeSignInHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceCompleteClaudeSignInProcedure,
+		svc.CompleteClaudeSignIn,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("CompleteClaudeSignIn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	credentialMutationServiceRenameCredentialHandler := connect.NewUnaryHandler(
@@ -562,6 +668,10 @@ func NewCredentialMutationServiceHandler(svc CredentialMutationServiceHandler, o
 			credentialMutationServiceAddApiKeyCredentialHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceAddClaudeSubscriptionTokenCredentialProcedure:
 			credentialMutationServiceAddClaudeSubscriptionTokenCredentialHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceStartClaudeSignInProcedure:
+			credentialMutationServiceStartClaudeSignInHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceCompleteClaudeSignInProcedure:
+			credentialMutationServiceCompleteClaudeSignInHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceRenameCredentialProcedure:
 			credentialMutationServiceRenameCredentialHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceRotateApiKeyCredentialProcedure:
@@ -601,6 +711,14 @@ func (UnimplementedCredentialMutationServiceHandler) AddApiKeyCredential(context
 
 func (UnimplementedCredentialMutationServiceHandler) AddClaudeSubscriptionTokenCredential(context.Context, *connect.Request[v1.AddClaudeSubscriptionTokenCredentialRequest]) (*connect.Response[v1.AddClaudeSubscriptionTokenCredentialResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.AddClaudeSubscriptionTokenCredential is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) StartClaudeSignIn(context.Context, *connect.Request[v1.StartClaudeSignInRequest]) (*connect.Response[v1.StartClaudeSignInResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.StartClaudeSignIn is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) CompleteClaudeSignIn(context.Context, *connect.Request[v1.CompleteClaudeSignInRequest]) (*connect.Response[v1.CompleteClaudeSignInResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.CompleteClaudeSignIn is not implemented"))
 }
 
 func (UnimplementedCredentialMutationServiceHandler) RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error) {

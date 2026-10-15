@@ -26,6 +26,7 @@ mod files;
 pub(crate) use files::{Tree, leaf_refusal, publish_session, tree_refusal};
 mod payload;
 pub use payload::{PinRefusal, ProviderIdentity, ProviderPin};
+pub(crate) use payload::{image_client_version, pinned_version};
 mod service;
 pub(crate) use service::{CleanupLink, Owner, RestartAdvance, Service};
 
@@ -232,6 +233,34 @@ pub enum Error {
     /// any effect. It names only the product.
     #[error("this managed agent was started with an earlier {}; start a new conversation", .0.product())]
     EarlierProvider(Agent),
+    /// An issued launch whose environment projection was refused before the
+    /// agent's program ran, with the launcher's cleanup confirmed: nothing
+    /// started and nothing remains, so the request is refused, not unknown.
+    #[error("the environment launch was denied before the managed agent started")]
+    DeniedBeforeRun,
+    /// A Resume refused before issue for one of the closed plain reasons in
+    /// [`codewire_daemon_proto::platform_managed::RESUME_REFUSALS`] (#2705).
+    #[error("platform managed resume refused: {0}")]
+    ResumeRefused(&'static str),
+}
+
+/// A Resume's plain refusals the daemon itself finds (#2705); the helper's
+/// `adopt` check names the others. Members of `RESUME_REFUSALS`.
+pub(crate) const DRIVER_ALIVE: &str = "resume-driver-alive";
+pub(crate) const PROVIDER_NOT_ADMITTED: &str = "resume-provider-not-admitted";
+
+/// The closed plain reason the helper's `adopt` check names, if any (#2705).
+/// Anything else in its place is refused, never passed on.
+pub(crate) fn adopt_refusal(value: &Value) -> Result<Option<&'static str>, Error> {
+    match value.get("refused") {
+        None => Ok(None),
+        Some(Value::String(reason)) => codewire_daemon_proto::platform_managed::RESUME_REFUSALS
+            .iter()
+            .find(|known| **known == reason.as_str())
+            .map(|known| Some(*known))
+            .ok_or(Error::Refused),
+        Some(_) => Err(Error::Refused),
+    }
 }
 
 fn canonical_uuid(value: &str) -> Result<(), Error> {
@@ -479,6 +508,38 @@ impl ImagePin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn platform_adopt_refusal_passes_on_only_a_closed_reason() {
+        assert!(matches!(
+            adopt_refusal(&json!({"launch_generation": 3})),
+            Ok(None)
+        ));
+        for reason in codewire_daemon_proto::platform_managed::RESUME_REFUSALS {
+            assert!(matches!(
+                adopt_refusal(&json!({ "refused": reason })),
+                Ok(Some(known)) if known == reason
+            ));
+        }
+        for value in [
+            json!({"refused": "resume-anything"}),
+            json!({"refused": "/workspace/private path"}),
+            json!({"refused": ""}),
+            json!({"refused": 1}),
+            json!({"refused": null}),
+        ] {
+            assert!(
+                matches!(adopt_refusal(&value), Err(Error::Refused)),
+                "{value}"
+            );
+        }
+        assert_eq!(DRIVER_ALIVE, "resume-driver-alive");
+        assert_eq!(PROVIDER_NOT_ADMITTED, "resume-provider-not-admitted");
+        for reason in [DRIVER_ALIVE, PROVIDER_NOT_ADMITTED] {
+            assert!(codewire_daemon_proto::platform_managed::resume_refusal(
+                reason
+            ));
+        }
+    }
     #[test]
     fn platform_managed_selection_requires_typed_proxy_slot_before_image_io() {
         let environment = uuid::Uuid::new_v4();

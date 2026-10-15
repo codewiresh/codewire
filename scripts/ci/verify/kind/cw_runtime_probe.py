@@ -55,7 +55,8 @@ DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 # workspace) for any other image ref, such as the Kind source image. The
 # keepalive form respawns a daemon that exits, so the original daemon is held
 # by its own pidfd and birth: a respawn refuses rather than passing as it.
-SUPERVISOR_PREFIX = (
+# Both install their traps before setup and before any child (#2667).
+SUPERVISOR_SETUP = (
     "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; "
     "grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo "
     '"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}" >> /etc/passwd; '
@@ -63,20 +64,25 @@ SUPERVISOR_PREFIX = (
     "while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done; "
     "/codewire/bin/cw __hosted-daemon & daemon_pid=$!; "
 )
-SUPERVISOR_COMMAND = SUPERVISOR_PREFIX + (
-    "shutdown() { kill -TERM \"$daemon_pid\" 2>/dev/null || true; "
+SUPERVISOR_COMMAND = (
+    "daemon_pid=; shutdown() { daemon_pid=\"${daemon_pid:-$!}\"; "
+    "kill -TERM \"$daemon_pid\" 2>/dev/null || true; "
     "wait \"$daemon_pid\" 2>/dev/null || true; }; "
     "trap 'shutdown; exit 143' TERM; trap 'shutdown; exit 130' INT; "
+    + SUPERVISOR_SETUP +
     'wait "$daemon_pid"; status=$?; trap - TERM INT; exit "$status"'
 )
-KEEPALIVE_SUPERVISOR_COMMAND = SUPERVISOR_PREFIX + (
-    "(exec 'sleep' 'infinity') & workload_pid=$!; "
-    "shutdown() { kill \"$workload_pid\" \"$daemon_pid\" 2>/dev/null || true; "
+KEEPALIVE_SUPERVISOR_COMMAND = (
+    "daemon_pid=; workload_pid=; shutdown() { daemon_pid=\"${daemon_pid:-$!}\"; "
+    "workload_pid=\"${workload_pid:-$!}\"; "
+    "kill \"$workload_pid\" \"$daemon_pid\" 2>/dev/null || true; "
     "wait \"$workload_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; }; "
     "trap 'shutdown; exit 0' TERM INT; "
+    + SUPERVISOR_SETUP +
+    "(exec 'sleep' 'infinity') & workload_pid=$!; "
     "while kill -0 \"$workload_pid\" 2>/dev/null; do "
     "if ! kill -0 \"$daemon_pid\" 2>/dev/null; then wait \"$daemon_pid\" 2>/dev/null || true; sleep 1; "
-    "/codewire/bin/cw __hosted-daemon & daemon_pid=$!; fi; sleep 1; done; "
+    "daemon_pid=; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; fi; sleep 1; done; "
     'wait "$workload_pid"; status=$?; kill "$daemon_pid" 2>/dev/null || true; '
     'wait "$daemon_pid" 2>/dev/null || true; exit "$status"'
 )

@@ -65,7 +65,11 @@ pub fn validate_request(request: &v1::CredentialSshRequest) -> Result<SshOperati
     validate_request_shape(request)
 }
 
-fn validate_request_shape(request: &v1::CredentialSshRequest) -> Result<SshOperation, Status> {
+/// The request's closed shape without its deadline: a transport checks this
+/// on receipt, and the request's handler checks the deadline, so a request
+/// whose deadline is out of range (a skewed or older guest clock) is refused
+/// alone instead of ending the bridge epoch that carries every request.
+pub fn validate_request_shape(request: &v1::CredentialSshRequest) -> Result<SshOperation, Status> {
     if !valid_request_id(&request.request_id) {
         return Err(invalid());
     }

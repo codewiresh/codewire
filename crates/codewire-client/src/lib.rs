@@ -115,16 +115,19 @@ pub use codewire_proto::codewire::v1::{
 pub use codewire_proto::codewire::v1::{
     AddApiKeyCredentialRequest, AddApiKeyCredentialResponse,
     AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse,
-    AddSshCredentialRequest, AddSshCredentialResponse, CodexDeviceChallenge, Credential,
+    AddSshCredentialRequest, AddSshCredentialResponse, CodexDeviceChallenge,
+    CompleteClaudeSignInRequest, CompleteClaudeSignInResponse, Credential,
     CredentialAuthenticationKind, CredentialStatus, DeleteCredentialRequest,
     DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest,
     EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse,
-    GetCredentialRequest, GetCredentialResponse, GithubDeviceChallenge, GithubRepository,
-    ListCredentialsRequest, ListCredentialsResponse, ListGithubRepositoriesRequest,
-    ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse,
-    RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest,
-    RotateApiKeyCredentialResponse, SshPublicKey, enroll_codex_response, enroll_github_response,
-    get_credential_request,
+    GetCredentialRequest, GetCredentialResponse, GithubAppAccountKind, GithubAppPendingPermissions,
+    GithubDeviceChallenge, GithubRepository, ListCredentialsRequest, ListCredentialsResponse,
+    ListGithubPendingPermissionsRequest, ListGithubPendingPermissionsResponse,
+    ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest,
+    RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse,
+    RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse, SshPublicKey,
+    StartClaudeSignInRequest, StartClaudeSignInResponse, enroll_codex_response,
+    enroll_github_response, get_credential_request,
 };
 pub use codewire_proto::codewire::v1::{
     CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,
@@ -150,8 +153,9 @@ pub use codewire_proto::codewire::v1::{
     watch_environment_create_response,
 };
 pub use codewire_proto::codewire::v1::{
-    CredentialDelegationOpen, CredentialDelegationProfile, DelegateCredentialsRequest,
-    DelegateCredentialsResponse, delegate_credentials_request, delegate_credentials_response,
+    CredentialDelegationKeepalive, CredentialDelegationOpen, CredentialDelegationProfile,
+    DelegateCredentialsRequest, DelegateCredentialsResponse, delegate_credentials_request,
+    delegate_credentials_response,
 };
 pub use config::{
     CODEWIRE_API_URL_ENV, CODEWIRE_URL_ENV, ClientConfig, DEFAULT_CODEWIRE_URL,
@@ -163,7 +167,8 @@ pub use coordinator::{
     Handlers as CoordinatorHandlers, MeshCoordinateIdentity, MeshCoordinatorPeerSession,
     PrimaryCoordinateIdentity,
 };
-pub use credential_delegation::CredentialDelegationStream;
+pub use credential_delegation::{AdmittedCredentialDelegation, CredentialDelegationStream};
+pub use credentials::GithubEnrollment;
 pub use error::{ClientError, ErrorInfo, ValidationError};
 pub use tailnet::{
     EnvironmentTailnetDiagnostic, ExpectedTransport, NativeClientFacade, SshTransportMode,

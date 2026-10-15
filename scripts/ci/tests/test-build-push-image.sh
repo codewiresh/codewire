@@ -21,6 +21,8 @@ readonly MESH_DOCKERFILE="$ROOT/deployments/docker/mesh.Dockerfile"
 readonly DAEMON_DOCKERFILE="$ROOT/deployments/docker/daemon.Dockerfile"
 readonly DERP_DOCKERFILE="$ROOT/deployments/docker/derp.Dockerfile"
 readonly CW_FIXTURE="$ROOT/scripts/ci/tests/cw_image_fixtures.py"
+# Cases below set the CI apt snapshot cache explicitly.
+unset CODEWIRE_APT_SNAPSHOT_MIRROR
 readonly SERVICES_BINARY_ARTIFACTS=(
   codewire-idp:codewire-idp
   codewire-orchestration:codewire-orchestration
@@ -427,6 +429,7 @@ printf 'CODEWIRE_IMAGE_SOURCE_SHA=%q CODEWIRE_RUST_PROFILE=%q CODEWIRE_SCCACHE_M
   "${CODEWIRE_IMAGE_SOURCE_SHA:-}" "${CODEWIRE_RUST_PROFILE:-}" "${CODEWIRE_SCCACHE_MODE:-}" \
   "$(git -C "${CODEWIRE_SOURCE_DIR:-.}" remote get-url origin)" \
   >>"$FAKE_DOCKER_CALLS"
+printf 'CODEWIRE_APT_SNAPSHOT_MIRROR=%q ' "${CODEWIRE_APT_SNAPSHOT_MIRROR:-}" >>"$FAKE_DOCKER_CALLS"
 printf '%q ' "$@" >>"$FAKE_DOCKER_CALLS"
 printf '\n' >>"$FAKE_DOCKER_CALLS"
 
@@ -755,6 +758,17 @@ case "${1:-} ${2:-} ${3:-}" in
     esac
     ;;
   buildx\ build\ *)
+    if [ "${FAKE_BUILD_NETWORK_FAILURES:-0}" -gt 0 ]; then
+      network_attempt=1
+      if [ -f "${FAKE_BUILD_NETWORK_STATE:?}" ]; then
+        network_attempt="$(($(cat "$FAKE_BUILD_NETWORK_STATE") + 1))"
+      fi
+      printf '%s\n' "$network_attempt" >"$FAKE_BUILD_NETWORK_STATE"
+      if [ "$network_attempt" -le "$FAKE_BUILD_NETWORK_FAILURES" ]; then
+        echo 'ERROR: failed to solve: failed to load cache key: Get "https://github.com/virtee/snpguest/releases/download/v0.10.0/snpguest": net/http: TLS handshake timeout' >&2
+        exit 1
+      fi
+    fi
     if [ "${FAKE_BUILD_FATAL:-0}" = 1 ]; then
       echo 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/test/blobs/sha256:test: 503 Service Unavailable' >&2
       exit 1
@@ -1505,6 +1519,45 @@ fi
 grep -qF '503 Service Unavailable' "$work/failed-build.out" ||
   fail 'failed protected publication was not preserved'
 
+# A build that fails on a transient network error (#2691) is retried, with
+# its error and a fixed marker in the log, and recovers within three attempts.
+rm -f "$work/build-network-state"
+network_builds_before="$(build_invocation_count)"
+if ! (
+  cd "$source_fixture"
+  FAKE_BUILD_NETWORK_FAILURES=2 FAKE_BUILD_NETWORK_STATE="$work/build-network-state" \
+    CODEWIRE_BUILD_NETWORK_RETRY_DELAY_SECONDS=0 \
+    "$BUILDER" base images/base/Dockerfile images/base
+) >"$work/network-build.out" 2>&1; then
+  sed -n '1,80p' "$work/network-build.out" >&2
+  fail 'a transient network failure was not retried to success'
+fi
+[[ "$(build_invocation_count)" -eq $((network_builds_before + 3)) ]] ||
+  fail 'a transient network failure did not use exactly three build attempts'
+[[ "$(grep -Fc '[build-network] transient network failure image=base status=1; retrying in 0s' "$work/network-build.out")" == 2 ]] ||
+  fail 'network build retries were not reported with their fixed marker'
+[[ "$(grep -Fc 'net/http: TLS handshake timeout' "$work/network-build.out")" == 2 ]] ||
+  fail 'network build retries hid the failed fetch'
+
+# Removing the published tag makes the next case build again.
+awk -F '\t' -v reference="$base_source_tag" \
+  '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
+mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
+rm -f "$work/build-network-state"
+network_builds_before="$(build_invocation_count)"
+if (
+  cd "$source_fixture"
+  FAKE_BUILD_NETWORK_FAILURES=3 FAKE_BUILD_NETWORK_STATE="$work/build-network-state" \
+    CODEWIRE_BUILD_NETWORK_RETRY_DELAY_SECONDS=0 \
+    "$BUILDER" base images/base/Dockerfile images/base
+) >"$work/network-exhausted.out" 2>&1; then
+  fail 'an exhausted network retry was accepted'
+fi
+[[ "$(build_invocation_count)" -eq $((network_builds_before + 3)) ]] ||
+  fail 'network build retries exceeded three attempts'
+grep -qF '[build-network] class=transient-exhausted image=base status=1 attempts=3' \
+  "$work/network-exhausted.out" || fail 'exhausted network build retries lack their fixed marker'
+
 # Workspace publication retains the protected compiler-cache API, but no
 # untrusted external layer cache may reach any publisher, even on source reuse.
 fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
@@ -1557,6 +1610,51 @@ for variant in legacy disabled protected; do
     if grep -qF -- '--no-cache-filter' "$FAKE_DOCKER_CALLS"; then fail 'publisher combined exclusive no-cache flags'; fi
   fi
   if grep -qE -- '--cache-(from|to)|untrusted-(access-key|secret-key)' "$FAKE_DOCKER_CALLS"; then fail 'publisher exported candidate cache or credential material'; fi
+  if grep -qF 'codewire-apt-mirror' "$FAKE_DOCKER_CALLS"; then fail "$variant workspace received an unset apt snapshot secret"; fi
+done
+
+# The CI apt snapshot cache reaches only base and workspace builds, as an
+# optional secret whose value the Buildx client reads from its environment.
+apt_mirror='http://apt-cache.invalid:8080'
+apt_mirror_secret=' --secret id=codewire-apt-mirror\,env=CODEWIRE_APT_SNAPSHOT_MIRROR '
+probe_source_tag="registry.example.invalid/codewire/confidential-probe:$source_sha"
+for variant in base-mirror workspace-mirror base-empty-mirror probe-mirror; do
+  for reference in "$base_source_tag" "$workspace_source_tag" "$probe_source_tag"; do
+    awk -F '\t' -v reference="$reference" '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
+    mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
+  done
+  : >"$FAKE_DOCKER_CALLS"
+  case "$variant" in
+    base-mirror)
+      CODEWIRE_APT_SNAPSHOT_MIRROR="$apt_mirror" "$BUILDER" base images/base/Dockerfile images/base ;;
+    workspace-mirror)
+      CODEWIRE_APT_SNAPSHOT_MIRROR="$apt_mirror" CODEWIRE_BASE_IMAGE_REF="$base_ref" \
+        "$BUILDER" workspace images/workspace/Dockerfile . ;;
+    base-empty-mirror)
+      CODEWIRE_APT_SNAPSHOT_MIRROR='' "$BUILDER" base images/base/Dockerfile images/base ;;
+    probe-mirror)
+      CODEWIRE_APT_SNAPSHOT_MIRROR="$apt_mirror" \
+        "$BUILDER" confidential-probe images/confidential-probe/Dockerfile images/confidential-probe ;;
+  esac >"$work/$variant.out" 2>&1
+  [[ "$(build_invocation_count)" == 1 ]] || fail "$variant was not built exactly once"
+  build_call="$(grep -E ' buildx (bake|build) ' "$FAKE_DOCKER_CALLS")"
+  case "$variant" in
+    base-mirror|workspace-mirror)
+      [[ "$(grep -oF -- "$apt_mirror_secret" <<<"$build_call" | wc -l)" == 1 ]] ||
+        fail "$variant did not receive exactly one apt snapshot secret"
+      grep -qF "CODEWIRE_APT_SNAPSHOT_MIRROR=$apt_mirror " <<<"$build_call" ||
+        fail "$variant Buildx client cannot read the apt snapshot secret source"
+      # The value appears only as the client's inherited environment.
+      [[ "$(grep -oF 'apt-cache.invalid' "$FAKE_DOCKER_CALLS" | wc -l)" == \
+        "$(grep -c 'CODEWIRE_APT_SNAPSHOT_MIRROR=http://apt-cache.invalid:8080 ' "$FAKE_DOCKER_CALLS")" ]] ||
+        fail "$variant passed the apt snapshot cache host as an argument"
+      ;;
+    *)
+      if grep -qF 'codewire-apt-mirror' "$FAKE_DOCKER_CALLS"; then
+        fail "$variant received the apt snapshot secret"
+      fi
+      ;;
+  esac
 done
 
 # The support pair publishes one index for amd64 and arm64. Every platform in
@@ -1687,10 +1785,11 @@ import json
 from pathlib import Path
 import sys
 records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
-assert len(records) == 10 and Counter(record['profile'] for record in records) == {'release': 8, 'ci': 2}
-assert Counter(record['source_revision'] for record in records) == {sys.argv[2]: 9, sys.argv[3]: 1}
-assert len({record['producer_receipt_sha256'] for record in records}) == 10
-print('protected/runtime/Kind CW original-producer contexts: 10 verified')
+assert len(records) == 11 and Counter(record['profile'] for record in records) == {'release': 9, 'ci': 2}
+assert Counter(record['source_revision'] for record in records) == {sys.argv[2]: 10, sys.argv[3]: 1}
+assert len({record['producer_receipt_sha256'] for record in records}) == 11
+# The apt snapshot cache case adds one release workspace build.
+print('protected/runtime/Kind CW original-producer contexts: 11 verified')
 PY
 
 # support-images.yaml builds each platform of the pair in its own job and

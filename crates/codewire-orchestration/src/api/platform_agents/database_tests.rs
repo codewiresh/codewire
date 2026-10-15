@@ -4,6 +4,7 @@ use crate::test_database_support::TestDatabase;
 use crate::worker::workspace_binding::live_cw_runtime_binding;
 use anyhow::{Result, ensure};
 use codewire_daemon_proto::daemon::v1 as private;
+use codewire_server_core::AppError;
 use codewire_server_core::migrate::application_migrator;
 use sha2::{Digest, Sha384};
 const ORG: &str = "runtime-journal-org";
@@ -108,6 +109,82 @@ impl Fixture {
         Ok(m)
     }
 }
+const POD2: &str = "3f1c2b4a-5d6e-4f70-8a9b-0c1d2e3f4a5b";
+impl Fixture {
+    /// The environment's Pod after a Stop/Start (#2705): the first binding
+    /// is released and a second one, with the same selection, is live.
+    async fn next_pod(&self) -> Result<CapturedBindingFacts> {
+        self.next_pod_as(POD, POD2, 4, &"a".repeat(64)).await
+    }
+    /// Release `previous` and bind `pod` at `generation` with `selection`.
+    async fn next_pod_as(
+        &self,
+        previous: &str,
+        pod: &str,
+        generation: i64,
+        selection: &str,
+    ) -> Result<CapturedBindingFacts> {
+        sqlx::query(
+            "UPDATE sandbox_workspace_bindings SET released_at=bound_at+interval '30 minutes' WHERE pod_uid=$1",
+        )
+        .bind(previous)
+        .execute(&self.pool)
+        .await?;
+        let bound_at = format!("2026-10-01T{:02}:00:00Z", 9 + generation);
+        sqlx::query("INSERT INTO sandbox_workspace_bindings(pod_uid,environment_id,namespace,pod_name,\
+            claim_uid,sandbox_uid,workspace_pvc_uid,operation_generation,projection_selection_sha256,\
+            managed_credential_clients,credential_scope,bound_at) \
+            VALUES($1,$2,'runtime-sandboxes',$3,$4,$5,$6,$7,$8,$9,'pod',$10::timestamptz)")
+            .bind(pod).bind(ENV).bind(format!("sandbox-{ENV}")).bind(CLAIM).bind(SANDBOX).bind(PVC)
+            .bind(generation).bind(selection)
+            .bind(codewire_access::ManagedCredentialClients::default().encode())
+            .bind(&bound_at)
+            .execute(&self.pool).await?;
+        sqlx::query(
+            "UPDATE sandbox_environment_backend SET pod_uid=$2,bound_at=$3::timestamptz \
+             WHERE environment_id=$1",
+        )
+        .bind(ENV)
+        .bind(pod)
+        .bind(&bound_at)
+        .execute(&self.pool)
+        .await?;
+        let facts = read_facts(&self.pool).await?;
+        facts.validate()?;
+        ensure!(facts.pod_uid == pod && facts.binding_generation == generation);
+        Ok(facts)
+    }
+}
+fn scope2() -> private::PlatformManagedScope {
+    private::PlatformManagedScope {
+        pod_uid: POD2.into(),
+        binding_generation: 4,
+        ..scope()
+    }
+}
+fn resume(m: &ManagedMutation, predecessor: &str, generation: u64) -> ManagedMutation {
+    ManagedMutation::from_private(&private::PlatformManagedMutationRequest {
+        request_id: Uuid::new_v4().to_string(),
+        scope: Some(scope2()),
+        operation: Some(
+            private::platform_managed_mutation_request::Operation::Control(
+                private::PlatformManagedControl {
+                    action: private::PlatformManagedAction::Resume as i32,
+                    session_id: m.session_id.clone(),
+                    driver_id: m.driver_id.to_string(),
+                    expected_launch_generation: generation,
+                    predecessor_pod_uid: predecessor.into(),
+                    agent: private::PlatformManagedAgent::Codex as i32,
+                    expected_provider_sha256: vec![0xcc; 32],
+                    expected_provider_size: 4,
+                    expected_provider_version: "0.160.0".into(),
+                    ..Default::default()
+                },
+            ),
+        ),
+    })
+    .expect("closed synthetic resume")
+}
 fn flags() -> FeatureFlags {
     FeatureFlags {
         enabled: true,
@@ -185,7 +262,7 @@ fn control_with_id(
         ManagedAction::Interrupt => private::PlatformManagedAction::Interrupt,
         ManagedAction::Stop => private::PlatformManagedAction::Stop,
         ManagedAction::Restart => private::PlatformManagedAction::Restart,
-        ManagedAction::Launch => panic!("control action"),
+        ManagedAction::Launch | ManagedAction::Resume => panic!("plain control action"),
     };
     ManagedMutation::from_private(&private::PlatformManagedMutationRequest {
         request_id: request_id.to_string(),
@@ -231,7 +308,7 @@ fn receipt(m: &ManagedMutation, b: &CapturedBindingFacts, l: ManagedLifecycle) -
         session_id: m.session_id.clone(),
         driver_id: m.driver_id,
         message_id: m.message_id,
-        launch_generation: if m.action == ManagedAction::Restart {
+        launch_generation: if matches!(m.action, ManagedAction::Restart | ManagedAction::Resume) {
             m.expected_launch_generation.checked_add(1).unwrap()
         } else {
             m.expected_launch_generation
@@ -1115,7 +1192,10 @@ database_case!(
     {
         let mut tx = f.pool.begin().await?;
         let m = launch(Uuid::new_v4());
-        let _ = f.journal.admit_in(&mut tx, &f.facts, &f.user, &m).await?;
+        let _ = f
+            .journal
+            .admit_in(&mut tx, &f.facts, &f.user, &m, None)
+            .await?;
         tx.rollback().await?;
         ensure!(f.counts().await? == (0, 0, 0));
     }
@@ -1195,7 +1275,11 @@ database_case!(
 async fn db_migration39_fresh_upgrade_rollback_and_retained_evidence_refusal() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
-        let migrator = application_migrator();
+        // The fixture database carries every embedded migration. Return it to
+        // version 39 and prove only this boundary, so a later migration can
+        // neither enter this proof nor be undone by it.
+        application_migrator().undo(&db.pool, 39).await?;
+        let migrator = boundary39_migrator();
         let fresh = schema(&db.pool).await?;
         ensure!(fresh == SCHEMA39);
         println!("MEASURED_PLATFORM_MANAGED_SCHEMA39={fresh}");
@@ -1240,6 +1324,20 @@ async fn db_migration39_fresh_upgrade_rollback_and_retained_evidence_refusal() -
     }
     .await;
     db.finish(result).await
+}
+
+/// Embedded migrations 1..=39, up and down: the managed-agent boundary.
+fn boundary39_migrator() -> sqlx::migrate::Migrator {
+    sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            application_migrator()
+                .iter()
+                .filter(|m| m.version <= 39)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    }
 }
 
 async fn wait_blocker(pool: &PgPool, pid: i32) -> Result<()> {
@@ -1524,3 +1622,662 @@ database_case!(
         ensure!(effects == 1 && unresolved == 0);
     }
 );
+database_case!(
+    db_launch_denied_before_run_is_refused_and_releases_its_lease,
+    f,
+    {
+        // #2705: the daemon refused an issued launch's projection before its
+        // agent ran and confirmed cleanup. That is a definite refusal: the
+        // conversation has no active request and the deletion lease is
+        // released, not left resolution_required.
+        let m = launch(Uuid::new_v4());
+        let issued = f.issue(m.clone()).await?;
+        let mut denied = receipt(&m, &f.facts, ManagedLifecycle::Failed);
+        denied.phase = ManagedPhase::Rejected;
+        denied.reason_code = "denied-before-run".into();
+        denied.exit_code = None;
+        let saved = f.journal.settle(issued, denied).await?;
+        ensure!(saved.phase == ManagedPhase::Rejected);
+        ensure!(f.observe(m.request_id).await? == saved);
+        let (active, clean): (Option<Uuid>, bool) = sqlx::query_as(
+            "SELECT active_request_id,known_clean FROM environment_platform_agent_conversations WHERE session_id=$1",
+        )
+        .bind(&m.session_id)
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(active.is_none() && clean);
+        let reason: String = sqlx::query_scalar(
+            "SELECT reason_code FROM environment_platform_agent_requests WHERE request_id=$1",
+        )
+        .bind(m.request_id)
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(reason == "platform-agent-command-refused");
+        let unresolved: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM organization_mutation_leases WHERE state='resolution_required'",
+        )
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(unresolved == 0);
+        // Only a launch may be denied before it ran, and only as Failed with
+        // confirmed cleanup; anything else stays unknown.
+        for case in 0..3 {
+            let launched = f.launch().await?;
+            let (mutation, lifecycle) = match case {
+                0 => (
+                    control(&launched, ManagedAction::Stop),
+                    ManagedLifecycle::Failed,
+                ),
+                _ => (launch(Uuid::new_v4()), ManagedLifecycle::Interrupted),
+            };
+            let issued = f.issue(mutation.clone()).await?;
+            let mut bad = receipt(&mutation, &f.facts, lifecycle);
+            bad.phase = ManagedPhase::Rejected;
+            bad.reason_code = "denied-before-run".into();
+            bad.exit_code = None;
+            bad.pipe_acknowledged = false;
+            bad.native_acknowledged = false;
+            bad.cleanup_unknown = case == 2;
+            if case == 2 {
+                bad.lifecycle = ManagedLifecycle::Failed;
+            }
+            ensure!(
+                f.journal.settle(issued, bad).await?.phase == ManagedPhase::Unknown,
+                "invalid denial case {case} was settled"
+            );
+        }
+    }
+);
+database_case!(
+    db_resume_continues_a_conversation_of_the_released_pod_once,
+    f,
+    {
+        // #2705: after a Stop/Start the conversation continues in the new Pod
+        // from the last Pod a driver ran in, at its generation, once.
+        let m = f.launch().await?;
+        let refused = |result: AppResult<ResumePredecessor>, needle: &str| -> Result<()> {
+            match result {
+                Err(AppError::Coded { detail, .. }) if detail.contains(needle) => Ok(()),
+                other => anyhow::bail!("expected a refusal naming {needle:?}, got {other:?}"),
+            }
+        };
+        // Still this Pod's conversation: Restart is the operation for it.
+        ensure!(
+            f.journal
+                .resume_predecessor(&f.facts, &m.session_id, m.driver_id)
+                .await
+                .is_err()
+        );
+        let facts2 = f.next_pod().await?;
+        let predecessor = f
+            .journal
+            .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+            .await?;
+        ensure!(
+            predecessor
+                == ResumePredecessor {
+                    pod_uid: POD.into(),
+                    namespace: "runtime-sandboxes".into(),
+                    pod_name: format!("sandbox-{ENV}"),
+                    generation: 1,
+                    agent: ManagedAgent::Codex,
+                }
+        );
+        // A Resume naming anything other than the checked predecessor, its
+        // generation or its agent conflicts at admission.
+        for (pod, generation) in [(SANDBOX, 1), (POD, 2)] {
+            ensure!(
+                f.journal
+                    .admit_resume(
+                        facts2.clone(),
+                        &f.user,
+                        resume(&m, pod, generation),
+                        predecessor.clone()
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        // A Rejected Resume leaves the new Pod's row at the predecessor's
+        // generation; the next Resume reuses it.
+        let rejected = resume(&m, POD, 1);
+        let (_, owner) = own(f
+            .journal
+            .admit_resume(
+                facts2.clone(),
+                &f.user,
+                rejected.clone(),
+                predecessor.clone(),
+            )
+            .await?)?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        let mut refusal = receipt(&rejected, &facts2, ManagedLifecycle::Stopped);
+        refusal.phase = ManagedPhase::Rejected;
+        refusal.reason_code = "refused-before-issue".into();
+        // A refusal advances nothing: the daemon reports the predecessor's
+        // generation, not the one a completed Resume would reach.
+        refusal.launch_generation = rejected.expected_launch_generation;
+        ensure!(f.journal.settle(issued, refusal).await?.phase == ManagedPhase::Rejected);
+        // The predecessor is still the last Pod a driver ran in.
+        ensure!(
+            f.journal
+                .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+                .await?
+                == predecessor
+        );
+        let r = resume(&m, POD, 1);
+        let (_, owner) = own(f
+            .journal
+            .admit_resume(facts2.clone(), &f.user, r.clone(), predecessor.clone())
+            .await?)?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        let saved = f
+            .journal
+            .settle(issued, receipt(&r, &facts2, ManagedLifecycle::Running))
+            .await?;
+        ensure!(saved.phase == ManagedPhase::Completed);
+        let rows: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT pod_uid,launch_generation,active_request_id FROM environment_platform_agent_conversations \
+             WHERE session_id=$1 ORDER BY pod_uid=$2",
+        )
+        .bind(&m.session_id)
+        .bind(Uuid::parse_str(POD2)?)
+        .fetch_all(&f.pool)
+        .await?;
+        ensure!(
+            rows.len() == 2
+                && rows[0].0.to_string() == POD
+                && rows[0].1 == "1"
+                && rows[1].0.to_string() == POD2
+                && rows[1].1 == "2"
+                && rows[1].2.is_none(),
+            "{rows:?}"
+        );
+        // Now this Pod's conversation: it is Restart's, and a second Resume
+        // has no earlier Pod to continue from.
+        ensure!(
+            f.journal
+                .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+                .await
+                .is_err()
+        );
+        // A conversation whose last start has an unknown outcome has ended,
+        // wherever that start was.
+        let restart = ManagedMutation::from_private(&private::PlatformManagedMutationRequest {
+            request_id: Uuid::new_v4().to_string(),
+            scope: Some(scope2()),
+            operation: Some(
+                private::platform_managed_mutation_request::Operation::Control(
+                    private::PlatformManagedControl {
+                        action: private::PlatformManagedAction::Restart as i32,
+                        session_id: m.session_id.clone(),
+                        driver_id: m.driver_id.to_string(),
+                        expected_launch_generation: 2,
+                        ..Default::default()
+                    },
+                ),
+            ),
+        })?;
+        let (_, owner) = own(f.journal.admit(facts2.clone(), &f.user, restart).await?)?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        ensure!(
+            f.journal
+                .mark_unknown(issued, "platform-agent-dispatch-unknown")
+                .await?
+                .phase
+                == ManagedPhase::Unknown
+        );
+        refused(
+            f.journal
+                .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+                .await,
+            "unknown outcome",
+        )?;
+    }
+);
+fn resume_refusal(result: AppResult<ResumePredecessor>, needle: &str) -> Result<()> {
+    match result {
+        Err(AppError::Coded { code, detail, .. })
+            if code == "platform_agent_resume_refused" && detail.contains(needle) =>
+        {
+            Ok(())
+        }
+        other => anyhow::bail!("expected a refusal naming {needle:?}, got {other:?}"),
+    }
+}
+const POD3: &str = "6b2d3c4e-5f60-4a71-8b92-0a1b2c3d4e5f";
+const POD4: &str = "8c3e4d5f-6071-4b82-9ca3-1b2c3d4e5f60";
+database_case!(
+    db_resume_refusals_name_why_and_an_unknown_resume_ends_the_conversation,
+    f,
+    {
+        // #2705: each refusal says why. A Resume in progress in this Pod asks
+        // the user to wait; an Unknown Resume at the predecessor's generation
+        // ends the conversation wherever it ran.
+        let m = f.launch().await?;
+        let other = f.launch().await?;
+        let mut child = launch(Uuid::new_v4());
+        child.parent_session_id = Some(other.session_id.clone());
+        child.expected_parent_launch_generation = 1;
+        let issued = f.issue(child.clone()).await?;
+        f.journal
+            .settle(issued, receipt(&child, &f.facts, ManagedLifecycle::Running))
+            .await?;
+        let facts2 = f.next_pod().await?;
+        let predecessor = f
+            .journal
+            .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+            .await?;
+        let first = resume(&m, POD, 1);
+        let (_, owner) = own(f
+            .journal
+            .admit_resume(facts2.clone(), &f.user, first.clone(), predecessor.clone())
+            .await?)?;
+        // A second Resume while the first is admitted in this Pod.
+        match f
+            .journal
+            .admit_resume(
+                facts2.clone(),
+                &f.user,
+                resume(&m, POD, 1),
+                predecessor.clone(),
+            )
+            .await
+        {
+            Err(AppError::Coded { code, detail, .. })
+                if code == "platform_agent_resume_refused"
+                    && detail.contains("already resuming") => {}
+            other => anyhow::bail!("expected the in-progress refusal, got {:?}", other.err()),
+        }
+        // ... and while it is issued here.
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        resume_refusal(
+            f.journal
+                .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+                .await,
+            "already resuming",
+        )?;
+        // Its outcome becomes unknown: the conversation has ended, here and
+        // in every later Pod.
+        ensure!(
+            f.journal
+                .mark_unknown(issued, "platform-agent-dispatch-unknown")
+                .await?
+                .phase
+                == ManagedPhase::Unknown
+        );
+        // An unknown Resume ended its conversation; a plain Stop never
+        // becomes its cleanup (#2782).
+        ensure!(
+            f.journal
+                .unknown_active_request(&facts2, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
+        resume_refusal(
+            f.journal
+                .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+                .await,
+            "unknown outcome",
+        )?;
+        let facts3 = f.next_pod_as(POD2, POD3, 5, &"a".repeat(64)).await?;
+        resume_refusal(
+            f.journal
+                .resume_predecessor(&facts3, &m.session_id, m.driver_id)
+                .await,
+            "unknown outcome",
+        )?;
+        // A child conversation ends with its environment.
+        resume_refusal(
+            f.journal
+                .resume_predecessor(&facts3, &child.session_id, child.driver_id)
+                .await,
+            "child conversation",
+        )?;
+        // Unchanged selection: the other conversation still resumes.
+        f.journal
+            .resume_predecessor(&facts3, &other.session_id, other.driver_id)
+            .await?;
+        // A changed selection: credentials or secret sources.
+        let facts4 = f.next_pod_as(POD3, POD4, 6, &"b".repeat(64)).await?;
+        resume_refusal(
+            f.journal
+                .resume_predecessor(&facts4, &other.session_id, other.driver_id)
+                .await,
+            "selected credentials or secret sources changed",
+        )?;
+    }
+);
+database_case!(
+    db_resume_admission_rereads_the_exact_checked_predecessor,
+    f,
+    {
+        // #2705: the admission reads the predecessor again under its locks
+        // and refuses unless it is exactly the one proven absent.
+        let m = f.launch().await?;
+        let facts2 = f.next_pod().await?;
+        let predecessor = f
+            .journal
+            .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+            .await?;
+        for checked in [
+            ResumePredecessor {
+                pod_name: "sandbox-another".into(),
+                ..predecessor.clone()
+            },
+            ResumePredecessor {
+                namespace: "another-namespace".into(),
+                ..predecessor.clone()
+            },
+            ResumePredecessor {
+                pod_uid: POD3.into(),
+                ..predecessor.clone()
+            },
+            ResumePredecessor {
+                generation: 2,
+                ..predecessor.clone()
+            },
+            ResumePredecessor {
+                agent: ManagedAgent::Claude,
+                ..predecessor.clone()
+            },
+        ] {
+            ensure!(
+                f.journal
+                    .admit_resume(facts2.clone(), &f.user, resume(&m, POD, 1), checked.clone())
+                    .await
+                    .is_err(),
+                "{checked:?}"
+            );
+        }
+        // Nothing was admitted for any of them.
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM environment_platform_agent_requests \
+                     WHERE mutation_json->>'action'='resume') \
+                  + (SELECT count(*) FROM environment_platform_agent_conversations WHERE pod_uid=$1)",
+        )
+        .bind(Uuid::parse_str(POD2)?)
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(rows == 0, "{rows}");
+        own(f
+            .journal
+            .admit_resume(facts2, &f.user, resume(&m, POD, 1), predecessor)
+            .await?)?;
+    }
+);
+database_case!(
+    db_a_blocked_conversation_names_its_request_and_the_way_out,
+    f,
+    {
+        // #2782: while a conversation's request has not settled, only that
+        // request's cleanup may follow; anything else is refused definitely,
+        // naming the request and the way out, not as a plain conflict.
+        let blocked = |result: AppResult<Admission>, needles: &[&str]| -> Result<()> {
+            match result {
+                Err(AppError::Coded { code, detail, .. })
+                    if code == "platform_agent_request_refused"
+                        && needles.iter().all(|n| detail.contains(n)) =>
+                {
+                    Ok(())
+                }
+                Err(other) => anyhow::bail!("expected a named refusal {needles:?}, got {other:?}"),
+                Ok(_) => anyhow::bail!("expected a named refusal {needles:?}, got an admission"),
+            }
+        };
+        let m = f.launch().await?;
+        // Nothing unsettled: a plain Stop links nothing.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
+        let first = control(&m, ManagedAction::Message);
+        let (_, owner) = f.admit(first.clone()).await?;
+        let id = first.request_id.to_string();
+        // Still in progress: a plain Stop does not take it over.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                .is_none()
+        );
+        blocked(
+            f.journal
+                .admit(
+                    f.facts.clone(),
+                    &f.user,
+                    control(&m, ManagedAction::Message),
+                )
+                .await,
+            &["message", &id, "still in progress", "try again shortly"],
+        )?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        f.journal
+            .mark_unknown(issued, "platform-agent-dispatch-unknown")
+            .await?;
+        for action in [
+            ManagedAction::Message,
+            ManagedAction::Restart,
+            ManagedAction::Stop,
+        ] {
+            blocked(
+                f.journal
+                    .admit(f.facts.clone(), &f.user, control(&m, action))
+                    .await,
+                &[
+                    &format!("message {id}'s outcome is unknown"),
+                    &format!("run `cw stop {ENV} {}`", m.session_id),
+                    &format!("then `cw restart {ENV} {}`", m.session_id),
+                ],
+            )?;
+        }
+        // A plain Stop is that request's cleanup: orchestration links it, and
+        // the linked Stop is admitted. Its repeat keeps the first link.
+        ensure!(
+            f.journal
+                .unknown_active_request(&f.facts, &f.user, &m.session_id)
+                .await?
+                == Some(first.request_id)
+        );
+        let stop = cleanup(&first, first.expected_launch_generation);
+        own(f
+            .journal
+            .admit(f.facts.clone(), &f.user, stop.clone())
+            .await?)?;
+        ensure!(
+            f.journal
+                .saved_mutation(&f.facts, &f.user, stop.request_id)
+                .await?
+                .and_then(|saved| saved.cleanup_of_request_id)
+                == Some(first.request_id)
+        );
+    }
+);
+database_case!(
+    db_resume_denied_before_run_is_refused_and_can_resume_again,
+    f,
+    {
+        // #2769: the environment refused the resumed agent's launch before it
+        // ran, and the target undid the adoption. The Resume is a definite
+        // refusal at the predecessor's generation, said plainly, and the
+        // next Resume continues from the same predecessor.
+        let m = f.launch().await?;
+        let facts2 = f.next_pod().await?;
+        let predecessor = f
+            .journal
+            .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+            .await?;
+        let r = resume(&m, POD, 1);
+        let (_, owner) = own(f
+            .journal
+            .admit_resume(facts2.clone(), &f.user, r.clone(), predecessor.clone())
+            .await?)?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        let mut denied = receipt(&r, &facts2, ManagedLifecycle::Failed);
+        denied.phase = ManagedPhase::Rejected;
+        denied.reason_code = "denied-before-run".into();
+        denied.launch_generation = r.expected_launch_generation;
+        denied.exit_code = None;
+        let saved = f.journal.settle(issued, denied).await?;
+        ensure!(saved.phase == ManagedPhase::Rejected);
+        ensure!(
+            crate::api::platform_agents::resume_rejection(&saved)
+                .is_some_and(|text| text.contains("send the message again"))
+        );
+        let (generation, active): (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT launch_generation,active_request_id FROM environment_platform_agent_conversations \
+             WHERE pod_uid=$1 AND session_id=$2",
+        )
+        .bind(Uuid::parse_str(POD2)?)
+        .bind(&m.session_id)
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(
+            generation == "1" && active.is_none(),
+            "{generation} {active:?}"
+        );
+        let unresolved: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM organization_mutation_leases WHERE state='resolution_required'",
+        )
+        .fetch_one(&f.pool)
+        .await?;
+        ensure!(unresolved == 0);
+        ensure!(
+            f.journal
+                .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+                .await?
+                == predecessor
+        );
+        let again = resume(&m, POD, 1);
+        let (_, owner) = own(f
+            .journal
+            .admit_resume(facts2.clone(), &f.user, again.clone(), predecessor)
+            .await?)?;
+        let issued = f.journal.issue(&owner, &f.user).await?;
+        ensure!(
+            f.journal
+                .settle(issued, receipt(&again, &facts2, ManagedLifecycle::Running))
+                .await?
+                .phase
+                == ManagedPhase::Completed
+        );
+        // A denial is only a refusal when the agent provably never ran: a
+        // Running, exited or cleanup-unknown Resume, or one claiming the next
+        // generation, is not one.
+        for (lifecycle, exit_code, cleanup_unknown, generation) in [
+            (ManagedLifecycle::Running, None, false, 1),
+            (ManagedLifecycle::Failed, Some(1), false, 1),
+            (ManagedLifecycle::Failed, None, true, 1),
+            (ManagedLifecycle::Failed, None, false, 2),
+        ] {
+            let mut bad = receipt(&r, &facts2, lifecycle);
+            bad.phase = ManagedPhase::Rejected;
+            bad.reason_code = "denied-before-run".into();
+            bad.launch_generation = generation;
+            bad.exit_code = exit_code;
+            bad.cleanup_unknown = cleanup_unknown;
+            ensure!(
+                bad.validate_for(&r, &facts2).is_err(),
+                "{lifecycle:?} {exit_code:?} {cleanup_unknown} {generation}"
+            );
+        }
+    }
+);
+database_case!(db_resume_repeat_is_answered_from_its_first_admission, f, {
+    // #2705: a repeated Resume request ID is answered from its first
+    // admission in every phase, never re-derived or refused as in progress.
+    let m = f.launch().await?;
+    // A plain Resume reason on any other action is not a refusal.
+    let l = launch(Uuid::new_v4());
+    let issued = f.issue(l.clone()).await?;
+    let mut wrong = receipt(&l, &f.facts, ManagedLifecycle::Unspecified);
+    wrong.phase = ManagedPhase::Rejected;
+    wrong.reason_code = "resume-driver-alive".into();
+    ensure!(f.journal.settle(issued, wrong).await?.phase == ManagedPhase::Unknown);
+    let facts2 = f.next_pod().await?;
+    let predecessor = f
+        .journal
+        .resume_predecessor(&facts2, &m.session_id, m.driver_id)
+        .await?;
+    let r = resume(&m, POD, 1);
+    ensure!(
+        f.journal
+            .saved_resume(&facts2, &f.user, r.request_id)
+            .await?
+            .is_none()
+    );
+    // A repeat admits nothing new.
+    ensure!(
+        f.journal
+            .repeat_resume(facts2.clone(), &f.user, r.clone())
+            .await
+            .is_err()
+    );
+    let (_, owner) = own(f
+        .journal
+        .admit_resume(facts2.clone(), &f.user, r.clone(), predecessor.clone())
+        .await?)?;
+    ensure!(
+        f.journal
+            .saved_resume(&facts2, &f.user, r.request_id)
+            .await?
+            == Some(r.clone())
+    );
+    let repeat = |phase: ManagedPhase| {
+        let (journal, facts, user, r) = (&f.journal, facts2.clone(), &f.user, r.clone());
+        async move {
+            let saved = journal.repeat_resume(facts, user, r).await?;
+            ensure!(saved.phase == phase, "{:?}", saved.phase);
+            Ok::<_, anyhow::Error>(saved)
+        }
+    };
+    repeat(ManagedPhase::Admitted).await?;
+    let issued = f.journal.issue(&owner, &f.user).await?;
+    repeat(ManagedPhase::Issued).await?;
+    // A different request under the same ID conflicts, and another action's
+    // ID is never answered as a Resume.
+    let mut changed = r.clone();
+    changed.driver_id = Uuid::new_v4();
+    changed.session_id = format!("session-{}", changed.driver_id);
+    ensure!(
+        f.journal
+            .repeat_resume(facts2.clone(), &f.user, changed)
+            .await
+            .is_err()
+    );
+    ensure!(
+        f.journal
+            .saved_resume(&facts2, &f.user, m.request_id)
+            .await
+            .is_err()
+    );
+    // The target refused it for a plain reason: Rejected with that reason,
+    // answered with its text on every repeat, and the row stays at the
+    // predecessor's generation for the next Resume.
+    let mut refusal = receipt(&r, &facts2, ManagedLifecycle::Unspecified);
+    refusal.phase = ManagedPhase::Rejected;
+    refusal.reason_code = "resume-driver-alive".into();
+    refusal.launch_generation = r.expected_launch_generation;
+    let saved = f.journal.settle(issued, refusal).await?;
+    ensure!(saved.phase == ManagedPhase::Rejected);
+    let text = crate::api::platform_agents::resume_rejection(&saved);
+    ensure!(
+        text.is_some_and(|t| t.contains("still running")),
+        "{text:?}"
+    );
+    let again = repeat(ManagedPhase::Rejected).await?;
+    ensure!(crate::api::platform_agents::resume_rejection(&again) == text);
+    let generation: String = sqlx::query_scalar(
+        "SELECT launch_generation FROM environment_platform_agent_conversations WHERE pod_uid=$1",
+    )
+    .bind(Uuid::parse_str(POD2)?)
+    .fetch_one(&f.pool)
+    .await?;
+    ensure!(generation == "1");
+    own(f
+        .journal
+        .admit_resume(facts2.clone(), &f.user, resume(&m, POD, 1), predecessor)
+        .await?)?;
+});

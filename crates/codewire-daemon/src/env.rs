@@ -11,6 +11,13 @@ use crate::config::{
 
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/// A managed conversation's own environment and session IDs on a trusted
+/// host, which its driver gives only to its native agent, so a lead can run
+/// `cw run "$CW_ENVIRONMENT" --parent "$CW_SESSION_ID"`. A host daemon keeps
+/// the environment of whatever started it, which may be such an agent; its
+/// sessions never inherit those values, so no child sees a stale identity.
+pub const CONVERSATION_IDENTITY_ENV: [&str; 2] = ["CW_ENVIRONMENT", "CW_SESSION_ID"];
+
 /// Only explicit per-command/terminal inputs outrank an application projection.
 /// Keep their names separate from the flattened image/project environment.
 #[derive(Debug)]
@@ -228,7 +235,9 @@ fn build_process_env_from(
 
     let mut env = Vec::new();
     for (key, value) in inherited {
-        if is_internal_environment_name(&key) {
+        if is_internal_environment_name(&key)
+            || (config.host.is_some() && CONVERSATION_IDENTITY_ENV.contains(&key.as_str()))
+        {
             continue;
         }
         if override_keys.contains_key(&key) {
@@ -582,15 +591,25 @@ mod tests {
                 );
                 // An application secret of either name is not applied over
                 // the extended list: both are launch override names, beside
-                // the gh names while GitHub is selected.
+                // the gh names and the unreserved Git rewrite entries while
+                // GitHub is selected (with the SSH key: two entries).
                 let mut expected = BTreeSet::from(["NO_PROXY".to_owned(), "no_proxy".to_owned()]);
                 if slots.contains(&"github") {
-                    expected.extend(["GH_CONFIG_DIR".to_owned(), "GH_TOKEN".to_owned()]);
+                    expected.extend(
+                        [
+                            "GH_CONFIG_DIR",
+                            "GH_TOKEN",
+                            "GIT_CONFIG_KEY_1",
+                            "GIT_CONFIG_VALUE_1",
+                        ]
+                        .map(str::to_owned),
+                    );
                 }
                 assert_eq!(environment.override_names, expected);
             }
             // SSH alone, or no selection, has no HTTP route: nothing is set
-            // and a declared list is the workload's own.
+            // and a declared list is the workload's own. SSH's only launch
+            // overrides are its Git rewrite of GitHub's `git://` form.
             let config = selected_config(PathBuf::from("/home/codewire"), &["ssh"], transport);
             let environment = env_map(
                 &build_managed_process_env_from(
@@ -616,7 +635,13 @@ mod tests {
             )
             .unwrap()
             .override_names;
-            assert!(overrides.is_empty());
+            assert_eq!(
+                overrides,
+                BTreeSet::from(
+                    ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]
+                        .map(str::to_owned)
+                )
+            );
         }
     }
 
@@ -654,10 +679,23 @@ mod tests {
                 )
                 .unwrap()
             };
-            // The gh names, and the proxy exemption list every HTTP client
+            // The gh names, the Git rewrite entries GitHub projects without
+            // reserving, and the proxy exemption list every HTTP client
             // selection fixes.
             let gh_names = BTreeSet::from(
-                ["GH_CONFIG_DIR", "GH_TOKEN", "NO_PROXY", "no_proxy"].map(str::to_owned),
+                [
+                    "GH_CONFIG_DIR",
+                    "GH_TOKEN",
+                    "GIT_CONFIG_KEY_1",
+                    "GIT_CONFIG_KEY_2",
+                    "GIT_CONFIG_KEY_3",
+                    "GIT_CONFIG_VALUE_1",
+                    "GIT_CONFIG_VALUE_2",
+                    "GIT_CONFIG_VALUE_3",
+                    "NO_PROXY",
+                    "no_proxy",
+                ]
+                .map(str::to_owned),
             );
 
             // Nothing declared: the managed values, each exactly once.
@@ -747,6 +785,94 @@ mod tests {
                 environment.override_names,
                 BTreeSet::from(["NO_PROXY".to_owned(), "no_proxy".to_owned()])
             );
+        }
+    }
+
+    /// Issue #2720: Git's GitHub URL rewrite reaches every session on both
+    /// placements. Its names beyond the GitHub client's reserved three, and
+    /// all of them for an SSH key alone, are not reserved: a declared or
+    /// inherited value loses to the projected one instead of being refused.
+    #[test]
+    fn the_github_url_rewrite_wins_over_declared_git_entries_on_both_placements() {
+        const MANAGED: &str = "url.http://127.0.0.1:38081/_codewire/github/.insteadOf";
+        const SSH: &str = "url.git@github.com:.insteadOf";
+        for transport in [
+            CredentialBridgeTransport::Local,
+            CredentialBridgeTransport::Hosted,
+        ] {
+            for (slots, persisted, expected) in [
+                (
+                    &["github"][..],
+                    &["GIT_CONFIG_KEY_2=core.editor", "GIT_CONFIG_VALUE_3=vi"][..],
+                    &[
+                        ("GIT_CONFIG_COUNT", "4"),
+                        ("GIT_CONFIG_KEY_0", MANAGED),
+                        ("GIT_CONFIG_VALUE_0", "https://github.com/"),
+                        ("GIT_CONFIG_KEY_1", MANAGED),
+                        ("GIT_CONFIG_VALUE_1", "git://github.com/"),
+                        ("GIT_CONFIG_KEY_2", MANAGED),
+                        ("GIT_CONFIG_VALUE_2", "git@github.com:"),
+                        ("GIT_CONFIG_KEY_3", MANAGED),
+                        ("GIT_CONFIG_VALUE_3", "ssh://git@github.com/"),
+                    ][..],
+                ),
+                // The key alone rewrites only `git://`. The image's entry 1
+                // is beyond the projected count, so Git never reads it.
+                (
+                    &["ssh"],
+                    &["GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.editor"],
+                    &[
+                        ("GIT_CONFIG_COUNT", "1"),
+                        ("GIT_CONFIG_KEY_0", SSH),
+                        ("GIT_CONFIG_VALUE_0", "git://github.com/"),
+                        ("GIT_CONFIG_VALUE_1", "image-value"),
+                    ],
+                ),
+                (
+                    &["github", "ssh"],
+                    &["GIT_CONFIG_KEY_1=core.editor"],
+                    &[
+                        ("GIT_CONFIG_COUNT", "2"),
+                        ("GIT_CONFIG_KEY_0", MANAGED),
+                        ("GIT_CONFIG_VALUE_0", "https://github.com/"),
+                        ("GIT_CONFIG_KEY_1", MANAGED),
+                        ("GIT_CONFIG_VALUE_1", "git://github.com/"),
+                    ],
+                ),
+            ] {
+                let config = selected_config(PathBuf::from("/home/codewire"), slots, transport);
+                let environment = build_managed_process_env_from(
+                    &config,
+                    persisted.iter().map(|entry| (*entry).to_owned()).collect(),
+                    &[],
+                    "",
+                    [("GIT_CONFIG_VALUE_1".to_owned(), "image-value".to_owned())],
+                    "/bin/sh",
+                )
+                .unwrap();
+                let git: BTreeMap<_, _> = env_map(&environment.entries)
+                    .into_iter()
+                    .filter(|(name, _)| name.starts_with("GIT_CONFIG_"))
+                    .collect();
+                assert_eq!(
+                    git,
+                    expected
+                        .iter()
+                        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                        .collect::<BTreeMap<_, _>>(),
+                    "{slots:?}"
+                );
+                // Each projected name appears exactly once.
+                assert_eq!(
+                    environment
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.starts_with("GIT_CONFIG_"))
+                        .count(),
+                    expected.len(),
+                    "{slots:?}"
+                );
+            }
         }
     }
 
@@ -1159,6 +1285,64 @@ mod tests {
         ] {
             assert!(!rendered.contains(marker));
         }
+    }
+
+    #[test]
+    fn host_sessions_never_inherit_a_conversation_identity_from_their_daemon() {
+        let inherited = || {
+            [
+                ("CW_ENVIRONMENT".into(), "stale-environment".into()),
+                ("CW_SESSION_ID".into(), "session-stale".into()),
+                ("INHERITED".into(), "visible".into()),
+            ]
+        };
+        let mut host = test_config(PathBuf::from("/home/codewire"));
+        host.host = Some(crate::HostConfig {
+            state_root: PathBuf::from("/state/hosts/environment"),
+        });
+        let values = env_map(&build_process_env_from(
+            &host,
+            Vec::new(),
+            &[],
+            "",
+            inherited(),
+            "/bin/sh",
+        ));
+        for name in CONVERSATION_IDENTITY_ENV {
+            assert!(!values.contains_key(name), "{name} was inherited");
+        }
+        assert_eq!(values.get("INHERITED").map(String::as_str), Some("visible"));
+        // A value the launch names itself is the caller's, not inherited.
+        let explicit = env_map(&build_process_env_from(
+            &host,
+            Vec::new(),
+            &["CW_SESSION_ID=session-explicit".into()],
+            "",
+            inherited(),
+            "/bin/sh",
+        ));
+        assert_eq!(
+            explicit.get("CW_SESSION_ID").map(String::as_str),
+            Some("session-explicit")
+        );
+        assert!(!explicit.contains_key("CW_ENVIRONMENT"));
+        // Other placements keep their inherited environment unchanged.
+        let guest = env_map(&build_process_env_from(
+            &test_config(PathBuf::from("/home/codewire")),
+            Vec::new(),
+            &[],
+            "",
+            inherited(),
+            "/bin/sh",
+        ));
+        assert_eq!(
+            guest.get("CW_ENVIRONMENT").map(String::as_str),
+            Some("stale-environment")
+        );
+        assert_eq!(
+            guest.get("CW_SESSION_ID").map(String::as_str),
+            Some("session-stale")
+        );
     }
 
     #[test]

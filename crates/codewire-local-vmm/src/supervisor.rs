@@ -200,20 +200,29 @@ impl NativeRuntimeConfig {
         self.root.join("engine")
     }
 
-    fn runner_socket(&self, environment_id: Uuid) -> PathBuf {
-        self.root
-            .join("runners")
-            .join(format!("{environment_id}.sock"))
-    }
-
     fn credential_authority_config(&self) -> AuthorityRuntimeConfig {
         AuthorityRuntimeConfig {
             root: self.credential_authority_root.clone(),
             executable: self.executable.clone(),
+            socket_dir: crate::socket_dir::predicted(&self.credential_authority_root),
         }
     }
 
     fn direct_share_forbidden_roots(&self) -> Result<Vec<PathBuf>, SupervisorError> {
+        // The per-user directories that hold the supervisor's, runners', VMs'
+        // and credential authority's sockets (#2735, #2745) are never shared.
+        let socket_bases = [
+            &self.root,
+            &self.engine_root(),
+            &self.credential_authority_root,
+        ]
+        .into_iter()
+        .filter_map(|root| {
+            crate::socket_dir::predicted(root)
+                .parent()
+                .map(Path::to_path_buf)
+        })
+        .collect::<Vec<_>>();
         [
             &self.root,
             &self.artifact_root,
@@ -222,6 +231,7 @@ impl NativeRuntimeConfig {
             &self.platform_config_dir,
         ]
         .into_iter()
+        .chain(&socket_bases)
         .map(|path| resolve_forbidden_root(path))
         .collect()
     }
@@ -304,7 +314,7 @@ impl NativeSupervisorClient {
     /// anything itself.
     pub async fn connect_or_start(config: &NativeRuntimeConfig) -> Result<Self, SupervisorError> {
         config.validate()?;
-        let socket = config.supervisor_socket();
+        let mut socket = config.supervisor_socket();
         match fs::symlink_metadata(&socket) {
             Ok(_) => match Self::connect_for_config(&socket, config).await {
                 Err(error) if error.refused_connection() => {}
@@ -323,6 +333,9 @@ impl NativeSupervisorClient {
         let deadline = tokio::time::Instant::now() + RUNNER_START_TIMEOUT;
         let mut exited_at = None;
         loop {
+            // A supervisor that had to fall back records a new socket
+            // directory, so the endpoint is looked up afresh (#2735).
+            socket = config.supervisor_socket();
             if fs::symlink_metadata(&socket).is_ok() {
                 match Self::connect_for_config(&socket, config).await {
                     Ok(client) => return Ok(client),
@@ -346,7 +359,10 @@ impl NativeSupervisorClient {
                     .is_some()
             {
                 if fs::symlink_metadata(&socket).is_err() {
-                    return Err(SupervisorError::SpawnSupervisor);
+                    return Err(SupervisorError::SupervisorNotReachable {
+                        socket,
+                        log: config.root.join("logs").join("supervisor.log"),
+                    });
                 }
                 exited_at = Some(tokio::time::Instant::now());
             }
@@ -469,6 +485,21 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     let socket = config.supervisor_socket();
     let (listener, socket_identity) = bind_owner_only_listener(&socket)?;
     service.schedule_operation_worker(true);
+    // tmpfiles ages /tmp entries by their timestamps; keep this root's and its
+    // engine's sockets current for as long as the supervisor lives (#2735).
+    let refreshed = [
+        config.socket_dir(),
+        crate::socket_dir::predicted(&config.root.join("engine")),
+    ];
+    let refresher = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(crate::socket_dir::REFRESH_INTERVAL);
+        loop {
+            interval.tick().await;
+            for directory in &refreshed {
+                crate::socket_dir::refresh(directory);
+            }
+        }
+    });
     let app = public_api::supervisor_router(service);
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -480,6 +511,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         })
         .await
         .map_err(|_| SupervisorError::Serve);
+    refresher.abort();
     remove_bound_socket(&socket, &socket_identity)?;
     result
 }
@@ -2879,7 +2911,8 @@ impl SupervisorCore {
     ) -> Result<RunnerClient, SupervisorError> {
         let environment_id = self.environment(name)?.id;
         let socket = self.config.runner_socket(environment_id);
-        let runners = PrivateRoot::open(&self.root.path().join("runners"))?;
+        // tmpfiles may have removed the socket directory since startup.
+        let runners = PrivateRoot::open(&prepare_runner_socket_dir(self.root.path())?)?;
         let socket_name = socket
             .file_name()
             .map(Path::new)
@@ -7555,8 +7588,21 @@ fn prepare_runtime_root(path: &Path) -> Result<PrivateRoot, SupervisorError> {
         Err(error) => return Err(error.into()),
     };
     root.ensure_dir(Path::new("engine"), 0o700)?;
-    root.ensure_dir(Path::new("runners"), 0o700)?;
+    prepare_runner_socket_dir(root.path())?;
+    // Releases before #2735 kept runner sockets here; an empty directory is a
+    // leftover (one still holding a live runner's socket stays).
+    let _ = root.remove_empty_private_directory(Path::new("runners"));
     Ok(root)
+}
+
+/// The root's short private socket directory and its `runners` directory,
+/// created on demand (#2735).
+fn prepare_runner_socket_dir(root: &Path) -> Result<PathBuf, SupervisorError> {
+    let sockets = crate::socket_dir::prepare(root)?;
+    Ok(crate::socket_dir::ensure_subdirectory(
+        &sockets,
+        &["runners"],
+    )?)
 }
 
 fn spawn_supervisor(
@@ -7746,8 +7792,15 @@ impl From<SupervisorConfigError> for SupervisorError {
                 Self::SupervisorConfigurationMismatch
             }
             SupervisorConfigError::Io { path, source } => Self::Io { path, source },
-            #[cfg(target_os = "macos")]
-            SupervisorConfigError::SocketPathTooLong(root) => Self::SocketPathTooLong(root),
+            SupervisorConfigError::SocketPathTooLong {
+                path,
+                length,
+                limit,
+            } => Self::SocketPathTooLong {
+                path,
+                length,
+                limit,
+            },
         }
     }
 }
@@ -7756,11 +7809,18 @@ impl From<SupervisorConfigError> for SupervisorError {
 pub enum SupervisorError {
     #[error("native runtime configuration is invalid")]
     InvalidConfiguration,
-    #[cfg(target_os = "macos")]
+    #[error(transparent)]
+    SocketDir(#[from] crate::socket_dir::SocketDirError),
     #[error(
-        "local state root {0} is too long for macOS Unix sockets (103 bytes); choose a shorter path"
+        "the native supervisor did not come up at {socket}: another one may hold this state root while its socket is not visible here (one started by an older cw, or in another /tmp namespace such as systemd PrivateTmp, Flatpak or Snap); see {log}"
     )]
-    SocketPathTooLong(PathBuf),
+    SupervisorNotReachable { socket: PathBuf, log: PathBuf },
+    #[error("the local VM socket path {path} would be {length} bytes, over the {limit}-byte limit")]
+    SocketPathTooLong {
+        path: PathBuf,
+        length: usize,
+        limit: usize,
+    },
     #[cfg(target_os = "macos")]
     #[error("the Virtualization.framework helper {0} is missing")]
     VzHelperMissing(PathBuf),
@@ -7980,8 +8040,9 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
 fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
     match error {
         SupervisorError::InvalidConfiguration => "invalid_configuration",
-        #[cfg(target_os = "macos")]
-        SupervisorError::SocketPathTooLong(_) => "socket_path_too_long",
+        SupervisorError::SocketDir(_) => "socket_dir_unavailable",
+        SupervisorError::SupervisorNotReachable { .. } => "supervisor_not_reachable",
+        SupervisorError::SocketPathTooLong { .. } => "socket_path_too_long",
         #[cfg(target_os = "macos")]
         SupervisorError::VzHelperMissing(_) => "vz_helper_missing",
         #[cfg(target_os = "macos")]
@@ -8452,6 +8513,11 @@ mod tests {
         tokio::task::JoinHandle<Result<(), codewire_local_credentials::AuthorityRuntimeError>>,
     ) {
         let config = core.config.credential_authority_config();
+        // The authority process prepares its socket directory before serving.
+        assert_eq!(
+            crate::socket_dir::prepare(&config.root).unwrap(),
+            config.socket_dir
+        );
         let server_config = config.clone();
         let server = tokio::spawn(async move {
             serve_local_credential_authority(
@@ -8623,7 +8689,7 @@ mod tests {
         fs::set_permissions(&root_path, fs::Permissions::from_mode(0o700)).unwrap();
         let root = PrivateRoot::open(&root_path).unwrap();
         root.ensure_dir(Path::new("engine"), 0o700).unwrap();
-        root.ensure_dir(Path::new("runners"), 0o700).unwrap();
+        prepare_runner_socket_dir(root.path()).unwrap();
         let lock = SupervisorLock::acquire(&root).unwrap();
         let (store, _) = SupervisorStore::open(&root).unwrap();
         let state = SupervisorState {
@@ -9288,7 +9354,7 @@ mod tests {
         fs::set_permissions(&root_path, fs::Permissions::from_mode(0o700)).unwrap();
         let root = PrivateRoot::open(&root_path).unwrap();
         root.ensure_dir(Path::new("engine"), 0o700).unwrap();
-        root.ensure_dir(Path::new("runners"), 0o700).unwrap();
+        prepare_runner_socket_dir(root.path()).unwrap();
         let (store, _) = SupervisorStore::open_for_boot(&root, "boot-before").unwrap();
         let environment_id = environment.id;
         let state = SupervisorState {
@@ -12729,7 +12795,7 @@ mod tests {
         fs::set_permissions(&root_path, fs::Permissions::from_mode(0o700)).unwrap();
         let root = PrivateRoot::open(&root_path).unwrap();
         root.ensure_dir(Path::new("engine"), 0o700).unwrap();
-        root.ensure_dir(Path::new("runners"), 0o700).unwrap();
+        prepare_runner_socket_dir(root.path()).unwrap();
         let lock = SupervisorLock::acquire(&root).unwrap();
         let (store, _) = SupervisorStore::open(&root).unwrap();
         let engine = PrivateRoot::open(&root_path.join("engine")).unwrap();
@@ -15049,6 +15115,23 @@ mod tests {
         fs::create_dir_all(&expected).unwrap();
         let after_creation = core.config.direct_share_forbidden_roots().unwrap();
         assert!(after_creation.contains(&fs::canonicalize(expected).unwrap()));
+    }
+
+    /// The per-user socket directories hold the supervisor's, VMs' and the
+    /// credential authority's sockets; no direct share may expose them.
+    #[test]
+    fn the_socket_directories_are_never_shared() {
+        let (_runtime, core) = test_supervisor_core(project_environment());
+        let sockets = crate::socket_dir::prepare(&core.config.root).unwrap();
+        let base = fs::canonicalize(sockets.parent().unwrap()).unwrap();
+        let forbidden_roots = core.config.direct_share_forbidden_roots().unwrap();
+        assert!(forbidden_roots.contains(&base), "{forbidden_roots:?}");
+        for source in [&base, &sockets] {
+            assert!(matches!(
+                prepare_direct_input(source, "/workspace/private", true, &forbidden_roots),
+                Err(WorkspacePlanError::DirectShareInvalid)
+            ));
+        }
     }
 
     #[tokio::test]

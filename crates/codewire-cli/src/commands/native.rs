@@ -3,7 +3,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 
 use anyhow::Context as _;
 use codewire_access::{AccessProfileReference, EnvironmentId};
@@ -1796,9 +1796,16 @@ pub(crate) async fn setup_local_runtime(
         artifact_lock: config.artifact_lock,
     };
     let Some(from) = from else {
-        let document = crate::local_runtime_pin::embedded()?.context(
-            "this cw is a development build with no pinned local VM runtime; pass --from DIR with a runtime directory built from the same source",
-        )?;
+        // A release pins one runtime document; a host it has no target for
+        // (such as Linux arm64) gets the same answer as a cw with none.
+        let Some(document) = crate::local_runtime_pin::embedded()?
+            .filter(|document| runtime_install::host_runtime(document).is_ok())
+        else {
+            anyhow::bail!(no_pinned_runtime(
+                &crate::build_record::embedded()?,
+                &runtime_install::host_target()
+            ));
+        };
         report_runtime_install(install_embedded_runtime(&paths, &document).await?);
         return Ok(());
     };
@@ -1819,6 +1826,41 @@ pub(crate) async fn setup_local_runtime(
     }
     report_runtime_install(runtime_install::install(&paths, &document, &source, replace).await?);
     Ok(())
+}
+
+/// Why `cw setup --local` has nothing to install (#2733). A published release
+/// with no runtime for this host is not a development build, and no release
+/// for this host may exist yet, so it points to hosted Sandboxes rather than
+/// to `cw update` or `--from`.
+fn no_pinned_runtime(
+    record: &codewire_cw_release::build_record::BuildRecord,
+    host: &str,
+) -> String {
+    if record.source_revision.is_some()
+        && codewire_cw_release::release::valid_release_tag(&record.package_version)
+    {
+        format!(
+            "Local VMs aren't available on {} yet; hosted Sandboxes work (`cw env create --platform`).",
+            host_name(host)
+        )
+    } else {
+        "this cw is a development build with no pinned local VM runtime; pass --from DIR with a runtime directory built from the same source".to_owned()
+    }
+}
+
+/// A runtime target as people name the host: `linux-aarch64` is Linux arm64.
+fn host_name(host: &str) -> String {
+    let (system, machine) = host.split_once('-').unwrap_or((host, ""));
+    let system = match system {
+        "linux" => "Linux",
+        "macos" => "macOS",
+        other => other,
+    };
+    let machine = match machine {
+        "aarch64" => "arm64",
+        other => other,
+    };
+    format!("{system} {machine}").trim_end().to_owned()
 }
 
 /// Installs this cw's pinned runtime (#2539), for `cw setup --local` and
@@ -2317,13 +2359,13 @@ fn empty_native_workspace(
             ..NativeWorkspace::default()
         });
     };
-    match std::fs::create_dir(directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("create {}", directory.display()));
-        }
-    }
+    // Its parents, such as the Codewire data directory, may not exist yet in
+    // a fresh HOME (#2734). Every directory created here is private.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+        .with_context(|| format!("create {}", directory.display()))?;
     std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
         .with_context(|| format!("restrict {}", directory.display()))?;
     let directory = std::fs::canonicalize(directory)
@@ -3542,6 +3584,72 @@ working_directory: /workspace/github
         )
         .unwrap_err();
         assert!(error.to_string().contains("must stay empty"), "{error}");
+    }
+
+    #[test]
+    fn a_release_without_a_runtime_is_not_called_a_development_build() {
+        let record = |version: &str, revision: Option<&str>| {
+            codewire_cw_release::build_record::BuildRecord {
+                package_version: version.to_owned(),
+                rustc: "rustc 1.93.0 (254b59607 2026-01-19)".to_owned(),
+                source_revision: revision.map(str::to_owned),
+                source_tree_sha256: revision.map(|_| "b".repeat(64)),
+                target: "x86_64-unknown-linux-musl".to_owned(),
+            }
+        };
+        let revision = "a".repeat(40);
+        let release = no_pinned_runtime(&record("v0.3.389", Some(&revision)), "linux-aarch64");
+        assert_eq!(
+            release,
+            "Local VMs aren't available on Linux arm64 yet; hosted Sandboxes work (`cw env create --platform`)."
+        );
+        let release = no_pinned_runtime(&record("v0.3.389", Some(&revision)), "linux-x86_64");
+        assert!(
+            release.starts_with("Local VMs aren't available on Linux x86_64 yet;"),
+            "{release}"
+        );
+        for misleading in ["development build", "cw update", "--from"] {
+            assert!(!release.contains(misleading), "{release}");
+        }
+        assert_eq!(host_name("macos-aarch64"), "macOS arm64");
+        for (version, revision) in [
+            ("0.0.0-rca", Some(revision.as_str())),
+            ("0.3.389", Some(revision.as_str())),
+            ("v0.3.389", None),
+        ] {
+            let message = no_pinned_runtime(&record(version, revision), "linux-x86_64");
+            assert!(
+                message.starts_with("this cw is a development build"),
+                "{version}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_workspace_creates_a_missing_data_directory() {
+        let home = tempfile::tempdir().unwrap();
+        // Two missing levels: a data directory under a not-yet-created parent.
+        let parent = home.path().join("missing");
+        let data = parent.join(".codewire");
+        let empty = data.join("native-empty-workspace");
+        let mut project = NativeProjectPlan::default();
+        let workspace = resolve_native_workspace(
+            home.path(),
+            &mut project,
+            Some(PathModeArg::Empty),
+            Some(&empty),
+            true,
+        )
+        .unwrap();
+        assert_eq!(workspace.description, "empty");
+        for path in [&parent, &data, &empty] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{}",
+                path.display()
+            );
+        }
     }
 
     #[test]
