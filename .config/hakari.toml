@@ -1,0 +1,48 @@
+# cargo-hakari =0.9.39 settings for crates/codewire-workspace-hack.
+# Regenerate after any manifest or Cargo.lock change:
+#     scripts/ci/verify/check-workspace-hack.sh --fix
+# See https://docs.rs/cargo-hakari/0.9.39/cargo_hakari/config for every option.
+
+hakari-package = "codewire-workspace-hack"
+
+# Version 4 requires cargo-hakari 0.9.22 or above.
+dep-format-version = "4"
+
+resolver = "2"
+
+# Members depend on it as `codewire-workspace-hack.workspace = true` under
+# [dev-dependencies], so only builds of tests, examples and benches unify and
+# shipped binaries keep their own graph. `cargo hakari manage-deps` would write
+# the line under [dependencies], so check-workspace-hack.sh places it instead.
+workspace-hack-line-style = "workspace-dotted"
+
+# Unify for the developer platforms: Linux workstations and CI, and Apple
+# silicon Macs. Other targets (musl and arm64 Linux releases, Intel Macs) get
+# only the platform-independent lines.
+platforms = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+
+# Record the exact Cargo.lock version on every line. The lockfile stays the
+# pin; the drift check fails when it moves without regenerating this crate.
+exact-versions = true
+
+# These members are also built outside this workspace, where a workspace-hack
+# dependency would pull the whole workspace's third-party graph in: the
+# desktop's own workspace consumes codewire-client and codewire-types (and
+# through the client codewire-proto, codewire-tailnet and codewire-netstack),
+# the curated DERP image workspace (deployments/docker/derp.Cargo.toml) builds
+# codewire-derp with the same three, and the permissively licensed
+# codewire-oidc stays reusable on its own. Their dependencies still count
+# toward the unified features.
+[final-excludes]
+workspace-members = [
+    "codewire-client",
+    "codewire-derp",
+    "codewire-netstack",
+    "codewire-oidc",
+    "codewire-proto",
+    "codewire-tailnet",
+    "codewire-types",
+]

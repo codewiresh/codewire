@@ -860,6 +860,7 @@ impl LocalCredentialClient {
             .evaluate_environment_grants(v1::EvaluateEnvironmentGrantsRequest {
                 environment_id: environment_id.to_string(),
                 environment_generation,
+                platform: None,
             })
             .await?
             .into_inner()
@@ -897,6 +898,7 @@ impl LocalCredentialControlClient {
             .evaluate_environment_grants(v1::EvaluateEnvironmentGrantsRequest {
                 environment_id: environment_id.to_string(),
                 environment_generation,
+                platform: None,
             })
             .await?
             .into_inner()
@@ -904,6 +906,27 @@ impl LocalCredentialControlClient {
             .into_iter()
             .map(|grant| grant.capability_slot)
             .collect())
+    }
+
+    /// Whether a platform-sourced environment's creator has an active GitHub
+    /// connection now, asked of the platform as that creator. Material-free:
+    /// a start configures its guest for GitHub exactly when this holds.
+    pub async fn platform_github_connected(
+        &mut self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        platform: crate::PlatformCredentialBinding,
+    ) -> Result<bool, Status> {
+        Ok(self
+            .inner
+            .evaluate_environment_grants(v1::EvaluateEnvironmentGrantsRequest {
+                environment_id: environment_id.to_string(),
+                environment_generation,
+                platform: Some(platform.into_proto()),
+            })
+            .await?
+            .into_inner()
+            .platform_github_connected)
     }
 
     /// Read material-free client-slot metadata from an exact immutable profile

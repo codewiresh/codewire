@@ -57,6 +57,9 @@ const BROKER_LOCAL_START_TIMEOUT: Duration = Duration::from_secs(10);
 // not extend operation deadlines or the existing shutdown bound.
 const BROKER_PLATFORM_START_TIMEOUT: Duration = Duration::from_secs(30);
 const BROKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+// The connector's OAuth and metadata read for a start-time GitHub answer. It
+// is the same bound as a delegation's OAuth/admission phase.
+const PLATFORM_GITHUB_STATE_DEADLINE: Duration = Duration::from_secs(15);
 const BROKER_READY_STABILITY: std::time::Duration = std::time::Duration::from_millis(25);
 const BROKER_RESTART_MIN_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const BROKER_RESTART_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
@@ -543,6 +546,59 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
             platform_connector,
             log,
         }
+    }
+
+    /// A platform selection has no local binding to evaluate. Its one
+    /// start-time question is GitHub: the platform authorizes it only while
+    /// the creator's connection is active, so the guest is configured for it
+    /// exactly then. The connector asks as the pinned creator, material-free.
+    ///
+    /// The environment must be one a platform broker start would admit: it
+    /// has no local profile binding, the same check `ensure` makes for a
+    /// platform selection (the binding names no environment of its own). The
+    /// whole question, whatever the connector does, ends by the deadline.
+    async fn platform_github_connected(
+        &self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        platform: v1::PlatformCredentialBinding,
+    ) -> Result<bool, Status> {
+        self.platform_github_connected_within(
+            environment_id,
+            environment_generation,
+            platform,
+            PLATFORM_GITHUB_STATE_DEADLINE,
+        )
+        .await
+    }
+
+    async fn platform_github_connected_within(
+        &self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        platform: v1::PlatformCredentialBinding,
+        bound: Duration,
+    ) -> Result<bool, Status> {
+        // One deadline covers the whole question: the local binding check as
+        // well as the connector's OAuth read, `userinfo` and listing.
+        let deadline = tokio::time::Instant::now() + bound;
+        let binding = crate::PlatformCredentialBinding::from_proto(platform)?;
+        binding.validate()?;
+        let authority = Arc::clone(&self.authority);
+        let id = environment_id.clone();
+        let connector = self.platform_connector.clone();
+        tokio::time::timeout_at(deadline, async move {
+            run_blocking(move || {
+                authority.evaluate_selected_environment_grants(&id, environment_generation, None)
+            })
+            .await?;
+            let connector = connector.ok_or_else(|| {
+                Status::unavailable("native platform credential connector is unavailable")
+            })?;
+            connector.github_connected(binding, deadline).await
+        })
+        .await
+        .map_err(|_| Status::deadline_exceeded("platform GitHub connection state timed out"))?
     }
 
     async fn ensure(
@@ -1844,6 +1900,20 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         if request.environment_generation == 0 {
             return Err(Status::invalid_argument("invalid environment generation"));
         }
+        if let Some(platform) = request.platform {
+            let connected = self
+                .brokers
+                .platform_github_connected(
+                    &environment_id,
+                    request.environment_generation,
+                    platform,
+                )
+                .await?;
+            return Ok(Response::new(v1::EvaluateEnvironmentGrantsResponse {
+                grants: Vec::new(),
+                platform_github_connected: connected,
+            }));
+        }
         let authority = Arc::clone(&self.authority);
         let grants = run_blocking(move || {
             authority.evaluate_environment_grants(&environment_id, request.environment_generation)
@@ -1851,6 +1921,7 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         .await?;
         Ok(Response::new(v1::EvaluateEnvironmentGrantsResponse {
             grants: grants.into_iter().map(derived_grant_to_proto).collect(),
+            platform_github_connected: false,
         }))
     }
 

@@ -604,7 +604,7 @@ if [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
-      Cargo.toml|Cargo.lock|rust-toolchain.toml)
+      Cargo.toml|Cargo.lock|rust-toolchain.toml|.config/hakari.toml)
         select_token rust
         select_token rust_workspace
         select_token rust_curated_locks
@@ -1044,6 +1044,16 @@ if [ "$event_selected" = false ]; then
           select_token rust
           select_token rust_pkg_codewire_desktop
           select_token rust_pkg_codewire_types
+          ;;
+        codewire-workspace-hack)
+          # cargo-hakari's feature unification is a dependency of every other
+          # member: a change rebuilds the whole graph like the root manifest.
+          select_token rust
+          select_token rust_workspace
+          select_token rust_curated_locks
+          select_token transport
+          select_token transport_pkg_codewire_local_vmm
+          select_token transport_pkg_codewire_vmm_guest_probe
           ;;
         codewire-workspace-image)
           # The published workspace pin: every consumer compiles its constants,

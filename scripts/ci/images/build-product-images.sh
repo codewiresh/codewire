@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 docker_bin="${CODEWIRE_DOCKER_BIN:-docker}"
-profile="${CODEWIRE_RUST_PROFILE:-release}"
+profile="${CODEWIRE_RUST_PROFILE:-runtime}"
 arguments=("$@")
 if [[ "$#" == 0 ]]; then
   arguments=(default)

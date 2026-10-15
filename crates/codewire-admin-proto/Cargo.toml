@@ -25,3 +25,6 @@ serde_json = { workspace = true }
 
 [build-dependencies]
 connectrpc-build = { workspace = true }
+
+[dev-dependencies]
+codewire-workspace-hack.workspace = true

@@ -265,6 +265,7 @@ run_policy_core_one() {
   scripts/ci/tests/test-select-protected-rust-cache.sh
   scripts/ci/tests/test-run-host-rust-build.sh
   scripts/ci/tests/test-local-rust-cache.sh
+  scripts/ci/tests/test-check-workspace-hack.sh
   scripts/ci/tests/test-retired-local-sdk-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
   python3 -B scripts/ci/tests/test-integration-lane.py

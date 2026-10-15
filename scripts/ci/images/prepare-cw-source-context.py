@@ -431,7 +431,7 @@ def validate_inventory(root, expected, empty_directories=("git/refs",)):
 def prepare(source_root, revision, profile, version, output):
     global DEADLINE
     DEADLINE = time.monotonic() + 600
-    require(release.is_hex(revision, 40) and profile in ("ci", "release") and release.valid_version(version),
+    require(release.is_hex(revision, 40) and profile in ("ci", "release", "runtime") and release.valid_version(version),
             "producer selection refused")
     context = SourceContext()
     try:
@@ -531,7 +531,7 @@ def model(raw):
     value = release.parse_canonical(raw, MAX_DOCUMENT)
     require(type(value) is dict and set(value) == {"schema", "target", "profile", "version", "source",
                                                   "digest_inputs", "files", "objects", "prerequisites", "git_index"}
-            and value["schema"] == SCHEMA and value["target"] == TARGET and value["profile"] in ("ci", "release")
+            and value["schema"] == SCHEMA and value["target"] == TARGET and value["profile"] in ("ci", "release", "runtime")
             and release.valid_version(value["version"]), "capsule model refused")
     source = value["source"]
     require(type(source) is dict and set(source) == {"revision", "git_tree", "source_tree_sha256", "index_sha256", "object_count"}

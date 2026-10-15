@@ -45,10 +45,11 @@ REQUEST = Path("/run/cw-source-request.json")
 TARGET_ROOT = Path("/tmp/cargo-target")
 CARGO_HOME = Path("/usr/local/cargo")
 WORK = Path("/out")
-PROFILES = {"ci": ("--profile", "ci"), "release": ("--release",)}
+PROFILES = {"ci": ("--profile", "ci"), "release": ("--release",), "runtime": ("--profile", "runtime")}
 # Fixed per profile so the recorded command stays exact. The ci profile is the
-# Kind daemon producer, which owns its whole worker; release keeps its bound.
-JOBS = {"ci": "8", "release": "2"}
+# Kind daemon producer and runtime the Dev daemon producer; each owns its whole
+# worker. The release (workspace support image) producer keeps its bound.
+JOBS = {"ci": "8", "release": "2", "runtime": "8"}
 FILES = {"cw", "cw.d", "compile.log", "cw.oci.tar", "image.json", "runtime.pack", "cw-runtime.lock.json", "producer.json"}
 COMPILER_DEADLINE = 7200
 COMPLETION_FIELDS = {"command", "exit", "elapsed_seconds", "log", "log_sha256", "timed_out", "interrupted",

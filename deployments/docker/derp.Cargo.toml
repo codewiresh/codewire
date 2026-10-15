@@ -41,3 +41,8 @@ tower = { version = "0.5", features = ["util"] }
 lto = true
 codegen-units = 1
 strip = true
+
+[profile.runtime]
+inherits = "release"
+lto = "thin"
+codegen-units = 16

@@ -17,3 +17,6 @@ tonic-prost = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+codewire-workspace-hack.workspace = true
