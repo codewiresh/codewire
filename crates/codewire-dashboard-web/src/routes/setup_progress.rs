@@ -339,22 +339,16 @@ pub(super) async fn relay(
                 return;
             }
         };
-        match item(response) {
-            Some(Item::Row(row)) => {
-                if !send_row(&frames, &row).await {
-                    return;
-                }
-            }
-            Some(Item::Heartbeat) => {
-                if frames
-                    .send(Bytes::from_static(HEARTBEAT_FRAME.as_bytes()))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            None => {}
+        let follow = match item(response) {
+            Some(Item::Row(row)) => send_row(&frames, &row).await,
+            Some(Item::Heartbeat) => frames
+                .send(Bytes::from_static(HEARTBEAT_FRAME.as_bytes()))
+                .await
+                .is_ok(),
+            None => true,
+        };
+        if !follow {
+            return;
         }
     }
 }

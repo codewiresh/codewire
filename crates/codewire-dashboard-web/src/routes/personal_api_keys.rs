@@ -98,6 +98,7 @@ struct PageContext {
     organizations_available: bool,
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn context(
     state: &AppState,
     headers: &HeaderMap,
@@ -356,6 +357,7 @@ fn key_row(key: ApiKey) -> PersonalApiKeyRow {
     }
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn mutation_context(
     state: &AppState,
     headers: &HeaderMap,
@@ -566,6 +568,7 @@ pub(super) async fn delete_action(
     )
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn owned_key(
     state: &AppState,
     headers: &HeaderMap,

@@ -439,6 +439,7 @@ where
     Err(PreviewHostError::NotFound)
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn resolve_preview_target(
     pool: &sqlx::PgPool,
     host_match: &PreviewHostMatch,

@@ -1640,7 +1640,7 @@ mod tests {
         );
         // The former `phase != Interrupted` filter restored the original
         // binding here, rejecting this *second* read after successful recovery.
-        let old_expected = Some(&intent).filter(|_| completed.phase != OperationPhase::Interrupted);
+        let old_expected = (completed.phase != OperationPhase::Interrupted).then_some(&intent);
         assert!(old_expected.is_some_and(|expected| expected.binding != current));
         assert!(query_uses_retained_history(&completed, &intent, &current, false).unwrap());
         assert!(query_uses_retained_history(&completed, &intent, &current, true).is_err());

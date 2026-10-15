@@ -734,7 +734,7 @@ MUTATIONS = {
     "records on a retained retry": lambda t: t.replace('if [ "$CW_RELEASE_R2_STATE" = retained ]; then',
                                                        "if false; then", 1),
     "unsealed Linux target": lambda t: t.replace("CW_RELEASE_TARGETS='x86_64-unknown-linux-musl'",
-                                                 "CW_RELEASE_TARGETS='aarch64-unknown-linux-musl'", 1),
+                                                 "CW_RELEASE_TARGETS='riscv64gc-unknown-linux-gnu'", 1),
     "rustup on the runner": lambda t: t.replace(
         "          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}\n"
         "        run: |\n          set -euo pipefail\n",

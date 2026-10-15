@@ -133,6 +133,7 @@ pub(super) async fn legacy_page(State(state): State<AppState>, headers: HeaderMa
     private(redirect(PATH.to_owned(), &headers))
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn identity_context(
     state: &AppState,
     headers: &HeaderMap,
@@ -156,6 +157,7 @@ fn identity_error(error: WebError, headers: &HeaderMap) -> Response {
     })
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn mutation_context(
     state: &AppState,
     headers: &HeaderMap,

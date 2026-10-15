@@ -2,7 +2,6 @@
 //! The current service is personal-only. Organization selectors fail explicitly
 //! until the owner-aware public contract is composed; no fallback is permitted.
 
-use anyhow::Context as _;
 use codewire_access::{AccessProfileScope, CredentialAuthKind, ProviderId};
 use codewire_client::{self as rpc, CodewireClient};
 

@@ -158,7 +158,7 @@ impl CoordinatorService for FakeCoordinator {
             .map_err(|_| ConnectError::internal("response stream closed"))?;
         let end = self
             .end_sessions
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                 left.checked_sub(1)
             })
             .is_ok();

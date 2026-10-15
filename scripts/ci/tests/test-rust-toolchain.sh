@@ -67,7 +67,7 @@ grep -Fq 'latest-stable canary rustup digest drift' \
 cp "$ROOT/.gitea/workflows/rust-latest-canary.yaml" \
   "$fixture/.gitea/workflows/rust-latest-canary.yaml"
 
-sed -i 's/--default-toolchain stable/--default-toolchain 1.93.0/' \
+sed -i 's/--default-toolchain stable/--default-toolchain 1.99.0/' \
   "$fixture/.gitea/workflows/rust-latest-canary.yaml"
 if "$CHECK" --root "$fixture" >"$fixture/canary-moving-stable.log" 2>&1; then
   printf 'Rust toolchain guard accepted a pinned canary toolchain\n' >&2
@@ -90,15 +90,15 @@ grep -Fq 'primary Rust CI job must verify Cargo cache capacity before Cargo veri
   "$fixture/capacity-check-drift.log"
 cp "$ROOT/.gitea/workflows/ci.yaml" "$fixture/.gitea/workflows/ci.yaml"
 
-sed -i '0,/rust:1.93.0-bookworm/s//rust:1.93-bookworm/' \
+sed -i '0,/rust:1.99.0-bookworm/s//rust:1.99-bookworm/' \
   "$fixture/deployments/docker/rust-base.Dockerfile"
 if "$CHECK" --root "$fixture" >"$fixture/builder-drift.log" 2>&1; then
   printf 'Rust toolchain guard accepted shipped-builder drift\n' >&2
   exit 1
 fi
-grep -Fq 'deployments/docker/rust-base.Dockerfile does not declare exactly one reviewed rust:1.93.0-bookworm@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382 input' \
+grep -Fq 'deployments/docker/rust-base.Dockerfile does not declare exactly one reviewed rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 input' \
   "$fixture/builder-drift.log"
-sed -i '0,/rust:1.93-bookworm/s//rust:1.93.0-bookworm/' \
+sed -i '0,/rust:1.99-bookworm/s//rust:1.99.0-bookworm/' \
   "$fixture/deployments/docker/rust-base.Dockerfile"
 
 sed -i 's/^ARG RUST_IMAGE=.*/ARG RUST_IMAGE=rust:stable-bookworm/' \
@@ -138,15 +138,15 @@ fi
 grep -Fq 'workspace arm64 cw cross-compiler differs from the reviewed' "$fixture/workspace-cross-digest-drift.log"
 cp "$ROOT/images/workspace/Dockerfile" "$fixture/images/workspace/Dockerfile"
 
-sed -i '0,/rust-version = "1.93.0"/s//rust-version = "1.92.0"/' \
+sed -i '0,/rust-version = "1.99.0"/s//rust-version = "1.92.0"/' \
   "$fixture/crates/codewire-desktop/Cargo.toml"
 if "$CHECK" --root "$fixture" >"$fixture/msrv-drift.log" 2>&1; then
   printf 'Rust toolchain guard accepted detached-package MSRV drift\n' >&2
   exit 1
 fi
-grep -Fq 'crates/codewire-desktop/Cargo.toml must declare exact Rust 1.93.0' \
+grep -Fq 'crates/codewire-desktop/Cargo.toml must declare exact Rust 1.99.0' \
   "$fixture/msrv-drift.log"
-sed -i '0,/rust-version = "1.92.0"/s//rust-version = "1.93.0"/' \
+sed -i '0,/rust-version = "1.92.0"/s//rust-version = "1.99.0"/' \
   "$fixture/crates/codewire-desktop/Cargo.toml"
 
 sed -i '0,/\/usr\/local\/rustup\/ \/home\/codewire\/\.rustup\//s//\/usr\/local\/rustup\/ \/home\/codewire\/\.rustup-stable\//' \
@@ -155,7 +155,7 @@ if "$CHECK" --root "$fixture" >"$fixture/workspace-drift.log" 2>&1; then
   printf 'Rust toolchain guard accepted workspace-user drift\n' >&2
   exit 1
 fi
-grep -Fq 'workspace user Rustup home does not come from the exact 1.93.0 build stage' \
+grep -Fq 'workspace user Rustup home does not come from the exact 1.99.0 build stage' \
   "$fixture/workspace-drift.log"
 
 cp "$ROOT/images/workspace/Dockerfile" "$fixture/images/workspace/Dockerfile"
@@ -168,13 +168,13 @@ grep -Fq 'workspace user toolchain must not use the mutable Rustup network insta
   "$fixture/workspace-installer.log"
 
 cp "$ROOT/images/workspace/Dockerfile" "$fixture/images/workspace/Dockerfile"
-sed -i '/RUN rustup component add --toolchain 1.93.0 rustfmt clippy/d' \
+sed -i '/RUN rustup component add --toolchain 1.99.0 rustfmt clippy/d' \
   "$fixture/images/workspace/Dockerfile"
 if "$CHECK" --root "$fixture" >"$fixture/workspace-components.log" 2>&1; then
   printf 'Rust toolchain guard accepted missing workspace components\n' >&2
   exit 1
 fi
-grep -Fq 'workspace build stage does not select exact 1.93.0 rustfmt and clippy components' \
+grep -Fq 'workspace build stage does not select exact 1.99.0 rustfmt and clippy components' \
   "$fixture/workspace-components.log"
 
 printf 'Rust toolchain drift fixtures: OK\n'

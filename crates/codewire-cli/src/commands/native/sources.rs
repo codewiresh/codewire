@@ -1,6 +1,6 @@
 //! Value-free source resolution for the native CLI. Stored origin descriptors
 //! are identity constraints, never credentials or launch authorizations.
-use std::io::{BufRead, IsTerminal as _, Write as _};
+use std::io::BufRead;
 
 use codewire_access::{AccessProfileScope, Owner};
 use codewire_project::{

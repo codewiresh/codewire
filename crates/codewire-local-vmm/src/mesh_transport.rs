@@ -351,7 +351,6 @@ mod tests {
     use codewire_tailnet::node::Prefix;
     use codewire_tailnet::wg::{PublicKey, StaticSecret};
     use rand::rngs::OsRng;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use uuid::Uuid;
 
     use crate::mesh_ingress::{MeshIngressError, mesh_ingress_channel};

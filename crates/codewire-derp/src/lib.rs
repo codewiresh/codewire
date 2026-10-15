@@ -101,7 +101,7 @@ impl MeshKey {
             return Err(Error::Mesh("mesh key must be 64 hex characters"));
         }
         let mut out = [0u8; MESH_KEY_LEN];
-        for (i, chunk) in raw.as_bytes().chunks_exact(2).enumerate() {
+        for (i, chunk) in raw.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             out[i] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
         }
         Ok(Self(out))

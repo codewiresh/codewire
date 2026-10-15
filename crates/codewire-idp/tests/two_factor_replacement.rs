@@ -624,7 +624,7 @@ async fn recovery_codes_prove_once_and_regeneration_replaces_every_code() {
     let (status, _) = sign_in(&apps, &user.email, &code_at(&user.secret, &user.email, 0)).await;
     assert_eq!(status, 200, "the authenticator still signs in");
     // Recovery codes are accepted as typed, and a proof consumes the code.
-    let typed = format!("{} {}", &fresh[1][..5].to_uppercase(), &fresh[1][5..]);
+    let typed = format!("{} {}", fresh[1][..5].to_uppercase(), &fresh[1][5..]);
     let started = proof(&apps, START, &user, &user.session, PASSWORD, &typed).await;
     assert_eq!(started.status, 200, "{}", started.body);
     let (status, _) = sign_in(&apps, &user.email, &fresh[1]).await;

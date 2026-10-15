@@ -331,7 +331,7 @@ impl CallMeMaybe {
             };
         }
         let mut endpoints = Vec::with_capacity(body.len() / ENDPOINT_LEN);
-        for chunk in body.chunks_exact(ENDPOINT_LEN) {
+        for chunk in body.as_chunks::<ENDPOINT_LEN>().0 {
             let mut ip = [0u8; 16];
             ip.copy_from_slice(&chunk[..16]);
             let port = u16::from_be_bytes(chunk[16..18].try_into().unwrap());
@@ -548,7 +548,7 @@ impl UDPRelayEndpoint {
         ));
         offset += 8;
         let mut addr_ports = Vec::with_capacity((body.len() - offset) / ENDPOINT_LEN);
-        for chunk in body[offset..].chunks_exact(ENDPOINT_LEN) {
+        for chunk in body[offset..].as_chunks::<ENDPOINT_LEN>().0 {
             let mut ip = [0u8; 16];
             ip.copy_from_slice(&chunk[..16]);
             let port = u16::from_be_bytes(chunk[16..18].try_into().unwrap());
@@ -684,7 +684,9 @@ mod tests {
         let compact = s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
         compact
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|b| u8::from_str_radix(std::str::from_utf8(b).unwrap(), 16).unwrap())
             .collect()
     }

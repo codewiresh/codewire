@@ -244,7 +244,7 @@ class Admission(unittest.TestCase):
         binary.chmod(0o500)
         receipt = {"schema": "codewire.host-agent-broker-build/v1", "source_revision": "c" * 40,
                    "source_tree_sha256": "d" * 64, "executable_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                   "executable_size": binary.stat().st_size, "toolchain": "1.93.0", "profile": "ci",
+                   "executable_size": binary.stat().st_size, "toolchain": "1.99.0", "profile": "ci",
                    "features": ["host-agent-synthetic-smoke"], "inputs": pins, "build_exit": 0, "source_unchanged": True}
         receipt_path = self.root / "broker.json"
         # The complete-graph producer is stubbed only for this wire/physical
