@@ -485,7 +485,11 @@ export async function runDevUxWalkthrough(page: Page, options: {
   const terminal = page.locator("[data-terminal-tab-panel]:not([hidden]) [data-terminal-root]");
   const rows = terminal.locator(".xterm-rows");
   const send = async (command: string) => {
-    await terminal.locator("textarea").focus();
+    const input = terminal.locator("textarea");
+    await input.focus();
+    // Keystrokes reach the shell only from the focused terminal. After a menu
+    // or dialog, type only once focus has actually arrived there.
+    await expect(input).toBeFocused();
     await page.keyboard.type(command);
     await page.keyboard.press("Enter");
   };
