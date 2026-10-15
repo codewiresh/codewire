@@ -157,12 +157,22 @@ write_stub_tree() {
     "$repo/scripts/ci/verify/dashboard-image.sh"
   # As in the repository, .tmp/ holds ignored local state (merge passes, logs).
   printf '.tmp/\n' > "$repo/.gitignore"
-  # One workspace crate for the push check's changed-crate cases.
-  mkdir -p "$repo/crates/codewire-cli/src"
-  printf '[workspace]\nmembers = [\n    "crates/codewire-cli",\n]\n' > "$repo/Cargo.toml"
+  # One workspace crate for the push check's changed-crate cases, and the
+  # detached desktop and its component library, which the root manifest
+  # excludes as the repository's does.
+  mkdir -p "$repo/crates/codewire-cli/src" "$repo/crates/codewire-desktop/src" \
+    "$repo/crates/codewire-ui/src"
+  printf '[workspace]\nmembers = [\n    "crates/codewire-cli",\n]\nexclude = [\n    "crates/codewire-desktop",\n    "crates/codewire-ui",\n]\n' \
+    > "$repo/Cargo.toml"
   printf '[package]\nname = "codewire-cli"\nversion = "0.0.0"\n' > \
     "$repo/crates/codewire-cli/Cargo.toml"
   printf '// fixture crate\n' > "$repo/crates/codewire-cli/src/lib.rs"
+  printf '[package]\nname = "codewire-desktop"\nversion = "0.0.0"\n' > \
+    "$repo/crates/codewire-desktop/Cargo.toml"
+  printf '// fixture crate\n' > "$repo/crates/codewire-desktop/src/main.rs"
+  printf '[package]\nname = "codewire-ui"\nversion = "0.0.0"\n' > \
+    "$repo/crates/codewire-ui/Cargo.toml"
+  printf '// fixture crate\n' > "$repo/crates/codewire-ui/src/lib.rs"
   mkdir -p "$repo/scripts/ci/images"
   cat > "$repo/scripts/ci/images/workspace-image-pin.py" <<'EOF'
 #!/usr/bin/env python3
@@ -976,6 +986,21 @@ fi
 assert_contains detached_push "$detached_push" \
   'the pushed commit is not checked out here. Run exactly: scripts/dev/preflight.sh --for-push --emit-receipt'
 git -C "$linked_source" reset -q --hard HEAD~1
+
+# The desktop's component library is in the root manifest's exclude list, not
+# its members: a change to it runs the detached desktop checks, which compile
+# it, never a workspace `-p codewire-ui` that Cargo cannot resolve.
+linked_ui="$TMP/linked-ui"
+git -C "$repo" worktree add -q -b linked-ui "$linked_ui" main
+printf 'rust-version = "0.0.0"\n' >> "$linked_ui/crates/codewire-ui/Cargo.toml"
+commit_all "$linked_ui" 'test: detached desktop library fixture'
+ui_push_log="$TMP/ui-push-tools.log"
+ui_push_output="$(hook_push "$linked_ui" linked-ui-push "$ui_push_log")"
+assert_contains ui_push "$ui_push_output" \
+  '[push-check] passed: environment,desktop-fmt,desktop-check'
+assert_contains ui_push_tools "$(cat "$ui_push_log")" \
+  'cargo check --locked --manifest-path crates/codewire-desktop/Cargo.toml'
+assert_not_contains ui_push_tools "$(cat "$ui_push_log")" '-p codewire-ui'
 
 # Compile errors fail first: the compile gate stops the slower policy lane
 # beside it, and no other lane starts.
