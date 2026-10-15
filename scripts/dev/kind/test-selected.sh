@@ -12,7 +12,8 @@
 # service the cluster does not record as running this tree's source
 # (scripts/dev/kind/service-sources.py) is rebuilt incrementally and deployed
 # (deploy-service.sh): what the change feeds, and anything another tree or an
-# older main left there.
+# older main left there. A deploy applies the tree's new migrations to the
+# cluster's database after a backup (scripts/dev/kind/database.sh).
 #
 # Exit status: 0 when every selected suite passed or the change has nothing a
 # retained Kind cluster observes; 3 when only the full CI Kind gate covers the
@@ -95,8 +96,12 @@ map_token() {
     # Coordinator and Mesh data plane, also linked into the sandbox daemon.
     transport_pkg_codewire_tailnet | transport_pkg_codewire_netstack)
       want "$token" integrated workspace-services ;;
-    rust_pkg_codewire_server_core | rust_pkg_codewire_proto | rust_pkg_codewire_daemon_proto | \
-      rust_pkg_codewire_workload_secrets)
+    # Migrations alone are applied by the deploy and covered below.
+    rust_pkg_codewire_server_core)
+      if [[ "$changed_crates" == *' codewire-server-core '* ]]; then
+        full "$token" 'every service compiles it; only the full gate rebuilds them all'
+      fi ;;
+    rust_pkg_codewire_proto | rust_pkg_codewire_daemon_proto | rust_pkg_codewire_workload_secrets)
       full "$token" 'every service compiles it; only the full gate rebuilds them all' ;;
     rust_workspace) full "$token" 'the workspace manifest or lockfile rebuilds every service' ;;
     contracts_proto) full "$token" 'protobuf contracts change every service and client' ;;
@@ -133,12 +138,10 @@ fi
 [ -n "$base" ] || die 'no base branch to compare against; set PREFLIGHT_BASE_SHA'
 changes="$(python3 -B "$ROOT/scripts/dev/kind/service-sources.py" changes --base "$base")" \
   || die 'could not determine which services this change feeds'
+# Crates changed outside their migrations.
 changed_crates=" $(sed -n 's/^crate //p' <<<"$changes" | tr '\n' ' ')"
 mapfile -t changed_services < <(sed -n 's/^service //p' <<<"$changes")
-while read -r migration; do
-  [ -n "$migration" ] || continue
-  full "$migration" "deploying would apply it to this cluster's shared database"
-done < <(sed -n 's/^migration //p' <<<"$changes")
+mapfile -t migrations < <(sed -n 's/^migration //p' <<<"$changes")
 
 if [ -n "${KIND_TEST_SUITES:-}" ]; then
   read -r -a requested <<<"$KIND_TEST_SUITES"
@@ -178,6 +181,11 @@ else
     [ -n "$token" ] || continue
     case "$token" in edge_kind | kind | deploy) kind_relevant=true ;; esac
     map_token "$token"
+  done
+  # The deploy applies new migrations as the services start; the edge contract
+  # then reaches every service on the upgraded schema.
+  for migration in "${migrations[@]}"; do
+    want "${migration##*/}" edge-contract
   done
   if [ "$kind_relevant" = true ] && [ "${#wanted[@]}" -eq 0 ] && [ "${#full_reasons[@]}" -eq 0 ]; then
     full kind 'a Kind-relevant change with no narrower suite'

@@ -5,6 +5,11 @@ A receipt has a scope. ``push`` records the fast pre-push check; ``merge``
 records merge qualification. Each receipt lists exactly the checks that ran,
 the checks reused from an exact-tree pass, and the selected checks that did
 not run locally (for example Kind, which post-merge CI owns).
+
+A feature-branch receipt binds the canonical main it was checked against.
+Main often moves while a long check runs. The receipt still holds when main
+only moved forward and its newer commits touch none of the change's paths:
+those commits are not in the checked tree, so the evidence is unchanged.
 """
 
 from __future__ import annotations
@@ -48,6 +53,13 @@ ENTRYPOINT_PATHS = (
     "scripts/ci/verify/run-product-verification.sh",
     "scripts/ci/verify/run-integration-verification.sh",
     "scripts/ci/verify/kind-e2e.sh",
+)
+# Checks that compare the change with its base (the proto breaking-change
+# check) read these paths from the base itself. A newer main commit under them
+# overlaps a change under them even when the two touch different files.
+BASE_COMPARED_PATHS = (
+    "proto/",
+    "scripts/checks/contracts/proto-breaking-preimages.sha256",
 )
 TOOLCHAIN_PATHS = (
     "rust-toolchain.toml",
@@ -200,6 +212,39 @@ def changed_paths(root: Path, base: str, head: str) -> list[str]:
             raise fail("changed-path-invalid")
         paths.append(path)
     return sorted(set(paths))
+
+
+def touched_paths(root: Path, *revisions: str) -> set[str]:
+    """Paths a diff touches, listing both sides of a rename."""
+    raw = run_git(root, "diff", "--no-renames", "--name-only", "-z", *revisions, text=False)
+    assert isinstance(raw, bytes)
+    try:
+        return {path.decode("utf-8", errors="strict") for path in raw.split(b"\0") if path}
+    except UnicodeDecodeError as exc:
+        raise fail("changed-path-invalid") from exc
+
+
+def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", os.fspath(root), "merge-base", "--is-ancestor", ancestor, descendant],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise fail("git-state-unavailable") from exc
+    if completed.returncode not in (0, 1):
+        raise fail("git-state-unavailable")
+    return completed.returncode == 0
+
+
+def main_moved_into_change(newer: set[str], change: set[str]) -> bool:
+    """Whether newer main commits touch an input of the change's checks."""
+    if newer & change:
+        return True
+    return any(path.startswith(BASE_COMPARED_PATHS) for path in newer) and any(
+        path.startswith(BASE_COMPARED_PATHS) for path in change
+    )
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -529,16 +574,76 @@ def load_receipt(path: Path, common: Path) -> dict[str, Any]:
     return document
 
 
-def verify_receipt(context: dict[str, Any], accepted_scopes: Sequence[str]) -> tuple[Path, dict[str, Any]]:
-    """Accept the strongest valid scope; report the strongest present failure."""
+def verify_receipt(
+    root: Path,
+    context: dict[str, Any],
+    accepted_scopes: Sequence[str],
+    *,
+    main_may_move: bool,
+    remote_name: str | None,
+) -> tuple[Path, dict[str, Any], str | None]:
+    """Accept the strongest valid scope; report the strongest present failure.
+
+    Returns the receipt path, its execution record, and the older canonical
+    base it was checked against when main has moved since, or None.
+    """
     failure: ReceiptError | None = None
     for scope in sorted(accepted_scopes, key=lambda name: SCOPES.index(name), reverse=True):
         try:
-            return verify_scope_receipt(context, scope)
+            path, execution = verify_scope_receipt(context, scope)
+            return path, execution, None
         except ReceiptError as exc:
+            if main_may_move and str(exc) == "source-mismatch":
+                try:
+                    return verify_scope_after_main_moved(root, context, scope, remote_name)
+                except ReceiptError as moved:
+                    exc = moved
             if failure is None or str(failure) == "missing":
                 failure = exc
     raise failure if failure is not None else fail("missing")
+
+
+def verify_scope_after_main_moved(
+    root: Path, context: dict[str, Any], scope: str, remote_name: str | None
+) -> tuple[Path, dict[str, Any], str]:
+    """Accept a receipt checked against an older canonical main.
+
+    The receipt must be exact for the base it recorded, that base must be an
+    ancestor of the current one, the selection against the current base must
+    be the one the receipt bound, and the newer main commits must touch none
+    of the change's paths. Anything else stays a source mismatch or names
+    why the newer commits matter.
+    """
+    current_base = context["source"]["base_commit"]
+    head = context["source"]["commit"]
+    document = load_receipt(
+        receipt_path(context, scope), Path(context["repository"]["git_common_dir"])
+    )
+    source = document.get("source")
+    recorded = source.get("base_commit") if isinstance(source, dict) else None
+    if (
+        not isinstance(recorded, str)
+        or len(recorded) != 40
+        or any(char not in HEX40 for char in recorded)
+        or recorded == current_base
+        or not is_ancestor(root, recorded, current_base)
+    ):
+        raise fail("source-mismatch")
+    recorded_context = current_context(
+        root,
+        head_value=head,
+        base_value=recorded,
+        remote_name=remote_name,
+    )
+    path, execution = verify_scope_receipt(recorded_context, scope)
+    for key in ("changed_paths_digest", "classification", "selection", "required_local_mode"):
+        if recorded_context["plan"][key] != context["plan"][key]:
+            raise fail("main-moved-selection-changed")
+    newer = touched_paths(root, recorded, current_base)
+    change = touched_paths(root, f"{recorded}...{head}")
+    if main_moved_into_change(newer, change):
+        raise fail("main-moved-into-change")
+    return path, execution, recorded
 
 
 def verify_scope_receipt(context: dict[str, Any], scope: str) -> tuple[Path, dict[str, Any]]:
@@ -647,9 +752,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         accept_scope = arguments.accept_scope or ("merge" if arguments.base else "any")
         accepted_scopes = SCOPES if accept_scope == "any" else ("merge",)
-        path, execution = verify_receipt(context, accepted_scopes)
+        # Only a feature-branch push resolves canonical main itself. A direct
+        # main update names its exact base, which must match.
+        path, execution, verified_base = verify_receipt(
+            root,
+            context,
+            accepted_scopes,
+            main_may_move=not arguments.base,
+            remote_name=arguments.remote_name,
+        )
         print("receipt=accepted")
-        print("reason=exact-tree")
+        if verified_base is None:
+            print("reason=exact-tree")
+        else:
+            print("reason=main-moved-outside-change")
+            print(f"verified_base={verified_base}")
         print(f"scope={execution['scope']}")
         print(f"ran={','.join(execution['ran'])}")
         print(f"reused={','.join(execution['reused'])}")

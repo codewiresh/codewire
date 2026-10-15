@@ -39,9 +39,16 @@ pub(crate) fn require_local_vm_host() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Why this Mac cannot run local VMs, or `None` when it can.
+/// Why this Mac cannot run local VMs, or `None` when it can. Every refusal
+/// comes before any effect and says so.
 #[cfg(any(target_os = "macos", test))]
 fn local_vm_host_refusal(arch: &str, translated: bool, product_version: &str) -> Option<String> {
+    host_unsupported_reason(arch, translated, product_version)
+        .map(|reason| format!("{reason}. Nothing was installed or changed."))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn host_unsupported_reason(arch: &str, translated: bool, product_version: &str) -> Option<String> {
     if arch != "aarch64" {
         return Some(if translated {
             "local VMs need the Apple silicon build of cw; this is the Intel build running under Rosetta. Reinstall with `curl -fsSL https://codewire.sh/install.sh | sh` from a native terminal".to_owned()
@@ -111,8 +118,10 @@ mod tests {
         assert_eq!(local_vm_host_refusal("aarch64", false, "27.1"), None);
 
         let old = local_vm_host_refusal("aarch64", false, "15.7.1").unwrap();
-        assert!(old.contains("macOS 26 or later"), "{old}");
-        assert!(old.contains("macOS 15.7.1"), "{old}");
+        assert_eq!(
+            old,
+            "local VMs need macOS 26 or later; this Mac runs macOS 15.7.1. Nothing was installed or changed."
+        );
 
         let intel = local_vm_host_refusal("x86_64", false, "26.6.2").unwrap();
         assert!(intel.contains("Apple silicon"), "{intel}");
@@ -123,6 +132,12 @@ mod tests {
         for unreadable in ["", "macOS", ".1"] {
             let refusal = local_vm_host_refusal("aarch64", false, unreadable).unwrap();
             assert!(refusal.contains("could not read"), "{refusal}");
+        }
+        for refusal in [intel, rosetta] {
+            assert!(
+                refusal.ends_with(". Nothing was installed or changed."),
+                "{refusal}"
+            );
         }
     }
 }

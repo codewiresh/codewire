@@ -287,6 +287,7 @@ run_policy_core_one() {
   python3 scripts/checks/repo_checks.py identity-free-workspace --self-test
   python3 scripts/checks/repo_checks.py workspace-image-pin --self-test
   python3 scripts/checks/repo_checks.py workspace-image-pin
+  python3 scripts/checks/repo_checks.py mcp-settings --self-test
   python3 scripts/checks/repo_checks.py epoch-material-cache-owner --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
@@ -950,6 +951,7 @@ run_deploy() {
   scripts/ci/plan/test.sh
   scripts/ci/tests/test-deploy-dev.sh
   scripts/ci/tests/test-build-push-runtime-images.sh
+  scripts/ci/tests/test-delivery-superseded.sh
   install_kustomize
   python3 scripts/checks/repo_checks.py orchestration-authz --self-test
 

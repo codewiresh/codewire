@@ -64,6 +64,7 @@ COLD_IDS=()
 HIT_TIMES=()
 FIRST_SSH_WARM=()
 FIRST_SSH_PID=""
+FIRST_SSH_RESULT=""
 FAILURES=0
 RESULTS=()
 POOL_NAME=""
@@ -387,12 +388,17 @@ start_first_ssh() { # ID STARTED_MS
   FIRST_SSH_PID=$!
 }
 
-# The timed first SSH in ms; empty when none succeeded in time.
+# Wait for the timer, then set FIRST_SSH_RESULT to the timed first SSH in ms,
+# empty when none succeeded in time. Call it directly, never inside $(...): a
+# command substitution runs in a subshell, which cannot wait for the timer this
+# shell started, so it read the result before the SSH finished and reported a
+# slow first SSH as none at all.
 finish_first_ssh() { # ID
+  FIRST_SSH_RESULT=""
   [[ -n "$FIRST_SSH_PID" ]] || return 0
   wait "$FIRST_SSH_PID" 2>/dev/null || true
   FIRST_SSH_PID=""
-  cat "$TMPDIR_PROOF/first-ssh-$1" 2>/dev/null || true
+  FIRST_SSH_RESULT="$(cat "$TMPDIR_PROOF/first-ssh-$1" 2>/dev/null || true)"
 }
 
 abandon_first_ssh() {
@@ -405,7 +411,8 @@ abandon_first_ssh() {
 # Log one timed first SSH; with a non-empty LIST name, append it there.
 record_first_ssh() { # LABEL ID [LIST]
   local label="$1" id="$2" list="${3:-}" first
-  first="$(finish_first_ssh "$id")"
+  finish_first_ssh "$id"
+  first="$FIRST_SSH_RESULT"
   if [[ -z "$first" ]]; then
     fail "$label: no SSH over $FIRST_SSH_TRANSPORT within ${FIRST_SSH_TIMEOUT_SECONDS} s of the create"
     return

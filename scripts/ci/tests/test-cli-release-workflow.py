@@ -10,11 +10,14 @@ defaults to none. Each property rejects a mutated workflow. The exact route guar
 is also exercised with a private fake credential reader, without credentials.
 """
 
+import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -87,6 +90,65 @@ def steps(block):
         match = re.search(r"- name: (.+)", text) or re.search(r"- uses: (\S+)", text)
         named.append((match.group(1), text))
     return named
+
+
+def linked_crates(root=ROOT, package="crates/codewire-cli-bin"):
+    """The workspace crates PACKAGE links: its normal and build path
+    dependencies of every target, transitively (dev dependencies excluded)."""
+    workspace = tomllib.loads((root / "Cargo.toml").read_text())["workspace"].get("dependencies", {})
+    seen, pending = set(), [package]
+    while pending:
+        directory = pending.pop()
+        if directory in seen:
+            continue
+        seen.add(directory)
+        manifest = tomllib.loads((root / directory / "Cargo.toml").read_text())
+        tables = [manifest.get("dependencies", {}), manifest.get("build-dependencies", {})]
+        for target in manifest.get("target", {}).values():
+            tables += [target.get("dependencies", {}), target.get("build-dependencies", {})]
+        for table in tables:
+            for name, spec in table.items():
+                if not isinstance(spec, dict):
+                    continue
+                if spec.get("workspace") is True:
+                    shared = workspace.get(name)
+                    if isinstance(shared, dict) and "path" in shared:
+                        pending.append(posixpath.normpath(shared["path"]))
+                elif "path" in spec:
+                    pending.append(posixpath.normpath(posixpath.join(directory, spec["path"])))
+    return seen
+
+
+def push_paths(text):
+    """The dry run's push paths, in order."""
+    block = re.search(r"^    paths:\n((?:      - .+\n)+)", text, re.M)
+    return [line.strip()[2:].strip("'") for line in block.group(1).splitlines()] if block else []
+
+
+def covered(entry, paths):
+    """Whether a push path covers ENTRY: a file, a `dir/` or a `dir/**`."""
+    prefix = entry[:-2] if entry.endswith("/**") else entry
+    return any(path == entry or (path.endswith("/**") and prefix.startswith(path[:-2])) for path in paths)
+
+
+def dry_run_path_errors(text):
+    """A dry run starts exactly for a change to what a release builds."""
+    errors = []
+    paths = push_paths(text)
+    crates = {path[:-3] for path in paths if path.startswith("crates/")}
+    linked = linked_crates()
+    if crates != linked:
+        errors.append("the dry run's crate paths are not exactly the crates cw links: missing "
+                      f"{sorted(linked - crates)}, extra {sorted(crates - linked)}")
+    sys.path.insert(0, str(ROOT / "scripts/ci/release"))
+    import local_runtime_parts  # noqa: E402
+    graph = json.loads((ROOT / "scripts/ci/plan/artifact-graph.json").read_text())
+    inputs = [pattern for patterns in graph["artifacts"]["cw_cli_release_assets"]["package_inputs"].values()
+              for pattern in patterns]
+    for entry in list(local_runtime_parts.RUNTIME_INPUTS) + inputs:
+        if not covered(entry, paths):
+            errors.append(f"a change to {entry}, which a release build reads, starts no dry run")
+    return errors
 
 
 def external_download_errors(text):
@@ -514,6 +576,14 @@ MUTATIONS = {
 }
 
 
+def in_job(text, job, old, new):
+    """TEXT with OLD replaced by NEW once, inside JOB only."""
+    start = text.index(f"\n  {job}:\n")
+    end = re.compile(r"\n  [a-z0-9-]+:\n").search(text, start + 1)
+    end = end.start() if end else len(text)
+    return text[:start] + text[start:end].replace(old, new, 1) + text[end:]
+
+
 def move_step(text, name, before):
     """Move step `name` (and its body) to just before step `before`."""
     start = text.index(f"      - name: {name}\n")
@@ -607,9 +677,30 @@ def check_dry_run(text, release):
     # Forgejo keeps every queued run. Only the newest queued commit needs the
     # protected builders and the Mac; the checked-in rule says when an older
     # one may skip without losing a check (test-dry-run-superseded.sh).
-    skip_unless_newest = "    if: needs.superseded.outputs.superseded == 'false'\n"
-    need(skip_unless_newest in runtime and skip_unless_newest in darwin,
+    skip_unless_newest = "    if: needs.superseded.outputs.superseded == 'false'"
+    need(skip_unless_newest + "\n" in runtime
+         and skip_unless_newest + " && needs.build-runtime-linux.outputs.superseded == 'false'\n" in darwin,
          "a superseded dry run still reaches the protected builders or the Mac")
+    # Main may move on while a run waits for a builder (the Mac waits behind a
+    # release or another run): each builder job decides again, by the same
+    # checked-in rule, before anything else, every later step follows that
+    # decision, and so do the jobs after it.
+    recheck = ("      - name: Skip a superseded commit\n        id: superseded\n        env:\n"
+               "          BEFORE: ${{ github.event.before }}\n"
+               '        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"')
+    gate = re.compile(r"^        if: steps\.superseded\.outputs\.superseded == 'false'( && |$)", re.M)
+    for job in ("build-runtime-linux", "build-darwin", "assemble"):
+        named = steps(blocks.get(job, ""))
+        need(len(named) > 2 and "actions-checkout" in named[0][0] and named[1][1].startswith(recheck),
+             f"dry-run job {job} does not decide supersession again before its first step")
+        for name, body in named[2:]:
+            need(gate.search(body) is not None, f"dry-run job {job} step {name!r} runs for a superseded commit")
+    for job in ("build-runtime-linux", "build-darwin"):
+        need("      superseded: ${{ steps.superseded.outputs.superseded }}\n" in blocks.get(job, ""),
+             f"dry-run job {job} does not hand its supersession decision on")
+    need("    if: needs.build-darwin.outputs.superseded == 'false'\n" in blocks.get("sign-darwin", ""),
+         "the dry-run macOS signing runs after the Mac found the commit superseded")
+    errors.extend(dry_run_path_errors(text))
     need("    needs: [protected-main]\n    runs-on: ci-lite\n" in superseded
          and not re.search(r"^\s+if:", superseded, re.M)
          and "      superseded: ${{ steps.canonical.outputs.superseded }}\n" in superseded
@@ -653,7 +744,8 @@ def check_dry_run(text, release):
     release_header, header = release.split("\njobs:\n", 1)[0], text.split("\njobs:\n", 1)[0]
     pins = [re.findall(r"^  (RCODESIGN_[A-Z0-9_]+: \S+)$", part, re.M) for part in (release_header, header)]
     need(len(pins[0]) == 2 and pins[0] == pins[1], "the dry run does not pin the release's rcodesign")
-    need("    needs: [protected-main, build-darwin]\n    runs-on: ci-protected\n" in sign,
+    need("    needs: [protected-main, build-darwin]\n    if: needs.build-darwin.outputs.superseded == 'false'\n"
+         "    runs-on: ci-protected\n" in sign,
          "the dry-run macOS signing does not follow the macOS build on a protected runner")
     need(dict(steps(sign)).get("Install rcodesign (pinned)")
          == dict(steps(release_jobs.get("sign-darwin", ""))).get("Install rcodesign (pinned)", ""),
@@ -719,8 +811,46 @@ DRY_RUN_MUTATIONS = {
     "runtime build without the guard": lambda t: t.replace(
         "    needs: [protected-main, superseded]\n", "    needs: [superseded]\n", 1),
     "Mac builds a superseded commit": lambda t: t.replace(
-        "    if: needs.superseded.outputs.superseded == 'false'\n    runs-on: macos-arm64\n",
+        "    if: needs.superseded.outputs.superseded == 'false' && "
+        "needs.build-runtime-linux.outputs.superseded == 'false'\n    runs-on: macos-arm64\n",
         "    runs-on: macos-arm64\n", 1),
+    "Mac ignores the Linux side's decision": lambda t: t.replace(
+        " && needs.build-runtime-linux.outputs.superseded == 'false'\n    runs-on: macos-arm64\n",
+        "\n    runs-on: macos-arm64\n", 1),
+    "Mac does not decide again": lambda t: in_job(t, "build-darwin", "        id: superseded\n",
+                                                  "        id: decided\n"),
+    "Mac decides again without its push's own changes": lambda t: in_job(
+        t, "build-darwin", "          BEFORE: ${{ github.event.before }}\n", "          BEFORE: ''\n"),
+    "Mac builds the pair for a superseded commit": lambda t: in_job(
+        t, "build-darwin", "      - name: Build the macOS pair\n        id: build\n"
+        "        if: steps.superseded.outputs.superseded == 'false'\n",
+        "      - name: Build the macOS pair\n        id: build\n"),
+    "Linux side does not decide again": lambda t: in_job(
+        t, "build-runtime-linux", '        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"\n',
+        "        run: echo superseded=false >> \"$GITHUB_OUTPUT\"\n"),
+    "Linux side hides its decision": lambda t: in_job(
+        t, "build-runtime-linux", "      superseded: ${{ steps.superseded.outputs.superseded }}\n", ""),
+    "Linux side selects for a superseded commit": lambda t: in_job(
+        t, "build-runtime-linux", "        id: select\n        if: steps.superseded.outputs.superseded == 'false'\n",
+        "        id: select\n"),
+    "assembly does not decide again": lambda t: in_job(
+        t, "assemble", "      - name: Skip a superseded commit\n", "      - name: Skip nothing\n"),
+    "assembly packages a superseded commit": lambda t: in_job(
+        t, "assemble", "      - name: Package and verify the unsigned delivery\n"
+        "        if: steps.superseded.outputs.superseded == 'false'\n",
+        "      - name: Package and verify the unsigned delivery\n"),
+    "signing ignores the Mac's decision": lambda t: t.replace(
+        "    if: needs.build-darwin.outputs.superseded == 'false'\n", "", 1),
+    "a cw crate starts no dry run": lambda t: t.replace("      - 'crates/codewire-local-vmm/**'\n", "", 1),
+    "a server crate starts a dry run": lambda t: t.replace(
+        "      - 'crates/codewire-access/**'\n",
+        "      - 'crates/codewire-access/**'\n      - 'crates/codewire-dashboard-web/**'\n", 1),
+    "cw's embedded release key starts no dry run": lambda t: t.replace(
+        "      - 'apps/cli/GPG_PUBLIC_KEY.asc'\n", "", 1),
+    "a runtime recipe starts no dry run": lambda t: t.replace(
+        "      - 'scripts/dev/macos-git-tool.py'\n", "", 1),
+    "every crate starts a dry run": lambda t: re.sub(
+        r"(      - 'crates/[^']+'\n)+", "      - 'crates/**'\n", t, count=1),
     "runtime builds a superseded commit": lambda t: t.replace(
         "    if: needs.superseded.outputs.superseded == 'false'\n    runs-on: ci-protected\n",
         "    runs-on: ci-protected\n", 1),
@@ -743,9 +873,11 @@ DRY_RUN_MUTATIONS = {
     "unbound dry-run Linux side": lambda t: t.replace('= "$LINUX_SHA256" ]', "] || true", 1),
     "dry-run rustup on the runner": lambda t: t.replace(
         "      - name: Build the Linux side from cached parts\n        id: build\n"
-        "        if: steps.select.outputs.mode == 'full'\n        run: |\n          set -euo pipefail\n",
+        "        if: steps.superseded.outputs.superseded == 'false' && steps.select.outputs.mode == 'full'\n"
+        "        run: |\n          set -euo pipefail\n",
         "      - name: Build the Linux side from cached parts\n        id: build\n"
-        "        if: steps.select.outputs.mode == 'full'\n        run: |\n          set -euo pipefail\n"
+        "        if: steps.superseded.outputs.superseded == 'false' && steps.select.outputs.mode == 'full'\n"
+        "        run: |\n          set -euo pipefail\n"
         "          rustup target add aarch64-unknown-linux-musl\n", 1),
     "dry-run assembly from the unsigned pair": lambda t: t.replace(
         "          name: cw-dry-run-darwin-signed-${{ github.run_id }}\n          path: dist-darwin\n",
@@ -757,9 +889,11 @@ DRY_RUN_MUTATIONS = {
         "DARWIN_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}", 1),
     "dry-run signing with OIDC": lambda t: t.replace(
         "    name: Sign the macOS pair with the rcodesign stand-in (never signs)\n"
-        "    needs: [protected-main, build-darwin]\n    runs-on: ci-protected\n",
+        "    needs: [protected-main, build-darwin]\n    if: needs.build-darwin.outputs.superseded == 'false'\n"
+        "    runs-on: ci-protected\n",
         "    name: Sign the macOS pair with the rcodesign stand-in (never signs)\n"
-        "    needs: [protected-main, build-darwin]\n    runs-on: ci-protected\n    enable-openid-connect: true\n", 1),
+        "    needs: [protected-main, build-darwin]\n    if: needs.build-darwin.outputs.superseded == 'false'\n"
+        "    runs-on: ci-protected\n    enable-openid-connect: true\n", 1),
     "dry run reads the Apple keys": lambda t: t.replace(
         '          scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$stand_in"\n',
         '          scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$stand_in"\n'

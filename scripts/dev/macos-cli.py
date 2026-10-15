@@ -7,10 +7,11 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
+import importlib.util
 import io
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import platform
 import re
 import shlex
@@ -43,30 +44,23 @@ SWIFT_COMPONENTS = {
     "sandbox-canary": ("macos-sandbox-canary-experiment", "swift-sandbox-canary",
                        ("sandbox-experiment-owner", "sandbox-candidate", "canary-deputy")),
 }
-STOP_SECONDS = 3
 
-
-class CleanupUnknown(RuntimeError):
-    """A command's process group is not proven quiescent; retain its state."""
+# The command owner and archive helpers, shared with the runtime's e2fsprogs
+# build; the upload carries the file beside worker.py.
+COMMAND_OWNER = "macos-command-owner.py"
+_spec = importlib.util.spec_from_file_location("macos_command_owner", Path(__file__).with_name(COMMAND_OWNER))
+command_owner = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(command_owner)
+CleanupUnknown = command_owner.CleanupUnknown
+digest = command_owner.digest
+safe_name = command_owner.safe_name
+extract = command_owner.extract
+stop_group = command_owner.stop_group
+run_command = command_owner.run_command
 
 
 def output(argv, **kwargs):
     return subprocess.check_output(argv, **kwargs).decode().strip()
-
-
-def digest(path):
-    checksum = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            checksum.update(chunk)
-    return checksum.hexdigest()
-
-
-def safe_name(name):
-    path = PurePosixPath(name)
-    if not name or path.is_absolute() or ".." in path.parts or ".git" in path.parts:
-        raise ValueError(f"unsafe archive path: {name!r}")
-    return path
 
 
 def add_bytes(archive, name, data, mode=0o644, link=None):
@@ -193,34 +187,6 @@ def seed_archive(lock_bytes, cargo_home, destination):
     return missing
 
 
-def extract(archive_path, destination, links=False):
-    """Extract into an empty owned directory; links last, no hardlinks/devices."""
-    with tarfile.open(archive_path) as archive:
-        entries = archive.getmembers()
-        names = set()
-        symlinks = {entry.name for entry in entries if entry.issym()}
-        for entry in entries:
-            path = safe_name(entry.name)
-            if entry.name in names or any(str(parent) in symlinks for parent in path.parents):
-                raise ValueError(f"duplicate path or symlink parent: {entry.name}")
-            names.add(entry.name)
-            if not entry.isfile() and not (links and entry.issym()):
-                raise ValueError(f"unsupported archive entry: {entry.name}")
-            if entry.issym():
-                target = destination / entry.name
-                if Path(entry.linkname).is_absolute() or not (target.parent / entry.linkname).resolve().is_relative_to(destination.resolve()):
-                    raise ValueError(f"escaping archive link: {entry.name}")
-        for entry in sorted(entries, key=lambda member: member.issym()):
-            target = destination / entry.name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if entry.issym():
-                target.symlink_to(entry.linkname)
-            else:
-                with archive.extractfile(entry) as source, target.open("xb") as sink:
-                    shutil.copyfileobj(source, sink)
-                target.chmod(entry.mode & 0o777)
-
-
 def sync_source(staged, source):
     """Stable paths/mtimes for unchanged files; remove stale owned source only."""
     owned_directory(source)
@@ -297,80 +263,10 @@ def writable_retry(function, path, _):
     function(path)
 
 
-def group_absent(process):
-    try:
-        reaped = process.poll() is not None
-    except OSError as error:
-        raise CleanupUnknown("command child ownership is unknown") from error
-    try:
-        os.killpg(process.pid, 0)
-    except ProcessLookupError:
-        return reaped
-    except OSError as error:
-        raise CleanupUnknown("command group absence is unknown") from error
-    return False
-
-
-def stop_group(process):
-    for signum in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            # Only this command owner reaps its child. With default SIGCHLD,
-            # exit after this poll leaves a zombie pinning the PID until our
-            # next poll. A reaped or unknown leader never authorizes a signal.
-            live = process.poll() is None
-        except OSError as error:
-            raise CleanupUnknown("command child ownership is unknown") from error
-        try:
-            if live:
-                os.killpg(process.pid, signum)
-        except ProcessLookupError:
-            pass
-        except OSError as error:
-            raise CleanupUnknown("command group signal ownership is unknown") from error
-        stop = time.monotonic() + STOP_SECONDS
-        while True:
-            if group_absent(process):
-                return
-            if time.monotonic() >= stop:
-                break
-            time.sleep(0.02)
-    raise CleanupUnknown("command group remains; runtime and cache retained")
-
-
 # The credential authority's crates carry macOS signer and repository paths
 # (and the selected-key SSH signer feature the CLI enables on macOS).
 CREDENTIAL_CRATES = ["-p", "codewire-local-credentials", "-p", "codewire-credential-broker",
                      "--features", "codewire-credential-broker/ssh-agent"]
-
-
-def run_command(argv, cwd, env, log, cancel, deadline):
-    if cancel.is_set() or time.monotonic() >= deadline:
-        return 130 if cancel.is_set() else 124
-    # Heartbeat/watchdog threads only set cancellation; this standalone worker
-    # is the sole child reaper. Reset SIG_IGN/SA_NOCLDWAIT before every spawn.
-    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-    with log.open("wb") as stream:
-        process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=stream,
-                                   stderr=subprocess.STDOUT, start_new_session=True)
-        ownership_known = True
-        try:
-            while True:
-                try:
-                    status = process.poll()
-                except OSError as error:
-                    ownership_known = False
-                    raise CleanupUnknown("command child ownership is unknown") from error
-                if status is not None:
-                    return status
-                if cancel.is_set() or time.monotonic() >= deadline:
-                    return 130 if cancel.is_set() else 124
-                time.sleep(0.1)
-        finally:
-            if ownership_known:
-                try:
-                    stop_group(process)
-                except BaseException as error:
-                    raise CleanupUnknown("command cleanup is unknown; state retained") from error
 
 
 def import_git_seeds(seeded, cargo, command):
@@ -593,7 +489,7 @@ def worker(root, run):
     return 0 if result["status"] == "passed" else 1
 
 
-# The only bootstrap extraction accepts four regular files with fixed names.
+# The only bootstrap extraction accepts five regular files with fixed names.
 BOOTSTRAP = """
 import os, pathlib, sys, tarfile
 os.umask(0o077)
@@ -602,7 +498,7 @@ run = root / 'runs' / sys.argv[2]
 for path in reversed([run, *run.parents][:-1]):
     if path.is_symlink(): raise SystemExit('symlink in helper cache path')
 run.mkdir(parents=True, exist_ok=False)
-allowed = {'worker.py', 'source.tar.gz', 'seed.tar.gz', 'request.json'}
+allowed = {'worker.py', 'macos-command-owner.py', 'source.tar.gz', 'seed.tar.gz', 'request.json'}
 with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as archive:
     for entry in archive:
         if not entry.isfile() or entry.name not in allowed: raise SystemExit('unsafe upload')
@@ -652,7 +548,7 @@ def evidence_status(evidence, run_id):
         raise RuntimeError("outcome unknown: request or result missing; recover again later")
     request, result = json.loads(request_path.read_text()), json.loads(result_path.read_text())
     if request.get("run_id") != run_id or any(result.get(key) != request.get(key)
-            for key in ("run_id", "source_sha256", "lock_sha256", "helper_sha256")):
+            for key in ("run_id", "source_sha256", "lock_sha256", "helper_sha256", "command_owner_sha256")):
         raise RuntimeError("recovered evidence identity mismatch")
     if result.get("status") != "passed":
         return result.get("status", "unknown")
@@ -736,11 +632,13 @@ def main():
             request["uncached_crates"] = seed_archive(lock_bytes, cargo_home, stage / "seed.tar.gz")
             print(f"Seed: {len(request['uncached_crates'])} locked archives absent locally (offline build will fail if needed).", flush=True)
         shutil.copy2(Path(__file__), stage / "worker.py")
+        shutil.copy2(Path(__file__).with_name(COMMAND_OWNER), stage / COMMAND_OWNER)
         request["helper_sha256"] = digest(stage / "worker.py")
+        request["command_owner_sha256"] = digest(stage / COMMAND_OWNER)
         (stage / "request.json").write_text(json.dumps(request, indent=2) + "\n")
         upload = stage / "upload.tar"
         with tarfile.open(upload, "w") as archive:
-            for name in ("worker.py", "source.tar.gz", "seed.tar.gz", "request.json"):
+            for name in ("worker.py", COMMAND_OWNER, "source.tar.gz", "seed.tar.gz", "request.json"):
                 if (stage / name).exists():
                     archive.add(stage / name, arcname=name)
         print(f"Run {run_id}; source {request['source_sha256']}; evidence {evidence.resolve()}", flush=True)

@@ -453,6 +453,7 @@ if [ "$event_selected" = false ]; then
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
       scripts/dev/dashboard-watch.py|\
       scripts/dev/macos-cli.py|scripts/dev/test-macos-cli.py|\
+      scripts/dev/macos-command-owner.py|\
       scripts/dev/macos-ext4-tool.py|scripts/dev/test-macos-ext4-tool.py|\
       scripts/dev/macos-git-tool.py|scripts/dev/test-macos-git-tool.py|\
       scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
@@ -1423,6 +1424,12 @@ if [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
+      scripts/dev/kind/database.sh)
+        # The retained cluster's database upgrade, reset and restore. The Kind
+        # gate never runs it; its hermetic fixture runs with the edge family.
+        select_token edge_kind
+        recognized=true
+        ;;
       scripts/dev/kind/*)
         select_token edge_kind
         kind_relevant=true
@@ -1662,8 +1669,21 @@ if [ "$event_selected" = false ]; then
         select_token security
         recognized=true
         ;;
+      # The protected Dev runtime builder never builds a Kind image: Kind
+      # builds through build-kind-images.sh. Its contract runs in Deploy.
+      scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/tests/test-build-push-runtime-images.sh)
+        select_token deploy
+        select_token release
+        recognized=true
+        ;;
+      # Dev delivery's supersession stop runs only in Deploy Dev.
+      scripts/ci/tests/test-delivery-superseded.sh)
+        select_token deploy
+        recognized=true
+        ;;
       Dockerfile|docker-bake.hcl|apps/*/Dockerfile*|deployments/docker/*|\
-      scripts/ci/images/build-kind-images.sh|scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/images/build-kind-images.sh|\
       scripts/ci/images/run-rust-build.sh|scripts/ci/tests/test-run-rust-build.sh)
         select_token edge_kind
         select_token release

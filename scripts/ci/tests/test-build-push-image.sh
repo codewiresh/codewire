@@ -1270,15 +1270,22 @@ runtime_builds_before="$(build_invocation_count)"
 )
 [[ "$(build_invocation_count)" -eq $((runtime_builds_before + 1)) ]] ||
   fail 'protected runtime set did not issue exactly one additional Bake build'
-[[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
-  fail 'protected runtime set did not share one original CW producer'
-assert_cw_context release
-grep -Eq ' buildx bake .* default $' "$FAKE_DOCKER_CALLS" ||
-  fail 'protected runtime set did not execute the canonical five-target Bake group'
-runtime_set_call="$(grep -E ' buildx bake .* default $' "$FAKE_DOCKER_CALLS" | tail -1)"
-[[ "$(grep -oF 'secrets+=id=aws_shared_credentials\,src=' <<<"$runtime_set_call" | wc -l)" -eq 5 ]] ||
-  fail 'protected runtime Bake did not bind the private cache credential to all five targets'
-for family in dashboard services mesh daemon derp; do
+# The daemon and its static CW producer build in their own protected job, so
+# the service runtime set never runs the producer or touches the daemon tag.
+[[ "$(cw_producer_invocation_count)" -eq 0 ]] ||
+  fail 'protected service runtime set ran the CW producer'
+grep -Eq ' buildx bake .* dashboard services mesh derp ?$' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected runtime set did not execute exactly the four service targets'
+runtime_set_call="$(grep -E ' buildx bake .* dashboard services mesh derp ?$' "$FAKE_DOCKER_CALLS" | tail -1)"
+[[ "$(grep -oF 'secrets+=id=aws_shared_credentials\,src=' <<<"$runtime_set_call" | wc -l)" -eq 4 ]] ||
+  fail 'protected runtime Bake did not bind the private cache credential to all four service targets'
+[[ "$runtime_set_call" != *'daemon.'* && "$runtime_set_call" != *' default'* ]] ||
+  fail 'protected service runtime set built or tagged the daemon'
+awk -F '\t' \
+  -v reference="registry.example.invalid/codewire/daemon:$source_sha" \
+  '$1 == reference { found = 1 } END { exit found }' \
+  "$FAKE_MANIFESTS" || fail 'protected service runtime set published a daemon source tag'
+for family in dashboard services mesh derp; do
   grep -qF -- "${family}.tags=registry.example.invalid/codewire/${family}:$source_sha" \
     "$FAKE_DOCKER_CALLS" || fail "protected runtime Bake omitted exact $family source tag"
   awk -F '\t' \
@@ -1315,7 +1322,7 @@ grep -qF 'Required immutable runtime-set source images are missing: mesh' \
 )
 [[ "$(build_invocation_count)" -eq $((partial_runtime_builds_before + 1)) ]] ||
   fail 'partial protected runtime retry did not issue exactly one Bake build'
-[[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
+[[ "$(cw_producer_invocation_count)" -eq 0 ]] ||
   fail 'a mesh-only retry needlessly rebuilt CW'
 partial_runtime_call="$(grep -E ' buildx bake ' "$FAKE_DOCKER_CALLS" | tail -1)"
 [[ "$partial_runtime_call" == *' mesh ' ]] ||
@@ -1361,7 +1368,7 @@ grep -Eq ' buildx rm --force codewire-kind-' "$FAKE_DOCKER_CALLS" ||
   fail 'Kind did not verify existence and trust labels for all four loaded images'
 grep -qF 'CODEWIRE_CI_PHASE name=product-image-build' "$work/kind-build.out" ||
   fail 'Kind image builder omitted its structured phase result'
-[[ "$(cw_producer_invocation_count)" -eq 2 ]] ||
+[[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
   fail 'local Kind caller did not use one additional CI-profile original CW producer'
 assert_cw_context ci
 kind_default_work="$(cat "$work/kind-default-work")"
@@ -1785,11 +1792,12 @@ import json
 from pathlib import Path
 import sys
 records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
-assert len(records) == 11 and Counter(record['profile'] for record in records) == {'release': 9, 'ci': 2}
-assert Counter(record['source_revision'] for record in records) == {sys.argv[2]: 10, sys.argv[3]: 1}
-assert len({record['producer_receipt_sha256'] for record in records}) == 11
-# The apt snapshot cache case adds one release workspace build.
-print('protected/runtime/Kind CW original-producer contexts: 11 verified')
+# The service runtime set binds no CW: the daemon builds alone on its own
+# protected worker. The apt snapshot cache case adds one release workspace build.
+assert len(records) == 10 and Counter(record['profile'] for record in records) == {'release': 8, 'ci': 2}
+assert Counter(record['source_revision'] for record in records) == {sys.argv[2]: 9, sys.argv[3]: 1}
+assert len({record['producer_receipt_sha256'] for record in records}) == 10
+print('protected/runtime/Kind CW original-producer contexts: 10 verified')
 PY
 
 # support-images.yaml builds each platform of the pair in its own job and

@@ -69,10 +69,10 @@ CASES = ((256, "CWROOT"), (513, "CWSTATE"))
 FILESYSTEM_MIB = {256: 256, 513: 512}
 
 _spec = importlib.util.spec_from_file_location(
-    "macos_formatter_developer_loop", Path(__file__).with_name("macos-cli.py")
+    "macos_command_owner", Path(__file__).with_name("macos-command-owner.py")
 )
-developer_loop = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(developer_loop)
+command_owner = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(command_owner)
 
 
 def file_identity(info):
@@ -145,7 +145,7 @@ def extract_source(archive, destination, normalized):
         if len(members) > 10000 or sum(item.size for item in members) > 128 * 1024 * 1024:
             raise ValueError("source archive exceeds build bounds")
         for member in members:
-            name = developer_loop.safe_name(member.name)
+            name = command_owner.safe_name(member.name)
             if name.parts[0] != f"e2fsprogs-{VERSION}":
                 raise ValueError("unexpected source archive root")
             if member.isdir():
@@ -157,7 +157,7 @@ def extract_source(archive, destination, normalized):
                     filtered.addfile(member, content)
             else:
                 filtered.addfile(member)
-    developer_loop.extract(normalized, destination, links=True)
+    command_owner.extract(normalized, destination, links=True)
 
 
 def validate_build_config(content, make_config):
@@ -235,7 +235,7 @@ def run_checked(argv, cwd, env, log, cancel, deadline, commands, seconds):
     item = {"argv": argv, "cwd": str(cwd), "log": "logs/" + log.name}
     commands.append(item)
     print(f"command {len(commands)}: {argv[0]}", flush=True)
-    status = developer_loop.run_command(argv, cwd, env, log, cancel, command_deadline)
+    status = command_owner.run_command(argv, cwd, env, log, cancel, command_deadline)
     item["exit_code"] = status  # Actual child exit, not the wrapper's acceptance.
     require_active(cancel, command_deadline)
     if status != 0:
@@ -314,8 +314,8 @@ def build_binary(archive, output, env, command, result):
     config = output / "build" / "lib/config.h"
     make_config = output / "build" / "MCONFIG"
     validate_build_config(config.read_text(), make_config.read_text())
-    result["config_h_sha256"] = developer_loop.digest(config)
-    result["make_config_sha256"] = developer_loop.digest(make_config)
+    result["config_h_sha256"] = command_owner.digest(config)
+    result["make_config_sha256"] = command_owner.digest(make_config)
     command(["/usr/bin/make", "-j4", "libs"], output / "build", env)
     for directory, name in TOOLS:
         command(["/usr/bin/make", "-j4", "-C", directory, name], output / "build", env)
@@ -349,15 +349,15 @@ def run(archive, output, probe_binary=None, binary_sha=None):
     result = {"schema_version": 1, "status": "running", "commands": commands,
               "scope": "native-empty-formatter-probe" if probe_binary else "native-empty-formatter-discriminator",
               "mode": "probe-only" if probe_binary else "build-and-probe",
-              "tool_sha256": developer_loop.digest(Path(__file__)),
-              "command_owner_sha256": developer_loop.digest(Path(developer_loop.__file__))}
+              "tool_sha256": command_owner.digest(Path(__file__)),
+              "command_owner_sha256": command_owner.digest(Path(command_owner.__file__))}
     if probe_binary:
         result.update({"input_binary": str(probe_binary), "input_binary_sha256": binary_sha})
     else:
         result.update({"source_url": SOURCE_URL, "source_sha256": SOURCE_SHA256, "version": VERSION})
     write_json(output / "request.json", result)
     write_new(output / "producer-source.py", Path(__file__).read_bytes(), 0o400)
-    write_new(output / "command-owner-source.py", Path(developer_loop.__file__).read_bytes(), 0o400)
+    write_new(output / "command-owner-source.py", Path(command_owner.__file__).read_bytes(), 0o400)
     old_handlers = {}
     for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         old_handlers[number] = signal.signal(number, lambda _number, _frame: cancel.set())
@@ -380,10 +380,10 @@ def run(archive, output, probe_binary=None, binary_sha=None):
         # Probe mode keeps the supplied identity authoritative. Build mode binds
         # its output once, before any external validation, rather than blessing
         # whatever bytes happen to remain after those commands return.
-        result["binary_sha256"] = binary_sha if probe_binary else developer_loop.digest(binary)
+        result["binary_sha256"] = binary_sha if probe_binary else command_owner.digest(binary)
         tools = {"mke2fs": result["binary_sha256"]}
         if not probe_binary:
-            tools.update({name: developer_loop.digest(output / "bundle" / name)
+            tools.update({name: command_owner.digest(output / "bundle" / name)
                           for _directory, name in TOOLS[1:]})
         result["tools"] = tools
         for name, checksum in tools.items():
@@ -407,7 +407,7 @@ def run(archive, output, probe_binary=None, binary_sha=None):
             os.close(directory)
         accept_result(result, cancel, deadline)
     except BaseException as error:
-        result["status"] = "cleanup-unknown" if isinstance(error, developer_loop.CleanupUnknown) else "failed"
+        result["status"] = "cleanup-unknown" if isinstance(error, command_owner.CleanupUnknown) else "failed"
         result["error"] = f"{type(error).__name__}: {error}"
         raise
     finally:

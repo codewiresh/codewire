@@ -47,7 +47,7 @@ if grep -Eq 'CODEWIRE_(GHCR_PUBLISH|DEPLOY_SHA_DISPATCH)_ENABLED' "$WORKFLOW"; t
   fail "dev publication or dispatch retains a rollout flag"
 fi
 
-selection_job="$(sed -n '/^  deploy-selection:/,/^  build-publish-runtime-images:/p' "$WORKFLOW")"
+selection_job="$(sed -n '/^  deploy-selection:/,/^  build-service-images:/p' "$WORKFLOW")"
 grep -Fq '    runs-on: ci-lite' <<<"$selection_job" ||
   fail "deploy selection does not use the non-privileged CI tier"
 grep -Fq '    enable-openid-connect: true' <<<"$selection_job" ||
@@ -87,7 +87,7 @@ if compgen -G "$ROOT/scripts/ci/select/select-deploy-*" >/dev/null \
   || compgen -G "$ROOT/scripts/ci/select/artifact-*" >/dev/null; then
   fail "legacy deployment classifier remains in the repository"
 fi
-select_step="$(sed -n '/      - name: Plan and select atomic Dev deployment/,/^  build-publish-runtime-images:/p' \
+select_step="$(sed -n '/      - name: Plan and select atomic Dev deployment/,/^  build-service-images:/p' \
   <<<"$selection_job")"
 if grep -Fq 'secrets.' <<<"$select_step"; then
   fail "artifact classifier receives the private deploy credential"
@@ -96,6 +96,11 @@ grep -Fq "if: \${{ always() }}" <<<"$selection_job" ||
   fail "untrusted deployed-source candidate is not cleaned up unconditionally"
 grep -Fq "rm -f -- \"\$RUNNER_TEMP/codewire-deployed-source-candidate.json\"" \
   <<<"$selection_job" || fail "untrusted deployed-source candidate cleanup is missing"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -Fq 'baseline_committed_at: ${{ steps.deployed-age.outputs.committed_at }}' <<<"$selection_job" ||
+  fail "deploy selection does not expose when Dev's running commit was made"
+grep -Fq "committed_at=\"\$(git show -s --format=%ct \"\$BASELINE_SHA\" 2>/dev/null)\"" <<<"$selection_job" ||
+  fail "Dev's running commit age is not read from the validated baseline"
 for output in deploy_dev reason matched_categories \
   dashboard_image_state daemon_image_state derp_image_state services_image_state mesh_image_state \
   baseline_sha head_sha head_tree ci_plan_sha256 ci_policy_sha256 baseline_valid; do
@@ -105,8 +110,12 @@ for output in deploy_dev reason matched_categories \
 done
 
 [[ "$(grep -Fc "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}" \
-  "$WORKFLOW")" -eq 1 ]] ||
-  fail "all-unaffected or superseded selection does not skip the combined runtime build/publication"
+  "$WORKFLOW")" -eq 2 ]] ||
+  fail "all-unaffected or superseded selection does not skip both runtime builds"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -Fxq "    if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' && needs.build-service-images.outputs.stopped != 'true' && needs.build-daemon-image.outputs.stopped != 'true' }}" \
+  "$WORKFLOW" ||
+  fail "publication does not skip an unselected, superseded or stopped delivery"
 # shellcheck disable=SC2016 # Match the literal workflow expression.
 grep -Fq '      superseded: ${{ steps.canonical.outputs.superseded }}' <<<"$selection_job" ||
   fail "deploy selection does not expose whether its commit was superseded"
@@ -157,105 +166,157 @@ superseded_case() {
 [[ "$(superseded_case not-a-commit)" == failed ]] ||
   fail "a malformed canonical main did not fail closed"
 
-build_job="$(sed -n '/^  build-publish-runtime-images:/,$p' "$WORKFLOW")"
-grep -Fq '    runs-on: ci-protected' <<<"$build_job" ||
-  fail "runtime set does not build and publish on the protected CI tier"
-[[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 2 ]] ||
-  fail "Dev workflow does not confine OIDC to selection and publication"
-grep -Fq '    enable-openid-connect: true' <<<"$build_job" ||
-  fail "protected runtime transaction cannot mint just-in-time identities"
-grep -Fq '    timeout-minutes: 110' <<<"$build_job" ||
-  fail "runtime set exceeds the protected runner lifetime"
-grep -Fq '        run: scripts/ci/images/build-push-runtime-images.sh' <<<"$build_job" ||
-  fail "runtime set does not use the bounded shared-builder entrypoint"
-# The shared protected compiler cache is best effort: the selector's step
-# output admits exactly r2 or the job-local fallback, and nothing else.
-# shellcheck disable=SC2016 # Match the literal workflow expression.
-grep -Fxq "          CODEWIRE_SCCACHE_MODE: \${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}" \
-  <<<"$build_job" ||
-  fail "protected runtime build does not select the shared protected compiler cache with a local fallback"
-[[ "$(grep -Fc 'CODEWIRE_SCCACHE_MODE:' <<<"$build_job")" -eq 1 ]] ||
-  fail "protected runtime build fixes its compiler-cache mode outside the fail-open selector"
-# shellcheck disable=SC2016 # Match the literal workflow environment.
-grep -Fq '          SCCACHE_BUCKET: example-ci-cache-protected' <<<"$build_job" ||
-  fail "protected runtime build does not use the dedicated protected cache bucket"
-# shellcheck disable=SC2016 # Match the literal workflow environment.
-grep -Fq '          CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1' <<<"$build_job" ||
-  fail "protected runtime build does not stay below the protected cache prefix"
-# shellcheck disable=SC2016 # Match the literal workflow environment.
-grep -Fq '          CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws' \
-  <<<"$build_job" ||
-  fail "protected runtime build does not receive its private cache credential file"
-grep -Fq '      - name: Select the protected R2 compiler cache' <<<"$build_job" ||
-  fail "protected runtime build does not select its compiler cache"
-grep -Fq '          scripts/ci/setup/select-protected-rust-cache.sh \' <<<"$build_job" ||
-  fail "protected runtime build does not fetch its job-scoped cache credential through the fail-open selector"
-# shellcheck disable=SC2016 # Match the literal workflow command.
-grep -Fq '            "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"' <<<"$build_job" ||
-  fail "protected runtime build does not keep its cache credential below RUNNER_TEMP"
-if grep -Fq 'scripts/ci/setup/fetch-openbao-sccache-r2-protected-credentials.sh' <<<"$build_job"; then
-  fail "protected runtime build fetches its cache credential outside the fail-open selector"
-fi
-cache_steps="$(grep -E '^      - name: ' <<<"$build_job" | sed -n '1,3p')"
-[[ "$cache_steps" == "$(printf '%s\n' \
-    '      - name: Select the protected R2 compiler cache' \
-    '      - name: Build and push the exact runtime image set' \
-    '      - name: Remove the protected R2 compiler-cache credential')" ]] ||
-  fail "protected cache credential is not selected before, and removed right after, the build"
-cleanup_step="$(awk '
-  /^      - name: / { capture = ($0 == "      - name: Remove the protected R2 compiler-cache credential") }
-  capture { print }
-' <<<"$build_job")"
-# shellcheck disable=SC2016 # Match the literal workflow expression.
-grep -Fxq '        if: ${{ always() }}' <<<"$cleanup_step" ||
-  fail "protected cache credential removal is not unconditional"
-if grep -Fq 'scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh' <<<"$build_job"; then
-  fail "protected runtime build consumes the untrusted cache credential"
-fi
-if grep -Fq 'example-ci-cache-untrusted' <<<"$build_job"; then
-  fail "protected runtime build consumes the disposable untrusted cache bucket"
-fi
-grep -Fq 'shred -u -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"' <<<"$build_job" ||
-  fail "protected runtime build does not remove its cache credential"
-# shellcheck disable=SC2016 # Match the literal gated workflow environment.
-grep -Fq "          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'" <<<"$build_job" ||
-  fail "runtime carry-forward must stay gated until codewire/deploy accepts carried provenance"
-# shellcheck disable=SC2016 # Match the literal workflow expression.
-grep -Fq '          CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}' \
-  <<<"$build_job" ||
-  fail "runtime build does not receive the planner-certified deployed baseline"
-for family in DASHBOARD DERP DAEMON SERVICES MESH; do
-  lc="$(tr 'A-Z' 'a-z' <<<"$family")"
+# The runtime set builds in two protected halves on separate workers, joined
+# by one publishing job: exactly these four jobs, no per-image workers.
+[[ "$(sed -n '/^jobs:$/,$p' "$WORKFLOW" | grep -E '^  [a-z0-9-]+:$' | tr -d ' :' | paste -sd' ')" == \
+  'deploy-selection build-service-images build-daemon-image publish-runtime-images' ]] ||
+  fail "Dev delivery is not exactly selection, two build halves and one publisher"
+service_job="$(sed -n '/^  build-service-images:/,/^  build-daemon-image:/p' "$WORKFLOW")"
+daemon_job="$(sed -n '/^  build-daemon-image:/,/^  publish-runtime-images:/p' "$WORKFLOW")"
+publish_job="$(sed -n '/^  publish-runtime-images:/,$p' "$WORKFLOW")"
+[[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 4 ]] ||
+  fail "Dev workflow does not confine OIDC to selection, the protected builds and publication"
+grep -Fxq '    needs: [deploy-selection, build-service-images, build-daemon-image]' <<<"$publish_job" ||
+  fail "publication does not wait for both exact build halves"
+grep -Fxq '    timeout-minutes: 45' <<<"$publish_job" ||
+  fail "publication lacks its bounded protected deadline"
+
+assert_build_half() {
+  local half="$1" job="$2" step="$3"
+  shift 3
+  grep -Fq '    runs-on: ci-protected' <<<"$job" ||
+    fail "$half half does not build and push on the protected CI tier"
+  grep -Fq '    enable-openid-connect: true' <<<"$job" ||
+    fail "$half half cannot mint just-in-time identities"
+  grep -Fq '    timeout-minutes: 110' <<<"$job" ||
+    fail "$half half exceeds the protected runner lifetime"
+  grep -Fxq '    needs: [deploy-selection]' <<<"$job" ||
+    fail "$half half does not depend only on the trusted selection"
+  grep -A2 -Fx '        run: |' <<<"$job" | grep -Fxq '          scripts/ci/deploy/delivery-superseded.sh run -- \' ||
+    fail "$half half build does not stop when main moves past it"
+  grep -Fxq "            scripts/ci/images/build-push-runtime-images.sh $half" <<<"$job" ||
+    fail "$half half does not use the bounded shared-builder entrypoint"
   # shellcheck disable=SC2016 # Match the literal workflow expression.
-  grep -Fq "          CODEWIRE_IMAGE_STATE_${family}: \${{ needs.deploy-selection.outputs.${lc}_image_state }}" \
-    <<<"$build_job" ||
-    fail "runtime build does not receive the trusted ${lc} planner state"
-done
-[[ "$(grep -Fc 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$build_job")" -eq 2 ]] ||
-  fail "runtime workflow does not sign the Harbor set and GHCR mirror exactly once each"
-for family in DASHBOARD DERP DAEMON SERVICES MESH; do
-  lc="$(tr 'A-Z' 'a-z' <<<"$family")"
+  grep -Fxq "      stopped: \${{ steps.start-check.outputs.stop == 'true' || steps.build.outputs.stop == 'true' }}" \
+    <<<"$job" || fail "$half half does not report a stop to publication"
   # shellcheck disable=SC2016 # Match the literal workflow expression.
-  [[ "$(grep -Fc "          CODEWIRE_BUILT_FROM_${family}: \${{ steps.build.outputs.${lc}_built_from }}" <<<"$build_job")" -eq 2 ]] ||
-    fail "runtime signing does not receive the exact ${lc} built-from source for both registries"
-done
-[[ "$(grep -Fc '          CODEWIRE_DEPLOY_BASELINE_SHA:' <<<"$build_job")" -eq 3 ]] ||
-  fail "certified deployed baseline does not reach the build and both signing steps"
-if grep -Fq 'scripts/ci/verify/kind-e2e.sh' <<<"$build_job"; then
-  fail "protected delivery duplicates the locally required Kind gate"
-fi
+  [[ "$(grep -Fxc "        if: \${{ steps.start-check.outputs.stop != 'true' }}" <<<"$job")" -eq 2 ]] ||
+    fail "$half half does not skip its cache and build after a stop at its start"
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  [[ "$(grep -Fxc '          CODEWIRE_DEPLOYED_SOURCE_COMMITTED_AT: ${{ needs.deploy-selection.outputs.baseline_committed_at }}' <<<"$job")" -eq 2 ]] ||
+    fail "$half half does not bound its stops by Dev's running commit age"
+  if grep -Eq 'OPENBAO_GHCR_|publish-image-to-|sign-runtime-image-set|dispatch-deploy-dev' <<<"$job"; then
+    fail "$half half publishes, signs or dispatches outside the publishing job"
+  fi
+  # The shared protected compiler cache is best effort: the selector's step
+  # output admits exactly r2 or the job-local fallback, and nothing else.
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  grep -Fxq "          CODEWIRE_SCCACHE_MODE: \${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}" \
+    <<<"$job" ||
+    fail "$half half does not select the shared protected compiler cache with a local fallback"
+  [[ "$(grep -Fc 'CODEWIRE_SCCACHE_MODE:' <<<"$job")" -eq 1 ]] ||
+    fail "$half half fixes its compiler-cache mode outside the fail-open selector"
+  grep -Fq '          SCCACHE_BUCKET: example-ci-cache-protected' <<<"$job" ||
+    fail "$half half does not use the dedicated protected cache bucket"
+  grep -Fq '          CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1' <<<"$job" ||
+    fail "$half half does not stay below the protected cache prefix"
+  # shellcheck disable=SC2016 # Match the literal workflow environment.
+  grep -Fq '          CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws' \
+    <<<"$job" ||
+    fail "$half half does not receive its private cache credential file"
+  # shellcheck disable=SC2016 # Match the literal workflow command.
+  grep -Fq '            "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"' <<<"$job" ||
+    fail "$half half does not keep its cache credential below RUNNER_TEMP"
+  grep -Fq '          scripts/ci/setup/select-protected-rust-cache.sh \' <<<"$job" ||
+    fail "$half half does not fetch its job-scoped cache credential through the fail-open selector"
+  if grep -Fq 'scripts/ci/setup/fetch-openbao-sccache-r2-protected-credentials.sh' <<<"$job"; then
+    fail "$half half fetches its cache credential outside the fail-open selector"
+  fi
+  [[ "$(grep -E '^      - name: ' <<<"$job" | sed -n '1,4p')" == "$(printf '%s\n' \
+      '      - name: Stop when main has moved past this delivery' \
+      '      - name: Select the protected R2 compiler cache' \
+      "      - name: $step" \
+      '      - name: Remove the protected R2 compiler-cache credential')" ]] ||
+    fail "$half half does not check supersession first, then select its cache credential before, and remove it right after, the build"
+  grep -Fxq '        run: scripts/ci/deploy/delivery-superseded.sh check' <<<"$job" ||
+    fail "$half half does not check supersession before it builds"
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  awk '
+    /^      - name: / { capture = ($0 == "      - name: Remove the protected R2 compiler-cache credential") }
+    capture { print }
+  ' <<<"$job" | grep -Fxq '        if: ${{ always() }}' ||
+    fail "$half half does not remove its cache credential unconditionally"
+  # shellcheck disable=SC2016 # Match the literal workflow command.
+  grep -Fq 'shred -u -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"' <<<"$job" ||
+    fail "$half half does not remove its cache credential"
+  if grep -Fq 'scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh' <<<"$job" \
+      || grep -Fq 'example-ci-cache-untrusted' <<<"$job"; then
+    fail "$half half consumes the untrusted cache"
+  fi
+  grep -Fq "          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'" <<<"$job" ||
+    fail "$half half carry-forward must stay gated until codewire/deploy accepts carried provenance"
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  grep -Fq '          CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}' \
+    <<<"$job" || fail "$half half does not receive the planner-certified deployed baseline"
+  if grep -Fq 'scripts/ci/verify/kind-e2e.sh' <<<"$job"; then
+    fail "$half half duplicates the locally required Kind gate"
+  fi
+  local family upper
+  for family in dashboard derp daemon services mesh; do
+    upper="$(tr 'a-z' 'A-Z' <<<"$family")"
+    if [[ " $* " == *" $family "* ]]; then
+      # shellcheck disable=SC2016 # Match the literal workflow expression.
+      grep -Fq "          CODEWIRE_IMAGE_STATE_${upper}: \${{ needs.deploy-selection.outputs.${family}_image_state }}" \
+        <<<"$job" || fail "$half half does not receive the trusted $family planner state"
+      for output in candidate_ref built_from; do
+        # shellcheck disable=SC2016 # Match the literal workflow expression.
+        grep -Fxq "      ${family}_${output}: \${{ steps.build.outputs.${family}_${output} }}" <<<"$job" ||
+          fail "$half half does not expose its exact $family $output"
+      done
+    elif grep -Eq "CODEWIRE_IMAGE_STATE_${upper}|${family}_(candidate_ref|built_from)" <<<"$job"; then
+      fail "$half half builds or reports the $family image of the other half"
+    fi
+  done
+}
+assert_build_half services "$service_job" 'Build and push the service runtime images' \
+  dashboard derp services mesh
+assert_build_half daemon "$daemon_job" 'Build and push the daemon runtime image' daemon
+
+# The publisher takes every digest from this run's build-job outputs only.
 for family in dashboard derp daemon services mesh; do
+  half=build-service-images
+  [[ "$family" != daemon ]] || half=build-daemon-image
   # shellcheck disable=SC2016
-  [[ "$(grep -Fc "\${{ steps.build.outputs.${family}_candidate_ref }}" <<<"$build_job")" -eq 1 ]] ||
+  [[ "$(grep -Fc "\${{ needs.${half}.outputs.${family}_candidate_ref }}" <<<"$publish_job")" -eq 1 ]] ||
     fail "runtime bundle construction does not consume the exact $family candidate once"
+  upper="$(tr 'a-z' 'A-Z' <<<"$family")"
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  [[ "$(grep -Fc "          CODEWIRE_BUILT_FROM_${upper}: \${{ needs.${half}.outputs.${family}_built_from }}" <<<"$publish_job")" -eq 2 ]] ||
+    fail "runtime signing does not receive the exact $family built-from source for both registries"
 done
-if grep -Eq '^  (build-(daemon-image|dashboard-image|derp|services-image|mesh-image)|publish-runtime-images):' "$WORKFLOW"; then
-  fail "runtime products still allocate independent protected workers"
+if grep -Eq 'steps\.build\.outputs|imagetools inspect|build-push-runtime-images|build-push-image' <<<"$publish_job"; then
+  fail "publication resolves or rebuilds a candidate instead of taking its build job's digest"
 fi
+# The publisher's only stop point precedes all publication and signing, so a
+# stop never leaves a partially signed set.
+[[ "$(grep -Fc 'scripts/ci/deploy/delivery-superseded.sh' <<<"$publish_job")" -eq 1 ]] ||
+  fail "publication checks supersession other than once, before it signs"
+[[ "$(grep -E '^      - name: ' <<<"$publish_job" | sed -n '1p')" == \
+  '      - name: Stop when main has moved past this delivery' ]] ||
+  fail "publication does not check supersession before any publication"
+grep -Fxq '        run: scripts/ci/deploy/delivery-superseded.sh check' <<<"$publish_job" ||
+  fail "publication supersession check is not the plain check"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+[[ "$(grep -Fxc "        if: \${{ steps.publish-check.outputs.stop != 'true' }}" <<<"$publish_job")" -eq 5 ]] ||
+  fail "a stopped publication still publishes, signs, dispatches or mirrors"
+[[ "$(grep -Fc 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$publish_job")" -eq 2 ]] ||
+  fail "runtime workflow does not sign the Harbor set and GHCR mirror exactly once each"
+[[ "$(grep -Fc '          CODEWIRE_DEPLOY_BASELINE_SHA:' <<<"$publish_job")" -eq 2 ]] ||
+  fail "certified deployed baseline does not reach both signing steps"
 
 bash -n "$RUNTIME_BUILDER"
 [[ -x "$RUNTIME_BUILDER" ]] || fail "runtime image-set builder is not executable"
-[[ "$(grep -Ec '^build_one (dashboard|derp|daemon|mesh|services) ' "$RUNTIME_BUILDER")" -eq 5 ]] ||
+[[ "$(grep -Ec '^[[:space:]]*build_one (dashboard|derp|daemon|mesh|services) ' "$RUNTIME_BUILDER")" -eq 5 ]] ||
   fail "runtime image-set builder does not build exactly five separate product targets"
 grep -Fq "'  max-parallelism = 2'" "$RUNTIME_BUILDER" ||
   fail "runtime image-set builder lacks the CPX42 memory bound"
@@ -269,11 +330,10 @@ grep -Fq 'Protected runtime builds may use only job-local, disabled, or protecte
 grep -Fq 'Protected runtime builds may use only the protected R2 compiler-cache bucket' \
   "$RUNTIME_BUILDER" || fail "protected runtime build does not confine the shared cache to its protected bucket"
 
-publish_job="$build_job"
 grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-dev-publisher' \
-  <<<"$build_job" || fail "runtime publisher lacks its exact OpenBao GHCR role"
+  <<<"$publish_job" || fail "runtime publisher lacks its exact OpenBao GHCR role"
 grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher' \
-  <<<"$build_job" || fail "runtime publisher lacks its exact OpenBao GHCR audience"
+  <<<"$publish_job" || fail "runtime publisher lacks its exact OpenBao GHCR audience"
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail "runtime publisher retains a split Forgejo GHCR username"
 fi
@@ -458,7 +518,7 @@ for dev_dispatch_source in \
   fi
 done
 # shellcheck disable=SC2016
-grep -Fq 'scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"' <<<"$build_job" ||
+grep -Fq 'scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"' <<<"$publish_job" ||
   fail "deploy dispatch sends anything other than the workflow source SHA"
 grep -Fq 'return_run_info:true' "$ROOT/scripts/ci/deploy/dispatch-deploy-dev.sh" ||
   fail "Dev dispatch does not request its exact Forgejo run ID"
