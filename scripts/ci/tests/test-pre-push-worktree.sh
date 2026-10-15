@@ -202,6 +202,10 @@ if [ "${PREFLIGHT_TEST_ENV_FAIL:-0}" = 1 ]; then
   echo '[preflight-environment] FAILED: synthetic environment failure' >&2
   exit 1
 fi
+# Canonical main moving while a check runs, as another worktree's fetch does.
+if [ -n "${PREFLIGHT_TEST_MOVE_MAIN_TO:-}" ]; then
+  git update-ref refs/remotes/origin/main "$PREFLIGHT_TEST_MOVE_MAIN_TO"
+fi
 EOF
   cat > "$repo/scripts/ci/verify/run-product-verification.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -504,6 +508,50 @@ normal_hook_lines="$(wc -l < "$normal_hook_log")"
 hook_push "$repo" normal-docs-push "$normal_hook_log" >/dev/null
 [ "$normal_hook_lines" = "$(wc -l < "$normal_hook_log")" ] ||
   fail 'a retried push reran the push check'
+
+# Canonical main moves while a push check runs. Newer commits that touch none
+# of the change's paths keep the receipt; one that touches them needs the
+# check again, against the newer main.
+newer_main() {
+  local parent="$1" path="$2" index blob tree
+  index="$TMP/newer-main.index"
+  GIT_INDEX_FILE="$index" git -C "$repo" read-tree "$parent"
+  blob="$(printf 'newer main: %s\n' "$path" | git -C "$repo" hash-object -w --stdin)"
+  GIT_INDEX_FILE="$index" git -C "$repo" update-index --add --cacheinfo "100644,$blob,$path"
+  tree="$(GIT_INDEX_FILE="$index" git -C "$repo" write-tree)"
+  rm -f "$index"
+  printf 'test: newer main touching %s\n' "$path" |
+    git -C "$repo" commit-tree "$tree" -p "$parent"
+}
+normal_checked_base="$(git -C "$repo" rev-parse origin/main)"
+normal_push_receipt="$(
+  cd "$repo" && scripts/ci/receipts/local-prepush-receipt.py path --scope push --remote-name origin
+)"
+rm "$normal_push_receipt"
+moved_output="$(
+  PREFLIGHT_TEST_MOVE_MAIN_TO="$(newer_main "$normal_checked_base" docs/elsewhere.md)" \
+    hook_push "$repo" normal-docs-moved "$normal_hook_log"
+)" || {
+  printf '%s\n' "$moved_output" >&2
+  fail 'main moving outside the change during the push check refused the push'
+}
+assert_contains moved_main "$moved_output" \
+  'pre-push: no valid receipt (missing); running the fast push check'
+assert_contains moved_main "$moved_output" \
+  "pre-push: local push receipt accepted for $(git -C "$repo" rev-parse HEAD); checked against main at $normal_checked_base, which has since moved outside the change"
+# The retry after main moved reuses the receipt and runs nothing.
+normal_hook_lines="$(wc -l < "$normal_hook_log")"
+hook_push "$repo" normal-docs-moved-retry "$normal_hook_log" >/dev/null
+[ "$normal_hook_lines" = "$(wc -l < "$normal_hook_log")" ] ||
+  fail 'main moving outside the change reran the push check'
+git -C "$repo" update-ref refs/remotes/origin/main \
+  "$(newer_main "$normal_checked_base" docs/normal.md)"
+overlap_output="$(hook_push "$repo" normal-docs-overlap "$normal_hook_log")"
+assert_contains moved_overlap "$overlap_output" \
+  'pre-push: no valid receipt (main-moved-into-change); running the fast push check'
+assert_contains moved_overlap "$overlap_output" \
+  'pre-push: exact-tree local push receipt accepted'
+git -C "$repo" update-ref refs/remotes/origin/main "$normal_checked_base"
 
 # A direct canonical-main update needs merge qualification; a push receipt
 # never satisfies it.
