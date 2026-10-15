@@ -2,7 +2,7 @@
 
 Canonical home for Connect-RPC / protobuf contracts: internal
 service-to-service surfaces and the client-facing `codewire.*` packages
-(Connect-RPC migration, `codewire/plans:connect-rpc/`). Every surface gets a
+(Connect-RPC migration, `connect-rpc/`). Every surface gets a
 versioned schema here; implementations are generated from these files,
 which makes swapping a service's implementation language invisible to
 its callers.
@@ -25,7 +25,7 @@ proto/
 
 Generated Go clients for every audience package live in the standalone
 `libs/gen-go/` module and are checked in. The `codewire.*` packages
-(`codewire/plans:connect-rpc/`) additionally generate into
+(`connect-rpc/`) additionally generate into
 `libs/gen-python/` and `packages/codewire-proto-ts/src/gen/` (checked in), and
 are compiled for Rust at build time by `crates/codewire-proto`.
 
@@ -56,7 +56,7 @@ buf build --config libs/daemon-proto/buf.yaml --as-file-descriptor-set -o /dev/n
 headers retained, provenance comment added after each header). They define
 the well-known error detail types (`google.rpc.BadRequest`,
 `google.rpc.ErrorInfo`, `google.rpc.RetryInfo`, …) used by the Connect
-error model (`codewire/plans:connect-rpc/01-error-model.md`, D1). They are
+error model (`connect-rpc/01-error-model.md`, D1). They are
 vendored — not pulled from the BSR — because CI is restricted-network and
 this module uses no remote dependencies or plugins.
 

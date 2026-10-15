@@ -1,7 +1,7 @@
 //! Authentication for Codewire backend services.
 //!
 //! Three user-credential kinds are accepted, all validated by direct
-//! database lookup (`codewire/plans:connect-rpc/15-auth-policy.md`):
+//! database lookup (`connect-rpc/15-auth-policy.md`):
 //!
 //! 1. **Session cookie** (`codewire.session_token`) — the dominant flow for
 //!    browser callers (dashboard). Validated against the `sessions` table
@@ -129,8 +129,8 @@ impl AuthUser {
 /// Which credential kind validated a request.
 ///
 /// One variant per accepted user-credential flavor
-/// (`codewire/plans:connect-rpc/15-auth-policy.md`). The Connect per-RPC log event
-/// (`codewire/plans:connect-rpc/03-connect-server-infrastructure.md` D7) reports
+/// (`connect-rpc/15-auth-policy.md`). The Connect per-RPC log event
+/// (`connect-rpc/03-connect-server-infrastructure.md` D7) reports
 /// [`CredentialKind::as_str`] as its `credential` field — the evidence
 /// substrate for the migration's rollout observation — so the strings are
 /// load-bearing once dashboards key on them.

@@ -1,9 +1,11 @@
 use std::future::Future;
 use std::io::{self, Read, Write};
 use std::sync::mpsc as std_mpsc;
+use std::time::Duration;
 
 use codewire_daemon_proto::daemon::v1;
 use portable_pty::{PtySize, native_pty_system};
+use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -18,6 +20,9 @@ use crate::execution::{PreparedProcess, ProcessExecution};
 const BUFFER_SIZE: usize = 32 * 1024;
 const MAX_PRELAUNCH_PTY_CONTROLS: usize = 32;
 const MAX_PRELAUNCH_PTY_INPUT_BYTES: usize = 64 * 1024;
+/// How long a session's process group has after each signal before the next
+/// one, when the session's client is gone.
+const PROCESS_GROUP_GRACE: Duration = Duration::from_secs(2);
 
 enum PtyControl {
     Stdin(Vec<u8>),
@@ -93,6 +98,9 @@ async fn run_exec_session(
         }
     };
     let mut cmd = prepared.tokio_command();
+    // The command leads its own process group, so a session whose client is
+    // gone can end everything it started that did not detach itself.
+    cmd.process_group(0);
 
     let mut child = match cmd.spawn() {
         Ok(child) => {
@@ -144,22 +152,15 @@ async fn run_exec_session(
         status = child.wait() => status,
         disconnected = disconnected_rx => {
             if disconnected.unwrap_or(true) {
-                let _ = child.kill().await;
-                child.wait().await
+                end_exec_session(&mut child).await
             } else {
                 tokio::select! {
                     status = child.wait() => status,
-                    _ = tx.closed() => {
-                        let _ = child.kill().await;
-                        child.wait().await
-                    }
+                    _ = tx.closed() => end_exec_session(&mut child).await,
                 }
             }
         }
-        _ = tx.closed() => {
-            let _ = child.kill().await;
-            child.wait().await
-        }
+        _ = tx.closed() => end_exec_session(&mut child).await,
     };
     let completion = exec_wait_result(wait_result);
     if completion.is_err() {
@@ -328,13 +329,13 @@ async fn run_pty_session<S>(
 
     let (control_tx, control_rx) = std_mpsc::channel();
     let child = child.release();
+    let leader = child.process_id();
     let master = pair.master;
     let control_thread = std::thread::spawn(move || pty_control_loop(master, writer, control_rx));
     let output_task = tokio::task::spawn_blocking({
         let tx = tx.clone();
         move || copy_pty_output(reader, tx)
     });
-    let mut killer = Some(child.clone_killer());
     let mut wait_task = tokio::task::spawn_blocking(move || {
         let mut child = child;
         child.wait().map(|status| status.exit_code() as i32)
@@ -351,33 +352,134 @@ async fn run_pty_session<S>(
         result = &mut wait_task => result,
         disconnected = disconnected_rx => {
             if disconnected.unwrap_or(true) {
-                if let Some(mut killer) = killer.take() {
-                    let _ = tokio::task::spawn_blocking(move || killer.kill()).await;
-                }
-                wait_task.await
+                end_pty_session(leader, &mut wait_task).await
             } else {
                 tokio::select! {
                     result = &mut wait_task => result,
-                    _ = tx.closed() => {
-                        if let Some(mut killer) = killer.take() {
-                            let _ = tokio::task::spawn_blocking(move || killer.kill()).await;
-                        }
-                        wait_task.await
-                    }
+                    _ = tx.closed() => end_pty_session(leader, &mut wait_task).await,
                 }
             }
         }
-        _ = tx.closed() => {
-            if let Some(mut killer) = killer.take() {
-                let _ = tokio::task::spawn_blocking(move || killer.kill()).await;
-            }
-            wait_task.await
-        }
+        _ = tx.closed() => end_pty_session(leader, &mut wait_task).await,
     };
     let _ = output_task.await;
     let _ = tx.send(pty_wait_result(wait_result)).await;
     let _ = control_task.await;
     let _ = control_thread.join();
+}
+
+/// End an exec session whose client is gone: SIGTERM to the command's
+/// process group, then SIGKILL to whatever of it is left, and reap the
+/// command.
+async fn end_exec_session(
+    child: &mut tokio::process::Child,
+) -> io::Result<std::process::ExitStatus> {
+    tracing::info!("exec session client is gone; ending its process group");
+    let leader = child.id();
+    end_process_group(
+        leader,
+        GroupEnd::Terminate,
+        PROCESS_GROUP_GRACE,
+        child.wait(),
+    )
+    .await
+}
+
+/// End a PTY session whose client is gone as a terminal hangup does.
+async fn end_pty_session(
+    leader: Option<u32>,
+    wait: &mut tokio::task::JoinHandle<io::Result<i32>>,
+) -> Result<io::Result<i32>, tokio::task::JoinError> {
+    tracing::info!("PTY session client is gone; hanging up its process group");
+    end_process_group(leader, GroupEnd::HangUp, PROCESS_GROUP_GRACE, wait).await
+}
+
+/// How a session's process group is ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupEnd {
+    /// SIGTERM to the group, then SIGKILL to whatever of it is left.
+    Terminate,
+    /// SIGHUP to the group first, as a terminal hangup sends. When the
+    /// leader exits, what is left of its group ignored the hangup, as
+    /// `nohup` jobs do, and keeps running. A leader that ignores it is
+    /// ended as [`GroupEnd::Terminate`] ends it.
+    HangUp,
+}
+
+/// End the process group that `leader` leads, waiting `grace` after each
+/// signal for the leader, and for the rest of the group, before the next.
+/// Processes that left the group, such as `setsid` children and the daemon's
+/// own durable `cw` sessions, are never signalled. Returns `wait`, the
+/// leader's reap.
+async fn end_process_group<W, T>(leader: Option<u32>, end: GroupEnd, grace: Duration, wait: W) -> T
+where
+    W: Future<Output = T>,
+{
+    let Some(group) = leader
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(Pid::from_raw)
+    else {
+        // Already reaped: nothing to signal.
+        return wait.await;
+    };
+    tokio::pin!(wait);
+    if end == GroupEnd::HangUp {
+        let _ = kill_process_group(group, Signal::HUP);
+        if let Ok(result) = tokio::time::timeout(grace, &mut wait).await {
+            return result;
+        }
+    }
+    let _ = kill_process_group(group, Signal::TERM);
+    let deadline = tokio::time::Instant::now() + grace;
+    let reaped = tokio::time::timeout_at(deadline, &mut wait).await.ok();
+    if reaped.is_some() {
+        while process_group_has_members(group) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    if reaped.is_none() || process_group_has_members(group) {
+        let _ = kill_process_group(group, Signal::KILL);
+    }
+    match reaped {
+        Some(result) => result,
+        None => wait.await,
+    }
+}
+
+/// Whether a live process is still in `group`. A zombie is not: it waits
+/// only for its parent, or PID 1, to reap it.
+#[cfg(target_os = "linux")]
+fn process_group_has_members(group: Pid) -> bool {
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return test_kill_process_group(group).is_ok();
+    };
+    let group = group.as_raw_nonzero().get();
+    processes.flatten().any(|process| {
+        process
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+            && std::fs::read_to_string(process.path().join("stat"))
+                .is_ok_and(|stat| is_live_member(&stat, group))
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_group_has_members(group: Pid) -> bool {
+    test_kill_process_group(group).is_ok()
+}
+
+/// Whether a `/proc/<pid>/stat` line is a live process in `group`.
+#[cfg(target_os = "linux")]
+fn is_live_member(stat: &str, group: i32) -> bool {
+    // `pid (comm) state ppid pgrp ...`; comm may contain spaces and ')'.
+    let Some((_, fields)) = stat.rsplit_once(") ") else {
+        return false;
+    };
+    let mut fields = fields.split_ascii_whitespace();
+    let (state, _parent, process_group) = (fields.next(), fields.next(), fields.next());
+    !matches!(state, None | Some("Z" | "X"))
+        && process_group.and_then(|value| value.parse().ok()) == Some(group)
 }
 
 fn pty_wait_result(
@@ -747,3 +849,7 @@ fn pty_size(width: i32, height: i32) -> PtySize {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "session/projection_tests.rs"]
 mod projection_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "session/process_group_tests.rs"]
+mod process_group_tests;

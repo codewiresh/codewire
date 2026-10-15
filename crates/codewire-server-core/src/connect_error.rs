@@ -1,5 +1,5 @@
 //! Connect renderer for [`AppError`] — the second renderer of the shared
-//! error type (`codewire/plans:connect-rpc/01-error-model.md`, D6).
+//! error type (`connect-rpc/01-error-model.md`, D6).
 //!
 //! This module is deliberately **transport-agnostic**: connect-rust is not
 //! in the workspace yet (03 WI-1 pins it), so it defines the canonical

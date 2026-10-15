@@ -6,7 +6,7 @@ This document is the canonical architecture reference for the Codewire platform,
 the full stack from control plane through Kubernetes abstraction to hypervisor runtime.
 
 For implementation details, use the dev docs in `docs/dev/`. For future roadmap work, use
-the design plans in `codewire/plans:`.
+the design plans in ``.
 
 If a plan doc and this document disagree, treat the plan as **proposed work** and this file
 as the **current stable summary**.
@@ -503,7 +503,7 @@ mounted at `/var/lib/docker`, and starts dockerd with `vfs`. Docker layer unpack
 and nested container workloads require ext4/xattr semantics. The durable target is a
 separate raw block PVC presented to the Kata guest, formatted and mounted at
 `/var/lib/docker`; see
-`codewire/plans:2026-07-03-guest-docker-block-backed-data-root-plan.md`.
+`2026-07-03-guest-docker-block-backed-data-root-plan.md`.
 The bootstrap verifies the target is mounted as ext4 specifically, because
 `docker:dind` can make `/var/lib/docker` an existing virtiofs mount under Kata.
 

@@ -119,7 +119,7 @@ patches:
                   # → ImagePullBackOff → env never reaches running).
                   - name: SANDBOX_DAEMON_IMAGE
                     value: codewire-daemon:e2e
-                  # Mount the Connect conformance probe (codewire/plans:
+                  # Mount the Connect conformance probe (
                   # connect-rpc/03 D8) — kind/e2e manifests only, never
                   # base or production.
                   - name: CONNECT_TESTING_SURFACE
@@ -158,7 +158,7 @@ patches:
                 env:
                   - name: TEMPORAL_HOST_PORT
                     value: "temporal:7233"
-                  # Mount the Connect conformance probe (codewire/plans:
+                  # Mount the Connect conformance probe (
                   # connect-rpc/03 D8) — kind/e2e manifests only, never
                   # base or production.
                   - name: CONNECT_TESTING_SURFACE

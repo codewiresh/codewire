@@ -1434,7 +1434,7 @@ if [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
-      scripts/runtime/*apikey*|docs/runbooks/connect-apikey-lifecycle-smoke.md)
+      scripts/runtime/*apikey*)
         select_token service_apikey_smoke
         recognized=true
         ;;
