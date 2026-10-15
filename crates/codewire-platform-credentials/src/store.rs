@@ -1141,9 +1141,13 @@ pub(crate) fn is_subscription_token(metadata: &CredentialMetadata) -> bool {
 
 pub(crate) fn require_oauth_refresh(record: &CredentialRecord) -> Result<(), Error> {
     // A Claude subscription token has no refresh; only its owner replaces it.
-    if record.metadata.authentication_kind != CredentialAuthKind::OAuth
-        || is_subscription_token(&record.metadata)
-    {
+    // A Claude sign-in is its own kind and rotates like any OAuth login.
+    let refreshable = match record.metadata.authentication_kind {
+        CredentialAuthKind::OAuth => !is_subscription_token(&record.metadata),
+        CredentialAuthKind::ClaudeSignIn => record.metadata.provider.as_str() == "anthropic",
+        _ => false,
+    };
+    if !refreshable {
         return Err(Error::UnsupportedCredential);
     }
     record.active(unix_now()?)

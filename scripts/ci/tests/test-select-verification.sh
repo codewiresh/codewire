@@ -275,6 +275,8 @@ run_paths_case openbao_secret_authority_policy pull_request refs/pull/20011/head
   scripts/ci/tests/test-sync-local-secrets.sh
 run_paths_case local_secret_sync_policy pull_request refs/pull/20012/head false \
   'policy policy_shell security security_js' scripts/dev/kind/sync-local-secrets.sh
+run_paths_case workstation_cpu_helper pull_request refs/pull/20016/head false \
+  'policy policy_shell security security_js' scripts/dev/workstation-cpu.sh docs/dev/AGENT-WORKFLOW.md
 run_paths_case kind_runtime_images_fixture pull_request refs/pull/20014/head false \
   'policy policy_shell security security_js' scripts/ci/tests/test-kind-runtime-images.sh
 run_paths_case kind_watch_github_app_fixture pull_request refs/pull/20015/head false \
@@ -1730,7 +1732,7 @@ grep -qF -- '-- --ignored --exact --nocapture' <<<"$destroy_hint_block"
 grep -qF 'assert_passed_count "environment destroy template hint matrix" "$logfile" 1' <<<"$destroy_hint_block"
 grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
 grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 43' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 47' "$integration_runner"
 grep -qF -- '--features platform,ssh-agent --lib platform::tests::ssh::' "$integration_runner"
 grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
@@ -1739,7 +1741,7 @@ grep -qF 'cargo test --locked -p codewire-credential-service' "$integration_runn
 grep -qF -- '--skip tests::database::projection::' "$integration_runner"
 grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 6' "$integration_runner"
 grep -qF -- '--lib tests::database::projection::' "$integration_runner"
-grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 12' "$integration_runner"
+grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 13' "$integration_runner"
 grep -qF -- '--lib delegation::authority::tests::' "$integration_runner"
 grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfile" 7' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"
@@ -1754,10 +1756,10 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 89' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 90' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
 grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
-grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 23' "$integration_runner"
+grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 24' "$integration_runner"
 grep -qF 'assert_passed_count "platform access profile matrix" "$logfile" 15' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-platform-credentials --test owner_sources' "$integration_runner"
 grep -qF 'assert_passed_count "platform owner-source authority matrix" "$logfile" 5' "$integration_runner"

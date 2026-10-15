@@ -5,7 +5,9 @@
 //! retires the refresh token; the first later refresh is then rejected and the
 //! owner must reconnect. Codex CLI refreshes once its last refresh is older
 //! than 8 days. This owner refreshes an idle platform credential once its
-//! protected material is older than a provider-specific keep-alive age.
+//! protected material is older than a provider-specific keep-alive age. A
+//! Claude sign-in is kept alive the same way; a Claude subscription token,
+//! which has no refresh, is a different credential kind and is never selected.
 //!
 //! Each sweep reads only metadata to select candidates, then decides from the
 //! protected material's own refresh time. A due credential is refreshed through
@@ -27,9 +29,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use codewire_access::{CredentialId, ProviderId};
+use codewire_access::{CredentialAuthKind, CredentialId, ProviderId};
 use codewire_platform_credentials::{
-    CredentialVersion, OAuthKeepAliveCandidate, PlatformCredentialStore,
+    CredentialVersion, OAuthKeepAliveCandidate, OAuthKeepAliveForm, PlatformCredentialStore,
 };
 use codewire_protected_store::ProtectedValue;
 use tokio_util::sync::CancellationToken;
@@ -37,14 +39,18 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use super::{publish_started_refresh, refresh_store_error};
+use crate::claude_oauth::ClaudeOAuthCredential;
 use crate::codex_oauth::CodexOAuthCredential;
 use crate::github_app::{GitHubAppUserOAuthBundle, GitHubOAuthCredential};
 use crate::refresh_failure::RefreshFailure;
-use crate::runtime::{exchange_codex_oauth_refresh, exchange_github_app_refresh};
+use crate::runtime::{
+    exchange_claude_oauth_refresh, exchange_codex_oauth_refresh, exchange_github_app_refresh,
+};
 use crate::{BrokerRefreshError, BrokerUpstreamTransport, GitHubAppAuthorizationOwner};
 
 const CODEX_PROVIDER: &str = "openai";
 const GITHUB_PROVIDER: &str = "github";
+const CLAUDE_PROVIDER: &str = "anthropic";
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Metadata page size for one candidate query.
@@ -57,6 +63,10 @@ const MAX_REFRESHES_PER_SWEEP: usize = 8;
 /// Pause before each further material read once a sweep has refreshed one.
 const REFRESH_SPACING: Duration = Duration::from_secs(2);
 
+/// Metadata selection age of a Claude sign-in: the configuration's floor, so a
+/// sign-in whose refresh token is due at half its lifetime is not missed.
+const MIN_CLAUDE_SELECTION_AGE: Duration = Duration::from_secs(60);
+
 /// Default sweep interval; each wait is jittered by a quarter either way.
 pub const DEFAULT_OAUTH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// OpenAI (Codex) material older than this is refreshed: inside the 8-day
@@ -65,6 +75,10 @@ pub const DEFAULT_CODEX_KEEPALIVE_AGE: Duration = Duration::from_secs(7 * 24 * 6
 /// GitHub App user tokens are refreshed after this age, far inside GitHub's
 /// documented six-month refresh-token lifetime.
 pub const DEFAULT_GITHUB_KEEPALIVE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// Claude sign-in material older than this is refreshed, or sooner at half of
+/// the refresh token's lifetime when Claude reports it. Claude publishes no
+/// refresh-token lifetime, so the default follows Codex's.
+pub const DEFAULT_CLAUDE_KEEPALIVE_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Keep-alive timing. Ages are measured from the material's own refresh time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +86,7 @@ pub struct OAuthKeepAliveConfig {
     pub interval: Duration,
     pub codex_age: Duration,
     pub github_age: Duration,
+    pub claude_age: Duration,
 }
 
 impl Default for OAuthKeepAliveConfig {
@@ -80,14 +95,16 @@ impl Default for OAuthKeepAliveConfig {
             interval: DEFAULT_OAUTH_KEEPALIVE_INTERVAL,
             codex_age: DEFAULT_CODEX_KEEPALIVE_AGE,
             github_age: DEFAULT_GITHUB_KEEPALIVE_AGE,
+            claude_age: DEFAULT_CLAUDE_KEEPALIVE_AGE,
         }
     }
 }
 
 impl OAuthKeepAliveConfig {
     /// Accepted ranges: interval 10 s to 1 day; Codex age 1 minute to 8 days
-    /// (never later than Codex CLI's own habit); GitHub age 1 minute to 90 days.
-    /// Short values exist for local observation, not production tuning.
+    /// (never later than Codex CLI's own habit); GitHub age 1 minute to 90 days;
+    /// Claude age 1 minute to 8 days. Short values exist for local
+    /// observation, not production tuning.
     pub fn validate(self) -> Result<Self, OAuthKeepAliveConfigError> {
         let minute = Duration::from_secs(60);
         if !(Duration::from_secs(10)..=DAY).contains(&self.interval) {
@@ -98,6 +115,9 @@ impl OAuthKeepAliveConfig {
         }
         if !(minute..=90 * DAY).contains(&self.github_age) {
             return Err(OAuthKeepAliveConfigError::GitHubAge);
+        }
+        if !(minute..=8 * DAY).contains(&self.claude_age) {
+            return Err(OAuthKeepAliveConfigError::ClaudeAge);
         }
         Ok(self)
     }
@@ -112,6 +132,8 @@ pub enum OAuthKeepAliveConfigError {
     CodexAge,
     #[error("OAuth keep-alive GitHub age is out of range")]
     GitHubAge,
+    #[error("OAuth keep-alive Claude age is out of range")]
+    ClaudeAge,
 }
 
 /// One owner per credential-service process. It holds the trusted store and
@@ -148,6 +170,7 @@ struct Cached {
 enum Plan {
     Codex(CodexOAuthCredential),
     GitHub(Arc<GitHubAppAuthorizationOwner>, GitHubAppUserOAuthBundle),
+    Claude(ClaudeOAuthCredential),
 }
 
 enum Outcome {
@@ -202,6 +225,7 @@ impl OAuthKeepAlive {
             interval_seconds = self.config.interval.as_secs(),
             codex_age_seconds = self.config.codex_age.as_secs(),
             github_age_seconds = self.config.github_age.as_secs(),
+            claude_age_seconds = self.config.claude_age.as_secs(),
             github_app = self.github_app.is_some(),
             "OAuth credential keep-alive started"
         );
@@ -249,24 +273,46 @@ impl OAuthKeepAlive {
         }
     }
 
-    fn providers(&self) -> Vec<(ProviderId, u64)> {
-        let mut providers = Vec::with_capacity(2);
-        if let Ok(provider) = ProviderId::parse(CODEX_PROVIDER) {
-            providers.push((provider, self.config.codex_age.as_secs()));
+    /// The rotating credential forms this owner selects, each with the
+    /// metadata age below which it is never a candidate. A Claude sign-in may
+    /// be due earlier, at half its refresh token's lifetime; its decision
+    /// reads that from the material, so its selection age is the minute floor.
+    fn forms(&self) -> Vec<OAuthKeepAliveForm> {
+        let mut forms = Vec::with_capacity(3);
+        let mut add = |provider: &str, authentication_kind, age: Duration| {
+            if let Ok(provider) = ProviderId::parse(provider) {
+                forms.push(OAuthKeepAliveForm {
+                    provider,
+                    authentication_kind,
+                    min_age_seconds: age.as_secs(),
+                });
+            }
+        };
+        add(
+            CODEX_PROVIDER,
+            CredentialAuthKind::OAuth,
+            self.config.codex_age,
+        );
+        if self.github_app.is_some() {
+            add(
+                GITHUB_PROVIDER,
+                CredentialAuthKind::OAuth,
+                self.config.github_age,
+            );
         }
-        if self.github_app.is_some()
-            && let Ok(provider) = ProviderId::parse(GITHUB_PROVIDER)
-        {
-            providers.push((provider, self.config.github_age.as_secs()));
-        }
-        providers
+        add(
+            CLAUDE_PROVIDER,
+            CredentialAuthKind::ClaudeSignIn,
+            MIN_CLAUDE_SELECTION_AGE.min(self.config.claude_age),
+        );
+        forms
     }
 
     /// One bounded pass over every candidate page. Stops early, without
     /// pruning cached decisions, at a per-sweep cap or shutdown.
     pub(crate) async fn sweep(&self) -> OAuthKeepAliveSweep {
         let mut sweep = OAuthKeepAliveSweep::default();
-        let providers = self.providers();
+        let forms = self.forms();
         let mut seen = HashSet::new();
         let mut after: Option<CredentialId> = None;
         'pages: loop {
@@ -275,7 +321,7 @@ impl OAuthKeepAlive {
             }
             let page = match self
                 .store
-                .oauth_keepalive_candidates(&providers, after.as_ref(), PAGE_SIZE)
+                .oauth_keepalive_candidates(&forms, after.as_ref(), PAGE_SIZE)
                 .await
             {
                 Ok(page) => page,
@@ -376,19 +422,35 @@ impl OAuthKeepAlive {
         else {
             return Outcome::Skipped;
         };
-        let plan = match candidate.provider.as_str() {
-            CODEX_PROVIDER => match CodexOAuthCredential::parse(material.expose_secret()) {
-                Ok(credential) => match codex_decision(
-                    credential.refreshed_at_unix(),
-                    now,
-                    self.config.codex_age.as_secs(),
-                ) {
-                    Decision::Due => Plan::Codex(credential),
-                    decision => return Outcome::Decided(decision),
-                },
-                Err(_) => return Outcome::Decided(Decision::Never),
-            },
-            GITHUB_PROVIDER => {
+        let plan = match (candidate.provider.as_str(), candidate.authentication_kind) {
+            (CODEX_PROVIDER, CredentialAuthKind::OAuth) => {
+                match CodexOAuthCredential::parse(material.expose_secret()) {
+                    Ok(credential) => match codex_decision(
+                        credential.refreshed_at_unix(),
+                        now,
+                        self.config.codex_age.as_secs(),
+                    ) {
+                        Decision::Due => Plan::Codex(credential),
+                        decision => return Outcome::Decided(decision),
+                    },
+                    Err(_) => return Outcome::Decided(Decision::Never),
+                }
+            }
+            (CLAUDE_PROVIDER, CredentialAuthKind::ClaudeSignIn) => {
+                match ClaudeOAuthCredential::parse(material.expose_secret()) {
+                    Ok(credential) => match claude_decision(
+                        credential.refreshed_at_unix(),
+                        credential.refresh_expires_at_unix(),
+                        now,
+                        self.config.claude_age.as_secs(),
+                    ) {
+                        Decision::Due => Plan::Claude(credential),
+                        decision => return Outcome::Decided(decision),
+                    },
+                    Err(_) => return Outcome::Decided(Decision::Never),
+                }
+            }
+            (GITHUB_PROVIDER, CredentialAuthKind::OAuth) => {
                 let Some(owner) = self.github_app.as_ref() else {
                     return Outcome::Decided(Decision::Never);
                 };
@@ -425,6 +487,7 @@ impl OAuthKeepAlive {
         let provider = match plan {
             Plan::Codex(_) => CODEX_PROVIDER,
             Plan::GitHub(..) => GITHUB_PROVIDER,
+            Plan::Claude(_) => CLAUDE_PROVIDER,
         };
         let Ok(refreshed_at_unix) = unix_now() else {
             return Outcome::Skipped;
@@ -469,6 +532,14 @@ impl OAuthKeepAlive {
                         let mut bytes = bundle.into_bytes();
                         ProtectedValue::new(std::mem::take(&mut *bytes))
                     }),
+                Plan::Claude(credential) => {
+                    exchange_claude_oauth_refresh(&*self.upstream, credential, refreshed_at_unix)
+                        .await
+                        .map(|bundle| {
+                            let mut bytes = bundle.into_bytes();
+                            ProtectedValue::new(std::mem::take(&mut *bytes))
+                        })
+                }
             };
         match exchanged {
             Ok(value) => {
@@ -516,6 +587,29 @@ impl OAuthKeepAlive {
 /// Codex: due once the material's own last refresh is `age` old.
 fn codex_decision(refreshed_at_unix: u64, now: u64, age: u64) -> Decision {
     let due_at = refreshed_at_unix.saturating_add(age);
+    if due_at <= now {
+        Decision::Due
+    } else {
+        Decision::NotBefore(due_at)
+    }
+}
+
+/// Claude sign-in: due at the earlier of `age` and half the refresh token's
+/// lifetime, both from the material's own last refresh. An already expired
+/// refresh token cannot be renewed; on-demand use reports Reconnect instead.
+fn claude_decision(
+    refreshed_at_unix: u64,
+    refresh_expires_at_unix: Option<u64>,
+    now: u64,
+    age: u64,
+) -> Decision {
+    if refresh_expires_at_unix.is_some_and(|expiry| expiry <= now) {
+        return Decision::Never;
+    }
+    let half_lifetime = refresh_expires_at_unix.map_or(u64::MAX, |expiry| {
+        expiry.saturating_sub(refreshed_at_unix) / 2
+    });
+    let due_at = refreshed_at_unix.saturating_add(age.min(half_lifetime));
     if due_at <= now {
         Decision::Due
     } else {
@@ -615,12 +709,48 @@ mod tests {
     }
 
     #[test]
+    fn claude_is_due_at_its_age_or_half_its_refresh_token_lifetime() {
+        let age = DEFAULT_CLAUDE_KEEPALIVE_AGE.as_secs();
+        // Without a reported refresh-token lifetime, the age alone applies.
+        assert_eq!(claude_decision(NOW - age, None, NOW, age), Decision::Due);
+        assert_eq!(
+            claude_decision(NOW, None, NOW, age),
+            Decision::NotBefore(NOW + age)
+        );
+        // A long refresh token keeps the age; a short one is due at half.
+        assert_eq!(
+            claude_decision(NOW, Some(NOW + 90 * 86_400), NOW, age),
+            Decision::NotBefore(NOW + age)
+        );
+        assert_eq!(
+            claude_decision(NOW, Some(NOW + 4 * 86_400), NOW, age),
+            Decision::NotBefore(NOW + 2 * 86_400)
+        );
+        assert_eq!(
+            claude_decision(NOW - 2 * 86_400, Some(NOW + 2 * 86_400), NOW, age),
+            Decision::Due
+        );
+        // An expired refresh token cannot be renewed.
+        assert_eq!(
+            claude_decision(NOW - 86_400, Some(NOW), NOW, age),
+            Decision::Never
+        );
+        assert_eq!(
+            claude_decision(u64::MAX, None, NOW, age),
+            Decision::NotBefore(u64::MAX)
+        );
+    }
+
+    #[test]
     fn default_ages_stay_inside_provider_refresh_habits() {
         let config = OAuthKeepAliveConfig::default().validate().unwrap();
         // Codex CLI refreshes after 8 days; keep-alive must act earlier.
         assert!(config.codex_age < 8 * DAY);
         // GitHub refresh tokens last six months.
         assert!(config.github_age * 4 < Duration::from_secs(15_897_600));
+        // Claude publishes no refresh-token lifetime: follow Codex's habit.
+        assert!(config.claude_age < 8 * DAY);
+        assert!(config.interval * 48 <= config.claude_age);
         assert!(config.interval * 48 <= config.codex_age);
     }
 
@@ -663,6 +793,20 @@ mod tests {
                 },
                 OAuthKeepAliveConfigError::GitHubAge,
             ),
+            (
+                OAuthKeepAliveConfig {
+                    claude_age: Duration::from_secs(59),
+                    ..valid
+                },
+                OAuthKeepAliveConfigError::ClaudeAge,
+            ),
+            (
+                OAuthKeepAliveConfig {
+                    claude_age: 8 * DAY + Duration::from_secs(1),
+                    ..valid
+                },
+                OAuthKeepAliveConfigError::ClaudeAge,
+            ),
         ] {
             assert_eq!(config.validate(), Err(error));
         }
@@ -670,6 +814,7 @@ mod tests {
             interval: Duration::from_secs(10),
             codex_age: Duration::from_secs(60),
             github_age: Duration::from_secs(60),
+            claude_age: Duration::from_secs(60),
         };
         assert_eq!(short.validate(), Ok(short));
     }

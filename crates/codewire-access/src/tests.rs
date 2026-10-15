@@ -581,9 +581,16 @@ fn organizations_hold_api_keys_and_ssh_but_no_profile_selects_their_oauth() {
         CredentialAuthKind::AccessToken,
         CredentialAuthKind::GitHubApp,
         CredentialAuthKind::SshKey,
+        CredentialAuthKind::ClaudeSignIn,
     ] {
         assert!(user.may_hold(kind));
-        assert_eq!(org.may_hold(kind), kind != CredentialAuthKind::OAuth);
+        assert_eq!(
+            org.may_hold(kind),
+            !matches!(
+                kind,
+                CredentialAuthKind::OAuth | CredentialAuthKind::ClaudeSignIn
+            )
+        );
     }
 
     let catalog = builtin_provider_catalog();
@@ -741,6 +748,63 @@ fn claude_subscription_tokens_are_personal_anthropic_oauth_only() {
     assert_eq!(
         HttpProvider::for_credential(&slot("anthropic"), &personal),
         Some(HttpProvider::AnthropicSubscriptionToken)
+    );
+    let mut misplaced = platform_profile(&user, &personal);
+    misplaced.entries = [(slot("codex"), personal.id.clone())].into_iter().collect();
+    assert!(matches!(
+        validate_profile_entries(&misplaced, &credentials, &catalog),
+        Err(AccessError::UnsupportedCapability { .. })
+    ));
+}
+
+/// A Claude sign-in is the Anthropic slot's refreshing claude.ai login, its
+/// own kind. Like every OAuth login it is personal: an organization can
+/// neither hold one nor have any profile select one, and a personal profile
+/// selects it in the Anthropic slot only.
+#[test]
+fn claude_sign_ins_are_personal_anthropic_only() {
+    let user = Owner::User(owner_id("user-one"));
+    let org = Owner::Organization(owner_id("org-one"));
+    assert!(user.may_hold(CredentialAuthKind::ClaudeSignIn));
+    assert!(!org.may_hold(CredentialAuthKind::ClaudeSignIn));
+    assert!(CredentialAuthKind::ClaudeSignIn.is_personal_login());
+    assert!(!CredentialAuthKind::ApiKey.is_personal_login());
+
+    let catalog = builtin_provider_catalog();
+    let sign_in = |id: &str, owner: &Owner| CredentialMetadata {
+        placement: Placement::Platform,
+        provider: provider_id("anthropic"),
+        authentication_kind: CredentialAuthKind::ClaudeSignIn,
+        ..credential(id, owner.clone())
+    };
+    let personal = sign_in("claude-sign-in-personal", &user);
+    let organization = sign_in("claude-sign-in-org", &org);
+    let platform_profile = |owner: &Owner, credential: &CredentialMetadata| AccessProfile {
+        placement: Placement::Platform,
+        entries: [(slot("anthropic"), credential.id.clone())]
+            .into_iter()
+            .collect(),
+        ..profile("work", owner.clone(), "unused")
+    };
+    let credentials: BTreeMap<_, _> = [&personal, &organization]
+        .into_iter()
+        .map(|credential| (credential.id.clone(), credential.clone()))
+        .collect();
+    for owner in [&org, &user] {
+        assert_eq!(
+            validate_profile_entries(
+                &platform_profile(owner, &organization),
+                &credentials,
+                &catalog
+            ),
+            Err(AccessError::OrganizationOAuthUnsupported)
+        );
+    }
+    let selected = platform_profile(&user, &personal);
+    validate_profile_entries(&selected, &credentials, &catalog).unwrap();
+    assert_eq!(
+        HttpProvider::for_credential(&slot("anthropic"), &personal),
+        Some(HttpProvider::AnthropicClaudeSignIn)
     );
     let mut misplaced = platform_profile(&user, &personal);
     misplaced.entries = [(slot("codex"), personal.id.clone())].into_iter().collect();

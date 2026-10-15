@@ -113,6 +113,7 @@ fn proto_credential(value: codewire_access::CredentialMetadata) -> Credential {
             Kind::AccessToken => CredentialAuthenticationKind::AccessToken,
             Kind::GitHubApp => CredentialAuthenticationKind::GithubApp,
             Kind::SshKey => CredentialAuthenticationKind::SshKey,
+            Kind::ClaudeSignIn => CredentialAuthenticationKind::ClaudeSignIn,
         }
         .into(),
         account_hint: value.account_hint,

@@ -56,8 +56,8 @@ pub use material_cache::{
 pub use model::{CredentialRecord, CredentialRegistration, CredentialVersion};
 pub use profiles::{PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError};
 pub use refresh::{
-    OAuthKeepAliveCandidate, OAuthRefreshAttemptInfo, OAuthRefreshState, PreparedOAuthRefresh,
-    PreparedOAuthRefreshResult, StartedOAuthRefresh,
+    OAuthKeepAliveCandidate, OAuthKeepAliveForm, OAuthRefreshAttemptInfo, OAuthRefreshState,
+    PreparedOAuthRefresh, PreparedOAuthRefreshResult, StartedOAuthRefresh,
 };
 pub use store::{
     CredentialMetadataReader, OwnedCredentials, PlatformCredentialStore,

@@ -4,8 +4,9 @@
 //! managed Anthropic base path reaches the provider unchanged except for its
 //! credential; see [`crate::transparent`]. The API-key form injects
 //! `x-api-key`. The Claude subscription token form, the provider's OAuth kind,
-//! is [`AnthropicSubscriptionTokenAdapter`]. Both forms share one route and its
-//! one operation, leased for every request. No federation, Bedrock or
+//! is [`AnthropicSubscriptionTokenAdapter`], and the Claude sign-in form is
+//! [`AnthropicClaudeSignInAdapter`]. Every form shares one route and its one
+//! operation, leased for every request. No federation, Bedrock or
 //! Vertex/Foundry, and no WebSockets. Requests stay within AV's 4 MiB limit.
 
 use std::collections::BTreeMap;
@@ -22,7 +23,9 @@ use url::Url;
 use crate::transparent::TransparentRequest;
 use crate::{BrokerCredentialLease, CredentialBrokerError};
 
+mod sign_in;
 mod subscription;
+pub(crate) use sign_in::AnthropicClaudeSignInAdapter;
 pub use subscription::AnthropicSubscriptionTokenAdapter;
 
 const PROVIDER: &str = "anthropic";
@@ -206,18 +209,56 @@ fn prepare_transparent<L: BrokerCredentialLease>(
     request: TransparentRequest,
     extra: impl FnOnce(&mut HeaderMap) -> Result<(), CredentialBrokerError>,
 ) -> Result<PreparedAnthropicRequest, CredentialBrokerError> {
-    let target = request.target(BASE_URL)?;
-    let mut headers = request.outbound_headers(&[]);
-    extra(&mut headers)?;
+    let outbound = Outbound::new(request, extra)?;
     lease.with_material(|material| {
-        if material.is_empty()
-            || material.len() > MAX_KEY_BYTES
-            || !material.iter().all(|byte| byte.is_ascii_graphic())
+        let value = std::str::from_utf8(material)
+            .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
+        outbound.inject(route, key, value)
+    })
+}
+
+/// A validated request's target and form-specific outbound headers, prepared
+/// before any material is borrowed.
+struct Outbound {
+    request: TransparentRequest,
+    target: Url,
+    headers: HeaderMap,
+}
+
+impl Outbound {
+    fn new(
+        request: TransparentRequest,
+        extra: impl FnOnce(&mut HeaderMap) -> Result<(), CredentialBrokerError>,
+    ) -> Result<Self, CredentialBrokerError> {
+        let target = request.target(BASE_URL)?;
+        let mut headers = request.outbound_headers(&[]);
+        extra(&mut headers)?;
+        Ok(Self {
+            request,
+            target,
+            headers,
+        })
+    }
+
+    /// Inject one credential value as `route` specifies and keep its
+    /// redaction set.
+    fn inject(
+        self,
+        route: &ProxyRouteConfig,
+        key: &'static str,
+        value: &str,
+    ) -> Result<PreparedAnthropicRequest, CredentialBrokerError> {
+        let Self {
+            request,
+            target,
+            mut headers,
+        } = self;
+        if value.is_empty()
+            || value.len() > MAX_KEY_BYTES
+            || !value.bytes().all(|byte| byte.is_ascii_graphic())
         {
             return Err(CredentialBrokerError::InvalidCredentialMaterial);
         }
-        let value = std::str::from_utf8(material)
-            .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
         let prepared = prepare_credentials(route, &Material { key, value }, &request.body)
             .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
         headers.insert(
@@ -236,14 +277,24 @@ fn prepare_transparent<L: BrokerCredentialLease>(
                 max_body_bytes: MAX_RESPONSE_BYTES,
             },
         })
-    })
+    }
 }
 
-/// The exact lease checks of both forms, which differ only in the credential
+/// The exact lease checks of every form, which differ only in the credential
 /// kind each accepts.
 fn validate_lease_kind(
     lease: &impl BrokerCredentialLease,
     kind: CredentialAuthKind,
+) -> Result<(), CredentialBrokerError> {
+    validate_lease(lease, kind, OPERATION, ROUTE)
+}
+
+/// [`validate_lease_kind`] for an exact permission of the Anthropic slot.
+fn validate_lease(
+    lease: &impl BrokerCredentialLease,
+    kind: CredentialAuthKind,
+    operation: &str,
+    route: &str,
 ) -> Result<(), CredentialBrokerError> {
     let metadata = lease.credential_metadata();
     let grant = lease.grant();
@@ -267,8 +318,8 @@ fn validate_lease_kind(
             .as_ref()
             .is_none_or(|profile| profile.revision == 0)
         || lease.material_generation() == 0
-        || permission.operation.as_str() != OPERATION
-        || permission.route.as_str() != ROUTE
+        || permission.operation.as_str() != operation
+        || permission.route.as_str() != route
         || !grant.permissions.contains(permission)
     {
         return Err(CredentialBrokerError::UnsupportedLease);

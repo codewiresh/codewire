@@ -37,6 +37,21 @@ const LAUNCH_OPERATION_TIMEOUT: Duration = Duration::from_secs(40);
 /// The status of a launch whose environment projection was refused, expired or
 /// cancelled before the program was started: the launcher never executed it.
 pub(crate) const LAUNCH_PROJECTION_DENIED: &str = "environment launch denied or expired";
+/// The status of a launch whose projection failed after the launcher was
+/// told to execute: its program may have started, so this is never a
+/// denial (#2769).
+pub(crate) const LAUNCH_COMMITTED_UNKNOWN: &str =
+    "environment launch committed; its outcome is unknown";
+
+/// A failed projection is a denial only while the launcher had not been
+/// told to execute (#2769).
+pub(crate) fn launch_failure_status(committed: bool) -> &'static str {
+    if committed {
+        LAUNCH_COMMITTED_UNKNOWN
+    } else {
+        LAUNCH_PROJECTION_DENIED
+    }
+}
 const LAUNCH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const LAUNCH_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 // Compact at twice the retained byte/frame budget, amortizing disk rewrites.
@@ -2506,7 +2521,11 @@ impl SessionEngine {
             )
             .await;
             return self
-                .record_launch_cleanup(handle, confirmed, LAUNCH_PROJECTION_DENIED.into())
+                .record_launch_cleanup(
+                    handle,
+                    confirmed,
+                    launch_failure_status(prepared.launch_committed()).into(),
+                )
                 .await;
         }
         let Some(stdin) = child.stdin.take() else {
@@ -2730,7 +2749,11 @@ impl SessionEngine {
             )
             .await;
             return self
-                .record_launch_cleanup(handle, confirmed, LAUNCH_PROJECTION_DENIED.into())
+                .record_launch_cleanup(
+                    handle,
+                    confirmed,
+                    launch_failure_status(prepared.launch_committed()).into(),
+                )
                 .await;
         }
 

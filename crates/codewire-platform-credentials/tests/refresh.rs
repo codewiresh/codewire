@@ -17,8 +17,8 @@ use codewire_access::{
 };
 use codewire_platform_credentials::{
     CredentialMetadataReader, CredentialRecord, CredentialRegistration, CredentialVersion,
-    OAuthRefreshAttemptInfo, OAuthRefreshState as State, PlatformCredentialError as Error,
-    PlatformCredentialStore, StartedOAuthRefresh,
+    OAuthKeepAliveForm, OAuthRefreshAttemptInfo, OAuthRefreshState as State,
+    PlatformCredentialError as Error, PlatformCredentialStore, StartedOAuthRefresh,
 };
 use codewire_protected_store::secret_envelope::{
     DEK_BYTES, DekContext, GeneratedDek, KekProvider, KekProviderKind, SecretEnvelopeError,
@@ -1325,8 +1325,25 @@ async fn keepalive_candidates_are_idle_active_oauth_without_an_owned_attempt() -
         age(orphaned.metadata.id.clone()).await?;
         begin_organization_deletion(&db.pool, &admin_user(), deleting.id().as_str()).await?;
         let _ = fresh;
+        // An aged Claude subscription token (Anthropic's OAuth kind) and an
+        // aged Claude sign-in: each form selects exactly its own kind.
+        let anthropic = |name: &str, kind: Kind| {
+            let mut input = registration(name, kind);
+            input.provider = codewire_access::ProviderId::parse("anthropic").unwrap();
+            input.account_hint = None;
+            input
+        };
+        let setup_token = new(user.clone(), anthropic("Setup token", Kind::OAuth)).await?;
+        age(setup_token.metadata.id.clone()).await?;
+        let sign_in = new(user.clone(), anthropic("Sign-in", Kind::ClaudeSignIn)).await?;
+        age(sign_in.metadata.id.clone()).await?;
 
-        let providers = [(codewire_access::ProviderId::parse("openai")?, 7 * 86_400)];
+        let form = |provider: &str, kind: Kind, age: u64| OAuthKeepAliveForm {
+            provider: codewire_access::ProviderId::parse(provider).unwrap(),
+            authentication_kind: kind,
+            min_age_seconds: age,
+        };
+        let providers = [form("openai", Kind::OAuth, 7 * 86_400)];
         let page = |after: Option<CredentialId>, limit: u32| {
             let store = store.clone();
             let providers = providers.clone();
@@ -1341,7 +1358,11 @@ async fn keepalive_candidates_are_idle_active_oauth_without_an_owned_attempt() -
         let ids: Vec<_> = all.iter().map(|candidate| candidate.id.clone()).collect();
         ensure!(ids == expected, "selected {ids:?}, expected {expected:?}");
         let first = all.first().context("candidate")?;
-        ensure!(first.provider.as_str() == "openai" && first.version.material_generation == 1);
+        ensure!(
+            first.provider.as_str() == "openai"
+                && first.authentication_kind == Kind::OAuth
+                && first.version.material_generation == 1
+        );
         // ID-ordered pages resume after the cursor without repeating a row.
         let mut paged = Vec::new();
         let mut after = None;
@@ -1352,8 +1373,8 @@ async fn keepalive_candidates_are_idle_active_oauth_without_an_owned_attempt() -
             after = Some(candidate.id.clone());
         }
         ensure!(paged == expected);
-        // The age is per provider: nothing here is 11 days old.
-        let older = [(codewire_access::ProviderId::parse("openai")?, 11 * 86_400)];
+        // The age is per form: nothing here is 11 days old.
+        let older = [form("openai", Kind::OAuth, 11 * 86_400)];
         ensure!(store.oauth_keepalive_candidates(&older, None, 100).await?.is_empty());
         // Once the receipt itself is old, the rotated credential is due.
         sqlx::query(
@@ -1370,13 +1391,27 @@ async fn keepalive_candidates_are_idle_active_oauth_without_an_owned_attempt() -
             .context("aged commit receipt was not selected")?;
         ensure!(rotated_candidate.version == promoted(rotated.version));
         // A provider outside the list is never selected.
-        let other = [(codewire_access::ProviderId::parse("github")?, 0)];
+        let other = [form("github", Kind::OAuth, 0)];
         ensure!(store.oauth_keepalive_candidates(&other, None, 100).await?.is_empty());
+        // The Anthropic sign-in form selects the sign-in and never the
+        // subscription token, which has no refresh; naming Anthropic's OAuth
+        // kind would select only the token.
+        let claude = [form("anthropic", Kind::ClaudeSignIn, 7 * 86_400)];
+        let selected = store.oauth_keepalive_candidates(&claude, None, 100).await?;
+        ensure!(
+            selected.len() == 1
+                && selected[0].id == sign_in.metadata.id
+                && selected[0].authentication_kind == Kind::ClaudeSignIn
+        );
+        let tokens = [form("anthropic", Kind::OAuth, 7 * 86_400)];
+        let selected = store.oauth_keepalive_candidates(&tokens, None, 100).await?;
+        ensure!(selected.len() == 1 && selected[0].id == setup_token.metadata.id);
         for (providers, limit) in [
             (Vec::new(), 10),
             (providers.to_vec(), 0),
             (providers.to_vec(), 1001),
             ([providers[0].clone(), providers[0].clone()].to_vec(), 10),
+            ([form("openai", Kind::ApiKey, 60)].to_vec(), 10),
         ] {
             ensure!(matches!(
                 store.oauth_keepalive_candidates(&providers, None, limit).await,

@@ -309,6 +309,7 @@ pub(super) fn credential(metadata: CredentialMetadata) -> proto::Credential {
             CredentialAuthKind::AccessToken => proto::CredentialAuthenticationKind::AccessToken,
             CredentialAuthKind::GitHubApp => proto::CredentialAuthenticationKind::GithubApp,
             CredentialAuthKind::SshKey => proto::CredentialAuthenticationKind::SshKey,
+            CredentialAuthKind::ClaudeSignIn => proto::CredentialAuthenticationKind::ClaudeSignIn,
         }
         .into(),
         account_hint: metadata.account_hint,
