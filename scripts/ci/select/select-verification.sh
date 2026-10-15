@@ -1669,8 +1669,16 @@ if [ "$event_selected" = false ]; then
         select_token security
         recognized=true
         ;;
+      # The protected Dev runtime builder never builds a Kind image: Kind
+      # builds through build-kind-images.sh. Its contract runs in Deploy.
+      scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/tests/test-build-push-runtime-images.sh)
+        select_token deploy
+        select_token release
+        recognized=true
+        ;;
       Dockerfile|docker-bake.hcl|apps/*/Dockerfile*|deployments/docker/*|\
-      scripts/ci/images/build-kind-images.sh|scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/images/build-kind-images.sh|\
       scripts/ci/images/run-rust-build.sh|scripts/ci/tests/test-run-rust-build.sh)
         select_token edge_kind
         select_token release

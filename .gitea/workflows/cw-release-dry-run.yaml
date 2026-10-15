@@ -23,13 +23,48 @@ name: cw four-target dry run
 on:
   push:
     branches: [main]
+    # Only a change to what a release builds starts a dry run: the crates cw
+    # links (test-cli-release-workflow.py derives them from the workspace
+    # manifests and fails when they change) and the files outside them its
+    # build reads, the runtime recipes, and the release scripts and
+    # workflows. A server, dashboard or SDK change starts none.
+    # dry-run-superseded.sh reads this list; keep it one entry per line.
     paths:
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
-      - 'crates/**'
-      - 'libs/**'
+      - 'crates/codewire-access/**'
+      - 'crates/codewire-cli/**'
+      - 'crates/codewire-cli-bin/**'
+      - 'crates/codewire-client/**'
+      - 'crates/codewire-credential-bridge/**'
+      - 'crates/codewire-credential-broker/**'
+      - 'crates/codewire-cw-release/**'
+      - 'crates/codewire-daemon/**'
+      - 'crates/codewire-daemon-bridge/**'
+      - 'crates/codewire-daemon-proto/**'
+      - 'crates/codewire-derp/**'
+      - 'crates/codewire-egress-broker/**'
+      - 'crates/codewire-egress-policy/**'
+      - 'crates/codewire-local-credentials/**'
+      - 'crates/codewire-local-vmm/**'
+      - 'crates/codewire-mesh/**'
+      - 'crates/codewire-netstack/**'
+      - 'crates/codewire-platform-credentials/**'
+      - 'crates/codewire-project/**'
+      - 'crates/codewire-project-proto/**'
+      - 'crates/codewire-protected-store/**'
+      - 'crates/codewire-proto/**'
+      - 'crates/codewire-server-core/**'
+      - 'crates/codewire-tailnet/**'
+      - 'crates/codewire-tls/**'
+      - 'crates/codewire-vmm-guest-probe/**'
+      - 'crates/codewire-workload-secrets/**'
+      - 'crates/codewire-workspace-access/**'
+      - 'crates/codewire-workspace-image/**'
+      - 'libs/daemon-proto/**'
       - 'proto/**'
+      - 'apps/cli/GPG_PUBLIC_KEY.asc'
       - 'images/cw-runtime/**'
       - 'scripts/ci/release/**'
       - 'scripts/ci/tests/fixtures/rcodesign-stand-in.sh'
@@ -93,8 +128,9 @@ jobs:
   superseded:
     # Only the newest queued commit needs the protected builders and the
     # single Mac runner: scripts/ci/release/dry-run-superseded.sh says when an
-    # older one may skip without losing a check. The run already building when
-    # main moves on still finishes.
+    # older one may skip without losing a check. Each builder job decides
+    # again when it starts, so a run that main passes while it waits for the
+    # Mac (behind a release, say) gives the runner up in seconds.
     name: Skip a superseded commit
     needs: [protected-main]
     runs-on: ci-lite
@@ -124,6 +160,7 @@ jobs:
     # 20 min each; macOS 18.9-22.2 min, assembly 30.4-31.9 min.
     timeout-minutes: 75
     outputs:
+      superseded: ${{ steps.superseded.outputs.superseded }}
       mode: ${{ steps.select.outputs.mode }}
       present: ${{ steps.build.outputs.present }}
       linux_sha256: ${{ steps.build.outputs.linux_sha256 }}
@@ -132,8 +169,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Main may have moved on while this run waited for a builder: decide
+      # again, by the same rule, before using one. A superseded commit skips
+      # the rest of this job in seconds, and the jobs after it skip.
+      - name: Skip a superseded commit
+        id: superseded
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+
       - name: Select the local runtime check
         id: select
+        if: steps.superseded.outputs.superseded == 'false'
         env:
           BEFORE: ${{ github.event.before }}
         run: |
@@ -147,11 +194,11 @@ jobs:
           printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
 
       - name: Verify sealed Rust toolchain and release targets
-        if: steps.select.outputs.mode == 'full'
+        if: steps.superseded.outputs.superseded == 'false' && steps.select.outputs.mode == 'full'
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Install protoc (pinned)
-        if: steps.select.outputs.mode == 'full'
+        if: steps.superseded.outputs.superseded == 'false' && steps.select.outputs.mode == 'full'
         run: |
           set -euo pipefail
           scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
@@ -163,7 +210,7 @@ jobs:
 
       - name: Build the Linux side from cached parts
         id: build
-        if: steps.select.outputs.mode == 'full'
+        if: steps.superseded.outputs.superseded == 'false' && steps.select.outputs.mode == 'full'
         run: |
           set -euo pipefail
           # The kernel build's container reaches only this job's workspace.
@@ -185,7 +232,7 @@ jobs:
             "$(sha256sum "$work/runtime-linux.tar" | cut -c1-64)" >> "$GITHUB_OUTPUT"
 
       - name: Check the Linux side's slow parts are cached
-        if: steps.select.outputs.mode == 'parts'
+        if: steps.superseded.outputs.superseded == 'false' && steps.select.outputs.mode == 'parts'
         run: |
           set -euo pipefail
           status=0
@@ -197,7 +244,7 @@ jobs:
           esac
 
       - name: Hand the Linux side to the macOS build
-        if: steps.build.outputs.present == 'true'
+        if: steps.superseded.outputs.superseded == 'false' && steps.build.outputs.present == 'true'
         uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
         with:
           name: cw-dry-run-runtime-linux-${{ github.run_id }}
@@ -217,12 +264,24 @@ jobs:
     runs-on: macos-arm64
     timeout-minutes: 30
     outputs:
+      superseded: ${{ steps.superseded.outputs.superseded }}
       unsigned_sha256: ${{ steps.build.outputs.unsigned_sha256 }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      # The single Mac runner: decide again before holding it for a commit
+      # main has passed while this run waited (as build-darwin does).
+      - name: Skip a superseded commit
+        id: superseded
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
 
       - name: Build the helper unless its recipe is signed
         id: build
+        if: steps.superseded.outputs.superseded == 'false'
         run: |
           set -euo pipefail
           work="${RUNNER_TEMP:?}/codewire-vz-runner"
@@ -236,7 +295,7 @@ jobs:
           fi
 
       - name: Hand the unsigned helper to signing
-        if: steps.build.outputs.unsigned_sha256 != ''
+        if: steps.superseded.outputs.superseded == 'false' && steps.build.outputs.unsigned_sha256 != ''
         uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
         with:
           name: cw-dry-run-vz-runner-unsigned-${{ github.run_id }}
@@ -252,6 +311,7 @@ jobs:
     # packs only a helper a release signed.
     name: Sign the VZ helper with the rcodesign stand-in (never signs)
     needs: [protected-main, build-helper-darwin]
+    if: needs.build-helper-darwin.outputs.superseded == 'false'
     runs-on: ci-protected
     timeout-minutes: 20
     steps:
@@ -301,10 +361,11 @@ jobs:
   build-darwin:
     name: Build the macOS cw natively
     needs: [protected-main, superseded, build-runtime-linux, build-helper-darwin, sign-helper]
-    if: needs.superseded.outputs.superseded == 'false'
+    if: needs.superseded.outputs.superseded == 'false' && needs.build-runtime-linux.outputs.superseded == 'false' && needs.build-helper-darwin.outputs.superseded == 'false'
     runs-on: macos-arm64
     timeout-minutes: 60
     outputs:
+      superseded: ${{ steps.superseded.outputs.superseded }}
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
       runtime: ${{ steps.runtime.outputs.present }}
       # The one local runtime document every cw embeds (#2733).
@@ -314,7 +375,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Main may have moved on while this run waited for a builder: decide
+      # again, by the same rule, before using one. A superseded commit skips
+      # the rest of this job in seconds, and the jobs after it skip.
+      - name: Skip a superseded commit
+        id: superseded
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+
       - name: Install protoc (pinned)
+        if: steps.superseded.outputs.superseded == 'false'
         run: |
           set -euo pipefail
           scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip" \
@@ -325,7 +396,7 @@ jobs:
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
       - name: Receive the local runtime's Linux side
-        if: needs.build-runtime-linux.outputs.present == 'true'
+        if: steps.superseded.outputs.superseded == 'false' && needs.build-runtime-linux.outputs.present == 'true'
         uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-dry-run-runtime-linux-${{ github.run_id }}
@@ -333,7 +404,7 @@ jobs:
 
       - name: Build the local VM runtime from cached parts
         id: runtime
-        if: needs.build-runtime-linux.outputs.present == 'true'
+        if: steps.superseded.outputs.superseded == 'false' && needs.build-runtime-linux.outputs.present == 'true'
         env:
           LINUX_SHA256: ${{ needs.build-runtime-linux.outputs.linux_sha256 }}
         run: |
@@ -356,7 +427,7 @@ jobs:
           esac
 
       - name: Check the Mac side's slow parts are cached
-        if: needs.build-runtime-linux.outputs.present != 'true'
+        if: steps.superseded.outputs.superseded == 'false' && needs.build-runtime-linux.outputs.present != 'true'
         run: |
           set -euo pipefail
           status=0
@@ -369,6 +440,7 @@ jobs:
 
       - name: Build the macOS pair
         id: build
+        if: steps.superseded.outputs.superseded == 'false'
         run: |
           set -euo pipefail
           CW_RELEASE_TARGETS='aarch64-apple-darwin x86_64-apple-darwin' \
@@ -378,6 +450,7 @@ jobs:
             "$(shasum -a 256 dist/cw-release/SHA256SUMS | cut -c1-64)" >> "$GITHUB_OUTPUT"
 
       - name: Hand the macOS pair to the assembly
+        if: steps.superseded.outputs.superseded == 'false'
         uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
         with:
           name: cw-dry-run-darwin-${{ github.run_id }}
@@ -393,6 +466,7 @@ jobs:
     # still runs, and the assembly packages exactly the pair it hands over.
     name: Sign the macOS pair with the rcodesign stand-in (never signs)
     needs: [protected-main, build-darwin]
+    if: needs.build-darwin.outputs.superseded == 'false'
     runs-on: ci-protected
     timeout-minutes: 20
     outputs:
@@ -459,10 +533,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Main may have moved on while this run waited for a builder: decide
+      # again, by the same rule, before using one. A superseded commit skips
+      # the rest of this job in seconds, and the jobs after it skip.
+      - name: Skip a superseded commit
+        id: superseded
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+
       - name: Verify sealed Rust toolchain and release targets
+        if: steps.superseded.outputs.superseded == 'false'
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Install protoc (pinned)
+        if: steps.superseded.outputs.superseded == 'false'
         run: |
           set -euo pipefail
           scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
@@ -473,6 +558,7 @@ jobs:
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
       - name: Set up cross-build tools
+        if: steps.superseded.outputs.superseded == 'false'
         run: |
           set -euo pipefail
           zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
@@ -483,12 +569,14 @@ jobs:
           cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
 
       - name: Receive the stand-in-signed macOS pair
+        if: steps.superseded.outputs.superseded == 'false'
         uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-dry-run-darwin-signed-${{ github.run_id }}
           path: dist-darwin
 
       - name: Verify the received macOS pair is the stand-in-signed pair
+        if: steps.superseded.outputs.superseded == 'false'
         env:
           DARWIN_SUMS_SHA256: ${{ needs.sign-darwin.outputs.darwin_sums_sha256 }}
           DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}
@@ -506,6 +594,7 @@ jobs:
           fi
 
       - name: Package and verify the unsigned delivery
+        if: steps.superseded.outputs.superseded == 'false'
         env:
           RUNTIME: ${{ needs.build-darwin.outputs.runtime }}
           DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}

@@ -13,7 +13,8 @@
 #     a superseded push that changed a runtime input runs unless a newer full
 #     build is queued.
 # A dispatched run always builds. An unreadable or malformed canonical main
-# fails the step.
+# fails the step. The workflow runs this when the run starts and again at the
+# start of each builder job, on Linux and on the Mac.
 #
 # Usage: dry-run-superseded.sh SHA [BEFORE]   (writes superseded= to $GITHUB_OUTPUT)
 set -euo pipefail
@@ -59,7 +60,8 @@ fi
 # Judge the later pushes on the history actually fetched.
 unshallow=()
 [[ "$(git rev-parse --is-shallow-repository)" != true ]] || unshallow=(--unshallow)
-git fetch --quiet --no-tags "${unshallow[@]}" origin '+refs/heads/main:refs/remotes/origin/main'
+# The Mac's bash 3.2 treats an empty array as unbound under set -u.
+git fetch --quiet --no-tags ${unshallow[@]+"${unshallow[@]}"} origin '+refs/heads/main:refs/remotes/origin/main'
 main="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
 git merge-base --is-ancestor "$SHA" "$main" || fail "$SHA is not on canonical main $main"
 

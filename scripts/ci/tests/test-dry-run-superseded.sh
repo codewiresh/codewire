@@ -38,15 +38,17 @@ change() {
   git -C "$builder" rev-parse HEAD
 }
 
-# Chain P: a cw change, a change no dry run sees, a cw change, a runtime input.
-x_parts="$(change crates/a/src/lib.rs 'pub fn a() {}')"
+# Chain P: a cw change, changes no dry run sees (docs, and a crate cw does
+# not link), then a cw change.
+x_parts="$(change crates/codewire-cli/src/a.rs 'pub fn a() {}')"
 docs_only="$(change docs/notes.md 'no dry run')"
-t_parts="$(change crates/b/src/lib.rs 'pub fn b() {}')"
+server_only="$(change crates/codewire-dashboard-web/src/s.rs 'pub fn s() {}')"
+t_parts="$(change crates/codewire-daemon/src/b.rs 'pub fn b() {}')"
 git -C "$builder" branch chain-p
 # Chain F: a runtime input, then a cw change, then another runtime input.
 git -C "$builder" checkout --quiet -b chain-f "$base"
 x_full="$(change Cargo.lock 'lock change')"
-t_after_full="$(change crates/c/src/lib.rs 'pub fn c() {}')"
+t_after_full="$(change crates/codewire-client/src/c.rs 'pub fn c() {}')"
 f_full="$(change rust-toolchain.toml '[toolchain]')"
 git -C "$builder" push --quiet "$origin" chain-p chain-f "$base:refs/heads/main"
 
@@ -102,6 +104,7 @@ expect superseded superseded=true "$t_parts" "$x_parts" "$base"
 grep -Fq "the queued dry run of $t_parts builds this commit's changes" "$work/superseded.log" ||
   fail 'superseded case did not name the newer run in one line'
 expect no-later-run superseded=false "$docs_only" "$x_parts" "$base"
+expect server-crate-runs-none superseded=false "$server_only" "$x_parts" "$base"
 expect dispatched superseded=false "$t_parts" "$x_parts" "$base" workflow_dispatch
 expect runtime-not-rebuilt superseded=false "$t_after_full" "$x_full" "$base"
 expect runtime-rebuilt superseded=true "$f_full" "$x_full" "$base"
@@ -129,4 +132,4 @@ git -C "$shallow" checkout --quiet --detach "$t_parts"
   { sed 's/^/  /' "$work/shallow.log" >&2; fail 'shallow checkout failed'; }
 [[ "$(cat "$work/shallow.out")" == superseded=true ]] || fail 'shallow checkout did not see the later push'
 
-echo 'test-dry-run-superseded: PASS cases=14'
+echo 'test-dry-run-superseded: PASS cases=15'

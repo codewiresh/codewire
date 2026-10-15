@@ -321,6 +321,12 @@ run_paths_case protected_runtime_signing pull_request refs/pull/2005/head false 
   scripts/ci/images/sign-runtime-image-set.sh \
   scripts/ci/tests/test-sign-runtime-image-set.sh \
   scripts/ci/trust/codewire-runtime-signing.pub
+# The protected Dev runtime builder and its contract never build a Kind image:
+# they select Deploy and release verification, not Kind, even on main.
+run_paths_case protected_runtime_builder push refs/heads/main false \
+  'deploy go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
+  scripts/ci/images/build-push-runtime-images.sh \
+  scripts/ci/tests/test-build-push-runtime-images.sh
 run_paths_case runtime_plan_ci pull_request refs/pull/201/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/deploy/resolve-deployed-source.sh \
@@ -1483,6 +1489,11 @@ contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1911/head \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
 assert_contract_field edge "$contract_output" required_local_mode kind
+printf '%s\n' scripts/ci/images/build-push-runtime-images.sh > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1914/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field protected_runtime_builder "$contract_output" required_local_mode default
 printf '%s\n' scripts/ci/tests/test-kind-e2e-suites.sh > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1912/head \
