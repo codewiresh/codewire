@@ -294,6 +294,14 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
             self.assertIn("--profile", finalizer.command("ci"))
             self.assertIn("--release", finalizer.command("release"))
             self.assertNotIn("--profile", finalizer.command("release"))
+            # The Dev daemon producer: the thin-LTO runtime profile, owning its
+            # whole worker; the release (support image) producer keeps its bound.
+            runtime_command = finalizer.command("runtime")
+            self.assertEqual(runtime_command[runtime_command.index("--profile") + 1], "runtime")
+            self.assertNotIn("--release", runtime_command)
+            self.assertEqual(runtime_command[runtime_command.index("--jobs") + 1], "8")
+            release_command = finalizer.command("release")
+            self.assertEqual(release_command[release_command.index("--jobs") + 1], "2")
 
     def build_bytes(self, capsule, record_changes=None):
         model = capsule.model
