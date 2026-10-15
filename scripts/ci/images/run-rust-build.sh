@@ -5,7 +5,7 @@ set -euo pipefail
 mode="${CODEWIRE_SCCACHE_MODE:-disabled}"
 build_profile="${CODEWIRE_RUST_PROFILE:-release}"
 case "$build_profile" in
-  ci|release) ;;
+  ci|release|runtime) ;;
   *)
     printf 'codewire-rust-build: invalid CODEWIRE_RUST_PROFILE: %s\n' "$build_profile" >&2
     exit 2

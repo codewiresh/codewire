@@ -896,8 +896,8 @@ grep -qF -- "daemon.tags=registry.example.invalid/codewire/daemon:$source_sha" "
   fail 'immutable source tag did not reach canonical Bake target'
 grep -qF -- "CODEWIRE_IMAGE_SOURCE_SHA=$source_sha" "$FAKE_DOCKER_CALLS" ||
   fail 'exact source revision did not reach canonical Bake'
-grep -qF -- 'CODEWIRE_RUST_PROFILE=release' "$FAKE_DOCKER_CALLS" ||
-  fail 'protected publication did not force the release profile'
+grep -qF -- 'CODEWIRE_RUST_PROFILE=runtime' "$FAKE_DOCKER_CALLS" ||
+  fail 'protected publication did not force the thin-LTO runtime profile'
 grep -qF -- 'builder-id=https://git.example.invalid/infra/ci/builders/protected-delivery/v1' "$FAKE_DOCKER_CALLS" ||
   fail 'protected product build omitted its explicit minimal BuildKit SLSA provenance identity'
 grep -qF -- 'version=v1' "$FAKE_DOCKER_CALLS" ||
@@ -940,7 +940,7 @@ grep -qF -- 'buildx rm --force codewire-publish-' "$FAKE_DOCKER_CALLS" ||
   fail 'image was not built exactly once'
 [[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
   fail 'daemon did not use exactly one original CW producer'
-assert_cw_context release
+assert_cw_context runtime
 [[ "$(git -C "$source_fixture" remote get-url origin)" == "$source_remote_before" ]] ||
   fail 'protected image publication did not restore the checkout origin remote'
 
@@ -1793,8 +1793,9 @@ from pathlib import Path
 import sys
 records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
 # The service runtime set binds no CW: the daemon builds alone on its own
-# protected worker. The apt snapshot cache case adds one release workspace build.
-assert len(records) == 10 and Counter(record['profile'] for record in records) == {'release': 8, 'ci': 2}
+# protected worker, with the thin-LTO runtime profile; the workspace keeps the
+# release profile. The apt snapshot cache case adds one release workspace build.
+assert len(records) == 10 and Counter(record['profile'] for record in records) == {'release': 6, 'runtime': 2, 'ci': 2}
 assert Counter(record['source_revision'] for record in records) == {sys.argv[2]: 9, sys.argv[3]: 1}
 assert len({record['producer_receipt_sha256'] for record in records}) == 10
 print('protected/runtime/Kind CW original-producer contexts: 10 verified')

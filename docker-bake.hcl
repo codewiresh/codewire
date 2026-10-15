@@ -30,8 +30,9 @@ variable "CODEWIRE_SCCACHE_PREFIX" {
   default = ""
 }
 
+# Runtime images build the thin-LTO runtime profile; Kind targets override ci.
 variable "CODEWIRE_RUST_PROFILE" {
-  default = "release"
+  default = "runtime"
 }
 
 group "default" {

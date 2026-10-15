@@ -276,6 +276,15 @@ lto = true
 codegen-units = 1
 strip = true
 
+# Runtime images (dashboard, services, mesh, derp, and the daemon's static cw):
+# release semantics with thin LTO and parallel codegen. Full LTO with one
+# codegen unit made every Dev delivery relink each shipped binary on one core.
+# The cw CLI release assets keep [profile.release].
+[profile.runtime]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
 # Native tests hash the actual CW image at admission and custody checks. Keep
 # those hashes inside the same deadlines even with an unoptimized debug CW.
 # Set on dev, which the test profile inherits: a test-only override compiled
