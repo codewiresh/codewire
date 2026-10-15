@@ -241,6 +241,21 @@ impl PartialEq for ResolvedPlatformConfig {
 
 impl Eq for ResolvedPlatformConfig {}
 
+/// Why the saved platform config could not be used, named once beside "no
+/// server" or "not logged in". No config file at all is the ordinary state
+/// before `cw login`, so it adds nothing to the message.
+fn config_note(cause: Option<&ConfigError>) -> String {
+    match cause {
+        None => String::new(),
+        Some(ConfigError::ReadConfig { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            String::new()
+        }
+        Some(error) => format!(": {error}"),
+    }
+}
+
 pub fn oauth_credentials_path(config_dir: &Path) -> PathBuf {
     config_dir.join("credentials.json")
 }
@@ -265,7 +280,7 @@ pub fn resolve_platform(
         Some(server_url) => server_url,
         None => {
             return Err(ConfigError::NoPlatformServer {
-                source: config_result.err().map(Box::new),
+                cause: config_result.err().map(Box::new),
             });
         }
     };
@@ -298,7 +313,7 @@ pub fn resolve_platform(
                 });
             }
             return Err(ConfigError::NoPlatformToken {
-                source: config_result.err().map(Box::new),
+                cause: config_result.err().map(Box::new),
             });
         }
     };
@@ -1276,10 +1291,12 @@ pub enum ConfigError {
     InvalidCurrentTarget,
     #[error("incomplete platform config {path}: missing server_url")]
     IncompletePlatformConfig { path: PathBuf },
-    #[error("no server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login'){suffix}", suffix = source.as_ref().map(|e| format!(": {e}")).unwrap_or_default())]
-    NoPlatformServer { source: Option<Box<ConfigError>> },
-    #[error("not logged in (set CODEWIRE_API_KEY, run 'cw setup', or run 'cw login'){suffix}", suffix = source.as_ref().map(|e| format!(": {e}")).unwrap_or_default())]
-    NoPlatformToken { source: Option<Box<ConfigError>> },
+    // `cause` is printed at most once, here; as a `source` the error chain
+    // would print it again.
+    #[error("no server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login'){}", config_note(cause.as_deref()))]
+    NoPlatformServer { cause: Option<Box<ConfigError>> },
+    #[error("not logged in (set CODEWIRE_API_KEY, run 'cw setup', or run 'cw login'){}", config_note(cause.as_deref()))]
+    NoPlatformToken { cause: Option<Box<ConfigError>> },
     #[error(
         "not logged in for {requested} (saved config is for {saved}; set CODEWIRE_API_KEY or log in to that server)"
     )]
