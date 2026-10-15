@@ -307,7 +307,7 @@ SELECT state FROM environments
 WHERE id = :'environment' AND org_id = 'org_contract_1';
 SQL
       )"
-    elif ! state="$(kind_credential_cli env --platform info "$environment" --output json |
+    elif ! state="$(kind_credential_cli env --cloud info "$environment" --output json |
         jq -er '.state')" || [ -z "$state" ]; then
       # A failed observation must name itself. jq exits 4 without a word when
       # its input is empty, and older jq variants return success with no
@@ -334,7 +334,7 @@ SQL
 wait_kind_credential_setup_complete() {
   local environment="$1" attempt
   for ((attempt = 0; attempt < 180; attempt++)); do
-    if kind_credential_cli env --platform info "$environment" --output json |
+    if kind_credential_cli env --cloud info "$environment" --output json |
         jq -e '.state == "running" and .setup_complete == true' >/dev/null; then
       return 0
     fi
@@ -628,9 +628,9 @@ replace_kind_credential_sandbox() {
   local environment="$1" before after
   before="$(kubectl -n "$SANDBOX_NS" get pod "$(kind_credential_workspace "$environment")" \
     -o 'jsonpath={.metadata.uid}')" || return $?
-  kind_credential_cli env --platform stop "$environment" --output json >/dev/null || return $?
+  kind_credential_cli env --cloud stop "$environment" --output json >/dev/null || return $?
   wait_kind_credential_environment "$environment" stopped || return $?
-  kind_credential_cli env --platform start "$environment" --output json >/dev/null || return $?
+  kind_credential_cli env --cloud start "$environment" --output json >/dev/null || return $?
   wait_kind_credential_environment "$environment" running || return $?
   after="$(kubectl -n "$SANDBOX_NS" get pod "$(kind_credential_workspace "$environment")" \
     -o 'jsonpath={.metadata.uid}')" || return $?
@@ -1179,7 +1179,7 @@ cleanup_kind_credential_stage() {
   [ -n "${environment}${profiles}${credentials}" ] || return 0
   log "removing what the stage left: environment ${environment:-none}; profiles ${profiles:-none}; credentials ${credentials:-none}"
   if [ -n "$environment" ]; then
-    if kind_credential_cli env --platform rm "$environment" --yes --output json >/dev/null 2>&1 \
+    if kind_credential_cli env --cloud rm "$environment" --yes --output json >/dev/null 2>&1 \
         && wait_kind_credential_environment "$environment" destroyed >/dev/null 2>&1; then
       log "removed environment ${environment}"
     else
@@ -1187,15 +1187,15 @@ cleanup_kind_credential_stage() {
     fi
   fi
   for item in $profiles; do
-    if kind_credential_cli credentials --platform --profile "$item" delete --yes >/dev/null 2>&1; then
+    if kind_credential_cli credentials --cloud --profile "$item" delete --yes >/dev/null 2>&1; then
       log "deleted profile ${item}"
     else
       log "could not delete profile ${item}"
     fi
   done
   for item in $credentials; do
-    kind_credential_cli credentials --platform revoke "$item" --output json >/dev/null 2>&1 || true
-    if kind_credential_cli credentials --platform delete "$item" --yes >/dev/null 2>&1; then
+    kind_credential_cli credentials --cloud revoke "$item" --output json >/dev/null 2>&1 || true
+    if kind_credential_cli credentials --cloud delete "$item" --yes >/dev/null 2>&1; then
       log "deleted credential ${item}"
     else
       log "could not delete credential ${item}"
@@ -1241,16 +1241,16 @@ kind_credential_native_smoke() (
     $1 == "ID:" { id = $2; count++ }
     END { exit !(count == 1 && id == "org_contract_1") }'
   stage_credentials="$credential_name"
-  kind_credential_cli credentials --platform connect codex --name "$credential_name"
-  kind_credential_cli credentials --platform get "$credential_name" --output json | jq -e \
+  kind_credential_cli credentials --cloud connect codex --name "$credential_name"
+  kind_credential_cli credentials --cloud get "$credential_name" --output json | jq -e \
     --arg name "$credential_name" 'length == 1 and .[0].name == $name
       and .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"' >/dev/null
   # The first explicit identity selection creates the named profile atomically.
   stage_profiles="$profile_name"
-  kind_credential_cli credentials --platform --profile "$profile_name" set codex "$credential_name"
+  kind_credential_cli credentials --cloud --profile "$profile_name" set codex "$credential_name"
   # Let the public create path resolve a runnable preset for the exact runtime
   # image. preset_contract_1 is an API contract fixture with no template config.
-  environment="$(kind_credential_cli env --platform create --name "$profile_name" \
+  environment="$(kind_credential_cli env --cloud create --name "$profile_name" \
     --image "$workspace_image" \
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
@@ -1261,7 +1261,7 @@ kind_credential_native_smoke() (
   # before, so the two Pods' tokens expire within a minute of each other and
   # the renewal below runs in that band every time (#2641).
   restart_kind_orchestration
-  update="$(kind_credential_cli env --platform update "$environment" \
+  update="$(kind_credential_cli env --cloud update "$environment" \
     --profile "platform:$profile_name" --yes --output json)"
   printf '%s\n' "$update"
   restart_generation="$(jq -er '.operation_generation |
@@ -1332,9 +1332,9 @@ kind_credential_native_smoke() (
   kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- \
     sh -ec 'umask 077; printf "%s\n" "$1" > /home/codewire/.codex/kind-persistence' sh "$marker" ||
     return $?
-  kind_credential_cli env --platform stop "$environment" --output json
+  kind_credential_cli env --cloud stop "$environment" --output json
   wait_kind_credential_environment "$environment" stopped
-  kind_credential_cli env --platform start "$environment" --output json
+  kind_credential_cli env --cloud start "$environment" --output json
   wait_kind_credential_environment "$environment" running
   pod="$(kind_credential_workspace "$environment")" || return $?
   [ "$(kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- \
@@ -1361,7 +1361,7 @@ kind_credential_native_smoke() (
   authority_window_from="$(date +%s%3N)"
   kind_credential_daemon_probe "$environment" success
   kind_credential_daemon_probe "$environment" success
-  kind_credential_cli credentials --platform connect codex --name "$credential_name" --yes
+  kind_credential_cli credentials --cloud connect codex --name "$credential_name" --yes
   kind_credential_daemon_probe "$environment" success
   assert_kind_credential_provider_counts 5
   assert_kind_credential_material_reuse
@@ -1395,7 +1395,7 @@ kind_credential_native_smoke() (
     kind_credential_daemon_probe "$environment" success
   fi
   authority_window_from="$(date +%s%3N)"
-  kind_credential_cli credentials --platform --profile "$profile_name" unset codex
+  kind_credential_cli credentials --cloud --profile "$profile_name" unset codex
   rebind_kind_credential_environment "$environment"
   kind_credential_daemon_probe "$environment" denied "$KIND_AUTHORITY_CHANGE_WITHIN_MS"
   rebind_kind_credential_environment "$environment" "$bound_revision"
@@ -1408,7 +1408,7 @@ kind_credential_native_smoke() (
   printf '%s\n' '{"event":"sandbox_replaced"}' >> "$KIND_DAEMON_PROBE_LOG"
   kind_credential_daemon_probe "$environment" success
   # Revocation refuses the very next request on that epoch.
-  kind_credential_cli credentials --platform revoke "$credential_name" --output json
+  kind_credential_cli credentials --cloud revoke "$credential_name" --output json
   kind_credential_daemon_probe "$environment" revoked
   assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG" \
     "$login_check_seconds"
@@ -1423,12 +1423,12 @@ kind_credential_native_smoke() (
 
   # Do not unbind before destroy: terminal cleanup itself must remove the
   # binding, so a tombstone cannot permanently pin the profile and credential.
-  kind_credential_cli env --platform rm "$environment" --yes --output json
+  kind_credential_cli env --cloud rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   stage_environment=""
-  kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
+  kind_credential_cli credentials --cloud --profile "$profile_name" delete --yes
   stage_profiles=""
-  kind_credential_cli credentials --platform delete "$credential_name" --yes
+  kind_credential_cli credentials --cloud delete "$credential_name" --yes
   stage_credentials=""
   log "public synthetic Codex flow, ChatGPT login delivery, native rotation/retry, revocation and terminal cleanup passed"
 )
@@ -1601,7 +1601,7 @@ assert_kind_credential_anthropic_events() {
 assert_kind_credential_claude_token() {
   local name="$1" revision="$2"
   [[ "$revision" =~ ^[1-9][0-9]*$ ]] || return 1
-  kind_credential_cli credentials --platform get "$name" --output json | jq -e \
+  kind_credential_cli credentials --cloud get "$name" --output json | jq -e \
     --arg name "$name" --arg revision "$revision" '.[0] as $c
       | ((($c.expiresAtUnix // $c.expires_at_unix) | tonumber) - (now | floor)) as $left
       | length == 1 and $c.name == $name and $c.provider == "anthropic"
@@ -1651,10 +1651,10 @@ kind_credential_claude_session() (
   # Material only through stdin, as a user pastes it; never an argument.
   stage_credentials="$key_name $token_name"
   printf '%s' "$KIND_ANTHROPIC_API_KEY" |
-    kind_credential_cli credentials --platform add anthropic --name "$key_name"
+    kind_credential_cli credentials --cloud add anthropic --name "$key_name"
   printf '%s' "$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |
-    kind_credential_cli credentials --platform add claude-subscription --name "$token_name"
-  kind_credential_cli credentials --platform get "$key_name" --output json | jq -e \
+    kind_credential_cli credentials --cloud add claude-subscription --name "$token_name"
+  kind_credential_cli credentials --cloud get "$key_name" --output json | jq -e \
     --arg name "$key_name" '.[0] as $c | length == 1 and $c.name == $name
       and $c.provider == "anthropic" and $c.status == "CREDENTIAL_STATUS_ACTIVE"
       and ($c.authenticationKind // $c.authentication_kind) == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' \
@@ -1663,9 +1663,9 @@ kind_credential_claude_session() (
   # year after it was added.
   assert_kind_credential_claude_token "$token_name" 1
   stage_profiles="$key_profile $token_profile"
-  kind_credential_cli credentials --platform --profile "$key_profile" set anthropic "$key_name"
-  kind_credential_cli credentials --platform --profile "$token_profile" set anthropic "$token_name"
-  environment="$(kind_credential_cli env --platform create --name "$key_profile" \
+  kind_credential_cli credentials --cloud --profile "$key_profile" set anthropic "$key_name"
+  kind_credential_cli credentials --cloud --profile "$token_profile" set anthropic "$token_name"
+  environment="$(kind_credential_cli env --cloud create --name "$key_profile" \
     --image "$workspace_image" \
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
@@ -1677,7 +1677,7 @@ kind_credential_claude_session() (
   for form in api_key subscription_token; do
     profile="$key_profile"
     [ "$form" = api_key ] || profile="$token_profile"
-    update="$(kind_credential_cli env --platform update "$environment" \
+    update="$(kind_credential_cli env --cloud update "$environment" \
       --profile "platform:$profile" --yes --output json)"
     generation="$(jq -er '.operation_generation |
       if type == "number" and . > 0 and . == floor then .
@@ -1697,27 +1697,27 @@ kind_credential_claude_session() (
   # reports the 401 and the credential stays Active; nothing marks or
   # withholds it. Replacing it with a good token restores the next session.
   printf '%s' "$KIND_CLAUDE_REFUSED_TOKEN" |
-    kind_credential_cli credentials --platform rotate "$token_name"
+    kind_credential_cli credentials --cloud rotate "$token_name"
   assert_kind_credential_claude_token "$token_name" 2
   kind_credential_claude_run "$environment" "$driver" subscription_token refused
   baseline="$(assert_kind_credential_anthropic_events "$baseline" subscription_token 401)"
   assert_kind_credential_claude_token "$token_name" 2
   printf '%s' "$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |
-    kind_credential_cli credentials --platform rotate "$token_name"
+    kind_credential_cli credentials --cloud rotate "$token_name"
   assert_kind_credential_claude_token "$token_name" 3
   kind_credential_claude_run "$environment" "$driver" subscription_token success
   baseline="$(assert_kind_credential_anthropic_events "$baseline" subscription_token 200)"
 
-  kind_credential_cli env --platform rm "$environment" --yes --output json
+  kind_credential_cli env --cloud rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   stage_environment=""
   for profile in "$key_profile" "$token_profile"; do
-    kind_credential_cli credentials --platform --profile "$profile" delete --yes
+    kind_credential_cli credentials --cloud --profile "$profile" delete --yes
   done
   stage_profiles=""
   for credential in "$key_name" "$token_name"; do
-    kind_credential_cli credentials --platform revoke "$credential" --output json
-    kind_credential_cli credentials --platform delete "$credential" --yes
+    kind_credential_cli credentials --cloud revoke "$credential" --output json
+    kind_credential_cli credentials --cloud delete "$credential" --yes
   done
   stage_credentials=""
   log "stock Claude Code in daemon sessions passed with an Anthropic API key and a Claude subscription token, through a provider refusal and its replacement; none reached the Sandbox"
@@ -1731,7 +1731,7 @@ KIND_CLAUDE_SIGN_IN_CODE='kind-synthetic-claude-sign-in-code'
 # Bound on the CLI printing Claude's authorize URL.
 KIND_CLAUDE_SIGN_IN_SECONDS=60
 
-# `cw credentials --platform connect claude` as a person runs it. The CLI
+# `cw credentials --cloud connect claude` as a person runs it. The CLI
 # prints Claude's authorize URL alone on its line of the login screen; the
 # code is pasted on its stdin, never argv,
 # after `#` and that URL's own state (`match`) or another one (`mismatch`).
@@ -1746,7 +1746,7 @@ kind_credential_claude_connect() {
   scratch="$(mktemp -d "$KIND_CREDENTIAL_CLI_HOME/connect.XXXXXX")" || return $?
   fifo="$scratch/stdin"
   mkfifo -m 600 "$fifo" || return $?
-  kind_credential_cli credentials --platform connect claude --name "$name" "${confirm[@]}" \
+  kind_credential_cli credentials --cloud connect claude --name "$name" "${confirm[@]}" \
     <"$fifo" >"$scratch/stdout" 2>"$scratch/stderr" &
   pid=$!
   exec {writer}>"$fifo"
@@ -1784,7 +1784,7 @@ kind_credential_claude_connect() {
 assert_kind_credential_claude_sign_in() {
   local name="$1" minimum="$2"
   [[ "$minimum" =~ ^[1-9][0-9]*$ ]] || return 1
-  kind_credential_cli credentials --platform get "$name" --output json | jq -er \
+  kind_credential_cli credentials --cloud get "$name" --output json | jq -er \
     --arg name "$name" --argjson minimum "$minimum" '.[0] as $c
       | (($c.revocationGeneration // $c.revocation_generation) | tonumber) as $revision
       | if length == 1 and $c.name == $name and $c.provider == "anthropic"
@@ -1921,7 +1921,7 @@ kind_credential_claude_sign_in() (
     return 1
   fi
   grep -Fq 'not from this Claude sign-in' "$RUN_DIR/credential-claude-sign-in-mismatch.err"
-  if kind_credential_cli credentials --platform get "$name" --output json >/dev/null 2>&1; then
+  if kind_credential_cli credentials --cloud get "$name" --output json >/dev/null 2>&1; then
     echo "::error::a refused Claude sign-in stored a credential" >&2
     return 1
   fi
@@ -1937,15 +1937,15 @@ kind_credential_claude_sign_in() (
   exchanged="${BASH_REMATCH[1]}"
 
   stage_profiles="$profile"
-  kind_credential_cli credentials --platform --profile "$profile" set anthropic "$name"
-  environment="$(kind_credential_cli env --platform create --name "$profile" \
+  kind_credential_cli credentials --cloud --profile "$profile" set anthropic "$name"
+  environment="$(kind_credential_cli env --cloud create --name "$profile" \
     --image "$workspace_image" \
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   stage_environment="$environment"
   wait_kind_credential_environment "$environment" running
   wait_kind_credential_setup_complete "$environment"
-  update="$(kind_credential_cli env --platform update "$environment" \
+  update="$(kind_credential_cli env --cloud update "$environment" \
     --profile "platform:$profile" --yes --output json)"
   generation="$(jq -er '.operation_generation |
     if type == "number" and . > 0 and . == floor then .
@@ -2002,9 +2002,9 @@ kind_credential_claude_sign_in() (
 
   # A new container forgets the logout and delivers the login again, beside
   # the key the probe planted in the persistent home.
-  kind_credential_cli env --platform stop "$environment" --output json >/dev/null
+  kind_credential_cli env --cloud stop "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" stopped
-  kind_credential_cli env --platform start "$environment" --output json >/dev/null
+  kind_credential_cli env --cloud start "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" running
   login_events="$(kind_credential_claude_login "$environment" redelivered)"
   jq -e 'select(.event == "redelivered") | .unrelated == "kept"' <<<"$login_events" >/dev/null || {
@@ -2015,7 +2015,7 @@ kind_credential_claude_sign_in() (
   # Revocation removes Codewire's login at the daemon's next check and keeps
   # the file's other keys. Claude Code then has no login, and nothing reaches
   # the provider.
-  kind_credential_cli credentials --platform revoke "$name" --output json >/dev/null
+  kind_credential_cli credentials --cloud revoke "$name" --output json >/dev/null
   kind_credential_claude_login "$environment" revoked >/dev/null
   pod="$(kind_credential_workspace "$environment")"
   driver="$(kind_credential_claude_stage "$pod")"
@@ -2027,12 +2027,12 @@ kind_credential_claude_sign_in() (
     return 1
   }
 
-  kind_credential_cli env --platform rm "$environment" --yes --output json
+  kind_credential_cli env --cloud rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   stage_environment=""
-  kind_credential_cli credentials --platform --profile "$profile" delete --yes
+  kind_credential_cli credentials --cloud --profile "$profile" delete --yes
   stage_profiles=""
-  kind_credential_cli credentials --platform delete "$name" --yes
+  kind_credential_cli credentials --cloud delete "$name" --yes
   stage_credentials=""
   log "a Claude sign-in through the public CLI was delivered as Claude Code's own login at generation ${delivered} (revision ${revision}), served stock Claude Code, rotated to generation ${rotated} in a running process, kept a user's own login and a logout, and was removed once revoked; no refresh token reached the Sandbox"
 )

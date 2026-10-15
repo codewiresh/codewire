@@ -71,14 +71,14 @@ cw() {
   [[ "$*" != *cwdevapp* ]] || fail 'synthetic protected value entered CLI argv'
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
-    'secrets --platform --user list --output json')
+    'secrets --cloud --user list --output json')
       if [[ "$APP_FAILURE" == cleanup-user-list ]]; then
         printf '[]\n'; printf 'synthetic private list failure\n' >&2; return 23
       fi
       cat "$TMPDIR_SMOKE/user.db" ;;
-    'secrets --platform --organization list --output json')
+    'secrets --cloud --organization list --output json')
       cat "$TMPDIR_SMOKE/organization.db" ;;
-    'secrets --platform --user set '*|'secrets --platform --organization set '*)
+    'secrets --cloud --user set '*|'secrets --cloud --organization set '*)
       local input='' scope db key
       IFS= read -r input || [[ -n "$input" ]]
       [[ "$input" == cwdevall* ]] || fail 'all-scope protected stdin was not supplied'
@@ -87,7 +87,7 @@ cw() {
         "$db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$db"
       [[ "$APP_FAILURE" != "lost-$scope-write" ]] || return 1 ;;
-    'secrets --platform --user delete '*|'secrets --platform --organization delete '*)
+    'secrets --cloud --user delete '*|'secrets --cloud --organization delete '*)
       local scope db key
       scope="$3"; scope="${scope#--}"; db="$TMPDIR_SMOKE/$scope.db"; key="$5"
       [[ "$APP_FAILURE" != "cleanup-$scope" ]] || return 1
@@ -96,19 +96,19 @@ cw() {
       if [[ "$APP_FAILURE" == cleanup-user-delete-lost && "$scope" == user ]]; then
         printf 'synthetic private delete failure\n' >&2; return 24
       fi ;;
-    'secrets --platform projects list --output json')
+    'secrets --cloud projects list --output json')
       cat "$TMPDIR_SMOKE/projects.db" ;;
-    'secrets --platform projects create '*)
+    'secrets --cloud projects create '*)
       local count id
       count="$(jq length "$TMPDIR_SMOKE/projects.db")"
       printf -v id '00000000-0000-4000-8000-%012d' "$((count + 1))"
       jq --arg name "$5" --arg id "$id" '. + [{id:$id,name:$name}]' "$TMPDIR_SMOKE/projects.db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/projects.db" ;;
-    'secrets --platform projects delete '*)
+    'secrets --cloud projects delete '*)
       [[ "$APP_FAILURE" != cleanup ]] || return 1
       jq --arg selector "$5" 'map(select(if $selector | startswith("id:") then .id != ($selector | ltrimstr("id:")) else .name != $selector end))' "$TMPDIR_SMOKE/projects.db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/projects.db" ;;
-    'secrets --platform --project '*" set "*)
+    'secrets --cloud --project '*" set "*)
       local input=''
       IFS= read -r input || [[ -n "$input" ]]
       if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
@@ -117,16 +117,16 @@ cw() {
         [[ "$input" == cwdevapp* && ${#input} == 41 ]]
       fi || fail 'protected stdin was not supplied'
       [[ "$APP_FAILURE" != scope ]] || return 1 ;;
-    'secrets --platform --project '*" list --output json")
+    'secrets --cloud --project '*" list --output json")
       if [[ "$APP_FAILURE" == leak ]]; then
         jq -n --arg value "${APP_SECRET_VALUES[0]}" '[{key:"DATABASE_URL",value:$value},{key:"CW_DEV_PRECEDENCE"}]'
       elif [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
         printf '%s\n' "${APP_SECRET_ALL_KEYS[@]:1:1}" "${APP_SECRET_ALL_KEYS[@]:3:3}" |
           jq -Rsc 'split("\n")[:-1] | map({key:.,created_at:"now",updated_at:"now"})'
       else printf '[{"key":"DATABASE_URL"},{"key":"CW_DEV_PRECEDENCE"}]\n'; fi ;;
-    'env --platform list --output json') jq 'map(select(.state != "destroying" and .state != "destroyed"))' "$TMPDIR_SMOKE/environments.db" ;;
-    'env --platform list --all --output json') cat "$TMPDIR_SMOKE/environments.db" ;;
-    'env create --platform --file '*)
+    'env --cloud list --output json') jq 'map(select(.state != "destroying" and .state != "destroyed"))' "$TMPDIR_SMOKE/environments.db" ;;
+    'env --cloud list --all --output json') cat "$TMPDIR_SMOKE/environments.db" ;;
+    'env create --cloud --file '*)
       local project
       project="$(jq -r .secrets.project "$APP_SECRET_DOCUMENT")"
       local user organization
@@ -139,10 +139,10 @@ cw() {
             (if $user == "" then {} else {user:$user} end) +
             (if $organization then {organization:true} else {} end)),credentials:null,profile_revision:null}}]' >"$TMPDIR_SMOKE/environments.db"
       printf 'ID: 00000000-0000-4000-8000-000000000099\n' ;;
-    'env --platform info '*" --output json")
+    'env --cloud info '*" --output json")
       jq -e '.[0].state != "destroying" and .[0].state != "destroyed"' "$TMPDIR_SMOKE/environments.db" >/dev/null || return 1
       jq '.[0]' "$TMPDIR_SMOKE/environments.db" ;;
-    'env --platform update '*)
+    'env --cloud update '*)
       if [[ " $* " != *' --yes '* ]]; then
         printf 'source selection requires --yes for noninteractive or JSON commands; no source change was submitted\n' >&2
         return 2
@@ -184,7 +184,7 @@ cw() {
           outcome:"restart_required",selection:(.source_selection |
             if .secrets.project == "" then .secrets={} else . end)}' "$TMPDIR_SMOKE/environments.db"
       fi ;;
-    'env --platform rm --yes '*)
+    'env --cloud rm --yes '*)
       jq '.[0].state="destroyed"' "$TMPDIR_SMOKE/environments.db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/environments.db" ;;
     'run --no-tty '*'/dev/urandom'*)
@@ -670,9 +670,9 @@ cleanup_application_secrets
 [[ "$(jq length "$TMPDIR_SMOKE/projects.db")" == 0 ]]
 [[ "$(jq -r '.[0].state' "$TMPDIR_SMOKE/environments.db")" == destroyed ]]
 pass
-expect_failure terminal-info-hidden cw env --platform info "$ENV_ID" --output json
+expect_failure terminal-info-hidden cw env --cloud info "$ENV_ID" --output json
 application_environment_destroyed
-grep -Fq 'env --platform list --all --output json' "$TMPDIR_SMOKE/calls"
+grep -Fq 'env --cloud list --all --output json' "$TMPDIR_SMOKE/calls"
 pass
 
 

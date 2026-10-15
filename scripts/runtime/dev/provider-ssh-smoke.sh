@@ -53,16 +53,16 @@ prepare_provider_ssh_identity() {
   local nonce credential_name profile_name public_key
   nonce="$(tr -d '-' </proc/sys/kernel/random/uuid)"
   [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 'cannot generate disposable SSH fixture names'
-  cw_with_timeout 30 env --platform list --all --output json >"$TMPDIR_SMOKE/provider-ssh-environments-before.json" ||
+  cw_with_timeout 30 env --cloud list --all --output json >"$TMPDIR_SMOKE/provider-ssh-environments-before.json" ||
     die 'cannot inspect Dev environment ownership before SSH smoke'
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/provider-ssh-environments-before.json" >/dev/null ||
     die 'provider SSH smoke environment name is already in use'
   credential_name="dev-ssh-$nonce"
   profile_name="dev-ssh-profile-$nonce"
-  cw_with_timeout 30 credentials --platform list --output json >"$TMPDIR_SMOKE/provider-ssh-credentials-before.json" ||
+  cw_with_timeout 30 credentials --cloud list --output json >"$TMPDIR_SMOKE/provider-ssh-credentials-before.json" ||
     die 'cannot inspect personal credential metadata'
-  cw_with_timeout 30 credentials --platform profiles list --output json \
+  cw_with_timeout 30 credentials --cloud profiles list --output json \
     >"$TMPDIR_SMOKE/provider-ssh-profiles-before.json" || die 'cannot inspect personal profile metadata'
   jq -e --arg name "$credential_name" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/provider-ssh-credentials-before.json" >/dev/null || die 'disposable SSH credential name collision'
@@ -73,10 +73,10 @@ prepare_provider_ssh_identity() {
   PROVIDER_SSH_CREDENTIAL_NAME="$credential_name"
   PROVIDER_SSH_PROFILE_NAME="$profile_name"
 
-  cw_with_timeout 60 credentials --platform generate ssh --name "$PROVIDER_SSH_CREDENTIAL_NAME" \
+  cw_with_timeout 60 credentials --cloud generate ssh --name "$PROVIDER_SSH_CREDENTIAL_NAME" \
     >"$TMPDIR_SMOKE/provider-ssh-generate.out" 2>"$TMPDIR_SMOKE/provider-ssh-generate.err" ||
     die 'normal platform SSH generation failed; no private key was imported'
-  cw_with_timeout 30 credentials --platform get "$PROVIDER_SSH_CREDENTIAL_NAME" --output json \
+  cw_with_timeout 30 credentials --cloud get "$PROVIDER_SSH_CREDENTIAL_NAME" --output json \
     >"$TMPDIR_SMOKE/provider-ssh-credential.json" || die 'generated SSH metadata is unavailable'
   PROVIDER_SSH_CREDENTIAL_ID="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/provider-ssh-credential.json" "$PROVIDER_SSH_CREDENTIAL_NAME")" ||
     die 'generated SSH identity was not acknowledged exactly'
@@ -85,10 +85,10 @@ prepare_provider_ssh_identity() {
       .authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY") |
     .sshPublicKey.openssh | select(test("^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$"))' \
     "$TMPDIR_SMOKE/provider-ssh-credential.json")" || die 'generated SSH public metadata is invalid'
-  cw_with_timeout 30 credentials --platform --profile "$PROVIDER_SSH_PROFILE_NAME" set ssh "id:$PROVIDER_SSH_CREDENTIAL_ID" \
+  cw_with_timeout 30 credentials --cloud --profile "$PROVIDER_SSH_PROFILE_NAME" set ssh "id:$PROVIDER_SSH_CREDENTIAL_ID" \
     >"$TMPDIR_SMOKE/provider-ssh-profile-set.out" 2>"$TMPDIR_SMOKE/provider-ssh-profile-set.err" ||
     die 'cannot select generated SSH identity in its disposable profile'
-  cw_with_timeout 30 credentials --platform --profile "$PROVIDER_SSH_PROFILE_NAME" get --output json \
+  cw_with_timeout 30 credentials --cloud --profile "$PROVIDER_SSH_PROFILE_NAME" get --output json \
     >"$TMPDIR_SMOKE/provider-ssh-profile.json" || die 'created profile metadata is unavailable'
   PROVIDER_SSH_PROFILE_ID="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/provider-ssh-profile.json" "$PROVIDER_SSH_PROFILE_NAME")" ||
     die 'created profile identity was not acknowledged exactly'
@@ -117,7 +117,7 @@ prepare_provider_ssh() {
 run_provider_ssh_smoke() {
   run_kube_assertions
   wait_for_cw_run
-  cw_with_timeout 30 env --platform info "$ENV_ID" --output json \
+  cw_with_timeout 30 env --cloud info "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/provider-ssh-environment.json" 2>"$TMPDIR_SMOKE/provider-ssh-info.err" ||
     die 'cannot inspect the SSH environment binding'
   jq -e --arg id "$ENV_ID" --arg profile "platform:id:$PROVIDER_SSH_PROFILE_ID" '
@@ -160,13 +160,13 @@ run_provider_ssh_smoke() {
     die 'revocation probe workload was not admitted before revocation'
   wait_until 'admitted SSH revocation probe ready' "$(( $(seconds_now) + 30 ))" \
     provider_ssh_waiter_ready "$session_id"
-  cw_with_timeout 30 credentials --platform revoke "id:$PROVIDER_SSH_CREDENTIAL_ID" --output json \
+  cw_with_timeout 30 credentials --cloud revoke "id:$PROVIDER_SSH_CREDENTIAL_ID" --output json \
     >"$TMPDIR_SMOKE/provider-ssh-revoked.json" || die 'cannot revoke the exact synthetic SSH credential'
   jq -e --arg id "$PROVIDER_SSH_CREDENTIAL_ID" 'length == 1 and .[0].id == $id and
     .[0].status == "CREDENTIAL_STATUS_REVOKED" and .[0].revocationGeneration == "2"' \
     "$TMPDIR_SMOKE/provider-ssh-revoked.json" >/dev/null || die 'SSH revocation acknowledgement drifted'
   printf 'revoked\n' >"$TMPDIR_SMOKE/provider-ssh-revoked-trigger"
-  cw_with_timeout 30 env --platform cp "$TMPDIR_SMOKE/provider-ssh-revoked-trigger" \
+  cw_with_timeout 30 env --cloud cp "$TMPDIR_SMOKE/provider-ssh-revoked-trigger" \
     "$ENV_ID:/workspace/.cw-ssh-smoke/revoked-trigger" \
     >"$TMPDIR_SMOKE/provider-ssh-trigger.out" 2>"$TMPDIR_SMOKE/provider-ssh-trigger.err" ||
     die 'cannot signal the already-admitted probe through the normal file API'
@@ -200,11 +200,11 @@ provider_ssh_waiter_complete() {
 cleanup_provider_ssh() {
   local rc=0 deadline status
   if [[ -z "$ENV_ID" && "$PROVIDER_SSH_CREATE_ATTEMPTED" == 1 ]]; then
-    cw_with_timeout 30 env --platform list --all --output json >"$TMPDIR_SMOKE/provider-ssh-cleanup-environments.json" 2>/dev/null &&
+    cw_with_timeout 30 env --cloud list --all --output json >"$TMPDIR_SMOKE/provider-ssh-cleanup-environments.json" 2>/dev/null &&
       ENV_ID="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/provider-ssh-cleanup-environments.json" "$SMOKE_NAME")" || rc=1
   fi
   if [[ -n "$ENV_ID" ]]; then
-    cw_with_timeout 60 env --platform rm --yes "$ENV_ID" >"$TMPDIR_SMOKE/provider-ssh-cleanup-env.out" 2>&1 || rc=1
+    cw_with_timeout 60 env --cloud rm --yes "$ENV_ID" >"$TMPDIR_SMOKE/provider-ssh-cleanup-env.out" 2>&1 || rc=1
     deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
     while :; do
       if application_environment_destroyed; then break; else status=$?; fi
@@ -225,7 +225,7 @@ cleanup_provider_ssh_profile() {
   # A lost publication response can still have created the unique named object.
   # Resolve that exact prechecked name; never delete an ambiguous identity.
   if [[ -n "$PROVIDER_SSH_PROFILE_NAME" ]]; then
-    cw_with_timeout 30 credentials --platform profiles list --output json \
+    cw_with_timeout 30 credentials --cloud profiles list --output json \
       >"$TMPDIR_SMOKE/provider-ssh-cleanup-profiles.json" 2>/dev/null || return 1
     jq -e 'type == "array"' "$TMPDIR_SMOKE/provider-ssh-cleanup-profiles.json" >/dev/null || return 1
     if jq -e --arg name "$PROVIDER_SSH_PROFILE_NAME" 'any(.[]; .name == $name)' \
@@ -233,10 +233,10 @@ cleanup_provider_ssh_profile() {
       resolved="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/provider-ssh-cleanup-profiles.json" "$PROVIDER_SSH_PROFILE_NAME")" || return 1
       [[ -z "$PROVIDER_SSH_PROFILE_ID" || "$PROVIDER_SSH_PROFILE_ID" == "$resolved" ]] || return 1
       PROVIDER_SSH_PROFILE_ID="$resolved"
-      cw_with_timeout 30 credentials --platform --profile "id:$PROVIDER_SSH_PROFILE_ID" delete --yes \
+      cw_with_timeout 30 credentials --cloud --profile "id:$PROVIDER_SSH_PROFILE_ID" delete --yes \
         >"$TMPDIR_SMOKE/provider-ssh-cleanup-profile.out" 2>&1 || rc=1
     fi
-    cw_with_timeout 30 credentials --platform profiles list --output json \
+    cw_with_timeout 30 credentials --cloud profiles list --output json \
       >"$TMPDIR_SMOKE/provider-ssh-cleanup-profiles.json" 2>/dev/null &&
       jq -e --arg name "$PROVIDER_SSH_PROFILE_NAME" --arg id "$PROVIDER_SSH_PROFILE_ID" \
         'type == "array" and all(.[]; .name != $name and .id != $id)' \
@@ -248,14 +248,14 @@ cleanup_provider_ssh_profile() {
 cleanup_provider_ssh_credential() {
   local rc=0 resolved
   if [[ -n "$PROVIDER_SSH_CREDENTIAL_NAME" ]]; then
-    cw_with_timeout 30 credentials --platform list --output json >"$TMPDIR_SMOKE/provider-ssh-cleanup-credentials.json" 2>/dev/null || return 1
+    cw_with_timeout 30 credentials --cloud list --output json >"$TMPDIR_SMOKE/provider-ssh-cleanup-credentials.json" 2>/dev/null || return 1
     jq -e 'type == "array"' "$TMPDIR_SMOKE/provider-ssh-cleanup-credentials.json" >/dev/null || return 1
     if jq -e --arg name "$PROVIDER_SSH_CREDENTIAL_NAME" 'any(.[]; .name == $name)' \
         "$TMPDIR_SMOKE/provider-ssh-cleanup-credentials.json" >/dev/null; then
       resolved="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/provider-ssh-cleanup-credentials.json" "$PROVIDER_SSH_CREDENTIAL_NAME")" || return 1
       [[ -z "$PROVIDER_SSH_CREDENTIAL_ID" || "$PROVIDER_SSH_CREDENTIAL_ID" == "$resolved" ]] || return 1
       PROVIDER_SSH_CREDENTIAL_ID="$resolved"
-      cw_with_timeout 30 credentials --platform get "id:$PROVIDER_SSH_CREDENTIAL_ID" --output json \
+      cw_with_timeout 30 credentials --cloud get "id:$PROVIDER_SSH_CREDENTIAL_ID" --output json \
         >"$TMPDIR_SMOKE/provider-ssh-cleanup-credential.json" 2>/dev/null || return 1
       jq -e --arg id "$PROVIDER_SSH_CREDENTIAL_ID" --arg name "$PROVIDER_SSH_CREDENTIAL_NAME" \
         'type == "array" and length == 1 and .[0].id == $id and .[0].name == $name and
@@ -263,13 +263,13 @@ cleanup_provider_ssh_credential() {
         "$TMPDIR_SMOKE/provider-ssh-cleanup-credential.json" >/dev/null || return 1
       if ! jq -e 'length == 1 and .[0].status == "CREDENTIAL_STATUS_REVOKED"' \
           "$TMPDIR_SMOKE/provider-ssh-cleanup-credential.json" >/dev/null; then
-        cw_with_timeout 30 credentials --platform revoke "id:$PROVIDER_SSH_CREDENTIAL_ID" \
+        cw_with_timeout 30 credentials --cloud revoke "id:$PROVIDER_SSH_CREDENTIAL_ID" \
           >"$TMPDIR_SMOKE/provider-ssh-cleanup-revoke.out" 2>&1 || rc=1
       fi
-      cw_with_timeout 30 credentials --platform delete "id:$PROVIDER_SSH_CREDENTIAL_ID" --yes \
+      cw_with_timeout 30 credentials --cloud delete "id:$PROVIDER_SSH_CREDENTIAL_ID" --yes \
         >"$TMPDIR_SMOKE/provider-ssh-cleanup-key.out" 2>&1 || rc=1
     fi
-    cw_with_timeout 30 credentials --platform list --output json >"$TMPDIR_SMOKE/provider-ssh-cleanup-credentials.json" 2>/dev/null &&
+    cw_with_timeout 30 credentials --cloud list --output json >"$TMPDIR_SMOKE/provider-ssh-cleanup-credentials.json" 2>/dev/null &&
       jq -e --arg name "$PROVIDER_SSH_CREDENTIAL_NAME" --arg id "$PROVIDER_SSH_CREDENTIAL_ID" \
         'type == "array" and all(.[]; .name != $name and .id != $id)' \
         "$TMPDIR_SMOKE/provider-ssh-cleanup-credentials.json" >/dev/null || rc=1

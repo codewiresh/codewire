@@ -3550,7 +3550,7 @@ workspace_user_ssh_smoke() (
     trap - EXIT
     set +e
     if [ -n "$environment" ]; then
-      kind_credential_cli env --platform rm "$environment" --yes --output json >/dev/null ||
+      kind_credential_cli env --cloud rm "$environment" --yes --output json >/dev/null ||
         status=1
       wait_kind_credential_environment "$environment" destroyed || status=1
     fi
@@ -3577,7 +3577,7 @@ workspace_user_ssh_smoke() (
   image="$(kind_workspace_runtime_image)"
   host="cw-$name"
   started="$SECONDS"
-  environment="$(kind_credential_cli env --platform create --name "$name" --image "$image" \
+  environment="$(kind_credential_cli env --cloud create --name "$name" --image "$image" \
     --cpu 500 --memory 1Gi --disk 1Gi --ttl 1h --yes --output json | jq -er '.id')"
   first=""
   while [ $((SECONDS - started)) -lt "$KIND_USER_SSH_READY_SECONDS" ]; do

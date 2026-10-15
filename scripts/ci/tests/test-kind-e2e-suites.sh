@@ -3492,11 +3492,11 @@ python3 -B "$ROOT/scripts/ci/tests/test-kind-cw-runtime.py"
     record "cli:$*"
     case "$*" in
       'org current') printf 'ID: org_contract_1\n' ;;
-      'credentials --platform add '*) cat >/dev/null ;;
-      'credentials --platform get '*)
+      'credentials --cloud add '*) cat >/dev/null ;;
+      'credentials --cloud get '*)
         printf '[{"name":"%s","provider":"anthropic","status":"CREDENTIAL_STATUS_ACTIVE","authenticationKind":"CREDENTIAL_AUTHENTICATION_KIND_API_KEY"}]\n' "$4" ;;
-      'env --platform create '*) printf '{"id":"00000000-0000-4000-8000-0000000000cc"}\n' ;;
-      'env --platform rm '*) return 1 ;;
+      'env --cloud create '*) printf '{"id":"00000000-0000-4000-8000-0000000000cc"}\n' ;;
+      'env --cloud rm '*) return 1 ;;
     esac
   }
   # The new environment never becomes running.
@@ -3507,13 +3507,13 @@ python3 -B "$ROOT/scripts/ci/tests/test-kind-cw-runtime.py"
   stage_status=$?
   set -e
   [ "$stage_status" -ne 0 ] || fail 'the failing Claude stage fixture passed'
-  sed -n 's/^cli:\(env --platform rm\|credentials --platform --profile [^ ]* delete\|credentials --platform revoke\|credentials --platform delete\) .*/\1/p' "$CALLS" \
+  sed -n 's/^cli:\(env --cloud rm\|credentials --cloud --profile [^ ]* delete\|credentials --cloud revoke\|credentials --cloud delete\) .*/\1/p' "$CALLS" \
     >"$FIXTURE/claude-cleanup.calls"
-  printf '%s\n' 'env --platform rm' \
-      'credentials --platform --profile kind-claude-key-* delete' \
-      'credentials --platform --profile kind-claude-token-* delete' \
-      'credentials --platform revoke' 'credentials --platform delete' \
-      'credentials --platform revoke' 'credentials --platform delete' \
+  printf '%s\n' 'env --cloud rm' \
+      'credentials --cloud --profile kind-claude-key-* delete' \
+      'credentials --cloud --profile kind-claude-token-* delete' \
+      'credentials --cloud revoke' 'credentials --cloud delete' \
+      'credentials --cloud revoke' 'credentials --cloud delete' \
     | cmp -s - <(sed 's/--profile kind-claude-key-[0-9-]* delete/--profile kind-claude-key-* delete/; s/--profile kind-claude-token-[0-9-]* delete/--profile kind-claude-token-* delete/' "$FIXTURE/claude-cleanup.calls") ||
     fail "a failed Claude stage did not remove its environment, profiles and credentials in order: $(tr '\n' ';' <"$FIXTURE/claude-cleanup.calls")"
   grep -Fq 'log:could not remove environment 00000000-0000-4000-8000-0000000000cc' "$CALLS" ||

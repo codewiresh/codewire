@@ -13,14 +13,14 @@ reach as errors; `cw list ENV` lists one environment.
 | --- | --- | --- | --- |
 | Trusted Linux host | `--local --type host` | Owner daemon and private Unix socket | Codex, Claude and noel |
 | Native Linux sandbox | `--local --type sandbox` | Native supervisor and guest daemon | Codex/Claude implementation; VM qualification pending |
-| Platform sandbox | `--platform --type sandbox` | Authenticated platform API | Qualification pending |
+| Platform sandbox | `--cloud --type sandbox` | Authenticated platform API | Qualification pending |
 | macOS trusted host | `--local --type host` | Owner daemon and private Unix socket | Codex and Claude |
 | macOS local sandbox | `--local --type sandbox` on Apple Silicon | Shared supervisor, VZ helper and arm64 guest daemon | Same host route as a native Linux sandbox; needs a local credential profile, see [MACOS-CLI.md](MACOS-CLI.md) |
 
 ```sh
 cw env create --local --type host --name host-team --path .
 cw env create --local --type sandbox --name vm-team --path .
-cw env create --platform --type sandbox --name cloud-team --repo REPOSITORY_URL
+cw env create --cloud --type sandbox --name cloud-team --repo REPOSITORY_URL
 ```
 
 A trusted host runs as the local user with their ordinary HOME and installed

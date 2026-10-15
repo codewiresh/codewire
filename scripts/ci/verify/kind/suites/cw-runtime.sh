@@ -118,9 +118,9 @@ cw_runtime_managed_after_restart() {
   local environment="$1" before_pod="$2" before_uid after_uid pod launched session listed
   local state attempt output
   before_uid="$(kubectl -n "$SANDBOX_NS" get pod "$before_pod" -o 'jsonpath={.metadata.uid}')"
-  kind_credential_cli env --platform stop "$environment" --output json >/dev/null
+  kind_credential_cli env --cloud stop "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" stopped
-  kind_credential_cli env --platform start "$environment" --output json >/dev/null
+  kind_credential_cli env --cloud start "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" running
   pod="$(kind_credential_workspace "$environment")"
   after_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
@@ -197,15 +197,15 @@ cw_runtime_managed_after_restart() {
 cw_runtime_add_managed_credentials() {
   local credential_name="$1" anthropic_name="$2" profile_name="$3"
   printf '%s\n' cwlocalopenai0123456789abcdef0123456789abcdef |
-    kind_credential_cli credentials --platform add openai --name "$credential_name"
+    kind_credential_cli credentials --cloud add openai --name "$credential_name"
   printf '%s\n' cwlocalanthropic0123456789abcdef0123456789abcdef |
-    kind_credential_cli credentials --platform add anthropic --name "$anthropic_name"
-  kind_credential_cli credentials --platform get "$anthropic_name" --output json | jq -e \
+    kind_credential_cli credentials --cloud add anthropic --name "$anthropic_name"
+  kind_credential_cli credentials --cloud get "$anthropic_name" --output json | jq -e \
     --arg name "$anthropic_name" 'length == 1 and .[0].name == $name
       and .[0].provider == "anthropic" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"
       and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
-  kind_credential_cli credentials --platform --profile "$profile_name" set openai "$credential_name"
-  kind_credential_cli credentials --platform --profile "$profile_name" set anthropic "$anthropic_name"
+  kind_credential_cli credentials --cloud --profile "$profile_name" set openai "$credential_name"
+  kind_credential_cli credentials --cloud --profile "$profile_name" set anthropic "$anthropic_name"
 }
 
 # The product's pinned workspace image, which `make kind-runtime-images` loads
@@ -300,9 +300,9 @@ SQL
 cw_runtime_managed_resume_denied_before_run() {
   local environment="$1" session="$2" generation="$3" previous pods requests count
   local output sent message attempt resumed refused
-  kind_credential_cli env --platform stop "$environment" --output json >/dev/null
+  kind_credential_cli env --cloud stop "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" stopped
-  kind_credential_cli env --platform start "$environment" --output json >/dev/null
+  kind_credential_cli env --cloud start "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" running
   wait_kind_credential_setup_complete "$environment"
   refused="$(mktemp)"
@@ -408,7 +408,7 @@ cw_runtime_managed_resume_continues() {
   local profile="$1" workspace_image="$2" environment update operation pod
   local launched session first generation before after listed sent message waited resumed
   local back_to_back=20 round
-  environment="$(kind_credential_cli env --platform create --name "kind-cw-resume-${RANDOM}-${RANDOM}" \
+  environment="$(kind_credential_cli env --cloud create --name "kind-cw-resume-${RANDOM}-${RANDOM}" \
     --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -416,7 +416,7 @@ cw_runtime_managed_resume_continues() {
   wait_kind_credential_environment "$environment" running
   # A source change is refused until setup finishes.
   wait_kind_credential_setup_complete "$environment"
-  update="$(kind_credential_cli env --platform update "$environment" \
+  update="$(kind_credential_cli env --cloud update "$environment" \
     --profile "platform:$profile" --yes --output json)"
   operation="$(jq -er '.operation_generation |
     if type == "number" and . > 0 and . == floor then .
@@ -439,9 +439,9 @@ cw_runtime_managed_resume_continues() {
   generation="$(jq -er --arg id "$session" \
     '[.[] | select(.session_id == $id)][0].launch_generation' <<<"$listed")"
   before="$(cw_runtime_openai_attempts)"
-  kind_credential_cli env --platform stop "$environment" --output json >/dev/null
+  kind_credential_cli env --cloud stop "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" stopped
-  kind_credential_cli env --platform start "$environment" --output json >/dev/null
+  kind_credential_cli env --cloud start "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" running
   # Start reads running before its setup finishes, and a message is refused
   # until then ("environment runtime or setup is not ready").
@@ -501,7 +501,7 @@ cw_runtime_managed_resume_continues() {
   cw_runtime_managed_resume_denied_before_run "$environment" "$session" "$resumed"
   kind_credential_cli stop "$environment" "$session" --output json >/dev/null
   pod="$(kind_credential_workspace "$environment")"
-  kind_credential_cli env --platform rm "$environment" --yes --output json >/dev/null
+  kind_credential_cli env --cloud rm "$environment" --yes --output json >/dev/null
   wait_kind_credential_environment "$environment" destroyed
   kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s "pod/$pod"
 }
@@ -542,7 +542,7 @@ run_retained_managed_agents_journey() {
   # First, while the synthetic providers the smoke later revokes are valid,
   # a conversation continues across Stop/Start in its own environment (#2705).
   cw_runtime_managed_resume_continues "$profile_name" "$workspace_image"
-  environment="$(kind_credential_cli env --platform create --name "$profile_name" \
+  environment="$(kind_credential_cli env --cloud create --name "$profile_name" \
     --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -551,7 +551,7 @@ run_retained_managed_agents_journey() {
   # bound, and the probe's session waits for environment setup to finish,
   # which a source change requires.
   kind_credential_probe "$environment" unselected
-  update="$(kind_credential_cli env --platform update "$environment" \
+  update="$(kind_credential_cli env --cloud update "$environment" \
     --profile "platform:$profile_name" --yes --output json)"
   generation="$(jq -er '.operation_generation |
     if type == "number" and . > 0 and . == floor then .
@@ -575,15 +575,15 @@ run_retained_managed_agents_journey() {
     and any(.[]; .event == "api_key_attempt" and .family == "anthropic" and .api_attempt > 0)' >/dev/null
   cw_runtime_managed_after_restart "$environment" "$pod"
   pod="$(kind_credential_workspace "$environment")"
-  kind_credential_cli env --platform rm "$environment" --yes --output json
+  kind_credential_cli env --cloud rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s "pod/$pod"
-  kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
+  kind_credential_cli credentials --cloud --profile "$profile_name" delete --yes
   # A stored platform credential is revoked before its record is deleted.
   local name
   for name in "$credential_name" "$anthropic_name"; do
-    kind_credential_cli credentials --platform revoke "$name" --output json >/dev/null
-    kind_credential_cli credentials --platform delete "$name" --yes
+    kind_credential_cli credentials --cloud revoke "$name" --output json >/dev/null
+    kind_credential_cli credentials --cloud delete "$name" --yes
   done
   rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"
   log "retained managed-agent journey (launch, steer, interrupt, revoked provider, Stop, Restart, Stop/Start) green"
@@ -637,17 +637,17 @@ run_admitted_cw_runtime_journey() {
   if [ "$managed" = 1 ]; then
     cw_runtime_add_managed_credentials "$credential_name" "$anthropic_name" "$profile_name"
   else
-    kind_credential_cli credentials --platform connect codex --name "$credential_name"
-    kind_credential_cli credentials --platform --profile "$profile_name" set codex "$credential_name"
+    kind_credential_cli credentials --cloud connect codex --name "$credential_name"
+    kind_credential_cli credentials --cloud --profile "$profile_name" set codex "$credential_name"
   fi
-  kind_credential_cli credentials --platform get "$credential_name" --output json | jq -e \
+  kind_credential_cli credentials --cloud get "$credential_name" --output json | jq -e \
     --arg name "$credential_name" 'length == 1 and .[0].name == $name
       and .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"' >/dev/null
   if [ "$managed" = 1 ]; then
-    kind_credential_cli credentials --platform get "$credential_name" --output json | jq -e \
+    kind_credential_cli credentials --cloud get "$credential_name" --output json | jq -e \
       'length == 1 and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
   fi
-  environment="$(kind_credential_cli env --platform create --name "$profile_name" \
+  environment="$(kind_credential_cli env --cloud create --name "$profile_name" \
     --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -659,7 +659,7 @@ run_admitted_cw_runtime_journey() {
   # Profile setup may replace the initial sandbox before the baseline exists.
   # It is completed once; the same-Pod CW journey follows on that Pod, and
   # the managed journey then Stops and Starts the environment.
-  update="$(kind_credential_cli env --platform update "$environment" \
+  update="$(kind_credential_cli env --cloud update "$environment" \
     --profile "platform:$profile_name" --yes --output json)"
   generation="$(jq -er '.operation_generation |
     if type == "number" and . > 0 and . == floor then .
@@ -713,16 +713,16 @@ run_admitted_cw_runtime_journey() {
   fi
   # Public cleanup runs only after the complete journey, including Observe,
   # stale-incarnation refusal and permanent Attach closure, has succeeded.
-  kind_credential_cli env --platform rm "$environment" --yes --output json
+  kind_credential_cli env --cloud rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s "pod/$pod"
-  kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
+  kind_credential_cli credentials --cloud --profile "$profile_name" delete --yes
   # A stored platform credential is revoked before its record is deleted.
-  kind_credential_cli credentials --platform revoke "$credential_name" --output json >/dev/null
-  kind_credential_cli credentials --platform delete "$credential_name" --yes
+  kind_credential_cli credentials --cloud revoke "$credential_name" --output json >/dev/null
+  kind_credential_cli credentials --cloud delete "$credential_name" --yes
   if [ "$managed" = 1 ]; then
-    kind_credential_cli credentials --platform revoke "$anthropic_name" --output json >/dev/null
-    kind_credential_cli credentials --platform delete "$anthropic_name" --yes
+    kind_credential_cli credentials --cloud revoke "$anthropic_name" --output json >/dev/null
+    kind_credential_cli credentials --cloud delete "$anthropic_name" --yes
   fi
   rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"
   log "retained cw-runtime public create, original Attach/daemon/Pod, UID1000 A/B/A, CAS/Observe/refusal and cleanup green"

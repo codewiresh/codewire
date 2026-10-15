@@ -217,9 +217,9 @@ pub(crate) struct UseTargetArgs {
     )]
     pub(crate) local: bool,
     #[arg(
-        long,
+        long = "cloud",
         conflicts_with = "local",
-        help = "Select a platform environment explicitly"
+        help = "Select a cloud environment explicitly"
     )]
     pub(crate) platform: bool,
     #[arg(value_name = "TARGET")]
@@ -242,10 +242,10 @@ pub(crate) struct EnvArgs {
     )]
     pub(crate) local: bool,
     #[arg(
-        long,
+        long = "cloud",
         global = true,
         conflicts_with = "local",
-        help = "Operate on current-organization platform environments only"
+        help = "Operate on current-organization cloud environments only"
     )]
     pub(crate) platform: bool,
     #[command(subcommand)]
@@ -443,9 +443,9 @@ pub(crate) struct CredentialsArgs {
     )]
     pub(crate) local: bool,
     #[arg(
-        long,
+        long = "cloud",
         conflicts_with = "local",
-        help = "Use platform protected storage (prompts when omitted interactively)"
+        help = "Use cloud protected storage (prompts when omitted interactively)"
     )]
     pub(crate) platform: bool,
     #[arg(
@@ -1761,9 +1761,9 @@ pub(crate) struct SecretsArgs {
     )]
     pub(crate) local: bool,
     #[arg(
-        long,
+        long = "cloud",
         conflicts_with = "local",
-        help = "Use platform protected storage (prompts when omitted interactively)"
+        help = "Use cloud protected storage (prompts when omitted interactively)"
     )]
     pub(crate) platform: bool,
     #[arg(long, value_name = "NAME", conflicts_with_all = ["user", "organization"], value_parser = parse_secret_project_reference, help = "Explicit named project for key operations; never inferred from cw use or YAML")]

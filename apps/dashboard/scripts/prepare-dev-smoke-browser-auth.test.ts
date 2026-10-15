@@ -266,15 +266,15 @@ case " $* " in
   *" whoami --output json "*) printf '%s\\n' '${whoami}' ;;
   *" org list --output json "*) printf '%s\\n' '[{"id":"${ORG}","role":"owner","slug":"dedicated-smoke"}]' ;;
   *" org current "*) printf 'ID: ${ORG}\\nRole: owner\\n' ;;
-  *" env --platform list --output json "*) "${process.execPath}" -e "$list_rows" live ;;
-  *" env --platform list --all --output json "*)
+  *" env --cloud list --output json "*) "${process.execPath}" -e "$list_rows" live ;;
+  *" env --cloud list --all --output json "*)
     printf 'list-all\\n' >>"${directory}/audit"
     "${process.execPath}" -e "$list_rows" all ;;
   *" env report "*)
     "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); const row=rows.find(row=>row.id===process.argv[1]); if(!row)process.exit(92); console.log(JSON.stringify({environment:{id:row.id,org_id:row.org_id,type:"sandbox",state:row.state,isolation_tier:"standard"}},null,2));' "$5" ;;
-  *" env --platform info "*)
+  *" env --cloud info "*)
     "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); const row=rows.find(row=>row.id===process.argv[1]); if(!row||["destroying","destroyed"].includes(row.state))process.exit(92); console.log(JSON.stringify(row));' "$6" ;;
-  *" env --platform rm --yes "*)
+  *" env --cloud rm --yes "*)
     printf 'destroy\\n' >>"${directory}/audit"
     ${mode === "ux-cleanup-failure" ? "exit 96" : ":"}
     sed 's/"state":"running"/"state":"destroyed"/' "$CW_CONFIG_DIR/ux-resource.json" >"$CW_CONFIG_DIR/ux-destroyed.json"

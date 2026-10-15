@@ -38,8 +38,8 @@ Requirements:
     `openai` slot. A synthetic key is fine (any token-shaped value, for
     example sk-synthetic-latency-probe): OpenAI rejects it with 401, the same
     work as a real request until the first byte. For example:
-      cw credentials --platform add openai --name latency-probe
-      cw credentials --platform --profile latency-probe set openai id:<credential-id>
+      cw credentials --cloud add openai --name latency-probe
+      cw credentials --cloud --profile latency-probe set openai id:<credential-id>
     then create and start an environment with that profile.
   - `cw` is signed in to the target server (or CODEWIRE_API_KEY is set).
   - The Sandbox has curl and egress to api.openai.com.

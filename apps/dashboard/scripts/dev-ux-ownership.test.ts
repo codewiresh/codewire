@@ -94,7 +94,7 @@ test("ambiguous Create response reconciles only exact claimed name, actor and or
   const f = fixture(); await f.owned.admit(deadline()); f.owned.beforeCreate();
   f.set([{ ...f.row(), id: "00000000-0000-4000-8000-000000000002", name: "unrelated" }, f.row()]);
   await f.owned.cleanup(deadline());
-  expect(f.calls.filter((args) => args.includes("rm"))).toEqual([["env", "--platform", "rm", "--yes", ID]]);
+  expect(f.calls.filter((args) => args.includes("rm"))).toEqual([["env", "--cloud", "rm", "--yes", ID]]);
 });
 
 test("missing, duplicate, foreign or malformed records fail closed without deletion", async () => {
@@ -168,7 +168,7 @@ test("bound terminal cleanup does not call info or repeat deletion", async () =>
   f.set([{ ...f.row(), state: "destroyed" }]);
   await f.owned.cleanup(deadline());
   expect(f.calls.slice(calls)).toEqual([
-    ["env", "--platform", "list", "--output", "json"],
+    ["env", "--cloud", "list", "--output", "json"],
     ["env", "report", ID, "--output", "json"],
   ]);
 });
@@ -201,7 +201,7 @@ test("a destroyed history too large for one private output never enters admit, c
   f.set([f.row()]);
   expect(await f.owned.createdId(deadline())).toBe(ID);
   await f.owned.cleanup(deadline());
-  expect(f.calls.filter((args) => args.includes("rm"))).toEqual([["env", "--platform", "rm", "--yes", ID]]);
+  expect(f.calls.filter((args) => args.includes("rm"))).toEqual([["env", "--cloud", "rm", "--yes", ID]]);
   expect(f.calls.at(-1)).toEqual(["env", "report", ID, "--output", "json"]);
   expect(f.calls.some((args) => args.includes("--all"))).toBe(false);
   expect(f.largestList()).toBeLessThan(1024);

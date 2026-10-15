@@ -53,14 +53,19 @@ fn fixture(
                 }
             } else if list {
                 let plural = *path.last().unwrap();
-                if matches!(plural, "sandboxtemplates" | "sandboxwarmpools") {
+                if plural == "sandboxwarmpools" {
                     assert!(uri.query().unwrap().contains("labelSelector=codewire.sh%2Fenvironment-id%3Denv-test"));
+                }
+                // Identity-free templates carry no label: templates are
+                // listed whole, and cleanup selects its own.
+                if plural == "sandboxtemplates" {
+                    assert!(!uri.query().unwrap().contains("labelSelector"));
                 }
                 if list_failure && plural == "sandboxtemplates" {
                     (StatusCode::FORBIDDEN, json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403}))
                 } else {
-                    // PVCs are listed unfiltered: the residue scan matches them itself.
-                    let items: Vec<_> = objects.iter().filter(|((resource, _), value)| resource == plural && (plural == "persistentvolumeclaims" || value["metadata"]["labels"][LABEL_ENV_ID] == "env-test")).map(|(_, value)| value.clone()).collect();
+                    // PVCs and templates are listed unfiltered: cleanup matches them itself.
+                    let items: Vec<_> = objects.iter().filter(|((resource, _), value)| resource == plural && (matches!(plural, "persistentvolumeclaims" | "sandboxtemplates") || value["metadata"]["labels"][LABEL_ENV_ID] == "env-test")).map(|(_, value)| value.clone()).collect();
                     (StatusCode::OK, json!({"apiVersion":"v1","kind":"List","metadata":{},"items":items}))
                 }
             } else {
@@ -182,6 +187,70 @@ async fn cleanup_name_hint_cannot_adopt_a_foreign_template() {
             .is_err()
     );
     assert_eq!(objects.lock().unwrap().len(), 4);
+}
+
+fn insert_template(objects: &Arc<Mutex<Objects>>, name: &str) {
+    objects.lock().unwrap().insert(
+        ("sandboxtemplates".into(), name.into()),
+        json!({"apiVersion": super::super::EXTENSIONS_API_VERSION, "kind": "SandboxTemplate",
+            "metadata": {"name": name, "namespace": "dev-sandboxes", "uid": format!("uid-{name}")}}),
+    );
+}
+
+/// #2831: destroy removes the environment's identity-free template (no
+/// environment label) by its own name, even when the hint derived from the
+/// preset's current image names another template, as after the preset's
+/// image changed, or there is no hint, as after its configuration was
+/// removed. Templates of other environments and shared pool templates stay,
+/// and destroying again, with the template gone, succeeds.
+#[tokio::test]
+async fn destroy_removes_the_identity_free_template_whatever_its_preset_now_names() {
+    for hint in [None, Some("codewire-workspace-sha256-0ce0c5eb-env-test")] {
+        let (client, objects) = fixture(false, false, false);
+        for name in [
+            "workspace-env-test",
+            "workspace-env-foreign",
+            "cw-pool-500m-1024mi-5gi-0a1b2c3d",
+        ] {
+            insert_template(&objects, name);
+        }
+        let residue = client
+            .environment_residue("env-test", "", hint, false)
+            .await
+            .unwrap();
+        assert!(
+            residue
+                .resources
+                .contains(&"SandboxTemplate/workspace-env-test".to_owned())
+        );
+        for _ in 0..2 {
+            client
+                .delete_environment_resources("env-test", "", hint, false, Duration::from_secs(1))
+                .await
+                .unwrap();
+        }
+        assert!(
+            client
+                .environment_residue("env-test", "", hint, false)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let remaining = objects.lock().unwrap();
+        let templates: Vec<&str> = remaining
+            .keys()
+            .filter(|(resource, _)| resource == "sandboxtemplates")
+            .map(|(_, name)| name.as_str())
+            .collect();
+        assert_eq!(
+            templates,
+            [
+                "cw-pool-500m-1024mi-5gi-0a1b2c3d",
+                "sandboxtemplates-env-foreign",
+                "workspace-env-foreign"
+            ]
+        );
+    }
 }
 
 /// Design §12: destroy's storage proof also counts the recorded workspace PVC

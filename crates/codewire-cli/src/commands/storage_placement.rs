@@ -41,11 +41,11 @@ fn select_storage_placement(
         (true, false) => Ok(StoragePlacement::Local),
         (false, true) => Ok(StoragePlacement::Platform),
         (true, true) => {
-            anyhow::bail!("storage placement must be exactly one of --local or --platform")
+            anyhow::bail!("storage placement must be exactly one of --local or --cloud")
         }
         (false, false) if interactive => prompt(),
         (false, false) => anyhow::bail!(
-            "storage placement is required: pass --local or --platform (noninteractive and JSON commands never prompt)"
+            "storage placement is required: pass --local or --cloud (noninteractive and JSON commands never prompt)"
         ),
     }
 }
@@ -54,7 +54,7 @@ fn prompt_storage_placement(
     reader: impl BufRead,
     mut writer: impl Write,
 ) -> anyhow::Result<StoragePlacement> {
-    write!(writer, "Storage placement [local/platform]: ")
+    write!(writer, "Storage placement [local/cloud]: ")
         .context("write storage placement prompt")?;
     writer.flush().context("flush storage placement prompt")?;
     let mut input = String::new();
@@ -67,12 +67,12 @@ fn prompt_storage_placement(
     }
     anyhow::ensure!(
         count < 65,
-        "invalid storage placement; choose local or platform"
+        "invalid storage placement; choose local or cloud"
     );
     match input.trim() {
         "local" => Ok(StoragePlacement::Local),
-        "platform" => Ok(StoragePlacement::Platform),
-        _ => anyhow::bail!("invalid storage placement; choose local or platform"),
+        "cloud" => Ok(StoragePlacement::Platform),
+        _ => anyhow::bail!("invalid storage placement; choose local or cloud"),
     }
 }
 
@@ -102,14 +102,15 @@ mod tests {
             panic!("noninteractive input must remain unread")
         })
         .unwrap_err();
-        assert!(error.to_string().contains("--local or --platform"));
+        assert!(error.to_string().contains("--local or --cloud"));
     }
 
     #[test]
     fn missing_interactive_placement_accepts_only_explicit_answers() {
         for (answer, expected) in [
             ("local\n", Some(StoragePlacement::Local)),
-            ("platform\n", Some(StoragePlacement::Platform)),
+            ("cloud\n", Some(StoragePlacement::Platform)),
+            ("platform\n", None),
             ("", None),
             ("\n", None),
             ("yes\n", None),
@@ -123,7 +124,7 @@ mod tests {
                 assert!(!error.to_string().contains("sensitive-input-canary"));
             }
             assert_eq!(result.ok(), expected);
-            assert_eq!(output, b"Storage placement [local/platform]: ");
+            assert_eq!(output, b"Storage placement [local/cloud]: ");
         }
     }
 

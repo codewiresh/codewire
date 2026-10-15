@@ -97,7 +97,7 @@ async fn connect_credential(
         CredentialConnectProviderArg::Codex => connect_codex(client, args).await,
         CredentialConnectProviderArg::Github => connect_github(client, args).await,
         CredentialConnectProviderArg::Claude => anyhow::bail!(
-            "Claude sign-ins are stored only on the Codewire platform; connect one with --platform"
+            "Claude sign-ins are stored only on the Codewire platform; connect one with --cloud"
         ),
     }
 }
@@ -192,7 +192,7 @@ pub(crate) fn report_github_pending<'a>(
     }
 }
 
-/// The notice for each installation, as `cw credentials --platform list`
+/// The notice for each installation, as `cw credentials --cloud list`
 /// shows it.
 pub(crate) fn github_pending_notices<'a>(
     pending: impl IntoIterator<Item = (&'a str, u64, codewire_credential_broker::GitHubAccountKind)>,
@@ -854,7 +854,7 @@ fn api_key_enrollment_kind(provider: &str) -> anyhow::Result<CredentialAuthKind>
     match provider {
         "openai" | "anthropic" => Ok(CredentialAuthKind::ApiKey),
         "claude-subscription" => anyhow::bail!(
-            "Claude subscription tokens are stored only on the Codewire platform; add one with --platform"
+            "Claude subscription tokens are stored only on the Codewire platform; add one with --cloud"
         ),
         "codex" | "github" => {
             anyhow::bail!("use connect {provider} --name NAME for OAuth credentials")
@@ -1108,7 +1108,7 @@ mod tests {
 
     #[test]
     fn codex_connect_help_explains_device_authorization_for_both_placements() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             let error = Cli::try_parse_from(["cw", "credentials", placement, "connect", "--help"])
                 .unwrap_err();
             assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
@@ -1247,7 +1247,7 @@ mod tests {
 
     #[test]
     fn oauth_connect_parser_accepts_explicit_reconnect_confirmation() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             for provider in ["codex", "github"] {
                 let parsed = Cli::try_parse_from([
                     "cw",
@@ -1601,7 +1601,7 @@ mod tests {
 
     #[test]
     fn ssh_enrollment_uses_one_generate_or_explicit_import_in_both_stores() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             let generated = Cli::try_parse_from([
                 "cw",
                 "credentials",
@@ -1654,7 +1654,7 @@ mod tests {
                 api_key_enrollment_kind(provider).unwrap(),
                 CredentialAuthKind::ApiKey
             );
-            for placement in ["--local", "--platform"] {
+            for placement in ["--local", "--cloud"] {
                 let parsed = Cli::try_parse_from([
                     "cw",
                     "credentials",
@@ -1693,7 +1693,7 @@ mod tests {
         let parsed = Cli::try_parse_from([
             "cw",
             "credentials",
-            "--platform",
+            "--cloud",
             "add",
             "claude-subscription",
             "--name=claude",
@@ -1710,7 +1710,7 @@ mod tests {
             Cli::try_parse_from([
                 "cw",
                 "credentials",
-                "--platform",
+                "--cloud",
                 "add",
                 "claude-subscription",
                 "--name=claude",
@@ -1719,7 +1719,7 @@ mod tests {
             .is_err()
         );
         let error = api_key_enrollment_kind("claude-subscription").unwrap_err();
-        assert!(error.to_string().contains("--platform"));
+        assert!(error.to_string().contains("--cloud"));
     }
 
     #[test]

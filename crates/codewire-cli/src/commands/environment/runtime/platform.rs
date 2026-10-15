@@ -269,7 +269,7 @@ async fn status(
 
 fn print_observe_command(id: &str, request_id: &str) {
     eprintln!(
-        "Runtime request: {request_id}; observe with cw env --platform runtime observe {id} --request-id {request_id}"
+        "Runtime request: {request_id}; observe with cw env --cloud runtime observe {id} --request-id {request_id}"
     );
 }
 
