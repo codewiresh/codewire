@@ -315,6 +315,34 @@ pub async fn mutate(
             None => Some(prepare_resume(&state, &captured, &info, &mut private_request).await?),
         }
     };
+    // A plain Stop of a conversation whose last request has an unknown
+    // outcome is that request's cleanup, so `cw stop` needs no request ID; a
+    // repeat keeps its first admission's link (#2782).
+    if wire::is_plain_stop(&private_request) {
+        let request_id = Uuid::parse_str(&private_request.request_id).map_err(|_| invalid())?;
+        let journal = journal(&state);
+        let link = match journal
+            .saved_mutation(&captured.binding_facts(), &user, request_id)
+            .await?
+        {
+            Some(saved) => saved.cleanup_of_request_id,
+            None => {
+                let Some(private::platform_managed_mutation_request::Operation::Control(c)) =
+                    private_request.operation.as_ref()
+                else {
+                    return Err(invalid());
+                };
+                journal
+                    .unknown_active_request(&captured.binding_facts(), &user, &c.session_id)
+                    .await?
+            }
+        };
+        if let (Some(id), Some(private::platform_managed_mutation_request::Operation::Control(c))) =
+            (link, private_request.operation.as_mut())
+        {
+            c.cleanup_of_request_id = Some(id.to_string());
+        }
+    }
     require_support(&private_request, &info)?;
     captured.recheck(&state, &user).await?;
     let metadata = ManagedMutation::from_private(&private_request)?;
