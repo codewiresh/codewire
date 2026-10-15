@@ -117,7 +117,7 @@ pub(crate) async fn resolve_named_execution_target(
             if environment.name == target_ref =>
         {
             anyhow::bail!(
-                "environment {target_ref:?} exists in both placements; use `cw use --local {target_ref}` or `cw use --platform {target_ref}`"
+                "environment {target_ref:?} exists in both placements; use `cw use --local {target_ref}` or `cw use --cloud {target_ref}`"
             )
         }
         (Some(environment), _) => Ok(config::CurrentTargetConfig {

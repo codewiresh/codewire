@@ -81,16 +81,16 @@ identity_journey() (
   cw() {
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
-      'credentials --platform list --output json') printf '[]\n' ;;
-      'credentials --platform profiles list --output json') printf '[]\n' ;;
-      'credentials --platform connect codex --name dev-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+      'credentials --cloud list --output json') printf '[]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[]\n' ;;
+      'credentials --cloud connect codex --name dev-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
         printf 'owner-visible-device-prompt\n' ;;
-      'credentials --platform get dev-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output json')
+      'credentials --cloud get dev-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output json')
         jq -n --arg id "$CREDENTIAL_ID" '[{id:$id,name:"dev-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           provider:"openai",status:"CREDENTIAL_STATUS_ACTIVE",
           authenticationKind:"CREDENTIAL_AUTHENTICATION_KIND_OAUTH"}]' ;;
-      'credentials --platform --profile dev-codex-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa set codex id:'*) ;;
-      'credentials --platform --profile dev-codex-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa get --output json')
+      'credentials --cloud --profile dev-codex-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa set codex id:'*) ;;
+      'credentials --cloud --profile dev-codex-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa get --output json')
         jq -n --arg id "$PROFILE_ID" --arg key "$CREDENTIAL_ID" '[{id:$id,
           name:"dev-codex-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",revision:"1",
           entries:[{capabilitySlot:"codex",credentialId:$key}]}]' ;;
@@ -99,7 +99,7 @@ identity_journey() (
   }
   prepare_provider_codex
   [[ "$PROVIDER_CODEX_CREDENTIAL_ID" == "$CREDENTIAL_ID" && "$PROVIDER_CODEX_PROFILE_ID" == "$PROFILE_ID" ]]
-  grep -qxF 'credentials --platform connect codex --name dev-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ' "$TMPDIR_SMOKE/calls"
+  grep -qxF 'credentials --cloud connect codex --name dev-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ' "$TMPDIR_SMOKE/calls"
   jq -e --arg profile "platform:id:$PROFILE_ID" '.version == 1 and .working_directory == "/workspace" and
     .agents == {tools:["codex"]} and .credentials == {profile:$profile} and
     (.install_command | contains("provider-codex-workload.sh") and contains("provider-codex-output.py")) and
@@ -116,8 +116,8 @@ enrollment_cancelled() (
   cw() {
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
-      'credentials --platform list --output json'|'credentials --platform profiles list --output json') printf '[]\n' ;;
-      'credentials --platform connect codex --name dev-codex-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') return 130 ;;
+      'credentials --cloud list --output json'|'credentials --cloud profiles list --output json') printf '[]\n' ;;
+      'credentials --cloud connect codex --name dev-codex-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') return 130 ;;
       *) fail "command continued after cancelled enrollment: $*" ;;
     esac
   }
@@ -132,9 +132,9 @@ name_collision() (
   cw() {
     printf '%q ' "$@" >>"$TEST_ROOT/collision.calls"; printf '\n' >>"$TEST_ROOT/collision.calls"
     case "$*" in
-      'credentials --platform list --output json')
+      'credentials --cloud list --output json')
         printf '[{"name":"dev-codex-cccccccccccccccccccccccccccccccc"}]\n' ;;
-      'credentials --platform profiles list --output json') printf '[]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[]\n' ;;
       *) fail "collision permitted a mutation: $*" ;;
     esac
   }
@@ -150,31 +150,31 @@ pass
 cleanup_cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
-    'credentials --platform profiles list --output json')
+    'credentials --cloud profiles list --output json')
       [[ "$FAILURE" != profile-list ]] || return 1
       if [[ -e "$TMPDIR_SMOKE/profile-deleted" ]]; then printf '[]\n'; else
         local id="$PROFILE_ID"; [[ "$FAILURE" != profile-rebound ]] || id="$CREDENTIAL_ID"
         jq -n --arg id "$id" '[{id:$id,name:"owned-profile"}]'
       fi ;;
-    'credentials --platform --profile '*" delete --yes")
+    'credentials --cloud --profile '*" delete --yes")
       [[ "$4" == "id:$PROFILE_ID" ]] || fail 'unowned profile deletion'
       touch "$TMPDIR_SMOKE/profile-deleted" ;;
-    'credentials --platform list --output json')
+    'credentials --cloud list --output json')
       if [[ -e "$TMPDIR_SMOKE/credential-deleted" ]]; then printf '[]\n'; else
         local id="$CREDENTIAL_ID"; [[ "$FAILURE" != credential-rebound ]] || id="$PROFILE_ID"
         jq -n --arg id "$id" '[{id:$id,name:"owned-codex"}]'
       fi ;;
-    'credentials --platform get '*" --output json")
+    'credentials --cloud get '*" --output json")
       local id="$CREDENTIAL_ID" status=CREDENTIAL_STATUS_ACTIVE kind=CREDENTIAL_AUTHENTICATION_KIND_OAUTH
       [[ "$FAILURE" != get-rebound ]] || id="$PROFILE_ID"
       [[ "$FAILURE" != wrong-kind ]] || kind=CREDENTIAL_AUTHENTICATION_KIND_API_KEY
       [[ "$FAILURE" != already-revoked ]] || status=CREDENTIAL_STATUS_REVOKED
       jq -n --arg id "$id" --arg status "$status" --arg kind "$kind" '[{id:$id,name:"owned-codex",
         provider:"openai",authenticationKind:$kind,status:$status}]' ;;
-    'credentials --platform revoke '*)
+    'credentials --cloud revoke '*)
       [[ "$4" == "id:$CREDENTIAL_ID" ]] || fail 'unowned credential revocation'
       touch "$TMPDIR_SMOKE/credential-revoked" ;;
-    'credentials --platform delete '*" --yes")
+    'credentials --cloud delete '*" --yes")
       [[ "$4" == "id:$CREDENTIAL_ID" ]] || fail 'unowned credential deletion'
       touch "$TMPDIR_SMOKE/credential-deleted" ;;
     *) fail "unexpected cleanup command: $*" ;;
@@ -218,7 +218,7 @@ pass
 
 source_text="$(cat "$REPO_ROOT/scripts/runtime/dev/provider-codex-smoke.sh")"
 # shellcheck disable=SC2016 # Match literal source variable expansion.
-grep -qF 'cw_with_timeout 600 credentials --platform connect codex --name "$PROVIDER_CODEX_CREDENTIAL_NAME"' <<<"$source_text" ||
+grep -qF 'cw_with_timeout 600 credentials --cloud connect codex --name "$PROVIDER_CODEX_CREDENTIAL_NAME"' <<<"$source_text" ||
   fail 'normal public Codex enrollment command drifted'
 if grep -E 'connect codex.*(>|2>)' <<<"$source_text"; then
   fail 'owner-visible device prompt was redirected'

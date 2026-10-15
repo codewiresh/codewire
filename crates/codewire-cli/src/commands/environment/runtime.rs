@@ -45,7 +45,7 @@ fn validate_placement(
                     && args.image_sha256.is_some()
                     && args.expected_revision.is_some()
             },
-            "platform updates require --platform --from DIR --expected-generation; native updates require --source --image-sha256 --expected-revision"
+            "platform updates require --cloud --from DIR --expected-generation; native updates require --source --image-sha256 --expected-revision"
         ),
         EnvRuntimeCommand::Rollback(args) => anyhow::ensure!(
             if platform {
@@ -53,7 +53,7 @@ fn validate_placement(
             } else {
                 args.expected_revision.is_some() && args.expected_generation.is_none()
             },
-            "platform rollback requires --platform --expected-generation; native rollback requires --expected-revision"
+            "platform rollback requires --cloud --expected-generation; native rollback requires --expected-revision"
         ),
         EnvRuntimeCommand::Cancel(_) if platform => anyhow::bail!(
             "platform runtime requests are observe-only after dispatch; use observe with the original request UUID"

@@ -62,9 +62,9 @@ Use an explicit placement and scope. `set` prompts for the value without
 placing it in the command line:
 
 ```bash
-cw secrets --platform list
-cw secrets --platform organization set DATABASE_URL
-cw secrets --platform organization delete DATABASE_URL
+cw secrets --cloud list
+cw secrets --cloud organization set DATABASE_URL
+cw secrets --cloud organization delete DATABASE_URL
 ```
 
 ## Related

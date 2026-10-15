@@ -204,7 +204,7 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
         command => {
             if placement.is_some() {
                 anyhow::bail!(
-                    "--local and --platform currently support only create, update, list, info, start, stop, restart, refresh-skills, rm, cp, port, access, share, and daemon diagnostics"
+                    "--local and --cloud currently support only create, update, list, info, start, stop, restart, refresh-skills, rm, cp, port, access, share, and daemon diagnostics"
                 );
             }
             handle_platform_env_command(globals, command).await
@@ -352,7 +352,7 @@ async fn handle_unified_environment_share(
 ) -> anyhow::Result<()> {
     match placement {
         Some(EnvironmentPlacement::Local) => {
-            anyhow::bail!("environment sharing is available only with --platform")
+            anyhow::bail!("environment sharing is available only with --cloud")
         }
         Some(EnvironmentPlacement::Platform) | None => {
             handle_platform_env_command(globals, EnvCommand::Share(args)).await
@@ -1977,7 +1977,7 @@ pub(crate) fn ambiguous_environment_placement_error(
     target_ref: &str,
 ) -> anyhow::Error {
     anyhow::anyhow!(
-        "environment {target_ref:?} exists in both placements; use `cw env {command} --local {target_ref}` or `cw env {command} --platform {target_ref}`"
+        "environment {target_ref:?} exists in both placements; use `cw env {command} --local {target_ref}` or `cw env {command} --cloud {target_ref}`"
     )
 }
 

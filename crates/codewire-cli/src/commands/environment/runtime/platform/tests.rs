@@ -220,7 +220,7 @@ fn platform_parser_requires_source_pin_and_full_u64_generation() {
         let flags = [
             "cw",
             "env",
-            "--platform",
+            "--cloud",
             "runtime",
             "update",
             "env-a",
@@ -257,7 +257,7 @@ fn platform_parser_requires_source_pin_and_full_u64_generation() {
             Cli::try_parse_from([
                 "cw",
                 "env",
-                "--platform",
+                "--cloud",
                 "runtime",
                 "rollback",
                 "env-a",
@@ -275,7 +275,7 @@ fn native_and_platform_fields_cannot_cross_before_effects() {
     let (_, platform_command) = command(&[
         "cw",
         "env",
-        "--platform",
+        "--cloud",
         "runtime",
         "update",
         "env-a",
@@ -318,7 +318,7 @@ fn native_and_platform_fields_cannot_cross_before_effects() {
     let (_, cancel) = command(&[
         "cw",
         "env",
-        "--platform",
+        "--cloud",
         "runtime",
         "cancel",
         "env-a",

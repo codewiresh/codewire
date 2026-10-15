@@ -114,7 +114,7 @@ fn credential_dispatch(
         StoragePlacement::Platform => Ok(CredentialDispatch::Platform),
         StoragePlacement::Local if local_supported => Ok(CredentialDispatch::Local),
         StoragePlacement::Local => anyhow::bail!(
-            "local protected credential storage is available only on Linux and macOS; use --platform explicitly for platform storage"
+            "local protected credential storage is available only on Linux and macOS; use --cloud explicitly for cloud storage"
         ),
     }
 }
@@ -788,7 +788,7 @@ mod tests {
 
     #[test]
     fn credential_parser_is_available_for_both_explicit_placements() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             let parsed = crate::Cli::try_parse_from([
                 "cw",
                 "credentials",

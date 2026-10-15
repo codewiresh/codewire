@@ -36,7 +36,7 @@ cw_with_timeout() { shift; cw "$@"; }
 cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
-    'env --platform info '*" --output json")
+    'env --cloud info '*" --output json")
       [[ "$4" == "$ENV_ID" ]] || fail 'inspected a different environment'
       [[ "$FAILURE" != info ]] || return 1
       local id="$ENV_ID" profile="platform:id:$PROFILE_ID" revision=1
@@ -58,14 +58,14 @@ cw() {
       [[ "${11}" == "$HOST_KEY" ]] || fail 'waiter lost host trust'
       touch "$TMPDIR_SMOKE/admitted"
       printf '{"session_id":"owned-session","state":"Running"}\n' ;;
-    'credentials --platform revoke '*" --output json")
+    'credentials --cloud revoke '*" --output json")
       [[ -e "$TMPDIR_SMOKE/ready" ]] || fail 'revoke occurred before probe readiness'
       [[ "$4" == "id:$KEY_ID" ]] || fail 'different credential revoked'
       touch "$TMPDIR_SMOKE/revoked"
       if [[ "$FAILURE" == bad-revoke ]]; then printf '[]\n'; else
         jq -n --arg id "$KEY_ID" '[{id:$id,status:"CREDENTIAL_STATUS_REVOKED",revocationGeneration:"2"}]'
       fi ;;
-    'env --platform cp '*)
+    'env --cloud cp '*)
       [[ -e "$TMPDIR_SMOKE/revoked" && "$5" == "$ENV_ID:/workspace/.cw-ssh-smoke/revoked-trigger" ]] ||
         fail 'wrong trigger ordering or destination'
       [[ "$(cat "$4")" == revoked ]] || fail 'wrong trigger bytes'
@@ -132,8 +132,8 @@ done
 # Profile enumeration must use the existing collection command. A selected
 # profile followed by list is an alias for Get, so it fails for a fresh name.
 profile_calls="$(declare -f prepare_provider_ssh_identity cleanup_provider_ssh_profile)"
-[[ "$(grep -cF 'credentials --platform profiles list --output json' <<<"$profile_calls")" == 3 ]]
-if grep -E 'credentials --platform --profile .* list --output json' <<<"$profile_calls"; then
+[[ "$(grep -cF 'credentials --cloud profiles list --output json' <<<"$profile_calls")" == 3 ]]
+if grep -E 'credentials --cloud --profile .* list --output json' <<<"$profile_calls"; then
   fail 'selected-profile Get used as collection enumeration'
 fi
 pass
@@ -143,31 +143,31 @@ pass
 cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
-    'credentials --platform profiles list --output json')
+    'credentials --cloud profiles list --output json')
       [[ "$FAILURE" != profile-list ]] || return 1
       if [[ -e "$TMPDIR_SMOKE/profile-deleted" ]]; then printf '[]\n'; else
         local id="$PROFILE_ID"
         [[ "$FAILURE" != profile-rebound ]] || id="$KEY_ID"
         jq -n --arg id "$id" '[{id:$id,name:"owned-profile"}]'
       fi ;;
-    'credentials --platform --profile '*" delete --yes")
+    'credentials --cloud --profile '*" delete --yes")
       [[ "$4" == "id:$PROFILE_ID" ]] || fail 'unowned profile deletion'
       touch "$TMPDIR_SMOKE/profile-deleted" ;;
-    'credentials --platform list --output json')
+    'credentials --cloud list --output json')
       if [[ -e "$TMPDIR_SMOKE/key-deleted" ]]; then printf '[]\n'; else
         local id="$KEY_ID"
         [[ "$FAILURE" != key-rebound ]] || id="$PROFILE_ID"
         jq -n --arg id "$id" '[{id:$id,name:"owned-key"}]'
       fi ;;
-    'credentials --platform get '*" --output json")
+    'credentials --cloud get '*" --output json")
       local id="$KEY_ID" status=CREDENTIAL_STATUS_ACTIVE
       [[ "$FAILURE" != key-get-rebound ]] || id="$PROFILE_ID"
       [[ "$FAILURE" != already-revoked ]] || status=CREDENTIAL_STATUS_REVOKED
       jq -n --arg id "$id" --arg status "$status" '[{id:$id,name:"owned-key",status:$status}]' ;;
-    'credentials --platform revoke '*)
+    'credentials --cloud revoke '*)
       [[ "$4" == "id:$KEY_ID" ]] || fail 'unowned key revocation'
       touch "$TMPDIR_SMOKE/key-revoked" ;;
-    'credentials --platform delete '*" --yes")
+    'credentials --cloud delete '*" --yes")
       [[ "$4" == "id:$KEY_ID" ]] || fail 'unowned key deletion'
       touch "$TMPDIR_SMOKE/key-deleted" ;;
     *) fail "unexpected cleanup command: $*" ;;

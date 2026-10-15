@@ -201,7 +201,7 @@ now_ms() { date +%s%3N; }
 
 # ------------------------------------------------------------ environment
 
-env_info() { cw env --platform info "$1" --output json 2>/dev/null; }
+env_info() { cw env --cloud info "$1" --output json 2>/dev/null; }
 
 env_state() { env_info "$1" | jq -r '.state // ""'; }
 

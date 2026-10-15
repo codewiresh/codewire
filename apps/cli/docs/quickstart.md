@@ -63,13 +63,13 @@ The managed credential value is never copied into the workspace.
 
 To use a Claude Pro, Max, Team or Enterprise plan with Claude Code in a hosted
 Sandbox, run `claude setup-token`, then paste the freshly printed token into
-`cw credentials --platform add claude-subscription --name NAME` and select it
-with `cw credentials --platform --profile=PROFILE set anthropic NAME`. The token
+`cw credentials --cloud add claude-subscription --name NAME` and select it
+with `cw credentials --cloud --profile=PROFILE set anthropic NAME`. The token
 stays in Codewire; the Sandbox receives only a placeholder. Codewire records an
-expiry one year after you add it; replace it with `cw credentials --platform
+expiry one year after you add it; replace it with `cw credentials --cloud
 rotate NAME`.
 
-Or sign in to Claude itself: `cw credentials --platform connect claude --name
+Or sign in to Claude itself: `cw credentials --cloud connect claude --name
 NAME` prints a link to Claude's sign-in page. Sign in with the account whose
 plan you want; after you approve, Claude shows a code. Copy it, paste it at
 the prompt and press Enter (what you paste stays hidden; the CLI confirms its

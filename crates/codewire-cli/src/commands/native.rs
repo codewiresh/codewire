@@ -1865,7 +1865,7 @@ fn no_pinned_runtime(
         && codewire_cw_release::release::valid_release_tag(&record.package_version)
     {
         format!(
-            "Local VMs aren't available on {} yet; hosted Sandboxes work (`cw env create --platform`).",
+            "Local VMs aren't available on {} yet; hosted Sandboxes work (`cw env create --cloud`).",
             host_name(host)
         )
     } else {
@@ -3627,7 +3627,7 @@ working_directory: /workspace/github
         let release = no_pinned_runtime(&record("v0.3.389", Some(&revision)), "linux-aarch64");
         assert_eq!(
             release,
-            "Local VMs aren't available on Linux arm64 yet; hosted Sandboxes work (`cw env create --platform`)."
+            "Local VMs aren't available on Linux arm64 yet; hosted Sandboxes work (`cw env create --cloud`)."
         );
         let release = no_pinned_runtime(&record("v0.3.389", Some(&revision)), "linux-x86_64");
         assert!(

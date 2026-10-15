@@ -158,7 +158,7 @@ fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
         );
     }
 
-    let cli = Cli::try_parse_from(["cw", "env", "--platform", "list"]).unwrap();
+    let cli = Cli::try_parse_from(["cw", "env", "--cloud", "list"]).unwrap();
     let Command::Env(EnvArgs {
         local,
         platform,
@@ -170,7 +170,7 @@ fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
     assert!(!local);
     assert!(platform);
 
-    assert!(Cli::try_parse_from(["cw", "env", "--local", "--platform", "list"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "env", "--local", "--cloud", "list"]).is_err());
     assert!(Cli::try_parse_from(["cw", "environment", "list"]).is_err());
     assert!(
         Cli::try_parse_from([
@@ -558,7 +558,7 @@ fn platform_lifecycle_wait_horizon_matches_server_class() {
 #[test]
 fn platform_create_rejects_native_only_options() {
     let cli =
-        Cli::try_parse_from(["cw", "env", "--platform", "create", "--backend", "native"]).unwrap();
+        Cli::try_parse_from(["cw", "env", "--cloud", "create", "--backend", "native"]).unwrap();
     let Command::Env(EnvArgs {
         command: EnvCommand::Create(args),
         ..
@@ -596,7 +596,7 @@ fn platform_create_rejects_native_only_options() {
     let cli = Cli::try_parse_from([
         "cw",
         "env",
-        "--platform",
+        "--cloud",
         "create",
         "--profile",
         "user/work",
@@ -630,7 +630,7 @@ fn platform_create_rejects_native_only_options() {
 fn ambiguous_placement_error_gives_both_exact_commands() {
     assert_eq!(
         ambiguous_environment_placement_error("start", "workspace").to_string(),
-        "environment \"workspace\" exists in both placements; use `cw env start --local workspace` or `cw env start --platform workspace`"
+        "environment \"workspace\" exists in both placements; use `cw env start --local workspace` or `cw env start --cloud workspace`"
     );
 }
 
@@ -648,7 +648,7 @@ fn use_parser_accepts_explicit_environment_placement() {
     assert!(local);
     assert!(!platform);
     assert_eq!(target, "workbench");
-    assert!(Cli::try_parse_from(["cw", "use", "--local", "--platform", "workbench"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "use", "--local", "--cloud", "workbench"]).is_err());
 }
 
 #[test]
@@ -890,7 +890,7 @@ credentials: {profile: platform:user/work}
     let cli = Cli::try_parse_from([
         "cw",
         "env",
-        "--platform",
+        "--cloud",
         "create",
         "--file",
         file.to_str().unwrap(),
@@ -2231,7 +2231,7 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
     let cli = Cli::try_parse_from([
         "cw",
         "env",
-        "--platform",
+        "--cloud",
         "share",
         "list",
         "builder",
@@ -2316,7 +2316,7 @@ async fn env_share_rejects_local_before_platform_resolution() {
     let error = handle_env_command(&globals, args).await.unwrap_err();
     assert_eq!(
         error.to_string(),
-        "environment sharing is available only with --platform"
+        "environment sharing is available only with --cloud"
     );
 }
 

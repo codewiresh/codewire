@@ -326,7 +326,7 @@ pub(crate) async fn resolve_host_reference(
                 .await?;
             if find_environment_match(&environments, requested)?.is_some() {
                 anyhow::bail!(
-                    "environment name {requested:?} exists on the host and platform; use exact host ID {} or --platform",
+                    "environment name {requested:?} exists on the host and platform; use exact host ID {} or --cloud",
                     host.id
                 );
             }

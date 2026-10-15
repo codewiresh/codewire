@@ -87,15 +87,15 @@ cw_with_timeout() { shift; cw "$@"; }
 cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
-    'env --platform list --all --output json'|'credentials --platform list --output json'|\
-    'credentials --platform profiles list --output json') printf '[]\n' ;;
-    'credentials --platform generate ssh --name '*) [[ "$6" == "$PROVIDER_SSH_CREDENTIAL_NAME" ]] ;;
-    'credentials --platform get '*" --output json")
+    'env --cloud list --all --output json'|'credentials --cloud list --output json'|\
+    'credentials --cloud profiles list --output json') printf '[]\n' ;;
+    'credentials --cloud generate ssh --name '*) [[ "$6" == "$PROVIDER_SSH_CREDENTIAL_NAME" ]] ;;
+    'credentials --cloud get '*" --output json")
       jq -n --arg id "$KEY_ID" --arg name "$PROVIDER_SSH_CREDENTIAL_NAME" --arg key "$PUBLIC_KEY" \
         '[{id:$id,name:$name,provider:"ssh",status:"CREDENTIAL_STATUS_ACTIVE",
           authenticationKind:"CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY",sshPublicKey:{openssh:$key}}]' ;;
-    'credentials --platform --profile '*" set ssh "*) [[ "$7" == "id:$KEY_ID" ]] ;;
-    'credentials --platform --profile '*" get --output json")
+    'credentials --cloud --profile '*" set ssh "*) [[ "$7" == "id:$KEY_ID" ]] ;;
+    'credentials --cloud --profile '*" get --output json")
       local key="$KEY_ID"; [[ "$FAILURE" != wrong-key ]] || key="$VM_ID"
       jq -n --arg id "$PROFILE_ID" --arg name "$PROVIDER_SSH_PROFILE_NAME" --arg key "$key" \
         '[{id:$id,name:$name,revision:"1",entries:[{capabilitySlot:"ssh",credentialId:$key}]}]' ;;

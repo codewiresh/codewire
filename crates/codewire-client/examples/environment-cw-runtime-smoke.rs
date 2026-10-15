@@ -270,7 +270,7 @@ mod linux {
                 journal.request(&request,"update",generation,&original,&session,&payload.identity)?;
                 submitted.push(request.clone());
                 let operation: EnvironmentCwRuntimeOperation = inputs.cli_json(&[
-                    "env", "--platform", "runtime", "update", &inputs.environment,
+                    "env", "--cloud", "runtime", "update", &inputs.environment,
                     "--from", payload.directory.to_str().context("release path is not UTF8")?,
                     "--target-sha256", &payload.identity.sha256,
                     "--expected-generation", &generation.to_string(),
@@ -305,7 +305,7 @@ mod linux {
                     journal.request(&negative_id,"refusal-stale-generation",generation,&original,&session,&inputs.b.identity)?;
                     submitted.push(negative_id.clone());
                     ensure!(inputs.cli_json::<EnvironmentCwRuntimeOperation>(&[
-                        "env", "--platform", "runtime", "update", &inputs.environment,
+                        "env", "--cloud", "runtime", "update", &inputs.environment,
                         "--from", inputs.b.directory.to_str().unwrap(),
                         "--target-sha256", &inputs.b.identity.sha256,
                         "--expected-generation", &stale, "--request-id", &negative_id,
@@ -323,7 +323,7 @@ mod linux {
             journal.request(&rollback,"rollback",generation,&original,&session,&inputs.a.identity)?;
             submitted.push(rollback.clone());
             let operation: EnvironmentCwRuntimeOperation = inputs.cli_json(&[
-                "env", "--platform", "runtime", "rollback", &inputs.environment,
+                "env", "--cloud", "runtime", "rollback", &inputs.environment,
                 "--expected-generation", &generation.to_string(), "--request-id", &rollback,
                 "--output", "json",
             ]).await.context("public rollback did not return an acknowledged operation")?;
@@ -357,7 +357,7 @@ mod linux {
                 for (variable, prefix, worker) in MANAGED_CREDENTIALS {
                     let name = managed_credential(variable, prefix)?;
                     inputs.cli_json::<serde_json::Value>(&[
-                        "credentials", "--platform", "revoke", &name, "--output", "json",
+                        "credentials", "--cloud", "revoke", &name, "--output", "json",
                     ]).await.context("revoke the exact selected synthetic provider credential")?;
                     journey.revoked(&client, worker).await?;
                 }
@@ -1397,7 +1397,7 @@ mod linux {
                     .cli_json::<serde_json::Value>(
                         &[
                             "credentials",
-                            "--platform",
+                            "--cloud",
                             "revoke",
                             &name,
                             "--output",
@@ -1694,7 +1694,7 @@ mod linux {
         let printed: EnvironmentCwRuntimeOperation = inputs
             .cli_json(&[
                 "env",
-                "--platform",
+                "--cloud",
                 "runtime",
                 "observe",
                 &inputs.environment,

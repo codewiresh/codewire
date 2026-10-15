@@ -15,9 +15,9 @@ prepare_provider_codex_identity() {
   [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 'cannot generate disposable Codex fixture names'
   credential_name="dev-codex-$nonce"
   profile_name="dev-codex-profile-$nonce"
-  cw_with_timeout 30 credentials --platform list --output json \
+  cw_with_timeout 30 credentials --cloud list --output json \
     >"$TMPDIR_SMOKE/provider-codex-credentials-before.json" || die 'cannot inspect personal credential metadata'
-  cw_with_timeout 30 credentials --platform profiles list --output json \
+  cw_with_timeout 30 credentials --cloud profiles list --output json \
     >"$TMPDIR_SMOKE/provider-codex-profiles-before.json" || die 'cannot inspect personal profile metadata'
   jq -e --arg name "$credential_name" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/provider-codex-credentials-before.json" >/dev/null || die 'disposable Codex credential name collision'
@@ -30,9 +30,9 @@ prepare_provider_codex_identity() {
 
   # Intentionally inherit the terminal. The device URL/code and owner approval
   # must remain visible and must never be captured in smoke artifacts.
-  cw_with_timeout 600 credentials --platform connect codex --name "$PROVIDER_CODEX_CREDENTIAL_NAME" ||
+  cw_with_timeout 600 credentials --cloud connect codex --name "$PROVIDER_CODEX_CREDENTIAL_NAME" ||
     die 'fresh owner-operated platform Codex enrollment failed'
-  cw_with_timeout 30 credentials --platform get "$PROVIDER_CODEX_CREDENTIAL_NAME" --output json \
+  cw_with_timeout 30 credentials --cloud get "$PROVIDER_CODEX_CREDENTIAL_NAME" --output json \
     >"$TMPDIR_SMOKE/provider-codex-credential.json" || die 'created Codex metadata is unavailable'
   PROVIDER_CODEX_CREDENTIAL_ID="$(provider_ssh_metadata_id \
     "$TMPDIR_SMOKE/provider-codex-credential.json" "$PROVIDER_CODEX_CREDENTIAL_NAME")" ||
@@ -42,11 +42,11 @@ prepare_provider_codex_identity() {
     .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE" and
     .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_OAUTH"
   ' "$TMPDIR_SMOKE/provider-codex-credential.json" >/dev/null || die 'created Codex public metadata is invalid'
-  cw_with_timeout 30 credentials --platform --profile "$PROVIDER_CODEX_PROFILE_NAME" \
+  cw_with_timeout 30 credentials --cloud --profile "$PROVIDER_CODEX_PROFILE_NAME" \
     set codex "id:$PROVIDER_CODEX_CREDENTIAL_ID" \
     >"$TMPDIR_SMOKE/provider-codex-profile-set.out" 2>"$TMPDIR_SMOKE/provider-codex-profile-set.err" ||
     die 'cannot select the created Codex identity in its disposable profile'
-  cw_with_timeout 30 credentials --platform --profile "$PROVIDER_CODEX_PROFILE_NAME" get --output json \
+  cw_with_timeout 30 credentials --cloud --profile "$PROVIDER_CODEX_PROFILE_NAME" get --output json \
     >"$TMPDIR_SMOKE/provider-codex-profile.json" || die 'created Codex profile metadata is unavailable'
   PROVIDER_CODEX_PROFILE_ID="$(provider_ssh_metadata_id \
     "$TMPDIR_SMOKE/provider-codex-profile.json" "$PROVIDER_CODEX_PROFILE_NAME")" ||
@@ -102,7 +102,7 @@ cleanup_provider_codex() {
 cleanup_provider_codex_profile() {
   local rc=0 resolved
   if [[ -n "$PROVIDER_CODEX_PROFILE_NAME" ]]; then
-    cw_with_timeout 30 credentials --platform profiles list --output json \
+    cw_with_timeout 30 credentials --cloud profiles list --output json \
       >"$TMPDIR_SMOKE/provider-codex-cleanup-profiles.json" 2>/dev/null || return 1
     jq -e 'type == "array"' "$TMPDIR_SMOKE/provider-codex-cleanup-profiles.json" >/dev/null || return 1
     if jq -e --arg name "$PROVIDER_CODEX_PROFILE_NAME" 'any(.[]; .name == $name)' \
@@ -111,10 +111,10 @@ cleanup_provider_codex_profile() {
         "$PROVIDER_CODEX_PROFILE_NAME")" || return 1
       [[ -z "$PROVIDER_CODEX_PROFILE_ID" || "$PROVIDER_CODEX_PROFILE_ID" == "$resolved" ]] || return 1
       PROVIDER_CODEX_PROFILE_ID="$resolved"
-      cw_with_timeout 30 credentials --platform --profile "id:$PROVIDER_CODEX_PROFILE_ID" delete --yes \
+      cw_with_timeout 30 credentials --cloud --profile "id:$PROVIDER_CODEX_PROFILE_ID" delete --yes \
         >"$TMPDIR_SMOKE/provider-codex-cleanup-profile.out" 2>&1 || rc=1
     fi
-    cw_with_timeout 30 credentials --platform profiles list --output json \
+    cw_with_timeout 30 credentials --cloud profiles list --output json \
       >"$TMPDIR_SMOKE/provider-codex-cleanup-profiles.json" 2>/dev/null &&
       jq -e --arg name "$PROVIDER_CODEX_PROFILE_NAME" --arg id "$PROVIDER_CODEX_PROFILE_ID" '
         type == "array" and all(.[]; .name != $name and .id != $id)
@@ -126,7 +126,7 @@ cleanup_provider_codex_profile() {
 cleanup_provider_codex_credential() {
   local rc=0 resolved
   if [[ -n "$PROVIDER_CODEX_CREDENTIAL_NAME" ]]; then
-    cw_with_timeout 30 credentials --platform list --output json \
+    cw_with_timeout 30 credentials --cloud list --output json \
       >"$TMPDIR_SMOKE/provider-codex-cleanup-credentials.json" 2>/dev/null || return 1
     jq -e 'type == "array"' "$TMPDIR_SMOKE/provider-codex-cleanup-credentials.json" >/dev/null || return 1
     if jq -e --arg name "$PROVIDER_CODEX_CREDENTIAL_NAME" 'any(.[]; .name == $name)' \
@@ -135,7 +135,7 @@ cleanup_provider_codex_credential() {
         "$PROVIDER_CODEX_CREDENTIAL_NAME")" || return 1
       [[ -z "$PROVIDER_CODEX_CREDENTIAL_ID" || "$PROVIDER_CODEX_CREDENTIAL_ID" == "$resolved" ]] || return 1
       PROVIDER_CODEX_CREDENTIAL_ID="$resolved"
-      cw_with_timeout 30 credentials --platform get "id:$PROVIDER_CODEX_CREDENTIAL_ID" --output json \
+      cw_with_timeout 30 credentials --cloud get "id:$PROVIDER_CODEX_CREDENTIAL_ID" --output json \
         >"$TMPDIR_SMOKE/provider-codex-cleanup-credential.json" 2>/dev/null || return 1
       jq -e --arg id "$PROVIDER_CODEX_CREDENTIAL_ID" --arg name "$PROVIDER_CODEX_CREDENTIAL_NAME" '
         type == "array" and length == 1 and .[0].id == $id and .[0].name == $name and
@@ -145,13 +145,13 @@ cleanup_provider_codex_credential() {
       ' "$TMPDIR_SMOKE/provider-codex-cleanup-credential.json" >/dev/null || return 1
       if ! jq -e 'length == 1 and .[0].status == "CREDENTIAL_STATUS_REVOKED"' \
           "$TMPDIR_SMOKE/provider-codex-cleanup-credential.json" >/dev/null; then
-        cw_with_timeout 30 credentials --platform revoke "id:$PROVIDER_CODEX_CREDENTIAL_ID" \
+        cw_with_timeout 30 credentials --cloud revoke "id:$PROVIDER_CODEX_CREDENTIAL_ID" \
           >"$TMPDIR_SMOKE/provider-codex-cleanup-revoke.out" 2>&1 || rc=1
       fi
-      cw_with_timeout 30 credentials --platform delete "id:$PROVIDER_CODEX_CREDENTIAL_ID" --yes \
+      cw_with_timeout 30 credentials --cloud delete "id:$PROVIDER_CODEX_CREDENTIAL_ID" --yes \
         >"$TMPDIR_SMOKE/provider-codex-cleanup-credential.out" 2>&1 || rc=1
     fi
-    cw_with_timeout 30 credentials --platform list --output json \
+    cw_with_timeout 30 credentials --cloud list --output json \
       >"$TMPDIR_SMOKE/provider-codex-cleanup-credentials.json" 2>/dev/null &&
       jq -e --arg name "$PROVIDER_CODEX_CREDENTIAL_NAME" --arg id "$PROVIDER_CODEX_CREDENTIAL_ID" '
         type == "array" and all(.[]; .name != $name and .id != $id)

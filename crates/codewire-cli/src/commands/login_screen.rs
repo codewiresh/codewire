@@ -1,4 +1,4 @@
-//! The screens `credentials --platform connect` shows while a person signs in
+//! The screens `credentials --cloud connect` shows while a person signs in
 //! to a provider in their browser, laid out like Claude Code's own login:
 //! the sign-in link on its own line (copied to the clipboard with OSC 52 at a
 //! terminal), then a hidden paste prompt or a device code, then the account

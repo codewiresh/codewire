@@ -81,11 +81,11 @@ identity_journey() (
   cw() {
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
-      'credentials --platform list --output json') printf '[]\n' ;;
-      'credentials --platform profiles list --output json') printf '[]\n' ;;
-      'credentials --platform connect github --name dev-github-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+      'credentials --cloud list --output json') printf '[]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[]\n' ;;
+      'credentials --cloud connect github --name dev-github-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
         printf 'owner-visible-device-prompt\n' ;;
-      'credentials --platform get dev-github-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output json')
+      'credentials --cloud get dev-github-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output json')
         jq -n --arg id "$CREDENTIAL_ID" '[{id:$id,name:"dev-github-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           provider:"github",status:"CREDENTIAL_STATUS_ACTIVE",
           authenticationKind:"CREDENTIAL_AUTHENTICATION_KIND_OAUTH",accountHint:"fixture-owner"}]' |
@@ -95,8 +95,8 @@ identity_journey() (
             elif $failure == "wrong-provider" then .[0].provider="openai"
             elif $failure == "wrong-kind" then .[0].authenticationKind="CREDENTIAL_AUTHENTICATION_KIND_API_KEY"
             elif $failure == "duplicate" then . + . else . end' ;;
-      'credentials --platform --profile dev-github-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa set github id:'*) ;;
-      'credentials --platform --profile dev-github-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa get --output json')
+      'credentials --cloud --profile dev-github-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa set github id:'*) ;;
+      'credentials --cloud --profile dev-github-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa get --output json')
         jq -n --arg id "$PROFILE_ID" --arg key "$CREDENTIAL_ID" '[{id:$id,
           name:"dev-github-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",revision:"1",
           entries:[{capabilitySlot:"github",credentialId:$key}]}]' |
@@ -110,7 +110,7 @@ identity_journey() (
   }
   prepare_provider_github
   [[ "$PROVIDER_GITHUB_CREDENTIAL_ID" == "$CREDENTIAL_ID" && "$PROVIDER_GITHUB_PROFILE_ID" == "$PROFILE_ID" ]]
-  grep -qxF 'credentials --platform connect github --name dev-github-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ' "$TMPDIR_SMOKE/calls"
+  grep -qxF 'credentials --cloud connect github --name dev-github-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ' "$TMPDIR_SMOKE/calls"
   jq -e --arg profile "platform:id:$PROFILE_ID" '.version == 1 and .working_directory == "/workspace" and
     (has("agents") | not) and .credentials == {profile:$profile} and
     (.install_command | contains("provider-github-workload.py") and contains("expected-login")) and
@@ -133,8 +133,8 @@ enrollment_cancelled() (
   cw() {
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
-      'credentials --platform list --output json'|'credentials --platform profiles list --output json') printf '[]\n' ;;
-      'credentials --platform connect github --name dev-github-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') return 130 ;;
+      'credentials --cloud list --output json'|'credentials --cloud profiles list --output json') printf '[]\n' ;;
+      'credentials --cloud connect github --name dev-github-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') return 130 ;;
       *) fail "command continued after cancelled enrollment: $*" ;;
     esac
   }
@@ -149,9 +149,9 @@ name_collision() (
   cw() {
     printf '%q ' "$@" >>"$TEST_ROOT/collision.calls"; printf '\n' >>"$TEST_ROOT/collision.calls"
     case "$*" in
-      'credentials --platform list --output json')
+      'credentials --cloud list --output json')
         printf '[{"name":"dev-github-cccccccccccccccccccccccccccccccc"}]\n' ;;
-      'credentials --platform profiles list --output json') printf '[]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[]\n' ;;
       *) fail "collision permitted a mutation: $*" ;;
     esac
   }
@@ -167,31 +167,31 @@ pass
 cleanup_cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
-    'credentials --platform profiles list --output json')
+    'credentials --cloud profiles list --output json')
       [[ "$FAILURE" != profile-list ]] || return 1
       if [[ -e "$TMPDIR_SMOKE/profile-deleted" ]]; then printf '[]\n'; else
         local id="$PROFILE_ID"; [[ "$FAILURE" != profile-rebound ]] || id="$CREDENTIAL_ID"
         jq -n --arg id "$id" '[{id:$id,name:"owned-profile"}]'
       fi ;;
-    'credentials --platform --profile '*" delete --yes")
+    'credentials --cloud --profile '*" delete --yes")
       [[ "$4" == "id:$PROFILE_ID" ]] || fail 'unowned profile deletion'
       touch "$TMPDIR_SMOKE/profile-deleted" ;;
-    'credentials --platform list --output json')
+    'credentials --cloud list --output json')
       if [[ -e "$TMPDIR_SMOKE/credential-deleted" ]]; then printf '[]\n'; else
         local id="$CREDENTIAL_ID"; [[ "$FAILURE" != credential-rebound ]] || id="$PROFILE_ID"
         jq -n --arg id "$id" '[{id:$id,name:"owned-github"}]'
       fi ;;
-    'credentials --platform get '*" --output json")
+    'credentials --cloud get '*" --output json")
       local id="$CREDENTIAL_ID" status=CREDENTIAL_STATUS_ACTIVE kind=CREDENTIAL_AUTHENTICATION_KIND_OAUTH
       [[ "$FAILURE" != get-rebound ]] || id="$PROFILE_ID"
       [[ "$FAILURE" != wrong-kind ]] || kind=CREDENTIAL_AUTHENTICATION_KIND_API_KEY
       [[ "$FAILURE" != already-revoked ]] || status=CREDENTIAL_STATUS_REVOKED
       jq -n --arg id "$id" --arg status "$status" --arg kind "$kind" '[{id:$id,name:"owned-github",
         provider:"github",authenticationKind:$kind,status:$status}]' ;;
-    'credentials --platform revoke '*)
+    'credentials --cloud revoke '*)
       [[ "$4" == "id:$CREDENTIAL_ID" ]] || fail 'unowned credential revocation'
       touch "$TMPDIR_SMOKE/credential-revoked" ;;
-    'credentials --platform delete '*" --yes")
+    'credentials --cloud delete '*" --yes")
       [[ "$4" == "id:$CREDENTIAL_ID" ]] || fail 'unowned credential deletion'
       touch "$TMPDIR_SMOKE/credential-deleted" ;;
     *) fail "unexpected cleanup command: $*" ;;
@@ -240,7 +240,7 @@ for lost_reply in profile-delete revoke credential-delete; do
   cw() {
     cleanup_cw "$@" || return
     case "$lost_reply:$*" in
-      profile-delete:'credentials --platform --profile '*|revoke:'credentials --platform revoke '*|credential-delete:'credentials --platform delete '*) return 1 ;;
+      profile-delete:'credentials --cloud --profile '*|revoke:'credentials --cloud revoke '*|credential-delete:'credentials --cloud delete '*) return 1 ;;
     esac
   }
   if cleanup_provider_github; then fail 'lost retirement reply concealed failure'; fi
@@ -258,20 +258,20 @@ uncertain_enrollment() (
   tr() { printf 'dddddddddddddddddddddddddddddddd\n'; }
   cw() {
     case "$*" in
-      'credentials --platform profiles list --output json') printf '[]\n' ;;
-      'credentials --platform list --output json')
+      'credentials --cloud profiles list --output json') printf '[]\n' ;;
+      'credentials --cloud list --output json')
         if [[ -e "$TMPDIR_SMOKE/committed" && ! -e "$TMPDIR_SMOKE/credential-deleted" ]]; then
           jq -n --arg id "$CREDENTIAL_ID" --arg name "$PROVIDER_GITHUB_CREDENTIAL_NAME" '[{id:$id,name:$name}]'
         else printf '[]\n'; fi ;;
-      'credentials --platform connect github --name '*)
+      'credentials --cloud connect github --name '*)
         touch "$TMPDIR_SMOKE/committed"; return 124 ;;
-      'credentials --platform get '*)
+      'credentials --cloud get '*)
         jq -n --arg id "$CREDENTIAL_ID" --arg name "$PROVIDER_GITHUB_CREDENTIAL_NAME" '[{id:$id,name:$name,provider:"github",
           authenticationKind:"CREDENTIAL_AUTHENTICATION_KIND_OAUTH",status:"CREDENTIAL_STATUS_ACTIVE"}]' ;;
-      'credentials --platform revoke '*)
+      'credentials --cloud revoke '*)
         [[ "$4" == "id:$CREDENTIAL_ID" ]] || fail 'uncertain enrollment revoked another identity'
         touch "$TMPDIR_SMOKE/credential-revoked" ;;
-      'credentials --platform delete '*)
+      'credentials --cloud delete '*)
         [[ "$4" == "id:$CREDENTIAL_ID" ]] || fail 'uncertain enrollment deleted another identity'
         touch "$TMPDIR_SMOKE/credential-deleted" ;;
       *) fail 'unexpected uncertain enrollment command' ;;
@@ -286,7 +286,7 @@ pass
 
 source_text="$(cat "$REPO_ROOT/scripts/runtime/dev/provider-github-smoke.sh")"
 # shellcheck disable=SC2016 # Match literal source variable expansion.
-grep -qF 'cw_with_timeout 600 credentials --platform connect github --name "$PROVIDER_GITHUB_CREDENTIAL_NAME"' <<<"$source_text" ||
+grep -qF 'cw_with_timeout 600 credentials --cloud connect github --name "$PROVIDER_GITHUB_CREDENTIAL_NAME"' <<<"$source_text" ||
   fail 'normal public GitHub enrollment command drifted'
 if grep -E 'connect github.*(>|2>)' <<<"$source_text"; then
   fail 'owner-visible device prompt was redirected'
