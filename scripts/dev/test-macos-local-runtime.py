@@ -90,6 +90,24 @@ def macho(tag: bytes) -> bytes:
 SIGNATURE = b"\nFAKE-ADHOC-SIGNATURE\n"
 
 
+def signed(data: bytes, identifier: bytes = b"sh.codewire.vz-runner", authority: bytes = b"adhoc",
+           hardened: bool = True, entitlements: bytes = None) -> bytes:
+    """`data` with a fake signature FakeTools reads back: its flags, identifier,
+    authority (adhoc, or developer-id:TEAM[:timestamp]) and entitlements."""
+    adhoc = authority == b"adhoc"
+    flags = {(True, True): b"0x10002(adhoc,runtime)", (True, False): b"0x2(adhoc)",
+             (False, True): b"0x10000(runtime)", (False, False): b"0x0(none)"}[(adhoc, hardened)]
+    entitlements = runtime.ENTITLEMENTS.read_bytes() if entitlements is None else entitlements
+    return SIGNATURE.join((data, flags, identifier, authority, entitlements))
+
+
+def developer_id_helper(path: Path, team: bytes = b"PXQZM3GLP5", timestamp: bool = True, **signature) -> Path:
+    """A release's helper as sign-macos-helper.sh hands it over."""
+    authority = b"developer-id:" + team + (b":timestamp" if timestamp else b"")
+    path.write_bytes(signed(macho(b"release-helper"), authority=authority, **signature))
+    return path
+
+
 REVISION = "c" * 40
 
 
@@ -123,23 +141,41 @@ class FakeTools:
             hardened = "--options" in argv and argv[argv.index("--options") + 1] == "runtime"
             if self.hardened is not None:
                 hardened = self.hardened
-            flags = b"0x10002(adhoc,runtime)" if hardened else b"0x2(adhoc)"
-            target.write_bytes(target.read_bytes() + SIGNATURE + flags + SIGNATURE + entitlements)
+            identifier = argv[argv.index("--identifier") + 1].encode()
+            target.write_bytes(signed(target.read_bytes(), identifier, b"adhoc", hardened, entitlements))
             return subprocess.CompletedProcess(argv, 0, stdout=None)
         if argv[:2] == ["/usr/bin/env", "-i"] and argv[3:] == ["--version"]:
             return subprocess.CompletedProcess(argv, 0, stdout=self.git_version)
         if argv[0] == runtime.OTOOL and argv[1] == "-L":
             report = argv[2] + ":\n" + self.dependencies.get(argv[2], LIBSYSTEM)
             return subprocess.CompletedProcess(argv, 0, stdout=report.encode())
+        if argv[:3] == [runtime.CODESIGN, "--verify", "--strict"] and argv[3].startswith("-R="):
+            # Only a Developer ID signature of Codewire's team, naming the
+            # helper's identifier, satisfies the release requirement.
+            fields = Path(argv[-1]).read_bytes().split(SIGNATURE)
+            satisfied = (argv[3] == "-R=" + runtime.DEVELOPER_ID_REQUIREMENT and len(fields) == 5
+                         and fields[2] == runtime.HELPER_IDENTIFIER.encode()
+                         and fields[3].split(b":")[:2] == [b"developer-id", runtime.HELPER_TEAM.encode()])
+            return subprocess.CompletedProcess(argv, 0 if satisfied else 3, stdout=None)
         if argv[0] == runtime.CODESIGN and argv[1] == "--verify":
             return subprocess.CompletedProcess(argv, 1 if argv[-1] in self.unsigned else 0, stdout=None)
         if argv[0] == runtime.CODESIGN and argv[1] == "-d":
             data = Path(argv[-1]).read_bytes()
             if SIGNATURE not in data:
                 return subprocess.CompletedProcess(argv, 1, stdout=b"")
-            _, flags, entitlements = data.split(SIGNATURE, 2)
-            if "--verbose=2" in argv:
-                report = b"Format=Mach-O thin (arm64)\nCodeDirectory v=20400 size=1 flags=%s hashes=1+0 location=embedded\n" % flags
+            _, flags, identifier, authority, entitlements = data.split(SIGNATURE, 4)
+            if "--verbose=4" in argv:
+                report = (b"Executable=%s\nIdentifier=%s\nFormat=Mach-O thin (arm64)\n"
+                          b"CodeDirectory v=20500 size=1 flags=%s hashes=1+0 location=embedded\n"
+                          % (argv[-1].encode(), identifier, flags))
+                if authority.startswith(b"developer-id:"):
+                    team = authority.split(b":")[1]
+                    report += b"Authority=Developer ID Application: Synthetic (%s)\n" % team
+                    if authority.endswith(b":timestamp"):
+                        report += b"Timestamp=Oct 15, 2026 at 10:00:00 AM\n"
+                    report += b"TeamIdentifier=%s\n" % team
+                else:
+                    report += b"Signature=adhoc\nTeamIdentifier=not set\n"
                 return subprocess.CompletedProcess(argv, 0, stdout=report)
             return subprocess.CompletedProcess(argv, 0, stdout=entitlements)
         if argv[:2] == ["git", "-C"] and argv[3:] == ["rev-parse", "HEAD"]:
@@ -269,7 +305,9 @@ class PackTests(unittest.TestCase):
         self.assertEqual(calls[2][-1], "--show-bin-path")
         sign = [call for call in self.tools.calls if call[:2] == ["/usr/bin/codesign", "--force"]][0]
         self.assertEqual(sign[:9], ["/usr/bin/codesign", "--force", "--sign", "-", "--options", "runtime",
-                                    "--identifier", "codewire-vz-runner", "--entitlements"])
+                                    "--identifier", "sh.codewire.vz-runner", "--entitlements"])
+        # The development loop's ad hoc helper is never held to the release requirement.
+        self.assertFalse([call for call in self.tools.calls if any(arg.startswith("-R=") for arg in call)])
         self.assertEqual(sign[9], str(REPOSITORY / "crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist"))
         self.assertIn("packed %s (source %s)" % (self.release, REVISION), stdout)
         self.assertIsNone(self.tools.installed, "--pack must not install")
@@ -510,6 +548,64 @@ class PackTests(unittest.TestCase):
         self.assertIn("does not have the hardened runtime", stderr)
         self.assertFalse((self.release / runtime.LOCAL_RUNTIME_DOCUMENT).exists())
         self.assertIsNone(self.tools.installed)
+
+    def test_packs_a_release_signed_helper_as_is(self):
+        helper = developer_id_helper(self.inputs / "codewire-vz-runner")
+        status, _stdout, stderr = self.pack("--helper", str(helper))
+        self.assertEqual(status, 0, stderr)
+        files = self.snapshot()
+        lock = json.loads(files[runtime.LOCAL_RUNTIME_DOCUMENT])["targets"]["macos-aarch64"]["lock"]
+        self.assertEqual(files["blobs/sha256/" + lock["vz_runner"]["sha256"]], helper.read_bytes())
+        # Nothing is built or signed here, and the requirement is checked.
+        self.assertFalse([call for call in self.tools.calls
+                          if call[0] == runtime.SWIFT or call[:2] == [runtime.CODESIGN, "--force"]])
+        self.assertIn([runtime.CODESIGN, "--verify", "--strict", "-R=" + runtime.DEVELOPER_ID_REQUIREMENT,
+                       str(self.release / ("." + runtime.PRODUCT))], self.tools.calls)
+
+    def test_a_release_helper_must_be_codewire_s_developer_id_signature(self):
+        other = runtime.ENTITLEMENTS.read_bytes().replace(
+            b"</dict>", b"  <key>com.apple.security.cs.disable-library-validation</key>\n  <true/>\n</dict>")
+        for name, make, message in (
+            ("ad hoc", lambda path: path.write_bytes(signed(macho(b"adhoc"))),
+             "no Developer ID signature with a secure timestamp"),
+            ("another team", lambda path: developer_id_helper(path, team=b"ABCDE12345"),
+             "does not satisfy the Developer ID requirement"),
+            ("no timestamp", lambda path: developer_id_helper(path, timestamp=False),
+             "no Developer ID signature with a secure timestamp"),
+            ("another identifier", lambda path: developer_id_helper(path, identifier=b"codewire-vz-runner"),
+             "identifier is not sh.codewire.vz-runner"),
+            ("more entitlements", lambda path: developer_id_helper(path, entitlements=other),
+             "does not carry exactly developer-entitlements.plist"),
+            ("no hardened runtime", lambda path: developer_id_helper(path, hardened=False),
+             "does not have the hardened runtime"),
+        ):
+            with self.subTest(name):
+                helper = self.inputs / ("helper-" + name.replace(" ", "-"))
+                make(helper)
+                status, _stdout, stderr = self.pack("--helper", str(helper))
+                self.assertEqual(status, 1)
+                self.assertIn(message, stderr)
+                self.assertFalse((self.release / runtime.LOCAL_RUNTIME_DOCUMENT).exists())
+                shutil.rmtree(self.release)
+
+    def test_the_release_requirement_is_one_constant(self):
+        # Nothing selects a weaker requirement: no option, no environment, and
+        # only check_helper uses it (#1905).
+        tree = ast.parse(SOURCE.read_text())
+        users = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                 and any(isinstance(name, ast.Name) and name.id == "DEVELOPER_ID_REQUIREMENT"
+                         for name in ast.walk(node))}
+        self.assertEqual(users, {"check_helper"})
+        self.assertNotIn("environ", SOURCE.read_text())
+        self.assertNotIn("getenv", SOURCE.read_text())
+        options = re.findall(r'parser\.add_argument\("(--[a-z0-9-]+)"', SOURCE.read_text())
+        self.assertEqual(sorted(options), ["--components", "--cw", "--cw-runtime", "--e2fsprogs", "--git",
+                                           "--helper", "--initramfs", "--kernel", "--pack", "--replace",
+                                           "--source-revision"])
+        self.assertEqual(runtime.DEVELOPER_ID_REQUIREMENT,
+                         'anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] '
+                         'and certificate leaf[field.1.2.840.113635.100.6.1.13] '
+                         'and certificate leaf[subject.OU] = "PXQZM3GLP5" and identifier "sh.codewire.vz-runner"')
 
     def test_helper_must_be_thin_arm64_macho(self):
         self.tools.helper = b"\xca\xfe\xba\xbe" + bytes(60)
