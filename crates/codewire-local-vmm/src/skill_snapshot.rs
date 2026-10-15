@@ -23,9 +23,9 @@ use crate::direct_share::AdmittedDirectShare;
 use crate::host::path::{PrivateRoot, current_uid};
 use crate::oci::ContentStore;
 use crate::workspace::{
-    WorkspaceError, WorkspaceSelection, WorkspaceSourceMode, inspect_workspace, manifest_directory,
-    prepare_git_bundle, prepare_git_clone, snapshot_confined_directory,
-    snapshot_confined_open_directory, workspace_content_limit,
+    WorkspaceError, WorkspaceSelection, WorkspaceSourceMode, inspect_workspace,
+    inspect_workspace_skipping, manifest_directory, prepare_git_bundle, prepare_git_clone,
+    snapshot_confined_directory, snapshot_confined_open_directory, workspace_content_limit,
 };
 use crate::workspace_plan::{WorkspaceInput, WorkspacePlan, WorkspacePlanError};
 
@@ -484,10 +484,11 @@ fn prepare_repository_roots(
                     }
                     WorkspaceSourceMode::Copy => {
                         if require_exact_copy_source {
-                            let admitted = inspect_workspace(
+                            let admitted = inspect_workspace_skipping(
                                 &source.source_path,
                                 WorkspaceSelection::Copy,
                                 workspace_content_limit(u64::MAX),
+                                &source.vm_only,
                             )?;
                             if admitted != source {
                                 return Err(SkillSnapshotPreparationError::SnapshotChanged);
@@ -835,6 +836,7 @@ mod tests {
             &admitted,
             "/workspace/direct-skill",
             true,
+            Vec::new(),
         )])
         .unwrap();
         let (project, _, project_sha256) = project(vec![SkillSelection {

@@ -1955,6 +1955,7 @@ mod tests {
             host_ports: vec![HostPortBinding::new(18_080, 3_000).unwrap()],
             mesh: None,
             workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+                vm_only: Vec::new(),
                 source_path: PathBuf::from("/workspace/source"),
                 commit: "b".repeat(40),
                 mode: crate::workspace::WorkspaceSourceMode::Clone,
