@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# Build and push one protected half of the exact five-image runtime set.
+#
+#   build-push-runtime-images.sh services   # dashboard, services, mesh, derp
+#   build-push-runtime-images.sh daemon     # the static CW producer and daemon
+#
+# Each half runs in its own protected job on its own worker, so the daemon's
+# static CW producer, the longest single build, runs beside the service Bake
+# instead of before it. The halves never share a target, so they never race
+# for an immutable source tag. The publishing job joins both halves by the
+# exact digests these jobs report.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -11,6 +21,21 @@ readonly PROTECTED_SCCACHE_ENDPOINT='https://00000000000000000000000000000000.r2
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
+
+if [ "$#" -ne 1 ]; then
+  echo 'Usage: build-push-runtime-images.sh services|daemon' >&2
+  exit 2
+fi
+readonly runtime_group="$1"
+case "$runtime_group" in
+  services) image_families=(services mesh dashboard derp) ;;
+  daemon) image_families=(daemon) ;;
+  *)
+    echo 'Runtime image group must be exactly services or daemon' >&2
+    exit 2
+    ;;
+esac
+readonly image_families
 
 case "${CODEWIRE_SCCACHE_MODE:-local}" in
   disabled|local) ;;
@@ -45,7 +70,7 @@ mkdir -p "${RUNNER_TEMP:-$ROOT/.tmp}"
 work="$(mktemp -d "${RUNNER_TEMP:-$ROOT/.tmp}/codewire-runtime-images.XXXXXX")"
 docker_config="$work/docker-config"
 buildkit_config="$work/buildkitd.toml"
-builder="codewire-runtime-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${BASHPID}"
+builder="codewire-runtime-${runtime_group}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${BASHPID}"
 
 cleanup() {
   DOCKER_CONFIG="$docker_config" docker buildx rm --force "$builder" \
@@ -79,7 +104,6 @@ DOCKER_CONFIG="$docker_config" docker buildx create \
 # tag, identity mismatch) fails closed to a full source build.
 carry_forward="${CODEWIRE_RUNTIME_CARRY_FORWARD:-0}"
 baseline_sha=''
-image_families=(services mesh dashboard daemon derp)
 declare -a carried_families=()
 declare -a build_families=()
 
@@ -273,11 +297,12 @@ done
 carried_families=(${resolved_carried[@]+"${resolved_carried[@]}"})
 
 # One Bake graph anchored by services lets BuildKit schedule at most two
-# independent product builds concurrently while deduplicating their shared
+# independent service builds concurrently while deduplicating their shared
 # rust-base target. Product targets remain separate so Cargo feature
-# unification and the daemon lockfile cannot change shipped binaries. The
+# unification and the derp lockfile cannot change shipped binaries. The
 # anchor engages only when services itself builds; carried families already
-# have exact source tags and drop out of the transaction's missing set.
+# have exact source tags and drop out of the transaction's missing set. The
+# daemon half builds its single target directly.
 services_runtime_set=0
 for family in ${build_families[@]+"${build_families[@]}"}; do
   if [ "$family" = services ]; then
@@ -286,14 +311,18 @@ for family in ${build_families[@]+"${build_families[@]}"}; do
   fi
 done
 
-build_one services deployments/docker/services.Dockerfile "$services_runtime_set"
-build_one mesh deployments/docker/mesh.Dockerfile
-build_one dashboard apps/dashboard/Dockerfile
-build_one daemon deployments/docker/daemon.Dockerfile
-build_one derp deployments/docker/derp.Dockerfile
+if [ "$runtime_group" = services ]; then
+  build_one services deployments/docker/services.Dockerfile "$services_runtime_set"
+  build_one mesh deployments/docker/mesh.Dockerfile
+  build_one dashboard apps/dashboard/Dockerfile
+  build_one derp deployments/docker/derp.Dockerfile
+else
+  build_one daemon deployments/docker/daemon.Dockerfile
+fi
 
 if [ "${#carried_families[@]}" -gt 0 ]; then
   printf 'Carried forward %d exact runtime image(s) from deployed source %s: %s\n' \
     "${#carried_families[@]}" "$baseline_sha" "${carried_families[*]}"
 fi
-echo 'Materialized the exact five-image runtime candidate set and verified every candidate locally'
+printf 'Materialized the exact %s runtime candidates (%s) and verified every candidate locally\n' \
+  "$runtime_group" "${image_families[*]}"

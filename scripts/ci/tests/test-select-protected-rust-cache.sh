@@ -168,25 +168,31 @@ while IFS= read -r -d '' workflow; do
 done < <(find "$ROOT/.gitea/workflows" "$ROOT/.forgejo/workflows" "$ROOT/.github/workflows" \
   -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null)
 
-build_job="$(awk '
-  /^  [A-Za-z0-9_-]+:$/ { capture = ($0 == "  build-publish-runtime-images:") }
-  capture { print }
-' "$DEPLOY_WORKFLOW")"
-outside_build_job="$(awk '
-  /^  [A-Za-z0-9_-]+:$/ { capture = ($0 != "  build-publish-runtime-images:") }
+# Only the two protected build halves reference the protected compiler cache;
+# the publishing job and deploy selection never do.
+readonly -a protected_cache_jobs=('  build-service-images:' '  build-daemon-image:')
+outside_build_jobs="$(awk '
+  /^  [A-Za-z0-9_-]+:$/ { capture = ($0 != "  build-service-images:" && $0 != "  build-daemon-image:") }
   capture { print }
 ' "$DEPLOY_WORKFLOW")"
 for marker in "${protected_markers[@]}"; do
-  if grep -Fq -- "$marker" <<<"$outside_build_job"; then
-    fail "Deploy Dev references the protected compiler cache outside its publisher job ($marker)"
+  if grep -Fq -- "$marker" <<<"$outside_build_jobs"; then
+    fail "Deploy Dev references the protected compiler cache outside its build jobs ($marker)"
   fi
 done
-grep -Fq 'select-protected-rust-cache.sh' <<<"$build_job" ||
-  fail 'Deploy Dev publisher job does not select the protected compiler cache'
-grep -Fxq '    runs-on: ci-protected' <<<"$build_job" ||
-  fail 'protected compiler cache is reachable outside the protected runner tier'
-grep -Fxq '      OPENBAO_ROLE: codewire-source-dev-publisher' <<<"$build_job" ||
-  fail 'protected compiler cache job is not the Dev publisher identity'
+for job_header in "${protected_cache_jobs[@]}"; do
+  build_job="$(awk -v header="$job_header" '
+    /^  [A-Za-z0-9_-]+:$/ { capture = ($0 == header) }
+    capture { print }
+  ' "$DEPLOY_WORKFLOW")"
+  [[ -n "$build_job" ]] || fail "Deploy Dev lacks the protected build job${job_header%:}"
+  grep -Fq 'select-protected-rust-cache.sh' <<<"$build_job" ||
+    fail "Deploy Dev build job${job_header%:} does not select the protected compiler cache"
+  grep -Fxq '    runs-on: ci-protected' <<<"$build_job" ||
+    fail 'protected compiler cache is reachable outside the protected runner tier'
+  grep -Fxq '      OPENBAO_ROLE: codewire-source-dev-publisher' <<<"$build_job" ||
+    fail 'protected compiler cache job is not the Dev publisher identity'
+done
 # The trigger block ends at its first blank line; the workflow's `concurrency`
 # block follows it. No other `on:` key may exist anywhere in the file.
 [[ "$(sed -n '/^on:$/,/^$/p' "$DEPLOY_WORKFLOW")" == "$(printf '%s\n' \
