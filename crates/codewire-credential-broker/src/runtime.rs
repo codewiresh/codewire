@@ -574,6 +574,12 @@ impl BrokerUpstreamRequest {
         }
     }
 
+    /// The request's fixed destination: method and URL only, never its
+    /// headers or body.
+    pub fn destination(&self) -> (&Method, &Url) {
+        (&self.method, &self.target)
+    }
+
     pub fn into_parts(self) -> (Method, Url, HeaderMap, Vec<u8>) {
         (self.method, self.target, self.headers, self.body)
     }

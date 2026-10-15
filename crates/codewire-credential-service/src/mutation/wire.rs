@@ -256,6 +256,53 @@ impl CredentialMutationService for Service {
         })
     }
 
+    async fn start_claude_sign_in(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::StartClaudeSignInRequest>,
+    ) -> ServiceResult<proto::StartClaudeSignInResponse> {
+        let mut started = self
+            .owner
+            .start_claude_sign_in(authority(&ctx)?)
+            .await
+            .map_err(error)?;
+        connectrpc::Response::ok(proto::StartClaudeSignInResponse {
+            authorize_url: started.authorize_url,
+            sign_in: std::mem::take(&mut *started.handle),
+            expires_at_unix: started.expires_at_unix,
+            ..Default::default()
+        })
+    }
+
+    async fn complete_claude_sign_in(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::CompleteClaudeSignInRequest>,
+    ) -> ServiceResult<proto::CompleteClaudeSignInResponse> {
+        let authority = authority(&ctx)?;
+        let mut request = request.to_owned_message();
+        // The handle and the pasted code are write-only here. Never
+        // Debug/serialize the request into an error or log.
+        let handle = zeroize::Zeroizing::new(std::mem::take(&mut request.sign_in));
+        let code = zeroize::Zeroizing::new(std::mem::take(&mut request.authorization_code));
+        let metadata = self
+            .owner
+            .complete_claude_sign_in(
+                authority,
+                request.name,
+                handle,
+                code,
+                request.credential_id,
+                request.expected_revocation_generation,
+            )
+            .await
+            .map_err(error)?;
+        connectrpc::Response::ok(proto::CompleteClaudeSignInResponse {
+            credential: Some(credential(metadata)).into(),
+            ..Default::default()
+        })
+    }
+
     async fn revoke_credential(
         &self,
         ctx: RequestContext,
@@ -402,6 +449,14 @@ fn error(error: Error) -> connectrpc::ConnectError {
             ConnectCode::Unknown,
             "credential mutation may have completed; inspect current metadata before retrying",
         ),
+        Error::ClaudeSignInCodeInvalid => (
+            ConnectCode::InvalidArgument,
+            "the pasted code is not from this Claude sign-in; paste the whole code#state Claude shows, or start again",
+        ),
+        Error::ClaudeSignInExpired => (
+            ConnectCode::FailedPrecondition,
+            "the Claude sign-in expired; start a new one",
+        ),
     };
     // Closed classifications only: provider stderr, material, SQL and source
     // errors are never retained in the service error or its public detail.
@@ -415,6 +470,8 @@ fn error(error: Error) -> connectrpc::ConnectError {
         Error::GitHubAppNotConfigured => "CREDENTIAL_GITHUB_APP_NOT_CONFIGURED",
         Error::CleanupFailed => "CREDENTIAL_ENROLLMENT_CLEANUP_FAILED",
         Error::PublicationUnknown => "CREDENTIAL_MUTATION_UNCERTAIN",
+        Error::ClaudeSignInCodeInvalid => "CREDENTIAL_CLAUDE_SIGN_IN_CODE_INVALID",
+        Error::ClaudeSignInExpired => "CREDENTIAL_CLAUDE_SIGN_IN_EXPIRED",
         _ => "",
     };
     wire_error(&ConnectError {
@@ -485,6 +542,16 @@ mod tests {
                 Error::PublicationUnknown,
                 "CREDENTIAL_MUTATION_UNCERTAIN",
                 connectrpc::ErrorCode::Unknown,
+            ),
+            (
+                Error::ClaudeSignInCodeInvalid,
+                "CREDENTIAL_CLAUDE_SIGN_IN_CODE_INVALID",
+                connectrpc::ErrorCode::InvalidArgument,
+            ),
+            (
+                Error::ClaudeSignInExpired,
+                "CREDENTIAL_CLAUDE_SIGN_IN_EXPIRED",
+                connectrpc::ErrorCode::FailedPrecondition,
             ),
         ] {
             let wire = error(failure);

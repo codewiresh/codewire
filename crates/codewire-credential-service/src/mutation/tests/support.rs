@@ -27,6 +27,8 @@ pub const SESSION: &str = "private-mutation-session-canary";
 pub const API_KEY_MATERIAL: &str = "private-api-key-material-canary";
 pub const GITHUB_TOKEN: &str = "ghu_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 pub const USER_CODE: &str = "ABCD-EFGH";
+/// The one code the synthetic Claude token endpoint redeems.
+pub const CLAUDE_CODE: &str = "synthetic-claude-code";
 const GITHUB_APP_SLUG: &str = "codewire-synthetic";
 const SERVICE: &str = "codewire.v1.CredentialMutationService";
 
@@ -40,12 +42,18 @@ pub struct DeviceProvider {
     approved: AtomicBool,
     started: AtomicUsize,
     suffix: Mutex<String>,
+    claude_exchanges: AtomicUsize,
 }
 
 impl DeviceProvider {
     /// Device logins started (user or device code requested).
     pub fn started(&self) -> usize {
         self.started.load(Ordering::SeqCst)
+    }
+
+    /// Claude code exchanges received.
+    pub fn claude_exchanges(&self) -> usize {
+        self.claude_exchanges.load(Ordering::SeqCst)
     }
 
     fn answer(&self, target: &str, body: &[u8]) -> Option<(http::StatusCode, Value)> {
@@ -98,6 +106,39 @@ impl DeviceProvider {
                 http::StatusCode::OK,
                 json!({"installations":[{"id":41,"app_slug":GITHUB_APP_SLUG}]}),
             ),
+            // Claude redeems only its synthetic code, with a verifier, for
+            // Claude Code's client and manual redirect.
+            "https://platform.claude.com/v1/oauth/token" => {
+                let request: Value = serde_json::from_slice(body).ok()?;
+                if request["grant_type"] == "authorization_code"
+                    && request["code"] == CLAUDE_CODE
+                    && request["client_id"] == "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+                    && request["redirect_uri"] == "https://platform.claude.com/oauth/code/callback"
+                    && request["code_verifier"].as_str().is_some_and(|v| v.len() == 43)
+                    && request["state"].as_str().is_some_and(|v| v.len() == 43)
+                {
+                    (
+                        http::StatusCode::OK,
+                        json!({"token_type":"Bearer",
+                            "access_token":format!("{ACCESS}{suffix}"),
+                            "refresh_token":format!("{REFRESH}{suffix}"),
+                            "expires_in":28_800,
+                            "scope":"user:profile user:inference user:sessions:claude_code"}),
+                    )
+                } else {
+                    (
+                        http::StatusCode::BAD_REQUEST,
+                        json!({"error":"invalid_grant"}),
+                    )
+                }
+            }
+            "https://api.anthropic.com/api/oauth/profile" => (
+                http::StatusCode::OK,
+                json!({"account":{"uuid":"synthetic-account","email":"person@example.test"},
+                    "organization":{"uuid":"synthetic-organization",
+                        "organization_type":"claude_max",
+                        "rate_limit_tier":"default_claude_max_20x"}}),
+            ),
             _ => return None,
         })
         .filter(|_| body.len() <= 64 * 1024)
@@ -111,6 +152,9 @@ impl BrokerUpstreamTransport for DeviceProvider {
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let (_method, target, _headers, body) = request.into_parts();
+        if target.as_str() == "https://platform.claude.com/v1/oauth/token" {
+            self.claude_exchanges.fetch_add(1, Ordering::SeqCst);
+        }
         if matches!(
             target.as_str(),
             "https://auth.openai.com/api/accounts/deviceauth/usercode"
@@ -441,6 +485,46 @@ impl Rpc {
         Ok((status, value))
     }
 
+    /// StartClaudeSignIn: the authorize URL's state and the opaque handle.
+    pub async fn start_claude_sign_in(&self, auth: Auth) -> Result<(StatusCode, Value)> {
+        let request = self
+            .client
+            .post(format!("{}/{SERVICE}/StartClaudeSignIn", self.url))
+            .header("connect-protocol-version", "1")
+            .json(&json!({}));
+        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let status = response.status();
+        let value: Value = response.json().await?;
+        blind(&value)?;
+        Ok((status, value))
+    }
+
+    /// CompleteClaudeSignIn. `body` carries every field except the base64
+    /// pasted code.
+    pub async fn complete_claude_sign_in(
+        &self,
+        auth: Auth,
+        mut body: Value,
+        pasted: &str,
+    ) -> Result<(StatusCode, Value)> {
+        body["authorizationCode"] =
+            json!(base64::engine::general_purpose::STANDARD.encode(pasted.as_bytes()));
+        let request = self
+            .client
+            .post(format!("{}/{SERVICE}/CompleteClaudeSignIn", self.url))
+            .header("connect-protocol-version", "1")
+            .json(&body);
+        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let status = response.status();
+        let value: Value = response.json().await?;
+        blind(&value)?;
+        ensure!(
+            !value.to_string().contains(CLAUDE_CODE),
+            "response echoed the Claude code"
+        );
+        Ok((status, value))
+    }
+
     pub async fn denied_enrollment(&self, auth: Auth) -> Result<()> {
         // Connect streaming errors retain HTTP 200 and reject in the first
         // END_STREAM envelope. A Challenge before this error must fail.
@@ -527,6 +611,7 @@ impl Harness {
             }
             let device = Arc::new(DeviceProvider::default());
             let codex_login = CodexDeviceLogin::new(device.clone());
+            let claude_sign_in = ClaudeSignIn::new(device.clone());
             let github_login = GitHubDeviceLogin::new(
                 GitHubDeviceLoginConfig::new("Iv1.synthetic".into(), GITHUB_APP_SLUG.into())
                     .map_err(|_| anyhow::anyhow!("synthetic GitHub App configuration"))?,
@@ -534,7 +619,7 @@ impl Harness {
             );
             let provider = Arc::new(SyntheticKek::default());
             let store = Arc::new(PlatformCredentialStore::new(pool.clone(),provider.clone(),builtin_provider_catalog()));
-            let owner = Arc::new(CredentialMutationOwner::new(pool.clone(),store.clone(),codex_login,Some(github_login),None));
+            let owner = Arc::new(CredentialMutationOwner::new(pool.clone(),store.clone(),codex_login,claude_sign_in,Some(github_login),None));
             let rpc = Rpc {client:Client::builder().no_proxy().timeout(TIMEOUT).build()?,url:format!("http://{address}")};
             let server = listener.map(|listener| {
                 let app = connect_router_with_auth(owner.router(),ConnectAuthLayer::credential_mutation(AuthState{pool:pool.clone()},http::HeaderValue::from_static("https://codewire.example")));

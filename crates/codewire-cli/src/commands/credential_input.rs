@@ -322,6 +322,8 @@ fn reject_unknown_selector_prefix(selector: &str, kind: &str) -> anyhow::Result<
 
 /// The one paste-based enrollment step for a Claude subscription token. The
 /// owner runs Claude Code's own command; Codewire never drives its OAuth.
+pub(super) const CLAUDE_SIGN_IN_GUIDANCE: &str = "Sign in to Claude in your browser with the account whose Claude Pro, Max, Team or Enterprise plan you want to use, then paste the code Claude shows (code#state). Platform only.";
+
 pub(super) const CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE: &str = "Run `claude setup-token` (requires a Claude Pro, Max, Team or Enterprise plan), then paste the freshly printed token here. Codewire records an expiry one year from now; the token stays in Codewire and is never delivered to a Sandbox.";
 
 /// Every profile includes the account's one GitHub connection, so GitHub is

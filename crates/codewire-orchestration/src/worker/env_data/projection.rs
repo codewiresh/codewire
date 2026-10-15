@@ -19,9 +19,10 @@ use codewire_project::{
 // the profile's current_revision/name. Slot allocation is capped at 64; a
 // separate bounded existence probe rejects, rather than truncates, excess rows.
 // The pinned revision's Anthropic entry also fixes its client form: a Claude
-// subscription token (the provider's OAuth kind) selects Claude Code's
-// subscription mode. A credential's kind never changes, so this is as
-// immutable as the revision's slots; it is client configuration, not authority.
+// subscription token (the provider's OAuth kind) or a Claude sign-in selects
+// Claude Code's subscription mode, in which the broker injects the stored
+// token. A credential's kind never changes, so this is as immutable as the
+// revision's slots; it is client configuration, not authority.
 pub(super) const ENVIRONMENT_QUERY: &str = r#"
     SELECT e.id, e.org_id, e.preset_id, e.type, e.state, e.desired_state,
            e.external_cleanup_completed_at,
@@ -55,7 +56,8 @@ pub(super) const ENVIRONMENT_QUERY: &str = r#"
                JOIN platform_credentials AS c ON c.id = entry.credential_id
                WHERE entry.profile_id = b.profile_id AND entry.revision = b.profile_revision
                  AND entry.capability_slot = 'anthropic'
-                 AND c.provider = 'anthropic' AND c.authentication_kind = 'oauth'
+                 AND c.provider = 'anthropic'
+                 AND c.authentication_kind IN ('oauth', 'claude_sign_in')
            ) AS anthropic_subscription_token,
            (p.user_id IS NOT NULL OR b.environment_id IS NULL) AND EXISTS(
                SELECT 1 FROM platform_credentials AS c
@@ -81,7 +83,8 @@ pub(super) struct ProjectionCapture {
     pub profile_slots: Vec<String>,
     pub profile_slots_overflow: bool,
     pub github_connected: bool,
-    /// The pinned revision's Anthropic slot holds a Claude subscription token.
+    /// The pinned revision's Anthropic slot holds a Claude subscription token
+    /// or a Claude sign-in.
     pub anthropic_subscription_token: bool,
 }
 

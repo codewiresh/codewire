@@ -240,6 +240,40 @@ class AddClaudeSubscriptionTokenCredentialResponse(_message.Message):
     credential: Credential
     def __init__(self, credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
 
+class StartClaudeSignInRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class StartClaudeSignInResponse(_message.Message):
+    __slots__ = ("authorize_url", "sign_in", "expires_at_unix")
+    AUTHORIZE_URL_FIELD_NUMBER: _ClassVar[int]
+    SIGN_IN_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_AT_UNIX_FIELD_NUMBER: _ClassVar[int]
+    authorize_url: str
+    sign_in: str
+    expires_at_unix: int
+    def __init__(self, authorize_url: _Optional[str] = ..., sign_in: _Optional[str] = ..., expires_at_unix: _Optional[int] = ...) -> None: ...
+
+class CompleteClaudeSignInRequest(_message.Message):
+    __slots__ = ("name", "sign_in", "authorization_code", "credential_id", "expected_revocation_generation")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    SIGN_IN_FIELD_NUMBER: _ClassVar[int]
+    AUTHORIZATION_CODE_FIELD_NUMBER: _ClassVar[int]
+    CREDENTIAL_ID_FIELD_NUMBER: _ClassVar[int]
+    EXPECTED_REVOCATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    sign_in: str
+    authorization_code: bytes
+    credential_id: str
+    expected_revocation_generation: int
+    def __init__(self, name: _Optional[str] = ..., sign_in: _Optional[str] = ..., authorization_code: _Optional[bytes] = ..., credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ...) -> None: ...
+
+class CompleteClaudeSignInResponse(_message.Message):
+    __slots__ = ("credential",)
+    CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    credential: Credential
+    def __init__(self, credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
+
 class RenameCredentialRequest(_message.Message):
     __slots__ = ("credential_id", "expected_revocation_generation", "expected_name", "name")
     CREDENTIAL_ID_FIELD_NUMBER: _ClassVar[int]
