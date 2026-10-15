@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"
 CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-dev}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
-REGISTRY_HOST="${REGISTRY_HOST:-git.example.invalid}"
+REGISTRY_HOST="${REGISTRY_HOST:-registry.example.invalid}"
 CONFIGMAP_NAME="${CONFIGMAP_NAME:-}"
 DEFAULT_SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 EXPECTED_TAILNET_PATH_TRANSPORT="${EXPECTED_TAILNET_PATH_TRANSPORT:-direct_udp}"
@@ -70,7 +70,7 @@ Options:
   --image IMAGE             Candidate image to build/push/deploy; repeatable
   --current-dev             Run the existing commodity smoke against current dev
   --tag TAG                 Candidate tag (default: dev-smoke-<branch>-<sha>)
-  --registry-host HOST      Registry host (default: git.example.invalid)
+  --registry-host HOST      Registry host (default: registry.example.invalid)
   --sandbox-namespace NAME  Sandbox namespace for the candidate smoke
   --no-temp-sandbox-namespace
                             Use the current dev sandbox namespace instead

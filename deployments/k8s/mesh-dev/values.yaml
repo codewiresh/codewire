@@ -1,7 +1,7 @@
 fullnameOverride: codewire-mesh
 
 image:
-  repository: git.example.invalid/codewire/mesh
+  repository: registry.example.invalid/codewire/mesh
   tag: latest
   digest: ""
 
