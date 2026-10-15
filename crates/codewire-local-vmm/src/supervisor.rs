@@ -328,6 +328,12 @@ impl NativeSupervisorClient {
                 });
             }
         }
+        // A supervisor from before #2735 (protocol 10) listens in the root
+        // itself and holds its lock until it exits: it keeps serving.
+        let legacy = config.legacy_supervisor_socket();
+        if std::os::unix::net::UnixStream::connect(&legacy).is_ok() {
+            return Self::connect_for_config(&legacy, config).await;
+        }
         let root = prepare_runtime_root(&config.root)?;
         let mut child = spawn_supervisor(config, &root)?;
         let deadline = tokio::time::Instant::now() + RUNNER_START_TIMEOUT;
@@ -389,10 +395,12 @@ impl NativeSupervisorClient {
         socket: &Path,
         config: &NativeRuntimeConfig,
     ) -> Result<Self, SupervisorError> {
-        if socket != config.supervisor_socket() {
+        if socket != config.supervisor_socket() && socket != config.legacy_supervisor_socket() {
             return Err(SupervisorError::InvalidConfiguration);
         }
-        Self::connect_configured(config).await.map_err(Into::into)
+        Self::connect_configured_at(socket, config)
+            .await
+            .map_err(Into::into)
     }
 
     pub(crate) async fn reconnect_after_watch_failure(
@@ -436,6 +444,12 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     config.validate()?;
     let root = prepare_runtime_root(&config.root)?;
     let lock = SupervisorLock::acquire(&root)?;
+    // Releases before #2735 kept runner sockets here, and their supervisor
+    // opens this directory for every runner it starts. Only the lock holder
+    // may remove it, as an empty leftover (one still holding a live runner's
+    // socket stays): a CLI or a losing supervisor never touches it while an
+    // older supervisor may still serve this root.
+    let _ = root.remove_empty_private_directory(Path::new("runners"));
     // Only the lock holder logs; a losing supervisor's exit error still
     // reaches the same file through stderr.
     let log = DiagnosticLog::inherited();
@@ -464,6 +478,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         live_runners: HashMap::new(),
         runtime_operations: BTreeSet::new(),
         incompatible_runners: BTreeSet::new(),
+        retiring: false,
         operation_progress: operation_progress.clone(),
         log,
         _lock: lock,
@@ -647,6 +662,9 @@ struct SupervisorCore {
     // Observation only: an unsupported protocol never grants runner RPC or
     // retirement authority, and does not rewrite the durable lifecycle state.
     incompatible_runners: BTreeSet<Uuid>,
+    // Set once RetireSupervisor admits a handoff: every later request and
+    // pending-operation run is refused while this supervisor exits.
+    retiring: bool,
     operation_progress: broadcast::Sender<OperationProgress>,
     // The bounded owner-only log its spawner gave this supervisor, if any.
     log: Option<DiagnosticLog>,
@@ -1755,6 +1773,9 @@ impl SupervisorCore {
     }
 
     async fn run_pending_operations(&mut self, recovering: bool) -> Result<(), SupervisorError> {
+        if self.retiring {
+            return Err(SupervisorError::Retiring);
+        }
         for operation in self.store.pending_operations()? {
             if operation.kind.cw_runtime() {
                 if !self.runtime_operations.contains(&operation.operation_id) {
@@ -2595,6 +2616,15 @@ impl SupervisorCore {
         if exited {
             self.mark_runner_dead(name)?;
             return Ok(());
+        }
+        // A stopped environment's runner from another cw (an older supervisor
+        // started it, and on Linux it outlives that supervisor) holds no VM:
+        // end it and clear its record, so the next start runs this cw's
+        // runner. It is never adopted.
+        if self.environment(name)?.state == StoredEnvironmentState::Stopped
+            && record.process.executable != self.config.executable
+        {
+            return self.retire_foreign_runner(name, &record).await;
         }
         let socket_trusted = record.socket.revalidate(&expected_socket).is_ok();
         match direct_share_validation {
@@ -3633,6 +3663,31 @@ impl SupervisorCore {
         };
         // Once the exact runner has exited, clear its durable identity even if
         // cleanup of a previously trusted socket reports an I/O failure.
+        self.mark_runner_dead(name)?;
+        socket_cleanup
+    }
+
+    /// End a stopped environment's idle runner from another cw (see
+    /// `reconcile_runner`): its exact recorded process, then its socket, at
+    /// this root's runner path or the pre-#2735 one, removed only while it is
+    /// still the recorded socket.
+    async fn retire_foreign_runner(
+        &mut self,
+        name: &str,
+        record: &RunnerRecord,
+    ) -> Result<(), SupervisorError> {
+        let environment_id = self.environment(name)?.id;
+        self.terminate_recorded_runner_process(name).await?;
+        let socket = [
+            self.config.runner_socket(environment_id),
+            self.config.legacy_runner_socket(environment_id),
+        ]
+        .into_iter()
+        .find(|socket| record.socket.revalidate(socket).is_ok());
+        let socket_cleanup = match socket {
+            Some(socket) => remove_bound_socket(&socket, &record.socket).map_err(Into::into),
+            None => Ok(()),
+        };
         self.mark_runner_dead(name)?;
         socket_cleanup
     }
@@ -5407,6 +5462,54 @@ impl LocalSupervisorService for SupervisorRpc {
             catalog_json,
             cw_runtime_catalog_generation: runtime_generation,
         }))
+    }
+
+    /// Hand this state root to a newer cw's supervisor (supervisor_handoff).
+    /// Every pending operation runs first, under the one core lock every
+    /// request takes. While any environment may still run a VM nothing
+    /// changes; otherwise every later request is refused and the supervisor
+    /// shuts down, as after a fatal worker error.
+    async fn retire_supervisor(
+        &self,
+        request: Request<v1::RetireSupervisorRequest>,
+    ) -> Result<Response<v1::RetireSupervisorResponse>, Status> {
+        if request.into_inner().successor_protocol <= NATIVE_SUPERVISOR_PROTOCOL_VERSION {
+            return Err(Status::invalid_argument(
+                "a local VM supervisor retires only for a newer protocol",
+            ));
+        }
+        let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
+        if let Some((name, _)) = core
+            .state
+            .environments
+            .iter()
+            .find(|(_, environment)| may_run_a_vm(environment))
+        {
+            return Err(Status::from(SupervisorError::RetireRefused(name.clone())));
+        }
+        core.retiring = true;
+        diagnostic_log::record(core.log.as_ref(), "supervisor_retiring", &[]);
+        drop(core);
+        let _ = self.shutdown.send(true);
+        Ok(Response::new(v1::RetireSupervisorResponse {}))
+    }
+}
+
+/// Whether an environment may still have a VM: one running or starting, one
+/// whose runner still owns it after a failure (an error with a runner record
+/// keeps its VM; `runner_service` reports such failures without stopping it),
+/// or, on macOS, one whose ownership is unknown.
+fn may_run_a_vm(environment: &EnvironmentRecord) -> bool {
+    match environment.state {
+        StoredEnvironmentState::Stopped => false,
+        StoredEnvironmentState::Error => environment.runner.is_some(),
+        StoredEnvironmentState::Starting | StoredEnvironmentState::Running => true,
+        // A supervisor's exit stops its VMs only on macOS; a Linux orphan's
+        // runner outlives it.
+        StoredEnvironmentState::Orphaned => cfg!(target_os = "macos"),
     }
 }
 
@@ -7565,9 +7668,6 @@ fn prepare_runtime_root(path: &Path) -> Result<PrivateRoot, SupervisorError> {
     };
     root.ensure_dir(Path::new("engine"), 0o700)?;
     prepare_runner_socket_dir(root.path())?;
-    // Releases before #2735 kept runner sockets here; an empty directory is a
-    // leftover (one still holding a live runner's socket stays).
-    let _ = root.remove_empty_private_directory(Path::new("runners"));
     Ok(root)
 }
 
@@ -7706,9 +7806,10 @@ impl From<SupervisorError> for Status {
             | SupervisorError::WorkloadSecretDeliveryUnavailable => {
                 Status::failed_precondition(error.to_string())
             }
-            SupervisorError::CredentialAuthorityUnavailable => {
+            SupervisorError::CredentialAuthorityUnavailable | SupervisorError::Retiring => {
                 Status::unavailable(error.to_string())
             }
+            SupervisorError::RetireRefused(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::Workspace(workspace) => {
                 Status::failed_precondition(workspace.to_string())
             }
@@ -7839,9 +7940,7 @@ pub enum SupervisorError {
     EndpointNotReplaced(PathBuf),
     #[error("the running native supervisor does not implement the required compatibility protocol")]
     SupervisorProtocolUnavailable,
-    #[error(
-        "native supervisor protocol version mismatch: expected {expected}, running supervisor reported {actual}"
-    )]
+    #[error("{}", crate::supervisor_config::unsupported_protocol_message(*.actual))]
     SupervisorProtocolMismatch { expected: u32, actual: u32 },
     #[error("the running native supervisor returned invalid compatibility information")]
     InvalidSupervisorInfo,
@@ -7849,6 +7948,10 @@ pub enum SupervisorError {
     SupervisorInfoUnavailable,
     #[error("the running native supervisor uses a different runtime configuration")]
     SupervisorConfigurationMismatch,
+    #[error("the local VM supervisor is handing this state root to a newer cw")]
+    Retiring,
+    #[error("local environment {0:?} may still run a VM, so the local VM supervisor stays")]
+    RetireRefused(String),
     #[error("spawn native environment runner failed")]
     SpawnRunner,
     #[error("native environment runner startup timed out")]
@@ -8052,6 +8155,8 @@ fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         SupervisorError::InvalidSupervisorInfo => "supervisor_info_invalid",
         SupervisorError::SupervisorInfoUnavailable => "supervisor_info_unavailable",
         SupervisorError::SupervisorConfigurationMismatch => "supervisor_configuration_mismatch",
+        SupervisorError::Retiring => "supervisor_retiring",
+        SupervisorError::RetireRefused(_) => "supervisor_retire_refused",
         SupervisorError::SpawnRunner => "runner_spawn",
         SupervisorError::RunnerStartTimeout => "runner_start_timeout",
         SupervisorError::RunnerAdoption => "runner_adoption",
@@ -8691,6 +8796,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
             _lock: lock,
@@ -9377,6 +9483,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
             _lock: lock,
@@ -12843,6 +12950,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
             _lock: lock,
@@ -14358,6 +14466,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_supervisor_listening_on_the_roots_own_socket_is_admitted_not_replaced() {
+        let (parent, core) = test_supervisor_core(project_environment());
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let config = core.config.clone();
+        drop(core);
+        // Where a supervisor from before #2735 (protocol 10) listens.
+        let legacy = config.legacy_supervisor_socket();
+        let _listener = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = match NativeSupervisorClient::connect_or_start(&config).await {
+            Ok(_) => panic!("this test process was admitted as a supervisor"),
+            Err(error) => error,
+        };
+        // Admission ran against it (this process is no supervisor), and no
+        // replacement started at the current socket.
+        assert!(
+            matches!(
+                &error,
+                SupervisorError::Uds(UdsError::SupervisorPeerAdmission(_))
+            ),
+            "{error:?}"
+        );
+        assert!(!config.supervisor_socket().exists());
+        assert!(legacy.exists());
+    }
+
+    #[tokio::test]
     async fn connect_or_start_rejects_a_live_supervisor_with_different_configuration() {
         let (parent, core) = test_supervisor_core(project_environment());
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -15011,7 +15146,7 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_info_requires_the_exact_protocol_and_valid_digest_shape() {
+    fn supervisor_info_refuses_outside_the_supported_range_and_a_bad_digest_shape() {
         let config = test_supervisor_core(project_environment()).1.config;
         let mut info = supervisor_info(&config);
         info.protocol_version = NATIVE_SUPERVISOR_PROTOCOL_VERSION + 1;
@@ -15023,9 +15158,13 @@ mod tests {
                 actual,
             } if actual == NATIVE_SUPERVISOR_PROTOCOL_VERSION + 1
         ));
-        assert!(error.to_string().contains("protocol version mismatch"));
+        assert!(
+            error
+                .to_string()
+                .starts_with("a newer cw runs your local VMs")
+        );
 
-        info.protocol_version = NATIVE_SUPERVISOR_PROTOCOL_VERSION - 1;
+        info.protocol_version = crate::supervisor_config::MINIMUM_SUPERVISOR_PROTOCOL_VERSION - 1;
         assert!(matches!(
             admit_supervisor_info(&info, None),
             Err(SupervisorError::SupervisorProtocolMismatch { .. })
@@ -16079,6 +16218,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
             _lock: lock,
@@ -16148,6 +16288,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
             _lock: lock,
@@ -16521,5 +16662,120 @@ mod runner_exit_tests {
             StoredEnvironmentState::Running,
             Some(RUNNER_EXIT_ERROR_CODE)
         ));
+    }
+}
+
+#[cfg(test)]
+mod retire_tests {
+    use super::tests::{project_environment, test_supervisor_core, test_supervisor_service};
+    use super::*;
+
+    fn with_runner(core: &mut SupervisorCore, state: StoredEnvironmentState) {
+        let environment = core.environment_mut("dev").unwrap();
+        environment.state = state;
+        environment.runner = Some(RunnerRecord {
+            cw_runtime_catalog_generation: None,
+            process: ProcessIdentity {
+                pid: 42,
+                boot_id: "boot".to_owned(),
+                start_time_ticks: 7,
+                executable: PathBuf::from("/proc/self/exe"),
+                executable_file: crate::host::path::FileIdentity {
+                    device: 1,
+                    inode: 2,
+                    size: 3,
+                    uid: 4,
+                    mode: 0o100500,
+                    links: 1,
+                },
+                executable_sha256: "f".repeat(64),
+            },
+            socket: SocketIdentity {
+                device: 1,
+                inode: 2,
+                uid: 4,
+                mode: 0o140600,
+            },
+            artifact_generation: "a".repeat(64),
+            error_code: Some(RUNNER_EXIT_ERROR_CODE.to_owned()),
+        });
+    }
+
+    async fn retire(service: &SupervisorRpc, successor: u32) -> Result<(), Status> {
+        service
+            .retire_supervisor(Request::new(v1::RetireSupervisorRequest {
+                successor_protocol: successor,
+            }))
+            .await
+            .map(drop)
+    }
+
+    #[test]
+    fn only_a_stopped_environment_or_one_whose_runner_is_gone_has_no_vm() {
+        let mut environment = project_environment();
+        for (state, may_run) in [
+            (StoredEnvironmentState::Stopped, false),
+            (StoredEnvironmentState::Error, false),
+            (StoredEnvironmentState::Starting, true),
+            (StoredEnvironmentState::Running, true),
+            (StoredEnvironmentState::Orphaned, cfg!(target_os = "macos")),
+        ] {
+            environment.state = state;
+            assert_eq!(may_run_a_vm(&environment), may_run, "{state:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_retires_only_for_a_newer_protocol_and_with_no_vm() {
+        let ours = NATIVE_SUPERVISOR_PROTOCOL_VERSION;
+        for state in [
+            StoredEnvironmentState::Running,
+            StoredEnvironmentState::Starting,
+            // A failure its runner reports keeps the VM (runner_service).
+            StoredEnvironmentState::Error,
+            #[cfg(target_os = "macos")]
+            StoredEnvironmentState::Orphaned,
+        ] {
+            let (_parent, mut core) = test_supervisor_core(project_environment());
+            with_runner(&mut core, state);
+            let service = test_supervisor_service(core);
+            let shutdown = service.shutdown.subscribe();
+            let refused = retire(&service, ours + 1).await.unwrap_err();
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition, "{state:?}");
+            assert!(
+                refused.message().contains("\"dev\" may still run a VM"),
+                "{refused:?}"
+            );
+            assert!(!*shutdown.borrow(), "{state:?}");
+            assert!(!service.core.lock().await.retiring, "{state:?}");
+        }
+
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let service = test_supervisor_service(core);
+        let shutdown = service.shutdown.subscribe();
+        for successor in [ours - 1, ours] {
+            assert_eq!(
+                retire(&service, successor).await.unwrap_err().code(),
+                tonic::Code::InvalidArgument
+            );
+        }
+        assert!(!*shutdown.borrow());
+        retire(&service, ours + 1).await.unwrap();
+        assert!(*shutdown.borrow());
+        // Every later request is refused while it exits.
+        let listed = service
+            .list_environments(Request::new(v1::ListEnvironmentsRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(listed.code(), tonic::Code::Unavailable);
+        let started = service
+            .start_environment(Request::new(v1::EnvironmentSelector {
+                name: "dev".to_owned(),
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(started.code(), tonic::Code::Unavailable);
     }
 }

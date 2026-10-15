@@ -17,6 +17,17 @@ ROOT = Path(__file__).resolve().parents[2]
 PREIMAGES = ROOT / "scripts/checks/contracts/proto-breaking-preimages.sha256"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 CODEWIRE_PREFIX = "proto/codewire/"
+# The private local VM runtime contract. A cw keeps working with a supervisor
+# back to the oldest supported release (MINIMUM_SUPERVISOR_PROTOCOL_VERSION),
+# so the current file stays wire compatible with that release's, pinned here
+# by digest (v0.3.388, blob d00c63f9).
+LOCAL_RUNTIME_PROTO = ROOT / "crates/codewire-local-vmm/proto"
+LOCAL_RUNTIME_OLDEST = ROOT / "scripts/checks/contracts/local-runtime-oldest"
+LOCAL_RUNTIME_OLDEST_SHA256 = {
+    "codewire/local/v1/control.proto": (
+        "393379d7818f6f6e5f760796ee9477698bf5ac6331d6d78a5b4a11eb66448ef6"
+    ),
+}
 
 
 class PolicyError(RuntimeError):
@@ -210,6 +221,26 @@ def run_breaking(base_sha: str) -> None:
     )
 
 
+def run_local_runtime_compatibility(buf: str) -> None:
+    pinned = {
+        path.relative_to(LOCAL_RUNTIME_OLDEST).as_posix(): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in sorted(LOCAL_RUNTIME_OLDEST.rglob("*.proto"))
+    }
+    if pinned != LOCAL_RUNTIME_OLDEST_SHA256:
+        raise PolicyError(
+            "the oldest supported local runtime contract changed; it is the "
+            "exact file of the release MINIMUM_SUPERVISOR_PROTOCOL_VERSION names"
+        )
+    subprocess.run(
+        [buf, "breaking", "--against", str(LOCAL_RUNTIME_OLDEST)],
+        cwd=LOCAL_RUNTIME_PROTO,
+        check=True,
+    )
+    print("local runtime contract: wire compatible with the oldest supported release")
+
+
 def self_test() -> None:
     digest = "a" * 64
     deleted_path = "proto/codewire/internal/v1/retired.proto"
@@ -334,6 +365,10 @@ def main() -> int:
             if not args.base_sha:
                 parser.error("--base-sha is required unless --self-test is used")
             run_breaking(args.base_sha)
+            buf = os.environ.get("BUF") or shutil.which("buf")
+            if not buf:
+                raise PolicyError("buf executable not found")
+            run_local_runtime_compatibility(buf)
     except (PolicyError, subprocess.CalledProcessError) as error:
         print(f"proto breaking policy: {error}", file=sys.stderr)
         return 1

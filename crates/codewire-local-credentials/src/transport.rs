@@ -21,6 +21,15 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // Bump this whenever a detached authority must be replaced, including
 // behavior or provider-catalog changes that leave the wire layout intact.
 pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 15;
+/// The oldest authority protocol this cw works with (v0.3.388's). A running
+/// authority in [minimum, current] keeps serving after a cw update.
+pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
+/// What each authority protocol after the minimum changed, oldest first.
+/// Every protocol in (minimum, current] needs a row, so a bump says what an
+/// older authority lacks; its test enforces that.
+#[cfg(test)]
+const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[];
+const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 const AUTHORITY_SOCKET_FILE: &str = "authority.sock";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -48,8 +57,9 @@ impl AuthorityRuntimeConfig {
     }
 
     /// Where an authority from a cw before #2745 listens, inside the
-    /// credential root. A client still uses a compatible one that is running
-    /// there; a new authority removes the dead endpoint.
+    /// credential root, and where a supervisor from before #2735 (v0.3.388)
+    /// dials it. A client still uses a compatible one that is running there;
+    /// a new authority replaces the dead endpoint and listens there too.
     pub fn legacy_socket(&self) -> PathBuf {
         self.root.join(AUTHORITY_SOCKET_FILE)
     }
@@ -197,10 +207,10 @@ pub(crate) fn bind_owner_only_for_uid(
     config.prepare_root()?;
     validate_socket_dir(&config.socket_dir)?;
     let socket = config.socket();
+    let legacy = config.legacy_socket();
     // The caller holds the singleton lock, so no authority is live at either
-    // endpoint: replace a dead one here and remove one an earlier cw left in
-    // the credential root.
-    for stale in [socket.clone(), config.legacy_socket()] {
+    // endpoint: replace a dead one at each.
+    for stale in [socket.clone(), legacy.clone()] {
         match fs::symlink_metadata(&stale) {
             Ok(_) => {
                 SocketIdentity::capture(&stale)?;
@@ -217,7 +227,19 @@ pub(crate) fn bind_owner_only_for_uid(
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
         .map_err(|_| AuthorityRuntimeError::InvalidPrivateSocket)?;
     let identity = SocketIdentity::capture(&socket)?;
-    let incoming = UnixListenerStream::new(listener).filter_map(move |result| match result {
+    // A supervisor from before #2735 (v0.3.388's) dials the credential root's
+    // own socket, and it keeps serving its VMs after a cw update: listen
+    // there too, so they keep their credentials when this cw's authority
+    // replaces theirs. A root whose path is too long never had one there.
+    let legacy = check_socket_path(&legacy)
+        .ok()
+        .and_then(|()| UnixListener::bind(&legacy).ok())
+        .filter(|_| fs::set_permissions(&legacy, fs::Permissions::from_mode(0o600)).is_ok());
+    let accepted = futures::stream::select(
+        UnixListenerStream::new(listener),
+        futures::StreamExt::flatten(futures::stream::iter(legacy.map(UnixListenerStream::new))),
+    );
+    let incoming = accepted.filter_map(move |result| match result {
         Ok(stream) => match stream.peer_cred() {
             Ok(credential) if credential.uid() == uid => Some(Ok(stream)),
             Ok(_) => None,
@@ -426,5 +448,20 @@ mod exit_status_tests {
         // Killed by a signal: no exit code.
         let signaled = std::process::ExitStatus::from_raw(9);
         assert_eq!(store_error_from_exit_status(signaled), None);
+    }
+
+    #[test]
+    fn every_authority_protocol_after_the_minimum_says_what_it_changed() {
+        let protocols: Vec<u32> = AUTHORITY_PROTOCOL_CHANGES
+            .iter()
+            .map(|(protocol, _)| *protocol)
+            .collect();
+        let expected: Vec<u32> = (MINIMUM_AUTHORITY_PROTOCOL_VERSION..AUTHORITY_PROTOCOL_VERSION)
+            .map(|protocol| protocol + 1)
+            .collect();
+        assert_eq!(
+            protocols, expected,
+            "an authority protocol bump needs an AUTHORITY_PROTOCOL_CHANGES row"
+        );
     }
 }

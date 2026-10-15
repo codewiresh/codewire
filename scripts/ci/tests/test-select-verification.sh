@@ -895,6 +895,13 @@ run_paths_case proto_breaking_policy pull_request refs/pull/1141/head false \
   'contracts contracts_proto policy security security_js' \
   scripts/checks/proto_breaking.py \
   scripts/checks/contracts/proto-breaking-preimages.sha256
+run_paths_case local_runtime_contract pull_request refs/pull/1143/head false \
+  'contracts contracts_proto policy transport transport_pkg_codewire_local_vmm' \
+  crates/codewire-local-vmm/proto/buf.yaml \
+  crates/codewire-local-vmm/proto/codewire/local/v1/control.proto
+run_paths_case local_runtime_oldest_contract pull_request refs/pull/1144/head false \
+  'contracts contracts_proto policy security security_js' \
+  scripts/checks/contracts/local-runtime-oldest/codewire/local/v1/control.proto
 run_paths_case proto_retirement_ledger_transition pull_request refs/pull/1142/head false \
   'contracts contracts_proto policy security security_js' \
   scripts/checks/contracts/proto-retirements.sha256

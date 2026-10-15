@@ -1,4 +1,6 @@
-//! A live, socket-derived supervisor birth. No numeric-PID adoption or effects.
+//! A live, socket-derived supervisor birth. No numeric-PID adoption or effects;
+//! the pidfd signals an older supervisor only to end it in a handoff
+//! (`terminate`).
 
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -79,7 +81,7 @@ impl SupervisorPeerPin {
             })
             .transpose()?;
         if let Some(config) = &config
-            && argv != supervisor_argv(config)
+            && argv != config.supervisor_argv()
         {
             return Err(PeerError::Role);
         }
@@ -96,6 +98,17 @@ impl SupervisorPeerPin {
         });
         pin.revalidate(deadline)?;
         Ok(pin)
+    }
+
+    /// The admitted peer's PID and executable, for messages that name it.
+    pub(crate) fn peer_process(&self) -> Option<(u32, &Path)> {
+        Some((self.peer.pid(), self.peer.executable()))
+    }
+
+    /// Remove the socket an ended supervisor left (a SIGTERM skips its own
+    /// cleanup), only while it is still the socket this pin admitted.
+    pub(crate) fn remove_stale_socket(&self) -> Result<(), crate::uds::UdsError> {
+        crate::uds::remove_bound_socket(&self.socket, &self.socket_identity)
     }
 
     pub(crate) fn socket(&self) -> &Path {
@@ -118,6 +131,35 @@ impl SupervisorPeerPin {
         self.revalidate(deadline)
     }
 
+    /// The role is checked at every admission on Linux; a handoff only
+    /// requires that this peer was admitted for a configuration.
+    pub(crate) fn require_role(&self) -> Result<(), PeerError> {
+        if self.config.is_none() {
+            return Err(PeerError::Role);
+        }
+        Ok(())
+    }
+
+    /// Watch this supervisor's exit for a handoff (supervisor_handoff), once
+    /// its birth, arguments and socket check out again. The pidfd names this
+    /// birth.
+    pub(crate) fn watch_exit(&self) -> Result<SupervisorExit, PeerError> {
+        self.require_role()?;
+        self.revalidate(Instant::now() + ADMISSION_TIMEOUT)?;
+        Ok(SupervisorExit(
+            rustix::io::dup(&self.pidfd).map_err(|_| PeerError::Kernel)?,
+        ))
+    }
+
+    /// End this supervisor for a handoff: SIGTERM through the pidfd, which
+    /// never reaches a reused PID, once `watch_exit` holds.
+    pub(crate) fn terminate(&self) -> Result<SupervisorExit, PeerError> {
+        let exit = self.watch_exit()?;
+        rustix::process::pidfd_send_signal(&self.pidfd, rustix::process::Signal::TERM)
+            .map_err(|_| PeerError::Kernel)?;
+        Ok(exit)
+    }
+
     fn revalidate(&self, deadline: Instant) -> Result<(), PeerError> {
         require_live(&self.pidfd)?;
         self.socket_identity
@@ -136,26 +178,24 @@ impl SupervisorPeerPin {
     }
 }
 
-fn supervisor_argv(config: &NativeRuntimeConfig) -> Vec<OsString> {
-    let mut argv = vec![
-        config.executable.as_os_str().to_owned(),
-        "__native-supervisor".into(),
-    ];
-    for (flag, path) in [
-        ("--root", &config.root),
-        ("--artifact-root", &config.artifact_root),
-        ("--artifact-lock", &config.artifact_lock),
-        ("--mesh-data-dir", &config.mesh_data_dir),
-        ("--platform-config-dir", &config.platform_config_dir),
-        (
-            "--credential-authority-root",
-            &config.credential_authority_root,
-        ),
-    ] {
-        argv.push(flag.into());
-        argv.push(path.as_os_str().to_owned());
+/// The ended supervisor's pidfd, readable once it has exited.
+#[derive(Debug)]
+pub(crate) struct SupervisorExit(OwnedFd);
+
+impl SupervisorExit {
+    pub(crate) fn exited(&self) -> Result<bool, PeerError> {
+        let mut entry = libc::pollfd {
+            fd: self.0.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized entry and a nonblocking timeout.
+        let result = unsafe { libc::poll(&mut entry, 1, 0) };
+        if result < 0 {
+            return Err(PeerError::Kernel);
+        }
+        Ok(result != 0)
     }
-    argv
 }
 
 fn socket_pidfd(stream: &UnixStream) -> Result<(OwnedFd, u32), PeerError> {

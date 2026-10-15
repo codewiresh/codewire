@@ -116,6 +116,27 @@ the VM comes from the runtime that `cw setup --local` installed.
 parent and child agents, and [SECRETS.md](../SECRETS.md) covers credentials
 and profiles.
 
+## After a cw update
+
+`cw update` never stops your local VMs. The previous cw's local VM supervisor
+keeps serving them, and this cw uses it for everything that does not boot or
+reconfigure a VM: listing, `cw run`, `cw shell`, sessions and logs, stopping,
+removing and host ports. Starting, creating, restarting or resizing a VM,
+updating its sources and refreshing its skills need this cw's own supervisor.
+Once none of your VMs runs, the next such command switches over by itself,
+without a message, and installs this cw's runtime. While one still runs, the
+command says so instead:
+
+```text
+your local VMs dev, web still run on the cw you updated from; this cw starts and changes local VMs once they stop (`cw env --local stop NAME`)
+```
+
+Stop them when it suits you and run the command again. `cw setup --local`
+waits the same way, because the previous supervisor would start its next VM
+from the new runtime's files. This cw works with supervisors back to
+v0.3.388's; an older one, or a newer one after `cw update rollback`, is
+refused with a message that names it.
+
 ## Troubleshooting
 
 **`this host cannot run local VMs yet`**: fix each listed item, then rerun the
@@ -128,6 +149,10 @@ firewall, allow the `cw` executable (installed under
 `~/.local/share/codewire/cli/versions/`) to reach `releases.codewire.sh` over
 HTTPS for the runtime, and `ghcr.io` and `pkg-containers.githubusercontent.com`
 for the workspace image (`ghcr.io/codewiresh/workspace`).
+
+**`your local VMs ... still run on the cw you updated from`**: see
+[After a cw update](#after-a-cw-update). Stop those VMs, then rerun the
+command.
 
 **`this cw is a development build with no pinned local VM runtime`**: install a
 release with the install script, or pass `--from DIR` with a runtime directory

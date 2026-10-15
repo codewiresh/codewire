@@ -675,6 +675,13 @@ if [ "$event_selected" = false ]; then
         select_token contracts_proto
         recognized=true
         ;;
+      crates/codewire-local-vmm/proto/*)
+        # The local VM runtime contract stays wire compatible with the oldest
+        # supported release; its Rust consumers select through the crate.
+        select_token contracts
+        select_token contracts_proto
+        ;;
+      scripts/checks/contracts/local-runtime-oldest/*|\
       scripts/ci/proto/build-rust-descriptors.sh|\
       scripts/checks/proto_breaking.py|\
       scripts/checks/contracts/proto-retirements.sha256|\
