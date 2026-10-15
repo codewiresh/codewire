@@ -552,6 +552,42 @@ pub(super) fn resume_refusal_text(reason: &str) -> Option<&'static str> {
         _ => return None,
     })
 }
+/// A conversation whose last request has not settled admits only that
+/// request's cleanup. Anything else is refused definitely, before any
+/// effect, naming the request and the way out (#2782).
+pub(super) fn request_blocked(
+    action: ManagedAction,
+    request_id: Uuid,
+    unknown: bool,
+    environment: &str,
+    session_id: &str,
+) -> AppError {
+    let name = match action {
+        ManagedAction::Launch => "launch",
+        ManagedAction::Message => "message",
+        ManagedAction::Steer => "steer",
+        ManagedAction::Interrupt => "interrupt",
+        ManagedAction::Stop => "stop",
+        ManagedAction::Restart => "restart",
+        ManagedAction::Resume => "resume",
+    };
+    let detail = match (unknown, action) {
+        (false, _) => format!("{name} {request_id} is still in progress; try again shortly"),
+        (true, ManagedAction::Resume) => format!(
+            "{name} {request_id}'s outcome is unknown, so this conversation has ended; \
+             start a new conversation"
+        ),
+        (true, _) => format!(
+            "{name} {request_id}'s outcome is unknown; run `cw stop {environment} {session_id}`, \
+             then `cw restart {environment} {session_id}`"
+        ),
+    };
+    AppError::Coded {
+        status: axum::http::StatusCode::CONFLICT,
+        code: "platform_agent_request_refused",
+        detail: std::borrow::Cow::Owned(detail),
+    }
+}
 /// A Resume refused definitely, before any effect, with why in plain words.
 pub(super) fn resume_refused(detail: &'static str) -> AppError {
     AppError::Coded {

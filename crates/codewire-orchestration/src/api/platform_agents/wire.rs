@@ -235,6 +235,17 @@ pub(super) fn is_resume(request: &private::PlatformManagedMutationRequest) -> bo
     )
 }
 
+/// A Stop that names no cleanup: if the conversation's last request has an
+/// unknown outcome, orchestration makes it that request's cleanup (#2782).
+pub(super) fn is_plain_stop(request: &private::PlatformManagedMutationRequest) -> bool {
+    matches!(
+        &request.operation,
+        Some(private::platform_managed_mutation_request::Operation::Control(c))
+            if c.action == private::PlatformManagedAction::Stop as i32
+                && c.cleanup_of_request_id.is_none()
+    )
+}
+
 pub(super) fn read(
     request: &proto::ReadEnvironmentAgentRequest,
 ) -> AppResult<(

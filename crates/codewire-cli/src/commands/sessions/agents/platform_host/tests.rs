@@ -146,6 +146,54 @@ fn a_stopped_conversation_names_how_to_continue_it_and_is_recognised_on_every_cl
     assert!(!is_platform_driver(&[]));
 }
 
+#[test]
+fn platform_refusals_are_definite_only_with_their_exact_reason() {
+    // #2782: a refusal at admission names its reason; nothing else is
+    // treated as definite, so a lost answer stays an uncertain outcome.
+    use codewire_proto::google::rpc::ErrorInfo;
+    use connectrpc::{ConnectError, ErrorDetail};
+    let reasoned = |error: ConnectError, reason: &str| {
+        codewire_client::ClientError::from(error.with_detail(ErrorDetail::from_message(
+            "google.rpc.ErrorInfo",
+            &ErrorInfo {
+                reason: reason.into(),
+                domain: "codewire.sh".into(),
+                ..Default::default()
+            },
+        )))
+    };
+    let blocked = reasoned(
+        ConnectError::failed_precondition("message x is still in progress; try again shortly"),
+        "PLATFORM_AGENT_REQUEST_REFUSED",
+    );
+    assert!(request_refused(&blocked));
+    assert!(!resume_refused(&blocked));
+    let resume = reasoned(
+        ConnectError::failed_precondition("the previous Pod is still stopping"),
+        "PLATFORM_AGENT_RESUME_REFUSED",
+    );
+    assert!(resume_refused(&resume));
+    assert!(!request_refused(&resume));
+    // The right reason under another code, a plain conflict, or no reason at
+    // all stay uncertain.
+    for error in [
+        reasoned(
+            ConnectError::unavailable("transport"),
+            "PLATFORM_AGENT_REQUEST_REFUSED",
+        ),
+        codewire_client::ClientError::from(ConnectError::already_exists(
+            "platform managed request requires observation or original-generation cleanup",
+        )),
+        codewire_client::ClientError::new(
+            codewire_client::ErrorCode::FailedPrecondition,
+            "no reason",
+        ),
+    ] {
+        assert!(!request_refused(&error), "{error:?}");
+        assert!(!resume_refused(&error), "{error:?}");
+    }
+}
+
 const ENVIRONMENT: &str = "550e8400-e29b-41d4-a716-446655440000";
 const MESSAGE: &str = "dff2f8e1-1788-454e-94a9-f4dc6d4b057e";
 const INFO: &str = "/codewire.v1.EnvironmentAgentService/GetEnvironmentAgentInfo";
