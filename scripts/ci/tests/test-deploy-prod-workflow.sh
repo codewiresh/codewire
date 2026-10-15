@@ -116,6 +116,7 @@ for platform in amd64 arm64; do
       '    needs: [release-selection, support-pair-selection]' \
       "    if: \${{ needs.support-pair-selection.outputs.build == 'true' }}" \
       '          CODEWIRE_SOURCE_DIR: .release-source' \
+      "          SUPPORT_PLATFORM_BASE_DIGEST: \${{ needs.support-pair-selection.outputs.base_${platform}_digest }}" \
       "          SUPPORT_PLATFORM_BUDGET_MINUTES: '110'" \
       "        run: scripts/ci/images/build-support-platform.sh linux/$platform"; do
     grep -qxF -- "$expected" <<<"$platform_job" || fail "linux/$platform release support build omits: $expected"
@@ -228,6 +229,12 @@ case "$1" in
   login) exit 0 ;;
   buildx)
     image="${*: -1}"; image="${image#registry.example.invalid/codewire/}"; image="${image%%:*}"
+    if [[ " $* " == *' --raw '* ]]; then
+      printf '{"manifests":[{"digest":"sha256:%064d","platform":{"os":"linux","architecture":"amd64"}},' 1
+      printf '{"digest":"sha256:%064d","platform":{"os":"linux","architecture":"arm64"}},' 2
+      printf '{"digest":"sha256:%064d","platform":{"os":"unknown","architecture":"unknown"}}]}\n' 3
+      exit 0
+    fi
     case " $STUB_PUBLISHED " in
       *" $image "*) printf '{"digest":"sha256:%064d"}\n' 1 ;;
       *" error "*) echo 'connection reset by peer' >&2; exit 1 ;;
@@ -248,8 +255,13 @@ state_case() {
 }
 [[ "$(state_case 'base workspace')" == build=false ]] || fail "a published release pair is not reused"
 [[ "$(state_case '')" == build=true ]] || fail "an unpublished release pair is not built"
-if [[ "$(state_case 'base')" != failed ]] || ! grep -qF 'only part of the support pair' "$stub_tree/out"; then
-  fail "a partly published release pair was accepted"
+# A base a cancelled release published is reused per platform; only the
+# workspace is built, from exactly those images.
+[[ "$(state_case 'base')" == "build=true
+base_amd64_digest=sha256:$(printf '%064d' 1)
+base_arm64_digest=sha256:$(printf '%064d' 2)" ]] || fail "a published base alone is not reused per platform"
+if [[ "$(state_case 'workspace')" != failed ]] || ! grep -qF 'workspace is published without its base' "$stub_tree/out"; then
+  fail "a workspace published without its base was accepted"
 fi
 [[ "$(state_case 'error')" == failed ]] || fail "an unreadable registry was taken as an unpublished pair"
 [[ -z "$(find "$stub_tree" -maxdepth 1 -name 'codewire-release-support-pair.*' -print -quit)" ]] ||

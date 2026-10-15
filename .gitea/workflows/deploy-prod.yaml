@@ -224,6 +224,8 @@ jobs:
     needs: [release-selection]
     outputs:
       build: ${{ steps.select.outputs.build }}
+      base_amd64_digest: ${{ steps.select.outputs.base_amd64_digest }}
+      base_arm64_digest: ${{ steps.select.outputs.base_arm64_digest }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
@@ -262,6 +264,8 @@ jobs:
           CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CODEWIRE_SOURCE_DIR: .release-source
           SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
+          # Set only when a base index for this source is already published.
+          SUPPORT_PLATFORM_BASE_DIGEST: ${{ needs.support-pair-selection.outputs.base_amd64_digest }}
         run: scripts/ci/images/build-support-platform.sh linux/amd64
 
   build-support-arm64:
@@ -289,6 +293,8 @@ jobs:
           CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CODEWIRE_SOURCE_DIR: .release-source
           SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
+          # Set only when a base index for this source is already published.
+          SUPPORT_PLATFORM_BASE_DIGEST: ${{ needs.support-pair-selection.outputs.base_arm64_digest }}
         run: scripts/ci/images/build-support-platform.sh linux/arm64
 
   publish-support-release-images:

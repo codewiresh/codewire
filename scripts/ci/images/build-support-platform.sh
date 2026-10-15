@@ -19,6 +19,9 @@
 # the checkout whose images are built: deploy-prod.yaml builds a release
 # tag's pair from .release-source with this tree's scripts, and passes the
 # tag's CODEWIRE_SOURCE_SHA and CODEWIRE_RELEASE_TAG through to the builder.
+# SUPPORT_PLATFORM_BASE_DIGEST, when set, is this platform's image in a base
+# index main already published for the same source: the base is not rebuilt
+# and the workspace is built from exactly that digest.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -130,7 +133,15 @@ build() {
   printf '%s\n' "$digest"
 }
 
-base_digest="$(build base "$base_dockerfile" "$base_context")"
+published_base="${SUPPORT_PLATFORM_BASE_DIGEST:-}"
+if [[ -n "$published_base" ]]; then
+  [[ "$published_base" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    fail "SUPPORT_PLATFORM_BASE_DIGEST is not an exact digest: $published_base"
+  base_digest="$published_base"
+  printf 'Building the %s workspace from the published base %s\n' "$PLATFORM" "$base_digest" >&2
+else
+  base_digest="$(build base "$base_dockerfile" "$base_context")"
+fi
 workspace_digest="$(build workspace "$workspace_dockerfile" "$workspace_context" \
   "CODEWIRE_BASE_IMAGE_REF=registry.example.invalid/codewire/base@$base_digest")"
 printf 'base_digest=%s\nworkspace_digest=%s\n' "$base_digest" "$workspace_digest" >>"$output"

@@ -726,6 +726,17 @@ for bad_source in /abs ../outside missing-dir; do
   [[ "$(cd "$platform_tree" && platform_case 110 linux/amd64 CODEWIRE_SOURCE_DIR="$bad_source")" == failed* && ! -s "$platform_tree/calls" ]] ||
     fail "a platform build accepted the source directory $bad_source"
 done
+# A base index already published for the release source is not rebuilt: the
+# workspace is built from exactly that platform image.
+published_base=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+[[ "$(platform_case 110 linux/amd64 SUPPORT_PLATFORM_BASE_DIGEST="$published_base")" == ok ]] ||
+  { cat "$platform_tree/out" >&2; fail 'platform build from a published base failed'; }
+[[ "$(cat "$platform_tree/calls")" == "workspace|linux/amd64|registry.example.invalid/codewire/base@$published_base||workspace images/workspace/Dockerfile ." ]] ||
+  fail 'a published base was rebuilt or not used for the workspace'
+grep -qxF "base_digest=$published_base" "$platform_tree/output" ||
+  fail 'a platform build from a published base does not report that base'
+[[ "$(platform_case 110 linux/amd64 SUPPORT_PLATFORM_BASE_DIGEST=sha256:short)" == failed* && ! -s "$platform_tree/calls" ]] ||
+  fail 'a malformed published base digest was accepted'
 # The arm64 build fails closed, never falling back to emulation.
 for arm64_failure in 'STUB_FETCH=fail|client certificate could not be read' \
     'STUB_NODE=down|did not answer as a running linux/arm64 builder' \
