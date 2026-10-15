@@ -1732,7 +1732,8 @@ KIND_CLAUDE_SIGN_IN_CODE='kind-synthetic-claude-sign-in-code'
 KIND_CLAUDE_SIGN_IN_SECONDS=60
 
 # `cw credentials --platform connect claude` as a person runs it. The CLI
-# prints Claude's authorize URL; the code is pasted on its stdin, never argv,
+# prints Claude's authorize URL alone on its line of the login screen; the
+# code is pasted on its stdin, never argv,
 # after `#` and that URL's own state (`match`) or another one (`mismatch`).
 # With `reconnect`, the existing sign-in of that name is reconnected in place
 # (`--yes` answers the CLI's confirmation). The CLI's stdout is printed and
@@ -1751,7 +1752,7 @@ kind_credential_claude_connect() {
   exec {writer}>"$fifo"
   url=""
   for ((attempt = 0; attempt < KIND_CLAUDE_SIGN_IN_SECONDS * 2; attempt++)); do
-    url="$(sed -n 's#^Open \(https://claude\.com/cai/oauth/authorize?[^ ]*\)$#\1#p' \
+    url="$(sed -n 's#^\(https://claude\.com/cai/oauth/authorize?[^ ]*\)$#\1#p' \
       "$scratch/stderr")"
     [ -z "$url" ] && kill -0 "$pid" 2>/dev/null || break
     sleep 0.5

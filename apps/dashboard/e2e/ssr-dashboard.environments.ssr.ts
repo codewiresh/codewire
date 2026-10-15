@@ -2,7 +2,7 @@ import { expect, test } from "./helpers/test";
 import type { Locator, Page } from "@playwright/test";
 import postgres from "postgres";
 import { ensureWorkerIdentity } from "./helpers/worker-identity";
-import { cleanupEnvironments, waitForEnvironmentState } from "./helpers/environment";
+import { cleanupEnvironments, saveSandboxDaemonLogs, waitForEnvironmentState } from "./helpers/environment";
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import { defaultWorkspaceImage } from "./helpers/runtime-images";
 import { terminalWebSocketUrl } from "./helpers/terminal-websocket";
@@ -437,6 +437,13 @@ test.describe.serial("server-rendered environments", () => {
     ownerId = await ensureWorkerIdentity(testInfo.workerIndex);
     orgId = await ensureTestOrg(orgName, slug, ownerId);
     await seedPinnedPreset();
+  });
+
+  test.afterEach(async ({}, testInfo) => {
+    // Keep a failed Sandbox's daemon log as evidence before cleanup removes it.
+    if (testInfo.status !== testInfo.expectedStatus && process.env.CODEWIRE_PLAYWRIGHT_SNAPSHOT_PROFILE !== "prepared-kind-terminal") {
+      await saveSandboxDaemonLogs(slug, testInfo);
+    }
   });
 
   test.afterAll(async () => {
@@ -1024,6 +1031,10 @@ test.describe.serial("server-rendered environments", () => {
     await terminalRoot.locator(".xterm").click();
     await page.keyboard.press("Control+C");
     await expect.poll(() => page.evaluate(() => ((window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames || []).filter((frame) => frame.type === "input").at(-1))).toEqual({ type: "input", data: "\u0003" });
+    // The line discipline discards input queued behind an interrupt, and the
+    // shell re-prepares its terminal after SIGINT. Type only once it has drawn
+    // a fresh prompt after the ^C, as a person would.
+    await expect(terminalRows).toContainText(/\^C[\s\S]*\$\s*$/);
 
     // Use a deterministic single-row prompt for the durability checks that
     // follow viewport changes.

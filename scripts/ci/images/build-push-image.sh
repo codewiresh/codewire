@@ -766,12 +766,16 @@ if [ "$build_runtime_set" = 1 ] && [ "$product_bake_target" != services ]; then
   exit 2
 fi
 
-# Build every missing release target in one Bake transaction. Inspect exact
-# source tags first so a retry never overwrites an immutable target that was
-# already published by a partially successful attempt.
+# Build every missing service runtime target in one Bake transaction. The
+# daemon is not part of it: its static CW producer is the longest build, so
+# the daemon builds alone on its own protected worker and the two jobs never
+# race for the same immutable tag. Inspect exact source tags first so a retry
+# never overwrites an immutable target that a partially successful attempt
+# already published.
+readonly SERVICE_RUNTIME_TARGETS=(dashboard services mesh derp)
 if [ "$build_runtime_set" = 1 ]; then
   missing_runtime_targets=()
-  for runtime_target in dashboard services mesh daemon derp; do
+  for runtime_target in "${SERVICE_RUNTIME_TARGETS[@]}"; do
     runtime_source_tag="${REGISTRY_REPOSITORY_PREFIX}/${runtime_target}:${source_sha}"
     if inspect_manifest_digest "$runtime_source_tag" >/dev/null; then
       continue
@@ -816,9 +820,6 @@ if [ "$build_runtime_set" = 1 ]; then
       fi
     done
     bake_targets=("${missing_runtime_targets[@]}")
-    if [ "${#missing_runtime_targets[@]}" -eq 5 ]; then
-      bake_targets=(default)
-    fi
     cw_selected_source_dir="$(cd "$source_dir" && pwd -P)"
     [ "$(cd "$context" && pwd -P)" = "$cw_selected_source_dir" ] || {
       echo 'Protected CW image context differs from the selected release source' >&2
@@ -828,9 +829,9 @@ if [ "$build_runtime_set" = 1 ]; then
     DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
-      CODEWIRE_RUST_PROFILE=release \
+      CODEWIRE_RUST_PROFILE=runtime \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
-      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
+      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" runtime "$cw_selected_source_dir" "$cw_image_work" -- \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
         "${bake_targets[@]}"
 
@@ -912,9 +913,9 @@ else
     DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
-      CODEWIRE_RUST_PROFILE=release \
+      CODEWIRE_RUST_PROFILE=runtime \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
-      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
+      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" runtime "$cw_selected_source_dir" "$cw_image_work" -- \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
         "$product_bake_target"
     jq -e --arg target "$product_bake_target" '

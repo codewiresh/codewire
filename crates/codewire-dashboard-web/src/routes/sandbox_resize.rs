@@ -254,6 +254,7 @@ fn unique_browser_session_authority(headers: &HeaderMap) -> bool {
     session.is_some()
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn context(
     state: &AppState,
     headers: &HeaderMap,

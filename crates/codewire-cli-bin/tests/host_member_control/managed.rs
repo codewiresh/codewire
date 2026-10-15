@@ -1095,7 +1095,7 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
     );
     let token = format!(
         "CW_TOOL_MARKER_{}",
-        &Uuid::new_v4().simple().to_string()[..16].to_uppercase()
+        Uuid::new_v4().simple().to_string()[..16].to_uppercase()
     );
     let task = send(
         &caller,

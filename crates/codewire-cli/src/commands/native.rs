@@ -5,7 +5,6 @@ use std::pin::Pin;
 
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 
-use anyhow::Context as _;
 use codewire_access::{AccessProfileReference, EnvironmentId};
 use codewire_client::TokenProvider as _;
 use codewire_local_credentials::LocalCredentialClient;
@@ -1168,9 +1167,16 @@ fn native_environment_name_for_id<'a>(
 }
 
 /// Managed guests use a selected typed proxy, never the host agent's login.
+/// A local VM qualifies a managed agent by the rule hosted Sandboxes use
+/// ([`codewire_access::ManagedCredentialClients::managed_agent_client`]), over
+/// the slots its selected profile pinned: a platform profile's slots as the
+/// environment captured them, a local profile's from its exact revision. The
+/// VM's native Codex home is configured for the client the rule picks, so a
+/// profile with only the OpenAI API-key slot runs Codex through that route, as
+/// a hosted managed Codex agent does.
 pub(crate) async fn require_native_agent_profile(
     environment_id: &str,
-    provider: &str,
+    agent: codewire_access::ManagedAgent,
 ) -> anyhow::Result<()> {
     let environment_id = uuid::Uuid::parse_str(environment_id)?.to_string();
     let environment = native_environments()
@@ -1181,21 +1187,47 @@ pub(crate) async fn require_native_agent_profile(
     let spec = sources::project_from_environment(&environment)?;
     let selected = spec
         .credentials
-        .context("managed VM agents require a selected local credential profile")?;
-    if selected.profile.starts_with("platform:") {
-        anyhow::bail!("managed native agents currently require a local credential profile");
-    }
-    let profile_id = codewire_access::AccessProfileId::parse(environment.access_profile_id)?;
-    let mut credentials = connect_local_credential_authority().await?;
-    let bound = credentials
-        .get_profile_revision(&profile_id, environment.access_profile_revision)
-        .await?;
-    if !bound
-        .profile
-        .entries
-        .keys()
-        .any(|slot| slot.as_str() == provider)
-    {
+        .context("managed VM agents require a selected credential profile")?;
+    let clients = if selected.profile.starts_with("platform:") {
+        pinned_platform_clients(&environment)?
+    } else {
+        let profile_id = codewire_access::AccessProfileId::parse(environment.access_profile_id)?;
+        let mut credentials = connect_local_credential_authority().await?;
+        let bound = credentials
+            .get_profile_revision(&profile_id, environment.access_profile_revision)
+            .await?;
+        codewire_access::ManagedCredentialClients::from_profile_slots(
+            bound.profile.entries.keys().map(|slot| slot.as_str()),
+        )?
+    };
+    require_managed_agent_client(clients, agent)
+}
+
+/// The client slots a platform-profile environment pinned when its sources
+/// were selected. They name provider identities only, never credentials.
+fn pinned_platform_clients(
+    environment: &v1::Environment,
+) -> anyhow::Result<codewire_access::ManagedCredentialClients> {
+    let authority = environment
+        .platform_source_authority
+        .as_ref()
+        .context("the native environment's platform profile has no pinned selection")?;
+    Ok(
+        codewire_access::ManagedCredentialClients::from_profile_slots(
+            authority.profile_slots.iter().map(String::as_str),
+        )?,
+    )
+}
+
+fn require_managed_agent_client(
+    clients: codewire_access::ManagedCredentialClients,
+    agent: codewire_access::ManagedAgent,
+) -> anyhow::Result<()> {
+    if clients.managed_agent_client(agent).is_none() {
+        let provider = match agent {
+            codewire_access::ManagedAgent::Codex => "Codex or OpenAI",
+            codewire_access::ManagedAgent::Claude => "Anthropic",
+        };
         anyhow::bail!(
             "the native environment's selected credential profile has no {provider} provider"
         );
@@ -2537,6 +2569,55 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A platform profile qualifies a managed agent in a local VM by its
+    /// pinned slots and the rule hosted Sandboxes use; before, any platform
+    /// profile was refused.
+    #[test]
+    fn a_platform_profile_qualifies_managed_agents_by_its_pinned_slots() {
+        use codewire_access::ManagedAgent::{Claude, Codex};
+        let environment = |slots: &[&str]| v1::Environment {
+            platform_source_authority: Some(v1::PlatformSourceAuthority {
+                server_url: "https://codewire.example".into(),
+                organization_id: "org-synthetic".into(),
+                user_id: "user-synthetic".into(),
+                profile_slots: slots.iter().map(|slot| (*slot).to_owned()).collect(),
+            }),
+            ..Default::default()
+        };
+        for (slots, codex, claude) in [
+            (&["codex", "anthropic", "github"][..], true, true),
+            (&["openai", "github"], true, false),
+            (&["codex", "openai"], true, false),
+            (&["anthropic"], false, true),
+            (&["ssh", "github"], false, false),
+            (&[], false, false),
+        ] {
+            let clients = pinned_platform_clients(&environment(slots)).unwrap();
+            assert_eq!(
+                require_managed_agent_client(clients, Codex).is_ok(),
+                codex,
+                "{slots:?}"
+            );
+            assert_eq!(
+                require_managed_agent_client(clients, Claude).is_ok(),
+                claude,
+                "{slots:?}"
+            );
+        }
+        let refused = require_managed_agent_client(
+            pinned_platform_clients(&environment(&["ssh"])).unwrap(),
+            Claude,
+        )
+        .unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "the native environment's selected credential profile has no Anthropic provider"
+        );
+        // No pinned selection, or an unknown slot, is never a qualification.
+        assert!(pinned_platform_clients(&v1::Environment::default()).is_err());
+        assert!(pinned_platform_clients(&environment(&["telnet"])).is_err());
+    }
 
     #[test]
     fn only_an_undecodable_runtime_document_suggests_packing_again() {

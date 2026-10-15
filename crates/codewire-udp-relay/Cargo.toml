@@ -29,3 +29,4 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }
+codewire-workspace-hack.workspace = true

@@ -22,8 +22,9 @@ const RECORD_BYTES: usize = 5 * 1024 * 1024;
 #[error("agent outcome is uncertain; observe the original request {request_id}")]
 pub struct PlatformAgentMutationError {
     pub request_id: String,
+    /// Boxed so the error stays small beside the response it replaces.
     #[source]
-    pub source: ClientError,
+    pub source: Box<ClientError>,
 }
 
 fn invalid_response() -> ClientError {
@@ -129,7 +130,7 @@ impl CodewireClient {
         .await;
         call.map_err(|source| PlatformAgentMutationError {
             request_id: id,
-            source,
+            source: Box::new(source),
         })
     }
 

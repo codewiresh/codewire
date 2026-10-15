@@ -632,8 +632,6 @@ fn read_workload_secret_bytes<R: std::io::BufRead>(
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser as _;
-
     use super::*;
 
     #[test]

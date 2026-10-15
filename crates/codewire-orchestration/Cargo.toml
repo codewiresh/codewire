@@ -133,3 +133,4 @@ libc = "0.2"
 regorus = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
+codewire-workspace-hack.workspace = true

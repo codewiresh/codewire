@@ -490,6 +490,15 @@ dump_cluster_state() {
   kubectl --context "$context" -n "$SANDBOX_NS" get sandboxclaim,sandbox,sandboxtemplate,sandboxwarmpool,pvc,pv -o wide || true
   kubectl --context "$context" -n "$SANDBOX_NS" describe sandboxclaim,sandbox,sandboxtemplate,sandboxwarmpool || true
   kubectl --context "$context" -n "$SANDBOX_NS" get events --sort-by=.lastTimestamp || true
+  # Each remaining Sandbox's daemon log, the only record of a terminal or
+  # workspace session failure once the shard cluster is deleted.
+  local sandbox_pod
+  for sandbox_pod in $(kubectl --context "$context" -n "$SANDBOX_NS" get pods \
+      --request-timeout=10s -o 'jsonpath={.items[*].metadata.name}' 2>/dev/null); do
+    printf '\nSandbox daemon log: %s\n' "$sandbox_pod"
+    kubectl --context "$context" -n "$SANDBOX_NS" logs "pod/$sandbox_pod" -c workspace \
+      --request-timeout=10s --tail=400 --limit-bytes=262144 2>/dev/null || true
+  done
   kubectl --context "$context" -n "$NS" get events --sort-by=.lastTimestamp || true
   kubectl --context "$context" -n ingress-nginx describe pods || true
   kubectl --context "$context" -n ingress-nginx get events --sort-by=.lastTimestamp || true

@@ -182,8 +182,10 @@ fn decode(
     };
     let bytes = text
         .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[high, low]| Some((nibble(high)? << 4) | nibble(low)?))
         .collect::<Option<Vec<u8>>>()
         .ok_or(Error::InvalidInput)?;
     let mut reader = Reader(&bytes);

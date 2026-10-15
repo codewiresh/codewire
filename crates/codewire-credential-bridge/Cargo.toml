@@ -21,3 +21,4 @@ uuid = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 zeroize = { workspace = true }
+codewire-workspace-hack.workspace = true

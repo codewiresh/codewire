@@ -46,14 +46,20 @@ spawned the helper (macOS has no parent-death signal). The process exits 0 after
 or a requested stop completes, and 1 when the VM fails to start or stops with
 an error. It removes the socket only if that path is still the one it bound.
 The VM has no network, console or graphics device. The helper needs the
-`com.apple.security.virtualization` entitlement; developer builds are signed
-ad hoc with the hardened runtime and `developer-entitlements.plist`
-(`scripts/dev/macos-local-runtime.py` refuses a helper without either).
+`com.apple.security.virtualization` entitlement. Every signature names the
+identifier `sh.codewire.vz-runner` and carries the hardened runtime and exactly
+`developer-entitlements.plist`; `scripts/dev/macos-local-runtime.py` refuses a
+helper without them. Developer builds are signed ad hoc. A release's helper is
+Developer ID signed and notarized, once per change of its sources
+(`sign-macos-helper.sh`, #1905), and the pack accepts it only if it satisfies
+the Developer ID requirement for team `PXQZM3GLP5`.
 
 Posture, observed with `lsof`, `codesign` and `sandbox_check` while a VM ran
 on macOS 26:
-- The helper runs as the user, as a child of the runner, signed ad hoc with
-  the hardened runtime and that one entitlement. It holds `/dev/null` for
+- The helper runs as the user, as a child of the runner, signed with the
+  hardened runtime and that one entitlement (observed ad hoc; an
+  rcodesign-signed build with a throwaway Developer ID-shaped certificate
+  behaved the same). It holds `/dev/null` for
   standard I/O, its `vz.json`, the VM's `vm.lock` and three Unix sockets. It
   holds no internet socket and no other file, and writes no log of its own. It
   has no Seatbelt profile.
@@ -67,8 +73,7 @@ on macOS 26:
 - The helper does not parse guest data. It copies vsock bytes to and from
   connections on its owner-only socket, and it reads only `CONNECT <port>`
   lines, from those host-side clients.
-- Distribution needs Developer ID signing and notarization in place of the
-  ad hoc signature.
+- Releases sign the helper with the Developer ID and notarize it (#1905).
 
 The sections below describe the earlier fixed-topology developer fixtures,
 which remain separate from the product `vm --config` mode above.

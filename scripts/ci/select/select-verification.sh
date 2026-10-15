@@ -453,6 +453,7 @@ if [ "$event_selected" = false ]; then
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
       scripts/dev/dashboard-watch.py|\
       scripts/dev/macos-cli.py|scripts/dev/test-macos-cli.py|\
+      scripts/dev/macos-command-owner.py|\
       scripts/dev/macos-ext4-tool.py|scripts/dev/test-macos-ext4-tool.py|\
       scripts/dev/macos-git-tool.py|scripts/dev/test-macos-git-tool.py|\
       scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
@@ -603,7 +604,7 @@ if [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
-      Cargo.toml|Cargo.lock|rust-toolchain.toml)
+      Cargo.toml|Cargo.lock|rust-toolchain.toml|.config/hakari.toml)
         select_token rust
         select_token rust_workspace
         select_token rust_curated_locks
@@ -1050,6 +1051,16 @@ if [ "$event_selected" = false ]; then
           select_token rust
           select_token rust_pkg_codewire_desktop
           select_token rust_pkg_codewire_types
+          ;;
+        codewire-workspace-hack)
+          # cargo-hakari's feature unification is a dependency of every other
+          # member: a change rebuilds the whole graph like the root manifest.
+          select_token rust
+          select_token rust_workspace
+          select_token rust_curated_locks
+          select_token transport
+          select_token transport_pkg_codewire_local_vmm
+          select_token transport_pkg_codewire_vmm_guest_probe
           ;;
         codewire-workspace-image)
           # The published workspace pin: every consumer compiles its constants,
@@ -1675,8 +1686,21 @@ if [ "$event_selected" = false ]; then
         select_token security
         recognized=true
         ;;
+      # The protected Dev runtime builder never builds a Kind image: Kind
+      # builds through build-kind-images.sh. Its contract runs in Deploy.
+      scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/tests/test-build-push-runtime-images.sh)
+        select_token deploy
+        select_token release
+        recognized=true
+        ;;
+      # Dev delivery's supersession stop runs only in Deploy Dev.
+      scripts/ci/tests/test-delivery-superseded.sh)
+        select_token deploy
+        recognized=true
+        ;;
       Dockerfile|docker-bake.hcl|apps/*/Dockerfile*|deployments/docker/*|\
-      scripts/ci/images/build-kind-images.sh|scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/images/build-kind-images.sh|\
       scripts/ci/images/run-rust-build.sh|scripts/ci/tests/test-run-rust-build.sh)
         select_token edge_kind
         select_token release
@@ -1774,6 +1798,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/package-cw-release.sh|scripts/ci/release/publish-cw-release.sh|\
       scripts/ci/release/cw_release.py|scripts/ci/release/cw_release_r2.py|\
       scripts/ci/release/sign-cw-release.sh|scripts/ci/release/sign-macos-cw.sh|\
+      scripts/ci/release/sign-macos-helper.sh|scripts/ci/release/macos-signing.sh|\
       scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/setup/fetch-openbao-release-signing-key.sh|\
       scripts/ci/setup/fetch-openbao-macos-signing.sh|\
@@ -1792,6 +1817,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-release-signing-key.sh|\
       scripts/ci/tests/test-fetch-openbao-macos-signing.sh|scripts/ci/tests/test-sign-macos-cw.sh|\
+      scripts/ci/tests/test-sign-macos-helper.sh|\
       scripts/ci/tests/fixtures/rcodesign-stand-in.sh|\
       scripts/ci/tests/test-copy-image-to-ghcr.sh|\
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\

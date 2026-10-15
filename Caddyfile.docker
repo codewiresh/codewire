@@ -5,6 +5,14 @@
 #
 # Caddy automatically generates and trusts local certificates for .localhost domains
 
+# Audit-IP integrity (#2505 M1): Caddy 2.10's default proxy posture is
+# REPLACE — an incoming client X-Forwarded-For is discarded and the peer IP
+# is forwarded as the sole hop. Keep it that way: adding `trusted_proxies`
+# here would switch this edge to APPEND mode, preserve attacker-chosen hops
+# for every backend, and re-open the audit_logs IP spoof. (Verified against
+# caddy 2.10.2: none ⇒ replace; trusted_proxies <any> ⇒ append.) See the
+# matching comment in Caddyfile.
+
 *.codewire.localhost {
 	reverse_proxy 127.0.0.1:8084
 }

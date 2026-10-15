@@ -68,6 +68,10 @@ impl Fixture {
                 enabled: false,
                 admin_only: true,
             },
+            // Tests must observe database writes immediately, so the
+            // context carries a zero-TTL cache: every lookup is one query,
+            // the pre-L5 behavior.
+            org_slugs: zero_ttl_org_slugs(),
         }
     }
 

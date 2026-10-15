@@ -223,6 +223,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .or_else(|| raw.strip_prefix("bearer "))
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn authorize_client(
     state: &CoordinatorState,
     authentication: &Authentication,
@@ -315,6 +316,7 @@ async fn get_user_org_role(
     .ok_or(sqlx::Error::RowNotFound)
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn require_environment_access(
     pool: &PgPool,
     env_id: &str,

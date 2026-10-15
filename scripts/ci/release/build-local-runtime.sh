@@ -4,7 +4,8 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 usage: build-local-runtime.sh linux --source-sha SHA --version VERSION --output DIR
-       build-local-runtime.sh macos --linux DIR --source-sha SHA --output DIR
+       build-local-runtime.sh helper --output DIR
+       build-local-runtime.sh macos --linux DIR --source-sha SHA [--helper DIR] --output DIR
        build-local-runtime.sh linux|macos --check
 
 Builds the local VM runtime a release's cws embed, from this checkout: the
@@ -15,7 +16,7 @@ linux   x86_64 Linux with Docker, from a checkout whose HEAD is SHA. Takes
         the arm64 and x86_64 kernels from the parts cache or builds them in
         the pinned Arch container; builds the arm64 and x86_64 guest roots and
         the aarch64 and x86_64 sealed cw runtimes (a cw of VERSION) in the
-        pinned Rust 1.93.0 container; fetches the pinned Cloud Hypervisor and
+        pinned Rust container; fetches the pinned Cloud Hypervisor and
         virtiofsd and the third-party sources. It never changes the host's
         Rust toolchain. For the macOS target DIR gets initramfs.cpio, kernel/,
         sources/, cw-runtime-aarch64/ and built/ (the cache records of its
@@ -24,13 +25,21 @@ linux   x86_64 Linux with Docker, from a checkout whose HEAD is SHA. Takes
         fragment; scripts/dev/linux-local-runtime.py), and linux-x86_64-built/,
         the cache records of its parts built in this run, which name only
         blobs of that target.
+helper  An Apple silicon Mac. Writes DIR/recipe, the recipe of the Developer
+        ID-signed VZ helper on this Mac (#1905), and, when the parts cache
+        has none for it, DIR/codewire-vz-runner: the helper built here, not
+        yet signed. The release's sign-helper job signs and notarizes it
+        (sign-macos-helper.sh); nothing here signs.
 macos   An Apple silicon Mac. Takes e2fsprogs and git from the parts cache or
         builds them, fetches the Mac-side sources, and packs the macOS target
-        from the Linux job's DIR (with its aarch64 cw runtime) and the VZ
-        helper built here. DIR/runtime is the one local runtime every release
-        cw embeds: the macOS target merged with the Linux job's linux-x86_64
-        fragment. DIR/built gets this job's and the Linux job's cache records,
-        all of which now name only blobs the release publishes.
+        from the Linux job's DIR (with its aarch64 cw runtime) and the
+        Developer ID-signed VZ helper: --helper DIR names one signed in this
+        run (DIR holds codewire-vz-runner, recipe and provenance.json), and
+        otherwise it comes from the parts cache. It is never built or signed
+        here. DIR/runtime is the one local runtime every release cw embeds:
+        the macOS target merged with the Linux job's linux-x86_64 fragment.
+        DIR/built gets this job's and the Linux job's cache records, all of
+        which now name only blobs the release publishes.
 
 Only a release's publishing job writes cache records; nothing here holds a
 credential. Set LOCAL_RUNTIME_NO_BUILD=1 to refuse a cache miss instead of
@@ -41,7 +50,10 @@ when all are, and 4 when one would be built.
 In a CI job container, LOCAL_RUNTIME_JOB_CONTAINER names that container so the
 container builds can reach its files (build-runtime-kernel.sh --job-container);
 TMPDIR and DIR must then be on its workspace. LOCAL_RUNTIME_JOBS (default 4)
-bounds each kernel and cw build's parallel jobs.
+bounds each kernel and cw build's parallel jobs. The linux side fetches every
+pinned download first, then builds the parts that do not depend on each other
+side by side: the two kernels, then the two targets' guest roots and cw
+runtimes.
 EOF
 }
 
@@ -57,11 +69,12 @@ log() {
 mode="${1:-}"
 [ -n "$mode" ] || { usage >&2; exit 2; }
 shift
-linux_dir="" source_sha="" version="" output="" check=""
+linux_dir="" source_sha="" version="" output="" check="" helper_dir=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) check=1; shift ;;
     --linux) linux_dir="${2:-}"; shift 2 ;;
+    --helper) helper_dir="${2:-}"; shift 2 ;;
     --source-sha) source_sha="${2:-}"; shift 2 ;;
     --version) version="${2:-}"; shift 2 ;;
     --output) output="${2:-}"; shift 2 ;;
@@ -78,10 +91,15 @@ case "$mode" in
   macos) [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] || die "the macos side runs on an Apple silicon Mac"
          [ -n "$check" ] ||
            case "$linux_dir" in /*) [ -d "$linux_dir" ] || die "--linux is not a directory" ;; *) die "--linux must be absolute" ;; esac
-         [ -n "$check" ] || [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || die "--source-sha must be the release commit" ;;
-  *) die "mode must be linux or macos" ;;
+         [ -n "$check" ] || [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || die "--source-sha must be the release commit"
+         [ -z "$helper_dir" ] ||
+           case "$helper_dir" in /*) [ -d "$helper_dir" ] || die "--helper is not a directory" ;; *) die "--helper must be absolute" ;; esac ;;
+  helper) [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] || die "the helper is built on an Apple silicon Mac"
+          [ -z "$check$linux_dir$source_sha$helper_dir" ] || die "helper takes only --output" ;;
+  *) die "mode must be linux, helper or macos" ;;
 esac
 [ "$mode" = linux ] || [ -z "$version" ] || die "--version is for the linux side"
+[ "$mode" = macos ] || [ -z "$helper_dir" ] || die "--helper is for the macos side"
 if [ -n "$check" ]; then
   [ -z "$output$linux_dir$source_sha$version" ] || die "--check takes no other argument"
 else
@@ -141,7 +159,9 @@ for name in parts.PARTS[sys.argv[2]]["outputs"]:
     shutil.copy2(f"{sys.argv[3]}/{name}", f"{sys.argv[4]}/{name}")' "$release_dir" "$part" "$from" "$dir"
 }
 
-if [ -z "$check" ]; then
+if [ "$mode" = helper ]; then
+  mkdir -m 0700 "$output"
+elif [ -z "$check" ]; then
   mkdir -m 0700 "$output" "$output/built"
   [ "$mode" != linux ] || mkdir -m 0700 "$output/linux-x86_64-built"
 fi
@@ -165,7 +185,8 @@ check() {
     host_facts
     facts=(--host-facts "$work/host.json")
   fi
-  for part in $( [ "$mode" = linux ] && echo kernel-arm64 kernel-x86_64 || echo e2fsprogs-macos git-macos ); do
+  for part in $( [ "$mode" = linux ] && echo kernel-arm64 kernel-x86_64 ||
+                 echo e2fsprogs-macos git-macos vz-runner-macos ); do
     recipe="$(python3 "$parts" recipe --part "$part" "${facts[@]}")"
     status=0
     python3 "$parts" present --part "$part" --recipe "$recipe" || status=$?
@@ -202,17 +223,24 @@ kernel_source() {
   [ "$(sha256_of "$work/bc")" = "$(pin kernel_bc sha256)" ] || die "bc differs from its pin"
 }
 
-# The ARCH kernel part in DIR, from the parts cache or built in the pinned
-# Arch container; a built part's record goes to RECORDS.
-kernel() {
-  local arch="$1" dir="$2" records="$3" part="kernel-$1" recipe
+# The ARCH kernel part in DIR from the parts cache; a miss is added to
+# kernels_missing (and with LOCAL_RUNTIME_NO_BUILD stops the run).
+kernel_lookup() {
+  local arch="$1" dir="$2" part="kernel-$1" recipe
   recipe="$(python3 "$parts" recipe --part "$part")"
   if cached "$part" "$recipe" "$dir"; then
     log "$part cached (recipe $recipe)"
-    return 0
+  else
+    log "$part not cached (recipe $recipe); building it"
+    kernels_missing+=("$arch")
   fi
-  log "$part not cached (recipe $recipe); building it"
-  kernel_source
+}
+
+# Build the ARCH kernel part into DIR in the pinned Arch container; its record
+# goes to RECORDS. kernel_source has run.
+kernel_build() {
+  local arch="$1" dir="$2" records="$3" part="kernel-$1" recipe
+  recipe="$(python3 "$parts" recipe --part "$part")"
   mkdir -m 0700 "$work/$part-build"
   "$release_dir/build-runtime-kernel.sh" --arch "$arch" --source "$linux_source" --bc "$work/bc" \
     --output "$work/$part-build/kernel" --jobs "${LOCAL_RUNTIME_JOBS:-4}" ${shared[@]+"${shared[@]}"}
@@ -220,21 +248,35 @@ kernel() {
   outputs "$part" "$work/$part-build/kernel" "$dir"
   record "$part" "$recipe" "$dir" "$records"
 }
+kernel-arm64() { kernel_build arm64 "$output/kernel" "$output/built"; }
+kernel-x86_64() { kernel_build x86_64 "$work/kernel-x86_64" "$output/linux-x86_64-built"; }
+
+# Run each named function in its own subshell at the same time, every line it
+# writes prefixed with its name, and fail when any fails. The functions write
+# disjoint paths and share only this run's read-only inputs.
+side_by_side() {
+  local name pid failed=0
+  local -a pids=()
+  for name in "$@"; do
+    ( "$name" ) > >(sed -u "s/^/[$name] /") 2>&1 &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" || failed=1
+  done
+  [ "$failed" = 0 ] || die "a part built side by side failed; its lines above say which"
+}
 
 # The TARGET guest root at FILE: the sealed probe built twice, with the pinned
-# Alpine BusyBox and official runc, in the pinned Rust 1.93.0 container (the
-# runner's sealed toolchain has no arm64 musl target).
+# Alpine BusyBox and official runc, in the pinned Rust container (not on the
+# runner's sealed toolchain).
 guest_root() {
   local target="$1" file="$2" member
   log "building the $target guest root"
   member="$(pin initramfs_inputs "$target" busybox member)"
-  fetch "$(pin initramfs_inputs "$target" busybox url)" "$(pin initramfs_inputs "$target" busybox sha256)" \
-    "$work/busybox-$target.apk"
   mkdir "$work/busybox-$target"
   tar -xzf "$work/busybox-$target.apk" -C "$work/busybox-$target" "$member" 2>/dev/null ||
     die "the $target BusyBox package holds no $member"
-  fetch "$(pin initramfs_inputs "$target" runc url)" "$(pin initramfs_inputs "$target" runc sha256)" \
-    "$work/runc-$target"
   "$release_dir/build-runtime-guest-root.sh" --target "$target" --busybox "$work/busybox-$target/$member" \
     --runc "$work/runc-$target" "${rust_std[@]}" --protoc-zip "$work/protoc.zip" \
     --output "$file" ${shared[@]+"${shared[@]}"}
@@ -250,13 +292,28 @@ cw_runtime() {
     --jobs "${LOCAL_RUNTIME_JOBS:-4}" ${shared[@]+"${shared[@]}"}
 }
 
+# The two targets' guest roots and sealed cw runtimes, one chain per target.
+# Each chain runs its cw build when the other's guest root builds, so the two
+# Rust builds overlap for a minute or two rather than end to end.
+aarch64-parts() {
+  guest_root aarch64-unknown-linux-musl "$output/initramfs.cpio"
+  cw_runtime aarch64-unknown-linux-musl "$output/cw-runtime-aarch64"
+}
+x86_64-parts() {
+  cw_runtime x86_64-unknown-linux-musl "$work/cw-runtime-x86_64"
+  guest_root x86_64-unknown-linux-musl "$work/initramfs-x86_64.cpio"
+}
+
 linux() {
   shared=()
   [ -z "${LOCAL_RUNTIME_JOB_CONTAINER:-}" ] || shared=(--job-container "$LOCAL_RUNTIME_JOB_CONTAINER")
   # The slow parts first: with LOCAL_RUNTIME_NO_BUILD a miss stops here.
-  kernel arm64 "$output/kernel" "$output/built"
-  kernel x86_64 "$work/kernel-x86_64" "$output/linux-x86_64-built"
+  kernels_missing=()
+  kernel_lookup arm64 "$output/kernel"
+  kernel_lookup x86_64 "$work/kernel-x86_64"
 
+  # Every pinned download before any build, so an unreachable origin fails
+  # the run in minutes, not after the builds.
   local target
   rust_std=()
   for target in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
@@ -266,21 +323,32 @@ linux() {
   done
   fetch "$(pin guest_root_builder protoc url)" "$(pin guest_root_builder protoc sha256)" "$work/protoc.zip"
   fetch "$(pin cw_runtime_builder zig url)" "$(pin cw_runtime_builder zig sha256)" "$work/zig.tar.xz"
+  fetch "$(pin linux_runtime cloud_hypervisor url)" "$(pin linux_runtime cloud_hypervisor sha256)" \
+    "$work/cloud-hypervisor"
+  fetch "$(pin linux_runtime virtiofsd url)" "$(pin linux_runtime virtiofsd sha256)" "$work/virtiofsd.zip"
+  python3 "$release_dir/local_runtime_sources.py" fetch --side linux-host --output "$work/host-sources"
+  local guest
+  for guest in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+    fetch "$(pin initramfs_inputs "$guest" busybox url)" "$(pin initramfs_inputs "$guest" busybox sha256)" \
+      "$work/busybox-$guest.apk"
+    fetch "$(pin initramfs_inputs "$guest" runc url)" "$(pin initramfs_inputs "$guest" runc sha256)" \
+      "$work/runc-$guest"
+  done
+
+  # A kernel that missed is built beside the other, from one source clone.
+  if [ "${#kernels_missing[@]}" -gt 0 ]; then
+    kernel_source
+    side_by_side "${kernels_missing[@]/#/kernel-}"
+  fi
+  # Each target's guest root and cw runtime, beside the other target's.
+  side_by_side aarch64-parts x86_64-parts
 
   # The macOS target's Linux side.
-  guest_root aarch64-unknown-linux-musl "$output/initramfs.cpio"
-  cw_runtime aarch64-unknown-linux-musl "$output/cw-runtime-aarch64"
   python3 "$release_dir/local_runtime_sources.py" fetch --side linux --kernel "$output/kernel" \
     --output "$output/sources"
 
   # The Linux target, packed as the linux fragment. Its kernel source is the
   # archive above: the same pinned commit.
-  guest_root x86_64-unknown-linux-musl "$work/initramfs-x86_64.cpio"
-  cw_runtime x86_64-unknown-linux-musl "$work/cw-runtime-x86_64"
-  python3 "$release_dir/local_runtime_sources.py" fetch --side linux-host --output "$work/host-sources"
-  fetch "$(pin linux_runtime cloud_hypervisor url)" "$(pin linux_runtime cloud_hypervisor sha256)" \
-    "$work/cloud-hypervisor"
-  fetch "$(pin linux_runtime virtiofsd url)" "$(pin linux_runtime virtiofsd sha256)" "$work/virtiofsd.zip"
   python3 "$root/scripts/dev/linux-local-runtime.py" pack \
     --kernel "$work/kernel-x86_64/vmlinuz-$(pin sources linux version)-codewire2" \
     --initramfs "$work/initramfs-x86_64.cpio" \
@@ -288,6 +356,49 @@ linux() {
     --cw-runtime "$work/cw-runtime-x86_64" \
     --components "$output/sources" --components "$work/host-sources" \
     --source-revision "$source_sha" --output "$output/linux-x86_64"
+}
+
+# The VZ helper part's recipe on this Mac and, on a cache miss, the helper
+# built from this checkout, unsigned (sign-macos-helper.sh signs it).
+helper() {
+  local recipe status=0 package="$root/crates/codewire-local-vmm/macos-vz-runner" bin
+  host_facts
+  recipe="$(python3 "$parts" recipe --part vz-runner-macos --host-facts "$work/host.json")"
+  printf '%s\n' "$recipe" >"$output/recipe"
+  python3 "$parts" present --part vz-runner-macos --recipe "$recipe" || status=$?
+  case "$status" in
+    0) log "vz-runner-macos cached (recipe $recipe); nothing to sign"
+       return 0 ;;
+    3) log "vz-runner-macos not cached (recipe $recipe); building it for signing" ;;
+    *) die "the vz-runner-macos cache could not be read" ;;
+  esac
+  # The build stays in this run's work directory, out of the checkout.
+  swift build -c release --package-path "$package" --scratch-path "$work/swift"
+  bin="$(swift build -c release --package-path "$package" --scratch-path "$work/swift" --show-bin-path)"
+  [ -f "$bin/codewire-vz-runner" ] && [ ! -L "$bin/codewire-vz-runner" ] || die "swift build produced no helper"
+  install -m 0755 "$bin/codewire-vz-runner" "$output/codewire-vz-runner"
+}
+
+# The Developer ID-signed VZ helper part in DIR: signed in this run (its
+# record, with the run's provenance, goes to the publishing job) or cached.
+signed_helper() {
+  local dir="$1" recipe
+  recipe="$(python3 "$parts" recipe --part vz-runner-macos --host-facts "$work/host.json")"
+  if [ -n "$helper_dir" ]; then
+    [ "$(cat "$helper_dir/recipe")" = "$recipe" ] ||
+      die "the signed helper was built for another recipe than this Mac's $recipe"
+    [ "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("source_sha", ""))' \
+      "$helper_dir/provenance.json")" = "$source_sha" ] || die "the signed helper's provenance names another commit"
+    mkdir -m 0700 "$dir"
+    outputs vz-runner-macos "$helper_dir" "$dir"
+    python3 "$parts" record --part vz-runner-macos --recipe "$recipe" --dir "$dir" \
+      --provenance "$helper_dir/provenance.json" >"$output/built/$recipe.json"
+    log "vz-runner-macos signed in this run (recipe $recipe)"
+  elif cached vz-runner-macos "$recipe" "$dir"; then
+    log "vz-runner-macos cached (recipe $recipe)"
+  else
+    die "the signed VZ helper (recipe $recipe) is not cached; a release signs it in sign-helper and passes --helper"
+  fi
 }
 
 macos() {
@@ -317,6 +428,7 @@ for name in parts.PARTS[sys.argv[2]]["outputs"]:
       "$release_dir" "$part" "$work/$part-parent/out/bundle" "$output/$part"
     record "$part" "$recipe" "$output/$part"
   done
+  signed_helper "$output/vz-runner-macos"
   python3 "$release_dir/local_runtime_sources.py" fetch --side macos --output "$output/sources"
   # The macOS target, with the aarch64 cw runtime the Linux job built.
   local cw_runtime=()
@@ -325,6 +437,7 @@ for name in parts.PARTS[sys.argv[2]]["outputs"]:
     --kernel "$linux_dir/kernel/Image-$(pin sources linux version)-codewire2" \
     --initramfs "$linux_dir/initramfs.cpio" \
     --e2fsprogs "$output/e2fsprogs-macos" --git "$output/git-macos" \
+    --helper "$output/vz-runner-macos/codewire-vz-runner" \
     --components "$linux_dir/sources" --components "$output/sources" \
     ${cw_runtime[@]+"${cw_runtime[@]}"} \
     --pack "$work/runtime-macos" --source-revision "$source_sha"
@@ -341,6 +454,9 @@ for name in parts.PARTS[sys.argv[2]]["outputs"]:
 if [ -n "$check" ]; then
   check
   log "$mode side: every slow part is cached"
+elif [ "$mode" = helper ]; then
+  helper
+  log "helper complete: $output"
 else
   "$mode"
   log "$mode side complete: $output"

@@ -20,3 +20,4 @@ rustix = { workspace = true, features = ["event", "net", "param"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+codewire-workspace-hack.workspace = true

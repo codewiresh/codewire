@@ -50,11 +50,13 @@ pub fn prepare(path: &Path) {
     drop(copy);
 
     // Cargo's debug CW can exceed the product's unchanged executable cap.
-    // Strip only this disposable copy. --strip-debug preserves allocated
-    // code/data, including the #[used] build record backing CLI_VERSION.
+    // Strip only this disposable copy. Since Rust 1.97 its v0-mangled symbol
+    // names alone exceed that cap, so remove the symbol table with the debug
+    // information. --strip-all preserves allocated code/data, including the
+    // #[used] build record backing CLI_VERSION.
     let mut strip = StripChild(
         Command::new("/usr/bin/strip")
-            .args(["--strip-debug", "--"])
+            .args(["--strip-all", "--"])
             .arg(path)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

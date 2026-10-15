@@ -114,14 +114,21 @@ if [ -n "${1:-}" ]; then
 fi
 
 accept_receipt() {
-  local output scope not_run
+  local output scope not_run verified_base
   output="$($LOCAL_RECEIPT "${receipt_args[@]}" 2>&1)" || {
     printf '%s\n' "$output"
     return 1
   }
   scope="$(sed -n 's/^scope=//p' <<<"$output")"
   not_run="$(sed -n 's/^not_run=//p' <<<"$output")"
-  printf 'pre-push: exact-tree local %s receipt accepted for %s\n' "$scope" "${head_sha:-HEAD}"
+  verified_base="$(sed -n 's/^verified_base=//p' <<<"$output")"
+  if [ -n "$verified_base" ]; then
+    # Main moved forward since the check, with no commit touching the change.
+    printf 'pre-push: local %s receipt accepted for %s; checked against main at %s, which has since moved outside the change\n' \
+      "$scope" "${head_sha:-HEAD}" "$verified_base"
+  else
+    printf 'pre-push: exact-tree local %s receipt accepted for %s\n' "$scope" "${head_sha:-HEAD}"
+  fi
   if [ -n "$not_run" ]; then
     printf 'pre-push: not run locally: %s; post-merge CI owns it\n' "$not_run"
   fi

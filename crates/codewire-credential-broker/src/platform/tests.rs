@@ -59,7 +59,7 @@ impl SessionGate {
     async fn pass(&self) {
         if self
             .remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
             .ok()

@@ -100,6 +100,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-vmm-guest-probe/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-workload-secrets/Cargo.toml": "workspace",
         "crates/codewire-workspace-access/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-workspace-hack/Cargo.toml": "workspace",
         "crates/codewire-workspace-image/Cargo.toml": "workspace",
     }
     actual_cargo_manifests = {

@@ -92,7 +92,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Host
     let mut body = vec![0_u8; (interfaces + public) * ENTRY_LEN];
     reader.read_exact(&mut body).await?;
     let mut addresses = Vec::with_capacity(interfaces + public);
-    for entry in body.chunks_exact(ENTRY_LEN) {
+    for entry in body.as_chunks::<ENTRY_LEN>().0 {
         let octets: [u8; 16] = entry[1..].try_into().expect("entry length");
         let v6 = Ipv6Addr::from(octets);
         addresses.push(match entry[0] {

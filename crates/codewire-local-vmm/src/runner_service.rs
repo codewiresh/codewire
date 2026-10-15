@@ -508,7 +508,7 @@ impl RunnerEvents {
         }
         let sequence = self
             .sequence
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |sequence| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |sequence| {
                 sequence.checked_add(1)
             })
             .map_err(|_| Status::internal("runner event sequence overflow"))?

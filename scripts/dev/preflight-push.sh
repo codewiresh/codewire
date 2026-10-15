@@ -48,7 +48,9 @@ while IFS= read -r path; do
     crates/*/*)
       dir="${path#crates/}"
       dir="crates/${dir%%/*}"
-      if [ "$dir" = crates/codewire-desktop ]; then
+      # The desktop and its component library sit in the root manifest's
+      # exclude list, not its members: the desktop's own check compiles both.
+      if [ "$dir" = crates/codewire-desktop ] || [ "$dir" = crates/codewire-ui ]; then
         detached_desktop=true
       elif [ -f "$dir/Cargo.toml" ] && grep -Fq "\"$dir\"" Cargo.toml; then
         crate_dirs["$dir"]=1

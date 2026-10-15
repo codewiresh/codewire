@@ -559,6 +559,7 @@ pub(super) async fn delete_api_key(
     api_key_mutation_result(&state, &headers, &slug, result, "key-deleted")
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn get_context(
     state: &AppState,
     headers: &HeaderMap,
@@ -578,6 +579,7 @@ pub(super) async fn get_context(
 
 /// Resolve current identity and organization without waiting for Sandbox
 /// inventory. Create and inventory fragments load the rail independently.
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn get_context_without_rail(
     state: &AppState,
     headers: &HeaderMap,
@@ -599,6 +601,7 @@ pub(super) async fn get_context_without_rail(
     Ok((dashboard, organization, cookie))
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn action_context(
     state: &AppState,
     headers: &HeaderMap,
@@ -613,6 +616,7 @@ pub(super) async fn action_context(
 }
 
 /// Authority for a Create mutation without the unrelated Sandbox inventory.
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn action_context_without_rail(
     state: &AppState,
     headers: &HeaderMap,

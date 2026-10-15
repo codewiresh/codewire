@@ -2260,7 +2260,7 @@ pub enum WorkspaceError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Seek as _, SeekFrom, Write as _};
+    use std::io::{Seek as _, SeekFrom};
     use std::os::unix::fs::symlink;
 
     use super::*;
