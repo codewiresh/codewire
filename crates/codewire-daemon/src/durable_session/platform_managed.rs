@@ -13,11 +13,15 @@ pub(super) fn refuse_platform_managed_bypass(
     metadata: &PersistedSession,
 ) -> Result<(), SessionError> {
     if metadata.platform_managed_origin.is_some() {
-        return Err(SessionError::FailedPrecondition(
-            "platform managed control requires its original incarnation and guardian".into(),
-        ));
+        return Err(platform_managed_bypass_refused());
     }
     Ok(())
+}
+
+pub(super) fn platform_managed_bypass_refused() -> SessionError {
+    SessionError::FailedPrecondition(
+        "platform managed control requires its original incarnation and guardian".into(),
+    )
 }
 
 struct Captured {
@@ -265,8 +269,8 @@ impl SessionEngine {
                 return Err(Error::Refused);
             }
         }
-        let handle = Arc::new(SessionHandle {
-            metadata: AsyncMutex::new(PersistedSession {
+        let handle = SessionHandle::new(
+            PersistedSession {
                 session_id: session.clone(),
                 control_origin: None,
                 platform_managed_origin: Some(origin.clone()),
@@ -292,11 +296,9 @@ impl SessionEngine {
                 cleanup_confirmed: false,
                 cleanup_unknown: true,
                 status_message: "platform managed session starting".into(),
-            }),
-            output_index: Mutex::new(Vec::new()),
-            operation: AsyncMutex::new(()),
-            launch_cancellation: watch::channel(false).0,
-        });
+            },
+            Vec::new(),
+        );
         let _operation = handle.operation.lock().await;
         owner.issue().await?;
         self.ensure_platform_records(true).await?;
