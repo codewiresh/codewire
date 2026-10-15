@@ -87,9 +87,22 @@ fn current_session(f: &Fixture) -> PlatformRuntimeSession {
 
 /// The Codex login a local VM's owner-local delegation leases: its profile
 /// owner resolved to `owner`, the creator's personal consent `confirmed` or
-/// not, and the fixture's profile selected when `profile`.
+/// not, and the fixture's profile selected when `profile`. The delegation
+/// grants the fixture's login in the Codex slot.
 async fn owner_local_login(
     f: &Fixture,
+    owner: Owner,
+    confirmed: bool,
+    profile: bool,
+) -> Result<Result<PlatformCredentialLease, BrokerLeaseError>> {
+    owner_local_login_of(f, &f.record, owner, confirmed, profile).await
+}
+
+/// [`owner_local_login`] with the delegation granting `record` in the Codex
+/// slot, whatever its kind or state, so the broker's own checks refuse it.
+async fn owner_local_login_of(
+    f: &Fixture,
+    record: &CredentialRecord,
     owner: Owner,
     confirmed: bool,
     profile: bool,
@@ -106,7 +119,7 @@ async fn owner_local_login(
                 confirmed,
                 binding,
                 CapabilitySlot::codex(),
-                &f.record,
+                record,
                 codex_login_permission(),
             )
             .await?
@@ -135,6 +148,8 @@ async fn codex_login_admits_only_the_creators_own_active_personal_oauth_login() 
         "owner-local organization profile",
         "owner-local profile not confirmed by the creator",
         "owner-local delegation, another user's credential",
+        "owner-local delegation granting an api key",
+        "owner-local delegation granting a revoked login",
         "no codex-login permission",
     ] {
         let f = Fixture::create_for_bridge().await?;
@@ -308,6 +323,25 @@ async fn codex_login_admits_only_the_creators_own_active_personal_oauth_login() 
                         .bind(f.record.metadata.id.as_str())
                         .bind("synthetic-other-user")
                         .execute(&f.db.pool)
+                        .await?;
+                    owner_local_login(&f, f.owner.clone(), true, true).await?
+                }
+                // Even a delegation authority that granted it: the broker
+                // never delivers an API key or a revoked login.
+                "owner-local delegation granting an api key" => {
+                    let key = f
+                        .store
+                        .create(
+                            &f.owner,
+                            registration("Codex key", CredentialAuthKind::ApiKey),
+                            &value(b"sk-synthetic-owner-local-api-key-never-delivered"),
+                        )
+                        .await?;
+                    owner_local_login_of(&f, &key, f.owner.clone(), true, true).await?
+                }
+                "owner-local delegation granting a revoked login" => {
+                    f.store
+                        .revoke(&f.owner, &f.record.metadata.id, f.record.version)
                         .await?;
                     owner_local_login(&f, f.owner.clone(), true, true).await?
                 }

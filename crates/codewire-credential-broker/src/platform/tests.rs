@@ -359,7 +359,13 @@ impl Fixture {
         let mut context = self.context.clone();
         context.placement = GrantPlacement::PlatformToLocal;
         context.allow_personal_credentials = allow_personal_credentials;
-        context.authorized_credentials = [record.metadata.id.clone()].into();
+        // A delegation without a profile authorizes no credential; the session
+        // shape requires that, so the delivery predicate is what refuses it.
+        context.authorized_credentials = if profile.is_some() {
+            [record.metadata.id.clone()].into()
+        } else {
+            Default::default()
+        };
         let expires_at_unix = unix_now()? + 3_600;
         let grant = DerivedGrant {
             environment_id: context.environment_id.clone(),

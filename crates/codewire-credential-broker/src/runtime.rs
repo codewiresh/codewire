@@ -149,12 +149,13 @@ pub trait BrokerLeaseProvider: Send + Sync {
     ) -> Result<Self::Lease, BrokerLeaseError>;
 
     /// Lease the Codex slot's selected login for sealed delivery to the
-    /// workspace daemon: a listed direct delivery exception
-    /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions").
-    /// The request names nothing; the placement rederives the grant, requires
-    /// its dedicated `codex-login` permission, and admits only the Sandbox
-    /// creator's own Active personal Codex OAuth login, selected by the
-    /// creator's own confirmed profile, rechecked around the material read.
+    /// daemon of a hosted Sandbox or of the creator's own local VM: a listed
+    /// direct delivery exception (docs/dev/SECRETS-AND-CREDENTIALS.md,
+    /// "Direct delivery exceptions"). The request names nothing; the
+    /// placement rederives the grant, requires its dedicated `codex-login`
+    /// permission, and admits only the environment creator's own Active
+    /// personal Codex OAuth login, selected by the creator's own profile,
+    /// rechecked around the material read.
     /// Placements that do not implement that whole predicate deny.
     async fn lease_codex_login(&self, _request_id: Uuid) -> Result<Self::Lease, BrokerLeaseError> {
         Err(BrokerLeaseError::Denied)
@@ -162,10 +163,10 @@ pub trait BrokerLeaseProvider: Send + Sync {
 
     /// [`Self::lease_codex_login`] for the Anthropic slot's Claude sign-in:
     /// the other listed direct delivery exception. The placement requires the
-    /// dedicated `claude-login` permission and admits only the Sandbox
+    /// dedicated `claude-login` permission and admits only the environment
     /// creator's own Active personal Claude sign-in (never an API key or a
-    /// Claude subscription token), selected by the creator's own confirmed
-    /// profile, rechecked around the material read. Placements that do not
+    /// Claude subscription token), selected by the creator's own profile,
+    /// rechecked around the material read. Placements that do not
     /// implement that whole predicate deny.
     async fn lease_claude_login(&self, _request_id: Uuid) -> Result<Self::Lease, BrokerLeaseError> {
         Err(BrokerLeaseError::Denied)
