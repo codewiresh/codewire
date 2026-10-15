@@ -4986,15 +4986,20 @@ fn direct_share_process_with_domain(
         .arg(&share.socket)
         .arg("--tag")
         .arg(share.request.mount.tag())
+        // No worker pool: each request is served on the queue thread, which
+        // avoids a hand-off per request.
         .arg("--thread-pool-size")
-        .arg("1")
+        .arg("0")
         .arg("--sandbox")
         .arg("none")
         .arg("--seccomp")
         .arg("kill")
         .arg("--no-announce-submounts")
         .arg("--inode-file-handles=never")
-        .arg("--cache=never")
+        // The guest caches names, attributes and file data for virtiofsd's
+        // default timeout (about one second) and revalidates on open, so an
+        // edit made on the host appears in the guest within about a second.
+        .arg("--cache=auto")
         // The daemon runs without capabilities, so it must never try to adopt
         // a guest credential. Collapse every guest identity to this process's
         // one admitted host identity while leaving numeric host ownership
