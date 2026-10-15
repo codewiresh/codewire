@@ -14,6 +14,7 @@ class EnvironmentAgentKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     ENVIRONMENT_AGENT_KIND_UNSPECIFIED: _ClassVar[EnvironmentAgentKind]
     ENVIRONMENT_AGENT_KIND_CODEX: _ClassVar[EnvironmentAgentKind]
     ENVIRONMENT_AGENT_KIND_CLAUDE: _ClassVar[EnvironmentAgentKind]
+    ENVIRONMENT_AGENT_KIND_NOEL: _ClassVar[EnvironmentAgentKind]
 
 class EnvironmentAgentAction(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -42,6 +43,7 @@ class EnvironmentAgentRecordKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapp
 ENVIRONMENT_AGENT_KIND_UNSPECIFIED: EnvironmentAgentKind
 ENVIRONMENT_AGENT_KIND_CODEX: EnvironmentAgentKind
 ENVIRONMENT_AGENT_KIND_CLAUDE: EnvironmentAgentKind
+ENVIRONMENT_AGENT_KIND_NOEL: EnvironmentAgentKind
 ENVIRONMENT_AGENT_ACTION_UNSPECIFIED: EnvironmentAgentAction
 ENVIRONMENT_AGENT_ACTION_MESSAGE: EnvironmentAgentAction
 ENVIRONMENT_AGENT_ACTION_STEER: EnvironmentAgentAction
