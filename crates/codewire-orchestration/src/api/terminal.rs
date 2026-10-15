@@ -1,6 +1,6 @@
 //! Browser terminal adapter for the existing authenticated daemon PTY channel.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ use codewire_server_core::org_deletion::{
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 use super::ApiState;
 use super::environment_daemon::environment_daemon_bridge_client_core;
@@ -45,6 +45,43 @@ const TERMINAL_LEASE_TIMEOUT: Duration = Duration::from_secs(5);
 type HmacSha256 = Hmac<Sha256>;
 
 mod durable;
+
+/// Single-use enforcement for terminal tickets (#2505 L3).
+///
+/// A ticket's HMAC proves authenticity and `exp` bounds its lifetime, but
+/// nothing bound redemption to first use — the browser hands the ticket to
+/// the WebSocket route as a query parameter, where it can linger in proxy
+/// and browser history for the full 30s TTL and be replayed for a parallel
+/// session. Every successful redemption records `sha256(nonce)` here;
+/// a second presentation of the same nonce within the TTL is rejected.
+///
+/// This map is process-local by design: codewire-orchestration is a
+/// single-replica Deployment (deployments/k8s/orchestration/deployment.yaml
+/// pins `replicas: 1`). During a rolling update the old and new Pods overlap,
+/// so a ticket redeemed on one could be replayed once on the other within its
+/// TTL. If orchestration scales out, move the check to the shared store.
+#[derive(Debug, Default)]
+pub struct TerminalTicketReplayCache {
+    seen: std::sync::Mutex<HashMap<[u8; 32], i64>>,
+}
+
+impl TerminalTicketReplayCache {
+    /// Record `nonce_digest` as redeemed until `expires_at` (unix seconds).
+    /// Returns `false` when the nonce was already redeemed and its entry has
+    /// not expired — the replay case.
+    pub(crate) fn record(&self, nonce_digest: [u8; 32], expires_at: i64) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        let mut seen = self.seen.lock().expect("replay cache poisoned");
+        // Opportunistic sweep: entries are tiny and TTL-bounded (≤30s), so
+        // sweeping on insert keeps the map proportional to live tickets.
+        seen.retain(|_, exp| *exp > now);
+        if seen.contains_key(&nonce_digest) {
+            return false;
+        }
+        seen.insert(nonce_digest, expires_at);
+        true
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TerminalTicketClaims {
@@ -170,6 +207,22 @@ pub(crate) async fn authenticate_socket_request(
                 r#"{"error":"invalid or expired ticket"}"#,
             ));
         };
+        // Single-use (#2505 L3): the nonce is unique per issue and the cache
+        // entry dies with the ticket's own `exp`, so a ticket replayed from
+        // history/proxy logs cannot open a second session. The 401 matches
+        // the invalid-ticket branch so a replay is indistinguishable from a
+        // forgery to the caller.
+        let mut nonce_digest = [0u8; 32];
+        nonce_digest.copy_from_slice(&Sha256::digest(claims.nonce.as_bytes()));
+        if !state
+            .terminal_ticket_replays
+            .record(nonce_digest, claims.exp)
+        {
+            return Err(terminal_error(
+                StatusCode::UNAUTHORIZED,
+                r#"{"error":"invalid or expired ticket"}"#,
+            ));
+        }
         return Ok(AuthUser {
             user_id: claims.user_id,
             org_id: None,
@@ -709,6 +762,38 @@ mod tests {
         let claims = redeem_ticket("0123456789abcdef0123456789abcdef", &ticket).unwrap();
         assert_eq!(claims.user_id, "test-user-123");
         assert!(claims.global_admin_user_credential);
+    }
+
+    /// #2505 L3 regression: a redeemed ticket cannot be replayed while its
+    /// `exp` window is live, distinct tickets are independent, and entries
+    /// vanish once expired so the cache cannot pin an old nonce set forever.
+    #[test]
+    fn ticket_replay_cache_is_single_use_per_nonce() {
+        let cache = TerminalTicketReplayCache::default();
+        let now = chrono::Utc::now().timestamp();
+        let digest_of = |n: u8| {
+            let mut digest = [0u8; 32];
+            digest.copy_from_slice(&Sha256::digest([n]));
+            digest
+        };
+
+        assert!(cache.record(digest_of(1), now + TERMINAL_TICKET_TTL_SECS));
+        assert!(
+            !cache.record(digest_of(1), now + TERMINAL_TICKET_TTL_SECS),
+            "same nonce within TTL is a replay"
+        );
+        assert!(
+            cache.record(digest_of(2), now + TERMINAL_TICKET_TTL_SECS),
+            "distinct nonces are independent"
+        );
+
+        // Expired entries are swept on the next insert: the same nonce may
+        // be recorded again after its ticket is long dead.
+        assert!(cache.record(digest_of(3), now - 1));
+        assert!(
+            cache.record(digest_of(3), now + TERMINAL_TICKET_TTL_SECS),
+            "expired entry must not pin its nonce"
+        );
     }
 
     #[test]

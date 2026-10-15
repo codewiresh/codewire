@@ -23,6 +23,16 @@ pub(super) struct PreviewContext<'a> {
     frontend_url: &'a str,
     session_secret: &'a str,
     confidential_storage_flags: crate::confidential_storage::FeatureFlags,
+    /// Shared org-slug snapshot cache (#2505 L5).
+    org_slugs: &'a super::OrgSlugCache,
+}
+
+/// Zero-TTL org cache for tests: every `get` is one query, exactly the
+/// pre-L5 behavior, so tests observe database writes immediately.
+#[cfg(test)]
+fn zero_ttl_org_slugs() -> &'static super::OrgSlugCache {
+    static ZERO_TTL: std::sync::OnceLock<super::OrgSlugCache> = std::sync::OnceLock::new();
+    ZERO_TTL.get_or_init(|| super::OrgSlugCache::new(std::time::Duration::ZERO))
 }
 
 impl<'a> From<&'a ApiState> for PreviewContext<'a> {
@@ -33,6 +43,7 @@ impl<'a> From<&'a ApiState> for PreviewContext<'a> {
             frontend_url: &state.frontend_url,
             session_secret: &state.session_secret,
             confidential_storage_flags: state.confidential_storage_flags,
+            org_slugs: &state.org_slugs,
         }
     }
 }
@@ -265,11 +276,19 @@ async fn challenge_target(
     state: &PreviewContext<'_>,
     challenge: &Challenge,
 ) -> Result<(PreviewHostMatch, PreviewTarget), Response> {
-    let matched =
-        super::resolve_preview_host(state.pool, state.preview_base_domain, &challenge.host)
-            .await
-            .map_err(|_| invalid())?
-            .ok_or_else(invalid)?;
+    // Cached org list (#2505 L5): the challenge already binds the exact
+    // org/env/port ids, and a stale slug snapshot cannot mint a match for a
+    // host it shouldn't — the ids must still line up below. Worst case a
+    // just-renamed org's old-slug host resolves for one TTL window.
+    let matched = super::resolve_preview_host_with(
+        state.pool,
+        state.org_slugs,
+        state.preview_base_domain,
+        &challenge.host,
+    )
+    .await
+    .map_err(|_| invalid())?
+    .ok_or_else(invalid)?;
     let target = super::resolve_preview_target(state.pool, &matched).await?;
     if matched.org_id != challenge.organization_id
         || target.env_id != challenge.environment_id
@@ -747,6 +766,7 @@ mod tests {
                 enabled: false,
                 admin_only: true,
             },
+            org_slugs: zero_ttl_org_slugs(),
         };
         let response = denied_page(&context);
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
