@@ -2175,7 +2175,8 @@ async fn wait_for_socket(path: &std::path::Path) {
 
 /// #2745: the authority listens in its short socket directory. One a cw
 /// before that started still listens in the credential root; a client uses
-/// it while it runs, and the next authority removes its dead endpoint.
+/// it while it runs. The next authority replaces its dead endpoint and
+/// listens there too, where a v0.3.388 supervisor still dials it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_legacy_authority_serves_until_a_new_one_listens_in_the_socket_dir() {
     let temp = tempfile::tempdir().unwrap();
@@ -2224,10 +2225,24 @@ async fn a_legacy_authority_serves_until_a_new_one_listens_in_the_socket_dir() {
     }
     let (shutdown, server) = start_server(config.clone(), TestProtectedStore::default()).await;
     wait_for_socket(&config.socket()).await;
-    assert!(!config.legacy_socket().exists());
     let client = LocalCredentialClient::connect(&config).await.unwrap();
     assert_eq!(client.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
     drop(client);
+    // The same authority answers at the credential root's own socket.
+    let through_legacy = LocalCredentialClient::connect(&legacy).await.unwrap();
+    assert_eq!(
+        through_legacy.info().protocol_version,
+        AUTHORITY_PROTOCOL_VERSION
+    );
+    assert_eq!(
+        fs::symlink_metadata(config.legacy_socket())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    drop(through_legacy);
     shutdown.send(()).unwrap();
     server.await.unwrap().unwrap();
 }

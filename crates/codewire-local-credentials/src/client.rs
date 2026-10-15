@@ -25,8 +25,9 @@ use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector};
 use crate::service::REPOSITORY_PREPARATION_TIMEOUT;
 use crate::service::auth_kind_to_proto;
 use crate::transport::{
-    AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError, connect_owner_only,
-    connect_owner_only_with_timeout, store_error_from_exit_status,
+    AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError,
+    MINIMUM_AUTHORITY_PROTOCOL_VERSION, connect_owner_only, connect_owner_only_with_timeout,
+    store_error_from_exit_status,
 };
 use crate::{
     AccessProfileRecord, AccessProfileRevisionRecord, AuthorityProtectedStore,
@@ -329,7 +330,10 @@ impl LocalCredentialClient {
             .await
             .map_err(|_| AuthorityRuntimeError::Connect)?
             .into_inner();
-        if response.protocol_version != AUTHORITY_PROTOCOL_VERSION {
+        // An authority in the supported range keeps serving after an update.
+        if !(MINIMUM_AUTHORITY_PROTOCOL_VERSION..=AUTHORITY_PROTOCOL_VERSION)
+            .contains(&response.protocol_version)
+        {
             return Err(AuthorityRuntimeError::ProtocolMismatch);
         }
         let info = AuthorityInfo {

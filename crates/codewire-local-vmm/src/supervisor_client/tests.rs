@@ -120,6 +120,13 @@ impl LocalSupervisorService for ProtocolPeer {
         Err(Status::unimplemented("unused synthetic method"))
     }
 
+    async fn retire_supervisor(
+        &self,
+        _: Request<v1::RetireSupervisorRequest>,
+    ) -> Result<Response<v1::RetireSupervisorResponse>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
     async fn list_orphans(
         &self,
         _: Request<v1::ListOrphansRequest>,

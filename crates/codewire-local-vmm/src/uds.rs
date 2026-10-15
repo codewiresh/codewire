@@ -164,7 +164,6 @@ fn supervisor_peer_error(error: crate::host::supervisor_peer::PeerError) -> UdsE
     UdsError::SupervisorPeerAdmission(match error {
         PeerError::Kernel => "kernel socket-derived process identity is unavailable",
         PeerError::Identity => "process, socket or executable identity changed",
-        #[cfg(target_os = "linux")]
         PeerError::Role => "role or configuration arguments do not match",
         PeerError::Provenance => "retained executable provenance is unavailable or changed",
     })

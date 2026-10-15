@@ -695,9 +695,22 @@ impl SupervisorRpc {
         };
         // Credential brokerage is auxiliary to daemon/session transport.
         // Start its authority-owned retry lifecycle, but never make an offline
-        // shell depend on remote provider DNS or inference availability.
+        // shell depend on remote provider DNS or inference availability. A
+        // failure is still recorded, by its closed cause, so a VM that has no
+        // credentials says why (an unreachable authority, for one).
+        let core = self.core.clone();
         drop(tokio::spawn(async move {
-            let _ = ensure_credential_broker(broker_request).await;
+            if let Err(error) = ensure_credential_broker(broker_request).await {
+                let core = core.lock().await;
+                diagnostic_log::record(
+                    core.log.as_ref(),
+                    "credential_broker_failed",
+                    &[
+                        ("environment", LogField::Id(environment_id)),
+                        ("cause", LogField::Name(lifecycle_failure_cause(&error))),
+                    ],
+                );
+            }
         }));
         if access.generation_capability.is_empty() {
             return Err(local_internal());

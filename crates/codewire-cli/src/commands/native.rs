@@ -365,7 +365,9 @@ pub(crate) async fn create_native_environment(
 ) -> anyhow::Result<Option<v1::Environment>> {
     host_support::require_local_vm_host()?;
     reject_unsupported_native_create_options(&args)?;
-    ensure_pinned_runtime().await?;
+    // Before the review: a VM of the cw this one updated from that still runs
+    // refuses the create.
+    let mut client = native_boot_client().await?;
     if args.name.as_deref().and_then(trimmed_str).is_none() {
         args.name = Some(default_native_name(
             args.path.as_deref(),
@@ -487,7 +489,7 @@ pub(crate) async fn create_native_environment(
     } = project;
     let (project_spec_json, project_spec_sha256) =
         canonical_native_project_intent(spec, vcpus, memory_mib, disk_bytes)?;
-    let mut client = native_client().await?;
+    ensure_pinned_runtime().await?;
     let request = v1::CreateEnvironmentRequest {
         name,
         source_path: request_source_path,
@@ -855,7 +857,7 @@ pub(crate) async fn handle_native_environment_update(
     args: EnvUpdateArgs,
 ) -> anyhow::Result<()> {
     sources::validate_update_args(&args)?;
-    let mut supervisor = native_client().await?;
+    let mut supervisor = native_boot_client().await?;
     let environment = supervisor
         .get(&args.environment)
         .await
@@ -1030,8 +1032,8 @@ pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::
 
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     host_support::require_local_vm_host()?;
+    let mut client = native_boot_client().await?;
     ensure_pinned_runtime().await?;
-    let mut client = native_client().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
     let progress = native_progress();
     let started = match &progress {
@@ -1055,8 +1057,8 @@ pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::En
 
 pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     host_support::require_local_vm_host()?;
+    let mut client = native_boot_client().await?;
     ensure_pinned_runtime().await?;
-    let mut client = native_client().await?;
     let environment = get_native_environment_with_required_authority(&mut client, name).await?;
     client
         .restart(name, &environment.id)
@@ -1067,7 +1069,7 @@ pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1:
 pub(crate) async fn refresh_native_environment_skills(
     name: &str,
 ) -> anyhow::Result<v1::Environment> {
-    let mut client = native_client().await?;
+    let mut client = native_boot_client().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
     client.refresh_skills(name).await.map_err(native_status)
 }
@@ -1078,7 +1080,7 @@ pub(crate) async fn resize_native_environment(
     memory_mib: u32,
     disk_bytes: u64,
 ) -> anyhow::Result<v1::Environment> {
-    let mut client = native_client().await?;
+    let mut client = native_boot_client().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
     client
         .resize(name, vcpus, memory_mib, disk_bytes)
@@ -1736,6 +1738,25 @@ async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
     .await
 }
 
+/// The client for a command that boots or reconfigures a VM. After a cw
+/// update the previous cw's supervisor may still serve its VMs: this cw takes
+/// the state root over once it runs none, and refuses the command with one
+/// line while it may (supervisor_upgrade). A command that boots installs
+/// this cw's runtime only after this, so an older supervisor never starts a
+/// VM from it.
+async fn native_boot_client() -> anyhow::Result<NativeSupervisorClient> {
+    let config = native_runtime_config()?;
+    connect_native_after_authority_admission(
+        || async { admit_existing_local_credential_authority().await },
+        || async {
+            codewire_local_vmm::supervisor_upgrade::connect_for_boot(&config)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+    )
+    .await
+}
+
 async fn connect_native_after_authority_admission<T, A, AF, C, CF>(
     admit_authority: A,
     connect_supervisor: C,
@@ -1793,6 +1814,8 @@ pub(crate) async fn setup_local_runtime(
     use codewire_local_vmm::runtime_install::{self, DirectoryBlobSource, RuntimePaths};
     host_support::require_local_vm_host()?;
     let config = native_runtime_config()?;
+    // An older cw's supervisor would start its next VM from the new files.
+    codewire_local_vmm::supervisor_upgrade::refuse_while_older_serves(&config).await?;
     let paths = RuntimePaths {
         artifact_root: config.artifact_root,
         artifact_lock: config.artifact_lock,
