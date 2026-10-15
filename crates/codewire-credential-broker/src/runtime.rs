@@ -23,11 +23,13 @@ use thiserror::Error;
 use tokio_util::task::TaskTracker;
 use url::Url;
 use uuid::Uuid;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::anthropic::{
-    AnthropicApiKeyAdapter, AnthropicStreamingResponse, AnthropicSubscriptionTokenAdapter,
+    AnthropicApiKeyAdapter, AnthropicClaudeSignInAdapter, AnthropicStreamingResponse,
+    AnthropicSubscriptionTokenAdapter,
 };
+use crate::claude_oauth::{CanonicalClaudeOAuthBundle, ClaudeOAuthCredential};
 use crate::codex_oauth::{
     ACCESS_TOKEN_REFRESH_WINDOW_SECONDS, CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS,
     CanonicalCodexOAuthBundle, CodexOAuthCredential,
@@ -52,6 +54,7 @@ const MAX_OAUTH_REFRESH_RESPONSE_BYTES: usize = 1024 * 1024;
 const OAUTH_REFRESH_WAIT_ATTEMPTS: usize = 64;
 const OAUTH_REFRESH_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 const CODEX_REFRESH_PROVIDER: &str = "openai";
+const CLAUDE_REFRESH_PROVIDER: &str = "anthropic";
 const GITHUB_REFRESH_PROVIDER: &str = "github";
 #[cfg(feature = "local-broker-synthetic-smoke")]
 const SYNTHETIC_CODEX_ACCOUNT_ID: &str = "account-native-broker";
@@ -89,6 +92,8 @@ pub struct BrokerCredentialRefreshRequest {
 pub enum BrokerCredentialRefreshKind {
     CodexOAuth,
     GitHubAppUserOAuth,
+    /// A Claude sign-in (the Anthropic slot's `ClaudeSignIn` kind).
+    ClaudeOAuth,
 }
 
 /// Refresh ownership or completion of a previously staged result.
@@ -185,6 +190,16 @@ pub trait BrokerLeaseProvider: Send + Sync {
         &self,
         _permit: Self::StartedRefresh,
         _material: GitHubAppUserOAuthBundle,
+    ) -> Result<(), BrokerRefreshError> {
+        Err(BrokerRefreshError::Denied)
+    }
+
+    /// Narrow Claude sign-in publication hook. The only accepted material is
+    /// the canonical sign-in envelope. Placements without Claude sign-ins deny.
+    async fn commit_claude_oauth_refresh(
+        &self,
+        _permit: Self::StartedRefresh,
+        _material: CanonicalClaudeOAuthBundle,
     ) -> Result<(), BrokerRefreshError> {
         Err(BrokerRefreshError::Denied)
     }
@@ -1250,6 +1265,7 @@ pub struct OpenAiBroker<P, U> {
     oauth_adapter: OpenAiChatGptOAuthAdapter,
     anthropic_adapter: AnthropicApiKeyAdapter,
     anthropic_subscription_adapter: AnthropicSubscriptionTokenAdapter,
+    anthropic_sign_in_adapter: AnthropicClaudeSignInAdapter,
     github_adapter: GitHubOAuthAdapter,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     oauth_refresh: tokio::sync::Mutex<()>,
@@ -1288,27 +1304,82 @@ struct GitHubRefreshPreparation<'a> {
     admitted_grant: &'a DerivedGrant,
 }
 
-/// Which admission a Codex OAuth lease answers. A proxied request's lease and
-/// the sealed login's lease have different permissions and predicates; one is
+/// Which admission an OAuth lease answers. A proxied request's lease and a
+/// sealed login's lease have different permissions and predicates; one is
 /// never used in place of the other.
-enum CodexOAuthPurpose {
+enum OAuthPurpose {
+    /// A proxied request's operation on its slot.
     Operation {
+        slot: CapabilitySlot,
         operation: BrokerOperationId,
         route: BrokerRouteId,
     },
-    /// The one listed direct delivery exception, leased only through
+    /// The Codex login's direct delivery exception, leased only through
     /// [`BrokerLeaseProvider::lease_codex_login`].
-    Login,
+    CodexLogin,
 }
 
-impl CodexOAuthPurpose {
+impl OAuthPurpose {
     fn permission(&self) -> GrantPermission {
         match self {
-            Self::Operation { operation, route } => GrantPermission {
+            Self::Operation {
+                operation, route, ..
+            } => GrantPermission {
                 operation: operation.clone(),
                 route: route.clone(),
             },
-            Self::Login => codex_login_permission(),
+            Self::CodexLogin => codex_login_permission(),
+        }
+    }
+}
+
+/// An OAuth login the broker refreshes through the placement's durable
+/// refresh journal.
+trait RefreshingOAuth: Sized {
+    /// The only credential kind whose lease yields this login.
+    const AUTHENTICATION_KIND: CredentialAuthKind;
+    const REFRESH_KIND: BrokerCredentialRefreshKind;
+    fn should_refresh_within(&self, now_unix: u64, minimum_validity_seconds: u64) -> bool;
+    fn into_refresh(self) -> OAuthRefreshMaterial;
+}
+
+impl RefreshingOAuth for CodexOAuthCredential {
+    const AUTHENTICATION_KIND: CredentialAuthKind = CredentialAuthKind::OAuth;
+    const REFRESH_KIND: BrokerCredentialRefreshKind = BrokerCredentialRefreshKind::CodexOAuth;
+
+    fn should_refresh_within(&self, now_unix: u64, minimum_validity_seconds: u64) -> bool {
+        CodexOAuthCredential::should_refresh_within(self, now_unix, minimum_validity_seconds)
+    }
+
+    fn into_refresh(self) -> OAuthRefreshMaterial {
+        OAuthRefreshMaterial::Codex(self)
+    }
+}
+
+impl RefreshingOAuth for ClaudeOAuthCredential {
+    const AUTHENTICATION_KIND: CredentialAuthKind = CredentialAuthKind::ClaudeSignIn;
+    const REFRESH_KIND: BrokerCredentialRefreshKind = BrokerCredentialRefreshKind::ClaudeOAuth;
+
+    fn should_refresh_within(&self, now_unix: u64, minimum_validity_seconds: u64) -> bool {
+        ClaudeOAuthCredential::should_refresh_within(self, now_unix, minimum_validity_seconds)
+    }
+
+    fn into_refresh(self) -> OAuthRefreshMaterial {
+        OAuthRefreshMaterial::Claude(self)
+    }
+}
+
+/// The admitted material one started refresh exchanges at its provider.
+enum OAuthRefreshMaterial {
+    Codex(CodexOAuthCredential),
+    Claude(ClaudeOAuthCredential),
+}
+
+impl OAuthRefreshMaterial {
+    fn provider(&self) -> &'static str {
+        match self {
+            Self::Codex(_) => CODEX_REFRESH_PROVIDER,
+            Self::Claude(_) => CLAUDE_REFRESH_PROVIDER,
         }
     }
 }
@@ -1402,6 +1473,8 @@ where
             anthropic_adapter: AnthropicApiKeyAdapter::new().map_err(map_adapter_error)?,
             anthropic_subscription_adapter: AnthropicSubscriptionTokenAdapter::new()
                 .map_err(map_adapter_error)?,
+            anthropic_sign_in_adapter: AnthropicClaudeSignInAdapter::new()
+                .map_err(map_adapter_error)?,
             github_adapter: GitHubOAuthAdapter::new().map_err(map_adapter_error)?,
             github_app_authorization: None,
             oauth_refresh: tokio::sync::Mutex::new(()),
@@ -1488,19 +1561,19 @@ where
             return Err(BrokerRequestError::AuthorityUnavailable);
         }
 
-        let lease = self
-            .lease_codex_oauth(request_id, &CodexOAuthPurpose::Login)
-            .await?;
+        let purpose = OAuthPurpose::CodexLogin;
+        let lease = self.lease_oauth(request_id, &purpose).await?;
         let admitted_grant = lease.grant().clone();
         let generation = refresh_generation(&lease);
-        let credential = self.codex_oauth_credential(lease, &CodexOAuthPurpose::Login)?;
+        let credential = self.codex_oauth_credential(lease, &purpose)?;
         let (credential, generation) = if credential
             .should_refresh_within(current_unix_time()?, CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS)
         {
             drop(credential);
-            self.fresh_codex_oauth_credential(
+            self.fresh_oauth_credential(
                 request_id,
-                &CodexOAuthPurpose::Login,
+                &purpose,
+                |lease| self.codex_oauth_credential(lease, &purpose),
                 None,
                 &admitted_grant,
                 CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS,
@@ -1718,9 +1791,10 @@ where
             .map_err(map_lease_error)?;
         validate_http_lease_coordinates(&lease, &request.slot, &operation, &request.route)?;
         // The validated request is form-independent; the lease's credential
-        // kind selects the API key or the Claude subscription token adapter.
-        // Neither form is refreshed, and no provider response marks, deletes
-        // or withholds either: its owner replaces it.
+        // kind selects the API key, Claude subscription token or Claude
+        // sign-in adapter. No provider response marks, deletes or withholds
+        // any form: a Sandbox process shapes the request. Only a sign-in
+        // refreshes, and only when its access token is about to expire.
         let prepared = match lease.credential_metadata().authentication_kind {
             CredentialAuthKind::ApiKey => self
                 .anthropic_adapter
@@ -1730,6 +1804,33 @@ where
                 .anthropic_subscription_adapter
                 .prepare_validated(lease, validated)
                 .map_err(map_adapter_error)?,
+            CredentialAuthKind::ClaudeSignIn => {
+                let admitted_grant = lease.grant().clone();
+                let purpose = OAuthPurpose::Operation {
+                    slot: request.slot.clone(),
+                    operation: operation.clone(),
+                    route: request.route.clone(),
+                };
+                let credential = self.claude_oauth_credential(lease, &purpose)?;
+                let credential = if credential.should_refresh(current_unix_time()?) {
+                    drop(credential);
+                    self.fresh_oauth_credential(
+                        request.request_id,
+                        &purpose,
+                        |lease| self.claude_oauth_credential(lease, &purpose),
+                        None,
+                        &admitted_grant,
+                        ACCESS_TOKEN_REFRESH_WINDOW_SECONDS,
+                    )
+                    .await?
+                    .0
+                } else {
+                    credential
+                };
+                self.anthropic_sign_in_adapter
+                    .prepare_credential(&credential, validated)
+                    .map_err(map_adapter_error)?
+            }
             _ => return Err(BrokerRequestError::Denied),
         };
         let (method, target, headers, body, policy) = prepared.into_parts();
@@ -1921,10 +2022,16 @@ where
         force_refresh_of: Option<&RefreshCredentialGeneration>,
         admitted_grant: &DerivedGrant,
     ) -> Result<PreparedOAuthRequest, BrokerRequestError> {
+        let purpose = OAuthPurpose::Operation {
+            slot: CapabilitySlot::codex(),
+            operation,
+            route,
+        };
         let (credential, generation) = self
-            .fresh_codex_oauth_credential(
+            .fresh_oauth_credential(
                 request_id,
-                &CodexOAuthPurpose::Operation { operation, route },
+                &purpose,
+                |lease| self.codex_oauth_credential(lease, &purpose),
                 force_refresh_of,
                 admitted_grant,
                 ACCESS_TOKEN_REFRESH_WINDOW_SECONDS,
@@ -1939,24 +2046,23 @@ where
         })
     }
 
-    /// Lease the selected Codex OAuth login for `purpose`.
-    async fn lease_codex_oauth(
+    /// Lease the selected OAuth login for `purpose`.
+    async fn lease_oauth(
         &self,
         request_id: Uuid,
-        purpose: &CodexOAuthPurpose,
+        purpose: &OAuthPurpose,
     ) -> Result<P::Lease, BrokerRequestError> {
         match purpose {
-            CodexOAuthPurpose::Operation { operation, route } => {
+            OAuthPurpose::Operation {
+                slot,
+                operation,
+                route,
+            } => {
                 self.leases
-                    .lease_operation(
-                        request_id,
-                        CapabilitySlot::codex(),
-                        operation.clone(),
-                        route.clone(),
-                    )
+                    .lease_operation(request_id, slot.clone(), operation.clone(), route.clone())
                     .await
             }
-            CodexOAuthPurpose::Login => self.leases.lease_codex_login(request_id).await,
+            OAuthPurpose::CodexLogin => self.leases.lease_codex_login(request_id).await,
         }
         .map_err(map_lease_error)
     }
@@ -1964,52 +2070,66 @@ where
     fn codex_oauth_credential(
         &self,
         lease: P::Lease,
-        purpose: &CodexOAuthPurpose,
+        purpose: &OAuthPurpose,
     ) -> Result<CodexOAuthCredential, BrokerRequestError> {
         match purpose {
-            CodexOAuthPurpose::Operation { .. } => self.oauth_adapter.credential_from_lease(lease),
-            CodexOAuthPurpose::Login => self.oauth_adapter.login_credential_from_lease(lease),
+            OAuthPurpose::Operation { .. } => self.oauth_adapter.credential_from_lease(lease),
+            OAuthPurpose::CodexLogin => self.oauth_adapter.login_credential_from_lease(lease),
         }
         .map_err(map_adapter_error)
     }
 
-    /// The selected Codex OAuth login from a lease whose access token stays
-    /// valid for `minimum_validity_seconds` (capped at half its lifetime, see
-    /// `CodexOAuthCredential::should_refresh_within`), refreshing first when
-    /// it would not. Every caller shares one serialized refresh: this epoch's
-    /// mutex, then the placement's durable refresh journal, whose `InProgress`
-    /// or `Stale` answer waits for another owner's refresh and re-leases. The
-    /// minimum applies on every pass of that wait. A rotated token is used only
-    /// from a fresh lease taken after its durable commit, so the placement
-    /// rechecks its whole admission, and for a login its delivery predicate,
-    /// before anything uses the new material.
-    async fn fresh_codex_oauth_credential(
+    fn claude_oauth_credential(
+        &self,
+        lease: P::Lease,
+        purpose: &OAuthPurpose,
+    ) -> Result<ClaudeOAuthCredential, BrokerRequestError> {
+        match purpose {
+            OAuthPurpose::Operation { .. } => self
+                .anthropic_sign_in_adapter
+                .credential_from_lease(lease)
+                .map_err(map_adapter_error),
+            OAuthPurpose::CodexLogin => Err(BrokerRequestError::Denied),
+        }
+    }
+
+    /// The selected OAuth login from a lease whose access token stays valid
+    /// for `minimum_validity_seconds` (capped at half its lifetime), refreshing
+    /// first when it would not. Every caller shares one serialized refresh:
+    /// this epoch's mutex, then the placement's durable refresh journal, whose
+    /// `InProgress` or `Stale` answer waits for another owner's refresh and
+    /// re-leases. The minimum applies on every pass of that wait. A rotated
+    /// token is used only from a fresh lease taken after its durable commit,
+    /// so the placement rechecks its whole admission, and for a login its
+    /// delivery predicate, before anything uses the new material.
+    async fn fresh_oauth_credential<C: RefreshingOAuth>(
         &self,
         request_id: Uuid,
-        purpose: &CodexOAuthPurpose,
+        purpose: &OAuthPurpose,
+        parse: impl Fn(P::Lease) -> Result<C, BrokerRequestError>,
         force_refresh_of: Option<&RefreshCredentialGeneration>,
         admitted_grant: &DerivedGrant,
         minimum_validity_seconds: u64,
-    ) -> Result<(CodexOAuthCredential, RefreshCredentialGeneration), BrokerRequestError> {
+    ) -> Result<(C, RefreshCredentialGeneration), BrokerRequestError> {
         let _refresh_guard = self.oauth_refresh.lock().await;
         let permission = purpose.permission();
         for refresh_waits in 0..=OAUTH_REFRESH_WAIT_ATTEMPTS {
-            let lease = self.lease_codex_oauth(request_id, purpose).await?;
+            let lease = self.lease_oauth(request_id, purpose).await?;
             validate_request_binding(lease.grant(), admitted_grant)?;
-            if lease.credential_metadata().authentication_kind != CredentialAuthKind::OAuth {
+            if lease.credential_metadata().authentication_kind != C::AUTHENTICATION_KIND {
                 return Err(BrokerRequestError::Denied);
             }
             let generation = refresh_generation(&lease);
             let refresh_request = BrokerCredentialRefreshRequest {
                 refresh_id: Uuid::new_v4(),
                 request_id,
-                kind: BrokerCredentialRefreshKind::CodexOAuth,
+                kind: C::REFRESH_KIND,
                 grant: bounded_refresh_grant(lease.grant(), admitted_grant),
                 operation: permission.operation.clone(),
                 route: permission.route.clone(),
                 material_generation: lease.material_generation(),
             };
-            let credential = self.codex_oauth_credential(lease, purpose)?;
+            let credential = parse(lease)?;
             let force_refresh = force_refresh_of == Some(&generation);
             if !force_refresh
                 && !credential.should_refresh_within(current_unix_time()?, minimum_validity_seconds)
@@ -2018,7 +2138,7 @@ where
             }
             match timing::timed(
                 Phase::Refresh,
-                self.refresh_oauth_credential(credential, refresh_request),
+                self.refresh_oauth_credential(credential.into_refresh(), refresh_request),
             )
             .await?
             {
@@ -2026,10 +2146,10 @@ where
                     // Persisting a rotated token does not authorize using it.
                     // Refresh can outlive the original grant or binding; ask
                     // the placement authority again after durable commit.
-                    let lease = self.lease_codex_oauth(request_id, purpose).await?;
+                    let lease = self.lease_oauth(request_id, purpose).await?;
                     validate_request_binding(lease.grant(), admitted_grant)?;
                     let generation = refresh_generation(&lease);
-                    let credential = self.codex_oauth_credential(lease, purpose)?;
+                    let credential = parse(lease)?;
                     return Ok((credential, generation));
                 }
                 None if refresh_waits < OAUTH_REFRESH_WAIT_ATTEMPTS => {
@@ -2043,7 +2163,7 @@ where
 
     async fn refresh_oauth_credential(
         &self,
-        credential: CodexOAuthCredential,
+        credential: OAuthRefreshMaterial,
         refresh_request: BrokerCredentialRefreshRequest,
     ) -> Result<Option<()>, BrokerRequestError> {
         let refreshed_at_unix = current_unix_time()?;
@@ -2075,10 +2195,11 @@ where
     async fn complete_oauth_refresh(
         leases: Arc<P>,
         upstream: Arc<U>,
-        credential: CodexOAuthCredential,
+        credential: OAuthRefreshMaterial,
         reservation: P::RefreshReservation,
         refreshed_at_unix: u64,
     ) -> Result<(), BrokerRequestError> {
+        let provider = credential.provider();
         let permit = match leases.start_credential_refresh(reservation).await {
             Ok(permit) => permit,
             // Start consumed the reservation. Even a definite denial answers
@@ -2090,24 +2211,35 @@ where
             // ending its epoch; that relies on the platform store's durable
             // deadlines (see `send_codex_login_response` in bridge.rs).
             Err(error) => {
-                RefreshFailure::Start(error).warn(CODEX_REFRESH_PROVIDER);
+                RefreshFailure::Start(error).warn(provider);
                 return Err(BrokerRequestError::AuthorityUnavailable);
             }
         };
-        let (failure, error) =
-            match exchange_codex_oauth_refresh(&*upstream, credential, refreshed_at_unix).await {
-                Ok(bundle) => {
-                    return leases
-                        .commit_credential_refresh(permit, bundle)
-                        .await
-                        .map_err(|error| {
-                            RefreshFailure::Publication(error).warn(CODEX_REFRESH_PROVIDER);
-                            publication_failure()
-                        });
+        let exchanged = match credential {
+            OAuthRefreshMaterial::Codex(credential) => {
+                match exchange_codex_oauth_refresh(&*upstream, credential, refreshed_at_unix).await
+                {
+                    Ok(bundle) => Ok(leases.commit_credential_refresh(permit, bundle).await),
+                    Err(failed) => Err((permit, failed)),
                 }
-                Err(failed) => failed,
-            };
-        Self::fail_started_refresh(&*leases, permit, CODEX_REFRESH_PROVIDER, failure, error).await
+            }
+            OAuthRefreshMaterial::Claude(credential) => {
+                match exchange_claude_oauth_refresh(&*upstream, credential, refreshed_at_unix).await
+                {
+                    Ok(bundle) => Ok(leases.commit_claude_oauth_refresh(permit, bundle).await),
+                    Err(failed) => Err((permit, failed)),
+                }
+            }
+        };
+        match exchanged {
+            Ok(published) => published.map_err(|error| {
+                RefreshFailure::Publication(error).warn(provider);
+                publication_failure()
+            }),
+            Err((permit, (failure, error))) => {
+                Self::fail_started_refresh(&*leases, permit, provider, failure, error).await
+            }
+        }
     }
 
     /// Record one terminal failure for an exact started attempt after logging
@@ -2371,7 +2503,7 @@ where
 {
     // Request construction is local and fixed; failing it sends nothing.
     let local = OAuthRefreshError::Permanent(RefreshFailure::RequestBuild);
-    let mut body = Zeroizing::new(
+    let body = Zeroizing::new(
         serde_json::to_vec(&OAuthRefreshRequest {
             client_id: CODEX_OAUTH_CLIENT_ID,
             grant_type: "refresh_token",
@@ -2380,6 +2512,28 @@ where
         .map_err(|_| local)?,
     );
     let target = Url::parse(OPENAI_TOKEN_URL).map_err(|_| local)?;
+    let response = post_token_refresh(upstream, target, body).await?;
+    let parsed = serde_json::from_slice::<OAuthRefreshResponse>(&response)
+        .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::ResponseParse))?;
+    drop(response);
+    if parsed.access_token.is_none() {
+        return Err(OAuthRefreshError::Permanent(RefreshFailure::ResponseParse));
+    }
+    Ok(parsed)
+}
+
+/// One refresh request to a provider's fixed token endpoint: the JSON `body`
+/// is sent once, and only a success's bounded, identity-encoded body returns.
+/// A non-success answer is classified from allowlisted identifiers only; its
+/// body, including any provider description, is zeroized on drop.
+async fn post_token_refresh<U>(
+    upstream: &U,
+    target: Url,
+    mut body: Zeroizing<Vec<u8>>,
+) -> Result<Zeroizing<Vec<u8>>, OAuthRefreshError>
+where
+    U: BrokerUpstreamTransport + ?Sized,
+{
     let mut headers = HeaderMap::new();
     headers.insert(
         http::header::ACCEPT,
@@ -2434,8 +2588,6 @@ where
         response.extend_from_slice(&chunk);
     }
     if !status.is_success() {
-        // Only allowlisted identifiers survive classification; the body,
-        // including any provider description, is zeroized on drop.
         let rejection = ProviderRejection::classify(status, &response);
         return Err(if rejection.permanent {
             OAuthRefreshError::Permanent(RefreshFailure::Rejected(rejection))
@@ -2446,13 +2598,47 @@ where
             )
         });
     }
-    let parsed = serde_json::from_slice::<OAuthRefreshResponse>(&response)
-        .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::ResponseParse))?;
-    response.zeroize();
-    if parsed.access_token.is_none() {
-        return Err(OAuthRefreshError::Permanent(RefreshFailure::ResponseParse));
+    Ok(response)
+}
+
+/// One bounded Claude sign-in refresh-token exchange plus rotated-material
+/// validation: a non-empty access token, a lifetime in range and the required
+/// scopes kept. Like the Codex exchange, every `Err` is terminal for the
+/// started attempt and the previous refresh token is never replayed. Shared by
+/// on-demand broker refresh and the platform keep-alive.
+pub(crate) async fn exchange_claude_oauth_refresh<U>(
+    upstream: &U,
+    credential: ClaudeOAuthCredential,
+    refreshed_at_unix: u64,
+) -> Result<CanonicalClaudeOAuthBundle, (RefreshFailure, BrokerRequestError)>
+where
+    U: BrokerUpstreamTransport + ?Sized,
+{
+    let exchange = tokio::time::timeout(
+        Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
+        async {
+            let (target, body) = crate::provider_oauth::claude::refresh_request(
+                credential.refresh_token(),
+                credential.scopes(),
+            )
+            .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::RequestBuild))?;
+            let response = post_token_refresh(upstream, target, body).await?;
+            crate::provider_oauth::claude::parse_refresh_response(&response)
+                .map_err(|_| OAuthRefreshError::Permanent(RefreshFailure::ResponseParse))
+        },
+    )
+    .await;
+    match exchange {
+        Ok(Ok(tokens)) => credential
+            .refreshed(tokens, refreshed_at_unix)
+            .and_then(|refreshed| refreshed.to_bundle())
+            .map_err(|_| (RefreshFailure::Material, BrokerRequestError::Denied)),
+        Ok(Err(OAuthRefreshError::Uncertain(error, failure))) => Err((failure, error)),
+        Ok(Err(OAuthRefreshError::Permanent(failure))) => {
+            Err((failure, BrokerRequestError::Denied))
+        }
+        Err(_) => Err((RefreshFailure::Timeout, BrokerRequestError::UpstreamFailed)),
     }
-    Ok(parsed)
 }
 
 /// Terminal refresh exchange outcomes. Both are recorded as an unknown

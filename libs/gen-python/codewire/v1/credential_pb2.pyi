@@ -15,6 +15,7 @@ class CredentialAuthenticationKind(int, metaclass=_enum_type_wrapper.EnumTypeWra
     CREDENTIAL_AUTHENTICATION_KIND_ACCESS_TOKEN: _ClassVar[CredentialAuthenticationKind]
     CREDENTIAL_AUTHENTICATION_KIND_GITHUB_APP: _ClassVar[CredentialAuthenticationKind]
     CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY: _ClassVar[CredentialAuthenticationKind]
+    CREDENTIAL_AUTHENTICATION_KIND_CLAUDE_SIGN_IN: _ClassVar[CredentialAuthenticationKind]
 
 class CredentialStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -36,6 +37,7 @@ CREDENTIAL_AUTHENTICATION_KIND_API_KEY: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_ACCESS_TOKEN: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_GITHUB_APP: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY: CredentialAuthenticationKind
+CREDENTIAL_AUTHENTICATION_KIND_CLAUDE_SIGN_IN: CredentialAuthenticationKind
 CREDENTIAL_STATUS_UNSPECIFIED: CredentialStatus
 CREDENTIAL_STATUS_ACTIVE: CredentialStatus
 CREDENTIAL_STATUS_REVOKED: CredentialStatus

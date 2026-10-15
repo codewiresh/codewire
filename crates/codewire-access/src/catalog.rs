@@ -80,20 +80,26 @@ pub fn builtin_provider_catalog() -> ProviderCatalog {
                 ),
             ]),
         },
-        // One Anthropic slot holds either an API key or a Claude subscription
-        // token (`claude setup-token`), its OAuth form. Both reach the whole
-        // Anthropic API through the broker's transparent route, whose one
-        // operation covers every request; neither is delivered.
+        // One Anthropic slot holds an API key, a Claude subscription token
+        // (`claude setup-token`, its OAuth form) or a Claude sign-in (Claude
+        // Code's own claude.ai login, which the broker refreshes). All reach
+        // the whole Anthropic API through the broker's transparent route,
+        // whose one operation covers every request.
         ProviderDefinition {
             id: ProviderId::parse("anthropic").expect("built-in Anthropic provider ID"),
             authentication_kinds: BTreeSet::from([
                 CredentialAuthKind::OAuth,
                 CredentialAuthKind::ApiKey,
+                CredentialAuthKind::ClaudeSignIn,
             ]),
             capabilities: BTreeMap::from([(
                 CapabilitySlot::anthropic(),
                 policy(
-                    &[CredentialAuthKind::OAuth, CredentialAuthKind::ApiKey],
+                    &[
+                        CredentialAuthKind::OAuth,
+                        CredentialAuthKind::ApiKey,
+                        CredentialAuthKind::ClaudeSignIn,
+                    ],
                     &[("messages", "anthropic-api")],
                 ),
             )]),
@@ -186,7 +192,20 @@ mod tests {
                 CredentialAuthKind::OAuth,
                 Some(HttpProvider::AnthropicSubscriptionToken),
             ),
+            (
+                "anthropic",
+                "anthropic",
+                CredentialAuthKind::ClaudeSignIn,
+                Some(HttpProvider::AnthropicClaudeSignIn),
+            ),
             ("codex", "anthropic", CredentialAuthKind::OAuth, None),
+            ("codex", "anthropic", CredentialAuthKind::ClaudeSignIn, None),
+            (
+                "anthropic",
+                "openai",
+                CredentialAuthKind::ClaudeSignIn,
+                None,
+            ),
             ("anthropic", "openai", CredentialAuthKind::OAuth, None),
             (
                 "github",
@@ -208,12 +227,19 @@ mod tests {
         assert!(serde_json::from_str::<HttpProvider>("\"unknown\"").is_err());
         assert!(HttpProvider::parse("github-app-authorization").is_none());
         assert!(HttpProvider::parse("codex-device-enrollment").is_none());
+        assert!(HttpProvider::parse("claude-sign-in-enrollment").is_none());
+        assert!(
+            HttpProvider::ClaudeSignInEnrollment
+                .reserved_environment_keys()
+                .is_empty()
+        );
         for provider in [
             HttpProvider::AnthropicApiKey,
             HttpProvider::AnthropicSubscriptionToken,
+            HttpProvider::AnthropicClaudeSignIn,
         ] {
             assert_eq!(HttpProvider::parse(provider.as_str()), Some(provider));
-            // Both Anthropic forms own the same stock-client names.
+            // Every Anthropic form owns the same stock-client names.
             assert_eq!(
                 provider.reserved_environment_keys(),
                 [
@@ -329,14 +355,31 @@ mod tests {
             .unwrap();
         assert_eq!(
             anthropic.authentication_kinds,
-            BTreeSet::from([CredentialAuthKind::OAuth, CredentialAuthKind::ApiKey])
+            BTreeSet::from([
+                CredentialAuthKind::OAuth,
+                CredentialAuthKind::ApiKey,
+                CredentialAuthKind::ClaudeSignIn,
+            ])
         );
         assert_eq!(
             anthropic.capabilities[&CapabilitySlot::anthropic()],
             policy(
-                &[CredentialAuthKind::OAuth, CredentialAuthKind::ApiKey],
+                &[
+                    CredentialAuthKind::OAuth,
+                    CredentialAuthKind::ApiKey,
+                    CredentialAuthKind::ClaudeSignIn,
+                ],
                 &[("messages", "anthropic-api")]
             )
         );
+        // The Claude sign-in is an Anthropic form only.
+        for id in ["openai", "anthropic", "github", "ssh"] {
+            let provider = catalog.get(&ProviderId::parse(id).unwrap()).unwrap();
+            assert_eq!(
+                provider.supports_authentication_kind(CredentialAuthKind::ClaudeSignIn),
+                id == "anthropic",
+                "{id}"
+            );
+        }
     }
 }

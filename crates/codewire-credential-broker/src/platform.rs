@@ -43,7 +43,7 @@ use crate::timing::{self, AuthorityUse, MaterialCacheUse, Phase};
 use crate::{
     BrokerCredentialLease, BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest,
     BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
-    CanonicalCodexOAuthBundle, GitHubAppUserOAuthBundle,
+    CanonicalClaudeOAuthBundle, CanonicalCodexOAuthBundle, GitHubAppUserOAuthBundle,
 };
 pub use decision::AUTHORITY_DECISION_REUSE;
 use decision::EpochDecision;
@@ -814,20 +814,27 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             )
             .await
             .map_err(refresh_lease_error)?;
+        let metadata = &admission.record.metadata;
         let expected_form = match request.kind {
             BrokerCredentialRefreshKind::CodexOAuth => {
-                admission.record.metadata.provider.as_str() == "openai"
+                metadata.provider.as_str() == "openai"
+                    && metadata.authentication_kind == CredentialAuthKind::OAuth
                     && request.grant.capability_slot.as_str() == "codex"
             }
             BrokerCredentialRefreshKind::GitHubAppUserOAuth => {
-                admission.record.metadata.provider.as_str() == "github"
+                metadata.provider.as_str() == "github"
+                    && metadata.authentication_kind == CredentialAuthKind::OAuth
                     && request.grant.capability_slot.as_str() == "github"
             }
+            // Never a Claude subscription token, which is the provider's
+            // OAuth kind and has no refresh.
+            BrokerCredentialRefreshKind::ClaudeOAuth => {
+                metadata.provider.as_str() == "anthropic"
+                    && metadata.authentication_kind == CredentialAuthKind::ClaudeSignIn
+                    && request.grant.capability_slot.as_str() == "anthropic"
+            }
         };
-        if !expected_form
-            || admission.record.metadata.authentication_kind != CredentialAuthKind::OAuth
-            || !same_grant_binding(&admission.grant, &request.grant)
-        {
+        if !expected_form || !same_grant_binding(&admission.grant, &request.grant) {
             return Err(BrokerRefreshError::Denied);
         }
         // A refresh started for login delivery keeps that delivery's whole
@@ -1099,6 +1106,7 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
                         provider = match request.kind {
                             BrokerCredentialRefreshKind::CodexOAuth => "openai",
                             BrokerCredentialRefreshKind::GitHubAppUserOAuth => "github",
+                            BrokerCredentialRefreshKind::ClaudeOAuth => "anthropic",
                         },
                         failure = "abandoned",
                         "started credential refresh passed its execution deadline without an outcome"
@@ -1235,6 +1243,20 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         material: GitHubAppUserOAuthBundle,
     ) -> Result<(), BrokerRefreshError> {
         if permit.request.kind != BrokerCredentialRefreshKind::GitHubAppUserOAuth {
+            return Err(BrokerRefreshError::Denied);
+        }
+        let mut bytes = material.into_bytes();
+        let value = ProtectedValue::new(std::mem::take(&mut *bytes))
+            .map_err(|_| BrokerRefreshError::InvalidResponse)?;
+        self.commit_refresh_value(permit, value).await
+    }
+
+    async fn commit_claude_oauth_refresh(
+        &self,
+        permit: Self::StartedRefresh,
+        material: CanonicalClaudeOAuthBundle,
+    ) -> Result<(), BrokerRefreshError> {
+        if permit.request.kind != BrokerCredentialRefreshKind::ClaudeOAuth {
             return Err(BrokerRefreshError::Denied);
         }
         let mut bytes = material.into_bytes();
