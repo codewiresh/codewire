@@ -585,7 +585,7 @@ if [ "$event_selected" = false ]; then
     fi
 
     case "$path" in
-      .gitattributes|.gitignore|.dockerignore|.env.example|turbo.json)
+      .gitattributes|.gitignore|.dockerignore|.env.example|.envrc.example|turbo.json)
         select_token policy
         recognized=true
         ;;
@@ -1718,6 +1718,7 @@ if [ "$event_selected" = false ]; then
 
     case "$path" in
       scripts/ci/images/cosign-private-signing-config.json|\
+      scripts/ci/images/pipeline-identity.sh|\
       scripts/ci/images/sign-runtime-image-set.sh|\
       scripts/ci/tests/test-sign-runtime-image-set.sh|\
       scripts/ci/trust/codewire-runtime-signing.pub)
@@ -1774,6 +1775,7 @@ if [ "$event_selected" = false ]; then
       keys/production-release.asc|\
       .gitea/workflows/observe-*.yaml|\
       scripts/ci/images/build-push-image.sh|scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/images/pipeline-identity.sh|\
       scripts/ci/images/build-support-platform.sh|\
       scripts/ci/images/release-support-pair-state.sh|scripts/ci/images/join-release-support-image.sh|\
       scripts/ci/images/compute-image-tags.sh|\

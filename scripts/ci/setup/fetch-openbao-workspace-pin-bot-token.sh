@@ -23,7 +23,7 @@ fail() {
 }
 readonly token_file="$1"
 
-readonly openbao_addr='https://openbao.example.invalid'
+readonly openbao_addr="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly openbao_role='codewire-source-workspace-pin-propose'
 readonly openbao_audience='openbao-codewire-source-workspace-pin-propose'
 readonly secret_path='platform/data/ci/codewire/workspace-pin-bot'

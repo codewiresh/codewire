@@ -13,8 +13,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# shellcheck source=scripts/ci/images/pipeline-identity.sh
+source "$ROOT/scripts/ci/images/pipeline-identity.sh"
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
-readonly PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+readonly PROVENANCE_BUILDER_ID="$PIPELINE_BUILDER_ID"
 readonly PUBLISH_REGISTRY_HOST='registry.example.invalid'
 readonly PROTECTED_SCCACHE_BUCKET='example-ci-cache-protected'
 readonly PROTECTED_SCCACHE_ENDPOINT='https://00000000000000000000000000000000.r2.cloudflarestorage.com'

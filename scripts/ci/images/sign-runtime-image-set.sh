@@ -17,16 +17,18 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# shellcheck source=scripts/ci/images/pipeline-identity.sh
+source "$ROOT/scripts/ci/images/pipeline-identity.sh"
 readonly BUNDLE_INPUT="$1"
 readonly PUBLIC_KEY_INPUT="$2"
-readonly OPENBAO_ADDR='https://openbao.example.invalid'
+readonly OPENBAO_ADDR="$PIPELINE_OPENBAO_ADDR"
 readonly OPENBAO_ROLE='codewire-source-dev-publisher'
 readonly OPENBAO_AUDIENCE='openbao-codewire-source-dev-publisher'
 readonly OPENBAO_KEY='openbao://codewire-runtime'
 readonly GHCR_HOST='ghcr.io'
 readonly HARBOR_HOST='registry.example.invalid'
-readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
-readonly PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+readonly PROVENANCE_SOURCE_URL="$PIPELINE_SOURCE_URL"
+readonly PROVENANCE_BUILDER_ID="$PIPELINE_BUILDER_ID"
 readonly COSIGN_IMAGE='registry.example.invalid/oci-approved/sigstore/cosign/cosign@sha256:6ca1127dc1e9ff19f3f2bfa214936813a86fbbf52919652eda49d393c888ad3c'
 readonly SIGNING_CONFIG_SOURCE="$ROOT/scripts/ci/images/cosign-private-signing-config.json"
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)

@@ -24,7 +24,7 @@ fail() {
 }
 readonly key_directory="$1"
 
-readonly openbao_addr='https://openbao.example.invalid'
+readonly openbao_addr="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly openbao_role='codewire-source-cli-release-signing'
 readonly openbao_audience='openbao-codewire-source-cli-release-signing'
 readonly developer_id_path='platform/data/ci/codewire/macos-developer-id'

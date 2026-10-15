@@ -26,7 +26,7 @@ readonly output_dir="$1"
 : "${OPENBAO_ROLE:?OpenBao role is required}"
 : "${OPENBAO_AUDIENCE:?OpenBao audience is required}"
 
-readonly OPENBAO_ADDR='https://openbao.example.invalid'
+readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly CREDENTIAL_PATH='platform/data/ci/codewire/arm64-buildkit-client'
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
 # Only the two protected-main support-pair publishers may read the node's

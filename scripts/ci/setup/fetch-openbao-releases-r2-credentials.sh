@@ -21,7 +21,7 @@ fail() {
 }
 readonly credentials_file="$1"
 
-readonly openbao_addr='https://openbao.example.invalid'
+readonly openbao_addr="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly openbao_role='codewire-source-cli-releases-r2'
 readonly openbao_audience='openbao-codewire-source-cli-releases-r2'
 readonly secret_path='platform/data/ci/codewire/releases-r2'

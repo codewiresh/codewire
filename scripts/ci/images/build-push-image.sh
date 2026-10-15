@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# shellcheck source=scripts/ci/images/pipeline-identity.sh
+source "$ROOT/scripts/ci/images/pipeline-identity.sh"
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
   echo "Usage: $0 IMAGE_NAME DOCKERFILE [CONTEXT]" >&2
@@ -36,8 +38,8 @@ readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5
 # multi-platform index (docker/buildkit-syft-scanner 1.12.0, promoted by
 # infra#1383): the native arm64 support build runs its arm64 variant.
 readonly SBOM_GENERATOR_IMAGE='registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9'
-readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
-readonly EXPECTED_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+readonly PROVENANCE_SOURCE_URL="$PIPELINE_SOURCE_URL"
+readonly EXPECTED_PROVENANCE_BUILDER_ID="$PIPELINE_BUILDER_ID"
 
 provenance_builder_id="${CODEWIRE_PROVENANCE_BUILDER_ID:-$EXPECTED_PROVENANCE_BUILDER_ID}"
 if [ "$provenance_builder_id" != "$EXPECTED_PROVENANCE_BUILDER_ID" ]; then

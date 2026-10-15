@@ -16,6 +16,8 @@ fixture="$work/fixture"
 mkdir -p "$fixture/scripts/ci/images" "$fixture/bin" "$fixture/tmp"
 cp "$ROOT/scripts/ci/images/build-push-runtime-images.sh" \
   "$fixture/scripts/ci/images/build-push-runtime-images.sh"
+cp "$ROOT/scripts/ci/images/pipeline-identity.sh" \
+  "$fixture/scripts/ci/images/pipeline-identity.sh"
 mkdir -p "$fixture/scripts/ci/setup"
 cat >"$fixture/scripts/ci/setup/fetch-openbao-harbor-credentials.sh" <<'SH'
 #!/usr/bin/env bash
