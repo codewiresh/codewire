@@ -1721,6 +1721,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/pipeline-identity.sh|\
       scripts/ci/images/sign-runtime-image-set.sh|\
       scripts/ci/tests/test-sign-runtime-image-set.sh|\
+      scripts/ci/images/verify-runtime-image-signatures.sh|\
+      scripts/ci/tests/test-verify-runtime-image-signatures.sh|\
       scripts/ci/trust/codewire-runtime-signing.pub)
         select_token deploy
         select_token policy
