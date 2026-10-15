@@ -4,8 +4,9 @@ use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::PathBuf;
 
+use codewire_project::valid_vm_only_patterns;
 use codewire_project::{ProjectSpec, parse_repository_ssh_host};
-use codewire_vmm_guest_probe::{DirectShareMount, DirectSharePlan, valid_vm_only_paths};
+use codewire_vmm_guest_probe::{DirectShareMount, DirectSharePlan};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use url::Url;
@@ -94,7 +95,7 @@ impl WorkspacePlan {
                         || !valid_object_id(identity)
                         || (*mode == WorkspaceSourceMode::Clone && destination != "/workspace")
                         || (*mode == WorkspaceSourceMode::Clone && !vm_only.is_empty())
-                        || !valid_vm_only_paths(vm_only)
+                        || !valid_vm_only_patterns(vm_only)
                     {
                         return Err(WorkspacePlanError::InvalidPlan);
                     }

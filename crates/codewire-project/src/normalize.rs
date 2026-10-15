@@ -530,72 +530,24 @@ fn normalize_mounts(mounts: Vec<RawMountBlock>) -> Result<Vec<LocalMountIntent>,
         .collect()
 }
 
-/// Normalized relative paths, each kept on the VM's own disk. Order is kept;
-/// duplicates and paths nested in another are refused.
-fn normalize_vm_only(paths: Vec<String>) -> Result<Vec<String>, ProjectError> {
-    enforce_count(VM_ONLY_FIELD, paths.len(), MAX_VM_ONLY_PATHS)?;
-    let mut normalized: Vec<String> = Vec::with_capacity(paths.len());
-    for path in paths {
-        let path = path.trim();
-        if path.is_empty() {
-            return invalid(VM_ONLY_FIELD, "entries must not be empty");
-        }
-        if path.starts_with('/') {
-            return invalid(
-                VM_ONLY_FIELD,
-                format!("{path:?} must be relative to the project directory"),
-            );
-        }
-        if path
-            .split('/')
-            .any(|segment| segment.eq_ignore_ascii_case(".git"))
-        {
-            return invalid(
-                VM_ONLY_FIELD,
-                format!("{path:?} would hide the Git repository from the VM"),
-            );
-        }
-        if path.len() > MAX_VM_ONLY_PATH_BYTES
-            || path.ends_with('/')
-            || path.chars().any(char::is_control)
-            || path.split('/').any(|segment| {
-                segment.is_empty()
-                    || segment == "."
-                    || segment == ".."
-                    || segment.len() > MAX_PATH_COMPONENT_BYTES
-            })
-        {
-            return invalid(
-                VM_ONLY_FIELD,
-                format!(
-                    "{path:?} must be a plain relative path such as node_modules or packages/web/node_modules, without ., .. or empty segments"
-                ),
-            );
-        }
-        if let Some(other) = normalized
-            .iter()
-            .find(|other| vm_only_paths_overlap(other, path))
-        {
-            return invalid(VM_ONLY_FIELD, format!("{other:?} and {path:?} overlap"));
-        }
-        normalized.push(path.to_owned());
+/// Canonical `.dockerignore`-style patterns, each naming project folders kept
+/// on the VM's own disk. Order is kept; see [`VmOnlyPatterns`].
+fn normalize_vm_only(patterns: Vec<String>) -> Result<Vec<String>, ProjectError> {
+    if patterns.len() > MAX_VM_ONLY_PATTERNS {
+        return Err(ProjectError::TooManyEntries {
+            field: VM_ONLY_FIELD,
+            maximum: MAX_VM_ONLY_PATTERNS,
+        });
     }
-    if normalized.iter().map(String::len).sum::<usize>() > MAX_VM_ONLY_TOTAL_BYTES {
-        return invalid(VM_ONLY_FIELD, "paths exceed 4 KiB in all");
-    }
+    let normalized = patterns
+        .iter()
+        .map(|pattern| normalize_vm_only_pattern(pattern))
+        .collect::<Vec<_>>();
+    VmOnlyPatterns::parse(&normalized).map_err(|error| ProjectError::InvalidField {
+        field: VM_ONLY_FIELD,
+        detail: error.to_string(),
+    })?;
     Ok(normalized)
-}
-
-/// Equal or nested paths, ignoring ASCII case: macOS shares are
-/// case-insensitive.
-fn vm_only_paths_overlap(left: &str, right: &str) -> bool {
-    let (left, right) = (left.to_ascii_lowercase(), right.to_ascii_lowercase());
-    let nested = |outer: &str, inner: &str| {
-        inner
-            .strip_prefix(outer)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-    };
-    left == right || nested(&left, &right) || nested(&right, &left)
 }
 
 fn validate_workspace_input_destinations(

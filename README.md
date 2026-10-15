@@ -151,7 +151,8 @@ the change and binds it at its next start; changes persist across restarts.
 
 Small files on the live project mount are 10–140× slower to create than on
 the VM's own disk, so dependency and build folders stay in the VM.
-`workspace.vm_only` lists them, relative to the project folder:
+`workspace.vm_only` lists them as `.dockerignore`-style patterns, relative to
+the project folder:
 
 ```yaml
 workspace:
@@ -159,33 +160,64 @@ workspace:
     - node_modules
     - target
     - .venv
+    - "**/node_modules"   # every node_modules in a monorepo
 ```
 
-Without the key the list is `node_modules`, `target` and `.venv`, less any
-that Git tracks in the project; `vm_only: []` turns it off. Entries are plain
-relative paths: no absolute paths, `..`, `.git`, empty entries, duplicates or
-nesting, and at most 32. `cw env create --local` shows the list in its review
-("Kept in the VM: node_modules, target, .venv"); a change applies to VMs
-created after it.
+Without the key the list is `node_modules`, `target` and `.venv`, top level
+only, less any that Git tracks in the project; `vm_only: []` turns it off.
 
-- With the default live mount, the guest binds a folder on the VM's disk over
-  each listed path, so installs and builds there run at VM-disk speed. The VM
-  never sees the host's copy and the host never sees the VM's; the VM's copy
-  survives stop and start. A listed folder the host lacks is created on the
-  host, empty, as the mount point (its parent must exist). A symlink or a file
-  at the path, or a missing parent, stays shared, and create says so.
-- Inside the VM a kept folder is a mount point: its contents can be deleted,
-  but the folder itself cannot be removed or renamed. `rm -rf node_modules`
-  and `cargo clean` empty it, then report that it is busy.
-- If the host deletes or replaces a kept folder while the VM runs, for example
-  with `cargo clean` or `rm -rf node_modules` on the host, the guest binds it
-  again within about a second (and recreates the empty host folder). Files the
-  VM writes there in that second land on the host.
-- A copy (`--path-mode copy`, a snapshot of a folder that is not a Git root,
-  or a `mode: copy` mount of the project folder) leaves the listed folders
-  out; a clone already takes only committed files. Read-only mounts and
-  mounts of other folders keep nothing in the VM.
-- If the workspace image's user changes, the kept folders start empty.
+- **Patterns** are anchored at the project folder, as in `.dockerignore`:
+  `node_modules` is the top-level folder only. A `**` segment matches any
+  number of folders, none included (`build/**` also names `build`), `*` any
+  run of characters within a name, `?` one character, `[abc]`, `[a-z]` or
+  `[!a-z]` one character of a class, and `\` escapes the next character.
+  Matching is case-sensitive. Patterns match folders only, never a `.git`
+  folder or anything in one, and a match that holds its own `.git` stays
+  shared. A trailing `/` is ignored. Refused: absolute paths, `..`, `.git`,
+  `!` exceptions, a pattern that is only `**`, duplicates (letter case
+  aside), more than 32 patterns, 256 bytes in one or 2 KiB in all, more than
+  16 segments, or more than 4 `*` in one segment. Patterns may overlap: a
+  matching folder is kept whole, so the outermost match wins.
+- **Review:** `cw env create --local` shows the patterns ("Kept in the VM:
+  node_modules, target, .venv"), the folders each one matches, those that
+  stay shared and why, and any matching folder that holds files Git tracks
+  (in the VM they look deleted, so do not commit there). A change to
+  `vm_only` applies to VMs created after it.
+- **Live mount (the default):** at every start the guest finds the folders
+  that match and binds a folder on the VM's disk over each one, so installs
+  and builds there run at VM-disk speed. The VM never sees the host's copy
+  and the host never sees the VM's; the VM's copy survives stop and start.
+  A folder created after the VM starts that matches is kept from the next
+  start: until then it is shared, and what is written into it before then
+  stays on the host, hidden from the VM, so install again. The search keeps
+  at most 256 folders per VM (plain names first, then the shallowest) and
+  stops after 20,000 folders, 100,000 names, 64 levels or 10 seconds; when a
+  limit stops it, the review and the guest console say so. A plain-names
+  list, such as the default, needs no search. A VM-disk folder that no start
+  has used for 7 days is removed.
+- **Folders the host lacks:** a pattern without wildcards whose folder is
+  missing gets it created on the host, empty, as the mount point (its parent
+  must exist). A symlink or a file at the path, or a missing parent, stays
+  shared, and create says so. A pattern with wildcards keeps only folders
+  that exist.
+- **Inside the VM** a kept folder is a mount point: its contents can be
+  deleted, but the folder itself cannot be removed or renamed.
+  `rm -rf node_modules` and `cargo clean` empty it, then report that it is
+  busy, as does removing a folder that holds one (`rm -rf packages/web`).
+- **Host changes while the VM runs:** if the host deletes or replaces a kept
+  folder, for example with `cargo clean` or `rm -rf node_modules` on the
+  host, the guest binds it again within about a second (and recreates the
+  empty host folder). Files the VM writes there in that second land on the
+  host.
+- **Copy:** a copy (`--path-mode copy`, a snapshot of a folder that is not a
+  Git root, or a `mode: copy` mount of the project folder) leaves every
+  matching folder out, like `.dockerignore`; a clone already takes only
+  committed files.
+- **Not applied:** read-only mounts and mounts of other folders keep nothing
+  in the VM.
+- **Image user changes:** if the workspace image's user changes, the kept
+  folders start empty.
+
 Only declared ports are reachable over Mesh.
 
 ```bash
