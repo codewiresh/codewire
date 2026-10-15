@@ -378,6 +378,9 @@ pub(crate) async fn create_native_environment(
     if reviewed && !review_native_create(&mut args).await? {
         return Ok(None);
     }
+    if reviewed && let Some(profile) = args.profile.as_deref().and_then(local_profile_selector) {
+        super::credentials::offer_local_profile_ssh_key(profile).await?;
+    }
     let name = args
         .name
         .as_deref()
@@ -556,6 +559,14 @@ fn native_direct_mount_warning(mounts: &[v1::LocalMountInput]) -> Option<String>
     Some(format!(
         "Warning: direct mounts let guest root inspect every file beneath each selected host directory.{write_warning} The explicit mode: direct and read_only choice acknowledges this grant."
     ))
+}
+
+/// The selector of an explicitly local credential profile reference.
+fn local_profile_selector(reference: &str) -> Option<&str> {
+    codewire_project::StorageReference::profile(reference)
+        .ok()
+        .filter(|reference| reference.placement == Some(codewire_project::StoragePlacement::Local))
+        .map(|reference| reference.selector)
 }
 
 /// A create in a terminal shows the settings it will use and lets the person
@@ -2580,6 +2591,15 @@ mod tests {
     /// A platform profile qualifies a managed agent in a local VM by its
     /// pinned slots and the rule hosted Sandboxes use; before, any platform
     /// profile was refused.
+    #[test]
+    fn create_offers_an_ssh_key_only_for_explicitly_local_profiles() {
+        assert_eq!(local_profile_selector("local:work"), Some("work"));
+        assert_eq!(local_profile_selector("local:user/work"), Some("user/work"));
+        assert_eq!(local_profile_selector("platform:work"), None);
+        assert_eq!(local_profile_selector("work"), None);
+        assert_eq!(local_profile_selector("local:"), None);
+    }
+
     #[test]
     fn a_platform_profile_qualifies_managed_agents_by_its_pinned_slots() {
         use codewire_access::ManagedAgent::{Claude, Codex};

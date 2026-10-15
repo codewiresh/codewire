@@ -18,9 +18,9 @@ use super::storage_placement::{
     StoragePlacement, require_reference_placement, resolve_storage_placement,
 };
 use super::{
-    CredentialProfileCommand, CredentialProfileDeleteArgs, CredentialProfileSelectorArgs,
-    CredentialProfilesCommand, CredentialsArgs, CredentialsCommand, EchoGuard, Globals,
-    OutputFormat, trimmed_required,
+    CredentialGenerateArgs, CredentialProfileCommand, CredentialProfileDeleteArgs,
+    CredentialProfileSelectorArgs, CredentialProfilesCommand, CredentialsArgs, CredentialsCommand,
+    EchoGuard, Globals, OutputFormat, trimmed_required,
 };
 
 pub(super) const CODEX_DEVICE_AUTHORIZATION_GUIDANCE: &str = "Before connecting, turn on \"Enable device code authorization for Codex\" in ChatGPT Security settings: https://chatgpt.com/#settings/Security. For a managed workspace, your administrator may need to allow device code login.";
@@ -32,7 +32,14 @@ const MAX_SSH_PASSPHRASE_BYTES: usize = 1024;
 pub(super) enum CredentialOperation {
     Credential(CredentialsCommand),
     Profile(CredentialProfileCommand),
+    /// `--profile NAME generate ssh`: generate the identity, then set it as
+    /// the profile's SSH key.
+    GenerateIntoProfile(CredentialGenerateArgs, String),
 }
+
+/// Printed after a generated SSH public key.
+pub(super) const SSH_PUBLIC_KEY_GITHUB_HINT: &str =
+    "Add the public key above to GitHub: https://github.com/settings/ssh/new";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CredentialDispatch {
@@ -215,8 +222,11 @@ pub(super) fn resolve_credential_operation(
                 yes: args.yes,
             })
         }
+        CredentialsCommand::Generate(args) => {
+            return Ok(CredentialOperation::GenerateIntoProfile(args, profile));
+        }
         _ => anyhow::bail!(
-            "--profile supports set, unset, list, get, revisions and delete; enrollment never binds a profile"
+            "--profile supports set, unset, list, get, revisions, delete and generate ssh; connect and add never bind a profile"
         ),
     };
     Ok(CredentialOperation::Profile(command))

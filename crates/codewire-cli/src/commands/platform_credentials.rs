@@ -4,12 +4,30 @@ use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::{
     CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE, CLAUDE_SUBSCRIPTION_TOKEN_PROMPT,
-    CODEX_DEVICE_AUTHORIZATION_GUIDANCE, ParsedCredentialSelector, parse_credential_selector,
-    prompt_claude_code, prompt_credential_material, prompt_named_material, read_ssh_import,
-    validate_ssh_generation, validate_ssh_import,
+    CODEX_DEVICE_AUTHORIZATION_GUIDANCE, ParsedCredentialSelector, SSH_PUBLIC_KEY_GITHUB_HINT,
+    parse_credential_selector, prompt_claude_code, prompt_credential_material,
+    prompt_named_material, read_ssh_import, validate_ssh_generation, validate_ssh_import,
 };
 use super::login_screen;
 use super::*;
+
+/// Generates a cloud SSH identity and prints it with its public key.
+pub(super) async fn generate_ssh(
+    client: &CodewireClient,
+    args: &CredentialGenerateArgs,
+) -> anyhow::Result<rpc::Credential> {
+    let name = validate_ssh_generation(args)?;
+    let response = client.generate_ssh_credential(rpc::GenerateSshCredentialRequest {
+        name, expires_at_unix: args.expires_at, ..Default::default()
+    }).await.context("generate cloud SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
+    let credential = response
+        .credential
+        .into_option()
+        .context("cloud omitted SSH metadata")?;
+    print(std::slice::from_ref(&credential), OutputFormat::Text)?;
+    eprintln!("{SSH_PUBLIC_KEY_GITHUB_HINT}");
+    Ok(credential)
+}
 
 /// The `add` provider word for a Claude subscription token: the anthropic
 /// provider's OAuth kind, enrolled by paste.
@@ -20,19 +38,7 @@ pub(super) async fn handle(
     command: CredentialsCommand,
 ) -> anyhow::Result<()> {
     match command {
-        CredentialsCommand::Generate(args) => {
-            let name = validate_ssh_generation(&args)?;
-            let response = client.generate_ssh_credential(rpc::GenerateSshCredentialRequest {
-                name, expires_at_unix: args.expires_at, ..Default::default()
-            }).await.context("generate platform SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
-            print(
-                &[response
-                    .credential
-                    .into_option()
-                    .context("platform omitted SSH metadata")?],
-                OutputFormat::Text,
-            )
-        }
+        CredentialsCommand::Generate(args) => generate_ssh(client, &args).await.map(drop),
         CredentialsCommand::Connect(args) => {
             let (provider, kind, label) = match args.provider {
                 CredentialConnectProviderArg::Codex => {
