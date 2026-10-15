@@ -239,8 +239,6 @@ build_database_suites() {
     cargo test -p codewire-billing --lib --no-run
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-mesh --lib --no-run
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-orchestration --lib --no-run
 }
 
 database_lane_core() {
@@ -417,8 +415,10 @@ database_lane_orchestration() {
   assert_passed_count "public credential metadata matrix" "$logfile" 3
 
   logfile="$RUN_DIR/mesh-authorization-receiver.log"
+  # The orchestration batch already built this harness; a CI-profile build
+  # compiled the crate again for one test.
   DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-orchestration --lib \
+    cargo test --locked -p codewire-orchestration --lib \
       connect::mesh_authorization::tests::generated_mesh_authorization_service_enforces_the_canonical_matrix \
       -- --ignored --exact --nocapture | tee "$logfile"
   assert_passed_count "Mesh authorization receiver matrix" "$logfile" 1
