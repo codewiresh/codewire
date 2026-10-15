@@ -579,21 +579,26 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
         platform: v1::PlatformCredentialBinding,
         bound: Duration,
     ) -> Result<bool, Status> {
+        // One deadline covers the whole question: the local binding check as
+        // well as the connector's OAuth read, `userinfo` and listing.
+        let deadline = tokio::time::Instant::now() + bound;
         let binding = crate::PlatformCredentialBinding::from_proto(platform)?;
         binding.validate()?;
         let authority = Arc::clone(&self.authority);
         let id = environment_id.clone();
-        run_blocking(move || {
-            authority.evaluate_selected_environment_grants(&id, environment_generation, None)
+        let connector = self.platform_connector.clone();
+        tokio::time::timeout_at(deadline, async move {
+            run_blocking(move || {
+                authority.evaluate_selected_environment_grants(&id, environment_generation, None)
+            })
+            .await?;
+            let connector = connector.ok_or_else(|| {
+                Status::unavailable("native platform credential connector is unavailable")
+            })?;
+            connector.github_connected(binding, deadline).await
         })
-        .await?;
-        let connector = self.platform_connector.as_ref().cloned().ok_or_else(|| {
-            Status::unavailable("native platform credential connector is unavailable")
-        })?;
-        let deadline = tokio::time::Instant::now() + bound;
-        tokio::time::timeout_at(deadline, connector.github_connected(binding, deadline))
-            .await
-            .map_err(|_| Status::deadline_exceeded("platform GitHub connection state timed out"))?
+        .await
+        .map_err(|_| Status::deadline_exceeded("platform GitHub connection state timed out"))?
     }
 
     async fn ensure(

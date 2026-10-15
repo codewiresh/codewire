@@ -424,7 +424,9 @@ impl ManagedCredentialClients {
     /// every placement, or `None` when the selection has none for it. Codex
     /// uses the Codex slot, as Codex's own configuration does, and the OpenAI
     /// API-key slot only without one; Claude uses the Anthropic slot. Hosted
-    /// and local VM managed agents both qualify and route by this rule.
+    /// managed agents qualify and route by this rule. A local VM qualifies by
+    /// it too, except that its Codex needs the Codex slot: a VM configures
+    /// Codex only through Codewire's native Codex home.
     pub fn managed_agent_client(self, agent: ManagedAgent) -> Option<ManagedCredentialClient> {
         match agent {
             ManagedAgent::Codex if self.contains(ManagedCredentialClient::Codex) => {

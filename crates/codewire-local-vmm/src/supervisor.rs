@@ -128,6 +128,10 @@ const _: () = assert!(
 const OPERATION_WATCH_BUFFER: usize = 8;
 const OPERATION_PROGRESS_CAPACITY: usize = 256;
 const RUNNER_EVENT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+/// A start's GitHub question to the credential authority: the authority's
+/// own 15-second bound plus a margin, so a stalled authority cannot hold a
+/// start; past it the start omits GitHub.
+const PLATFORM_GITHUB_STATE_CALL_BOUND: Duration = Duration::from_secs(20);
 const MAXIMUM_RUNNER_EVENTS: usize = 128;
 const DAEMON_VSOCK_PORT: u32 = 7777;
 const DEFAULT_OCI_ROOT_DISK_BYTES: u64 = 32 * 1024 * 1024 * 1024;
@@ -859,12 +863,14 @@ impl SupervisorCore {
                 .ok()??;
         sources::platform::resolve_config_directory(&mut binding).ok()?;
         let environment_id = access_environment_id(environment.id).ok()?;
-        self.access_control_client()
-            .await
-            .ok()?
-            .platform_github_connected(&environment_id, generation, binding)
-            .await
-            .ok()
+        let mut client = self.access_control_client().await.ok()?;
+        tokio::time::timeout(
+            PLATFORM_GITHUB_STATE_CALL_BOUND,
+            client.platform_github_connected(&environment_id, generation, binding),
+        )
+        .await
+        .ok()?
+        .ok()
     }
 
     /// Capture only client-slot metadata from the exact selected revision.

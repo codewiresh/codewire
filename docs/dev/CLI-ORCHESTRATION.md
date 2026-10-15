@@ -34,9 +34,10 @@ Native sandboxes retain their protected credential and workspace contracts.
 Creating a host does not copy authentication files into a sandbox.
 
 Managed Linux VM sessions require a selected credential profile, local or
-platform, with a provider for the agent, chosen by the rule a hosted Sandbox
-uses: Codex takes the Codex slot, and the OpenAI API-key slot only without one;
-Claude takes the Anthropic slot. A platform profile qualifies by the slots the
+platform, with a provider for the agent: Codex needs the Codex slot (the
+OpenAI API-key slot serves a managed Codex only in a hosted Sandbox, whose
+launcher writes that provider's configuration); Claude takes the Anthropic
+slot. A platform profile qualifies by the slots the
 VM pinned when its sources were selected. Provider material stays outside the
 VM (the host broker, or the platform broker for a platform profile); the guest
 receives its generated proxy configuration. VM sessions use the same

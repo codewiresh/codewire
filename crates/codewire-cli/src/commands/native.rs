@@ -1169,7 +1169,11 @@ fn native_environment_name_for_id<'a>(
 /// A local VM qualifies a managed agent by the rule hosted Sandboxes use
 /// ([`codewire_access::ManagedCredentialClients::managed_agent_client`]), over
 /// the slots its selected profile pinned: a platform profile's slots as the
-/// environment captured them, a local profile's from its exact revision.
+/// environment captured them, a local profile's from its exact revision. A
+/// VM configures Codex only through Codewire's native Codex home, which the
+/// Codex slot alone provides, so its Codex needs that slot; the OpenAI
+/// API-key slot serves a managed Codex only in a hosted Sandbox, whose
+/// launcher writes that provider's configuration.
 pub(crate) async fn require_native_agent_profile(
     environment_id: &str,
     agent: codewire_access::ManagedAgent,
@@ -1219,10 +1223,19 @@ fn require_managed_agent_client(
     clients: codewire_access::ManagedCredentialClients,
     agent: codewire_access::ManagedAgent,
 ) -> anyhow::Result<()> {
-    if clients.managed_agent_client(agent).is_none() {
+    use codewire_access::{ManagedAgent, ManagedCredentialClient};
+    let served = matches!(
+        (agent, clients.managed_agent_client(agent)),
+        (ManagedAgent::Codex, Some(ManagedCredentialClient::Codex))
+            | (
+                ManagedAgent::Claude,
+                Some(ManagedCredentialClient::Anthropic)
+            )
+    );
+    if !served {
         let provider = match agent {
-            codewire_access::ManagedAgent::Codex => "Codex or OpenAI",
-            codewire_access::ManagedAgent::Claude => "Anthropic",
+            ManagedAgent::Codex => "Codex",
+            ManagedAgent::Claude => "Anthropic",
         };
         anyhow::bail!(
             "the native environment's selected credential profile has no {provider} provider"
@@ -2562,7 +2575,10 @@ mod tests {
         };
         for (slots, codex, claude) in [
             (&["codex", "anthropic", "github"][..], true, true),
-            (&["openai", "github"], true, false),
+            // The OpenAI API-key slot serves a managed Codex only in a
+            // hosted Sandbox: a VM has no such Codex configuration.
+            (&["openai", "github"], false, false),
+            (&["codex", "openai"], true, false),
             (&["anthropic"], false, true),
             (&["ssh", "github"], false, false),
             (&[], false, false),

@@ -1211,7 +1211,7 @@ fn a_managed_agent_uses_the_codex_slot_first_and_the_api_key_slot_only_without_i
             "{slots:?}"
         );
     }
-    // The subscription form is still the Anthropic client.
+    // The subscription and sign-in forms are still the Anthropic client.
     let subscription = clients(&["anthropic"])
         .with_anthropic_subscription_token()
         .unwrap();
@@ -1219,6 +1219,12 @@ fn a_managed_agent_uses_the_codex_slot_first_and_the_api_key_slot_only_without_i
         subscription.managed_agent_client(ManagedAgent::Claude),
         Some(Anthropic)
     );
+    let sign_in = clients(&["anthropic"]).with_anthropic_sign_in().unwrap();
+    assert_eq!(
+        sign_in.managed_agent_client(ManagedAgent::Claude),
+        Some(Anthropic)
+    );
+    assert_eq!(sign_in.managed_agent_client(ManagedAgent::Codex), None);
 }
 
 #[test]
@@ -1240,4 +1246,12 @@ fn a_launch_without_a_usable_github_connection_omits_only_the_github_client() {
             .with_anthropic_subscription_token()
             .unwrap()
     );
+    let sign_in = clients(&["anthropic", "github"])
+        .with_anthropic_sign_in()
+        .unwrap();
+    assert_eq!(
+        sign_in.without_github(),
+        clients(&["anthropic"]).with_anthropic_sign_in().unwrap()
+    );
+    assert!(sign_in.without_github().anthropic_sign_in());
 }
