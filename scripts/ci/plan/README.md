@@ -49,8 +49,11 @@ private protobuf inputs. Unknown files inside a reachable package remain
 unclassified even when a runtime image also owns `crates/**`.
 
 This split does not change capability selection or exact-source publication.
-Selected Kind still builds and verifies its workspace image, then consumes the
-exact local image receipt. The receipt retains its contract, architecture and
+Selected Kind runs the published workspace pin unless the change alters the
+image definition (`images/base`, `images/workspace`); then it builds and
+verifies its workspace image and consumes the exact local image receipt. With
+the pin, Container contract verification keeps any selected exact-source
+workspace verification. The receipt retains its contract, architecture and
 immutable image bindings. A local receipt also covers a later tree when this
 planner shows `workspace_image_verification` unchanged from the receipt's
 commit (see `docs/dev/WORKSPACE-CACHE.md`). Only standalone workspace

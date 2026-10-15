@@ -399,6 +399,89 @@ fn platform_environment_list_marks_selection_and_daemon_health() {
     assert_eq!(entries[0].daemon_health, "ready");
 }
 
+#[tokio::test]
+async fn platform_environment_list_asks_daemon_status_only_for_running_environments() {
+    use buffa::Message as _;
+    const STATUS_PATH: &str = "/codewire.v1.EnvironmentService/GetEnvironmentDaemonStatus";
+    let environments = || {
+        vec![
+            test_environment("env-creating", Some("creating"), "creating"),
+            test_environment("env-running", Some("running"), "running"),
+            test_environment("env-stopped", Some("stopped"), "stopped"),
+            test_environment("env-error", Some("error"), "error"),
+            test_environment("env-destroying", Some("destroying"), "destroying"),
+            test_environment("env-destroyed", Some("destroyed"), "destroyed"),
+            test_environment("env-running-2", Some("running-2"), "running"),
+        ]
+    };
+    let client = |server: &wiremock::MockServer| {
+        EnvironmentClient::new(&config::ResolvedPlatformConfig::static_token(
+            server.uri(),
+            "synthetic-daemon-status-token",
+            true,
+            None,
+        ))
+        .unwrap()
+    };
+
+    let server = wiremock::MockServer::start().await;
+    let ready = codewire_client::GetEnvironmentDaemonStatusResponse {
+        status: Some(codewire_client::EnvironmentDaemonStatus {
+            state: codewire_client::EnvironmentDaemonState::Ready.into(),
+            ..Default::default()
+        })
+        .into(),
+        ..Default::default()
+    };
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path(STATUS_PATH))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "application/proto")
+                .set_body_bytes(ready.encode_to_vec()),
+        )
+        .mount(&server)
+        .await;
+    let health =
+        platform_environment_daemon_health(&client(&server), "org_test", environments()).await;
+    let health = health
+        .iter()
+        .map(|(environment, health)| (environment.id.as_str(), health.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        health,
+        [
+            ("env-creating", "unavailable"),
+            ("env-running", "ready"),
+            ("env-stopped", "unavailable"),
+            ("env-error", "unavailable"),
+            ("env-destroying", "unavailable"),
+            ("env-destroyed", "unavailable"),
+            ("env-running-2", "ready"),
+        ]
+    );
+    let asked = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| {
+            let mut body = request.body.as_slice();
+            codewire_client::GetEnvironmentDaemonStatusRequest::decode(&mut body)
+                .unwrap()
+                .environment_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(asked, ["env-running", "env-running-2"]);
+
+    // A running environment whose status call fails is still listed, as before.
+    let failing = wiremock::MockServer::start().await;
+    let health =
+        platform_environment_daemon_health(&client(&failing), "org_test", environments()).await;
+    assert!(health.iter().all(|(_, health)| health == "unavailable"));
+    assert_eq!(failing.received_requests().await.unwrap().len(), 2);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn native_environment_list_uses_explicit_current_then_supervisor_selection() {

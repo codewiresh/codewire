@@ -380,6 +380,17 @@ pub(crate) fn codex_login_refused(reason: &'static str) {
     );
 }
 
+/// [`codex_login_refused`] for the Claude login, with the same closed reasons
+/// and `scopes_outside_sign_in`.
+pub(crate) fn claude_login_refused(reason: &'static str) {
+    tracing::info!(
+        target: TARGET,
+        event = "claude_login_refused",
+        reason,
+        "credential broker Claude login refused"
+    );
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::collections::BTreeSet;
@@ -533,7 +544,7 @@ pub(crate) mod tests {
         "in_use",
         "message",
     ];
-    const CODEX_LOGIN_REFUSED_FIELDS: &[&str] = &["event", "reason", "message"];
+    const LOGIN_REFUSED_FIELDS: &[&str] = &["event", "reason", "message"];
     /// Every string a timing line may carry besides a canonical request UUID.
     const CLOSED_LABELS: &[&str] = &[
         "proxied_request",
@@ -576,9 +587,14 @@ pub(crate) mod tests {
         "codex_login_in_flight",
         "codex_login_refused",
         "credential broker Codex login refused",
+        "claude_login",
+        "claude_login_in_flight",
+        "claude_login_refused",
+        "credential broker Claude login refused",
         "deadline_passed",
         "deadline_too_far",
         "deadline_passed_before_seal",
+        "scopes_outside_sign_in",
         "hit",
         "miss",
         "bypass",
@@ -598,7 +614,7 @@ pub(crate) mod tests {
             Some("proxied_request") => REQUEST_FIELDS,
             Some("epoch_admission") => EPOCH_FIELDS,
             Some("capacity_rejected") => CAPACITY_FIELDS,
-            Some("codex_login_refused") => CODEX_LOGIN_REFUSED_FIELDS,
+            Some("codex_login_refused" | "claude_login_refused") => LOGIN_REFUSED_FIELDS,
             other => panic!("unknown timing event {other:?}"),
         }
         .iter()

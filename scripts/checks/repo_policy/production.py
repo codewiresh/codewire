@@ -97,7 +97,7 @@ def validate_production_source(files: dict[str, Any]) -> str:
         pin = one_match(
             files["kustomization"],
             rf"^\s*- name: git\.example\.com/codewire/{name}\s*\n"
-            rf"\s+newName: git\.example\.invalid/codewire/{name}\s*\n"
+            rf"\s+newName: registry\.example\.invalid/codewire/{name}\s*\n"
             r"\s+newTag: (v\d+\.\d+\.\d+)\s*\n"
             r"\s+digest: (sha256:[0-9a-f]{64})\s*$",
             f"{name} image",
@@ -107,7 +107,7 @@ def validate_production_source(files: dict[str, Any]) -> str:
 
     daemon = one_match(
         files["daemon_patch"],
-        r"^\s*SANDBOX_DAEMON_IMAGE:\s*git\.example\.invalid/codewire/daemon:(v\d+\.\d+\.\d+)@(sha256:[0-9a-f]{64})\s*$",
+        r"^\s*SANDBOX_DAEMON_IMAGE:\s*registry\.example\.invalid/codewire/daemon:(v\d+\.\d+\.\d+)@(sha256:[0-9a-f]{64})\s*$",
         "daemon image",
     )
     tags["daemon"] = daemon.group(1)
@@ -115,7 +115,7 @@ def validate_production_source(files: dict[str, Any]) -> str:
 
     mesh = one_match(
         files["mesh_release"],
-        r"^\s*image:\s*\n\s+repository:\s*git\.example\.invalid/codewire/mesh\s*\n"
+        r"^\s*image:\s*\n\s+repository:\s*registry\.example\.invalid/codewire/mesh\s*\n"
         r"\s+tag:\s*(v\d+\.\d+\.\d+)\s*\n"
         r"\s+digest:\s*(sha256:[0-9a-f]{64})\s*$",
         "mesh image",

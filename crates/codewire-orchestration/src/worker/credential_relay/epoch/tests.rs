@@ -2,6 +2,7 @@
 //! claim Kubernetes authentication, provider success, or protected-store proof.
 mod budgets;
 mod relay;
+mod ssh_deadlines;
 
 use super::*;
 use crate::worker::credential_relay::budget::Limits;
@@ -474,13 +475,18 @@ async fn broker_admission_precedes_open_and_typed_frames_are_preserved() {
 }
 
 #[tokio::test]
-async fn broker_capabilities_reach_the_open_and_codex_login_frames_relay_opaquely() {
+async fn broker_capabilities_reach_the_open_and_login_frames_relay_opaquely() {
     for current_broker in [false, true] {
         let mut fixture = Fixture::new().await;
         if current_broker {
             // A malformed and an unknown value are dropped, never forwarded.
-            *fixture.broker_capabilities.lock().unwrap() =
-                vec!["future-op", "Not-Canonical", "codex-login", "codex-login"];
+            *fixture.broker_capabilities.lock().unwrap() = vec![
+                "future-op",
+                "Not-Canonical",
+                "codex-login",
+                "codex-login",
+                "claude-login",
+            ];
         }
         let (cancel, task) = fixture.epoch();
         let mut daemon = bounded(fixture.daemon_calls.recv()).await.unwrap();
@@ -505,7 +511,7 @@ async fn broker_capabilities_reach_the_open_and_codex_login_frames_relay_opaquel
             // Codex login it would end the epoch on.
             assert!(open.capabilities.is_empty());
         } else {
-            assert_eq!(open.capabilities, ["codex-login"]);
+            assert_eq!(open.capabilities, ["codex-login", "claude-login"]);
             let request = v1::CodexLoginRequest {
                 request_id: Uuid::new_v4().to_string(),
                 recipient_public_key: vec![7; 32],
@@ -557,6 +563,50 @@ async fn broker_capabilities_reach_the_open_and_codex_login_frames_relay_opaquel
                     ))
                 );
             }
+            let request = v1::ClaudeLoginRequest {
+                request_id: Uuid::new_v4().to_string(),
+                recipient_public_key: vec![8; 32],
+                deadline_unix_ms: 123456,
+            };
+            daemon
+                .output
+                .send(Ok(v1::CredentialBridgeGuestMessage {
+                    payload: Some(v1::credential_bridge_guest_message::Payload::ClaudeLogin(
+                        request.clone(),
+                    )),
+                }))
+                .await
+                .unwrap();
+            assert_eq!(
+                bounded(input.message()).await.unwrap().unwrap().payload,
+                Some(v1::credential_bridge_guest_message::Payload::ClaudeLogin(
+                    request.clone()
+                ))
+            );
+            let response = v1::ClaudeLoginResponse {
+                request_id: request.request_id.clone(),
+                result: Some(v1::claude_login_response::Result::SealedLogin(
+                    b"opaque-synthetic-sealed-claude-login".to_vec(),
+                )),
+            };
+            output
+                .send(Ok(v1::CredentialBridgeHostMessage {
+                    payload: Some(v1::credential_bridge_host_message::Payload::ClaudeLogin(
+                        response.clone(),
+                    )),
+                }))
+                .await
+                .unwrap();
+            assert_eq!(
+                bounded(daemon.input.message())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .payload,
+                Some(v1::credential_bridge_host_message::Payload::ClaudeLogin(
+                    response
+                ))
+            );
         }
         cancel.cancel();
         bounded(task).await.unwrap().unwrap();

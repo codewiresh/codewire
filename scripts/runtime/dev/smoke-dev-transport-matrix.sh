@@ -175,8 +175,8 @@ current_daemon_tag() {
 
   image="$(kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get configmap "$configmap" -o json |
     jq -r '.data.SANDBOX_DAEMON_IMAGE // empty')"
-  [[ "$image" == git.example.invalid/codewire/daemon:* ]] || \
-    die "dev SANDBOX_DAEMON_IMAGE=$image, expected git.example.invalid/codewire/daemon:<tag>"
+  [[ "$image" == registry.example.invalid/codewire/daemon:* ]] || \
+    die "dev SANDBOX_DAEMON_IMAGE=$image, expected registry.example.invalid/codewire/daemon:<tag>"
   printf '%s\n' "${image##*:}"
 }
 

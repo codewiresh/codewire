@@ -332,7 +332,7 @@
     "longhorn_v1": {
       "attach_ms": 10000,
       "provision_ms": 3000,
-      "source": "docs/plans/2026-09-29-fast-sandbox-starts.md (Dev, 2026-09-29, one traced start)"
+      "source": "2026-09-29-fast-sandbox-starts.md (Dev, 2026-09-29, one traced start)"
     }
   },
   "remote_snapshot": {

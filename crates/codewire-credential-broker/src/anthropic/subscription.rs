@@ -68,7 +68,7 @@ impl Default for AnthropicSubscriptionTokenAdapter {
 }
 
 /// The caller's beta list, as one value, with the OAuth flag present.
-fn with_oauth_beta(headers: &mut HeaderMap) -> Result<(), CredentialBrokerError> {
+pub(super) fn with_oauth_beta(headers: &mut HeaderMap) -> Result<(), CredentialBrokerError> {
     let mut tokens = Vec::new();
     for value in headers.get_all("anthropic-beta") {
         let value = value
@@ -91,7 +91,7 @@ fn with_oauth_beta(headers: &mut HeaderMap) -> Result<(), CredentialBrokerError>
     Ok(())
 }
 
-fn route() -> ProxyRouteConfig {
+pub(super) fn route() -> ProxyRouteConfig {
     route_with(
         "codewire-anthropic-subscription-token",
         ProxyInjectionConfig::Bearer {

@@ -69,6 +69,12 @@ stays in Codewire; the Sandbox receives only a placeholder. Codewire records an
 expiry one year after you add it; replace it with `cw credentials --platform
 rotate NAME`.
 
+Or sign in to Claude itself: `cw credentials --platform connect claude --name
+NAME` prints a link to Claude's sign-in page. Sign in with the account whose
+plan you want, paste the `code#state` Claude shows, and select the credential
+the same way. Codewire keeps the login and refreshes it; repeat the command
+with the same name to reconnect.
+
 ## Run durable sessions
 
 Pass the environment first and the command after `--`:

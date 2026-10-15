@@ -379,6 +379,7 @@ class SuiteRoute(unittest.TestCase):
 require_kind_errexit() { :; }
 require_tool() { :; }
 python3() { printf '%s\\0' "$@" >"$CAPTURED"; printf '%s' "${CW_RUNTIME_MANAGED_AGENTS-}" >"$CAPTURED.mode"; return 46; }
+run_retained_managed_agents_journey() { printf 'managed-only' >"$CAPTURED.route"; return 47; }
 if [ "$SELECT_MANAGED" = 1 ]; then run_retained_cw_managed_agents_suite; else run_retained_cw_runtime_suite; fi
 '''
         environment = {"PATH": "/usr/bin:/bin", "HOME": str(directory), "KIND_E2E_COMMON_LOADED": "1",
@@ -405,10 +406,14 @@ if [ "$SELECT_MANAGED" = 1 ]; then run_retained_cw_managed_agents_suite; else ru
             self.assertEqual(original_capture.read_bytes(), selected_capture.read_bytes())
             self.assertEqual(Path(str(original_capture) + ".mode").read_bytes(), b"")
             self.assertEqual(Path(str(selected_capture) + ".mode").read_bytes(), b"1")
-            refused = Path(temporary) / "refused"; refused.mkdir()
-            failure, no_capture = self.run_suite(refused, managed=True, KIND_PROFILE="0", CLUSTER="")
-            self.assertEqual(failure.returncode, 2)
-            self.assertFalse(no_capture.exists())
+            self.assertFalse(Path(str(selected_capture) + ".route").exists())
+            # Without a named profile (a retained `make kind-test` cluster) the
+            # managed journey runs alone and admits no release producers (#2672).
+            retained = Path(temporary) / "retained"; retained.mkdir()
+            routed, no_intake = self.run_suite(retained, managed=True, KIND_PROFILE="0", CLUSTER="")
+            self.assertEqual(routed.returncode, 47)
+            self.assertFalse(no_intake.exists())
+            self.assertEqual(Path(str(no_intake) + ".route").read_bytes(), b"managed-only")
 
     def test_fixed_intake_route_forwards_three_pinned_producers_once(self):
         with tempfile.TemporaryDirectory(prefix="kind-cw-route-", dir=ROOT / ".tmp") as temporary:

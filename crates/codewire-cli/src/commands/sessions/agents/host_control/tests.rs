@@ -762,6 +762,56 @@ fn member_helper_private_records_and_locks_refuse_links_fifo_and_unsafe_ancestor
 }
 
 #[test]
+fn private_record_reads_a_record_replaced_during_its_read_again() {
+    // A driver rewrites its state while a helper reads it (#2782): every read
+    // returns one complete version, in order, and none reports a change.
+    let temp = tempfile::tempdir().unwrap();
+    let dir = fs::canonicalize(temp.path()).unwrap().join("records");
+    private_directory(&dir).unwrap();
+    let path = dir.join("state.json");
+    let version = |n: u64| json!({"version": n, "body": format!("{n:08}").repeat(64)});
+    write_private_json(&path, &version(0)).unwrap();
+    // `write_private` without its syncs, so the record is replaced often. The
+    // pause keeps replacements apart, as a driver's are; it spins, as a sleep
+    // wakes late on a loaded host.
+    let replace = |n: u64| {
+        let temporary = dir.join(format!(".{n}.tmp"));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .unwrap();
+        std::io::Write::write_all(&mut file, &serde_json::to_vec(&version(n)).unwrap()).unwrap();
+        fs::rename(&temporary, &path).unwrap();
+        let apart = Instant::now() + Duration::from_micros(100);
+        while Instant::now() < apart {
+            std::hint::spin_loop();
+        }
+    };
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| (1..=1000).for_each(replace));
+        let (mut reads, mut last, mut seen) = (0, 0, 0);
+        let mut refused = std::collections::BTreeMap::<String, usize>::new();
+        while !writer.is_finished() {
+            reads += 1;
+            match private_record::<Value>(&path) {
+                Ok(record) => {
+                    let n = record["version"].as_u64().unwrap();
+                    assert_eq!(record, version(n), "a read returned a partial record");
+                    assert!(n >= last, "a read returned an older record");
+                    seen += usize::from(n > last);
+                    last = n;
+                }
+                Err(error) => *refused.entry(error.to_string()).or_default() += 1,
+            }
+        }
+        assert!(refused.is_empty(), "of {reads} reads, refused: {refused:?}");
+        assert!(seen > 1, "the reads did not overlap the replacements");
+    });
+}
+
+#[test]
 fn member_helper_generation_addition_keeps_ordinary_record_bytes_and_refuses_zero() {
     let f = Fixture::new();
     let driver = f.prepare(None, false);

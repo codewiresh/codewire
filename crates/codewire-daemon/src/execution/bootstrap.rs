@@ -143,13 +143,16 @@ impl StartupProjectionIngress {
                         let bridge = self.bridge.clone();
                         tasks.spawn(async move {
                             let overrides = Default::default();
+                            // Startup bootstrap records no denial; its own
+                            // outcome is the daemon's start.
+                            let committed = std::sync::atomic::AtomicBool::new(false);
                             tokio::select! {
                                 biased;
                                 _ = life.readable() => Err(denied()),
                                 // Bootstrap has no per-command overrides. The
                                 // broker already omits declared project keys;
                                 // image defaults must remain below app values.
-                                result = super::projection::relay_accepted_launch(channel, context, &bridge, true, &overrides) => result,
+                                result = super::projection::relay_accepted_launch(channel, context, &bridge, true, &overrides, &committed) => result,
                             }
                         });
                     }

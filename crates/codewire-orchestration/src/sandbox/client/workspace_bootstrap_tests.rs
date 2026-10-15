@@ -2174,7 +2174,7 @@ async fn generic_resume_re_pins_and_suspend_never_does() {
 #[tokio::test]
 async fn every_listed_repository_re_pins_to_the_support_image() {
     let mut froms = vec![
-        "git.example.invalid/codewire/daemon:v0.3.359@sha256:1bc918a7c16ac72c4d3f84641efb12343372fa70a0e8839466ab26e660c81173".to_owned(),
+        "registry.example.invalid/codewire/daemon:v0.3.359@sha256:1bc918a7c16ac72c4d3f84641efb12343372fa70a0e8839466ab26e660c81173".to_owned(),
         "registry.example.invalid/codewire/daemon:main-4b5b65d".to_owned(),
     ];
     for repository in SUPPORT_IMAGE_REPOSITORIES {
@@ -2530,8 +2530,8 @@ fn daemon_image_plan_compares_repositories_not_tags_or_digests() {
             "registry.example.invalid/codewire/daemon",
         ),
         (
-            "git.example.invalid/codewire/daemon:v0.3.359@sha256:aa",
-            "git.example.invalid/codewire/daemon",
+            "registry.example.invalid/codewire/daemon:v0.3.359@sha256:aa",
+            "registry.example.invalid/codewire/daemon",
         ),
         (
             "registry.example.invalid/codewire/daemon:main-4b5b65d",
@@ -2569,6 +2569,16 @@ fn daemon_image_plan_compares_repositories_not_tags_or_digests() {
     assert_eq!(
         plan_daemon_image(&old, OLD_DAEMON_IMAGE).unwrap(),
         DaemonImagePlan::Current
+    );
+    // The retired Forgejo registry is not a support image repository: a
+    // daemon still rendered from it is kept, not re-pinned.
+    let legacy = volume(&format!(
+        "git.example.invalid/codewire/daemon:v0.3.359@sha256:{}",
+        "b".repeat(64)
+    ));
+    assert_eq!(
+        plan_daemon_image(&legacy, tagged_current).unwrap(),
+        DaemonImagePlan::Kept(DaemonImageKept::UnlistedRepository)
     );
     for unpinned in [
         "registry.example.invalid/codewire/daemon:v0.3.400",

@@ -8,7 +8,10 @@ import "codewire/v1/environment_session.proto";
 // Managed conversations on one captured, running platform Pod. These methods
 // never deliver provider credentials or accept executable paths or environment
 // overrides. A lost mutation response is observed with its original request
-// UUID; clients must never automatically retry it or switch to a newer Pod.
+// UUID. The identical request re-sent under its original UUID returns the
+// saved operation as it is: an UNKNOWN stays UNKNOWN and nothing is issued
+// again. A different request under the same UUID is refused. A re-send never
+// recovers an unknown outcome, and clients must never switch to a newer Pod.
 service EnvironmentAgentService {
   rpc GetEnvironmentAgentInfo(GetEnvironmentAgentInfoRequest)
       returns (GetEnvironmentAgentInfoResponse) {
@@ -34,6 +37,9 @@ enum EnvironmentAgentKind {
   ENVIRONMENT_AGENT_KIND_UNSPECIFIED = 0;
   ENVIRONMENT_AGENT_KIND_CODEX = 1;
   ENVIRONMENT_AGENT_KIND_CLAUDE = 2;
+  // noel, the Rust pi. The platform does not run it yet: a launch is refused
+  // with FAILED_PRECONDITION, and Info never lists it.
+  ENVIRONMENT_AGENT_KIND_NOEL = 3;
 }
 
 enum EnvironmentAgentAction {
@@ -43,6 +49,10 @@ enum EnvironmentAgentAction {
   ENVIRONMENT_AGENT_ACTION_INTERRUPT = 3;
   ENVIRONMENT_AGENT_ACTION_STOP = 4;
   ENVIRONMENT_AGENT_ACTION_RESTART = 5;
+  // A conversation of an earlier Pod of this environment continues in the
+  // captured Pod from its saved native session. The platform chooses the
+  // earlier Pod and proves it gone; nothing in flight is replayed.
+  ENVIRONMENT_AGENT_ACTION_RESUME = 6;
 }
 
 enum EnvironmentAgentPhase {

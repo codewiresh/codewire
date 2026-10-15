@@ -340,13 +340,45 @@ impl DirectoryPin {
         Ok(())
     }
 }
+/// Pauses before each further read of a record that a writer is replacing.
+/// The path names the replaced file, unlinked, until the rename completes,
+/// which a loaded host can hold for tens of milliseconds.
+const REPLACED_RECORD_PAUSES: [Duration; 4] = [
+    Duration::from_millis(2),
+    Duration::from_millis(8),
+    Duration::from_millis(32),
+    Duration::from_millis(128),
+];
+/// Reads one complete owner-private managed record. A writer replaces a
+/// record by renaming a complete sibling over it (`write_private`), so a read
+/// that overlaps the rename holds the file being replaced. That read is
+/// discarded and the path read again, a bounded number of times. Every read
+/// makes every check, and none returns a file that changed while it was read.
 pub(super) fn private_record<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
     let directory = DirectoryPin::open(path.parent().context("managed record parent")?)?;
+    let mut pauses = REPLACED_RECORD_PAUSES.iter();
+    let bytes = loop {
+        if let Some(bytes) = read_record_once(path)? {
+            break bytes;
+        }
+        std::thread::sleep(*pauses.next().context("managed record changed")?);
+    };
+    directory.check()?;
+    serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid managed record"))
+}
+/// The bytes of the record `path` names, or `None` when a rename over it
+/// overlapped this read.
+fn read_record_once(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)?;
     let a = file.metadata()?;
+    // A rename over a file unlinks it, which changes its link count and change
+    // time but not what was written, then points the path at the new file.
+    if a.nlink() == 0 {
+        return Ok(None);
+    }
     ensure!(
         a.is_file()
             && a.uid() == euid()
@@ -355,32 +387,39 @@ pub(super) fn private_record<T: serde::de::DeserializeOwned>(path: &Path) -> any
             && a.len() <= MAX_RECORD_BYTES,
         "managed record is unsafe"
     );
-    fn stamp(m: &fs::Metadata) -> (u64, u64, u32, u32, u64, u64, i64, i64, i64, i64) {
+    type Written = (u64, u64, u32, u32, u64, i64, i64);
+    fn written(m: &fs::Metadata) -> Written {
         (
             m.dev(),
             m.ino(),
             m.uid(),
             m.mode(),
-            m.nlink(),
             m.len(),
             m.mtime(),
             m.mtime_nsec(),
-            m.ctime(),
-            m.ctime_nsec(),
         )
+    }
+    fn stamp(m: &fs::Metadata) -> (Written, u64, i64, i64) {
+        (written(m), m.nlink(), m.ctime(), m.ctime_nsec())
     }
     let mut bytes = Vec::new();
     (&mut file)
         .take(MAX_RECORD_BYTES + 1)
         .read_to_end(&mut bytes)?;
+    let held = file.metadata()?;
+    let named = fs::symlink_metadata(path)?;
+    if bytes.len() as u64 <= MAX_RECORD_BYTES
+        && stamp(&a) == stamp(&held)
+        && stamp(&a) == stamp(&named)
+    {
+        return Ok(Some(bytes));
+    }
+    let renamed = (named.dev(), named.ino()) != (a.dev(), a.ino());
     ensure!(
-        bytes.len() as u64 <= MAX_RECORD_BYTES
-            && stamp(&a) == stamp(&file.metadata()?)
-            && stamp(&a) == stamp(&fs::symlink_metadata(path)?),
+        written(&a) == written(&held) && (renamed || written(&a) == written(&named)),
         "managed record changed"
     );
-    directory.check()?;
-    serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid managed record"))
+    Ok(None)
 }
 fn marker(environment: &DriverEnvironment, driver: &str) -> anyhow::Result<Option<Marker>> {
     nonnil_id(driver)?;

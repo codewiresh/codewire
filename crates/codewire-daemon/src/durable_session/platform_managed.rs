@@ -3,7 +3,9 @@
 //! ordinary Launch continues to write None and cannot adopt a managed record.
 use super::*;
 use crate::platform_managed::{CleanupLink, Owner, ProviderPin, RestartAdvance};
-use crate::platform_managed::{Error, ImagePin, Origin, peer_packet};
+use crate::platform_managed::{
+    DRIVER_ALIVE, Error, ImagePin, Origin, PROVIDER_NOT_ADMITTED, peer_packet,
+};
 use codewire_daemon_proto::platform_managed as wire;
 use serde_json::{Value, json};
 
@@ -334,11 +336,226 @@ impl SessionEngine {
         }
         Ok((record, false, false))
     }
+    /// Whether the record of `c.session_id` can continue in this Pod: it names
+    /// exactly the earlier Pod the control plane proved absent (#2705).
+    pub(crate) async fn platform_resumable(
+        &self,
+        scope: &v1::PlatformManagedScope,
+        c: &v1::PlatformManagedControl,
+    ) -> Result<(), Error> {
+        if !self.ensure_platform_records(false).await? {
+            return Err(Error::Refused);
+        }
+        if lock(&self.inner.active).contains_key(&c.session_id) {
+            return Err(Error::ResumeRefused(DRIVER_ALIVE));
+        }
+        let handle = self.handle(&c.session_id).map_err(|_| Error::Refused)?;
+        let metadata = handle.metadata.lock().await;
+        resumable_origin(&metadata, scope, c).map(|_| ())
+    }
+    /// Continue a conversation of an earlier Pod here. Every check runs before
+    /// issue. The record's new origin and generation are written together
+    /// before the helper moves the driver's own markers, so each origin and
+    /// generation pair on disk belongs to one Pod. The driver then starts as a
+    /// Restart's does and resumes its saved native session; what was in flight
+    /// at the Stop stays unknown and is never replayed.
+    async fn platform_resume(
+        &self,
+        owner: &Owner,
+        c: v1::PlatformManagedControl,
+    ) -> Result<(v1::SessionRecord, bool, bool), Error> {
+        if !self.ensure_platform_records(false).await? {
+            return Err(Error::Refused);
+        }
+        let scope = owner.request().scope.clone().ok_or(Error::Refused)?;
+        let admission = self.inner.retention_admission.lock().await;
+        let handle = self.handle(&c.session_id).map_err(|_| Error::Refused)?;
+        let _operation = handle.operation.lock().await;
+        if lock(&self.inner.active).contains_key(&c.session_id) {
+            return Err(Error::ResumeRefused(DRIVER_ALIVE));
+        }
+        let previous = resumable_origin(&*handle.metadata.lock().await, &scope, &c)?;
+        let origin = owner.resume_origin()?;
+        let image = ImagePin::admit(&self.inner.config, &origin)?;
+        let provider = ProviderPin::admit(origin.agent, &origin.provider)
+            .map_err(|_| Error::ResumeRefused(PROVIDER_NOT_ADMITTED))?;
+        let route = origin
+            .agent
+            .route(self.inner.config.managed_credential_clients)
+            .ok_or(Error::Refused)?;
+        // The driver's own markers must still name the predecessor at this
+        // generation, its credential route must be unchanged and no driver may
+        // hold its lock. Read only; nothing changes before issue. A plain
+        // refusal names its closed reason, which reaches the user.
+        let checked = image
+            .helper(
+                &previous,
+                &c.session_id,
+                c.expected_launch_generation,
+                json!({"op":"adopt","origin":origin,"route":route,"commit":false}),
+            )
+            .await?;
+        if let Some(reason) = crate::platform_managed::adopt_refusal(&checked)? {
+            return Err(Error::ResumeRefused(reason));
+        }
+        owner.issue().await?;
+        let generation = c
+            .expected_launch_generation
+            .checked_add(1)
+            .ok_or(Error::Unknown)?;
+        // What the Resume overwrites returns if it is undone (#2769).
+        let before = {
+            let mut metadata = handle.metadata.lock().await;
+            if resumable_origin(&metadata, &scope, &c)? != previous {
+                return Err(Error::Unknown);
+            }
+            let before = metadata.clone();
+            handle.launch_cancellation.send_replace(false);
+            metadata.platform_managed_origin = Some(origin.clone());
+            metadata.launch_generation = generation;
+            metadata.state = v1::SessionLifecycleState::Starting as i32;
+            metadata.started_at = None;
+            metadata.finished_at = None;
+            metadata.exit_code = None;
+            metadata.cleanup_unknown = true;
+            metadata.cleanup_confirmed = false;
+            metadata.status_message = "platform managed session resuming".into();
+            persist_metadata(&self.inner.root, &metadata)
+                .await
+                .map_err(|_| Error::Unknown)?;
+            before
+        };
+        let adopted = image
+            .helper(
+                &previous,
+                &c.session_id,
+                c.expected_launch_generation,
+                json!({"op":"adopt","origin":origin,"route":route,"commit":true}),
+            )
+            .await
+            .map_err(|_| Error::Unknown)?;
+        if adopted["launch_generation"].as_u64() != Some(generation) {
+            return Err(Error::Unknown);
+        }
+        provider.check().map_err(|_| Error::Unknown)?;
+        image.check().map_err(|_| Error::Unknown)?;
+        drop(admission);
+        let record = self
+            .start_process(handle.clone(), &self.inner.shutdown)
+            .await
+            .map_err(|_| Error::Unknown)?;
+        // The environment projection was refused before the launcher ran the
+        // agent, with its cleanup confirmed: nothing ran here, so the
+        // adoption is undone and the Resume is a definite refusal the user
+        // can simply repeat (#2769). Any other outcome stands.
+        if denied_before_run(&record) {
+            return self
+                .revert_resume(&handle, &image, &before, &origin, &c, generation)
+                .await;
+        }
+        Ok((record, false, false))
+    }
+    /// Move a Resume whose agent never started back to its predecessor: the
+    /// helper's markers first, then this record, as `before` the Resume.
+    /// Any refusal or failure leaves the outcome unknown, as before (#2769).
+    async fn revert_resume(
+        &self,
+        handle: &Arc<SessionHandle>,
+        image: &ImagePin,
+        before: &PersistedSession,
+        origin: &Origin,
+        c: &v1::PlatformManagedControl,
+        generation: u64,
+    ) -> Result<(v1::SessionRecord, bool, bool), Error> {
+        let previous = before
+            .platform_managed_origin
+            .as_ref()
+            .ok_or(Error::Unknown)?;
+        self.revert_resume_with(handle, before, origin, c, generation, || async {
+            image
+                .helper(
+                    origin,
+                    &c.session_id,
+                    generation,
+                    json!({"op":"revert","previous":previous}),
+                )
+                .await
+        })
+        .await
+    }
+    /// [`Self::revert_resume`] with its helper call supplied: production
+    /// passes the support image's helper; tests pass its answer.
+    pub(super) async fn revert_resume_with<F, Fut>(
+        &self,
+        handle: &Arc<SessionHandle>,
+        before: &PersistedSession,
+        origin: &Origin,
+        c: &v1::PlatformManagedControl,
+        generation: u64,
+        revert: F,
+    ) -> Result<(v1::SessionRecord, bool, bool), Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Value, Error>>,
+    {
+        // The caller holds the session's operation lock throughout.
+        if lock(&self.inner.active).contains_key(&c.session_id)
+            || before.launch_generation != c.expected_launch_generation
+        {
+            return Err(Error::Unknown);
+        }
+        let previous = before
+            .platform_managed_origin
+            .as_ref()
+            .ok_or(Error::Unknown)?;
+        {
+            let metadata = handle.metadata.lock().await;
+            if metadata.platform_managed_origin.as_ref() != Some(origin)
+                || metadata.launch_generation != generation
+                || !denied_before_run(&metadata.to_record())
+            {
+                return Err(Error::Unknown);
+            }
+        }
+        let reverted = revert().await.map_err(|_| Error::Unknown)?;
+        if reverted["launch_generation"].as_u64() != Some(c.expected_launch_generation) {
+            return Err(Error::Unknown);
+        }
+        let mut metadata = handle.metadata.lock().await;
+        if metadata.platform_managed_origin.as_ref() != Some(origin)
+            || metadata.launch_generation != generation
+            || lock(&self.inner.active).contains_key(&c.session_id)
+        {
+            return Err(Error::Unknown);
+        }
+        // The record returns to the predecessor, and to the lifecycle the
+        // Resume overwrote: as resumable, and as retained, as it was. Left
+        // Failed with its cleanup confirmed, it could be pruned before the
+        // message the user was told to send again.
+        let mut reverted_metadata = metadata.clone();
+        reverted_metadata.platform_managed_origin = Some(previous.clone());
+        reverted_metadata.launch_generation = c.expected_launch_generation;
+        reverted_metadata.state = before.state;
+        reverted_metadata.started_at = before.started_at;
+        reverted_metadata.finished_at = before.finished_at;
+        reverted_metadata.exit_code = before.exit_code;
+        reverted_metadata.cleanup_unknown = before.cleanup_unknown;
+        reverted_metadata.cleanup_confirmed = before.cleanup_confirmed;
+        reverted_metadata.status_message = before.status_message.clone();
+        persist_metadata(&self.inner.root, &reverted_metadata)
+            .await
+            .map_err(|_| Error::Unknown)?;
+        *metadata = reverted_metadata;
+        Err(Error::DeniedBeforeRun)
+    }
     async fn platform_control(
         &self,
         owner: &Owner,
         c: v1::PlatformManagedControl,
     ) -> Result<(v1::SessionRecord, bool, bool), Error> {
+        if c.action == v1::PlatformManagedAction::Resume as i32 {
+            return self.platform_resume(owner, c).await;
+        }
         if !self.ensure_platform_records(false).await? {
             return Err(Error::Refused);
         }
@@ -678,6 +895,41 @@ impl SessionEngine {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
+}
+/// The record's origin when it may continue in `scope`: it names exactly the
+/// predecessor Pod, which is not this one, in the same environment and
+/// organization, for the same driver and agent, at the expected generation,
+/// with no parent and nothing live. A same-Pod record stays Restart's.
+fn resumable_origin(
+    metadata: &PersistedSession,
+    scope: &v1::PlatformManagedScope,
+    c: &v1::PlatformManagedControl,
+) -> Result<Origin, Error> {
+    let origin = metadata
+        .platform_managed_origin
+        .as_ref()
+        .ok_or(Error::Refused)?;
+    origin.validate_shape(&metadata.session_id)?;
+    if c.action != v1::PlatformManagedAction::Resume as i32
+        || origin.pod_uid != c.predecessor_pod_uid
+        || origin.pod_uid == scope.pod_uid
+        || origin.environment_id != scope.environment_id
+        || origin.org_id != scope.org_id
+        || origin.driver_id != c.driver_id
+        || origin.parent_generation.is_some()
+        || crate::platform_managed::Agent::try_from(c.agent)? != origin.agent
+        || metadata.session_id != c.session_id
+        || metadata.launch_generation != c.expected_launch_generation
+        || metadata.control_origin.is_some()
+        || metadata.command != origin.command()
+        || metadata.pty
+        || metadata.environment_projection_required
+        || !metadata.env.is_empty()
+        || is_live_state(metadata.state)
+    {
+        return Err(Error::Refused);
+    }
+    Ok(origin.clone())
 }
 fn checked_origin(
     metadata: &PersistedSession,

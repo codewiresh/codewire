@@ -121,5 +121,6 @@ run_retained_credentials_suite() {
   restart_credential_service
   kind_credential_native_smoke
   kind_credential_claude_session
+  kind_credential_claude_sign_in
   log "retained credentials suite green"
 }

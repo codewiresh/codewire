@@ -404,7 +404,7 @@ spec:
                 port:
                   name: http
 ---
-# Connect-RPC path routing (docs/plans/connect-rpc/03, D5). Connect routes
+# Connect-RPC path routing (connect-rpc/03, D5). Connect routes
 # are /{package}.{Service}/{Method}; packages span binaries, so routing is
 # per-Service. Billing-owned Services gain regex rules in the billing Ingress
 # above as their protos land. CoordinatorService has its own h2 Ingress. This
