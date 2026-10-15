@@ -15,7 +15,11 @@ release manifest binds. Signing is a separate step (sign-cw-release.sh);
 compilation never receives signing or publication credentials.
 
 Environment:
-  CW_RELEASE_TARGETS             Space-separated target triples.
+  CW_RELEASE_TARGETS             Space-separated target triples, built
+                                 together in one Cargo invocation so their
+                                 builds and final links run side by side;
+                                 `none` builds nothing and only prepares the
+                                 imported assets.
   CW_RELEASE_PROFILE             Cargo profile to build (default: release).
   CW_RELEASE_BUILD_CMD           Cargo command prefix (default: cargo build).
   CW_RELEASE_DIST_DIR            Output directory (default: dist/cw-release).
@@ -69,6 +73,7 @@ release_py="$script_dir/cw_release.py"
 release_targets='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin'
 host_target="$(rustc -vV | awk '/^host:/ {print $2}')"
 targets="${CW_RELEASE_TARGETS:-$host_target}"
+[ "$targets" != none ] || targets=""
 profile="${CW_RELEASE_PROFILE:-release}"
 build_cmd="${CW_RELEASE_BUILD_CMD:-cargo build}"
 dist_dir="${CW_RELEASE_DIST_DIR:-dist/cw-release}"
@@ -126,16 +131,23 @@ fi
 rm -rf "$dist_dir"
 mkdir -p "$dist_dir"
 
-for target in $targets; do
-  echo "building cw $version for $target"
+runtime_env=()
+admit_runtime=()
+if [ -n "$runtime_dir" ]; then
+  runtime_env=("CODEWIRE_LOCAL_RUNTIME=$runtime_dir/local-runtime.json")
+  admit_runtime=(--embedded-runtime "$runtime_dir/local-runtime.json=$runtime_document_sha256")
+fi
+# Every target in one Cargo invocation: their builds and their final
+# (single-unit LTO) links run side by side, sharing host build scripts. Each
+# target's features resolve as when it is built alone.
+if [ -n "$targets" ]; then
+  echo "building cw $version for $targets"
   # shellcheck disable=SC2206
   cmd=($build_cmd)
-  runtime_env=()
-  admit_runtime=()
-  if [ -n "$runtime_dir" ]; then
-    runtime_env=("CODEWIRE_LOCAL_RUNTIME=$runtime_dir/local-runtime.json")
-    admit_runtime=(--embedded-runtime "$runtime_dir/local-runtime.json=$runtime_document_sha256")
-  fi
+  target_flags=()
+  for target in $targets; do
+    target_flags+=(--target "$target")
+  done
   # macOS bash 3.2 treats an empty array as unbound under set -u.
   env -u CODEWIRE_LOCAL_RUNTIME ${runtime_env[@]+"${runtime_env[@]}"} \
     CODEWIRE_VERSION="$version" \
@@ -146,8 +158,10 @@ for target in $targets; do
     "${profile_flag[@]}" \
     -p codewire-cli-bin \
     --bin cw \
-    --target "$target"
+    "${target_flags[@]}"
+fi
 
+for target in $targets; do
   binary="$target_dir/$target/$profile_dir/cw"
   [ -x "$binary" ] || die "expected built binary at $binary"
   python3 "$release_py" admit \
