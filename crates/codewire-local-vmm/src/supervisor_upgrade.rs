@@ -165,6 +165,219 @@ fn authority_replaceable(environments: &[v1::Environment]) -> bool {
     !environments.iter().any(vm_may_run)
 }
 
+/// A previous cw's supervisor still serving this root: an older protocol, or
+/// this protocol from another cw executable (#2549 keeps that one serving).
+/// `cw env --local upgrade` moves its VMs to this cw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviousCw {
+    socket: PathBuf,
+    pid: u32,
+    /// Running or starting: stopped, then started on this cw.
+    pub restart: Vec<String>,
+    /// An error whose runner still owns its VM: stopped, and left stopped.
+    pub stop_only: Vec<String>,
+    /// May still run a VM that no stop reaches (a macOS orphan); nothing
+    /// moves while one does.
+    pub blocked: Vec<String>,
+}
+
+impl PreviousCw {
+    /// Every VM it stops, in order.
+    pub fn stopping(&self) -> impl Iterator<Item = &str> {
+        self.restart
+            .iter()
+            .chain(&self.stop_only)
+            .map(String::as_str)
+    }
+}
+
+/// The supervisor serving this root, when it belongs to a previous cw. Starts
+/// nothing. A supervisor no takeover can retire is refused here, before any
+/// VM stops.
+pub async fn previous_cw(
+    config: &NativeRuntimeConfig,
+) -> Result<Option<PreviousCw>, TakeoverError> {
+    for socket in [
+        config.supervisor_socket(),
+        config.legacy_supervisor_socket(),
+    ] {
+        if std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            continue;
+        }
+        let mut client = NativeSupervisorClient::connect_configured_at(&socket, config)
+            .await
+            .map_err(SupervisorError::from)?;
+        let pin = client.supervisor_peer_pin();
+        let Some((pid, executable)) = pin.peer_process() else {
+            return Ok(None);
+        };
+        if client.protocol() == NATIVE_SUPERVISOR_PROTOCOL_VERSION
+            && executable == config.executable
+        {
+            return Ok(None);
+        }
+        let legacy = socket == config.legacy_supervisor_socket();
+        if !client.supports(SupervisorFeature::Retire) && !may_signal(client.protocol(), legacy) {
+            return Err(failed(
+                &client,
+                format!(
+                    "its local VM supervisor protocol {} has no safe takeover",
+                    client.protocol()
+                ),
+            ));
+        }
+        let environments = list(&mut client).await?;
+        return Ok(Some(sort_previous(socket, pid, &environments)));
+    }
+    Ok(None)
+}
+
+fn sort_previous(socket: PathBuf, pid: u32, environments: &[v1::Environment]) -> PreviousCw {
+    let mut previous = PreviousCw {
+        socket,
+        pid,
+        restart: Vec::new(),
+        stop_only: Vec::new(),
+        blocked: Vec::new(),
+    };
+    for environment in environments
+        .iter()
+        .filter(|environment| vm_may_run(environment))
+    {
+        let name = environment.name.clone();
+        if environment.state == v1::EnvironmentState::Running as i32
+            || environment.state == v1::EnvironmentState::Starting as i32
+        {
+            previous.restart.push(name);
+        } else if environment.state == v1::EnvironmentState::Error as i32 {
+            previous.stop_only.push(name);
+        } else {
+            previous.blocked.push(name);
+        }
+    }
+    previous
+}
+
+/// Why moving a previous cw's VMs to this cw stopped.
+#[derive(Debug, thiserror::Error)]
+pub enum MoveError {
+    #[error(
+        "your local VMs changed since they were listed; nothing was stopped. Run `cw env --local upgrade` again"
+    )]
+    Changed,
+    #[error("{stage}{}", restored_note(.restored, .not_restored))]
+    Stopped {
+        stage: String,
+        restored: Vec<String>,
+        not_restored: Vec<String>,
+    },
+    #[error(transparent)]
+    Takeover(#[from] TakeoverError),
+}
+
+fn restored_note(restored: &[String], not_restored: &[String]) -> String {
+    let mut note = String::new();
+    if !restored.is_empty() {
+        note.push_str(&format!(
+            "; {} run again on the previous cw",
+            restored.join(", ")
+        ));
+    }
+    if !not_restored.is_empty() {
+        note.push_str(&format!(
+            "; {} stayed stopped (`cw env --local start NAME` once this is fixed)",
+            not_restored.join(", ")
+        ));
+    }
+    note
+}
+
+/// Stop `previous`'s VMs through its own supervisor, the ordinary stop, then
+/// retire it, all under the takeover lock and only while it still serves
+/// exactly those VMs. A failure before it retires starts the VMs this stopped
+/// again through that supervisor, on the runtime they ran; nothing is left
+/// half moved. `stopped` hears each VM once it stopped.
+pub async fn stop_and_retire(
+    config: &NativeRuntimeConfig,
+    previous: &PreviousCw,
+    mut stopped: impl FnMut(&str),
+) -> Result<(), MoveError> {
+    let root = PrivateRoot::open(&config.root).map_err(TakeoverError::from)?;
+    let _lock = TakeoverLock::acquire(&root, LOCK_WAIT).await?;
+    let mut client = NativeSupervisorClient::connect_configured_at(&previous.socket, config)
+        .await
+        .map_err(|error| TakeoverError::Supervisor(error.into()))?;
+    let pin = client.supervisor_peer_pin();
+    let pid = pin.peer_process().map(|(pid, _)| pid);
+    if pid != Some(previous.pid)
+        || sort_previous(
+            previous.socket.clone(),
+            previous.pid,
+            &list(&mut client).await?,
+        ) != *previous
+    {
+        return Err(MoveError::Changed);
+    }
+    let mut done = Vec::new();
+    for name in previous.stopping() {
+        if let Err(status) = client.stop(name).await {
+            let stage = format!("stopping local VM {name} failed: {}", status.message());
+            return Err(restore(&mut client, previous, &done, stage).await);
+        }
+        stopped(name);
+        done.push(name.to_owned());
+    }
+    let legacy = previous.socket == config.legacy_supervisor_socket();
+    if let Err(error) = retire_idle(&mut client, legacy).await {
+        let stage = format!("the previous cw's supervisor did not hand over: {error}");
+        return Err(restore(&mut client, previous, &done, stage).await);
+    }
+    Ok(())
+}
+
+/// Start again, through the previous supervisor, the VMs this stopped that
+/// were running.
+async fn restore(
+    client: &mut NativeSupervisorClient,
+    previous: &PreviousCw,
+    done: &[String],
+    stage: String,
+) -> MoveError {
+    let mut restored = Vec::new();
+    let mut not_restored = Vec::new();
+    for name in done.iter().filter(|name| previous.restart.contains(name)) {
+        match client.start(name).await {
+            Ok(_) => restored.push(name.clone()),
+            Err(_) => not_restored.push(name.clone()),
+        }
+    }
+    MoveError::Stopped {
+        stage,
+        restored,
+        not_restored,
+    }
+}
+
+async fn list(client: &mut NativeSupervisorClient) -> Result<Vec<v1::Environment>, TakeoverError> {
+    tokio::time::timeout(LIST_DEADLINE, client.list())
+        .await
+        .map_err(|_| {
+            failed(
+                client,
+                format!(
+                    "listing its VMs did not answer within {} s",
+                    LIST_DEADLINE.as_secs()
+                ),
+            )
+        })?
+        .map_err(|status| {
+            failed(
+                client,
+                format!("listing its VMs failed: {}", status.message()),
+            )
+        })
+}
+
 async fn running_vms(client: &mut NativeSupervisorClient) -> Result<Vec<String>, String> {
     let environments = tokio::time::timeout(LIST_DEADLINE, client.list())
         .await
@@ -333,6 +546,61 @@ mod tests {
             error_code: error_code.to_owned(),
             ..Default::default()
         }
+    }
+
+    fn named(name: &str, state: v1::EnvironmentState, error_code: &str) -> v1::Environment {
+        v1::Environment {
+            name: name.to_owned(),
+            ..environment(state, error_code)
+        }
+    }
+
+    #[test]
+    fn a_previous_cws_vms_restart_stay_stopped_or_block_the_move() {
+        use v1::EnvironmentState::{Error, Orphaned, Running, Starting, Stopped};
+        let previous = sort_previous(
+            PathBuf::from("/run/cw/supervisor.sock"),
+            7,
+            &[
+                named("a", Running, ""),
+                named("b", Starting, ""),
+                named("c", Error, "network_worker_exit"),
+                named("d", Error, ""),
+                named("e", Stopped, ""),
+                named("f", Orphaned, ""),
+            ],
+        );
+        assert_eq!(previous.restart, ["a", "b"]);
+        assert_eq!(previous.stop_only, ["c"]);
+        let orphans: &[&str] = if cfg!(target_os = "macos") {
+            &["f"]
+        } else {
+            &[]
+        };
+        assert_eq!(previous.blocked, orphans);
+        assert_eq!(previous.stopping().collect::<Vec<_>>(), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_failed_move_says_which_vms_run_again_and_which_stayed_stopped() {
+        let failed = MoveError::Stopped {
+            stage: "stopping local VM b failed: busy".to_owned(),
+            restored: vec!["a".to_owned()],
+            not_restored: vec!["c".to_owned()],
+        };
+        assert_eq!(
+            failed.to_string(),
+            "stopping local VM b failed: busy; a run again on the previous cw; c stayed stopped (`cw env --local start NAME` once this is fixed)"
+        );
+        let nothing_to_restore = MoveError::Stopped {
+            stage: "stopping local VM a failed: busy".to_owned(),
+            restored: Vec::new(),
+            not_restored: Vec::new(),
+        };
+        assert_eq!(
+            nothing_to_restore.to_string(),
+            "stopping local VM a failed: busy"
+        );
     }
 
     #[test]

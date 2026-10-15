@@ -32,15 +32,16 @@ service LocalSupervisorService {
   // Public runtime identity from this immutable UUID's retained native binding.
   // Never consults the current global artifact source or a guest manifest.
   rpc GetManagedRuntime(EnvironmentSelector) returns (ManagedRuntime);
-  // Hands the state root to a newer cw's supervisor. Every pending operation
-  // runs first; while any environment may still run a VM the request fails
-  // and nothing changes. Otherwise this supervisor refuses every later
-  // request and exits. Every protocol from 12 on keeps this RPC unchanged.
+  // Hands the state root to another cw's supervisor of the same protocol or a
+  // newer one. Every pending operation runs first; while any environment may
+  // still run a VM the request fails and nothing changes. Otherwise this
+  // supervisor refuses every later request and exits. Every protocol from 12
+  // on keeps this RPC unchanged.
   rpc RetireSupervisor(RetireSupervisorRequest) returns (RetireSupervisorResponse);
 }
 
 message RetireSupervisorRequest {
-  // The newer supervisor's protocol; it must be above this one's.
+  // The successor supervisor's protocol; it must not be below this one's.
   uint32 successor_protocol = 1;
 }
 

@@ -150,9 +150,21 @@ command says so instead:
 
 ```text
 your local VMs dev, web still run on the cw you updated from; this cw starts and changes local VMs once they stop (`cw env --local stop NAME`)
+cw: restart them with `cw env --local upgrade`
 ```
 
-Stop them when it suits you and run the command again. `cw setup --local`
+At a terminal that command also offers to restart them now. To move them
+yourself, run `cw env --local upgrade`: it names the VMs that still run on the
+previous cw and asks before it restarts them, because a restart ends the work
+running in them. Each stops the ordinary way, the previous supervisor hands
+over, and each starts again on this cw; `--yes` skips the question. If a stop
+or the handover fails, the VMs it already stopped start again on the previous
+cw. A VM in an error state is stopped and stays stopped. Updating from a cw
+that already has this command asks right after the update, and
+`cw update --restart-vms` restarts them without asking; without a terminal,
+both only list them and change nothing.
+
+Or stop them when it suits you and run the command again. `cw setup --local`
 waits the same way, because the previous supervisor would start its next VM
 from the new runtime's files. This cw works with supervisors back to
 v0.3.388's; an older one, or a newer one after `cw update rollback`, is
@@ -172,8 +184,8 @@ HTTPS for the runtime, and `ghcr.io` and `pkg-containers.githubusercontent.com`
 for the workspace image (`ghcr.io/codewiresh/workspace`).
 
 **`your local VMs ... still run on the cw you updated from`**: see
-[After a cw update](#after-a-cw-update). Stop those VMs, then rerun the
-command.
+[After a cw update](#after-a-cw-update). Restart them on this cw with
+`cw env --local upgrade`, or stop them, then rerun the command.
 
 **`this cw is a development build with no pinned local VM runtime`**: install a
 release with the install script, or pass `--from DIR` with a runtime directory

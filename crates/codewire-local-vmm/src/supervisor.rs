@@ -5553,9 +5553,12 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         request: Request<v1::RetireSupervisorRequest>,
     ) -> Result<Response<v1::RetireSupervisorResponse>, Status> {
-        if request.into_inner().successor_protocol <= NATIVE_SUPERVISOR_PROTOCOL_VERSION {
+        // The same protocol too: `cw env --local upgrade` moves idle VMs from
+        // another cw of this protocol to its own supervisor (#2549 keeps that
+        // one serving otherwise). Never for an older one.
+        if request.into_inner().successor_protocol < NATIVE_SUPERVISOR_PROTOCOL_VERSION {
             return Err(Status::invalid_argument(
-                "a local VM supervisor retires only for a newer protocol",
+                "a local VM supervisor retires only for its own protocol or a newer one",
             ));
         }
         let mut core = self.core.lock().await;
@@ -16806,7 +16809,7 @@ mod retire_tests {
     }
 
     #[tokio::test]
-    async fn a_supervisor_retires_only_for_a_newer_protocol_and_with_no_vm() {
+    async fn a_supervisor_retires_only_for_its_protocol_or_newer_and_with_no_vm() {
         let ours = NATIVE_SUPERVISOR_PROTOCOL_VERSION;
         for state in [
             StoredEnvironmentState::Running,
@@ -16833,14 +16836,12 @@ mod retire_tests {
         let (_parent, core) = test_supervisor_core(project_environment());
         let service = test_supervisor_service(core);
         let shutdown = service.shutdown.subscribe();
-        for successor in [ours - 1, ours] {
-            assert_eq!(
-                retire(&service, successor).await.unwrap_err().code(),
-                tonic::Code::InvalidArgument
-            );
-        }
+        assert_eq!(
+            retire(&service, ours - 1).await.unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
         assert!(!*shutdown.borrow());
-        retire(&service, ours + 1).await.unwrap();
+        retire(&service, ours).await.unwrap();
         assert!(*shutdown.borrow());
         // Every later request is refused while it exits.
         let listed = service
