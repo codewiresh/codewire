@@ -4,11 +4,12 @@ use anyhow::Context as _;
 use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::{
-    CLAUDE_SIGN_IN_GUIDANCE, CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE,
+    CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE, CLAUDE_SUBSCRIPTION_TOKEN_PROMPT,
     CODEX_DEVICE_AUTHORIZATION_GUIDANCE, ParsedCredentialSelector, parse_credential_selector,
-    prompt_credential_material, prompt_named_material, read_ssh_import, validate_ssh_generation,
-    validate_ssh_import,
+    prompt_claude_code, prompt_credential_material, prompt_named_material, read_ssh_import,
+    validate_ssh_generation, validate_ssh_import,
 };
+use super::login_screen;
 use super::*;
 
 /// The `add` provider word for a Claude subscription token: the anthropic
@@ -146,6 +147,10 @@ pub(super) async fn handle(
                     anyhow::bail!("enrollment cancelled; inspect the credential by name before retrying because storage acknowledgement may be unknown");
                 }
             };
+            eprint!(
+                "\n{}",
+                login_screen::success_screen(signed_in_account(&credential))
+            );
             print(&[credential], OutputFormat::Text)?;
             super::credentials::report_github_pending(github_pending(&pending));
             Ok(())
@@ -264,7 +269,7 @@ pub(super) async fn handle(
                     "credential name already exists; replace its token with `credentials rotate`"
                 );
                 eprintln!("{CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE}");
-                let token = prompt_named_material("Claude subscription token")?;
+                let token = prompt_named_material(CLAUDE_SUBSCRIPTION_TOKEN_PROMPT)?;
                 let response = client
                     .add_claude_subscription_token_credential(
                         rpc::AddClaudeSubscriptionTokenCredentialRequest {
@@ -394,7 +399,7 @@ async fn replace_subscription_token(
         "Replacing the token of Claude subscription credential {:?} ({}, revision {}) sets its status to Active (including if revoked) and restarts its one-year expiry. {CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE}",
         current.name, current.id, current.revocation_generation
     );
-    let token = prompt_named_material("Claude subscription token")?;
+    let token = prompt_named_material(CLAUDE_SUBSCRIPTION_TOKEN_PROMPT)?;
     let response = client
         .add_claude_subscription_token_credential(rpc::AddClaudeSubscriptionTokenCredentialRequest {
             name: current.name.clone(),
@@ -490,15 +495,38 @@ async fn find_named(
     }
 }
 
+/// A device flow's challenge (Codex, GitHub): the link screen, then the code
+/// to enter on the provider's page.
 fn display_challenge(provider: &str, url: &str, code: &str) -> bool {
-    eprintln!("Open {url} and enter {code}");
-    eprintln!("Continue only if you started this {provider} login.");
+    show_sign_in_link(url);
+    eprint!("{}", login_screen::device_code_lines(provider, code));
     true
 }
 
-/// Start a Claude sign-in, show where to sign in, and read the pasted
-/// `code#state` from a no-echo prompt or stdin, never argv. The returned
-/// handle stays in this process.
+/// The link screen, then the browser at a terminal. The link is on its own
+/// line first, so it works when no browser opens; the browser is started
+/// fully detached, so nothing it prints reaches a prompt.
+fn show_sign_in_link(url: &str) {
+    login_screen::show_link(url);
+    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        let _ = super::platform_commands::open_browser(url);
+    }
+}
+
+/// The account a connected credential names: its account hint (an email or
+/// login), or its name when the provider gave none. Metadata only.
+fn signed_in_account(credential: &rpc::Credential) -> &str {
+    credential
+        .account_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+        .unwrap_or(&credential.name)
+}
+
+/// Start a Claude sign-in, show where to sign in, and read the code Claude
+/// shows from a no-echo prompt or stdin, never argv, as `code#state` (see
+/// [`prompt_claude_code`]). The returned handle stays in this process.
 async fn start_claude_sign_in(
     client: &CodewireClient,
 ) -> anyhow::Result<(String, codewire_protected_store::ProtectedValue)> {
@@ -513,13 +541,9 @@ async fn start_claude_sign_in(
             && !started.sign_in.is_empty(),
         "platform returned an invalid Claude sign-in"
     );
-    eprintln!("{CLAUDE_SIGN_IN_GUIDANCE}");
-    eprintln!("Open {}", started.authorize_url);
-    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-        // Best effort: the link above works when no browser opens.
-        let _ = super::platform_commands::open_browser(&started.authorize_url);
-    }
-    let pasted = prompt_named_material("Code from Claude (code#state)")?;
+    show_sign_in_link(&started.authorize_url);
+    eprintln!();
+    let pasted = prompt_claude_code()?;
     Ok((started.sign_in, pasted))
 }
 
