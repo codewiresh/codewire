@@ -141,13 +141,16 @@ Apple silicon. Elsewhere, use hosted Sandboxes with `cw env create --platform`.
 given to `--from` belongs to another build. Use the runtime from the same
 release or source as your `cw`.
 
-**`managed VM agents require a selected local credential profile`**: the VM has
-no profile. Select one that has a `codex` slot for Codex or an `anthropic` slot
-for Claude: `cw env update ENV --profile local:NAME`. If the error says the
-profile has no `codex` (or `anthropic`) provider, add that slot with
+**`managed VM agents require a selected credential profile`**: the VM has no
+profile. Select a local or platform profile with a provider for the agent: a
+`codex` slot (or, without one, an `openai` slot) for Codex, or an `anthropic`
+slot for Claude: `cw env update ENV --profile local:NAME` or
+`--profile platform:NAME`. If the error says the profile has no "Codex or
+OpenAI" (or "Anthropic") provider, add that slot, for a local profile with
 `cw credentials --local --profile NAME set codex CREDENTIAL`. Editing a profile
 makes a new revision, and a VM keeps the revision it selected, so run
-`cw env update ENV --profile local:NAME` again afterwards.
+`cw env update ENV --profile local:NAME` again afterwards. A platform profile
+counts the slots the VM pinned when its sources were selected.
 
 **A credential command fails to reach the Secret Service**: start or unlock
 your keyring. Over SSH or on a headless host, make sure a session bus and a
