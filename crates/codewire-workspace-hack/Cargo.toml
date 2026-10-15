@@ -292,7 +292,7 @@ num = { version = "0.4.3" }
 proc-macro2 = { version = "1.0.106" }
 quote = { version = "1.0.45" }
 rustix = { version = "1.1.4", default-features = false, features = ["event", "param", "system", "time"] }
-syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", features = ["extra-traits", "fold", "full"] }
+syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", features = ["extra-traits", "fold", "full", "visit-mut"] }
 toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
 tower = { version = "0.5.3", default-features = false, features = ["timeout"] }
@@ -311,7 +311,7 @@ linux-raw-sys = { version = "0.12.1", default-features = false, features = ["aux
 nix = { version = "0.31.3", features = ["ioctl", "mman", "socket", "time", "user"] }
 num = { version = "0.4.3" }
 rustix = { version = "1.1.4", default-features = false, features = ["event", "param", "system", "time"] }
-syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", features = ["extra-traits", "fold", "full"] }
+syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", features = ["extra-traits", "fold", "full", "visit-mut"] }
 toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
 tower = { version = "0.5.3", default-features = false, features = ["timeout"] }
