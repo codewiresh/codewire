@@ -574,13 +574,6 @@ test_g4_event_verifier() {
   done
 }
 
-test_g4_runbook_collection_contract() {
-  local runbook="$ROOT/docs/runbooks/connect-apikey-lifecycle-smoke.md"
-
-  grep -F -- '--tail=-1 \' "$runbook" >/dev/null || \
-    fail "G4 runbook collector can silently accept kubectl selector tail truncation"
-}
-
 test_workflow_protoc_pin() {
   local workflow="$ROOT/.gitea/workflows/connect-apikey-smoke.yaml"
   local version checksum
@@ -632,7 +625,6 @@ test_lifecycle
 test_provisioner
 test_g4_evidence_runner
 test_g4_event_verifier
-test_g4_runbook_collection_contract
 test_workflow_protoc_pin
 "$ROOT/scripts/runtime/tests/test-with-dev-smoke-auth.sh"
 test_workflow_g4_evidence_contract

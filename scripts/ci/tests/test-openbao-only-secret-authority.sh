@@ -75,9 +75,6 @@ fi
 
 is_allowed() {
   local candidate="$1" allowed
-  case "$candidate" in
-    docs/runbooks/runtime-dev-commodity-evidence-*) return 0 ;;
-  esac
   for allowed in "${ALLOWED[@]}"; do
     [[ "$candidate" == "$allowed" ]] && return 0
   done
