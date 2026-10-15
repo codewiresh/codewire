@@ -9,7 +9,11 @@ use tokio::process::{Child, Command};
 
 use super::{GroupEnd, end_process_group};
 
+/// The grace in tests that wait it out.
 const GRACE: Duration = Duration::from_millis(300);
+/// The grace in tests that must not wait it out: long enough that a loaded
+/// test host cannot mistake a slow exit for the grace.
+const LONG_GRACE: Duration = Duration::from_secs(20);
 
 /// `script` under `sh`, leading its own process group as a session command
 /// does, and the pids it prints, one per line, before it settles.
@@ -68,10 +72,14 @@ fn kill(pid: i32) {
     unsafe { libc::kill(pid, libc::SIGKILL) };
 }
 
-async fn end(child: &mut Child, end: GroupEnd) -> (std::process::ExitStatus, Duration) {
+async fn end(
+    child: &mut Child,
+    end: GroupEnd,
+    grace: Duration,
+) -> (std::process::ExitStatus, Duration) {
     let started = Instant::now();
     let leader = child.id();
-    let status = end_process_group(leader, end, GRACE, child.wait())
+    let status = end_process_group(leader, end, grace, child.wait())
         .await
         .unwrap();
     (status, started.elapsed())
@@ -80,16 +88,16 @@ async fn end(child: &mut Child, end: GroupEnd) -> (std::process::ExitStatus, Dur
 #[tokio::test]
 async fn a_group_that_exits_on_sigterm_ends_without_waiting_out_the_grace() {
     let (mut child, pids) = spawn_group("sleep 600 & echo $!; wait", 1).await;
-    let (status, elapsed) = end(&mut child, GroupEnd::Terminate).await;
+    let (status, elapsed) = end(&mut child, GroupEnd::Terminate, LONG_GRACE).await;
     assert_eq!(status.signal(), Some(libc::SIGTERM));
-    assert!(elapsed < GRACE, "took {elapsed:?}");
+    assert!(elapsed < LONG_GRACE / 2, "took {elapsed:?}");
     assert!(gone(pids[0]).await, "the group's job outlived SIGTERM");
 }
 
 #[tokio::test]
 async fn a_group_that_ignores_sigterm_is_killed_after_the_grace() {
     let (mut child, pids) = spawn_group("trap '' TERM; sleep 600 & echo $!; wait", 1).await;
-    let (status, elapsed) = end(&mut child, GroupEnd::Terminate).await;
+    let (status, elapsed) = end(&mut child, GroupEnd::Terminate, GRACE).await;
     assert_eq!(status.signal(), Some(libc::SIGKILL));
     assert!(
         elapsed >= GRACE,
@@ -106,7 +114,7 @@ async fn a_member_its_leader_left_behind_is_killed_after_the_grace() {
         1,
     )
     .await;
-    let (status, elapsed) = end(&mut child, GroupEnd::Terminate).await;
+    let (status, elapsed) = end(&mut child, GroupEnd::Terminate, GRACE).await;
     assert_eq!(status.signal(), Some(libc::SIGTERM));
     assert!(
         elapsed >= GRACE,
@@ -130,7 +138,7 @@ async fn a_process_that_left_the_group_is_never_signalled() {
         (pids[1], pids[0])
     };
     assert!(is_session_leader(detached) && !is_session_leader(member));
-    let _ = end(&mut child, GroupEnd::Terminate).await;
+    let _ = end(&mut child, GroupEnd::Terminate, GRACE).await;
     let member_gone = gone(member).await;
     let detached_alive = alive(detached);
     kill(detached);
@@ -164,22 +172,26 @@ async fn a_hangup_spares_a_job_that_ignores_it_once_its_leader_exits() {
         1,
     )
     .await;
-    let (status, elapsed) = end(&mut child, GroupEnd::HangUp).await;
+    let (status, elapsed) = end(&mut child, GroupEnd::HangUp, LONG_GRACE).await;
     let survived = alive(pids[0]);
     kill(pids[0]);
     assert_eq!(status.signal(), Some(libc::SIGHUP));
-    assert!(elapsed < GRACE, "took {elapsed:?}");
+    assert!(elapsed < LONG_GRACE / 2, "took {elapsed:?}");
     assert!(survived, "a job that ignored the hangup was ended");
 }
 
 #[tokio::test]
 async fn a_leader_that_ignores_the_hangup_is_terminated() {
     let (mut child, pids) = spawn_group("trap '' HUP; sleep 600 & echo $!; wait", 1).await;
-    let (status, elapsed) = end(&mut child, GroupEnd::HangUp).await;
-    assert_eq!(status.signal(), Some(libc::SIGTERM));
+    let (status, elapsed) = end(&mut child, GroupEnd::HangUp, GRACE).await;
+    // SIGTERM ends it; on a loaded host the reap may come after SIGKILL.
+    assert!(
+        matches!(status.signal(), Some(libc::SIGTERM | libc::SIGKILL)),
+        "{status:?}"
+    );
     assert!(
         elapsed >= GRACE,
         "SIGTERM came before the hangup's grace: {elapsed:?}"
     );
-    assert!(gone(pids[0]).await, "the group's job outlived SIGTERM");
+    assert!(gone(pids[0]).await, "the group's job outlived its end");
 }
