@@ -398,9 +398,11 @@ async fn deliver<U: BrokerUpstreamTransport + 'static>(
     )?)
 }
 
-/// The Claude login delivers only the creator's own Active Claude sign-in on
-/// a hosted Sandbox: never a setup token or an API key in the same slot, a
-/// sign-in that needs Reconnect, or one the creator did not confirm.
+/// The Claude login delivers only the creator's own Active Claude sign-in, to
+/// a hosted Sandbox or to the creator's own local VM through its owner-local
+/// delegation: never a setup token or an API key in the same slot, a sign-in
+/// that needs Reconnect, one the creator did not confirm, or one a delegation
+/// without the creator's own profile asks for.
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn the_claude_login_delivers_only_the_creators_own_active_sign_in() -> Result<()> {
@@ -414,6 +416,10 @@ async fn the_claude_login_delivers_only_the_creators_own_active_sign_in() -> Res
         "organization profile",
         "not confirmed by the creator",
         "scopes outside the sign-in",
+        "owner-local delegation",
+        "owner-local delegation without a profile",
+        "owner-local organization profile",
+        "owner-local profile not confirmed by the creator",
     ] {
         let f = Fixture::create_for_bridge().await?;
         let result = async {
@@ -578,6 +584,60 @@ async fn the_claude_login_delivers_only_the_creators_own_active_sign_in() -> Res
                     match hosted(&f).await {
                         Ok((_pool, adapter)) => adapter.lease_claude_login(Uuid::new_v4()).await,
                         Err(_) => Err(BrokerLeaseError::Denied),
+                    }
+                }
+                // A local VM's delegation by the creator, with the creator's
+                // own personal profile, gets the same sealed login (owner
+                // decision, 2026-10-15), bound to the VM's environment.
+                "owner-local delegation" => {
+                    let binding = f.current_binding().await?;
+                    let adapter = f
+                        .owner_local(
+                            f.owner.clone(),
+                            true,
+                            Some(binding),
+                            CapabilitySlot::anthropic(),
+                            &sign_in,
+                            claude_login_permission(),
+                        )
+                        .await??;
+                    let provider = SyntheticClaude::default();
+                    let broker = OpenAiBroker::new(adapter, provider.clone())?;
+                    let opened = deliver(&f, &broker).await?;
+                    ensure!(opened.login.access_token() == "synthetic-access-fresh");
+                    ensure!(opened.login.scopes().join(" ") == SCOPES);
+                    ensure!(opened.login.subscription_type() == Some("max"));
+                    ensure!(opened.binding.credential_id == sign_in.metadata.id.as_str());
+                    ensure!(provider.refreshes.load(Ordering::SeqCst) == 0);
+                    return Ok(());
+                }
+                "owner-local delegation without a profile"
+                | "owner-local organization profile"
+                | "owner-local profile not confirmed by the creator" => {
+                    let owner = if case == "owner-local organization profile" {
+                        Owner::Organization(OwnerId::parse("synthetic-org")?)
+                    } else {
+                        f.owner.clone()
+                    };
+                    let binding = if case == "owner-local delegation without a profile" {
+                        None
+                    } else {
+                        Some(f.current_binding().await?)
+                    };
+                    let confirmed = case != "owner-local profile not confirmed by the creator";
+                    match f
+                        .owner_local(
+                            owner,
+                            confirmed,
+                            binding,
+                            CapabilitySlot::anthropic(),
+                            &sign_in,
+                            claude_login_permission(),
+                        )
+                        .await?
+                    {
+                        Ok(adapter) => adapter.lease_claude_login(Uuid::new_v4()).await,
+                        Err(error) => Err(error),
                     }
                 }
                 // The lease admits it, but the broker never seals a login

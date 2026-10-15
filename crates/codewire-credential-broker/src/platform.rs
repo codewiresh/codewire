@@ -1322,17 +1322,24 @@ type DeliveryPredicate =
 
 /// Delivery predicate of a listed direct delivery exception
 /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions"): the
-/// Sandbox creator's own personal Codex ChatGPT login, sealed to the
-/// workspace daemon. Every condition must hold:
+/// environment creator's own personal Codex ChatGPT login, sealed to the
+/// daemon of a hosted Sandbox or of the creator's own local VM. Every
+/// condition must hold:
 ///
-/// - a hosted Sandbox: an owner-local runtime never receives a login;
-/// - the profile owner is the Sandbox creator (`context.user_id`, the
-///   environment's `created_by`), and the creator confirmed the personal
-///   profile's consent. The hosted authority sets `allow_personal_credentials`
-///   exactly when the bound profile is the creator's own and its
-///   `personal_owner_confirmed_by` is the creator, and resolves the profile
-///   owner to the creator only then (credential-service `authority.rs`,
-///   `Scope::context` and `Scope::owner`). Both facts are part of
+/// - a hosted Sandbox, or the owner-local delegation of a local VM that
+///   selected a profile. A delegation without a profile leases no provider
+///   credential at all;
+/// - the profile owner is the environment creator (`context.user_id`). For a
+///   hosted Sandbox that is the environment's `created_by`, and the creator
+///   confirmed the personal profile's consent: the hosted authority sets
+///   `allow_personal_credentials` exactly when the bound profile is the
+///   creator's own and its `personal_owner_confirmed_by` is the creator, and
+///   resolves the profile owner to the creator only then (credential-service
+///   `authority.rs`, `Scope::context` and `Scope::owner`). For a local VM it
+///   is the owner whose own OAuth login authenticated the delegation and
+///   created the VM's platform selection; the delegation authority resolves
+///   the profile owner to that owner only for their personal profile
+///   (credential-service `delegation/authority.rs`). These facts are part of
 ///   `same_binding`, so every authority check rechecks them;
 /// - the Codex grant comes from that profile and carries the dedicated
 ///   `codex-login` permission, which this lease requested;
@@ -1342,7 +1349,9 @@ type DeliveryPredicate =
 ///
 /// Other users who can open the Sandbox's terminal can read a delivered token
 /// until its `exp`; the owner accepted that ("always deliver"), so this
-/// predicate deliberately does not consider them.
+/// predicate deliberately does not consider them. A local VM keeps the token
+/// on its state disk until its next boot's check removes it or it expires,
+/// which the owner accepted on 2026-10-15.
 fn codex_login_admissible(
     session: &PlatformRuntimeSession,
     admission: Option<&Admission>,
@@ -1359,8 +1368,9 @@ fn codex_login_admissible(
     )
 }
 
-/// [`codex_login_admissible`] for the other listed exception, the Sandbox
-/// creator's own personal Claude sign-in: the Anthropic grant carries the
+/// [`codex_login_admissible`] for the other listed exception, the
+/// environment creator's own personal Claude sign-in, for a hosted Sandbox or
+/// the creator's own local VM alike: the Anthropic grant carries the
 /// dedicated `claude-login` permission, and the credential is the creator's
 /// own Active Claude sign-in on the platform. An Anthropic API key or Claude
 /// subscription token (`claude setup-token`) is never delivered.
@@ -1393,11 +1403,21 @@ fn personal_login_admissible(
     admission: Option<&Admission>,
     login: &PersonalLogin,
 ) -> Result<(), BrokerLeaseError> {
-    let RuntimeIdentity::Hosted { .. } = &session.identity else {
-        return Err(BrokerLeaseError::Denied);
+    // A hosted Sandbox, or a local VM's owner-local delegation that selected
+    // a profile (owner decision, 2026-10-15). Each runtime identity has its
+    // one placement; a delegation without a profile leases no provider
+    // credential.
+    let placement = match &session.identity {
+        RuntimeIdentity::Hosted { .. } => GrantPlacement::Platform,
+        RuntimeIdentity::OwnerLocal {
+            profile: Some(_), ..
+        } => GrantPlacement::PlatformToLocal,
+        RuntimeIdentity::OwnerLocal { profile: None, .. } => {
+            return Err(BrokerLeaseError::Denied);
+        }
     };
     let creator = Owner::User(session.context.user_id.clone());
-    if session.context.placement != GrantPlacement::Platform
+    if session.context.placement != placement
         || session.credential_owner != creator
         || !session.context.allow_personal_credentials
     {

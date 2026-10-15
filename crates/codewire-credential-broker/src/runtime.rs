@@ -1612,8 +1612,9 @@ where
             .map_err(map_lease_error)
     }
 
-    /// Seal the Sandbox creator's own personal Codex ChatGPT login to the
-    /// workspace daemon's recipient key: a listed direct delivery exception
+    /// Seal the environment creator's own personal Codex ChatGPT login to the
+    /// recipient key of a hosted Sandbox's workspace daemon or a local VM's
+    /// guest daemon: a listed direct delivery exception
     /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions").
     /// Codex enables `/usage`, analytics and account routing only with its own
     /// login, which a proxy cannot supply.
@@ -1682,8 +1683,9 @@ where
         })
     }
 
-    /// Seal the Sandbox creator's own personal Claude sign-in to the workspace
-    /// daemon's recipient key, which writes it as `claudeAiOauth` in Claude
+    /// Seal the environment creator's own personal Claude sign-in to the
+    /// recipient key of a hosted Sandbox's workspace daemon or a local VM's
+    /// guest daemon, which writes it as `claudeAiOauth` in Claude
     /// Code's `~/.claude/.credentials.json`: the other listed direct delivery
     /// exception. Claude Code shows `/usage` and its plan only with its own
     /// claude.ai login, whose account calls ignore `ANTHROPIC_BASE_URL`, so the

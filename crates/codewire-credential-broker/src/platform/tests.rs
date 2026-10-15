@@ -102,6 +102,10 @@ pub(super) struct SyntheticAuthority {
     /// Deny every resolve, as the hosted authority does once the creator's
     /// membership or role, the organization, or the Pod lineage changed.
     deny: AtomicBool,
+    /// The grants an owner-local delegation authority derives from the
+    /// delegation's selected profile. `None`: a hosted authority, which
+    /// cannot use that path.
+    owner_local_grants: Option<Vec<DerivedGrant>>,
 }
 
 #[async_trait]
@@ -114,6 +118,19 @@ impl PlatformRuntimeAuthority for SyntheticAuthority {
         }
         Ok(self.session.lock().expect("synthetic session").clone())
     }
+
+    /// As the delegation authority does: the grants only for exactly the
+    /// session binding it authenticated.
+    async fn owner_local_grants(
+        &self,
+        expected: &PlatformRuntimeSession,
+    ) -> Result<Vec<DerivedGrant>, PlatformRuntimeError> {
+        let current = self.current_session().await?;
+        match &self.owner_local_grants {
+            Some(grants) if expected.same_binding(&current) => Ok(grants.clone()),
+            _ => Err(PlatformRuntimeError::Denied),
+        }
+    }
 }
 
 impl SyntheticAuthority {
@@ -123,6 +140,7 @@ impl SyntheticAuthority {
             gate: SessionGate::default(),
             calls: AtomicUsize::new(0),
             deny: AtomicBool::new(false),
+            owner_local_grants: None,
         }
     }
 
@@ -320,6 +338,78 @@ impl Fixture {
     /// decision, evaluated at admission.
     pub(super) async fn epoch(&self) -> Result<Arc<Adapter>> {
         epoch(&self.authority, &self.store, &self.pool).await
+    }
+
+    /// A local VM's owner-local delegation for this fixture's environment, as
+    /// credential-service's delegation authority admits one: placement
+    /// `PlatformToLocal`, the profile owner resolved to `credential_owner`,
+    /// the delegation's selected `profile` (`None`: no profile), and the one
+    /// grant it derives for `record` in `slot` with `permission`. Every lease
+    /// runs the full per-request checks. A session or provider the shape
+    /// checks refuse is a denial.
+    pub(super) async fn owner_local(
+        &self,
+        credential_owner: Owner,
+        allow_personal_credentials: bool,
+        profile: Option<EnvironmentAccessBinding>,
+        slot: CapabilitySlot,
+        record: &CredentialRecord,
+        permission: GrantPermission,
+    ) -> Result<Result<Adapter, BrokerLeaseError>> {
+        let mut context = self.context.clone();
+        context.placement = GrantPlacement::PlatformToLocal;
+        context.allow_personal_credentials = allow_personal_credentials;
+        context.authorized_credentials = [record.metadata.id.clone()].into();
+        let expires_at_unix = unix_now()? + 3_600;
+        let grant = DerivedGrant {
+            environment_id: context.environment_id.clone(),
+            environment_generation: context.environment_generation,
+            profile: profile
+                .as_ref()
+                .map(|profile| codewire_access::GrantProfile {
+                    id: profile.profile_id.clone(),
+                    revision: profile.profile_revision,
+                }),
+            capability_slot: slot,
+            credential_id: record.metadata.id.clone(),
+            credential_revocation_generation: record.version.revocation_generation,
+            expires_at_unix: Some(expires_at_unix),
+            permissions: [permission].into(),
+        };
+        let Ok(session) = PlatformRuntimeSession::owner_local(
+            context,
+            credential_owner,
+            profile,
+            [7; 32],
+            expires_at_unix,
+        ) else {
+            return Ok(Err(BrokerLeaseError::Denied));
+        };
+        let authority = Arc::new(SyntheticAuthority {
+            owner_local_grants: Some(vec![grant]),
+            ..SyntheticAuthority::new(session)
+        });
+        Ok(Adapter::connect(
+            authority,
+            self.store.clone(),
+            PlatformAccessProfileStore::new(self.pool.clone(), builtin_provider_catalog()),
+        )
+        .await
+        .map_err(|_| BrokerLeaseError::Denied))
+    }
+
+    /// The current binding of this fixture's environment to the creator's
+    /// profile, as a local VM's delegation would select it.
+    pub(super) async fn current_binding(&self) -> Result<EnvironmentAccessBinding> {
+        let current =
+            PlatformAccessProfileStore::new(self.db.pool.clone(), builtin_provider_catalog())
+                .get(&self.owner, &self.profile.id)
+                .await?;
+        Ok(EnvironmentAccessBinding {
+            environment_id: self.context.environment_id.clone(),
+            profile_id: current.id,
+            profile_revision: current.revision,
+        })
     }
 
     /// Another replica's provider outside any hosted bridge epoch: no

@@ -1,5 +1,6 @@
 //! The delivery predicate of a listed direct delivery exception, the
-//! Sandbox creator's personal Codex login, against real restricted
+//! environment creator's personal Codex login for a hosted Sandbox or the
+//! creator's own local VM, against real restricted
 //! PostgreSQL and a synthetic runtime authority, KEK and provider. No
 //! Kubernetes, OpenBao, provider network or real credential.
 
@@ -84,6 +85,38 @@ fn current_session(f: &Fixture) -> PlatformRuntimeSession {
     f.authority.session.lock().unwrap().clone()
 }
 
+/// The Codex login a local VM's owner-local delegation leases: its profile
+/// owner resolved to `owner`, the creator's personal consent `confirmed` or
+/// not, and the fixture's profile selected when `profile`.
+async fn owner_local_login(
+    f: &Fixture,
+    owner: Owner,
+    confirmed: bool,
+    profile: bool,
+) -> Result<Result<PlatformCredentialLease, BrokerLeaseError>> {
+    let binding = if profile {
+        Some(f.current_binding().await?)
+    } else {
+        None
+    };
+    Ok(
+        match f
+            .owner_local(
+                owner,
+                confirmed,
+                binding,
+                CapabilitySlot::codex(),
+                &f.record,
+                codex_login_permission(),
+            )
+            .await?
+        {
+            Ok(adapter) => login(&adapter).await,
+            Err(error) => Err(error),
+        },
+    )
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn codex_login_admits_only_the_creators_own_active_personal_oauth_login() -> Result<()> {
@@ -97,7 +130,11 @@ async fn codex_login_admits_only_the_creators_own_active_personal_oauth_login() 
         "another user's credential",
         "not confirmed by the creator",
         "codex not selected",
-        "owner-local runtime",
+        "owner-local delegation",
+        "owner-local delegation without a profile",
+        "owner-local organization profile",
+        "owner-local profile not confirmed by the creator",
+        "owner-local delegation, another user's credential",
         "no codex-login permission",
     ] {
         let f = Fixture::create_for_bridge().await?;
@@ -215,21 +252,64 @@ async fn codex_login_admits_only_the_creators_own_active_personal_oauth_login() 
                     .await?;
                     login(&f.adapter).await
                 }
-                "owner-local runtime" => {
-                    let mut context = f.context.clone();
-                    context.placement = GrantPlacement::PlatformToLocal;
-                    let session = PlatformRuntimeSession::owner_local(
-                        context,
-                        f.owner.clone(),
-                        Some(EnvironmentAccessBinding {
-                            environment_id: f.context.environment_id.clone(),
-                            profile_id: f.profile.id.clone(),
-                            profile_revision: f.profile.revision,
-                        }),
-                        [7; 32],
-                        unix_now()? + 3_600,
-                    )?;
-                    login(&connect(&f, session, builtin_provider_catalog()).await?).await
+                // A local VM's delegation by the creator, with the creator's
+                // own personal profile, gets the same login (owner decision,
+                // 2026-10-15), and still only through the dedicated path.
+                "owner-local delegation" => {
+                    let lease = owner_local_login(&f, f.owner.clone(), true, true).await??;
+                    ensure!(lease.permission() == &codex_login_permission());
+                    ensure!(lease.credential_metadata().id == f.record.metadata.id);
+                    ensure!(lease.grant().capability_slot == CapabilitySlot::codex());
+                    let adapter = f
+                        .owner_local(
+                            f.owner.clone(),
+                            true,
+                            Some(f.current_binding().await?),
+                            CapabilitySlot::codex(),
+                            &f.record,
+                            codex_login_permission(),
+                        )
+                        .await??;
+                    let permission = codex_login_permission();
+                    ensure!(matches!(
+                        adapter
+                            .lease_operation(
+                                Uuid::new_v4(),
+                                CapabilitySlot::codex(),
+                                permission.operation,
+                                permission.route,
+                            )
+                            .await,
+                        Err(BrokerLeaseError::Denied)
+                    ));
+                    return Ok(());
+                }
+                // A delegation without a profile leases no provider credential.
+                "owner-local delegation without a profile" => {
+                    owner_local_login(&f, f.owner.clone(), true, false).await?
+                }
+                // A delegation whose profile is an organization's: never the
+                // creator's own login.
+                "owner-local organization profile" => {
+                    owner_local_login(
+                        &f,
+                        Owner::Organization(OwnerId::parse("synthetic-org")?),
+                        true,
+                        true,
+                    )
+                    .await?
+                }
+                "owner-local profile not confirmed by the creator" => {
+                    owner_local_login(&f, f.owner.clone(), false, true).await?
+                }
+                "owner-local delegation, another user's credential" => {
+                    f.db.user("synthetic-other-user").await?;
+                    sqlx::query("UPDATE platform_credentials SET user_id=$2 WHERE id=$1")
+                        .bind(f.record.metadata.id.as_str())
+                        .bind("synthetic-other-user")
+                        .execute(&f.db.pool)
+                        .await?;
+                    owner_local_login(&f, f.owner.clone(), true, true).await?
                 }
                 "no codex-login permission" => {
                     let adapter =
