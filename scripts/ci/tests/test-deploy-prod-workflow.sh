@@ -34,6 +34,16 @@ validation_line="$(grep -n 'scripts/ci/images/image-bundle.py create' <<<"$publi
 first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
 [[ -n "$validation_line" && -n "$first_copy_line" && "$validation_line" -lt "$first_copy_line" ]] ||
   fail "complete production validation does not precede registry publication"
+# Reused source images must carry their Dev delivery signature for this exact
+# source before any release tag points at them.
+[[ "$(grep -Fc 'scripts/ci/images/verify-runtime-image-signatures.sh' <<<"$publish_job")" -eq 1 ]] ||
+  fail "production does not require the delivery signature exactly once"
+# shellcheck disable=SC2016 # Match the literal workflow command.
+grep -Fq '            "$bundle" scripts/ci/trust/codewire-runtime-signing.pub' <<<"$publish_job" ||
+  fail "production signature check is not bound to the validated bundle and tracked key"
+signature_line="$(grep -n 'scripts/ci/images/verify-runtime-image-signatures.sh' <<<"$publish_job" | cut -d: -f1)"
+[[ -n "$signature_line" && "$validation_line" -lt "$signature_line" && "$signature_line" -lt "$first_copy_line" ]] ||
+  fail "production signature check does not sit between validation and publication"
 
 for job in build-daemon-image build-dashboard-image build-derp build-services-image build-mesh-image; do
   grep -Fq "      - $job" <<<"$publish_job" ||

@@ -331,6 +331,10 @@ run_paths_case dev_delivery_supersession push refs/heads/main false \
   'deploy policy policy_shell security security_js' \
   scripts/ci/deploy/delivery-superseded.sh \
   scripts/ci/tests/test-delivery-superseded.sh
+run_paths_case production_signature_reuse pull_request refs/pull/2007/head false \
+  'deploy go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
+  scripts/ci/images/verify-runtime-image-signatures.sh \
+  scripts/ci/tests/test-verify-runtime-image-signatures.sh
 run_paths_case runtime_plan_ci pull_request refs/pull/201/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/deploy/resolve-deployed-source.sh \
