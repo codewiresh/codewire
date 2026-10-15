@@ -156,11 +156,10 @@ changing it, and reconcile `origin/main` immediately before landing.
 
 Plans, proposals, handoffs, goals and design history live in the sibling
 `codewire/plans` repository, checked out at `../plans`
-(`/home/user/src/codewire/plans` on the owner workstation), not under
-`docs/plans/` here. Write new plans there as `YYYY-MM-DD-<slug>.md`, commit and
-push them to its `main`, and link them from issues by path. Do not add new
-files under `docs/plans/`; stable, shipped-behavior documentation stays under
-`docs/`.
+(`/home/user/src/codewire/plans` on the owner workstation), not in
+this repository. Write new plans there as `YYYY-MM-DD-<slug>.md`, commit and
+push them to its `main`, and link them from issues by path. Stable,
+shipped-behavior documentation stays under `docs/`.
 
 ## Worktree and artifact lifecycle
 

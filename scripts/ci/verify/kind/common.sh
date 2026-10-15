@@ -2381,7 +2381,7 @@ edge_routing_probes() {
   fi
 }
 
-# Connect-RPC edge proofs (docs/plans/connect-rpc/03, WI-4 / D5):
+# Connect-RPC edge proofs (codewire/plans:connect-rpc/03, WI-4 / D5):
 #   - a billing-owned Connect regex beats the /codewire\. orchestration
 #     fallback (the probe's PublicPing rule -> codewire-billing),
 #   - the fallback delivers every other Connect path to orchestration with
