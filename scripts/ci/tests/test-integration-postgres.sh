@@ -254,7 +254,7 @@ suites = [
     {'args': ['test', '-p', 'codewire-server-core', '--test', 'session_auth', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'session hash-only matrix', 'count': 4},
     {'args': ['test', '-p', 'codewire-server-core', '--test', 'org_deletion_lifecycle', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'organization deletion lifecycle matrix', 'count': 20},
     {'args': ['test', '-p', 'codewire-billing', '--lib', 'billing_teardown::tests::db_', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'organization billing teardown matrix', 'count': 5},
-    {'args': ['test', '--profile', 'ci', '-p', 'codewire-orchestration', '--lib', 'connect::mesh_authorization::tests::generated_mesh_authorization_service_enforces_the_canonical_matrix', '--', '--ignored', '--exact', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': True, 'label': 'Mesh authorization receiver matrix', 'count': 1},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'connect::mesh_authorization::tests::generated_mesh_authorization_service_enforces_the_canonical_matrix', '--', '--ignored', '--exact', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'Mesh authorization receiver matrix', 'count': 1},
     {'args': ['test', '-p', 'codewire-orchestration', '--test', 'environment_external_cleanup', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'environment external cleanup matrix', 'count': 9},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_daemon::session_mutation::tests::db_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment session admission matrix', 'count': 5},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure', '--', '--ignored', '--exact', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment destroy template hint matrix', 'count': 1},
@@ -289,7 +289,6 @@ batches = [
      'platform,ssh-agent', '--lib', '--no-run'],
     ['test', '-p', 'codewire-billing', '--lib', '--no-run'],
     ['test', '-p', 'codewire-mesh', '--lib', '--no-run'],
-    ['test', '--profile', 'ci', '-p', 'codewire-orchestration', '--lib', '--no-run'],
 ]
 # Four lanes, each keeping its suites in their established order. Every
 # harness compiles before any lane starts.
@@ -384,10 +383,10 @@ assert commands[0]['args'] == ['build', '--locked', '--profile', 'ci', '-p',
 assert commands[0]['target'] == environment['CODEWIRE_CARGO_CI_TARGET_DIR']
 actual_batches = [command for command in commands if '--no-run' in command['args']]
 assert [command['args'] for command in actual_batches] == batches
-for command in actual_batches:
-    ci_batch = '--profile' in command['args']
-    assert command['target'] == environment['CODEWIRE_CARGO_CI_TARGET_DIR' if ci_batch else 'CARGO_TARGET_DIR']
-    assert command['database' if ci_batch else 'test_database'] == environment['DATABASE_URL_RUST']
+assert all(command['target'] == environment['CARGO_TARGET_DIR'] and
+           command['test_database'] == environment['DATABASE_URL_RUST'] for command in actual_batches)
+# Every database suite runs in the test profile its batch built.
+assert not any(suite['ci'] for suite in suites)
 executions = [command for command in commands if command['args'][0] == 'test'
               and '--no-run' not in command['args']]
 assert len(executions) == len(suites) == 42
