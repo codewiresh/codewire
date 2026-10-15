@@ -29,6 +29,9 @@ phase() {
 }
 
 cd "$ROOT"
+# The workspace hack unifies third-party features for every build below; a
+# stale one is cheap to detect before any of them compiles.
+phase "workspace hack" "$ROOT/scripts/ci/verify/check-workspace-hack.sh"
 # Clippy compiles every target and lints it: once with default features and
 # once with all features, so feature-gated and default-only code are linted.
 phase "root clippy (default features)" \

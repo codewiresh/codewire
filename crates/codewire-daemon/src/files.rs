@@ -75,6 +75,65 @@ pub fn resolve_workspace_path(config: &Config, raw: &str) -> Result<PathBuf> {
     }
 }
 
+/// Refuse a path below the workspace or home root that passes through a
+/// symlink, for daemon file RPCs on non-Linux platforms (#2505 L4).
+///
+/// [`resolve_workspace_path`] is lexical, so `workspace/link/file` passes even
+/// when `link` points outside. Linux confines every operation with `openat2`
+/// (`RESOLVE_BENEATH | NO_MAGICLINKS | NO_XDEV`, see `files/linux.rs`). Without
+/// it this check refuses a symlink at any component below the configured root,
+/// probing with lstat. The root itself is configuration and may sit under a
+/// symlink, such as macOS `/var` or `/tmp`. Callers that only name an entry
+/// (`stat` without follow, `readlink`) may name a symlink leaf but never pass
+/// through one.
+///
+/// This stops a link that is already in place. It is check-then-use, so a
+/// process that swaps a directory for a link between the check and the
+/// operation can still redirect it. Non-Linux daemons serve development and
+/// host builds only; Sandbox guests run Linux.
+///
+/// Compiled under `test` on every platform so Linux CI runs its tests.
+#[cfg(any(test, not(target_os = "linux")))]
+pub(crate) fn reject_symlinked_components(
+    root: &Path,
+    path: &Path,
+    allow_leaf_symlink: bool,
+    is_symlink: impl Fn(&Path) -> bool,
+) -> Result<()> {
+    let below_root = path
+        .strip_prefix(root)
+        .map_err(|_| FileError::PathOutsideWorkspace)?;
+    let mut components = below_root.components().peekable();
+    let mut prefix = root.to_path_buf();
+    while let Some(component) = components.next() {
+        prefix.push(component);
+        let leaf = components.peek().is_none();
+        if !(leaf && allow_leaf_symlink) && is_symlink(&prefix) {
+            return Err(FileError::TraversalDenied);
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a workspace path for a non-Linux file RPC: lexical confinement,
+/// then the symlink refusal above against the most specific configured root.
+/// Missing components pass; the operation reports them.
+#[cfg(not(target_os = "linux"))]
+fn resolve_confined_path(config: &Config, path: &str, allow_leaf_symlink: bool) -> Result<PathBuf> {
+    let resolved = resolve_workspace_path(config, path)?;
+    let root = [&config.workspace_root, &config.home_root]
+        .into_iter()
+        .filter(|root| resolved.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .ok_or(FileError::PathOutsideWorkspace)?;
+    reject_symlinked_components(root, &resolved, allow_leaf_symlink, |probe| {
+        fs::symlink_metadata(probe)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false)
+    })?;
+    Ok(resolved)
+}
+
 pub fn is_allowed_workspace_path(config: &Config, path: &Path) -> bool {
     path == config.workspace_root
         || path.starts_with(&config.workspace_root)
@@ -84,7 +143,9 @@ pub fn is_allowed_workspace_path(config: &Config, path: &Path) -> bool {
 
 #[cfg(not(target_os = "linux"))]
 pub fn list(config: &Config, path: &str) -> Result<Vec<v1::FileMetadata>> {
-    let target = resolve_workspace_path(config, path)?;
+    // Listing enters the directory, so it may not be a link. Entries that are
+    // links are named from lstat and never entered.
+    let target = resolve_confined_path(config, path, false)?;
     let entries = fs::read_dir(&target)?;
     let mut result = Vec::new();
 
@@ -103,11 +164,10 @@ pub fn list(config: &Config, path: &str) -> Result<Vec<v1::FileMetadata>> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn stat(config: &Config, path: &str, follow: bool) -> Result<v1::FileMetadata> {
-    let target = resolve_workspace_path(config, path)?;
-    let mut metadata = fs::symlink_metadata(&target)?;
-    if follow && metadata.file_type().is_symlink() {
-        metadata = fs::metadata(&target)?;
-    }
+    // Without follow, a link leaf is named from lstat; following one is
+    // refused because the lexical path says nothing about where it lands.
+    let target = resolve_confined_path(config, path, !follow)?;
+    let metadata = fs::symlink_metadata(&target)?;
     file_metadata_from_info(&target, &metadata)
 }
 
@@ -118,7 +178,7 @@ pub fn open_file(
     options: Option<&v1::FileOpenOptions>,
     perm: u32,
 ) -> Result<()> {
-    let target = resolve_workspace_path(config, path)?;
+    let target = resolve_confined_path(config, path, false)?;
     let options = options.cloned().unwrap_or_default();
     let mut open = OpenOptions::new();
     open.read(options.read || !options.write);
@@ -141,7 +201,7 @@ pub fn open_file(
 
 #[cfg(not(target_os = "linux"))]
 pub fn read(config: &Config, path: &str, offset: i64, length: i64) -> Result<Vec<u8>> {
-    let target = resolve_workspace_path(config, path)?;
+    let target = resolve_confined_path(config, path, false)?;
     if offset < 0 {
         return Err(FileError::InvalidOffset);
     }
@@ -171,7 +231,7 @@ pub fn read(config: &Config, path: &str, offset: i64, length: i64) -> Result<Vec
 
 #[cfg(not(target_os = "linux"))]
 pub fn write(config: &Config, path: &str, offset: i64, data: &[u8]) -> Result<i64> {
-    let target = resolve_workspace_path(config, path)?;
+    let target = resolve_confined_path(config, path, false)?;
     if offset < 0 {
         return Err(FileError::InvalidOffset);
     }
@@ -184,7 +244,7 @@ pub fn write(config: &Config, path: &str, offset: i64, data: &[u8]) -> Result<i6
 
 #[cfg(not(target_os = "linux"))]
 pub fn mkdir(config: &Config, path: &str, perm: u32) -> Result<()> {
-    let target = resolve_workspace_path(config, path)?;
+    let target = resolve_confined_path(config, path, false)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -202,7 +262,7 @@ pub fn mkdir(config: &Config, path: &str, perm: u32) -> Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn remove(config: &Config, path: &str) -> Result<()> {
-    let target = resolve_workspace_path(config, path)?;
+    let target = resolve_confined_path(config, path, false)?;
     fs::remove_file(&target).or_else(|err| {
         if err.kind() == std::io::ErrorKind::IsADirectory {
             fs::remove_dir(target)
@@ -215,15 +275,15 @@ pub fn remove(config: &Config, path: &str) -> Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn rename(config: &Config, old_path: &str, new_path: &str) -> Result<()> {
-    let old_path = resolve_workspace_path(config, old_path)?;
-    let new_path = resolve_workspace_path(config, new_path)?;
+    let old_path = resolve_confined_path(config, old_path, false)?;
+    let new_path = resolve_confined_path(config, new_path, false)?;
     fs::rename(old_path, new_path)?;
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn set_stat(config: &Config, request: &v1::SetStatRequest) -> Result<()> {
-    let target = resolve_workspace_path(config, &request.path)?;
+    let target = resolve_confined_path(config, &request.path, false)?;
     if let Some(size) = request.size {
         if size < 0 {
             return Err(FileError::InvalidSize);
@@ -265,7 +325,8 @@ pub fn set_stat(config: &Config, request: &v1::SetStatRequest) -> Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn readlink(config: &Config, path: &str) -> Result<String> {
-    let target = resolve_workspace_path(config, path)?;
+    // Reading a link's target never passes through it.
+    let target = resolve_confined_path(config, path, true)?;
     Ok(fs::read_link(target)?.to_string_lossy().into_owned())
 }
 
@@ -471,5 +532,51 @@ mod tests {
         let entry = file_metadata_from_info(&link, &metadata).expect("entry");
         assert_ne!(entry.mode & GO_MODE_SYMLINK, 0);
         assert_eq!(entry.link_target, "target");
+    }
+
+    /// #2505 L4: the non-Linux walker refuses a symlink at any depth below
+    /// the root, ignores links above it, and lets lstat-style callers name a
+    /// link leaf. A probe stands in for lstat so Linux CI runs it.
+    #[test]
+    fn symlinked_components_below_the_root_are_refused() {
+        let is_symlink = |probe: &Path| {
+            probe.file_name().is_some_and(|name| name == "link") || probe == Path::new("/var")
+        };
+        let root = Path::new("/var/workspace");
+        let check = |path: &str, allow_leaf: bool| {
+            reject_symlinked_components(root, Path::new(path), allow_leaf, is_symlink)
+        };
+
+        assert!(
+            check("/var/workspace", false).is_ok(),
+            "a link above the root is configuration"
+        );
+        assert!(check("/var/workspace/src/main.rs", false).is_ok());
+        assert!(matches!(
+            check("/var/workspace/link", false),
+            Err(FileError::TraversalDenied)
+        ));
+        assert!(
+            matches!(
+                check("/var/workspace/link/secret", false),
+                Err(FileError::TraversalDenied)
+            ),
+            "the lexical path stays inside, but the link decides where it lands"
+        );
+        assert!(
+            check("/var/workspace/src/link", true).is_ok(),
+            "naming a link leaf"
+        );
+        assert!(
+            matches!(
+                check("/var/workspace/link/secret", true),
+                Err(FileError::TraversalDenied)
+            ),
+            "naming a leaf never passes through a link"
+        );
+        assert!(matches!(
+            check("/elsewhere/file", false),
+            Err(FileError::PathOutsideWorkspace)
+        ));
     }
 }

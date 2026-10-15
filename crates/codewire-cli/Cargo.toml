@@ -90,6 +90,7 @@ tempfile = { workspace = true }
 # Paused time for the delegation keepalive tests.
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }
+codewire-workspace-hack.workspace = true
 
 [build-dependencies]
 codewire-cw-release = { workspace = true }

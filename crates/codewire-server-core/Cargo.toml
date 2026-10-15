@@ -94,3 +94,4 @@ reqwest = { workspace = true }
 # (codewire.testing.v1.PingService) and the h2c prior-knowledge client.
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["axum", "client"] }
+codewire-workspace-hack.workspace = true

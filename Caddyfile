@@ -8,6 +8,15 @@
 {
 	admin localhost:2020
 	auto_https disable_redirects
+	# Audit-IP integrity (#2505 M1): Caddy 2.10's default proxy posture is
+	# REPLACE — an incoming client X-Forwarded-For is discarded and the peer
+	# IP is forwarded as the sole hop. That is deliberate: adding
+	# `trusted_proxies` here (e.g. 0.0.0.0/0 or private_ranges) switches the
+	# edge to APPEND mode and preserves attacker-chosen hops for every
+	# backend, re-opening the audit_logs IP spoof the IdP now defends
+	# against (it reads the LAST parseable hop). Do not add trusted_proxies
+	# unless another L7 proxy is placed in front of this Caddy — and then
+	# list only that proxy's address range.
 }
 
 # App preview hosts route by Host header, not API path.
