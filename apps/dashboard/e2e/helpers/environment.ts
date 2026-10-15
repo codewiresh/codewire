@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import { writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
+import type { TestInfo } from "@playwright/test";
 import postgres from "postgres";
 
 const sql = postgres(process.env.DATABASE_URL!);
@@ -157,6 +159,43 @@ export async function cleanupSystemPresets(): Promise<void> {
     DELETE FROM environment_presets
     WHERE official = true AND name LIKE 'e2e-%'
   `;
+}
+
+/**
+ * Save the daemon log of each Sandbox of the orgs matching `slugPrefix` into
+ * the test's output directory, which a failed Kind dashboard shard uploads.
+ * Call it from a failed test, before cleanup removes the Sandboxes: their
+ * daemon log is otherwise lost with them.
+ */
+export async function saveSandboxDaemonLogs(slugPrefix: string, testInfo: TestInfo): Promise<void> {
+  const rows = await sql`
+    SELECT e.id
+    FROM environments e
+    JOIN organizations o ON e.org_id = o.id
+    WHERE o.slug LIKE ${slugPrefix + "%"}
+  `;
+  const context = process.env.PLAYWRIGHT_KUBE_CONTEXT || "kind-codewire";
+  const namespace = process.env.PLAYWRIGHT_SANDBOX_NAMESPACE || "dev-sandboxes";
+  for (const row of rows) {
+    try {
+      const { stdout } = await execFileAsync("kubectl", [
+        "--context",
+        context,
+        "-n",
+        namespace,
+        "logs",
+        "-l",
+        `codewire.sh/environment-id=${row.id}`,
+        "-c",
+        "workspace",
+        "--tail=-1",
+        "--prefix",
+      ], { maxBuffer: 32 * 1024 * 1024 });
+      if (stdout) await writeFile(testInfo.outputPath(`sandbox-daemon-${row.id}.log`), stdout);
+    } catch (err) {
+      console.warn(`  [diagnostics] no daemon log for Sandbox ${row.id}: ${(err as Error).message}`);
+    }
+  }
 }
 
 export async function cleanupKubernetesSandboxes(slugPrefix: string): Promise<void> {
