@@ -414,19 +414,35 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
             with self.subTest(events=reordered):
                 self.assertNotEqual(self.rotation_proof(reordered).returncode, 0)
 
-    def admission_watch(self, events):
+    def admission_watch(self, events, relay=None):
         directory = tempfile.TemporaryDirectory(prefix="kind-admission-watch-")
         self.addCleanup(directory.cleanup)
         calls = Path(directory.name) / "calls"
+        relay_log = Path(directory.name) / "relay.log"
+        if relay is None:
+            relay = [self.relay_decision("credential_bridge_epoch_overlap")]
+        relay_log.write_text("".join(json.dumps(line) + "\n" for line in relay) + "not json\n")
         result = self.shell('''
+NS=codewire
 SANDBOX_NS=dev-sandboxes
 KIND_ADMISSION_WATCH_SECONDS=1
 sleep() { :; }
 kind_credential_fixture_events() { printf '%%s\\n' '%s'; }
-kubectl() { printf '%%s\\n' "$*" >> '%s'; }
-watch_kind_credential_fresh_admission '%s' workspace-pod /tmp/codewire-kind-fresh-admission-7
-''' % (json.dumps(events), calls, ENVIRONMENT))
+kubectl() {
+  case "$*" in
+    "-n codewire logs pod/relay-pod -c orchestration") cat '%s' ;;
+    *) printf '%%s\\n' "$*" >> '%s' ;;
+  esac
+}
+watch_kind_credential_fresh_admission '%s' workspace-pod relay-pod /tmp/codewire-kind-fresh-admission-7
+''' % (json.dumps(events), relay_log, calls, ENVIRONMENT))
         return result.returncode, calls.read_text() if calls.exists() else ""
+
+    @staticmethod
+    def relay_decision(event, environment=ENVIRONMENT):
+        return {"timestamp": "2026-10-15T14:02:26.072995Z", "level": "INFO",
+                "fields": {"event": event, "environment_id": environment},
+                "target": "codewire_orchestration::worker::credential_relay::epoch"}
 
     def test_the_admission_mark_follows_only_a_fresh_token_after_baseline(self):
         baseline = {"event": "provider_response", "scenario": "baseline", "attempt": 1,
@@ -441,6 +457,27 @@ watch_kind_credential_fresh_admission '%s' workspace-pod /tmp/codewire-kind-fres
                        [baseline, auth(environment=WORKSPACE_UID)], [auth()]):
             with self.subTest(events=events):
                 self.assertEqual(self.admission_watch(events), (1, ""))
+
+    def test_the_admission_mark_waits_for_the_relay_to_admit_its_successor(self):
+        # Run 14359: the broker authenticated the replaced workspace token, but
+        # the relay refused that successor until kubelet replaced its own token.
+        events = [{"event": "provider_response", "scenario": "baseline", "attempt": 1,
+                   "status": 200, "response_calls": 1, "refresh_calls": 0},
+                  {"event": "bridge_authenticated", "environment_id": ENVIRONMENT,
+                   "workspace_token_changed": True}]
+        overlap = self.relay_decision("credential_bridge_epoch_overlap")
+        refused = self.relay_decision("credential_bridge_successor_refused")
+        marked = (0, "-n dev-sandboxes exec workspace-pod -c workspace -- "
+                     "touch /tmp/codewire-kind-fresh-admission-7\n")
+        self.assertEqual(self.admission_watch(events, [refused, refused, overlap]), marked)
+        for relay in ([], [refused], [overlap, refused],
+                      [self.relay_decision("credential_bridge_epoch_admitted")],
+                      [self.relay_decision("credential_bridge_epoch_overlap", WORKSPACE_UID)],
+                      [refused, self.relay_decision("credential_bridge_epoch_overlap",
+                                                    WORKSPACE_UID)],
+                      [dict(overlap, target="codewire_orchestration::worker::other")]):
+            with self.subTest(relay=relay):
+                self.assertEqual(self.admission_watch(events, relay), (1, ""))
 
     def test_rotation_ends_at_an_admission_mark_or_else_past_the_epoch_bound(self):
         for changes in ({}, {"fresh_admission": False, "rotated_ms": 590000, "elapsed_ms": 600001}):

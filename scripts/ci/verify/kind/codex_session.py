@@ -68,10 +68,10 @@ ROTATION_TIMEOUT = 720.0
 # baseline's epoch. Host-side authenticated admission logs prove fresh tokens;
 # time or the changed file by itself is not sufficient acceptance evidence.
 HOSTED_EPOCH_MAX_LIFETIME = 600.0
-# The host creates this file when the credential fixture records a fresh-token
-# admission for this environment: the relay's successor epoch authenticated
-# with the replaced workspace token. With the replaced token it ends the idle
-# before the epoch bound (codex_session.py <marker>).
+# The host creates this file once the relay has admitted a successor epoch for
+# this environment that authenticated with the replaced workspace token. With
+# the replaced token it ends the idle before the epoch bound
+# (codex_session.py <marker>).
 ADMISSION_MARKER = re.compile(r"/tmp/codewire-kind-fresh-admission-[0-9]{1,12}")
 SCENARIO_TIMEOUT = 30.0
 SHUTDOWN_GRACE = 5.0
