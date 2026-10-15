@@ -424,9 +424,9 @@ impl ManagedCredentialClients {
     /// every placement, or `None` when the selection has none for it. Codex
     /// uses the Codex slot, as Codex's own configuration does, and the OpenAI
     /// API-key slot only without one; Claude uses the Anthropic slot. Hosted
-    /// managed agents qualify and route by this rule. A local VM qualifies by
-    /// it too, except that its Codex needs the Codex slot: a VM configures
-    /// Codex only through Codewire's native Codex home.
+    /// and local VM managed agents both qualify and route by this rule, with
+    /// either a platform or a local profile; a VM's native Codex home is
+    /// configured for the client it picks.
     pub fn managed_agent_client(self, agent: ManagedAgent) -> Option<ManagedCredentialClient> {
         match agent {
             ManagedAgent::Codex if self.contains(ManagedCredentialClient::Codex) => {
@@ -522,17 +522,24 @@ impl ManagedCredentialClients {
     ) -> ManagedCredentialClientProjection {
         let mut environment = BTreeMap::new();
         let origin = format!("http://127.0.0.1:{MANAGED_HTTP_PORT}");
-        let codex = self.contains(ManagedCredentialClient::Codex).then(|| {
-            let projection = CodexProviderProjection::for_loopback_port(MANAGED_HTTP_PORT)
-                .expect("fixed managed HTTP port is unprivileged");
-            // The native home is Codewire's own directory. The hosted home is
-            // the user's `~/.codex`, so its file carries the ownership header.
-            let (home, projection) = match placement {
-                ManagedCredentialClientPlacement::Native => (CODEX_NATIVE_HOME, projection),
-                ManagedCredentialClientPlacement::Platform => {
-                    (CODEX_PLATFORM_HOME, projection.with_managed_header())
-                }
-            };
+        let codex = match placement {
+            // A local VM configures Codex only through Codewire's own native
+            // home, so the home routes the client a managed Codex agent uses
+            // (`managed_agent_client`): the Codex slot's route, or the OpenAI
+            // API-key slot's without one, byte for byte as a hosted managed
+            // Codex agent's private home is configured.
+            ManagedCredentialClientPlacement::Native => self
+                .managed_agent_client(ManagedAgent::Codex)
+                .and_then(CodexProviderProjection::for_managed_client)
+                .map(|projection| (CODEX_NATIVE_HOME, projection)),
+            // The hosted home is the user's `~/.codex`, configured only for
+            // the Codex slot, so its file carries the ownership header.
+            ManagedCredentialClientPlacement::Platform => Some(ManagedCredentialClient::Codex)
+                .filter(|client| self.contains(*client))
+                .and_then(CodexProviderProjection::for_managed_client)
+                .map(|projection| (CODEX_PLATFORM_HOME, projection.with_managed_header())),
+        }
+        .map(|(home, projection)| {
             environment.insert("CODEX_HOME".into(), home.into());
             projection
         });
@@ -679,10 +686,30 @@ impl CodexProviderProjection {
         Self::provider(port, CODEX_PROVIDER_ID, "Codewire OpenAI", "/v1", None)
     }
 
+    /// The provider configuration for `client`, the client a managed Codex
+    /// agent uses ([`ManagedCredentialClients::managed_agent_client`]) on the
+    /// fixed managed port: the Codex slot's route, or the OpenAI API-key
+    /// slot's. A hosted managed Codex agent's private home and a local VM's
+    /// native Codex home both take it from here, so they hold the same bytes.
+    /// `None` for a client Codex does not use.
+    pub fn for_managed_client(client: ManagedCredentialClient) -> Option<Self> {
+        let projection = match client {
+            ManagedCredentialClient::Codex => Self::for_loopback_port(MANAGED_HTTP_PORT),
+            ManagedCredentialClient::OpenAi => {
+                Self::for_openai_api_loopback_port(MANAGED_HTTP_PORT)
+            }
+            ManagedCredentialClient::Anthropic
+            | ManagedCredentialClient::Ssh
+            | ManagedCredentialClient::GitHub => return None,
+        };
+        Some(projection.expect("fixed managed HTTP port is unprivileged"))
+    }
+
     /// The same for Codex through the distinct OpenAI API-key slot: that
     /// slot's managed base path, with Codex sending the session's
     /// `OPENAI_API_KEY` placeholder, which the broker replaces. A managed
-    /// agent uses it when its profile has no Codex slot.
+    /// agent uses it when its profile has no Codex slot, hosted or in a local
+    /// VM.
     pub fn for_openai_api_loopback_port(port: u16) -> Result<Self, ProjectionError> {
         Self::provider(
             port,

@@ -412,6 +412,52 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
     assert_eq!(SSH_PLATFORM_AUTH_SOCK, "/codewire/run/ssh-agent.sock");
 }
 
+/// A local VM with only the OpenAI API-key slot configures its native Codex
+/// home exactly as a hosted managed Codex agent's private home is configured
+/// for that route; a hosted Sandbox's own `~/.codex` stays for the Codex slot
+/// alone. With a Codex slot both placements use the Codex route.
+#[test]
+fn an_openai_only_local_vm_configures_codex_for_the_api_key_route() {
+    let openai = clients(&["openai"]);
+    let native = openai.for_placement(ManagedCredentialClientPlacement::Native);
+    let api = CodexProviderProjection::for_managed_client(ManagedCredentialClient::OpenAi).unwrap();
+    assert_eq!(native.codex.as_ref(), Some(&api));
+    assert_eq!(
+        api,
+        CodexProviderProjection::for_openai_api_loopback_port(MANAGED_HTTP_PORT).unwrap()
+    );
+    assert!(
+        api.config_toml()
+            .contains("[model_providers.codewire_openai_api]")
+    );
+    assert_eq!(
+        native.environment.get("CODEX_HOME").map(String::as_str),
+        Some(CODEX_NATIVE_HOME)
+    );
+    assert_eq!(
+        native.environment.get("OPENAI_API_KEY").map(String::as_str),
+        Some("codewire-managed")
+    );
+    let hosted = openai.for_placement(ManagedCredentialClientPlacement::Platform);
+    assert!(hosted.codex.is_none());
+    assert!(!hosted.environment.contains_key("CODEX_HOME"));
+    for selected in [clients(&["codex"]), clients(&["codex", "openai"])] {
+        assert_eq!(
+            selected
+                .for_placement(ManagedCredentialClientPlacement::Native)
+                .codex,
+            CodexProviderProjection::for_managed_client(ManagedCredentialClient::Codex)
+        );
+    }
+    for client in [
+        ManagedCredentialClient::Anthropic,
+        ManagedCredentialClient::Ssh,
+        ManagedCredentialClient::GitHub,
+    ] {
+        assert!(CodexProviderProjection::for_managed_client(client).is_none());
+    }
+}
+
 #[test]
 fn managed_client_projection_covers_all_owned_names_without_environment_lookup() {
     for bits in 0..32 {
@@ -428,17 +474,28 @@ fn managed_client_projection_covers_all_owned_names_without_environment_lookup()
             ManagedCredentialClientPlacement::Platform,
         ] {
             let projection = selected.for_placement(placement);
+            // A local VM configures Codex for the client a managed Codex agent
+            // uses, so an OpenAI-only selection also gets the native
+            // `CODEX_HOME`. It is not added to the reserved names (bound into
+            // every selection digest): a VM refuses a declared `CODEX_HOME`
+            // whatever is selected.
+            let native_codex = placement == ManagedCredentialClientPlacement::Native
+                && selected.managed_agent_client(ManagedAgent::Codex).is_some();
+            let mut expected = projected_names(selected);
+            if native_codex {
+                expected.insert("CODEX_HOME");
+            }
             assert_eq!(
                 projection
                     .environment
                     .keys()
                     .map(String::as_str)
                     .collect::<BTreeSet<_>>(),
-                projected_names(selected)
+                expected
             );
             assert_eq!(
                 projection.codex.is_some(),
-                selected.contains(ManagedCredentialClient::Codex)
+                native_codex || selected.contains(ManagedCredentialClient::Codex)
             );
             assert_eq!(
                 projection.gh.is_some(),

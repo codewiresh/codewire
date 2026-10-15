@@ -143,10 +143,10 @@ release or source as your `cw`.
 
 **`managed VM agents require a selected credential profile`**: the VM has no
 profile. Select a local or platform profile with a provider for the agent: a
-`codex` slot for Codex, or an `anthropic` slot for Claude:
-`cw env update ENV --profile local:NAME` or `--profile platform:NAME`. If the
-error says the profile has no "Codex" (or "Anthropic") provider, add that
-slot, for a local profile with
+`codex` slot (or, without one, an `openai` slot) for Codex, or an `anthropic`
+slot for Claude: `cw env update ENV --profile local:NAME` or
+`--profile platform:NAME`. If the error says the profile has no "Codex or
+OpenAI" (or "Anthropic") provider, add that slot, for a local profile with
 `cw credentials --local --profile NAME set codex CREDENTIAL`. Editing a profile
 makes a new revision, and a VM keeps the revision it selected, so run
 `cw env update ENV --profile local:NAME` again afterwards. A platform profile
