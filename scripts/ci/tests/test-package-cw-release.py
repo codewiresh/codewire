@@ -30,24 +30,28 @@ from pathlib import Path
 sys.path.insert(0, {fixtures!r})
 import cw_release_fixtures as fx
 args = sys.argv[1:]
-target = args[args.index("--target") + 1]
-out = Path(os.environ["CARGO_TARGET_DIR"]) / target / "release"
-out.mkdir(parents=True, exist_ok=True)
+targets = [args[index + 1] for index, arg in enumerate(args) if arg == "--target"]
+# Each invocation's targets, one line per invocation.
+with (Path(os.environ["CARGO_TARGET_DIR"]).parent / "cargo-invocations").open("a") as log:
+    log.write(" ".join(targets) + "\\n")
 runtime = os.environ.get("CODEWIRE_LOCAL_RUNTIME")
 embedded = Path(runtime).read_bytes() if runtime else b""
-data = fx.executable(target, os.environ["CODEWIRE_VERSION"], revision=os.environ["CODEWIRE_SOURCE_REVISION"],
-                     tree=os.environ["CODEWIRE_SOURCE_TREE_SHA256"], embedded=embedded)
-(out / "cw").write_bytes(data)
-(out / "cw").chmod(0o755)
-# As Cargo does for include_bytes!, dep-info names the embedded document.
-inputs = [str(Path.cwd() / "crates/demo/src/lib.rs")]
-if runtime:
-    inputs.append(runtime)
-    if os.environ.get("FAKE_CARGO_RUNTIME_SIBLING"):
-        inputs.append(str(Path(runtime).parent / "blobs"))
-    if os.environ.get("FAKE_CARGO_TAMPER_RUNTIME"):
-        Path(runtime).write_bytes(embedded + b" ")
-(out / "cw.d").write_text(f"{{out / 'cw'}}: {{' '.join(inputs)}}\\n")
+for target in targets:
+    out = Path(os.environ["CARGO_TARGET_DIR"]) / target / "release"
+    out.mkdir(parents=True, exist_ok=True)
+    data = fx.executable(target, os.environ["CODEWIRE_VERSION"], revision=os.environ["CODEWIRE_SOURCE_REVISION"],
+                         tree=os.environ["CODEWIRE_SOURCE_TREE_SHA256"], embedded=embedded)
+    (out / "cw").write_bytes(data)
+    (out / "cw").chmod(0o755)
+    # As Cargo does for include_bytes!, dep-info names the embedded document.
+    inputs = [str(Path.cwd() / "crates/demo/src/lib.rs")]
+    if runtime:
+        inputs.append(runtime)
+        if os.environ.get("FAKE_CARGO_RUNTIME_SIBLING"):
+            inputs.append(str(Path(runtime).parent / "blobs"))
+    (out / "cw.d").write_text(f"{{out / 'cw'}}: {{' '.join(inputs)}}\\n")
+if runtime and os.environ.get("FAKE_CARGO_TAMPER_RUNTIME"):
+    Path(runtime).write_bytes(embedded + b" ")
 '''
 
 FAKE_RUSTC = f'''#!/bin/sh
@@ -183,6 +187,48 @@ class PackageTest(unittest.TestCase):
                              CW_RELEASE_LOCAL_RUNTIME_DIR=str(self.runtime))
         self.assertNotEqual(twice.returncode, 0)
         self.assertIn("both imported and given", twice.stderr)
+
+    def invocations(self):
+        log = self.base / "cargo-invocations"
+        return log.read_text().splitlines() if log.exists() else []
+
+    def test_the_targets_build_side_by_side_in_one_invocation(self):
+        before = len(self.invocations())
+        mac = self.package("together", "aarch64-apple-darwin x86_64-apple-darwin",
+                           CW_RELEASE_LOCAL_RUNTIME_DIR=str(self.runtime))
+        self.assertEqual(mac.returncode, 0, mac.stderr)
+        self.assertEqual(self.invocations()[before:], ["aarch64-apple-darwin x86_64-apple-darwin"])
+        for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            self.assertIn(f"cw-release: admitted target={target}", mac.stdout)
+
+    def test_none_prepares_the_four_imported_targets_and_builds_nothing(self):
+        # As the release runs it: the macOS pair from the Mac, each Linux cw
+        # from its own job, then one job that builds nothing and prepares.
+        for name, targets in (("none-mac", "aarch64-apple-darwin x86_64-apple-darwin"),
+                              ("none-musl", "x86_64-unknown-linux-musl"),
+                              ("none-gnu", "aarch64-unknown-linux-gnu")):
+            built = self.package(name, targets, CW_RELEASE_LOCAL_RUNTIME_DIR=str(self.runtime))
+            self.assertEqual(built.returncode, 0, built.stderr)
+        imported = self.base / "none-import"
+        shutil.copytree(self.base / "none-mac", imported)
+        for name, target in (("none-musl", "x86_64-unknown-linux-musl"), ("none-gnu", "aarch64-unknown-linux-gnu")):
+            shutil.copy2(self.base / name / release.asset_name(fx.VERSION, target), imported)
+        before = len(self.invocations())
+        prepared = self.package("none-full", "none", CW_RELEASE_IMPORT_DIR=str(imported))
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        self.assertEqual(self.invocations()[before:], [], "preparation built a target")
+        self.assertNotIn("cw-release: admitted target=", prepared.stdout)
+        verified = subprocess.run([sys.executable, str(ROOT / "scripts/ci/release/cw_release.py"), "verify",
+                                   "--dist", str(self.base / "none-full"), "--unsigned"],
+                                  capture_output=True, text=True)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertIn(f"cw-release: verified targets=4 version={fx.VERSION} runtime_equal=true signed=false",
+                      verified.stdout.splitlines())
+        # Without the Linux pair the import does not complete the release.
+        partial = self.package("none-partial", "none", CW_RELEASE_IMPORT_DIR=str(self.base / "none-mac"))
+        self.assertNotEqual(partial.returncode, 0)
+        self.assertIn("missing imported release asset", partial.stderr)
+
 
 if __name__ == "__main__":
     result = unittest.main(argv=[sys.argv[0], "-v"], exit=False).result
