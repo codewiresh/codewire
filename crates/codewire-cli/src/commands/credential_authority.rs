@@ -187,6 +187,46 @@ async fn connect_configured_authority(
         return Ok(client);
     }
     eprintln!("Restarting the local credential authority to switch its store to {store}.");
+    let client = restart_authority(client, config, store).await?;
+    anyhow::ensure!(
+        running_store(&client).as_ref() == Some(store),
+        "local credential authority did not switch its store to {store}"
+    );
+    Ok(client)
+}
+
+/// Replace a running authority older than this cw, so the VM a boot command
+/// starts gets this cw's (#2850's platform GitHub question needs protocol
+/// 16). Only once `no_vm_may_run`: each running VM's broker belongs to the
+/// authority that started it, so while one may run, the older one keeps
+/// serving. No authority, or a current one, changes nothing.
+pub(crate) async fn replace_older_local_credential_authority(
+    no_vm_may_run: impl std::future::Future<Output = anyhow::Result<bool>>,
+) -> anyhow::Result<()> {
+    let env = OsEnv;
+    let config = authority_config(local_credential_root(&env)?)?;
+    let Some(client) = LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
+        Err::<std::process::Child, _>(AuthorityRuntimeError::Spawn)
+    })
+    .await
+    .context("admit existing local credential authority")?
+    else {
+        return Ok(());
+    };
+    if !client.is_older() || !no_vm_may_run.await? {
+        return Ok(());
+    }
+    let store = configured_authority_store(&env)?;
+    restart_authority(client, &config, &store).await.map(drop)
+}
+
+/// Stop `client`'s authority and start this cw's for `store`; a changed
+/// store moves the stored values on that start.
+async fn restart_authority(
+    client: LocalCredentialClient,
+    config: &AuthorityRuntimeConfig,
+    store: &AuthorityProtectedStore,
+) -> anyhow::Result<LocalCredentialClient> {
     client
         .shutdown()
         .await
@@ -202,12 +242,7 @@ async fn connect_configured_authority(
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let client = start_authority(config, store).await?;
-    anyhow::ensure!(
-        running_store(&client).as_ref() == Some(store),
-        "local credential authority did not switch its store to {store}"
-    );
-    Ok(client)
+    start_authority(config, store).await
 }
 
 async fn start_authority(

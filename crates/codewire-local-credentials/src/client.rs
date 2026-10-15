@@ -351,6 +351,12 @@ impl LocalCredentialClient {
         self.info.clone()
     }
 
+    /// An authority older than this cw still serves after an update; one a
+    /// boot command may replace once no local VM uses it.
+    pub fn is_older(&self) -> bool {
+        self.info.protocol_version < AUTHORITY_PROTOCOL_VERSION
+    }
+
     pub async fn shutdown(mut self) -> Result<(), Status> {
         self.inner
             .shutdown_authority(v1::ShutdownAuthorityRequest {})
