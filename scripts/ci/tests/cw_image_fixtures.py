@@ -224,6 +224,7 @@ def main(argv=None):
     create = commands.add_parser("source", allow_abbrev=False)
     create.add_argument("destination")
     produced = commands.add_parser("producer", allow_abbrev=False)
+    produced.add_argument("--profile", choices=("ci", "release"), default="release")
     produced.add_argument("source")
     produced.add_argument("output")
     produced.add_argument("result")
@@ -246,7 +247,7 @@ def main(argv=None):
     if args.operation == "source":
         print(json.dumps(create_source(Path(args.destination)), sort_keys=True))
     elif args.operation == "producer":
-        summary = make_producer(Path(args.source), Path(args.output))
+        summary = make_producer(Path(args.source), Path(args.output), profile=args.profile)
         write(Path(args.result), release.canonical(summary), 0o400)
     elif args.operation == "export":
         export_producer(args.arguments[1:] if args.arguments[:1] == ["--"] else args.arguments)

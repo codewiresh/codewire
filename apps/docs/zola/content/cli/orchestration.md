@@ -253,8 +253,10 @@ Start, `cw list` still shows it, and `cw msg` or `cw restart` resumes it in the
 new sandbox first: its agent starts again from its saved session, with its
 earlier turns, and the message goes to it. What was in flight when the sandbox
 stopped is not replayed; the agent may see an interrupted step and redo it.
-`cw wait --message` for a message sent before the Stop says that it ended with
-the environment.
+`cw wait --message` for a message sent before the Stop reads it in the new
+sandbox once the conversation has resumed there. Until then it says that the
+conversation stopped with its environment and that `cw msg` or `cw restart`
+continues it.
 
 A conversation waits, and `cw msg` says to try again shortly, while:
 

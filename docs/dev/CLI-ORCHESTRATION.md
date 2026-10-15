@@ -505,8 +505,10 @@ make cli-install-user
 ```
 
 Trusted hosts use that installed executable and the user's ordinary agent
-tools. Native Linux VMs also need durable base artifacts, their matching lock
-file, and the static managed guest runtime. Keep those inputs outside a
+tools. A release's `cw` installs everything a native Linux VM needs with
+`cw setup --local` (see [LINUX-LOCAL-VMS.md](LINUX-LOCAL-VMS.md)); the rest of
+this section is for a development build. Native Linux VMs also need durable
+base artifacts, their matching lock file, and the static managed guest runtime. Keep those inputs outside a
 disposable worktree. The base defaults are
 `$HOME/.cache/codewire/local-vmm-v1/artifacts` and the adjacent
 `artifacts.lock.json`; `CODEWIRE_NATIVE_ARTIFACT_ROOT` and

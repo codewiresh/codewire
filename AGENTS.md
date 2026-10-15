@@ -152,6 +152,16 @@ invalidates a trust boundary, remove or defer that slice before spending the
 expensive gate. Keep the main checkout clean, investigate unexpected dirt before
 changing it, and reconcile `origin/main` immediately before landing.
 
+## Plans
+
+Plans, proposals, handoffs, goals and design history live in the sibling
+`codewire/plans` repository, checked out at `../plans`
+(`/home/user/src/codewire/plans` on the owner workstation), not under
+`docs/plans/` here. Write new plans there as `YYYY-MM-DD-<slug>.md`, commit and
+push them to its `main`, and link them from issues by path. Do not add new
+files under `docs/plans/`; stable, shipped-behavior documentation stays under
+`docs/`.
+
 ## Worktree and artifact lifecycle
 
 On the owner workstation, keep the canonical checkout at
@@ -208,6 +218,10 @@ Hosted CI confirms after merge; it is not a merge gate. The exception is a
 hosted-only claim (such as scheduling, credentials, permissions, cache, or
 timing) that lacks equivalent accepted exact local/read-only evidence. Every
 `main` run finishes: never cancel one by hand, and fix forward when it fails.
+Pull-request CI runs only the quick checks (selection, policy, compiling every
+Rust target); `main` runs the full verification after merge. Label the pull
+request `ci-full` to run that full verification, Kind included, on the pull
+request when such a hosted-only claim needs it.
 
 Local and hosted policy checks share one checked-in core. Never maintain a
 separate local subset; preserve capability-selected expensive checks. A failing

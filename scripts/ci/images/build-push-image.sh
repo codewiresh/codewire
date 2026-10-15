@@ -735,6 +735,18 @@ if [ "$image_name" = workspace ]; then
   fi
 fi
 
+# CI may name an internal HTTP cache of the dated apt snapshots used by the base
+# and workspace images. BuildKit receives it only as an optional secret, so
+# layer cache keys and image history do not depend on it.
+apt_mirror_args=()
+if [ -n "${CODEWIRE_APT_SNAPSHOT_MIRROR:-}" ]; then
+  case "$image_name" in
+    base|workspace)
+      apt_mirror_args=(--secret "id=codewire-apt-mirror,env=CODEWIRE_APT_SNAPSHOT_MIRROR")
+      ;;
+  esac
+fi
+
 product_bake_target=''
 dockerfile_from_context="$dockerfile"
 if [ "$context" != . ]; then
@@ -921,7 +933,7 @@ else
     image_command=(docker buildx build --builder "$buildx_builder" --progress plain
       --provenance="$provenance" \
       --sbom="generator=$SBOM_GENERATOR_IMAGE" \
-      --metadata-file "$build_metadata" "${platform_args[@]}" "${build_args[@]}" \
+      --metadata-file "$build_metadata" "${platform_args[@]}" "${build_args[@]}" "${apt_mirror_args[@]}" \
       -f "$dockerfile" "${output_args[@]}" "${label_args[@]}" "$context")
     # The consumer runs the CW producer only when the build includes amd64,
     # the one platform that carries the admitted static asset.

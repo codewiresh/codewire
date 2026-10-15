@@ -372,6 +372,12 @@ class CwCopyOwner:
         self.parent.close()
 
 
+# The Cargo profile of the verified amd64 cw producer. It is fixed here, not
+# taken from the producer pointer, and equals WORKSPACE_CW_PROFILE in
+# scripts/ci/images/workspace-cache.sh. Publication builds the release profile.
+WORKSPACE_CW_PROFILE = "ci"
+
+
 def verify_cw(root, image_id, result_path):
     """Reopen the original compiler proof, then compare actual image bytes.
 
@@ -423,7 +429,7 @@ def verify_cw_admitted(consumer, root, image_id, result_path):
         accepted = False
         try:
             with producer.reopen(value["receipt"]["path"], value["receipt"]["sha256"], root,
-                                 identity["source_sha"], "release", version) as admitted:
+                                 identity["source_sha"], WORKSPACE_CW_PROFILE, version) as admitted:
                 summary = admitted.summary
                 if any(producer.release.canonical(value[key]) != producer.release.canonical(summary[key])
                        for key in fields):
@@ -454,7 +460,7 @@ def verify_cw_admitted(consumer, root, image_id, result_path):
                 accepted = True
                 return {"status": "workspace-cw-verified", "workspace_image_id": selected_image,
                         "payload": summary["payload"], "source": summary["source"],
-                        "current_source": summary["current_source"], "profile": "release", "version": version,
+                        "current_source": summary["current_source"], "profile": summary["profile"], "version": version,
                         "producer_receipt_sha256": summary["receipt"]["sha256"],
                         "family_cleanup_known": True, "container_cleanup_known": True}
         finally:

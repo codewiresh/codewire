@@ -3,7 +3,7 @@
   "kind": "SandboxTemplate",
   "metadata": {
     "annotations": {
-      "codewire.sh/pool-revision": "1c66a837e76f154155cdccc039377f50ff190cfa3c616c7cb5d4408f8d6ceac7"
+      "codewire.sh/pool-revision": "ef1ce1cb81123853a634c2f76b921eaa967ee281312dc9d24a0d47938d61e0be"
     },
     "labels": {
       "app.kubernetes.io/managed-by": "codewire",
@@ -152,7 +152,7 @@
             "command": [
               "sh",
               "-c",
-              "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group; while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; (exec 'sleep' 'infinity') & workload_pid=$!; shutdown() { kill \"$workload_pid\" \"$daemon_pid\" 2>/dev/null || true; wait \"$workload_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; }; trap 'shutdown; exit 0' TERM INT; while kill -0 \"$workload_pid\" 2>/dev/null; do if ! kill -0 \"$daemon_pid\" 2>/dev/null; then wait \"$daemon_pid\" 2>/dev/null || true; sleep 1; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; fi; sleep 1; done; wait \"$workload_pid\"; status=$?; kill \"$daemon_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; exit \"$status\""
+              "daemon_pid=; workload_pid=; shutdown() { daemon_pid=\"${daemon_pid:-$!}\"; workload_pid=\"${workload_pid:-$!}\"; kill \"$workload_pid\" \"$daemon_pid\" 2>/dev/null || true; wait \"$workload_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; }; trap 'shutdown; exit 0' TERM INT; user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group; while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; (exec 'sleep' 'infinity') & workload_pid=$!; while kill -0 \"$workload_pid\" 2>/dev/null; do if ! kill -0 \"$daemon_pid\" 2>/dev/null; then wait \"$daemon_pid\" 2>/dev/null || true; sleep 1; daemon_pid=; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; fi; sleep 1; done; wait \"$workload_pid\"; status=$?; kill \"$daemon_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; exit \"$status\""
             ],
             "env": [
               {
@@ -185,7 +185,7 @@
               },
               {
                 "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
-                "value": "1c66a837e76f154155cdccc039377f50ff190cfa3c616c7cb5d4408f8d6ceac7"
+                "value": "ef1ce1cb81123853a634c2f76b921eaa967ee281312dc9d24a0d47938d61e0be"
               }
             ],
             "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
