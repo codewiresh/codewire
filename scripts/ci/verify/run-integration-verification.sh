@@ -511,7 +511,7 @@ database_lane_orchestration() {
     cargo test --locked -p codewire-orchestration --lib \
       'api::platform_agents::journal::database_tests::db_' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform managed agent journal matrix" "$logfile" 35
+  assert_passed_count "platform managed agent journal matrix" "$logfile" 39
 
   logfile="$RUN_DIR/environment-resize-admission.log"
   DATABASE_URL="$DATABASE_URL_RUST" \

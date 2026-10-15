@@ -182,6 +182,26 @@ pub fn validate_mutation(r: &v1::PlatformManagedMutationRequest) -> Result<(), &
         }
         Operation::Control(c) => {
             use v1::PlatformManagedAction as A;
+            let resume = c.action == A::Resume as i32;
+            let resume_fields = if resume {
+                let scope = r.scope.as_ref().ok_or("missing platform scope")?;
+                let agent = v1::PlatformManagedAgent::try_from(c.agent)
+                    .map_err(|_| "invalid platform agent")?;
+                valid_uuid(&c.predecessor_pod_uid)
+                    && c.predecessor_pod_uid != scope.pod_uid
+                    && provider_version(agent) == Some(c.expected_provider_version.as_str())
+                    && hash(&c.expected_provider_sha256)
+                    && (4..=PROVIDER_BYTES).contains(&c.expected_provider_size)
+            } else {
+                c.predecessor_pod_uid.is_empty()
+                    && c.agent == 0
+                    && c.expected_provider_sha256.is_empty()
+                    && c.expected_provider_size == 0
+                    && c.expected_provider_version.is_empty()
+            };
+            if !resume_fields {
+                return Err("invalid platform resume");
+            }
             if !valid_uuid(&c.driver_id)
                 || c.session_id != format!("session-{}", c.driver_id)
                 || c.expected_launch_generation == 0
@@ -212,7 +232,7 @@ pub fn validate_mutation(r: &v1::PlatformManagedMutationRequest) -> Result<(), &
                         && c.reply_to.is_none()
                         && c.expected_active_message_id.is_some()
                 }
-                Ok(A::Stop | A::Restart) => {
+                Ok(A::Stop | A::Restart | A::Resume) => {
                     c.text.is_empty()
                         && c.reply_to.is_none()
                         && c.expected_turn_id.is_none()
@@ -286,6 +306,19 @@ pub fn validate_read(r: &v1::PlatformManagedReadRequest) -> Result<(), &'static 
     }
 }
 
+/// The plain reasons a Resume is refused before issue (#2705). Each names a
+/// condition only, never a path, value, child error or provider output.
+pub const RESUME_REFUSALS: [&str; 4] = [
+    "resume-driver-alive",
+    "resume-working-directory-missing",
+    "resume-credential-changed",
+    "resume-provider-not-admitted",
+];
+
+pub fn resume_refusal(reason: &str) -> bool {
+    RESUME_REFUSALS.contains(&reason)
+}
+
 /// Exact private response grammar. Reasons describe ownership state only and
 /// never carry child errors, commands, credentials or provider output.
 pub fn validate_receipt(r: &v1::PlatformManagedReceipt) -> Result<(), &'static str> {
@@ -294,12 +327,15 @@ pub fn validate_receipt(r: &v1::PlatformManagedReceipt) -> Result<(), &'static s
         1 => r.reason == "pending",
         2 => r.reason == "issued",
         3 => r.reason == "settled",
-        // Refused before any effect, or an issued launch refused before its
-        // agent ran, with cleanup confirmed.
-        4 => matches!(
-            r.reason.as_str(),
-            "refused-before-issue" | "denied-before-run"
-        ),
+        // Refused before any effect, possibly with a Resume's plain reason, or
+        // an issued launch refused before its agent ran, with cleanup
+        // confirmed.
+        4 => {
+            matches!(
+                r.reason.as_str(),
+                "refused-before-issue" | "denied-before-run"
+            ) || resume_refusal(&r.reason)
+        }
         5 => matches!(
             r.reason.as_str(),
             "issued-outcome-unknown" | "target-owner-lost"
@@ -409,6 +445,7 @@ mod tests {
                     expected_turn_id: None,
                     expected_active_message_id: None,
                     cleanup_of_request_id: None,
+                    ..Default::default()
                 },
             )),
         }
@@ -488,6 +525,39 @@ mod tests {
         assert!(validate_receipt(&row).is_ok());
         row.session_id.push('x');
         assert!(validate_receipt(&row).is_err());
+    }
+    #[test]
+    fn platform_wire_resume_refusal_reasons_are_closed_and_rejected_only() {
+        let request = request();
+        let mut row = v1::PlatformManagedReceipt {
+            request_id: request.request_id.clone(),
+            scope: request.scope.clone(),
+            fingerprint_sha256: platform_managed_request_fingerprint(&request).unwrap(),
+            phase: 4,
+            session_id: "session-00000000-0000-4000-8000-000000000004".into(),
+            driver_id: "00000000-0000-4000-8000-000000000004".into(),
+            launch_generation: 7,
+            ..Default::default()
+        };
+        for reason in RESUME_REFUSALS {
+            row.phase = 4;
+            row.reason = reason.into();
+            row.cleanup_unknown = false;
+            assert!(validate_receipt(&row).is_ok(), "{reason}");
+            // A refusal confirms nothing ran; any other phase is refused.
+            row.cleanup_unknown = true;
+            assert!(validate_receipt(&row).is_err(), "{reason}");
+            row.cleanup_unknown = false;
+            for phase in [1, 2, 3, 5] {
+                row.phase = phase;
+                assert!(validate_receipt(&row).is_err(), "{reason} {phase}");
+            }
+        }
+        row.phase = 4;
+        for reason in ["resume-", "resume-anything", "resume-driver-alive "] {
+            row.reason = reason.into();
+            assert!(validate_receipt(&row).is_err(), "{reason}");
+        }
     }
     #[test]
     fn platform_wire_cleanup_link_is_stop_only_canonical_and_never_self_or_empty() {

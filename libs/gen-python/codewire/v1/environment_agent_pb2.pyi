@@ -23,6 +23,7 @@ class EnvironmentAgentAction(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     ENVIRONMENT_AGENT_ACTION_INTERRUPT: _ClassVar[EnvironmentAgentAction]
     ENVIRONMENT_AGENT_ACTION_STOP: _ClassVar[EnvironmentAgentAction]
     ENVIRONMENT_AGENT_ACTION_RESTART: _ClassVar[EnvironmentAgentAction]
+    ENVIRONMENT_AGENT_ACTION_RESUME: _ClassVar[EnvironmentAgentAction]
 
 class EnvironmentAgentPhase(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -47,6 +48,7 @@ ENVIRONMENT_AGENT_ACTION_STEER: EnvironmentAgentAction
 ENVIRONMENT_AGENT_ACTION_INTERRUPT: EnvironmentAgentAction
 ENVIRONMENT_AGENT_ACTION_STOP: EnvironmentAgentAction
 ENVIRONMENT_AGENT_ACTION_RESTART: EnvironmentAgentAction
+ENVIRONMENT_AGENT_ACTION_RESUME: EnvironmentAgentAction
 ENVIRONMENT_AGENT_PHASE_UNSPECIFIED: EnvironmentAgentPhase
 ENVIRONMENT_AGENT_PHASE_ADMITTED: EnvironmentAgentPhase
 ENVIRONMENT_AGENT_PHASE_ISSUED: EnvironmentAgentPhase

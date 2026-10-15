@@ -641,6 +641,9 @@ enum PlatformManagedAction {
   PLATFORM_MANAGED_ACTION_INTERRUPT = 3;
   PLATFORM_MANAGED_ACTION_STOP = 4;
   PLATFORM_MANAGED_ACTION_RESTART = 5;
+  // A conversation of an earlier Pod of this environment continues in this
+  // Pod from its own saved native session (#2705).
+  PLATFORM_MANAGED_ACTION_RESUME = 6;
 }
 enum PlatformManagedRequestPhase {
   PLATFORM_MANAGED_REQUEST_PHASE_UNSPECIFIED = 0;
@@ -716,6 +719,15 @@ message PlatformManagedControl {
   optional string expected_active_message_id = 8;
   // Explicit recovery link; only Stop. Never replay the original request.
   optional string cleanup_of_request_id = 9;
+  // Resume only: the earlier Pod the record must name. The control plane
+  // derives it from its own journal and proves it absent; never a client value.
+  string predecessor_pod_uid = 10;
+  // Resume only: the agent and this image's pinned provider, admitted as a
+  // launch's are. Empty for every other action.
+  PlatformManagedAgent agent = 11;
+  bytes expected_provider_sha256 = 12;
+  uint64 expected_provider_size = 13;
+  string expected_provider_version = 14;
 }
 message PlatformManagedMutationRequest {
   string request_id = 1; //canonical nonnil UUID; unique target owner
