@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Exchange the current Forgejo job OIDC token for the support publisher's
-# OpenBao role and write the native arm64 BuildKit node's mutual-TLS client
+# Exchange the current Forgejo job OIDC token for a support-pair publisher's
+# OpenBao role (support-images.yaml's support publisher, or deploy-prod.yaml's
+# production publisher when a release's pair was never published) and write the native arm64 BuildKit node's mutual-TLS client
 # tuple (infra runbooks/ci-arm64-builder.md) into a private directory:
 # ca.crt, client.crt and client.key, each mode 0600. Nothing is printed. The
 # caller owns the directory and shreds it when its builds end.
@@ -28,10 +29,13 @@ readonly output_dir="$1"
 readonly OPENBAO_ADDR='https://openbao.example.invalid'
 readonly CREDENTIAL_PATH='platform/data/ci/codewire/arm64-buildkit-client'
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
-# Only the canonical-main support publisher may read the node's client tuple.
-[[ "$OPENBAO_ROLE|$OPENBAO_AUDIENCE" == \
-  'codewire-source-support-publisher|openbao-codewire-source-support-publisher' ]] ||
-  fail 'only the support publisher role reads the arm64 BuildKit client certificate'
+# Only the two protected-main support-pair publishers may read the node's
+# client tuple: the support publisher and the production publisher.
+case "$OPENBAO_ROLE|$OPENBAO_AUDIENCE" in
+  'codewire-source-support-publisher|openbao-codewire-source-support-publisher' | \
+    'codewire-source-prod-publisher|openbao-codewire-source-prod-publisher') ;;
+  *) fail 'only the support and production publisher roles read the arm64 BuildKit client certificate' ;;
+esac
 [[ "$output_dir" == /* && -d "$output_dir" && ! -L "$output_dir" \
   && "$(stat -c '%u %a' -- "$output_dir")" == "$(id -u) 700" \
   && -z "$(find "$output_dir" -mindepth 1 -print -quit)" ]] ||

@@ -35,7 +35,8 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$output" && -n "$url" ]]
 case "$url" in
-  https://git.example.invalid/*audience=openbao-codewire-source-support-publisher)
+  https://git.example.invalid/*audience=openbao-codewire-source-support-publisher | \
+    https://git.example.invalid/*audience=openbao-codewire-source-prod-publisher)
     jq -n --arg value synthetic-forgejo-jwt '{value:$value}' >"$output" ;;
   https://openbao.example.invalid/v1/auth/forgejo-jwt/login)
     jq -n '{auth:{client_token:"synthetic-openbao-token"}}' >"$output" ;;
@@ -101,9 +102,17 @@ refuse() {
   grep -qF "$message" "$work/$name.out" || { cat "$work/$name.out" >&2; fail "$name was not attributable"; }
   [[ ! -e "$dir/client.key" ]] || fail "$name left a private key behind"
 }
+# The production publisher reads the same tuple for a release's native arm64 build.
+prod_tls="$(private_dir prod-tls)"
+OPENBAO_ROLE=codewire-source-prod-publisher OPENBAO_AUDIENCE=openbao-codewire-source-prod-publisher \
+  "$FETCHER" "$prod_tls" >"$work/prod.out" 2>&1 || { cat "$work/prod.out" >&2; fail 'the production publisher could not read the client tuple'; }
+[[ "$(cd "$prod_tls" && find . -type f | sort | tr '\n' ' ')" == './ca.crt ./client.crt ./client.key ' ]] ||
+  fail 'the production publisher did not receive exactly the client tuple'
 calls_before="$(wc -l <"$FAKE_CURL_CALLS")"
-refuse other-role 'only the support publisher role' "$(private_dir other-role)" \
+refuse other-role 'only the support and production publisher roles' "$(private_dir other-role)" \
   OPENBAO_ROLE=codewire-source-dev-publisher OPENBAO_AUDIENCE=openbao-codewire-source-dev-publisher
+refuse mixed-role 'only the support and production publisher roles' "$(private_dir mixed-role)" \
+  OPENBAO_ROLE=codewire-source-prod-publisher OPENBAO_AUDIENCE=openbao-codewire-source-support-publisher
 shared="$work/shared"; mkdir -m 0755 "$shared"
 refuse shared-directory 'empty private directory' "$shared"
 used="$(private_dir used)"; : >"$used/leftover"
@@ -116,4 +125,4 @@ refuse no-key 'has no privateKey' "$(private_dir no-key)" FAKE_DOCUMENT=no-key
 refuse not-pem "certificate is not PEM" "$(private_dir not-pem)" FAKE_DOCUMENT=not-pem
 [[ -z "$(find "$RUNNER_TEMP" -mindepth 1 -print -quit)" ]] || fail 'a failed read left material behind'
 
-echo 'test-fetch-openbao-arm64-buildkit-client: PASS cases=9'
+echo 'test-fetch-openbao-arm64-buildkit-client: PASS cases=11'

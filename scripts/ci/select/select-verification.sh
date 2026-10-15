@@ -1775,6 +1775,7 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/observe-*.yaml|\
       scripts/ci/images/build-push-image.sh|scripts/ci/images/build-push-runtime-images.sh|\
       scripts/ci/images/build-support-platform.sh|\
+      scripts/ci/images/release-support-pair-state.sh|scripts/ci/images/join-release-support-image.sh|\
       scripts/ci/images/compute-image-tags.sh|\
       scripts/ci/images/copy-image-to-ghcr.sh|\
       scripts/ci/images/publish-image-to-harbor.sh|\
@@ -1855,6 +1856,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/*observe*.sh|scripts/ci/*observe*.py|\
       scripts/ci/*observer*.tsv|\
       scripts/ci/release/verify-cw-release-signing-key.sh|scripts/ci/release/verify-release-tag-ref.sh|\
+      scripts/ci/release/verify-release-support-pair.sh|scripts/ci/tests/test-verify-release-support-pair.sh|\
       apps/cli/GPG_PUBLIC_KEY.asc|\
       apps/cli/README.md|apps/cli/install.sh|scripts/dev/test-cw-release-update.py|\
       apps/cli/aur/PKGBUILD|apps/cli/nfpm.yaml|\

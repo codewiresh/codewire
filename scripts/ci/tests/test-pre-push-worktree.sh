@@ -184,6 +184,17 @@ if os.environ.get("PREFLIGHT_TEST_PIN_STALE") == "1":
     print("workspace image pin: synthetic stale pin", file=sys.stderr)
     sys.exit(1)
 EOF
+mkdir -p "$repo/scripts/ci/release"
+cat > "$repo/scripts/ci/release/verify-release-support-pair.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'release-support-pair %s\n' "$1" >> "${PREFLIGHT_TEST_TOOL_LOG:?}"
+if [ "${PREFLIGHT_TEST_SUPPORT_PAIR_MISSING:-0}" = 1 ]; then
+  echo 'release support pair: synthetic unpublished pair' >&2
+  exit 1
+fi
+EOF
+chmod 0755 "$repo/scripts/ci/release/verify-release-support-pair.sh"
 cat > "$repo/scripts/ci/receipts/verify-release-tag-receipt.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -832,6 +843,28 @@ assert_contains release_tag_tools "$(cat "$tag_log")" \
   'receipt-ref=refs/tags/v1.2.3 remote=origin'
 assert_contains release_tag_tools "$(cat "$tag_log")" \
   'workspace-image-pin check --release --commit'
+assert_contains release_tag_tools "$(cat "$tag_log")" \
+  "release-support-pair $(git -C "$repo" rev-parse 'refs/tags/v1.2.3^{commit}')"
+
+# A release commit without its published support pair is refused before any
+# receipt or gate.
+missing_pair_log="$TMP/missing-pair-tools.log"
+if missing_pair_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" \
+    PREFLIGHT_TEST_TOOL_LOG="$missing_pair_log" \
+    PREFLIGHT_TEST_SUPPORT_PAIR_MISSING=1 \
+    PREFLIGHT_RELEASE_TAG_REF=refs/tags/v1.2.3 \
+    PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$(git rev-parse refs/tags/v1.2.3)" \
+    PREFLIGHT_PUSH_REMOTE_NAME=origin \
+    PREFLIGHT_HEAD_SHA="$(git rev-parse refs/tags/v1.2.3)" \
+    "$repo/scripts/dev/preflight.sh"
+} 2>&1)"; then
+  fail 'release preflight accepted a commit without its published support pair'
+fi
+assert_contains missing_pair "$missing_pair_output" \
+  'release commit has no published support pair; tag a commit support-images published'
+assert_not_contains missing_pair_tools "$(cat "$missing_pair_log")" 'receipt-ref='
 
 # A stale workspace image pin refuses the release before any receipt or gate.
 stale_pin_log="$TMP/stale-pin-tools.log"

@@ -47,12 +47,12 @@ BUILDER = re.compile(
     r"|build-support-platform\.sh linux/"
 )
 HEAVY = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}"
-# Jobs that call an image builder without the cache: the arm64 support leg
-# builds on the remote ci-arm64-builder node outside the cluster, the support
-# join only assembles the two platform digests, and the production release
-# workflow keeps the canonical snapshots.
+# Jobs that call an image builder without the cache: the arm64 support legs
+# build on the remote ci-arm64-builder node outside the cluster, and the
+# support join only assembles the two platform digests. A release's own pair
+# (deploy-prod.yaml) builds exactly as support-images does.
 CANONICAL = {
-    "deploy-prod.yaml:publish-support-release-images",
+    "deploy-prod.yaml:build-support-arm64",
     "support-images.yaml:build-support-arm64",
     "support-images.yaml:publish-support-images",
 }
@@ -61,6 +61,7 @@ EXPECTED = {
     "ci.yaml:workspace-cache-measurement",
     "ci.yaml:workspace-cache-probes",
     "ci.yaml:workspace-image",
+    "deploy-prod.yaml:build-support-amd64",
     "support-images.yaml:build-support-amd64",
 }
 builders, configured = set(), set()
