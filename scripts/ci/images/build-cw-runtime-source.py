@@ -133,7 +133,7 @@ class Prepared:
 
 
 def prepare_plan(source_dir, revision, profile, version, output):
-    source.require(release.is_hex(revision, 40) and profile in ("ci", "release") and release.valid_version(version),
+    source.require(release.is_hex(revision, 40) and profile in ("ci", "release", "runtime") and release.valid_version(version),
                    "producer selection refused before task allocation")
     path = source.asset.path_arg(str(output))
     source.require("," not in str(path), "producer output cannot contain an exporter separator")
@@ -224,7 +224,7 @@ class ReusedBuild:
         self.files, self.parent, self.capsule, self.original = {}, None, None, None
         self.reused = True
         source.require(release.is_hex(expected_sha256, 64) and release.is_hex(revision, 40)
-                       and profile in ("ci", "release") and release.valid_version(version),
+                       and profile in ("ci", "release", "runtime") and release.valid_version(version),
                        "retained producer selection refused")
         try:
             path = source.asset.path_arg(str(receipt_path))

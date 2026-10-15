@@ -194,7 +194,7 @@ carry_one() {
   promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$local_ref")"
   revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$local_ref")"
   if [ -z "$candidate_id" ] || [ "$candidate_id" != "$local_id" ] \
-      || [ "$profile" != release ] || [ "$promotable" != true ] \
+      || [ "$profile" != runtime ] || [ "$promotable" != true ] \
       || [ "$revision" != "$baseline_sha" ]; then
     echo "Carried runtime image $image_name does not preserve the deployed baseline release identity" >&2
     return 1
@@ -273,7 +273,7 @@ build_one() {
   promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$local_ref")"
   revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$local_ref")"
   if [ -z "$candidate_id" ] || [ "$candidate_id" != "$local_id" ] \
-      || [ "$profile" != release ] || [ "$promotable" != true ] \
+      || [ "$profile" != runtime ] || [ "$promotable" != true ] \
       || [ "$revision" != "$GITHUB_SHA" ]; then
     echo "Runtime candidate $image_name did not preserve its exact release identity locally" >&2
     exit 1
