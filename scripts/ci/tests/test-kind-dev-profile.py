@@ -1469,7 +1469,8 @@ class DatabaseTests(unittest.TestCase):
     def test_new_migration_is_backed_up_before_the_deploy(self) -> None:
         result = self.run_database("prepare", FAKE_LEDGERS=json.dumps(self.ledgers(through=1)))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("this deploy applies new migrations to codewire-ux-2099: codewire 0002_next.up.sql", result.stderr)
+        self.assertIn("this deploy applies new migrations to codewire-ux-2099:\n[kind-db]   codewire 0002_next.up.sql\n",
+                      result.stderr)
         backup, = self.backup_names()
         self.assertRegex(backup, r"^\d{8}T\d{6}Z-upgrade$")
         self.assertIn(f"backed up codewire-ux-2099's databases to {self.backups / backup}", result.stderr)
@@ -1566,7 +1567,8 @@ class DatabaseTests(unittest.TestCase):
         for kind in sandbox_kinds:
             expected += [f"get {kind} -l codewire.sh/environment-id -o name",
                          f"delete {kind} -l codewire.sh/environment-id --ignore-not-found --wait=true --timeout=180s"]
-        expected += ["psql postgres DROP DATABASE IF EXISTS codewire WITH (FORCE) DROP DATABASE IF EXISTS codewire_mesh "
+        expected += ["psql postgres SET client_min_messages = warning DROP DATABASE IF EXISTS codewire WITH (FORCE) "
+                     "DROP DATABASE IF EXISTS codewire_mesh "
                      "WITH (FORCE) DROP ROLE IF EXISTS codewire_credential_broker CREATE DATABASE codewire",
                      "scale deployment/codewire-idp --replicas=1",
                      "rollout status deployment/codewire-idp --timeout=300s"]
@@ -1590,11 +1592,12 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(len(self.backup_names()), 2)
         self.assertRegex(self.backup_names()[1], r"-before-restore$")
         lines = self.commands()
-        restore = [line for line in lines if line.startswith(("psql postgres DROP", "psql postgres CREATE", "pg_restore"))]
-        self.assertEqual(restore, ["psql postgres DROP DATABASE IF EXISTS codewire WITH (FORCE)",
-                                   "psql postgres CREATE DATABASE codewire",
-                                   "pg_restore codewire old codewire archive",
-                                   "psql postgres DROP DATABASE IF EXISTS codewire_mesh WITH (FORCE)"])
+        restore = [line for line in lines if line.startswith(("psql postgres SET", "psql postgres CREATE", "pg_restore"))]
+        self.assertEqual(restore, [
+            "psql postgres SET client_min_messages = warning DROP DATABASE IF EXISTS codewire WITH (FORCE)",
+            "psql postgres CREATE DATABASE codewire",
+            "pg_restore codewire old codewire archive",
+            "psql postgres SET client_min_messages = warning DROP DATABASE IF EXISTS codewire_mesh WITH (FORCE)"])
         self.assertLess(lines.index("scale " + " ".join(f"deployment/{service}" for service in (
             "codewire-idp", "codewire-billing", "codewire-mesh", "codewire-orchestration", "codewire-coordinator",
             "codewire-credential-service")) + " --replicas=0"), lines.index(restore[0]))

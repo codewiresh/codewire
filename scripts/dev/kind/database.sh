@@ -179,8 +179,8 @@ cmd_prepare() {
     exit 1
   fi
   [ "${#pending[@]}" -gt 0 ] || return 0
-  mapfile -t pending < <(printf '%s\n' "${pending[@]}" | sort)
-  log "this deploy applies new migrations to ${KIND_CLUSTER_NAME}: ${pending[*]}"
+  log "this deploy applies new migrations to ${KIND_CLUSTER_NAME}:"
+  printf '%s\n' "${pending[@]}" | sort | while read -r line; do log "  ${line}"; done
   backup upgrade
 }
 
@@ -246,7 +246,7 @@ cmd_reset() {
   done
   log 'recreating the databases'
   # The fixture creates the restricted credential login; it owns nothing else.
-  psql_in postgres -c 'DROP DATABASE IF EXISTS codewire WITH (FORCE)' \
+  psql_in postgres -c 'SET client_min_messages = warning' -c 'DROP DATABASE IF EXISTS codewire WITH (FORCE)' \
     -c 'DROP DATABASE IF EXISTS codewire_mesh WITH (FORCE)' \
     -c 'DROP ROLE IF EXISTS codewire_credential_broker' -c 'CREATE DATABASE codewire' >/dev/null \
     || die 'recreating the databases failed'
@@ -271,7 +271,7 @@ cmd_restore() {
   stop_services
   for entry in "${DATABASES[@]}"; do
     database="${entry%%:*}"
-    psql_in postgres -c "DROP DATABASE IF EXISTS ${database} WITH (FORCE)" >/dev/null \
+    psql_in postgres -c 'SET client_min_messages = warning' -c "DROP DATABASE IF EXISTS ${database} WITH (FORCE)" >/dev/null \
       || die "dropping ${database} failed"
     [ -f "$source/${database}.dump" ] || continue
     psql_in postgres -c "CREATE DATABASE ${database}" >/dev/null || die "creating ${database} failed"
