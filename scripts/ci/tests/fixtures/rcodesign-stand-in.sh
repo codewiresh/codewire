@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # A recording stand-in for rcodesign. It signs and notarizes nothing, holds no
-# identity and opens no connection. The signer's test (test-sign-macos-cw.sh)
-# and the release dry run use it to exercise sign-macos-cw.sh and the jobs
-# around it; the release itself installs the pinned rcodesign.
+# identity and opens no connection. The signers' tests (test-sign-macos-cw.sh,
+# test-sign-macos-helper.sh) and the release dry run use it to exercise
+# sign-macos-cw.sh, sign-macos-helper.sh and the jobs around them; the release
+# itself installs the pinned rcodesign.
 #
 #   rcodesign-stand-in.sh --install DIR
 #
 # lays out DIR/bin/rcodesign, synthetic DIR/keys and an empty DIR/state.
 # DIR/bin/rcodesign then answers the rcodesign commands the signer uses,
 # records each call in DIR/calls and the environment it saw in DIR/env, and
-# appends a marker to every executable it "signs". A file in DIR/state makes
-# it fail: `drop` (omit that exact signature-info line), `verify-fails`, or
-# `reject` (the notarization).
+# appends a marker to every executable it "signs", after the identifier and
+# entitlements it was given. A file in DIR/state makes it misbehave: `drop`
+# (omit that exact signature-info line), `extra-entitlement` (report one more
+# entitlement than it was given), `verify-fails`, `reject` (the notarization)
+# or `no-submission-id` (a notarization log without the id).
 set -euo pipefail
 
 if [ "${1:-}" = --install ]; then
@@ -40,9 +43,18 @@ shift
 shift 2
 case "$command" in
   sign)
-    [ "$#" -eq 9 ] && [ "${*:1:7}" = "--pem-file $root/keys/developer-id.pem \
---binary-identifier sh.codewire.cw --for-notarization --code-signature-flags runtime" ] || exit 91
-    { cat "$8"; printf 'developer-id-signature\n'; } >"$9"
+    if [ "$#" -eq 9 ] && [ "${*:1:7}" = "--pem-file $root/keys/developer-id.pem \
+--binary-identifier sh.codewire.cw --for-notarization --code-signature-flags runtime" ]; then
+      { cat "$8"; printf 'developer-id-signature\n'; } >"$9"
+    elif [ "$#" -eq 11 ] && [ "${*:1:7}" = "--pem-file $root/keys/developer-id.pem \
+--binary-identifier sh.codewire.vz-runner --for-notarization --code-signature-flags runtime" ] &&
+      [ "$8" = --entitlements-xml-file ] && [ -f "$9" ]; then
+      { cat "${10}"; printf 'stand-in-identifier sh.codewire.vz-runner\n'
+        sed -n 's/.*<key>\([^<]*\)<\/key>.*/stand-in-entitlement \1/p' "$9"
+        printf 'developer-id-signature\n'; } >"${11}"
+    else
+      exit 91
+    fi
     ;;
   verify)
     [ ! -e "$state/verify-fails" ]
@@ -50,10 +62,14 @@ case "$command" in
     ;;
   print-signature-info)
     grep -q developer-id-signature "$1"
+    identifier="$(sed -n 's/^stand-in-identifier //p' "$1")"
+    entitlements="$(sed -n "s/^stand-in-entitlement \(.*\)/        - '  <key>\1<\/key>'/p" "$1")"
+    [ ! -e "$state/extra-entitlement" ] ||
+      entitlements+=$'\n'"        - '  <key>com.apple.security.cs.disable-library-validation</key>'"
     while IFS= read -r line; do
       [ -e "$state/drop" ] && [ "$line" = "$(cat "$state/drop")" ] && continue
       printf '%s\n' "$line"
-    done <<'INFO'
+    done <<INFO
 - path: synthetic
   entity:
     mach_o:
@@ -61,7 +77,9 @@ case "$command" in
         code_directory:
           version: '0x20500'
           flags: CodeSignatureFlags(RUNTIME)
-          identifier: sh.codewire.cw
+          identifier: ${identifier:-sh.codewire.cw}
+$( [ -z "$entitlements" ] || printf '        entitlements_plist:\n%s\n        entitlements_der_plist:\n%s\n' \
+  "$entitlements" "$entitlements")
         cms:
           certificates:
           - subject: 'CN=Developer ID Application: Synthetic (PXQZM3GLP5)'
@@ -69,6 +87,8 @@ case "$command" in
             apple_team_id: PXQZM3GLP5
           signers:
           - signature_verifies: true
+            cdhash_plist:
+            - '    <key>cdhashes</key>'
             time_stamp_token:
               certificates:
               - apple_team_id: Apple Certification Authority
@@ -83,6 +103,8 @@ INFO
     [ "$1" = --api-key-file ] && [ -f "$2" ] && [ "$3" = --wait ] && [ "$4" = --max-wait-seconds ] || exit 93
     python3 -I -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); print(" ".join(sorted(z.namelist())))
 for name in z.namelist(): assert b"developer-id-signature" in z.read(name), name' "$6" >"$state/zip" || exit 94
+    [ -e "$state/no-submission-id" ] ||
+      echo 'created submission ID: 0b7e5f2a-1c3d-4e5f-8a9b-0c1d2e3f4a5b' >&2
     [ ! -e "$state/reject" ] || { echo 'notary status: Invalid' >&2; exit 1; }
     ;;
   *) exit 95 ;;

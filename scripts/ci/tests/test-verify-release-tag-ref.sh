@@ -550,6 +550,7 @@ python3 -B "$ROOT/scripts/ci/tests/test-local-runtime-parts.py" >/dev/null 2>&1 
 "$ROOT/scripts/ci/tests/test-fetch-openbao-release-signing-key.sh"
 "$ROOT/scripts/ci/tests/test-fetch-openbao-macos-signing.sh"
 "$ROOT/scripts/ci/tests/test-sign-macos-cw.sh"
+"$ROOT/scripts/ci/tests/test-sign-macos-helper.sh"
 
 compiled_fingerprint="$(
   sed -n 's/^const TRUST_FINGERPRINT: &str = "\([0-9A-F]*\)";$/\1/p' \
