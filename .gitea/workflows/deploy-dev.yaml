@@ -101,19 +101,31 @@ jobs:
         if: ${{ always() }}
         run: rm -f -- "$RUNNER_TEMP/codewire-deployed-source-candidate.json"
 
-  build-publish-runtime-images:
+  # The runtime set builds in two protected halves on separate workers: the
+  # daemon's static CW producer is the longest single build, so it runs beside
+  # the service images instead of before them. The halves share no image, so
+  # they never race for an immutable source tag; publish-runtime-images joins
+  # them by the exact digests they report.
+  build-service-images:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
-    name: Build and publish exact runtime image set
+    name: Build and push the service runtime images
     runs-on: ci-protected
     enable-openid-connect: true
     timeout-minutes: 110
     needs: [deploy-selection]
     if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}
+    outputs:
+      dashboard_candidate_ref: ${{ steps.build.outputs.dashboard_candidate_ref }}
+      dashboard_built_from: ${{ steps.build.outputs.dashboard_built_from }}
+      derp_candidate_ref: ${{ steps.build.outputs.derp_candidate_ref }}
+      derp_built_from: ${{ steps.build.outputs.derp_built_from }}
+      services_candidate_ref: ${{ steps.build.outputs.services_candidate_ref }}
+      services_built_from: ${{ steps.build.outputs.services_built_from }}
+      mesh_candidate_ref: ${{ steps.build.outputs.mesh_candidate_ref }}
+      mesh_built_from: ${{ steps.build.outputs.mesh_built_from }}
     env:
       OPENBAO_ROLE: codewire-source-dev-publisher
       OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
-      OPENBAO_GHCR_ROLE: codewire-source-dev-publisher
-      OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
@@ -126,7 +138,7 @@ jobs:
           scripts/ci/setup/select-protected-rust-cache.sh \
             "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
 
-      - name: Build and push the exact runtime image set
+      - name: Build and push the service runtime images
         id: build
         env:
           CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
@@ -143,10 +155,9 @@ jobs:
           CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
           CODEWIRE_IMAGE_STATE_DASHBOARD: ${{ needs.deploy-selection.outputs.dashboard_image_state }}
           CODEWIRE_IMAGE_STATE_DERP: ${{ needs.deploy-selection.outputs.derp_image_state }}
-          CODEWIRE_IMAGE_STATE_DAEMON: ${{ needs.deploy-selection.outputs.daemon_image_state }}
           CODEWIRE_IMAGE_STATE_SERVICES: ${{ needs.deploy-selection.outputs.services_image_state }}
           CODEWIRE_IMAGE_STATE_MESH: ${{ needs.deploy-selection.outputs.mesh_image_state }}
-        run: scripts/ci/images/build-push-runtime-images.sh
+        run: scripts/ci/images/build-push-runtime-images.sh services
 
       - name: Remove the protected R2 compiler-cache credential
         if: ${{ always() }}
@@ -154,6 +165,71 @@ jobs:
           shred -u -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws" 2>/dev/null ||
             rm -f -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
 
+  build-daemon-image:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Build and push the daemon runtime image
+    runs-on: ci-protected
+    enable-openid-connect: true
+    timeout-minutes: 110
+    needs: [deploy-selection]
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}
+    outputs:
+      daemon_candidate_ref: ${{ steps.build.outputs.daemon_candidate_ref }}
+      daemon_built_from: ${{ steps.build.outputs.daemon_built_from }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      # The protected R2 compiler cache is best effort: when this job cannot
+      # obtain its protected credential, the selector chooses the job-local
+      # cache, and run-rust-build.sh compiles locally on any R2 outage.
+      - name: Select the protected R2 compiler cache
+        id: compiler-cache
+        run: |
+          scripts/ci/setup/select-protected-rust-cache.sh \
+            "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
+
+      - name: Build and push the daemon runtime image
+        id: build
+        env:
+          CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
+          SCCACHE_BUCKET: example-ci-cache-protected
+          SCCACHE_ENDPOINT: https://00000000000000000000000000000000.r2.cloudflarestorage.com
+          CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1
+          CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws
+          # Carry-forward stays gated (issue #2353); see the service images.
+          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'
+          CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
+          CODEWIRE_IMAGE_STATE_DAEMON: ${{ needs.deploy-selection.outputs.daemon_image_state }}
+        run: scripts/ci/images/build-push-runtime-images.sh daemon
+
+      - name: Remove the protected R2 compiler-cache credential
+        if: ${{ always() }}
+        run: |
+          shred -u -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws" 2>/dev/null ||
+            rm -f -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
+
+  publish-runtime-images:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Publish the exact runtime image set
+    runs-on: ci-protected
+    enable-openid-connect: true
+    timeout-minutes: 45
+    needs: [deploy-selection, build-service-images, build-daemon-image]
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+      OPENBAO_GHCR_ROLE: codewire-source-dev-publisher
+      OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      # Each candidate is the exact digest its build job's Bake pushed, passed
+      # through this run's job outputs. Publication confirms that each
+      # source-SHA tag names that digest; it never takes a digest from a tag.
       - name: Publish the complete runtime set to Harbor without rebuilding
         run: |
           set -euo pipefail
@@ -161,12 +237,12 @@ jobs:
           scripts/ci/images/image-bundle.py create \
             --source-sha "$GITHUB_SHA" \
             --output "$bundle" \
-            --candidate dashboard "$GITHUB_SHA" "${{ steps.build.outputs.dashboard_candidate_ref }}" \
-            --candidate derp "$GITHUB_SHA" "${{ steps.build.outputs.derp_candidate_ref }}" \
-            --candidate daemon "$GITHUB_SHA" "${{ steps.build.outputs.daemon_candidate_ref }}" \
-            --candidate services "$GITHUB_SHA" "${{ steps.build.outputs.services_candidate_ref }}" \
-            --candidate mesh "$GITHUB_SHA" "${{ steps.build.outputs.mesh_candidate_ref }}"
-          # The build pushed all five images to Harbor, the registry every
+            --candidate dashboard "$GITHUB_SHA" "${{ needs.build-service-images.outputs.dashboard_candidate_ref }}" \
+            --candidate derp "$GITHUB_SHA" "${{ needs.build-service-images.outputs.derp_candidate_ref }}" \
+            --candidate daemon "$GITHUB_SHA" "${{ needs.build-daemon-image.outputs.daemon_candidate_ref }}" \
+            --candidate services "$GITHUB_SHA" "${{ needs.build-service-images.outputs.services_candidate_ref }}" \
+            --candidate mesh "$GITHUB_SHA" "${{ needs.build-service-images.outputs.mesh_candidate_ref }}"
+          # The build jobs pushed all five images to Harbor, the registry every
           # deployment pulls from. Confirm each source-SHA tag and prove each
           # digest with the consumer pull identity. The public GHCR mirror
           # follows delivery and never gates it.
@@ -180,11 +256,11 @@ jobs:
       - name: Sign the exact runtime set
         env:
           CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
-          CODEWIRE_BUILT_FROM_DASHBOARD: ${{ steps.build.outputs.dashboard_built_from }}
-          CODEWIRE_BUILT_FROM_DERP: ${{ steps.build.outputs.derp_built_from }}
-          CODEWIRE_BUILT_FROM_DAEMON: ${{ steps.build.outputs.daemon_built_from }}
-          CODEWIRE_BUILT_FROM_SERVICES: ${{ steps.build.outputs.services_built_from }}
-          CODEWIRE_BUILT_FROM_MESH: ${{ steps.build.outputs.mesh_built_from }}
+          CODEWIRE_BUILT_FROM_DASHBOARD: ${{ needs.build-service-images.outputs.dashboard_built_from }}
+          CODEWIRE_BUILT_FROM_DERP: ${{ needs.build-service-images.outputs.derp_built_from }}
+          CODEWIRE_BUILT_FROM_DAEMON: ${{ needs.build-daemon-image.outputs.daemon_built_from }}
+          CODEWIRE_BUILT_FROM_SERVICES: ${{ needs.build-service-images.outputs.services_built_from }}
+          CODEWIRE_BUILT_FROM_MESH: ${{ needs.build-service-images.outputs.mesh_built_from }}
         run: |
           scripts/ci/images/sign-runtime-image-set.sh \
             "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \
@@ -242,11 +318,11 @@ jobs:
         continue-on-error: true
         env:
           CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
-          CODEWIRE_BUILT_FROM_DASHBOARD: ${{ steps.build.outputs.dashboard_built_from }}
-          CODEWIRE_BUILT_FROM_DERP: ${{ steps.build.outputs.derp_built_from }}
-          CODEWIRE_BUILT_FROM_DAEMON: ${{ steps.build.outputs.daemon_built_from }}
-          CODEWIRE_BUILT_FROM_SERVICES: ${{ steps.build.outputs.services_built_from }}
-          CODEWIRE_BUILT_FROM_MESH: ${{ steps.build.outputs.mesh_built_from }}
+          CODEWIRE_BUILT_FROM_DASHBOARD: ${{ needs.build-service-images.outputs.dashboard_built_from }}
+          CODEWIRE_BUILT_FROM_DERP: ${{ needs.build-service-images.outputs.derp_built_from }}
+          CODEWIRE_BUILT_FROM_DAEMON: ${{ needs.build-daemon-image.outputs.daemon_built_from }}
+          CODEWIRE_BUILT_FROM_SERVICES: ${{ needs.build-service-images.outputs.services_built_from }}
+          CODEWIRE_BUILT_FROM_MESH: ${{ needs.build-service-images.outputs.mesh_built_from }}
         run: |
           scripts/ci/images/sign-runtime-image-set.sh --ghcr-mirror \
             "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \

@@ -85,6 +85,16 @@ case "$command" in
     [[ " $* " != *' --tlog-upload'* ]]
     [[ " $* " == *' --new-bundle-format=true '* ]]
     [[ " $* " != *' --registry-referrers-mode'* ]]
+    if [[ -n "${FAKE_SIGN_BARRIER:-}" ]]; then
+      # Every family must be signing at once: a serial signer never fills
+      # the barrier and fails here.
+      printf '%s\n' "$reference" | sha256sum | cut -d' ' -f1 >"$FAKE_SIGN_BARRIER/$BASHPID"
+      for _ in $(seq 1 100); do
+        [[ "$(find "$FAKE_SIGN_BARRIER" -type f | wc -l)" -lt 5 ]] || break
+        sleep 0.1
+      done
+      [[ "$(find "$FAKE_SIGN_BARRIER" -type f | wc -l)" -ge 5 ]]
+    fi
     grep -Fxq "$reference" "$SIGNATURE_STATE" || printf '%s\n' "$reference" >>"$SIGNATURE_STATE"
     ;;
   verify)
@@ -221,7 +231,8 @@ run_signer() {
     "$SIGNER" "$bundle" "$public_key"
 }
 
-if ! run_signer >"$work/first.out" 2>"$work/first.err"; then
+mkdir "$work/sign-barrier"
+if ! FAKE_SIGN_BARRIER="$work/sign-barrier" run_signer >"$work/first.out" 2>"$work/first.err"; then
   sed -n '1,80p' "$work/first.err" >&2
   sed -n '1,80p' "$docker_log" >&2
   sed -n '1,80p' "$cosign_log" >&2
@@ -291,6 +302,8 @@ if FAKE_BAD_PROVENANCE_REF="$bad_ref" run_signer \
 fi
 grep -Fq 'Runtime provenance is invalid for dashboard' "$work/provenance.err" ||
   fail 'invalid provenance rejection was not attributable'
+grep -Fxq 'Runtime signing failed for: dashboard' "$work/provenance.err" ||
+  fail 'a failed family did not fail the whole set by name'
 
 bad_sbom_ref="registry.example.invalid/codewire/dashboard@$digest"
 if FAKE_BAD_SBOM_REF="$bad_sbom_ref" run_signer \
