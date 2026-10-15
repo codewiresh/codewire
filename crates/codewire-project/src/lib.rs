@@ -15,6 +15,7 @@ mod normalize;
 mod platform_projection;
 mod repository;
 mod selection;
+mod vm_only;
 
 #[cfg(test)]
 mod selection_tests;
@@ -29,6 +30,12 @@ pub use repository::{
     github_ssh_source, parse_repository_ssh_host,
 };
 pub use selection::{StoragePlacement, StorageReference};
+pub use vm_only::{
+    MAX_VM_ONLY_DEPTH, MAX_VM_ONLY_MATCH_STEPS, MAX_VM_ONLY_MATCHES, MAX_VM_ONLY_PATH_BYTES,
+    MAX_VM_ONLY_PATTERNS, MAX_VM_ONLY_WALK_DIRECTORIES, MAX_VM_ONLY_WALK_ENTRIES, VmOnlyCursor,
+    VmOnlyExpansion, VmOnlyMatch, VmOnlyPatternError, VmOnlyPatterns, VmOnlyTree, expand_vm_only,
+    normalize_vm_only_pattern, valid_vm_only_patterns,
+};
 
 pub const PROJECT_SCHEMA_VERSION: u32 = 1;
 pub const MAX_PROJECT_DOCUMENT_BYTES: usize = 256 * 1024;
@@ -41,16 +48,13 @@ pub const MAX_APPLICATION_PORTS: usize = 128;
 pub const MAX_AGENTS: usize = 32;
 pub const MAX_SKILLS: usize = 256;
 pub const MAX_LOCAL_MOUNTS: usize = 64;
-/// The codewire.yaml setting naming workspace paths kept on the VM's own disk
-/// instead of the host share or copy. Its YAML key is the one serde attribute
-/// on `RawWorkspaceBlock`.
+/// The codewire.yaml setting whose patterns name project folders kept on the
+/// VM's own disk instead of the host share or copy. Its YAML key is the one
+/// serde attribute on `RawWorkspaceBlock`.
 pub const VM_ONLY_FIELD: &str = "workspace.vm_only";
-pub const MAX_VM_ONLY_PATHS: usize = 32;
-/// Kept on the VM's own disk when codewire.yaml does not set `workspace.vm_only`.
-pub const DEFAULT_VM_ONLY_PATHS: [&str; 3] = ["node_modules", "target", ".venv"];
-const MAX_VM_ONLY_PATH_BYTES: usize = 1024;
-const MAX_VM_ONLY_TOTAL_BYTES: usize = 4096;
-const MAX_PATH_COMPONENT_BYTES: usize = 255;
+/// Kept on the VM's own disk when codewire.yaml does not set `workspace.vm_only`:
+/// top-level folders only.
+pub const DEFAULT_VM_ONLY_PATTERNS: [&str; 3] = ["node_modules", "target", ".venv"];
 /// Environment names reserved for Codewire-owned runtime control channels.
 pub const RESERVED_RUNTIME_ENVIRONMENT_KEYS: [&str; 5] = [
     "CODEWIRE_MESH_URL",
@@ -329,34 +333,34 @@ impl CredentialBinding {
 pub struct LocalProjectIntent {
     pub mounts: Vec<LocalMountIntent>,
     pub host_ports: Vec<HostPortBinding>,
-    /// `workspace.vm_only` as written: `None` when absent, so the default list
-    /// applies; `Some([])` turns it off.
+    /// `workspace.vm_only` patterns as written (canonical): `None` when
+    /// absent, so the default list applies; `Some([])` turns it off.
     pub vm_only: Option<Vec<String>>,
 }
 
 impl LocalProjectIntent {
-    /// The paths kept on the VM's own disk: the declared list, or the default
-    /// list when codewire.yaml does not set one.
+    /// The patterns kept on the VM's own disk: the declared list, or the
+    /// default list when codewire.yaml does not set one.
     pub fn effective_vm_only(&self) -> Vec<String> {
         effective_vm_only(self.vm_only.as_deref())
     }
 }
 
-/// The paths kept on the VM's own disk for a `workspace.vm_only` as written:
-/// the default list when absent.
+/// The patterns kept on the VM's own disk for a `workspace.vm_only` as
+/// written: the default list when absent.
 pub fn effective_vm_only(declared: Option<&[String]>) -> Vec<String> {
     match declared {
-        Some(paths) => paths.to_vec(),
-        None => DEFAULT_VM_ONLY_PATHS.map(str::to_owned).to_vec(),
+        Some(patterns) => patterns.to_vec(),
+        None => DEFAULT_VM_ONLY_PATTERNS.map(str::to_owned).to_vec(),
     }
 }
 
-/// The create review's line for the effective `workspace.vm_only` list.
-pub fn vm_only_summary(paths: &[String]) -> String {
-    if paths.is_empty() {
+/// The create review's line for the effective `workspace.vm_only` patterns.
+pub fn vm_only_summary(patterns: &[String]) -> String {
+    if patterns.is_empty() {
         "Kept in the VM: none".to_owned()
     } else {
-        format!("Kept in the VM: {}", paths.join(", "))
+        format!("Kept in the VM: {}", patterns.join(", "))
     }
 }
 

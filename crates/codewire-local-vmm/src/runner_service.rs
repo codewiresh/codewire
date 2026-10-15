@@ -53,7 +53,8 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 // Bump for every detached-runner behavior change, even if the protobuf
 // message layout itself remains wire-compatible.
 // 6: direct shares carry vm_only paths into the digest-bound guest plan.
-const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 6;
+// 7: those entries are patterns the guest expands at every boot.
+const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 7;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =

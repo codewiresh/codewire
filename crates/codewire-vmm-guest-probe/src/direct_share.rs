@@ -1,12 +1,16 @@
 //! Canonical guest-visible plan for explicit host directory shares.
 //!
 //! This plan contains only the virtio-fs tag, the admitted guest destination,
-//! the read-only decision, and the share-relative paths kept on the VM's own
-//! disk (`vm_only`). Host paths and host filesystem identities stay in the
-//! private supervisor/runner control plane. The seed binds the digest of these
-//! exact bytes so guest-writable persistent state cannot redirect a later boot
-//! to a different layout. An empty `vm_only` is not encoded, so a plan without
-//! one has the same bytes as before the field existed.
+//! the read-only decision, and the share-relative `.dockerignore`-style
+//! patterns whose folders are kept on the VM's own disk (`vm_only`, see
+//! [`codewire_project::VmOnlyPatterns`]). The plan carries the patterns, not
+//! the folders they match: the guest expands them at every boot, walking its
+//! own view of the share, so the plan never changes after create. Host paths
+//! and host filesystem identities stay in the private supervisor/runner
+//! control plane. The seed binds the digest of these exact bytes so
+//! guest-writable persistent state cannot redirect a later boot to a
+//! different layout. An empty `vm_only` is not encoded, so a plan without one
+//! has the same bytes as before the field existed.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -17,17 +21,11 @@ pub const DIRECT_SHARE_PLAN_PATH: &str = "/state/codewire/direct-shares.json";
 pub const DIRECT_SHARE_PLAN_RELATIVE_PATH: &str = "codewire/direct-shares.json";
 pub const MAX_DIRECT_SHARES: usize = 16;
 pub const MAX_DIRECT_SHARE_PLAN_BYTES: usize = 128 * 1024;
-/// Present once in a guest init that binds `vm_only` paths. Host preflight
-/// reads it from the admitted boot image before it creates or starts a VM
-/// whose plan keeps paths on the VM's disk; an older guest would refuse that
-/// plan only at boot.
-pub const VM_ONLY_CAPABILITY_MARKER: &[u8] = b"CODEWIRE_GUEST_VM_ONLY_V1\0";
-/// The most share-relative paths one share keeps on the VM's own disk.
-pub const MAX_VM_ONLY_PATHS: usize = 32;
-const MAX_VM_ONLY_PATH_BYTES: usize = 1024;
-const MAX_VM_ONLY_TOTAL_BYTES: usize = 4096;
-const MAX_PATH_COMPONENT_BYTES: usize = 255;
-const MAX_GUEST_PATH_BYTES: usize = 4096;
+/// Present once in a guest init that expands `vm_only` patterns and binds the
+/// folders they match. Host preflight reads it from the admitted boot image
+/// before it creates or starts a VM whose plan keeps folders on the VM's
+/// disk; an older guest would refuse or misread that plan only at boot.
+pub const VM_ONLY_CAPABILITY_MARKER: &[u8] = b"CODEWIRE_GUEST_VM_ONLY_V2\0";
 
 const DIRECT_SHARE_PLAN_SCHEMA_VERSION: u32 = 1;
 const DIRECT_SHARE_TAG_PREFIX: &str = "cw-direct-";
@@ -64,8 +62,8 @@ impl DirectShareMount {
         Ok(mount)
     }
 
-    /// This share with `vm_only` paths kept on the VM's own disk. A read-only
-    /// share takes none.
+    /// This share with `vm_only` patterns whose folders are kept on the VM's
+    /// own disk. A read-only share takes none.
     pub fn with_vm_only(mut self, vm_only: Vec<String>) -> Result<Self, DirectSharePlanError> {
         self.vm_only = vm_only;
         self.validate_vm_only()?;
@@ -99,56 +97,12 @@ impl DirectShareMount {
 
     fn validate_vm_only(&self) -> Result<(), DirectSharePlanError> {
         if (self.read_only && !self.vm_only.is_empty())
-            || !valid_vm_only_paths(&self.vm_only)
-            || self
-                .vm_only
-                .iter()
-                .any(|path| self.destination.len() + 1 + path.len() > MAX_GUEST_PATH_BYTES)
+            || !codewire_project::valid_vm_only_patterns(&self.vm_only)
         {
             return Err(DirectSharePlanError::InvalidPlan);
         }
         Ok(())
     }
-}
-
-/// Whether `paths` is a valid `vm_only` list: at most [`MAX_VM_ONLY_PATHS`]
-/// normalized relative paths (no leading or trailing `/`, no empty, `.`,
-/// `..` or `.git` segment, no control character), 4 KiB in all, none equal
-/// to or nested in another even ignoring ASCII case (macOS shares are
-/// case-insensitive).
-pub fn valid_vm_only_paths(paths: &[String]) -> bool {
-    paths.len() <= MAX_VM_ONLY_PATHS
-        && paths.iter().map(String::len).sum::<usize>() <= MAX_VM_ONLY_TOTAL_BYTES
-        && paths.iter().all(|path| valid_vm_only_path(path))
-        && paths.iter().enumerate().all(|(index, path)| {
-            paths[index + 1..]
-                .iter()
-                .all(|other| !vm_only_paths_overlap(path, other))
-        })
-}
-
-fn valid_vm_only_path(path: &str) -> bool {
-    !path.is_empty()
-        && path.len() <= MAX_VM_ONLY_PATH_BYTES
-        && !path.starts_with('/')
-        && !path.ends_with('/')
-        && !path.chars().any(char::is_control)
-        && path.split('/').all(|component| {
-            !component.is_empty()
-                && !matches!(component, "." | "..")
-                && !component.eq_ignore_ascii_case(".git")
-                && component.len() <= MAX_PATH_COMPONENT_BYTES
-        })
-}
-
-fn vm_only_paths_overlap(left: &str, right: &str) -> bool {
-    let (left, right) = (left.to_ascii_lowercase(), right.to_ascii_lowercase());
-    let nested = |outer: &str, inner: &str| {
-        inner
-            .strip_prefix(outer)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-    };
-    left == right || nested(&left, &right) || nested(&right, &left)
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -302,31 +256,40 @@ mod tests {
 
     #[test]
     fn vm_only_round_trips_canonically_and_changes_the_digest() {
-        let paths = vec![
+        let patterns = vec![
             "node_modules".to_owned(),
-            "target".to_owned(),
-            "packages/web/.venv".to_owned(),
+            "**/node_modules".to_owned(),
+            "packages/*/dist".to_owned(),
         ];
         let plan = DirectSharePlan::new(vec![
             DirectShareMount::for_index(0, "/workspace/app", false)
                 .unwrap()
-                .with_vm_only(paths.clone())
+                .with_vm_only(patterns.clone())
                 .unwrap(),
         ])
         .unwrap();
         let bytes = plan.encode_canonical().unwrap();
         assert_eq!(
             bytes,
-            br#"{"schema_version":1,"mounts":[{"tag":"cw-direct-00","destination":"/workspace/app","read_only":false,"vm_only":["node_modules","target","packages/web/.venv"]}]}"#
+            br#"{"schema_version":1,"mounts":[{"tag":"cw-direct-00","destination":"/workspace/app","read_only":false,"vm_only":["node_modules","**/node_modules","packages/*/dist"]}]}"#
         );
         let decoded = DirectSharePlan::decode_canonical(&bytes).unwrap();
-        assert_eq!(decoded.mounts()[0].vm_only(), paths);
+        assert_eq!(decoded.mounts()[0].vm_only(), patterns);
         let without = DirectSharePlan::new(vec![
             DirectShareMount::for_index(0, "/workspace/app", false).unwrap(),
         ])
         .unwrap();
         assert_ne!(plan.sha256().unwrap(), without.sha256().unwrap());
 
+        // A plain-path list from before patterns keeps its bytes and meaning.
+        let paths = br#"{"schema_version":1,"mounts":[{"tag":"cw-direct-00","destination":"/workspace/app","read_only":false,"vm_only":["node_modules","target","packages/web/.venv"]}]}"#;
+        assert_eq!(
+            DirectSharePlan::decode_canonical(paths)
+                .unwrap()
+                .encode_canonical()
+                .unwrap(),
+            paths
+        );
         // An explicit empty list is not the canonical encoding.
         let explicit_empty = br#"{"schema_version":1,"mounts":[{"tag":"cw-direct-00","destination":"/workspace/app","read_only":false,"vm_only":[]}]}"#;
         assert!(DirectSharePlan::decode_canonical(explicit_empty).is_err());
@@ -336,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_only_rejects_read_only_shares_and_unsafe_paths() {
+    fn vm_only_rejects_read_only_shares_and_unsafe_patterns() {
         let share = || DirectShareMount::for_index(0, "/workspace/app", false).unwrap();
         assert!(
             DirectShareMount::for_index(0, "/workspace/app", true)
@@ -344,65 +307,46 @@ mod tests {
                 .with_vm_only(vec!["node_modules".to_owned()])
                 .is_err()
         );
-        for path in [
-            "", "/abs", "../up", "a/../b", "./a", ".", "..", "a//b", "a/", "a\0b", "a\nb",
+        for pattern in [
+            "", "/abs", "../up", "a/../b", "./a", ".", "..", "a//b", "a/", " a", "a\0b", "a\nb",
+            ".git", "**/.git", ".GIT/y", "**", "**/**", "!x", "[ab", "a\\",
         ] {
-            let path = path.to_owned();
             assert!(
-                share().with_vm_only(vec![path.clone()]).is_err(),
-                "{path:?}"
+                share().with_vm_only(vec![pattern.to_owned()]).is_err(),
+                "{pattern:?}"
             );
         }
-        for path in [".git", "x/.git", ".GIT/y"] {
-            assert!(
-                share().with_vm_only(vec![path.to_owned()]).is_err(),
-                "{path:?}"
-            );
-        }
-        assert!(share().with_vm_only(vec![".github".to_owned()]).is_ok());
-        for paths in [
-            vec!["a", "a"],
-            vec!["a", "a/b"],
-            vec!["a/b", "a"],
-            vec!["Node_modules", "node_modules"],
-            vec!["A", "a/b"],
-        ] {
-            let paths = paths.into_iter().map(str::to_owned).collect::<Vec<_>>();
-            assert!(share().with_vm_only(paths.clone()).is_err(), "{paths:?}");
-        }
+        // Overlap is resolved at expansion (outermost wins); duplicates are not.
         assert!(
             share()
-                .with_vm_only(vec!["a".to_owned(), "ab".to_owned(), "a-b".to_owned()])
+                .with_vm_only(vec!["a".to_owned(), "a/b".to_owned(), "**/b".to_owned()])
                 .is_ok()
         );
-        assert!(share().with_vm_only(vec!["x".repeat(256)]).is_err());
-        // Six paths of about 750 bytes each exceed the 4 KiB total.
-        let wide = (0..6)
-            .map(|index| {
-                format!(
-                    "{index}/{}/{}/{}",
-                    "y".repeat(250),
-                    "z".repeat(250),
-                    "w".repeat(250)
-                )
-            })
-            .collect::<Vec<_>>();
-        assert!(share().with_vm_only(wide[..5].to_vec()).is_ok());
-        assert!(share().with_vm_only(wide).is_err());
-        let many = (0..=MAX_VM_ONLY_PATHS)
+        assert!(
+            share()
+                .with_vm_only(vec!["a".to_owned(), "a".to_owned()])
+                .is_err()
+        );
+        let many = (0..=codewire_project::MAX_VM_ONLY_PATTERNS)
             .map(|index| format!("d{index}"))
             .collect::<Vec<_>>();
         assert!(
             share()
-                .with_vm_only(many[..MAX_VM_ONLY_PATHS].to_vec())
+                .with_vm_only(many[..codewire_project::MAX_VM_ONLY_PATTERNS].to_vec())
                 .is_ok()
         );
         assert!(share().with_vm_only(many).is_err());
 
         // A decoded plan gets the same checks.
-        let read_only = br#"{"schema_version":1,"mounts":[{"tag":"cw-direct-00","destination":"/workspace/app","read_only":true,"vm_only":["a"]}]}"#;
-        assert!(DirectSharePlan::decode_canonical(read_only).is_err());
-        let escaping = br#"{"schema_version":1,"mounts":[{"tag":"cw-direct-00","destination":"/workspace/app","read_only":false,"vm_only":["../state"]}]}"#;
-        assert!(DirectSharePlan::decode_canonical(escaping).is_err());
+        for vm_only in [r#"["a"]"#, r#"["../state"]"#, r#"["**"]"#, r#"["*/.git"]"#] {
+            let read_only = vm_only == r#"["a"]"#;
+            let bytes = format!(
+                r#"{{"schema_version":1,"mounts":[{{"tag":"cw-direct-00","destination":"/workspace/app","read_only":{read_only},"vm_only":{vm_only}}}]}}"#
+            );
+            assert!(
+                DirectSharePlan::decode_canonical(bytes.as_bytes()).is_err(),
+                "{bytes}"
+            );
+        }
     }
 }

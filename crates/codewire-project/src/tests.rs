@@ -618,27 +618,36 @@ fn vm_only_defaults_turns_off_and_stays_out_of_the_portable_spec() {
 }
 
 #[test]
-fn vm_only_rejects_unsafe_duplicate_nested_and_excess_paths() {
+fn vm_only_accepts_dockerignore_patterns_and_refuses_unsafe_ones() {
+    let document = parse_project_yaml(
+        "workspace:\n  vm_only:\n    - node_modules\n    - '**/node_modules'\n    - packages/*/dist/\n    - '[bt]arget'\n",
+    )
+    .unwrap();
+    // Overlapping patterns are fine, and a trailing / is dropped.
+    assert_eq!(
+        document.local.effective_vm_only(),
+        [
+            "node_modules",
+            "**/node_modules",
+            "packages/*/dist",
+            "[bt]arget"
+        ]
+    );
     for (yaml, detail) in [
-        ("workspace: {vm_only: ['']}\n", "empty"),
-        ("workspace: {vm_only: ['  ']}\n", "empty"),
+        ("workspace: {vm_only: ['']}\n", "is empty"),
+        ("workspace: {vm_only: ['  ']}\n", "is empty"),
         ("workspace: {vm_only: [/abs]}\n", "relative"),
-        ("workspace: {vm_only: [../up]}\n", "plain relative"),
-        ("workspace: {vm_only: [a/../b]}\n", "plain relative"),
-        ("workspace: {vm_only: [./a]}\n", "plain relative"),
-        ("workspace: {vm_only: [a//b]}\n", "plain relative"),
-        ("workspace: {vm_only: [a/]}\n", "plain relative"),
-        ("workspace: {vm_only: [.]}\n", "plain relative"),
-        ("workspace: {vm_only: [\"a\\tb\"]}\n", "plain relative"),
-        ("workspace: {vm_only: [a, a]}\n", "overlap"),
-        ("workspace: {vm_only: [a, a/b]}\n", "overlap"),
-        ("workspace: {vm_only: [a/b, a]}\n", "overlap"),
-        (
-            "workspace: {vm_only: [Node_Modules, node_modules]}\n",
-            "overlap",
-        ),
+        ("workspace: {vm_only: [../up]}\n", ". or .."),
+        ("workspace: {vm_only: [a/../b]}\n", ". or .."),
+        ("workspace: {vm_only: [./a]}\n", ". or .."),
+        ("workspace: {vm_only: [a//b]}\n", "empty segment"),
+        ("workspace: {vm_only: [\"a\\tb\"]}\n", "control"),
+        ("workspace: {vm_only: [a, a]}\n", "listed twice"),
         ("workspace: {vm_only: [.git]}\n", "Git repository"),
-        ("workspace: {vm_only: [sub/.GIT]}\n", "Git repository"),
+        ("workspace: {vm_only: ['**/.GIT']}\n", "Git repository"),
+        ("workspace: {vm_only: ['**']}\n", "whole project"),
+        ("workspace: {vm_only: ['!keep']}\n", "exception"),
+        ("workspace: {vm_only: ['[ab']}\n", "unclosed"),
     ] {
         let error = parse_project_yaml(yaml).unwrap_err().to_string();
         assert!(
@@ -646,22 +655,13 @@ fn vm_only_rejects_unsafe_duplicate_nested_and_excess_paths() {
             "{yaml:?}: {error}"
         );
     }
-    // Siblings that share a prefix are not nested.
-    parse_project_yaml("workspace: {vm_only: [a, ab, a-b, .github]}\n").unwrap();
-    let wide = (0..6)
-        .map(|index| {
-            format!(
-                "{index}/{}/{}/{}",
-                "y".repeat(250),
-                "z".repeat(250),
-                "w".repeat(250)
-            )
-        })
+    let wide = (0..9)
+        .map(|index| format!("{index}{}", "y".repeat(250)))
         .collect::<Vec<_>>();
     let error = parse_project_yaml(&format!("workspace: {{vm_only: [{}]}}\n", wide.join(", ")))
         .unwrap_err()
         .to_string();
-    assert!(error.contains("4 KiB"), "{error}");
+    assert!(error.contains("2 KiB"), "{error}");
     let long = "x".repeat(256);
     assert!(parse_project_yaml(&format!("workspace: {{vm_only: [{long}]}}\n")).is_err());
 

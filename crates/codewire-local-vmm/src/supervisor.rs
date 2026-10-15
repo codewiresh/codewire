@@ -109,7 +109,7 @@ use crate::workspace_plan::{
     RepositoryCredentialAccess, WorkspaceInput, WorkspacePlan, WorkspacePlanError,
     prepare_direct_input, prepare_repository_plan, validate_local_mount_destination,
 };
-use codewire_vmm_guest_probe::valid_vm_only_paths;
+use codewire_project::valid_vm_only_patterns;
 
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -6289,7 +6289,7 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
         let mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
         if request.source_path.is_empty()
             || !Path::new(&request.source_path).is_absolute()
-            || !valid_vm_only_paths(&request.implicit_vm_only)
+            || !valid_vm_only_patterns(&request.implicit_vm_only)
             || (mode == WorkspaceSourceMode::Clone && !request.implicit_vm_only.is_empty())
         {
             return Err(SupervisorError::InvalidRequest);
@@ -6324,7 +6324,7 @@ fn validate_local_mount_requests(mounts: &[v1::LocalMountInput]) -> Result<(), S
                 if mount.read_only == Some(true) && mount.vm_only.is_empty() => {}
             _ => return Err(SupervisorError::InvalidRequest),
         }
-        if !valid_vm_only_paths(&mount.vm_only) {
+        if !valid_vm_only_patterns(&mount.vm_only) {
             return Err(SupervisorError::InvalidRequest);
         }
         let path = PathBuf::from(OsString::from_vec(mount.source_path.clone()));
@@ -9471,7 +9471,7 @@ mod tests {
         );
         let live = child.capture(&executable);
         let service = TestRunnerProtocolService {
-            reply: TestRunnerProtocolReply::Version(6),
+            reply: TestRunnerProtocolReply::Version(7),
             useful_calls: Arc::new(AtomicUsize::new(0)),
             shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
         };
@@ -9509,7 +9509,7 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("unresponsive.sock");
         let (identity, calls, stop, server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(6));
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(7));
         let executable = fs::canonicalize("/bin/sleep").unwrap();
         let mut child = ShutdownTestChild(
             crate::test_child(&mut Command::new(&executable))
@@ -12524,11 +12524,17 @@ mod tests {
             validate_create(&clone),
             Err(SupervisorError::InvalidRequest)
         ));
+        // Overlapping patterns are valid: the outermost match wins.
+        let mut patterns = request.clone();
+        patterns.implicit_vm_only = vec!["node_modules".to_owned(), "**/node_modules".to_owned()];
+        validate_create(&patterns).unwrap();
         for invalid in [
             vec!["../escape".to_owned()],
             vec!["/abs".to_owned()],
-            vec!["a".to_owned(), "a/b".to_owned()],
+            vec!["a".to_owned(), "a".to_owned()],
             vec![".git".to_owned()],
+            vec!["**".to_owned()],
+            vec!["*/.git".to_owned()],
         ] {
             let mut unsafe_request = request.clone();
             unsafe_request.implicit_vm_only = invalid;

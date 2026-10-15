@@ -2414,35 +2414,185 @@ fn native_vm_only(source_path: &Path, declared: Option<&[String]>) -> (Vec<Strin
     )
 }
 
-/// Kept paths a live mount of `source_path` cannot bind, which the guest
-/// leaves shared: a symlink or file at the path, or a parent that is not a
-/// plain folder.
-fn vm_only_share_notes(source_path: &Path, paths: &[String]) -> Vec<String> {
-    paths
-        .iter()
-        .filter_map(|path| {
-            let mut current = source_path.to_path_buf();
-            let components = path.split('/').collect::<Vec<_>>();
-            for (index, component) in components.iter().enumerate() {
-                current.push(component);
-                let last = index + 1 == components.len();
-                let reason = match std::fs::symlink_metadata(&current) {
-                    Ok(metadata) if metadata.file_type().is_symlink() => "is a symlink",
-                    Ok(metadata) if !metadata.is_dir() => "is a file",
-                    Ok(_) => continue,
-                    Err(_) if last => return None,
-                    Err(_) => "is missing",
-                };
-                let shown = components[..=index].join("/");
-                return Some(if shown == *path {
-                    format!("{path} {reason}, so it stays shared with the host")
-                } else {
-                    format!("{path} stays shared with the host: {shown} {reason}")
-                });
-            }
-            None
+/// The project folder's folders, for the review: listed and inspected
+/// without following symlinks or leaving its filesystem, as the guest does.
+struct HostVmOnlyTree {
+    device: u64,
+}
+
+impl codewire_project::VmOnlyTree for HostVmOnlyTree {
+    type Folder = PathBuf;
+
+    fn names(&mut self, folder: &PathBuf) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect()
+    }
+
+    fn open(&mut self, folder: &PathBuf, name: &str) -> Option<PathBuf> {
+        let child = folder.join(name);
+        std::fs::symlink_metadata(&child)
+            .ok()
+            .filter(|metadata| metadata.is_dir() && metadata.dev() == self.device)
+            .map(|_| child)
+    }
+
+    fn holds_repository(&mut self, folder: &PathBuf) -> bool {
+        std::fs::symlink_metadata(folder.join(".git")).is_ok()
+    }
+}
+
+/// A path as the review shows it: bidirectional and other invisible format
+/// characters escaped, so a name cannot disguise itself.
+fn shown_vm_only_path(path: &str) -> String {
+    path.chars()
+        .map(|character| match character {
+            '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}' => format!("\\u{{{:04x}}}", u32::from(character)),
+            character => character.to_string(),
         })
         .collect()
+}
+
+/// The review lines for the project folder's kept patterns: each pattern
+/// with the folders it matches now, folders left shared and why, and folders
+/// holding files Git tracks. `live` is the mount, which the guest expands
+/// again at every start; otherwise the one-time copy.
+fn vm_only_review(source_path: &Path, patterns: &[String], live: bool) -> Vec<String> {
+    let Ok(parsed) = codewire_project::VmOnlyPatterns::parse(patterns) else {
+        return Vec::new();
+    };
+    let Ok(root) = std::fs::symlink_metadata(source_path) else {
+        return Vec::new();
+    };
+    let expansion = codewire_project::expand_vm_only(
+        &parsed,
+        &mut HostVmOnlyTree { device: root.dev() },
+        &source_path.to_path_buf(),
+    );
+    let mut kept_paths = Vec::new();
+    let mut lines = Vec::new();
+    for (index, pattern) in patterns.iter().enumerate() {
+        let mut found = Vec::new();
+        let mut notes = Vec::new();
+        for kept in expansion
+            .matches
+            .iter()
+            .filter(|kept| kept.pattern == index)
+        {
+            if kept.exists {
+                found.push(kept.path.clone());
+                continue;
+            }
+            let folder = source_path.join(&kept.path);
+            let is_folder =
+                std::fs::symlink_metadata(&folder).is_ok_and(|metadata| metadata.is_dir());
+            if is_folder && std::fs::symlink_metadata(folder.join(".git")).is_ok() {
+                notes.push(format!(
+                    "{} holds a Git repository, so it {}",
+                    shown_vm_only_path(&kept.path),
+                    if live {
+                        "stays shared with the host"
+                    } else {
+                        "is copied"
+                    }
+                ));
+            } else if is_folder {
+                found.push(kept.path.clone());
+            } else {
+                notes.push(match vm_only_blocked(source_path, &kept.path) {
+                    Some(reason) if live => format!("{reason}, so it stays shared with the host"),
+                    Some(reason) => format!("{reason}, so it is copied"),
+                    None if live => format!("{} is created empty", shown_vm_only_path(&kept.path)),
+                    None => format!("no {} to leave out", shown_vm_only_path(&kept.path)),
+                });
+            }
+        }
+        kept_paths.extend(found.iter().cloned());
+        let mut parts = Vec::new();
+        if !found.is_empty() {
+            let shown = found
+                .iter()
+                .take(5)
+                .map(|path| shown_vm_only_path(path))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(if found.len() > 5 {
+                format!("{shown} and {} more", found.len() - 5)
+            } else {
+                shown
+            });
+        }
+        parts.extend(notes);
+        if parts.is_empty() {
+            parts.push("no folder matches yet".to_owned());
+        }
+        lines.push(format!("  {pattern}: {}", parts.join("; ")));
+    }
+    for repository in &expansion.repositories {
+        lines.push(format!(
+            "  {} holds a Git repository, so it {}",
+            shown_vm_only_path(repository),
+            if live {
+                "stays shared with the host"
+            } else {
+                "is copied"
+            }
+        ));
+    }
+    for tracked in codewire_local_vmm::workspace::tracked_paths(source_path, &kept_paths) {
+        lines.push(format!(
+            "  {} holds files Git tracks: in the VM they look deleted, so do not commit there",
+            shown_vm_only_path(&tracked)
+        ));
+    }
+    if expansion.truncated {
+        lines.push(format!(
+            "A limit stopped the search: at most {} folders are kept, from at most {} folders and {} names searched {} deep.",
+            codewire_project::MAX_VM_ONLY_MATCHES,
+            codewire_project::MAX_VM_ONLY_WALK_DIRECTORIES,
+            codewire_project::MAX_VM_ONLY_WALK_ENTRIES,
+            codewire_project::MAX_VM_ONLY_DEPTH
+        ));
+    }
+    if live {
+        lines.push(
+            "Folders that match later are kept from the next start; what is written into them before then stays on the host, hidden from the VM, so install again."
+                .to_owned(),
+        );
+    }
+    lines
+}
+
+/// Why the guest leaves a pattern's folder shared: a symlink or file at the
+/// path, or a parent that is not a plain folder. None when it can be created.
+fn vm_only_blocked(source_path: &Path, path: &str) -> Option<String> {
+    let mut current = source_path.to_path_buf();
+    let components = path.split('/').collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        current.push(component);
+        let last = index + 1 == components.len();
+        let reason = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => "is a symlink",
+            Ok(metadata) if !metadata.is_dir() => "is a file",
+            Ok(_) => continue,
+            Err(_) if last => return None,
+            Err(_) => "is missing",
+        };
+        return Some(format!(
+            "{} {reason}",
+            shown_vm_only_path(&components[..=index].join("/"))
+        ));
+    }
+    None
 }
 
 /// codewire.yaml mounts for the request. The project folder's kept paths
@@ -2607,16 +2757,20 @@ fn resolve_native_workspace(
                 "--path-mode applies only when codewire.yaml has no repositories or mounts"
             );
         }
-        let mut vm_only_notes = Vec::new();
-        for mount in &project.local_mounts {
-            if mount.mode == v1::LocalMountMode::Direct as i32 && !mount.vm_only.is_empty() {
-                vm_only_notes.extend(vm_only_share_notes(source_path, &mount.vm_only));
-            }
-        }
-        let applies = project
+        let kept = project
             .local_mounts
             .iter()
-            .any(|mount| !mount.vm_only.is_empty());
+            .filter(|mount| !mount.vm_only.is_empty())
+            .collect::<Vec<_>>();
+        let applies = !kept.is_empty();
+        let live = kept
+            .iter()
+            .any(|mount| mount.mode == v1::LocalMountMode::Direct as i32);
+        let vm_only_notes = if applies {
+            vm_only_review(source_path, &vm_only, live)
+        } else {
+            Vec::new()
+        };
         return Ok(NativeWorkspace {
             description: "as declared in codewire.yaml".to_owned(),
             kept_in_vm: applies.then(|| codewire_project::vm_only_summary(&vm_only)),
@@ -2673,7 +2827,7 @@ fn resolve_native_workspace(
                 .vm_only_notes
                 .iter()
                 .cloned()
-                .chain(vm_only_share_notes(source_path, &vm_only))
+                .chain(vm_only_review(source_path, &vm_only, true))
                 .collect();
             project.local_mounts.push(v1::LocalMountInput {
                 source_path: source_path.as_os_str().as_bytes().to_vec(),
@@ -2706,6 +2860,12 @@ fn resolve_native_workspace(
             } else {
                 Vec::new()
             };
+            let vm_only_notes = project
+                .vm_only_notes
+                .iter()
+                .cloned()
+                .chain(vm_only_review(source_path, &vm_only, false))
+                .collect();
             Ok(NativeWorkspace {
                 source_path: source_path.to_string_lossy().into_owned(),
                 description: format!("snapshot of {shown} ({path_mode})"),
@@ -2713,7 +2873,7 @@ fn resolve_native_workspace(
                 notice: None,
                 vm_only,
                 kept_in_vm,
-                vm_only_notes: project.vm_only_notes.clone(),
+                vm_only_notes,
             })
         }
     }
@@ -4025,30 +4185,49 @@ working_directory: /workspace/github
     }
 
     #[test]
-    fn vm_only_notes_name_paths_the_share_leaves_shared() {
+    fn vm_only_review_lists_each_pattern_with_the_folders_it_matches() {
         let temp = tempfile::tempdir().unwrap();
         let source = std::fs::canonicalize(temp.path()).unwrap();
-        std::fs::create_dir(source.join("real")).unwrap();
+        for folder in [
+            "real",
+            "packages/web/node_modules",
+            "packages/api/node_modules/x/node_modules",
+            "apps/a/node_modules",
+            "apps/b/node_modules",
+            "apps/c/node_modules",
+            "apps/d/node_modules",
+            "apps/e/node_modules",
+            "apps/f/node_modules",
+            ".git/node_modules",
+        ] {
+            std::fs::create_dir_all(source.join(folder)).unwrap();
+        }
         std::os::unix::fs::symlink("real", source.join("node_modules")).unwrap();
         std::fs::write(source.join("target"), b"a file").unwrap();
-        std::fs::create_dir(source.join("packages")).unwrap();
-        let paths = [
+        let patterns = [
             "node_modules",
             "target",
             ".venv",
-            "packages/web/node_modules",
-            "node_modules/x",
-            "packages/node_modules",
+            "**/node_modules",
+            "lib/x/node_modules",
+            "dist-*",
         ]
         .map(str::to_owned);
         assert_eq!(
-            vm_only_share_notes(&source, &paths),
+            vm_only_review(&source, &patterns, true),
             [
-                "node_modules is a symlink, so it stays shared with the host",
-                "target is a file, so it stays shared with the host",
-                "packages/web/node_modules stays shared with the host: packages/web is missing",
-                "node_modules/x stays shared with the host: node_modules is a symlink",
+                "  node_modules: node_modules is a symlink, so it stays shared with the host",
+                "  target: target is a file, so it stays shared with the host",
+                "  .venv: .venv is created empty",
+                "  **/node_modules: apps/a/node_modules, apps/b/node_modules, apps/c/node_modules, apps/d/node_modules, apps/e/node_modules and 3 more",
+                "  lib/x/node_modules: lib is missing, so it stays shared with the host",
+                "  dist-*: no folder matches yet",
+                "Folders that match later are kept from the next start; what is written into them before then stays on the host, hidden from the VM, so install again.",
             ]
+        );
+        assert_eq!(
+            vm_only_review(&source, &["packages/*/node_modules".to_owned()], false),
+            ["  packages/*/node_modules: packages/api/node_modules, packages/web/node_modules"]
         );
 
         // The default list drops a path Git tracks; a declared list is kept.
@@ -4082,7 +4261,26 @@ working_directory: /workspace/github
                 native_vm_only(&source, Some(&declared)),
                 (vec!["target".to_owned()], Vec::new())
             );
+            // A declared pattern over tracked files is kept, with a warning;
+            // a match holding its own repository stays shared.
+            std::fs::create_dir_all(source.join("apps/nested/.git")).unwrap();
+            let review = vm_only_review(&source, &["target".to_owned(), "apps/*".to_owned()], true);
+            assert!(
+                review.contains(
+                    &"  target holds files Git tracks: in the VM they look deleted, so do not commit there"
+                        .to_owned()
+                ),
+                "{review:#?}"
+            );
+            assert!(
+                review.contains(
+                    &"  apps/nested holds a Git repository, so it stays shared with the host"
+                        .to_owned()
+                ),
+                "{review:#?}"
+            );
         }
+        assert_eq!(shown_vm_only_path("a\u{202e}b"), "a\\u{202e}b");
     }
 
     #[test]

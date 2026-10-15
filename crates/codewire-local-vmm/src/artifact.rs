@@ -1655,7 +1655,7 @@ mod tests {
             Vec::new(),
             marker.to_vec(),
             [marker, marker].concat(),
-            b"CODEWIRE_GUEST_VM_ONLY_V0\0".to_vec(),
+            b"CODEWIRE_GUEST_VM_ONLY_V1\0".to_vec(),
         ]
         .into_iter()
         .enumerate()
