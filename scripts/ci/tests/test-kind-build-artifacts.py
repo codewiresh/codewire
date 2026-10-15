@@ -687,24 +687,26 @@ class PinnedWorkspaceTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_unchanged_definition_selects_the_pin(self):
+    def test_only_a_pin_built_from_this_definition_is_used(self):
+        for base in (self.BASE, None):
+            self.use_pin(FakePinTool({self.HEAD: PIN_INPUTS, self.BASE: PIN_INPUTS}))
+            self.assertEqual(artifact.workspace_source(self.HEAD, base)[0], "pinned")
+
+    def test_a_pin_that_lags_an_unchanged_definition_rebuilds_from_source(self):
+        # The definition is unchanged from the base, but the pin was built from
+        # an older one: Kind must not run an image this tree does not deploy.
         self.use_pin(FakePinTool({self.HEAD: "1" * 64, self.BASE: "1" * 64}))
-        self.assertEqual(artifact.workspace_source(self.HEAD, self.BASE)[0], "pinned")
+        self.assertEqual(artifact.workspace_source(self.HEAD, self.BASE),
+                         ("source", "the pin was built from another workspace image definition"))
 
     def test_changed_definition_rebuilds_from_source(self):
-        self.use_pin(FakePinTool({self.HEAD: "1" * 64, self.BASE: "2" * 64}))
+        self.use_pin(FakePinTool({self.HEAD: "1" * 64, self.BASE: PIN_INPUTS}))
         self.assertEqual(artifact.workspace_source(self.HEAD, self.BASE)[0], "source")
-
-    def test_without_a_base_only_a_pin_built_from_this_definition_is_used(self):
-        self.use_pin(FakePinTool({self.HEAD: PIN_INPUTS}))
-        self.assertEqual(artifact.workspace_source(self.HEAD, None)[0], "pinned")
         self.use_pin(FakePinTool({self.HEAD: "1" * 64}))
         self.assertEqual(artifact.workspace_source(self.HEAD, None)[0], "source")
 
-    def test_unreadable_pin_or_missing_base_falls_back_to_source(self):
-        self.use_pin(FakePinTool({self.HEAD: "1" * 64}))
-        self.assertEqual(artifact.workspace_source(self.HEAD, self.BASE)[0], "source")
-        self.use_pin(FakePinTool({self.HEAD: "1" * 64, self.BASE: "1" * 64}, error="invalid pin"))
+    def test_unreadable_pin_falls_back_to_source(self):
+        self.use_pin(FakePinTool({self.HEAD: PIN_INPUTS}, error="invalid pin"))
         self.assertEqual(artifact.workspace_source(self.HEAD, self.BASE)[0], "source")
         with self.assertRaises(artifact.ArtifactError):
             artifact.workspace_source("HEAD", None)

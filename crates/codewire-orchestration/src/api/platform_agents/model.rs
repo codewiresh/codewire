@@ -23,6 +23,8 @@ pub enum ManagedAction {
     Interrupt,
     Stop,
     Restart,
+    /// Continue a conversation of an earlier Pod in this one (#2705).
+    Resume,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +89,11 @@ pub struct ManagedMutation {
     pub support_image_sha256: String,
     pub support_image_size: u64,
     pub private_fingerprint: String,
+    /// Resume only: the earlier Pod this conversation continues from, as the
+    /// control plane derived it and proved it absent. Absent on every other
+    /// action, and omitted when absent so earlier rows keep their fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor_pod_uid: Option<String>,
 }
 
 impl ManagedMutation {
@@ -131,11 +138,24 @@ impl ManagedMutation {
                         private::PlatformManagedAction::Interrupt => ManagedAction::Interrupt,
                         private::PlatformManagedAction::Stop => ManagedAction::Stop,
                         private::PlatformManagedAction::Restart => ManagedAction::Restart,
+                        private::PlatformManagedAction::Resume => ManagedAction::Resume,
                         _ => return Err(invalid()),
                     };
                     (
                         action,
-                        None,
+                        if action == ManagedAction::Resume {
+                            Some(
+                                match private::PlatformManagedAgent::try_from(c.agent)
+                                    .map_err(|_| invalid())?
+                                {
+                                    private::PlatformManagedAgent::Codex => ManagedAgent::Codex,
+                                    private::PlatformManagedAgent::Claude => ManagedAgent::Claude,
+                                    _ => return Err(invalid()),
+                                },
+                            )
+                        } else {
+                            None
+                        },
                         uuid(&c.driver_id)?,
                         c.expected_launch_generation,
                         if matches!(
@@ -157,6 +177,12 @@ impl ManagedMutation {
             Operation::Launch(_) => None,
             Operation::Control(c) => c.cleanup_of_request_id.as_deref().map(uuid).transpose()?,
         };
+        let predecessor_pod_uid = match request.operation.as_ref().ok_or_else(invalid)? {
+            Operation::Control(c) if !c.predecessor_pod_uid.is_empty() => {
+                Some(c.predecessor_pod_uid.clone())
+            }
+            _ => None,
+        };
         let value = Self {
             request_id,
             organization_id: scope.org_id.clone(),
@@ -176,6 +202,7 @@ impl ManagedMutation {
             support_image_sha256: hex(&scope.support_image_sha256),
             support_image_size: scope.support_image_size,
             private_fingerprint,
+            predecessor_pod_uid,
         };
         value.validate()?;
         Ok(value)
@@ -204,7 +231,17 @@ impl ManagedMutation {
                 .as_ref()
                 .is_some_and(|s| !wire::valid_session(s))
             || self.parent_session_id.is_some() != (self.expected_parent_launch_generation > 0)
-            || (self.action == ManagedAction::Launch) != self.agent.is_some()
+            || matches!(self.action, ManagedAction::Launch | ManagedAction::Resume)
+                != self.agent.is_some()
+            || (self.action == ManagedAction::Resume) != self.predecessor_pod_uid.is_some()
+            || self
+                .predecessor_pod_uid
+                .as_deref()
+                .is_some_and(|predecessor| {
+                    !wire::valid_uuid(predecessor) || predecessor == self.pod_uid
+                })
+            || (self.action == ManagedAction::Resume
+                && (self.cleanup_of_request_id.is_some() || self.message_id.is_some()))
             || (self.action == ManagedAction::Launch
                 && (self.driver_id != self.request_id || self.expected_launch_generation != 1))
             || (self.action != ManagedAction::Launch && self.parent_session_id.is_some())
@@ -212,8 +249,10 @@ impl ManagedMutation {
                 self.action,
                 ManagedAction::Message | ManagedAction::Steer | ManagedAction::Interrupt
             ) && self.message_id != Some(self.request_id))
-            || (matches!(self.action, ManagedAction::Stop | ManagedAction::Restart)
-                && self.message_id.is_some())
+            || (matches!(
+                self.action,
+                ManagedAction::Stop | ManagedAction::Restart | ManagedAction::Resume
+            ) && self.message_id.is_some())
         {
             return Err(invalid());
         }
@@ -335,14 +374,15 @@ impl ManagedReceipt {
     }
     pub fn validate_for(&self, m: &ManagedMutation, b: &CapturedBindingFacts) -> AppResult<()> {
         m.validate_binding(b)?;
-        let generation =
-            if m.action == ManagedAction::Restart && self.phase == ManagedPhase::Completed {
-                m.expected_launch_generation
-                    .checked_add(1)
-                    .ok_or_else(invalid)?
-            } else {
-                m.expected_launch_generation
-            };
+        let generation = if matches!(m.action, ManagedAction::Restart | ManagedAction::Resume)
+            && self.phase == ManagedPhase::Completed
+        {
+            m.expected_launch_generation
+                .checked_add(1)
+                .ok_or_else(invalid)?
+        } else {
+            m.expected_launch_generation
+        };
         if self.request_id != m.request_id
             || self.organization_id != b.organization_id
             || self.environment_id != b.environment_id
@@ -390,7 +430,7 @@ impl ManagedReceipt {
                 {
                     return Err(invalid());
                 }
-                ManagedAction::Launch | ManagedAction::Restart
+                ManagedAction::Launch | ManagedAction::Restart | ManagedAction::Resume
                     if !matches!(self.lifecycle, ManagedLifecycle::Running)
                         || self.pipe_acknowledged
                         || self.native_acknowledged =>
@@ -415,8 +455,9 @@ impl ManagedReceipt {
                 _ => {}
             }
         }
-        // A refusal leaves nothing running: refused before any effect, or an
-        // issued launch whose projection was denied before its agent ran.
+        // A refusal leaves nothing running: refused before any effect, a
+        // Resume refused before issue for a plain reason, or an issued launch
+        // whose projection was denied before its agent ran.
         let refusal = match self.reason_code.as_str() {
             "refused-before-issue" => true,
             "denied-before-run" => {
@@ -424,6 +465,7 @@ impl ManagedReceipt {
                     && matches!(self.lifecycle, ManagedLifecycle::Failed)
                     && self.exit_code.is_none()
             }
+            reason if wire::resume_refusal(reason) => m.action == ManagedAction::Resume,
             _ => false,
         };
         if (self.phase == ManagedPhase::Rejected
@@ -481,6 +523,47 @@ pub(super) fn conflict() -> AppError {
 pub(super) fn unavailable() -> AppError {
     AppError::ServiceUnavailable("platform managed journal is unavailable".into())
 }
+/// What the user is told when the target refused a Resume before issue for
+/// a plain reason (#2705). Nothing ran and nothing changed.
+pub(super) fn resume_refusal_text(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "resume-driver-alive" => {
+            "its agent is still running in this environment; try again shortly"
+        }
+        "resume-working-directory-missing" => {
+            "its working directory no longer exists in this environment; \
+             start a new conversation"
+        }
+        "resume-credential-changed" => {
+            "the agent's credential changed since this conversation started; \
+             start a new conversation"
+        }
+        "resume-provider-not-admitted" => {
+            "this environment's agent provider is not admitted for it; \
+             start a new conversation"
+        }
+        _ => return None,
+    })
+}
+/// A Resume refused definitely, before any effect, with why in plain words.
+pub(super) fn resume_refused(detail: &'static str) -> AppError {
+    AppError::Coded {
+        status: axum::http::StatusCode::CONFLICT,
+        code: "platform_agent_resume_refused",
+        detail: std::borrow::Cow::Borrowed(detail),
+    }
+}
+/// The earlier Pod a conversation continues from, as the control plane
+/// derived it from its own journal (#2705). It is checked against Kubernetes
+/// before admission and read again, unchanged, inside the admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResumePredecessor {
+    pub pod_uid: String,
+    pub namespace: String,
+    pub pod_name: String,
+    pub generation: u64,
+    pub agent: ManagedAgent,
+}
 pub(super) fn uuid(s: &str) -> AppResult<Uuid> {
     if !wire::valid_uuid(s) {
         return Err(invalid());
@@ -509,7 +592,7 @@ fn valid_private_reason(s: &str) -> bool {
             | "denied-before-run"
             | "issued-outcome-unknown"
             | "target-owner-lost"
-    )
+    ) || wire::resume_refusal(s)
 }
 mod decimal_u64 {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -525,5 +608,35 @@ mod decimal_u64 {
             ));
         }
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+
+    /// A launch request row as the release before Resume stored it, and the
+    /// admission fingerprint computed independently over its canonical JSON
+    /// (sorted keys, compact, trailing newline). Resume adds only an optional
+    /// field that is omitted when absent, so such rows decode and verify
+    /// unchanged (#2705).
+    const MUTATION: &str = r#"{"request_id":"0f9f6d2a-3c4b-4d5e-8f6a-7b8c9d0e1f2a","organization_id":"fixture-org","environment_id":"550e8400-e29b-41d4-a716-446655440000","pod_uid":"7e7b20f6-0bd2-4f11-8b16-9c239851eb52","binding_generation":3,"projection_selection_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","action":"launch","cleanup_of_request_id":null,"agent":"codex","session_id":"session-0f9f6d2a-3c4b-4d5e-8f6a-7b8c9d0e1f2a","driver_id":"0f9f6d2a-3c4b-4d5e-8f6a-7b8c9d0e1f2a","message_id":null,"expected_launch_generation":"1","parent_session_id":null,"expected_parent_launch_generation":"0","support_image_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","support_image_size":4,"private_fingerprint":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}"#;
+    const BINDING: &str = r#"{"organization_id":"fixture-org","organization_deletion_state":"active","organization_deletion_generation":0,"environment_id":"550e8400-e29b-41d4-a716-446655440000","environment_state":"running","desired_state":"started","environment_type":"sandbox","isolation_tier":"standard","environment_generation":9,"deletion_requested_at":null,"backend_namespace":"runtime-sandboxes","backend_pod_name":"sandbox-550e8400-e29b-41d4-a716-446655440000","backend_pod_ip":"10.12.3.4","backend_pod_uid":"7e7b20f6-0bd2-4f11-8b16-9c239851eb52","backend_claim_uid":"c0ffee00-e29b-41d4-a716-446655440000","backend_pvc_uid":"9d8c7b6a-2222-4f5e-8d4c-3b2a1f0e9d8c","backend_bound_at":"2026-10-01T12:00:00Z","setup_complete":true,"setup_owner_status":null,"pod_uid":"7e7b20f6-0bd2-4f11-8b16-9c239851eb52","namespace":"runtime-sandboxes","pod_name":"sandbox-550e8400-e29b-41d4-a716-446655440000","claim_uid":"c0ffee00-e29b-41d4-a716-446655440000","sandbox_uid":"5a4db0c5-e29b-41d4-a716-446655440000","workspace_pvc_uid":"9d8c7b6a-2222-4f5e-8d4c-3b2a1f0e9d8c","binding_generation":3,"projection_selection_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","managed_credential_clients":"","credential_scope":"pod","binding_bound_at":"2026-10-01T12:00:00Z"}"#;
+    const FINGERPRINT: &str = "5f2603d9ec35631bc2588bd9a62dacdc82548d48a357d2bf9f58c22ec2e83066";
+
+    #[test]
+    fn a_request_admitted_before_resume_decodes_and_keeps_its_fingerprint() {
+        let mutation: ManagedMutation = serde_json::from_str(MUTATION).unwrap();
+        let binding: CapturedBindingFacts = serde_json::from_str(BINDING).unwrap();
+        assert!(mutation.predecessor_pod_uid.is_none());
+        // Nothing is added or dropped on the way back out.
+        assert_eq!(
+            serde_json::to_value(&mutation).unwrap(),
+            serde_json::from_str::<serde_json::Value>(MUTATION).unwrap()
+        );
+        assert_eq!(
+            fingerprint("fixture-actor", false, None, &mutation, &binding).unwrap(),
+            FINGERPRINT
+        );
     }
 }
