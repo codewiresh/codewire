@@ -25,6 +25,17 @@ const ATTACH_SESSION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const ATTACH_SESSION_READ_BYTES: u64 = 32 * 1024;
 const ATTACH_SESSION_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const ATTACH_SESSION_FINAL_SEND_TIMEOUT: Duration = Duration::from_millis(100);
+/// Attach input read from the client and not yet applied. An attachment reads
+/// its input as it arrives, up to this bound, while it applies earlier input:
+/// keystroke-sized frames left unread in HTTP/2 count against the
+/// connection's small DATA frame flood guard, which ends the connection and
+/// every attachment on it (#2822). At the bound it stops reading, and flow
+/// control pauses the client.
+const MAX_PENDING_ATTACH_INPUT_BYTES: usize = 1024 * 1024;
+/// Largest input write that consecutive Input frames are joined into.
+const MAX_COALESCED_ATTACH_INPUT: usize = 32 * 1024;
+/// What a held message other than input counts against the bound.
+const ATTACH_CONTROL_COST: usize = 64;
 
 #[derive(Clone)]
 pub struct DaemonServiceImpl {
@@ -541,6 +552,125 @@ fn read_attach_batch(engine: SessionEngine, session_id: String, cursor: u64) -> 
     })
 }
 
+/// Join a read's contiguous chunks of one stream, up to the read size, so
+/// output read in one batch leaves as one message, not one small DATA frame
+/// per terminal write.
+fn merge_output_chunks(chunks: Vec<v1::SessionOutputChunk>) -> VecDeque<v1::SessionOutputChunk> {
+    let mut merged: VecDeque<v1::SessionOutputChunk> = VecDeque::with_capacity(chunks.len());
+    for chunk in chunks {
+        if let Some(last) = merged.back_mut()
+            && last.stream == chunk.stream
+            && last.next_offset == chunk.offset
+            && last.data.len() + chunk.data.len() <= ATTACH_SESSION_READ_BYTES as usize
+        {
+            last.data.extend_from_slice(&chunk.data);
+            last.next_offset = chunk.next_offset;
+            continue;
+        }
+        merged.push_back(chunk);
+    }
+    merged
+}
+
+/// Attach input read ahead of its application, in order; `None` is the end,
+/// or failure, of the client's stream. Consecutive Input joins into one write;
+/// a resize, detach or anything else keeps its place.
+#[derive(Default)]
+struct AttachInputQueue {
+    messages: VecDeque<Option<v1::SessionAttachMessage>>,
+    bytes: usize,
+}
+
+fn attach_input_cost(message: &Option<v1::SessionAttachMessage>) -> usize {
+    match message {
+        Some(v1::SessionAttachMessage {
+            payload: Some(v1::session_attach_message::Payload::Input(input)),
+        }) => input.data.len(),
+        _ => ATTACH_CONTROL_COST,
+    }
+}
+
+impl AttachInputQueue {
+    fn push(&mut self, message: Option<v1::SessionAttachMessage>) {
+        self.bytes = self.bytes.saturating_add(attach_input_cost(&message));
+        if let (
+            Some(Some(v1::SessionAttachMessage {
+                payload: Some(v1::session_attach_message::Payload::Input(held)),
+            })),
+            Some(v1::SessionAttachMessage {
+                payload: Some(v1::session_attach_message::Payload::Input(input)),
+            }),
+        ) = (self.messages.back_mut(), &message)
+            && held.data.len() + input.data.len() <= MAX_COALESCED_ATTACH_INPUT
+        {
+            held.data.extend_from_slice(&input.data);
+            return;
+        }
+        self.messages.push_back(message);
+    }
+
+    fn pop(&mut self) -> Option<Option<v1::SessionAttachMessage>> {
+        let message = self.messages.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(attach_input_cost(&message));
+        Some(message)
+    }
+}
+
+/// The input half of an attachment: a reader takes the client's frames as
+/// they arrive, and the attachment applies them in order.
+#[derive(Default)]
+struct AttachInput {
+    queue: std::sync::Mutex<AttachInputQueue>,
+    queued: tokio::sync::Notify,
+    room: tokio::sync::Notify,
+}
+
+impl AttachInput {
+    fn lock(&self) -> std::sync::MutexGuard<'_, AttachInputQueue> {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    async fn read<S>(&self, mut incoming: S)
+    where
+        S: Stream<Item = Result<v1::SessionAttachMessage, Status>> + Unpin,
+    {
+        loop {
+            loop {
+                let room = self.room.notified();
+                if self.lock().bytes < MAX_PENDING_ATTACH_INPUT_BYTES {
+                    break;
+                }
+                room.await;
+            }
+            let message = match incoming.next().await {
+                Some(Ok(message)) => Some(message),
+                None | Some(Err(_)) => None,
+            };
+            let ended = message.is_none();
+            self.lock().push(message);
+            self.queued.notify_one();
+            if ended {
+                return;
+            }
+        }
+    }
+
+    /// The next message to apply; `None` once the client's stream ended.
+    async fn next(&self) -> Option<v1::SessionAttachMessage> {
+        loop {
+            let queued = self.queued.notified();
+            let next = self.lock().pop();
+            if let Some(next) = next {
+                self.room.notify_one();
+                return next;
+            }
+            queued.await;
+        }
+    }
+}
+
 async fn finish_attach(
     tx: &mpsc::Sender<Result<v1::SessionAttachMessage, Status>>,
     message: Result<v1::SessionAttachMessage, Status>,
@@ -566,12 +696,19 @@ async fn attach_control<T>(
 
 async fn run_attach_session<S>(
     engine: SessionEngine,
-    mut incoming: S,
+    incoming: S,
     attach: v1::AttachSessionRequest,
     tx: mpsc::Sender<Result<v1::SessionAttachMessage, Status>>,
 ) where
-    S: Stream<Item = Result<v1::SessionAttachMessage, Status>> + Unpin,
+    S: Stream<Item = Result<v1::SessionAttachMessage, Status>> + Send + Unpin + 'static,
 {
+    // Input is read by its own task, so applying one input never leaves the
+    // next unread. It ends with the attachment.
+    let input = std::sync::Arc::new(AttachInput::default());
+    let _reader = tokio_util::task::AbortOnDropHandle::new(tokio::spawn({
+        let input = input.clone();
+        async move { input.read(incoming).await }
+    }));
     let session_id = attach.session_id;
     let mut cursor = attach.output_offset;
     let mut last_status = None;
@@ -615,9 +752,9 @@ async fn run_attach_session<S>(
         // reorder chunks or advance the replay cursor ahead of an enqueue.
         tokio::select! {
             () = tx.closed() => return,
-            message = incoming.next() => {
+            message = input.next() => {
                 match message {
-                    Some(Ok(message)) => match message.payload {
+                    Some(message) => match message.payload {
                         Some(v1::session_attach_message::Payload::Input(input)) => {
                             if let Err(error) = attach_control(&tx, engine.input(&session_id, input.data)).await {
                                 finish_attach(&tx, Err(error)).await;
@@ -694,7 +831,7 @@ async fn run_attach_session<S>(
                             return;
                         }
                     },
-                    None | Some(Err(_)) => return,
+                    None => return,
                 }
             }
             permit = tx.reserve(), if pending_gap.is_some() || !chunks.is_empty() || pending_status.is_some() || terminal_ready => {
@@ -741,7 +878,7 @@ async fn run_attach_session<S>(
                         retained_start_offset: output.retained_start_offset,
                     });
                 }
-                chunks = output.chunks.into();
+                chunks = merge_output_chunks(output.chunks);
                 let status = session_status(&updated, None);
                 if !is_attached_session_live(updated.state) {
                     terminal_status = Some(status);
@@ -1576,6 +1713,167 @@ mod tests {
         })
         .await
         .expect("quiet PTY fixture is ready with echo disabled");
+    }
+
+    /// A browser terminal types each key as its own small frame. While the
+    /// terminal is not taking input, the attachment still reads every frame
+    /// as it arrives, so none waits unread in HTTP/2, whose flood guard
+    /// would end the connection (#2822); the process then receives every
+    /// byte once, in order.
+    #[tokio::test]
+    async fn attach_reads_input_while_the_terminal_is_busy() {
+        const FRAMES: usize = 2000;
+        const FRAME: usize = 64;
+        let expected: Vec<u8> = (0..FRAMES * FRAME)
+            .map(|index| b'0' + (index % 10) as u8)
+            .collect();
+        let (temp, engine) = attach_engine();
+        let session = engine
+            .launch(v1::LaunchSessionRequest {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    format!(
+                        "stty raw -echo; printf ready > attach-ready; \
+                         while [ ! -e go ]; do sleep 0.05; done; \
+                         head -c {} > attach-input; exec sleep 30",
+                        expected.len()
+                    ),
+                ],
+                pty: true,
+                term: "xterm-256color".into(),
+                width: 80,
+                height: 24,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        wait_attach_fixture_ready(&temp).await;
+        let (input, incoming) = mpsc::channel(8);
+        let (output, _unread) = mpsc::channel(32);
+        let owner = tokio::spawn(run_attach_session(
+            engine.clone(),
+            ReceiverStream::new(incoming),
+            v1::AttachSessionRequest {
+                session_id: session.session_id.clone(),
+                output_offset: 0,
+            },
+            output,
+        ));
+        // More than the terminal holds, while its process reads nothing.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for frame in expected.chunks(FRAME) {
+                input
+                    .send(Ok(v1::SessionAttachMessage {
+                        payload: Some(v1::session_attach_message::Payload::Input(
+                            v1::SessionInput {
+                                data: frame.to_vec(),
+                            },
+                        )),
+                    }))
+                    .await
+                    .unwrap();
+            }
+        })
+        .await
+        .expect("the attachment stopped reading input while the terminal was busy");
+        std::fs::write(temp.path().join("home/go"), b"").unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while std::fs::read(temp.path().join("home/attach-input"))
+                .ok()
+                .is_none_or(|written| written.len() < expected.len())
+            {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the process received its input");
+        assert_eq!(
+            std::fs::read(temp.path().join("home/attach-input")).unwrap(),
+            expected
+        );
+        input
+            .send(Ok(v1::SessionAttachMessage {
+                payload: Some(v1::session_attach_message::Payload::Detach(
+                    v1::DetachSessionRequest {
+                        session_id: session.session_id.clone(),
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), owner)
+            .await
+            .expect("detach ends the attachment")
+            .unwrap();
+    }
+
+    #[test]
+    fn attach_input_joins_consecutive_input_only_and_output_reads_merge() {
+        use v1::session_attach_message::Payload;
+        let input = |data: &[u8]| {
+            Some(v1::SessionAttachMessage {
+                payload: Some(Payload::Input(v1::SessionInput {
+                    data: data.to_vec(),
+                })),
+            })
+        };
+        let resize = Some(v1::SessionAttachMessage {
+            payload: Some(Payload::Resize(v1::ResizeRequest {
+                width: 90,
+                height: 30,
+            })),
+        });
+        let mut queue = AttachInputQueue::default();
+        for message in [
+            input(b"a"),
+            input(b"b"),
+            resize.clone(),
+            input(b"c"),
+            input(&vec![b'd'; MAX_COALESCED_ATTACH_INPUT]),
+            None,
+        ] {
+            queue.push(message);
+        }
+        assert_eq!(
+            queue.bytes,
+            3 + MAX_COALESCED_ATTACH_INPUT + 2 * ATTACH_CONTROL_COST
+        );
+        let order: Vec<_> = std::iter::from_fn(|| queue.pop()).collect();
+        assert_eq!(
+            order,
+            [
+                input(b"ab"),
+                resize,
+                input(b"c"),
+                input(&vec![b'd'; MAX_COALESCED_ATTACH_INPUT]),
+                None
+            ]
+        );
+        assert_eq!(queue.bytes, 0);
+
+        let chunk =
+            |offset: u64, data: &[u8], stream: v1::SessionOutputStream| v1::SessionOutputChunk {
+                offset,
+                next_offset: offset + data.len() as u64,
+                stream: stream.into(),
+                data: data.to_vec(),
+            };
+        let pty = v1::SessionOutputStream::Pty;
+        let merged = merge_output_chunks(vec![
+            chunk(0, b"ab", pty),
+            chunk(2, b"cd", pty),
+            chunk(10, b"after a gap", pty),
+            chunk(21, b"other", v1::SessionOutputStream::Stdout),
+        ]);
+        assert_eq!(
+            merged,
+            [
+                chunk(0, b"abcd", pty),
+                chunk(10, b"after a gap", pty),
+                chunk(21, b"other", v1::SessionOutputStream::Stdout)
+            ]
+        );
     }
 
     #[tokio::test]
