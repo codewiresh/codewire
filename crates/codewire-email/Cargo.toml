@@ -17,3 +17,4 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+codewire-workspace-hack.workspace = true

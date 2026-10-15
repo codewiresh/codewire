@@ -8,3 +8,6 @@ authors.workspace = true
 description = "The published Codewire workspace image every consumer pins"
 
 [dependencies]
+
+[dev-dependencies]
+codewire-workspace-hack.workspace = true

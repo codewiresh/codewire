@@ -36,3 +36,6 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+codewire-workspace-hack.workspace = true

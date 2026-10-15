@@ -63,3 +63,4 @@ rustix = { workspace = true }
 [dev-dependencies]
 axum = { workspace = true }
 tempfile = { workspace = true }
+codewire-workspace-hack.workspace = true
