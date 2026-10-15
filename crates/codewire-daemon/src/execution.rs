@@ -226,8 +226,6 @@ impl PreparedProcess {
     /// this owner drops, including cancellation before the helper first runs.
     pub fn spawned(&mut self) {}
 
-    /// Complete the exact-child rendezvous before the caller marks it Running.
-    /// Cancellation drops the relay future and its existing bridge budget guard.
     /// Whether the launcher was told to execute (#2769). After that, a
     /// failure or cancellation is never a denial: the program may have
     /// started.
@@ -235,6 +233,8 @@ impl PreparedProcess {
         self.launch_committed
             .load(std::sync::atomic::Ordering::SeqCst)
     }
+    /// Complete the exact-child rendezvous before the caller marks it Running.
+    /// Cancellation drops the relay future and its existing bridge budget guard.
     pub(crate) async fn project_spawned(&mut self, pid: Option<u32>) -> io::Result<()> {
         if let Some(launch) = self.launch.take() {
             launch

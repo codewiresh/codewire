@@ -207,15 +207,22 @@ pub(super) async fn relay_accepted_launch(
         sealed.validate().await.map_err(|_| denied())?;
         // Final exec follows this commit; already inherited values cannot be
         // revoked. Peer/lifecycle owners must cancel this future on shutdown.
-        // From here on the program may start, so no later failure, timeout
-        // or cancellation is a denial (#2769).
-        committed.store(true, std::sync::atomic::Ordering::SeqCst);
-        channel.write_all(&[LAUNCH_COMMIT]).await?;
-        channel.shutdown().await?;
-        Ok(())
+        commit_launch(&mut channel, committed).await
     })
     .await
     .map_err(|_| denied())?
+}
+
+/// Tells the launcher to execute. `committed` is set before the byte is
+/// written: from here on the program may start, so no later failure, timeout
+/// or cancellation is a denial a Resume could undo (#2769).
+async fn commit_launch(
+    channel: &mut tokio::net::UnixStream,
+    committed: &std::sync::atomic::AtomicBool,
+) -> io::Result<()> {
+    committed.store(true, std::sync::atomic::Ordering::SeqCst);
+    channel.write_all(&[LAUNCH_COMMIT]).await?;
+    channel.shutdown().await
 }
 
 fn validate_native_helper(path: &Path) -> io::Result<()> {

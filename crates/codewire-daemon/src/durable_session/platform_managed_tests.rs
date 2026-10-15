@@ -710,6 +710,8 @@ async fn platform_managed_a_resume_denied_before_run_is_reverted_and_can_resume_
         ..Default::default()
     };
     let handle = engine.handle(&session).unwrap();
+    // The record as the Resume found it: the predecessor's, stopped.
+    let before = handle.metadata.lock().await.clone();
     let next = generation + 1;
     let denied = || async {
         let mut metadata = handle.metadata.lock().await;
@@ -735,7 +737,7 @@ async fn platform_managed_a_resume_denied_before_run_is_reverted_and_can_resume_
     denied().await;
     // The helper refuses, for example because a driver took custody here.
     let refused = engine
-        .revert_resume_with(&handle, &previous, &origin, &resume, next, || async {
+        .revert_resume_with(&handle, &before, &origin, &resume, next, || async {
             Err(Error::Refused)
         })
         .await;
@@ -743,7 +745,7 @@ async fn platform_managed_a_resume_denied_before_run_is_reverted_and_can_resume_
     unchanged().await;
     // The helper answers another generation.
     let skewed = engine
-        .revert_resume_with(&handle, &previous, &origin, &resume, next, || async {
+        .revert_resume_with(&handle, &before, &origin, &resume, next, || async {
             Ok(json!({"launch_generation": next}))
         })
         .await;
@@ -763,7 +765,7 @@ async fn platform_managed_a_resume_denied_before_run_is_reverted_and_can_resume_
         }
         let asked = std::sync::atomic::AtomicBool::new(false);
         let result = engine
-            .revert_resume_with(&handle, &previous, &origin, &resume, next, || async {
+            .revert_resume_with(&handle, &before, &origin, &resume, next, || async {
                 asked.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(json!({"launch_generation": generation}))
             })
@@ -776,7 +778,7 @@ async fn platform_managed_a_resume_denied_before_run_is_reverted_and_can_resume_
     let directory = session_directory(&engine.inner.root, &session).unwrap();
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
     let unsaved = engine
-        .revert_resume_with(&handle, &previous, &origin, &resume, next, || async {
+        .revert_resume_with(&handle, &before, &origin, &resume, next, || async {
             Ok(json!({"launch_generation": generation}))
         })
         .await;
@@ -786,7 +788,7 @@ async fn platform_managed_a_resume_denied_before_run_is_reverted_and_can_resume_
     // Reverted: a definite refusal, and the record names the predecessor at
     // its generation again.
     let reverted = engine
-        .revert_resume_with(&handle, &previous, &origin, &resume, next, || async {
+        .revert_resume_with(&handle, &before, &origin, &resume, next, || async {
             Ok(json!({"launch_generation": generation}))
         })
         .await;
@@ -796,6 +798,33 @@ async fn platform_managed_a_resume_denied_before_run_is_reverted_and_can_resume_
         engine.get(&session).await.unwrap().launch_generation,
         generation
     );
+    // The lifecycle the Resume overwrote returns with the predecessor, so the
+    // record is as resumable, and as retained, as before: not a failed launch
+    // with confirmed cleanup, which record room could prune.
+    {
+        let metadata = handle.metadata.lock().await;
+        assert_eq!(metadata.platform_managed_origin.as_ref(), Some(&previous));
+        assert_eq!(
+            (
+                metadata.state,
+                metadata.cleanup_unknown,
+                metadata.cleanup_confirmed,
+                metadata.exit_code,
+                &metadata.status_message,
+            ),
+            (
+                before.state,
+                before.cleanup_unknown,
+                before.cleanup_confirmed,
+                before.exit_code,
+                &before.status_message,
+            )
+        );
+        assert_eq!(
+            format!("{:?}", (metadata.started_at, metadata.finished_at)),
+            format!("{:?}", (before.started_at, before.finished_at))
+        );
+    }
     // The next Resume is admitted again, also after a daemon restart.
     engine.platform_resumable(&this_pod, &resume).await.unwrap();
     engine.shutdown().await.unwrap();
