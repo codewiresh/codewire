@@ -327,6 +327,12 @@ weakening of the required local hardware gate.
 - Applied migration bytes are immutable. Upgrade fixtures bind accepted prior
   bytes/checksums, not a historical ledger derived from the edited branch.
   Historical migration files do not imply legacy runtime support.
+- Local and Kind databases are disposable. Deploying to them applies new
+  migrations; a migration is never a reason to skip a local or Kind run. To
+  reset one, recreate it and rerun every migration (plus the checked-in
+  fixtures). A backup before upgrading a retained cluster is a convenience, not
+  a gate. Hosted Dev and Production data are not disposable: they move only
+  forward through the reviewed migration path.
 - Public/generated contracts ship generated clients, wrappers, and tests
   together.
 - Search existing users before adding global identifiers; send new packages and

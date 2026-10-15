@@ -211,6 +211,14 @@ with (pathlib.Path(os.environ["FAKE_STATE"]) / "calls").open("a") as log:
     log.write(json.dumps({"tool": "trust-roots", "args": []}) + "\n")
 '''
 
+# Stands in for scripts/dev/kind/database.sh, which DatabaseTests cover.
+FAKE_DATABASE = r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+with (pathlib.Path(os.environ["FAKE_STATE"]) / "calls").open("a") as log:
+    log.write(json.dumps({"tool": "database", "args": sys.argv[1:]}) + "\n")
+sys.exit(int(os.environ.get("FAKE_DATABASE_STATUS", "0")))
+'''
+
 # Stands in for scripts/dev/preflight.sh --explain.
 FAKE_PREFLIGHT = r'''#!/usr/bin/env bash
 printf 'preflight classification: %s\n' "${FAKE_CLASSIFICATION:-changed}"
@@ -283,6 +291,7 @@ class DeveloperProfileTests(unittest.TestCase):
         self.write_program(self.tree / "scripts/ci/verify/kind-e2e.sh", FAKE_SUITE)
         self.write_program(self.tree / "scripts/dev/kind/service-sources.py", FAKE_SOURCES)
         self.write_program(self.tree / "scripts/dev/kind/trust-roots.sh", FAKE_TRUST_ROOTS)
+        self.write_program(self.tree / "scripts/dev/kind/database.sh", FAKE_DATABASE)
         self.write_program(self.tree / "scripts/dev/preflight.sh", FAKE_PREFLIGHT)
         for tool in ("kind", "docker", "kubectl", "ss", "curl", "cat"):
             self.write_program(self.tools / tool, FAKE_TOOL)
@@ -996,11 +1005,12 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
 
     def test_selected_full_gate_runs_and_deploys_nothing(self) -> None:
         for name, environment, reason in (
-            ("migration", {"KIND_TEST_SUITES": "credentials",
-                           "FAKE_CHANGES": "crate codewire-server-core;migration crates/codewire-server-core/migrations/0099_x.sql;service idp"},
-             "shared database"),
             ("server core", {"FAKE_SELECTION": "rust|rust_pkg_codewire_server_core|rust_pkg_codewire_orchestration",
                              "FAKE_CHANGES": "crate codewire-server-core;service idp"}, "every service compiles it"),
+            ("server core beside a migration",
+             {"FAKE_SELECTION": "database|rust|rust_pkg_codewire_server_core",
+              "FAKE_CHANGES": "crate codewire-server-core;migration crates/codewire-server-core/migrations/0099_x.sql;service idp"},
+             "every service compiles it"),
             ("unmapped crate", {"FAKE_SELECTION": "rust|rust_pkg_codewire_future_crate"}, "no retained suite is mapped"),
             ("unclassified", {"FAKE_CLASSIFICATION": "unclassified", "FAKE_SELECTION": "web"}, "cannot classify"),
             ("manifest only", {"FAKE_SELECTION": "deploy|policy"}, "no narrower suite"),
@@ -1013,6 +1023,56 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
                 self.assertIn("only the full CI Kind gate covers this change", result.stderr)
                 self.assertIn(reason, result.stderr)
                 self.assertFalse([call for call in self.calls() if call["tool"] in ("docker", "kind", "suite")])
+
+    def test_selected_migration_upgrades_the_cluster_database(self) -> None:
+        migration = "crates/codewire-server-core/migrations/0041_claude_sign_in_credentials"
+        changes = f"migration {migration}.up.sql;migration {migration}.down.sql;service idp;service orchestration"
+        stale = current_records("idp", "orchestration")
+        # The selector reports the migration as a server-core change; alone it
+        # selects the edge contract, which reaches every upgraded service.
+        result = self.run_script("test-selected.sh", FAKE_SELECTION="database|rust|rust_pkg_codewire_server_core",
+                                 FAKE_CHANGES=changes, FAKE_RECORDS=stale, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("only the full CI Kind gate", result.stderr)
+        self.assertIn("suite edge-contract: 0041_claude_sign_in_credentials.up.sql", result.stderr)
+        self.assertEqual([call["args"] for call in self.calls("suite")], [["suite", "edge-contract"]])
+        calls = self.calls()
+        prepares = [i for i, call in enumerate(calls) if call["tool"] == "database"]
+        bakes = [i for i, call in enumerate(calls) if call["tool"] == "docker" and call["args"][:2] == ["buildx", "bake"]]
+        self.assertEqual([calls[i]["args"] for i in prepares], [["prepare"], ["prepare"]])
+        self.assertEqual([calls[i]["crate"] for i in bakes], ["codewire-idp", "codewire-orchestration"])
+        self.assertLess(prepares[0], bakes[0])
+        self.assertLess(prepares[1], bakes[1])
+        # Named suites run beside a migration as they would without one.
+        self.calls_path.write_text("")
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="credentials", FAKE_CHANGES=changes,
+                                 FAKE_RECORDS=stale, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([call["args"] for call in self.calls("suite")], [["suite", "credentials"]])
+
+    def test_deploy_stops_when_the_database_is_ahead_of_the_tree(self) -> None:
+        for service in ("idp", "orchestration", "billing", "coordinator", "mesh"):
+            with self.subTest(service=service):
+                self.calls_path.write_text("")
+                result = self.run_script("deploy-service.sh", service, FAKE_DATABASE_STATUS="1")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual([call["args"] for call in self.calls("database")], [["prepare"]])
+                # Nothing is built, loaded or restarted.
+                self.assertFalse(self.calls("docker"))
+                self.assertEqual([call["args"] for call in self.calls("kind")], [["get", "clusters"]])
+                self.assertFalse(self.calls("kubectl"))
+        # The others run no migrations and never consult the database.
+        for service in ("credential-service", "dashboard", "daemon"):
+            with self.subTest(service=service):
+                self.calls_path.write_text("")
+                result = self.run_script("deploy-service.sh", service, FAKE_DATABASE_STATUS="1")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(self.calls("database"))
+        # A service already running this source restarts nothing and skips it.
+        self.calls_path.write_text("")
+        result = self.run_script("deploy-service.sh", "idp", KIND_DEPLOY_SKIP_CURRENT="1", FAKE_DATABASE_STATUS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.calls("database"))
 
     def test_selected_workspace_pin_alone_is_observed_on_dev(self) -> None:
         selection = ("rust|rust_pkg_codewire_workspace_image|rust_pkg_codewire_server_core|"
@@ -1231,7 +1291,11 @@ class ServiceSourcesTests(unittest.TestCase):
 
     def test_untracked_migration_is_reported(self) -> None:
         self.edit("crates/codewire-server-core/migrations/0002_next.sql", "select 2;\n")
-        self.assertIn("migration crates/codewire-server-core/migrations/0002_next.sql", self.changes())
+        # It feeds every service that embeds it, but changes no crate's code.
+        self.assertEqual(self.changes(), ["migration crates/codewire-server-core/migrations/0002_next.sql"] + [
+            f"service {name}" for name in ("idp", "orchestration", "credential-service", "billing", "mesh", "dashboard")])
+        self.edit("crates/codewire-server-core/src/lib.rs")
+        self.assertIn("crate codewire-server-core", self.changes())
 
     def test_root_dev_dependencies_count_but_transitive_ones_do_not(self) -> None:
         self.edit("crates/codewire-email/src/lib.rs")
@@ -1289,6 +1353,257 @@ class ServiceSourcesTests(unittest.TestCase):
         self.assertNotEqual(self.helper("digest", "billing").strip(), before)
         # Reading the working tree never changes the checkout's own index.
         self.assertEqual(self.git("status", "--porcelain"), " M crates/codewire-coordinator/src/lib.rs\n M docs/README.md\n")
+
+
+# Stands in for kubectl against the retained cluster's Postgres and services:
+# FAKE_LEDGERS maps each existing database to its SQLx ledger rows.
+FAKE_DATABASE_KUBECTL = r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+state = pathlib.Path(os.environ["FAKE_STATE"])
+args = sys.argv[1:]
+stdin = sys.stdin.read() if "-i" in args else ""
+with (state / "calls").open("a") as log:
+    log.write(json.dumps({"args": args, "stdin": stdin}) + "\n")
+ledgers = json.loads(os.environ["FAKE_LEDGERS"])
+if os.environ.get("FAKE_KUBE_FAIL") and any(os.environ["FAKE_KUBE_FAIL"] in arg for arg in args): sys.exit(29)
+if "exec" in args:
+    command = args[args.index("--") + 1:]
+    database = command[command.index("-d") + 1]
+    sql = " ".join(command[i + 1] for i, arg in enumerate(command) if arg == "-c")
+    if command[0] == "pg_dump": sys.stdout.write("archive of " + database)
+    elif "FROM pg_database" in sql:
+        if sql.split("datname = '")[1].split("'")[0] in ledgers: print(1)
+    elif "to_regclass" in sql: print("t" if ledgers.get(database) else "f")
+    elif "FROM _sqlx_migrations" in sql:
+        for row in ledgers[database]: print(" ".join(str(field) for field in row))
+elif "get" in args and "deployment" in " ".join(args):
+    deployment = next(arg for arg in args if arg.startswith("deployment/")).split("/", 1)[1]
+    if any("spec.replicas" in arg for arg in args):
+        print(json.loads(os.environ.get("FAKE_REPLICAS", "{}")).get(deployment, 1), end="")
+    else: print(f"app={deployment},", end="")
+elif "get" in args and "pods" in args and args[args.index("-l") + 1].startswith("app="):
+    print("pod/" + args[args.index("-l") + 1].split("=", 1)[1] + "-0")
+'''
+
+
+def sha384(text: str) -> str:
+    return hashlib.sha384(text.encode()).hexdigest()
+
+
+class DatabaseTests(unittest.TestCase):
+    """scripts/dev/kind/database.sh: upgrade with a backup, refuse a downgrade, reset, restore."""
+
+    MIGRATIONS = {
+        "crates/codewire-server-core/migrations/0001_baseline.sql": "create table a();\n",
+        "crates/codewire-server-core/migrations/0002_next.up.sql": "create table b();\n",
+        "crates/codewire-server-core/migrations/0002_next.down.sql": "drop table b;\n",
+        "crates/codewire-mesh/migrations/001_mesh.sql": "create table m();\n",
+    }
+    FIXTURES = {"tests/fixtures/billing/seed.sql": "-- billing seed\n",
+                "tests/e2e/kind/coordinator-seed.sql": "-- coordinator seed\n",
+                "tests/e2e/kind/credential-broker.sql": "-- credential login\n"}
+
+    def setUp(self) -> None:
+        (ROOT / ".tmp").mkdir(exist_ok=True)
+        temp = tempfile.TemporaryDirectory(prefix="kind-database.", dir=ROOT / ".tmp")
+        self.addCleanup(temp.cleanup)
+        self.directory = Path(temp.name)
+        self.tree = self.directory / "tree"
+        self.state = self.directory / "state"
+        tools = self.directory / "bin"
+        for path in (self.tree / "scripts/dev/kind", self.state, tools):
+            path.mkdir(parents=True)
+        for name in ("database.sh", "profile.sh"):
+            shutil.copy2(CONSUMERS / "scripts/dev/kind" / name, self.tree / "scripts/dev/kind" / name)
+        for path, text in (self.MIGRATIONS | self.FIXTURES).items():
+            (self.tree / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.tree / path).write_text(text)
+        DeveloperProfileTests.write_program(tools / "kubectl", FAKE_DATABASE_KUBECTL)
+        self.calls_path = self.state / "calls"
+        self.backups = self.directory / "home/.cache/codewire/kind/codewire-ux-2099/database-backups"
+        self.env = {"PATH": f"{tools}:{os.environ['PATH']}", "FAKE_STATE": str(self.state),
+                    "HOME": str(self.directory / "home"), "KIND_CLUSTER_NAME": "codewire-ux-2099",
+                    "FAKE_LEDGERS": json.dumps(self.ledgers())}
+
+    def ledgers(self, *extra: list[object], through: int = 2) -> dict[str, list[list[object]]]:
+        """The ledgers of a cluster current with the tree through THROUGH, plus EXTRA codewire rows."""
+        rows = [[1, sha384(self.MIGRATIONS["crates/codewire-server-core/migrations/0001_baseline.sql"]), "t", "baseline"],
+                [2, sha384(self.MIGRATIONS["crates/codewire-server-core/migrations/0002_next.up.sql"]), "t", "next"]]
+        return {"codewire": rows[:through] + list(extra),
+                "codewire_mesh": [[1, sha384(self.MIGRATIONS["crates/codewire-mesh/migrations/001_mesh.sql"]), "t", "mesh"]]}
+
+    def run_database(self, *args: str, **environment: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", str(self.tree / "scripts/dev/kind/database.sh"), *args], stdin=subprocess.DEVNULL,
+                              env=self.env | environment, text=True, capture_output=True, timeout=30, cwd=self.directory)
+
+    def calls(self) -> list[dict[str, object]]:
+        if not self.calls_path.exists():
+            return []
+        return [json.loads(line) for line in self.calls_path.read_text().splitlines()]
+
+    def commands(self) -> list[str]:
+        """Each call as one line: the kubectl verb and its SQL or target."""
+        lines = []
+        for call in self.calls():
+            args = call["args"]
+            if "exec" in args:
+                command = args[args.index("--") + 1:]
+                sql = [command[i + 1] for i, arg in enumerate(command) if arg == "-c"]
+                lines.append(" ".join([command[0], command[command.index("-d") + 1]] + sql + ([call["stdin"]] if call["stdin"] else [])))
+            else:
+                # Without --context and the namespace, which every call names.
+                namespace = args.index("-n")
+                lines.append(" ".join(args[2:namespace] + args[namespace + 2:]))
+        return lines
+
+    def backup_names(self) -> list[str]:
+        return sorted(path.name for path in self.backups.iterdir()) if self.backups.exists() else []
+
+    def test_current_database_needs_no_backup(self) -> None:
+        result = self.run_database("prepare")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse([line for line in self.commands() if line.startswith("pg_dump")])
+        self.assertEqual(self.backup_names(), [])
+
+    def test_new_migration_is_backed_up_before_the_deploy(self) -> None:
+        result = self.run_database("prepare", FAKE_LEDGERS=json.dumps(self.ledgers(through=1)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("this deploy applies new migrations to codewire-ux-2099: codewire 0002_next.up.sql", result.stderr)
+        backup, = self.backup_names()
+        self.assertRegex(backup, r"^\d{8}T\d{6}Z-upgrade$")
+        self.assertIn(f"backed up codewire-ux-2099's databases to {self.backups / backup}", result.stderr)
+        self.assertEqual((self.backups / backup).stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.backups / backup / "codewire.dump").read_text(), "archive of codewire")
+        self.assertEqual((self.backups / backup / "codewire_mesh.dump").read_text(), "archive of codewire_mesh")
+        baseline = sha384(self.MIGRATIONS["crates/codewire-server-core/migrations/0001_baseline.sql"])
+        mesh = sha384(self.MIGRATIONS["crates/codewire-mesh/migrations/001_mesh.sql"])
+        self.assertEqual((self.backups / backup / "ledger").read_text(),
+                         f"codewire 1 {baseline}\ncodewire_mesh 1 {mesh}\n")
+        # Backing up only reads.
+        commands = self.commands()
+        self.assertEqual([line for line in commands if line.startswith("pg_dump")], ["pg_dump codewire", "pg_dump codewire_mesh"])
+        self.assertTrue(all(line.startswith("pg_dump") or " SELECT " in line for line in commands), commands)
+
+    def test_a_missing_database_is_not_backed_up(self) -> None:
+        ledgers = self.ledgers(through=1)
+        del ledgers["codewire_mesh"]
+        result = self.run_database("prepare", FAKE_LEDGERS=json.dumps(ledgers))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        backup, = self.backup_names()
+        self.assertEqual(sorted(path.name for path in (self.backups / backup).iterdir()), ["codewire.dump", "ledger"])
+
+    def test_only_the_newest_backups_are_kept(self) -> None:
+        for second in range(6):
+            (self.backups / f"20200101T00000{second}Z-upgrade").mkdir(parents=True)
+        result = self.run_database("prepare", FAKE_LEDGERS=json.dumps(self.ledgers(through=1)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        names = self.backup_names()
+        self.assertEqual(names[:4], [f"20200101T00000{second}Z-upgrade" for second in range(2, 6)])
+        self.assertEqual(len(names), 5)
+        result = self.run_database("prepare", FAKE_LEDGERS=json.dumps(self.ledgers(through=1)), KIND_DB_BACKUP_KEEP="0")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("KIND_DB_BACKUP_KEEP must be a positive integer", result.stderr)
+
+    def test_a_database_ahead_of_the_tree_is_refused(self) -> None:
+        ahead = json.dumps(self.ledgers([3, "ab" * 48, "t", "claude sign in credentials"]))
+        result = self.run_database("prepare", FAKE_LEDGERS=ahead)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("codewire-ux-2099's database is ahead of this tree", result.stderr)
+        self.assertIn("codewire has migration 3 (claude sign in credentials), which this tree lacks", result.stderr)
+        self.assertIn("make kind-db-reset", result.stderr)
+        self.assertNotIn("kind-db-restore", result.stderr)
+        self.assertFalse([line for line in self.commands() if not line.startswith("psql")])
+        self.assertEqual(self.backup_names(), [])
+        # The newest backup whose every migration this tree has is offered.
+        baseline = sha384(self.MIGRATIONS["crates/codewire-server-core/migrations/0001_baseline.sql"])
+        for name, ledger in (("20260101T000000Z-upgrade", f"codewire 1 {baseline}\n"),
+                             ("20260102T000000Z-upgrade", f"codewire 1 {baseline}\ncodewire 3 {'ab' * 48}\n")):
+            (self.backups / name).mkdir(parents=True)
+            (self.backups / name / "ledger").write_text(ledger)
+        result = self.run_database("prepare", FAKE_LEDGERS=ahead)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"make kind-db-restore BACKUP={self.backups / '20260101T000000Z-upgrade'}", result.stderr)
+
+    def test_other_bytes_or_a_failed_migration_are_refused(self) -> None:
+        for name, ledger, message in (
+            ("other bytes", {"codewire": [[1, sha384("create table a();\n"), "t", "baseline"], [2, "cd" * 48, "t", "next"]]},
+             "codewire applied migration 2 (next) from other bytes than this tree's 0002_next.up.sql"),
+            ("mesh other bytes", self.ledgers() | {"codewire_mesh": [[1, "ef" * 48, "t", "mesh"]]},
+             "codewire_mesh applied migration 1 (mesh) from other bytes than this tree's 001_mesh.sql"),
+            ("failed", {"codewire": [[1, sha384("create table a();\n"), "f", "baseline"]]},
+             "codewire records migration 1 (baseline) as failed"),
+        ):
+            with self.subTest(name):
+                result = self.run_database("prepare", FAKE_LEDGERS=json.dumps(ledger))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(self.backup_names(), [])
+
+    def test_an_unreadable_ledger_stops_the_deploy(self) -> None:
+        result = self.run_database("prepare", FAKE_KUBE_FAIL="_sqlx_migrations ORDER BY")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot read codewire's migration ledger", result.stderr)
+
+    def test_reset_recreates_the_databases_and_reloads_the_fixtures(self) -> None:
+        result = self.run_database("reset", FAKE_REPLICAS=json.dumps({"codewire-mesh": 0}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(self.backup_names()[0], r"-before-reset$")
+        services = ["codewire-idp", "codewire-billing", "codewire-mesh", "codewire-orchestration",
+                    "codewire-coordinator", "codewire-credential-service"]
+        lines = [line for line in self.commands()
+                 if not line.startswith(("psql postgres SELECT", "psql codewire SELECT", "psql codewire_mesh SELECT"))]
+        sandbox_kinds = ["sandboxclaims.extensions.agents.x-k8s.io", "sandboxes.agents.x-k8s.io", "pods", "services",
+                         "persistentvolumeclaims", "secrets", "configmaps"]
+        expected = ["pg_dump codewire", "pg_dump codewire_mesh"]
+        for service in services:
+            expected += [f"get deployment/{service} -o jsonpath={{.spec.replicas}}",
+                         f"get deployment/{service} -o go-template={{{{range $k, $v := .spec.selector.matchLabels}}}}"
+                         "{{$k}}={{$v}},{{end}}",
+                         f"get pods -l app={service} -o name"]
+        expected += ["scale " + " ".join(f"deployment/{service}" for service in services) + " --replicas=0",
+                     "wait --for=delete " + " ".join(f"pod/{service}-0" for service in services) + " --timeout=180s"]
+        for kind in sandbox_kinds:
+            expected += [f"get {kind} -l codewire.sh/environment-id -o name",
+                         f"delete {kind} -l codewire.sh/environment-id --ignore-not-found --wait=true --timeout=180s"]
+        expected += ["psql postgres DROP DATABASE IF EXISTS codewire WITH (FORCE) DROP DATABASE IF EXISTS codewire_mesh "
+                     "WITH (FORCE) DROP ROLE IF EXISTS codewire_credential_broker CREATE DATABASE codewire",
+                     "scale deployment/codewire-idp --replicas=1",
+                     "rollout status deployment/codewire-idp --timeout=300s"]
+        expected += [f"psql codewire {text}" for text in self.FIXTURES.values()]
+        started = [service for service in services[1:] if service != "codewire-mesh"]
+        expected += [f"scale deployment/{service} --replicas=1" for service in started]
+        expected += [f"rollout status deployment/{service} --timeout=300s" for service in started]
+        self.maxDiff = None
+        self.assertEqual(lines, expected)
+        sandbox_calls = [call["args"] for call in self.calls() if "codewire.sh/environment-id" in call["args"]]
+        self.assertEqual(len(sandbox_calls), 2 * len(sandbox_kinds))
+        self.assertTrue(all(args[args.index("-n") + 1] == "dev-sandboxes" for args in sandbox_calls))
+        self.assertIn("codewire is at migration 2 (next)", result.stderr)
+
+    def test_restore_returns_to_a_backup(self) -> None:
+        backup = self.backups / "20260101T000000Z-upgrade"
+        backup.mkdir(parents=True)
+        (backup / "codewire.dump").write_text("old codewire archive")
+        result = self.run_database("restore", str(backup))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.backup_names()), 2)
+        self.assertRegex(self.backup_names()[1], r"-before-restore$")
+        lines = self.commands()
+        restore = [line for line in lines if line.startswith(("psql postgres DROP", "psql postgres CREATE", "pg_restore"))]
+        self.assertEqual(restore, ["psql postgres DROP DATABASE IF EXISTS codewire WITH (FORCE)",
+                                   "psql postgres CREATE DATABASE codewire",
+                                   "pg_restore codewire old codewire archive",
+                                   "psql postgres DROP DATABASE IF EXISTS codewire_mesh WITH (FORCE)"])
+        self.assertLess(lines.index("scale " + " ".join(f"deployment/{service}" for service in (
+            "codewire-idp", "codewire-billing", "codewire-mesh", "codewire-orchestration", "codewire-coordinator",
+            "codewire-credential-service")) + " --replicas=0"), lines.index(restore[0]))
+        self.assertGreater(lines.index("scale deployment/codewire-idp --replicas=1"), lines.index(restore[2]))
+        for arguments, message in ((("restore",), "usage: make kind-db-restore BACKUP="),
+                                   (("restore", str(self.directory)), "holds no codewire.dump")):
+            result = self.run_database(*arguments)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(message, result.stderr)
 
 
 if __name__ == "__main__":
