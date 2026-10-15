@@ -144,6 +144,21 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
             }
         }
         EnvCommand::Runtime(args) => runtime::handle(globals, placement, args.command).await,
+        EnvCommand::Upgrade(args) => {
+            anyhow::ensure!(
+                placement != Some(EnvironmentPlacement::Platform),
+                "cw env upgrade restarts local VMs; use `cw env --local upgrade`"
+            );
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                upgrade_native_environments(args.yes, args.after_update).await
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                let _ = args;
+                anyhow::bail!("local VMs are not available on this platform")
+            }
+        }
         EnvCommand::Create(create) => {
             handle_unified_environment_create(globals, placement, create).await
         }
@@ -407,6 +422,9 @@ pub(crate) async fn handle_platform_env_command(
             }
         }
         EnvCommand::Runtime(_) => anyhow::bail!("cw env runtime supports only native Linux VMs"),
+        EnvCommand::Upgrade(_) => {
+            anyhow::bail!("cw env upgrade restarts local VMs; use `cw env --local upgrade`")
+        }
         EnvCommand::Create(args) => {
             let began = Instant::now();
             let mut request = prepare_platform_env_create_request(&args)?;

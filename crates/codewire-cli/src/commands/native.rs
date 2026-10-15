@@ -1043,7 +1043,13 @@ pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::
 
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     host_support::require_local_vm_host()?;
-    let mut client = native_boot_client().await?;
+    start_native_environment_with(native_boot_client().await?, name).await
+}
+
+async fn start_native_environment_with(
+    mut client: NativeSupervisorClient,
+    name: &str,
+) -> anyhow::Result<v1::Environment> {
     ensure_pinned_runtime().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
     let progress = native_progress();
@@ -1756,6 +1762,14 @@ async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
 /// this cw's runtime only after this, so an older supervisor never starts a
 /// VM from it.
 async fn native_boot_client() -> anyhow::Result<NativeSupervisorClient> {
+    match native_boot_client_here().await {
+        Err(error) => Err(offer_restart_when_refused(error).await),
+        client => client,
+    }
+}
+
+/// [`native_boot_client`] without the restart offer, for the restart itself.
+async fn native_boot_client_here() -> anyhow::Result<NativeSupervisorClient> {
     let config = native_runtime_config()?;
     let mut client = connect_native_after_authority_admission(
         || async { admit_existing_local_credential_authority().await },
@@ -1773,6 +1787,186 @@ async fn native_boot_client() -> anyhow::Result<NativeSupervisorClient> {
     })
     .await?;
     Ok(client)
+}
+
+/// `cw env --local upgrade`: move the local VMs a previous cw's supervisor
+/// still runs to this cw. Each stops through that supervisor, the ordinary
+/// stop; the supervisor then hands the state root over, and each starts again
+/// here. With `after_update`, the hand-off `cw update` runs, nothing is
+/// printed when nothing moves, and nothing moves unless this cw is still the
+/// store's selection.
+pub(crate) async fn upgrade_native_environments(
+    yes: bool,
+    after_update: bool,
+) -> anyhow::Result<()> {
+    if after_update && !crate::update::this_cw_is_selected() {
+        return Ok(());
+    }
+    let config = native_runtime_config()?;
+    let Some(previous) = codewire_local_vmm::supervisor_upgrade::previous_cw(&config).await? else {
+        if !after_update {
+            println!("No local VMs run on a previous cw.");
+        }
+        return Ok(());
+    };
+    refuse_orphaned(&previous)?;
+    match restart_consent(&previous, yes) {
+        Consent::Yes => move_previous_environments(&config, &previous, !after_update)
+            .await
+            .map(drop),
+        Consent::Declined | Consent::NoTerminal => {
+            for name in previous.stopping() {
+                eprintln!("cw: local VM {name} still runs on the cw you updated from");
+            }
+            eprintln!("cw: restart them with `cw env --local upgrade`");
+            Ok(())
+        }
+    }
+}
+
+enum Consent {
+    Yes,
+    Declined,
+    NoTerminal,
+}
+
+/// Restarting ends the work running in a VM, so only `--yes` or an answer at
+/// a terminal moves them; never a script without one. Nothing to restart
+/// needs no consent: an idle previous supervisor just hands the root over.
+fn restart_consent(
+    previous: &codewire_local_vmm::supervisor_upgrade::PreviousCw,
+    yes: bool,
+) -> Consent {
+    use std::io::{IsTerminal as _, Write as _};
+    let names: Vec<&str> = previous.stopping().collect();
+    if yes || names.is_empty() {
+        return Consent::Yes;
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Consent::NoTerminal;
+    }
+    let noun = if names.len() == 1 { "VM" } else { "VMs" };
+    eprint!(
+        "Restart {} local {noun} ({}) now to use cw {}? [y/N] ",
+        names.len(),
+        names.join(", "),
+        crate::CLI_VERSION
+    );
+    let mut response = String::new();
+    if std::io::stderr().flush().is_err() || std::io::stdin().read_line(&mut response).is_err() {
+        return Consent::Declined;
+    }
+    if matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Consent::Yes
+    } else {
+        Consent::Declined
+    }
+}
+
+/// Stop, hand over and start again; true once some VM moved. A VM in an
+/// error state is stopped and stays stopped. `report` says when nothing
+/// needed to move.
+async fn move_previous_environments(
+    config: &NativeRuntimeConfig,
+    previous: &codewire_local_vmm::supervisor_upgrade::PreviousCw,
+    report: bool,
+) -> anyhow::Result<bool> {
+    refuse_orphaned(previous)?;
+    let names: Vec<&str> = previous.stopping().collect();
+    if names.is_empty() {
+        // An idle previous supervisor hands the root over; nothing restarts.
+        codewire_local_vmm::supervisor_upgrade::stop_and_retire(config, previous, |_| {}).await?;
+        if report {
+            println!("No local VMs run on a previous cw.");
+        }
+        return Ok(false);
+    }
+    host_support::require_local_vm_host()?;
+    eprintln!(
+        "Stopping {} to restart on cw {}.",
+        names.join(", "),
+        crate::CLI_VERSION
+    );
+    codewire_local_vmm::supervisor_upgrade::stop_and_retire(config, previous, |name| {
+        eprintln!("Stopped {name}.");
+    })
+    .await?;
+    let mut failed = Vec::new();
+    for name in &previous.restart {
+        let started = match native_boot_client_here().await {
+            Ok(client) => start_native_environment_with(client, name).await,
+            Err(error) => Err(error),
+        };
+        match started {
+            Ok(_) => eprintln!("Started {name}."),
+            Err(error) => {
+                eprintln!("cw: local VM {name} did not start: {error:#}");
+                failed.push(name.as_str());
+            }
+        }
+    }
+    for name in &previous.stop_only {
+        eprintln!(
+            "cw: local VM {name} was in an error state and stays stopped; start it with `cw env --local start {name}`"
+        );
+    }
+    anyhow::ensure!(
+        failed.is_empty(),
+        "local VMs {} stopped but did not start on this cw; start them with `cw env --local start NAME`",
+        failed.join(", ")
+    );
+    Ok(true)
+}
+
+/// A VM no stop reaches keeps the previous supervisor serving; refuse before
+/// stopping anything.
+fn refuse_orphaned(
+    previous: &codewire_local_vmm::supervisor_upgrade::PreviousCw,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        previous.blocked.is_empty(),
+        "local VMs {} have orphaned ownership, so nothing moved to this cw; inspect them with `cw doctor local`",
+        previous.blocked.join(", ")
+    );
+    Ok(())
+}
+
+/// A boot command or `cw setup --local` refused while a previous cw's
+/// supervisor may run a VM (#2826): at a terminal, offer to move them here.
+/// The refused command itself does not continue; it runs again by hand.
+async fn offer_restart_when_refused(error: anyhow::Error) -> anyhow::Error {
+    use codewire_local_vmm::supervisor_upgrade::{TakeoverError, previous_cw};
+    if !matches!(
+        error.downcast_ref::<TakeoverError>(),
+        Some(TakeoverError::Busy(_))
+    ) {
+        return error;
+    }
+    let hint = || anyhow::anyhow!("{error}\ncw: restart them with `cw env --local upgrade`");
+    let config = match native_runtime_config() {
+        Ok(config) => config,
+        Err(_) => return hint(),
+    };
+    let previous = match previous_cw(&config).await {
+        Ok(Some(previous)) => previous,
+        _ => return hint(),
+    };
+    if let Err(orphaned) = refuse_orphaned(&previous) {
+        return orphaned;
+    }
+    if !matches!(restart_consent(&previous, false), Consent::Yes) {
+        return hint();
+    }
+    match move_previous_environments(&config, &previous, false).await {
+        Ok(_) if previous.restart.is_empty() => {
+            anyhow::anyhow!("The previous cw's local VMs are stopped. Run the command again.")
+        }
+        Ok(_) => anyhow::anyhow!(
+            "Local VMs {} now run on this cw. Run the command again.",
+            previous.restart.join(", ")
+        ),
+        Err(failure) => failure,
+    }
 }
 
 async fn connect_native_after_authority_admission<T, A, AF, C, CF>(
@@ -1833,7 +2027,11 @@ pub(crate) async fn setup_local_runtime(
     host_support::require_local_vm_host()?;
     let config = native_runtime_config()?;
     // An older cw's supervisor would start its next VM from the new files.
-    codewire_local_vmm::supervisor_upgrade::refuse_while_older_serves(&config).await?;
+    if let Err(error) =
+        codewire_local_vmm::supervisor_upgrade::refuse_while_older_serves(&config).await
+    {
+        return Err(offer_restart_when_refused(error.into()).await);
+    }
     let paths = RuntimePaths {
         artifact_root: config.artifact_root,
         artifact_lock: config.artifact_lock,

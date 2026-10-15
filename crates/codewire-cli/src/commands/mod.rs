@@ -656,6 +656,18 @@ pub(crate) struct CredentialProfileSlotArgs {
     pub(crate) slot: String,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct EnvUpgradeArgs {
+    /// Restart them without asking; a restart ends the work running in them.
+    #[arg(long)]
+    pub(crate) yes: bool,
+    /// The hand-off a `cw update` runs: silent when nothing needs a restart.
+    /// Every later cw keeps accepting `env --local upgrade --after-update
+    /// [--yes]`, since the cw being updated from builds that command line.
+    #[arg(long, hide = true)]
+    pub(crate) after_update: bool,
+}
+
 #[derive(Debug)]
 pub(crate) struct CredentialProfileDeleteArgs {
     pub(crate) profile: String,
@@ -875,6 +887,8 @@ pub(crate) enum EnvCommand {
         about = "Refresh immutable skills for a native local environment"
     )]
     RefreshSkills(EnvTargetArgs),
+    #[command(about = "Restart the local VMs still running on a previous cw so they use this one")]
+    Upgrade(EnvUpgradeArgs),
     #[command(about = "Delete an environment")]
     Rm(EnvDeleteArgs),
     #[command(

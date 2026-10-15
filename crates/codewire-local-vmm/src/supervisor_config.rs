@@ -31,7 +31,7 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
     ),
     (
         12,
-        "RetireSupervisor; a stopped environment's runner of another cw is retired; the pre-#2735 runners directory is removed only under the lock",
+        "RetireSupervisor (for its own protocol or a newer one); a stopped environment's runner of another cw is retired; the pre-#2735 runners directory is removed only under the lock",
     ),
 ];
 
