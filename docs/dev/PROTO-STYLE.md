@@ -1,10 +1,10 @@
 # Proto Style Guide
 
 Canonical authoring rules for every proto under `proto/`. Promoted from
-`codewire/plans:connect-rpc/02-proto-authoring-guide.md` (WI-3); amendments
+`connect-rpc/02-proto-authoring-guide.md` (WI-3); amendments
 land here, not in the plan doc. Program context:
-`codewire/plans:connect-rpc/00-MASTER.md` and the ADR
-(`codewire/plans:2026-07-10-connect-rpc-api-contract-design.md`).
+`connect-rpc/00-MASTER.md` and the ADR
+(`2026-07-10-connect-rpc-api-contract-design.md`).
 
 ## Layout
 
@@ -145,7 +145,7 @@ credential.
 ## Error model
 
 The full contract (design decisions D1–D6) is
-`codewire/plans:connect-rpc/01-error-model.md`; this section is the
+`connect-rpc/01-error-model.md`; this section is the
 authoring/consuming summary.
 
 ### Server side

@@ -54,7 +54,6 @@ legacy_sdk_hits="$(
     "$ROOT/libs/sdk-ts" \
     "$ROOT/apps/docs/zola/content" \
     "$ROOT/docs/dev" \
-    "$ROOT/docs/runbooks" \
     "$ROOT/docs/design/story.html" \
     --glob '!**/__pycache__/**' \
     --glob '!**/.venv/**' || true
@@ -73,8 +72,7 @@ legacy_doc_hits="$(
     "$ROOT/CONTRIBUTING.md" \
     "$ROOT/crates/codewire-dashboard-web" \
     "$ROOT/apps/docs/zola/content" \
-    "$ROOT/docs/dev" \
-    "$ROOT/docs/runbooks" || true
+    "$ROOT/docs/dev" || true
 )"
 [[ -z "$legacy_doc_hits" ]] || {
   printf '%s\n' "$legacy_doc_hits" >&2

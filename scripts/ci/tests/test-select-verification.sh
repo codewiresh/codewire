@@ -1320,13 +1320,6 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
   docs/dev/DERP-STUN.md \
   docs/dev/KIND-E2E.md \
   docs/dev/LOCAL-DEV.md \
-  docs/dev/MESH-PROD-OPS.md \
-  docs/dev/SANDBOX-CAPACITY-OPS.md \
-  docs/dev/TAILNET-PARITY-HARNESS.md \
-  docs/runbooks/kata-dev-runtime-validation.md \
-  docs/runbooks/runtime-coco-trustee-test-resource.md \
-  docs/runbooks/runtime-dev-commodity-smoke.md \
-  docs/runbooks/rust-release-candidate-staging.md \
   libs/sdk-go/local.go \
   libs/sdk-go/local_files.go \
   libs/sdk-python/codewire/__init__.py \
