@@ -248,9 +248,22 @@ impl Service {
         request: &v1::PlatformManagedMutationRequest,
         link: Option<&CleanupLink>,
     ) -> Result<(), Error> {
+        let session = match request.operation.as_ref() {
+            Some(v1::platform_managed_mutation_request::Operation::Control(c)) => {
+                Some(c.session_id.as_str())
+            }
+            _ => None,
+        };
         for old in books {
             let row = old.row()?;
             if !matches!(row.phase, 1 | 2 | 5) {
+                continue;
+            }
+            // An unresolved Resume bars only its own conversation (#2705):
+            // the platform ends that conversation, and no cleanup Stop can
+            // resolve a Resume, so it must not hold every other conversation
+            // and launch in this Pod.
+            if old.is_resume() && session != Some(row.session_id.as_str()) {
                 continue;
             }
             let root_id = row
@@ -803,12 +816,27 @@ impl PlatformManagedService for Service {
         self.check_info(&r).map_err(status)?;
         let (hash, size) = ImagePin::identity().map_err(status)?;
         let mut agents = Vec::new();
+        let mut stale = Vec::new();
         for agent in [Agent::Codex, Agent::Claude] {
             if agent
                 .route(self.inner.config.managed_credential_clients)
                 .is_some()
             {
-                let pin = ProviderPin::discover(agent).map_err(status)?;
+                let pin = match ProviderPin::admit_image_client(agent) {
+                    Ok(pin) => pin,
+                    // An older Sandbox keeps its image while this daemon follows
+                    // the current release: say which clients it lacks.
+                    Err(PinRefusal::Missing | PinRefusal::Version) => {
+                        stale.push(wire::StaleImageClient {
+                            agent: v1::PlatformManagedAgent::try_from(agent.wire())
+                                .map_err(|_| status(Error::Refused))?,
+                            installed: image_client_version(agent),
+                            pinned: pinned_version(agent).to_owned(),
+                        });
+                        continue;
+                    }
+                    Err(refusal) => return Err(status(refusal.hosted())),
+                };
                 agents.push(v1::PlatformManagedAgentSupport {
                     agent: agent.wire(),
                     provider_sha256: pin.identity.sha256.to_vec(),
@@ -819,6 +847,11 @@ impl PlatformManagedService for Service {
                     interrupt: true,
                 });
             }
+        }
+        if !stale.is_empty() {
+            let message =
+                wire::stale_image_message(&stale).ok_or_else(|| status(Error::Refused))?;
+            return Err(Status::failed_precondition(message));
         }
         Ok(Response::new(v1::PlatformManagedInfoResponse {
             protocol_version: wire::PROTOCOL,
@@ -1187,6 +1220,97 @@ mod tests {
         assert!(refused_launch(&control, "refused-before-issue").is_none());
         // Only a Resume carries a plain reason, and only a closed one (#2705).
         assert!(refused_launch(&request, "resume-driver-alive").is_none());
+    }
+
+    #[test]
+    fn platform_service_an_unknown_resume_bars_only_its_own_conversation() {
+        // #2705: an unknown Resume ends its conversation and no cleanup Stop
+        // can resolve it, so it must not hold the rest of the Pod's book.
+        let scope = scope(uuid::Uuid::new_v4(), &uuid::Uuid::new_v4().to_string());
+        let control = |action: v1::PlatformManagedAction, driver: &str| {
+            let mut c = v1::PlatformManagedControl {
+                action: action as i32,
+                session_id: format!("session-{driver}"),
+                driver_id: driver.to_owned(),
+                expected_launch_generation: 3,
+                ..Default::default()
+            };
+            if action == v1::PlatformManagedAction::Resume {
+                c.predecessor_pod_uid = uuid::Uuid::new_v4().to_string();
+                c.agent = v1::PlatformManagedAgent::Codex as i32;
+                c.expected_provider_sha256 = vec![3; 32];
+                c.expected_provider_size = 1024;
+                c.expected_provider_version = "0.160.0".into();
+            }
+            if action == v1::PlatformManagedAction::Message {
+                c.text = "synthetic".into();
+            }
+            v1::PlatformManagedMutationRequest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                scope: Some(scope.clone()),
+                operation: Some(v1::platform_managed_mutation_request::Operation::Control(c)),
+            }
+        };
+        let unknown = |request: &v1::PlatformManagedMutationRequest, driver: &str| {
+            let row = v1::PlatformManagedReceipt {
+                request_id: request.request_id.clone(),
+                scope: request.scope.clone(),
+                fingerprint_sha256: wire::platform_managed_request_fingerprint(request).unwrap(),
+                phase: 5,
+                session_id: format!("session-{driver}"),
+                driver_id: driver.to_owned(),
+                message_id: match request.operation.as_ref() {
+                    Some(v1::platform_managed_mutation_request::Operation::Control(c))
+                        if matches!(c.action, 1..=3) =>
+                    {
+                        request.request_id.clone()
+                    }
+                    _ => String::new(),
+                },
+                launch_generation: 3,
+                cleanup_unknown: true,
+                reason: "issued-outcome-unknown".into(),
+                ..Default::default()
+            };
+            Stored::new(request, &row).unwrap()
+        };
+        let resumed = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let resume = control(v1::PlatformManagedAction::Resume, &resumed);
+        let books = [unknown(&resume, &resumed)];
+        // A new launch and another conversation's controls are admitted.
+        Service::enforce_barriers(&books, &launch(&scope), None).unwrap();
+        Service::enforce_barriers(
+            &books,
+            &control(v1::PlatformManagedAction::Message, &other),
+            None,
+        )
+        .unwrap();
+        // Its own conversation stays barred.
+        for action in [
+            v1::PlatformManagedAction::Message,
+            v1::PlatformManagedAction::Stop,
+            v1::PlatformManagedAction::Restart,
+            v1::PlatformManagedAction::Resume,
+        ] {
+            assert!(
+                Service::enforce_barriers(&books, &control(action, &resumed), None).is_err(),
+                "{action:?}"
+            );
+        }
+        // Any other unknown request still bars the whole Pod until its
+        // cleanup, as before.
+        let restart = control(v1::PlatformManagedAction::Restart, &other);
+        let books = [unknown(&restart, &other)];
+        assert!(Service::enforce_barriers(&books, &launch(&scope), None).is_err());
+        assert!(
+            Service::enforce_barriers(
+                &books,
+                &control(v1::PlatformManagedAction::Message, &resumed),
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

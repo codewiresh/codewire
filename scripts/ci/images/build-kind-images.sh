@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Build every Kind product image once through the canonical Bake graph and load
-# the exact results into the job-local Docker store.
+# Build Kind product images once through the canonical Bake graph and load the
+# exact results into the job-local Docker store. With no arguments it builds all
+# four (the local gate). CI names its family: the three service images on one
+# worker, the daemon image (the static CW producer) on another.
+#
+# usage: build-kind-images.sh [dashboard] [services] [mesh] [daemon]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -15,6 +19,26 @@ case "$retain_cw_assets" in
   0|1) ;;
   *) echo 'CODEWIRE_KIND_RETAIN_CW_ASSETS must be 0 or 1' >&2; exit 2 ;;
 esac
+families=()
+for family in "$@"; do
+  case "$family" in
+    dashboard|services|mesh|daemon) ;;
+    *) printf 'unknown Kind image family: %s\n' "$family" >&2; exit 2 ;;
+  esac
+  case " ${families[*]} " in
+    *" $family "*) printf 'repeated Kind image family: %s\n' "$family" >&2; exit 2 ;;
+  esac
+  families+=("$family")
+done
+if [ "${#families[@]}" -eq 0 ]; then
+  families=(dashboard services mesh daemon)
+fi
+family_targets=("${families[@]/%/-ci}")
+if [ "$#" -eq 0 ]; then
+  bake_targets=(kind)
+else
+  bake_targets=("${family_targets[@]}")
+fi
 
 case "$sccache_mode" in
   disabled|local) ;;
@@ -119,17 +143,37 @@ bake_args=(
   --load
 )
 if [ "$sccache_mode" = r2 ]; then
-  for target in dashboard-ci services-ci mesh-ci daemon-ci; do
+  for target in "${family_targets[@]}"; do
     bake_args+=(
       --set "$target.secrets+=id=aws_shared_credentials,src=$credentials_file"
     )
   done
 fi
+case " ${families[*]} " in
+  *' daemon '*)
+    # The daemon's static CW producer is most of a daemon build. Admit it first
+    # so its own duration and compiler summary are reported; the image solve
+    # below reuses this exact producer (cw_image_prepare is idempotent).
+    producer_started_at="$(date +%s)"
+    CODEWIRE_SCCACHE_MODE="$sccache_mode" cw_image_prepare ci "$ROOT" "$work"
+    printf 'CODEWIRE_CI_PHASE name=cw-producer seconds=%s\n' "$(( $(date +%s) - producer_started_at ))"
+    while IFS= read -r producer_log; do
+      grep -E 'Finished `|CODEWIRE_CI_PHASE|Compile requests  |Cache hits rate  |Cache misses  |Non-cacheable calls|Average compiler' \
+        "$producer_log" | sed 's/^/cw-producer: /' || true
+      # Every producer step that took at least five seconds, with its name.
+      awk '
+        match($0, /^#[0-9]+ \[/) { id = substr($1, 2); if (!(id in name)) name[id] = substr($0, RSTART + RLENGTH - 1, 120) }
+        $2 == "DONE" && $1 ~ /^#[0-9]+$/ { id = substr($1, 2); seconds = $3; sub(/s$/, "", seconds)
+          if (seconds + 0 >= 5) printf "cw-producer step: %6.1fs %s\n", seconds, name[id] }
+      ' "$producer_log" || true
+    done < <(find "$work" -path '*/cw-producer.*' -name build.log -type f 2>/dev/null)
+    ;;
+esac
 CODEWIRE_SCCACHE_MODE="$sccache_mode" \
-  cw_image_run ci "$ROOT" "$work" "$docker_bin" buildx bake "${bake_args[@]}" kind
+  cw_image_run ci "$ROOT" "$work" "$docker_bin" buildx bake "${bake_args[@]}" "${bake_targets[@]}"
 elapsed="$(( $(date +%s) - started_at ))"
 
-for image in dashboard services mesh daemon; do
+for image in "${families[@]}"; do
   image_ref="codewire-${image}:e2e"
   "$docker_bin" image inspect "$image_ref" >/dev/null
   [ "$("$docker_bin" image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$image_ref")" = ci ] || {
@@ -142,8 +186,8 @@ for image in dashboard services mesh daemon; do
   }
 done
 
-printf 'CODEWIRE_CI_PHASE name=product-image-build seconds=%s metadata=%s\n' \
-  "$elapsed" "$metadata_file"
+printf 'CODEWIRE_CI_PHASE name=product-image-build seconds=%s images=%s metadata=%s\n' \
+  "$elapsed" "$(IFS=,; printf '%s' "${families[*]}")" "$metadata_file"
 
 if [ "$retain_cw_assets" = 1 ]; then
   # These are the admitted original producer selected by cw_image_run, not a

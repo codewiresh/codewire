@@ -761,6 +761,9 @@ fn handle_fixed(environment: &DriverEnvironment, request: Envelope) -> anyhow::R
                     "platform active turn changed"
                 );
             }
+            // Native intake takes an explicit turn only for a steer, as
+            // `cw steer --turn-id` does; an interrupt targets the active turn
+            // checked above and carries it on its record below (#2787).
             native::ControlRequest::Queue {
                 driver_id: driver_id.clone(),
                 session_id: session_id.clone(),
@@ -768,7 +771,9 @@ fn handle_fixed(environment: &DriverEnvironment, request: Envelope) -> anyhow::R
                 action: *action,
                 text: text.clone(),
                 reply_to: reply_to.clone(),
-                turn_id: expected_turn_id.clone(),
+                turn_id: matches!(action, MessageAction::Steer)
+                    .then(|| expected_turn_id.clone())
+                    .flatten(),
             }
         }
         Request::MarkDelivery {
@@ -911,6 +916,8 @@ fn handle_fixed(environment: &DriverEnvironment, request: Envelope) -> anyhow::R
     }
     if let Request::Queue {
         message_id,
+        action,
+        expected_turn_id,
         expected_active_message_id,
         ..
     } = &request.request
@@ -919,6 +926,9 @@ fn handle_fixed(environment: &DriverEnvironment, request: Envelope) -> anyhow::R
             r.platform_launch_generation = Some(request.launch_generation);
             if expected_active_message_id.is_some() {
                 r.expected_active_message_id = expected_active_message_id.clone();
+            }
+            if matches!(action, MessageAction::Interrupt) {
+                r.expected_turn_id = expected_turn_id.clone();
             }
         })?;
         value["record"] = json!(saved);

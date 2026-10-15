@@ -78,10 +78,13 @@ while IFS= read -r path; do
   case "$path" in
     .gitea/workflows/ci.yaml|\
     scripts/ci/select/select-verification.sh|\
+    scripts/ci/select/emit-verification-matrices.sh|\
     scripts/ci/select/require-verification-results.sh|\
+    scripts/ci/receipts/emit-verification-receipt.py|\
     scripts/ci/receipts/verify-tested-tree-receipt.sh|\
     scripts/ci/plan/*|\
     scripts/ci/tests/test-select-verification.sh|\
+    scripts/ci/tests/test-emit-verification-matrices.sh|\
     scripts/ci/tests/test-require-verification-results.sh|\
     scripts/ci/tests/test-verify-tested-tree-receipt.sh)
       fallback 'receipt-control-change'

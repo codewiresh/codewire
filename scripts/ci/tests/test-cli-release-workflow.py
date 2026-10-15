@@ -132,11 +132,15 @@ def check(text, ci_text):
     macos_signing = blocks.get("sign-darwin", "")
     build, package = blocks.get("build-release", ""), blocks.get("package-release", "")
 
-    # The local VM runtime the arm64 cw embeds (#2539): built from the release
+    # The local VM runtime every release cw embeds (#2539, #2733): built from the release
     # source's own scripts, slow parts included on a cache miss, by jobs with
     # no capability; only the publishing job records the parts it built.
     need("    needs: [release-selection]\n    runs-on: ci-protected\n" in runtime,
          "the runtime's Linux side does not follow release selection on a protected runner")
+    # Both kernels, guest roots and cw runtimes fit; a wedged build cannot hold
+    # a release near the protected pool's 330-minute limit (#2733).
+    need(re.findall(r"^    timeout-minutes: ([0-9]+)$", runtime, re.M) == ["165"],
+         "the runtime's Linux side is not bounded at 165 minutes")
     for capability in CAPABILITIES + MACOS_SIGNING:
         need(capability not in runtime, f"runtime build job holds capability {capability}")
     runtime_build = dict(steps(runtime)).get("Build the Linux side", "")
@@ -167,6 +171,11 @@ def check(text, ci_text):
          "the macOS build does not bind the received Linux side and embed the runtime it packs")
     need("records_sha256" in darwin and "name: cw-release-runtime-records-${{ github.run_id }}" in darwin,
          "the macOS build does not hand over and bind its runtime part records")
+    # Every release cw embeds the one document the macOS job packs (#2733).
+    need("      document_sha256: ${{ steps.runtime.outputs.document_sha256 }}\n" in darwin
+         and '"$(shasum -a 256 "$work/macos/runtime/local-runtime.json" | cut -c1-64)" >> "$GITHUB_OUTPUT"'
+         in mac_runtime,
+         "the macOS build does not bind the runtime document every cw embeds")
     need([job for job, body in blocks.items() if "local_runtime_parts.py publish" in body] == ["package-release"]
          and [step for step, body in steps(package) if "local_runtime_parts.py publish" in body]
          == ["Record the runtime parts this release built"],
@@ -211,8 +220,9 @@ def check(text, ci_text):
          "macOS signing does not hand over and bind the signed pair")
     need("rcodesign-stand-in" not in text, "the release signs with the rcodesign stand-in")
 
-    need("    needs: [release-selection, sign-darwin]" in build,
-         "build does not depend on release selection and the signed macOS pair")
+    # build-darwin for the runtime document's digest, sign-darwin for the pair.
+    need("    needs: [release-selection, build-darwin, sign-darwin]" in build,
+         "build does not depend on release selection, the macOS build and the signed macOS pair")
     need("name: cw-release-darwin-signed-${{ github.run_id }}" in build
          and "name: cw-release-darwin-${{ github.run_id }}" not in build
          and "DARWIN_SUMS_SHA256: ${{ needs.sign-darwin.outputs.darwin_sums_sha256 }}" in build,
@@ -226,6 +236,15 @@ def check(text, ci_text):
     need('[ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]' in build,
          "the received macOS pair is not checked against the built pair")
     need("cw_release.py verify --dist dist/cw-release --unsigned" in build, "build does not verify its delivery")
+    received = dict(steps(build)).get("Verify the received macOS pair is the signed pair", "")
+    packaged = dict(steps(build)).get("Package unsigned release delivery", "")
+    need("          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}\n" in received
+         and '[ "$(sha256sum dist-darwin/local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]'
+         in received and "[ ! -e dist-darwin/local-runtime ]" in received,
+         "the Linux cws may embed a runtime other than the one the macOS job packed")
+    need("          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}\n" in packaged
+         and 'grep -q "^cw-release: local runtime document_sha256=$DOCUMENT_SHA256 " <<<"$verified"' in packaged,
+         "build does not require its delivery to carry the macOS job's runtime document")
     need("delivery_sha256" in build, "build does not bind its delivery digest")
     need("cargo build --locked --release -p codewire-cw-release \\\n"
          "            --example verify-release-signatures" in build and "verifier_sha256" in build
@@ -318,6 +337,17 @@ def check(text, ci_text):
 
 
 MUTATIONS = {
+    "release Linux side without a job limit": lambda t: t.replace("    timeout-minutes: 165\n", "", 1),
+    "release Linux side at the pool limit": lambda t: t.replace(
+        "    timeout-minutes: 165\n", "    timeout-minutes: 330\n", 1),
+    "runtime document not handed over": lambda t: t.replace(
+        "      document_sha256: ${{ steps.runtime.outputs.document_sha256 }}\n", "", 1),
+    "received runtime document unchecked": lambda t: t.replace(
+        '            [ "$(sha256sum dist-darwin/local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]\n',
+        "            true\n", 1),
+    "delivery runtime document unchecked": lambda t: t.replace(
+        '            grep -q "^cw-release: local runtime document_sha256=$DOCUMENT_SHA256 " <<<"$verified"\n',
+        "            true\n", 1),
     "unbounded cargo git fetch": lambda t: t.replace("  CARGO_HTTP_TIMEOUT: '20'\n", "", 1),
     "cargo git fetch without retries": lambda t: t.replace("  CARGO_NET_RETRY: '5'\n", "", 1),
     "unbounded protoc download": lambda t: t.replace(
@@ -334,9 +364,9 @@ MUTATIONS = {
     "macOS build on a pool runner": lambda t: t.replace("    runs-on: macos-arm64\n", "    runs-on: ci-protected\n", 1),
     "unbound macOS pair": lambda t: t.replace(
         '[ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]', 'true', 1),
-    "build without the signed pair": lambda t: t.replace("    needs: [release-selection, sign-darwin]",
+    "build without the signed pair": lambda t: t.replace("    needs: [release-selection, build-darwin, sign-darwin]",
                                                          "    needs: [release-selection]", 1),
-    "build before signing": lambda t: t.replace("    needs: [release-selection, sign-darwin]",
+    "build before signing": lambda t: t.replace("    needs: [release-selection, build-darwin, sign-darwin]",
                                                 "    needs: [release-selection, build-darwin]", 1),
     "build from the unsigned pair": lambda t: t.replace(
         "          name: cw-release-darwin-signed-${{ github.run_id }}\n          path: .release-source/dist-darwin\n",
@@ -603,8 +633,10 @@ def check_dry_run(text, release):
          "the dry run does not check the slow parts are cached")
     need('[ "$(shasum -a 256 .local-runtime-linux/runtime-linux.tar | cut -c1-64)" = "$LINUX_SHA256" ]' in mac_build,
          "the dry-run macOS build does not bind the received Linux side")
-    need("grep -q '^cw-release: local runtime document_sha256=' <<<\"$verified\"" in assemble
-         and "[ ! -e dist/cw-release/delivery/local-runtime ]" in assemble,
+    need('grep -q "^cw-release: local runtime document_sha256=$DOCUMENT_SHA256 " <<<"$verified"' in assemble
+         and "[ ! -e dist/cw-release/delivery/local-runtime ]" in assemble
+         and '[ "$(sha256sum dist-darwin/local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]'
+         in assemble and "      document_sha256: ${{ steps.runtime.outputs.document_sha256 }}\n" in darwin,
          "the dry run does not check the delivery embeds exactly the runtime it built")
     for capability in CAPABILITIES:
         need(capability not in text, f"dry run holds capability {capability}")
@@ -747,7 +779,10 @@ DRY_RUN_MUTATIONS = {
         "    name: Sign the macOS pair with the rcodesign stand-in (never signs)\n"
         "    needs: [protected-main]\n", 1),
     "embedded runtime unchecked": lambda t: t.replace(
-        "            grep -q '^cw-release: local runtime document_sha256=' <<<\"$verified\"\n",
+        '            grep -q "^cw-release: local runtime document_sha256=$DOCUMENT_SHA256 " <<<"$verified"\n',
+        "            true\n", 1),
+    "received runtime unchecked": lambda t: t.replace(
+        '            [ "$(sha256sum dist-darwin/local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]\n',
         "            true\n", 1),
 }
 

@@ -71,6 +71,14 @@ def build_receipt(env: Mapping[str, str]) -> dict[str, object]:
     }
 
 
+def receipt_withheld(env: Mapping[str, str]) -> bool:
+    """A quick pull-request run verified less than main would, so main reruns it."""
+    selection = env.get("VERIFICATION_SELECTION", "")
+    if not (selection.startswith("|valid:v3|") and selection.endswith("|complete|")):
+        raise ReceiptError("receipt input VERIFICATION_SELECTION is invalid")
+    return "|pr_quick|" in selection
+
+
 def encode_receipt(receipt: dict[str, object]) -> str:
     raw = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
     return base64.b64encode(raw).decode("ascii")
@@ -78,6 +86,12 @@ def encode_receipt(receipt: dict[str, object]) -> str:
 
 def main() -> int:
     try:
+        if receipt_withheld(os.environ):
+            print(
+                "verification receipt: withheld; this quick pull-request run "
+                "is not main's verification, so main runs its own"
+            )
+            return 0
         receipt = build_receipt(os.environ)
     except ReceiptError as exc:
         print(f"verification receipt: {exc}", file=sys.stderr)

@@ -36,7 +36,7 @@ rand = { workspace = true }
 sha2 = { workspace = true }
 open = { workspace = true, optional = true }
 tiny_http = { workspace = true, optional = true }
-rustls = { version = "=0.23.45", default-features = false, features = ["ring"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring"] }
 rustls-pki-types = "=1.14.1"
 serde = { workspace = true }
 serde_json = { workspace = true }

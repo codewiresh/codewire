@@ -6,6 +6,13 @@ readonly WORKSPACE_CACHE_BUCKET='example-ci-cache-untrusted'
 readonly WORKSPACE_CACHE_ENDPOINT='https://00000000000000000000000000000000.r2.cloudflarestorage.com'
 readonly WORKSPACE_CACHE_PREFIX='untrusted/codewire/buildkit/v1/'
 readonly WORKSPACE_DAEMON_CREDENTIALS='/run/codewire-cache/aws-credentials'
+# Verification builds the amd64 cw producer with the CI Cargo profile. The
+# contracts check behavior, not optimization, and the release profile's fat
+# LTO alone took about 22 minutes. Publication (build-push-image.sh) still
+# builds the release profile; this verified cw is never published. The Python
+# readers pin the same value (WORKSPACE_CW_PROFILE in workspace-image-artifact.py
+# and workspace-cache-report.py); test-workspace-image-artifact.py checks it.
+readonly WORKSPACE_CW_PROFILE=ci
 
 workspace_cache_validate() {
   local mode source_root
@@ -236,6 +243,16 @@ workspace_cache_compiler_args() {
   fi
 }
 
+# CI may name an internal HTTP cache of the dated apt snapshots. BuildKit
+# receives it only as an optional secret, so layer cache keys and image
+# history stay identical to builds without it.
+workspace_cache_apt_mirror_args() {
+  apt_mirror_args=()
+  if [[ -n "${CODEWIRE_APT_SNAPSHOT_MIRROR:-}" ]]; then
+    apt_mirror_args=(--secret "id=codewire-apt-mirror,env=CODEWIRE_APT_SNAPSHOT_MIRROR")
+  fi
+}
+
 workspace_cache_retryable_read_failure() {
   local status="$1" log="$2" line diagnostic=''
   # Buildx uses 1 for an ordinary build error and distinct statuses for its
@@ -286,12 +303,15 @@ workspace_cache_build() {
   local cw_work="${log%/*}/cw-image-work"
   workspace_cache_layer_args "$target" "$source_tree" "$architecture" || return
   consumer_cache=("${layer_args[@]}")
-  command=("$docker_bin" buildx build --builder "$builder" --progress plain --platform "linux/$architecture" "${consumer_cache[@]}" "$@")
+  apt_mirror_args=()
+  [[ "$target" != base && "$target" != workspace ]] || workspace_cache_apt_mirror_args
+  command=("$docker_bin" buildx build --builder "$builder" --progress plain --platform "linux/$architecture" \
+    "${consumer_cache[@]}" "${apt_mirror_args[@]}" "$@")
   if [[ "$target" == workspace ]]; then
     workspace_cache_layer_args cw-runtime "$source_tree" "$architecture" || return
     producer_cache=("${layer_args[@]}")
     (umask 077; mkdir -p -- "$cw_work") || return
-    command=(bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$ROOT" "$cw_work" "${producer_cache[@]}" -- "${command[@]}")
+    command=(bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" "$WORKSPACE_CW_PROFILE" "$ROOT" "$cw_work" "${producer_cache[@]}" -- "${command[@]}")
   fi
   workspace_cache_logged_command "$log" "${command[@]}" || status=$?
   if [[ "$original_mode" == r2 ]] \
@@ -302,9 +322,10 @@ workspace_cache_build() {
     # A broken remote descriptor can remain in the daemon's local metadata.
     # Force computation on retry, preserving fresh floating tools without
     # combining the mutually exclusive no-cache and no-cache-filter flags.
-    command=("$docker_bin" buildx build --builder "$builder" --progress plain --platform "linux/$architecture" --no-cache "$@")
+    command=("$docker_bin" buildx build --builder "$builder" --progress plain --platform "linux/$architecture" --no-cache \
+      "${apt_mirror_args[@]}" "$@")
     if [[ "$target" == workspace ]]; then
-      command=(bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$ROOT" "$cw_work" --no-cache -- "${command[@]}")
+      command=(bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" "$WORKSPACE_CW_PROFILE" "$ROOT" "$cw_work" --no-cache -- "${command[@]}")
     fi
     workspace_cache_logged_command "$log.retry" "${command[@]}"
     return

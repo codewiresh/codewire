@@ -25,9 +25,12 @@ source "$ROOT/scripts/dev/kind/profile.sh"
 kind_profile_load "$ROOT" || exit $?
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 # cw-runtime, cw-managed-agents and warm-pools run only when named
-# (KIND_TEST_SUITES). The CW journeys need admitted release A/B and support
-# producers; warm-pools needs the C0 agent-sandbox controller and the
-# canonical image (make kind-runtime-images).
+# (KIND_TEST_SUITES). cw-runtime needs admitted release A/B and support
+# producers on a named profile; on a retained cluster cw-managed-agents runs
+# the managed-agent journey alone against the deployed daemon (#2672), and
+# takes long enough that every orchestration or CLI change should not pay
+# for it. warm-pools needs the C0 agent-sandbox controller and the canonical
+# image (make kind-runtime-images).
 ORDER=(edge-contract credentials workspace-services dashboard-browser final-fencing runtime-acceptance integrated cw-runtime cw-managed-agents warm-pools)
 # deploy-service.sh services, in deploy order.
 SERVICES=(idp orchestration credential-service billing coordinator mesh dashboard daemon)

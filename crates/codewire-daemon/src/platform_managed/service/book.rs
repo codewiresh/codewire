@@ -178,6 +178,11 @@ impl Stored {
             restart: None,
         })
     }
+    /// A Resume (#2705). Its open or unknown outcome ends its conversation,
+    /// and no cleanup Stop can resolve it.
+    pub(super) fn is_resume(&self) -> bool {
+        self.action == v1::PlatformManagedAction::Resume as i32
+    }
     pub(super) fn row(&self) -> Result<v1::PlatformManagedReceipt, Error> {
         let row = v1::PlatformManagedReceipt::decode(self.receipt.as_slice())
             .map_err(|_| Error::Refused)?;

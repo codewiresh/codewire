@@ -8,9 +8,10 @@ mod resume_tests;
 mod wire;
 
 use buffa::Message as _;
+use codewire_daemon_bridge::client::DaemonClientError;
 use codewire_daemon_proto::{daemon::v1 as private, platform_managed as native};
 use codewire_proto::codewire::v1 as proto;
-use codewire_server_core::{AppResult, auth::AuthUser};
+use codewire_server_core::{AppError, AppResult, auth::AuthUser};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
@@ -40,14 +41,42 @@ async fn target_info(
             incarnation
                 .projection_selection_sha256
                 .as_deref()
-                .ok_or_else(unavailable)?,
+                .ok_or_else(|| {
+                    // The answer stays opaque; the log names the unmet precondition.
+                    tracing::warn!(
+                        environment_id = %incarnation.environment_id,
+                        "platform agent unavailable: the live binding records no projection selection"
+                    );
+                    unavailable()
+                })?,
         )?,
     };
     captured
         .daemon()
         .platform_managed_info(request)
         .await
-        .map_err(|_| unavailable())
+        .map_err(|error| {
+            // The caller's own Sandbox image lacks the pinned clients: a
+            // normal state for an older Sandbox, which its owner is told.
+            if let Some(stale) = stale_image_clients(&error) {
+                return AppError::Precondition(wire::stale_image_text(&stale).into());
+            }
+            tracing::warn!(
+                environment_id = %incarnation.environment_id,
+                error = %error,
+                "platform agent unavailable: the daemon's managed info call failed"
+            );
+            unavailable()
+        })
+}
+
+fn stale_image_clients(error: &DaemonClientError) -> Option<Vec<native::StaleImageClient>> {
+    match error {
+        DaemonClientError::Status(status) if status.code() == tonic::Code::FailedPrecondition => {
+            native::stale_image_clients(status.message())
+        }
+        _ => None,
+    }
 }
 
 pub async fn info(
@@ -63,8 +92,21 @@ pub async fn info(
     // current operator, lifecycle, full binding and actual original Pod gates.
     let row = live_cw_runtime_binding(&state.pool, &request.org_id, &request.environment_id)
         .await
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
+        .map_err(|error| {
+            tracing::warn!(
+                environment_id = %request.environment_id,
+                error = %error,
+                "platform agent unavailable: the live binding could not be read"
+            );
+            unavailable()
+        })?
+        .ok_or_else(|| {
+            tracing::warn!(
+                environment_id = %request.environment_id,
+                "platform agent unavailable: the environment has no live CW runtime binding"
+            );
+            unavailable()
+        })?;
     let facts = super::cw_runtime::model::CapturedBindingFacts::from(&row);
     let captured = capture_platform_cw_runtime(state, user, &facts.incarnation()).await?;
     let info = target_info(&captured).await?;
@@ -433,4 +475,49 @@ pub async fn read(
         record_json: record,
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod stale_image_tests {
+    use super::*;
+
+    fn refusal(message: &str) -> DaemonClientError {
+        DaemonClientError::Status(tonic::Status::failed_precondition(message))
+    }
+
+    #[test]
+    fn an_older_sandbox_image_is_named_to_its_owner() {
+        let stale = stale_image_clients(&refusal(
+            "platform managed image clients: codex=0.157.0/0.160.0 claude=2.1.238/2.1.288",
+        ))
+        .unwrap();
+        assert_eq!(
+            wire::stale_image_text(&stale),
+            "This Sandbox's image has Codex 0.157.0 and Claude Code 2.1.238; managed agents \
+             need Codex 0.160.0 and Claude Code 2.1.288. Recreate the Sandbox to use managed agents."
+        );
+        let missing = stale_image_clients(&refusal(
+            "platform managed image clients: codex=none/0.160.0",
+        ))
+        .unwrap();
+        assert_eq!(
+            wire::stale_image_text(&missing),
+            "This Sandbox's image has no Codex; managed agents need Codex 0.160.0. \
+             Recreate the Sandbox to use managed agents."
+        );
+    }
+
+    #[test]
+    fn any_other_daemon_refusal_stays_opaque() {
+        for error in [
+            refusal("platform managed incarnation or outcome refused"),
+            refusal("platform managed image clients: codex=0.157.0/0.160.0; anything else"),
+            DaemonClientError::Status(tonic::Status::unavailable(
+                "platform managed image clients: codex=0.157.0/0.160.0",
+            )),
+            DaemonClientError::Connect,
+        ] {
+            assert!(stale_image_clients(&error).is_none(), "{error}");
+        }
+    }
 }
