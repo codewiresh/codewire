@@ -603,6 +603,79 @@ async fn github_is_granted_only_when_the_local_capture_selected_it_and_it_is_con
     h.finish(result).await
 }
 
+/// A refresh (or replacement) of a granted credential advances its
+/// revocation generation. The delegation keeps admitting it at the new
+/// generation, so the next lease binds the refreshed record: a sign-in
+/// delivered after its own refresh, or a proxied request. A revoked
+/// credential ends the delegation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_refreshed_credential_keeps_its_owner_local_delegation() -> Result<()> {
+    let h = Harness::unserved("127.0.0.1:0".parse()?).await?;
+    let result = async {
+        let owner = Owner::User(OwnerId::parse(ALICE)?);
+        let codex = h
+            .store
+            .create(
+                &owner,
+                CredentialRegistration {
+                    provider: ProviderId::parse("openai")?,
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: "Codex".into(),
+                    account_hint: Some("synthetic-account".into()),
+                    expires_at_unix: None,
+                },
+                &ProtectedValue::from_slice(b"synthetic-codex-material-never-public")?,
+            )
+            .await?;
+        let (selection, _) = setup_owner_sources_with_entries(
+            &h,
+            BTreeMap::from([(CapabilitySlot::codex(), codex.metadata.id.clone())]),
+        )
+        .await?;
+        let authority = admitted(&h, selection).await?;
+        let session = authority.current_session().await?;
+        let before = authority.owner_local_grants(&session).await?;
+        ensure!(before.len() == 1 && before[0].credential_id == codex.metadata.id);
+
+        let refreshed = h
+            .store
+            .replace(
+                &owner,
+                &codex.metadata.id,
+                codex.version,
+                &ProtectedValue::from_slice(b"synthetic-rotated-codex-material-never-public")?,
+                None,
+            )
+            .await?;
+        ensure!(
+            refreshed.version.revocation_generation > codex.version.revocation_generation,
+            "a replacement advances the revocation generation"
+        );
+        ensure!(authority.current_session().await? == session);
+        let after = authority.owner_local_grants(&session).await?;
+        ensure!(
+            after.len() == 1
+                && after[0].credential_revocation_generation
+                    == refreshed.version.revocation_generation
+                && DerivedGrant {
+                    credential_revocation_generation: before[0].credential_revocation_generation,
+                    ..after[0].clone()
+                } == before[0],
+            "the refreshed credential is granted at its new generation, nothing else changed"
+        );
+
+        h.store
+            .revoke(&owner, &codex.metadata.id, refreshed.version)
+            .await?;
+        ensure!(authority.current_session().await.is_err());
+        ensure!(authority.owner_local_grants(&session).await.is_err());
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
 async fn empty_profile_admits_without_platform_environment_and_seals_exact_winners() -> Result<()> {

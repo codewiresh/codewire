@@ -91,6 +91,32 @@ struct Admission {
     grants: Vec<DerivedGrant>,
 }
 
+impl Admission {
+    /// Whether this admission is still the delegation's `initial` one. Only
+    /// a granted credential's revocation generation may differ: a refresh or
+    /// replacement of that same credential advances it, and every lease
+    /// rereads the record by id and owner and binds it to the current grant,
+    /// as a hosted lease does, so the next request uses the new version. The
+    /// session (owner, selection, profile revision, authorized credential ids,
+    /// consent) and each grant's credential, slot, permissions, profile and
+    /// expiry must be unchanged; a revoked or inactive credential fails grant
+    /// evaluation before this.
+    fn is_initial(&self, initial: &Self) -> bool {
+        self.session == initial.session
+            && self.grants.len() == initial.grants.len()
+            && self
+                .grants
+                .iter()
+                .zip(&initial.grants)
+                .all(|(current, initial)| {
+                    DerivedGrant {
+                        credential_revocation_generation: initial.credential_revocation_generation,
+                        ..current.clone()
+                    } == *initial
+                })
+    }
+}
+
 impl OwnerLocalRuntimeAuthority {
     pub async fn new(
         pool: PgPool,
@@ -429,7 +455,7 @@ impl OwnerLocalSource {
 impl PlatformRuntimeAuthority for OwnerLocalRuntimeAuthority {
     async fn current_session(&self) -> Result<PlatformRuntimeSession, Error> {
         let current = self.source.admit().await?;
-        if current != self.initial {
+        if !current.is_initial(&self.initial) {
             return Err(Error::Denied);
         }
         Ok(current.session)
@@ -443,7 +469,7 @@ impl PlatformRuntimeAuthority for OwnerLocalRuntimeAuthority {
             return Err(Error::Denied);
         }
         let current = self.source.admit().await?;
-        if current != self.initial {
+        if !current.is_initial(&self.initial) {
             return Err(Error::Denied);
         }
         Ok(current.grants)
