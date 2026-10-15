@@ -98,6 +98,17 @@ pub(super) fn sign_in_material(
     age: u64,
     refresh_token_lifetime: Option<u64>,
 ) -> ProtectedValue {
+    sign_in_material_with_scopes(label, remaining, age, refresh_token_lifetime, SCOPES)
+}
+
+/// [`sign_in_material`] granting `scopes`.
+fn sign_in_material_with_scopes(
+    label: &str,
+    remaining: u64,
+    age: u64,
+    refresh_token_lifetime: Option<u64>,
+    scopes: &str,
+) -> ProtectedValue {
     let now = unix_now().unwrap();
     let (bundle, _) = import_tokens_at(
         ClaudeIssuedTokens {
@@ -105,7 +116,7 @@ pub(super) fn sign_in_material(
             refresh_token: Some(Zeroizing::new(format!("synthetic-refresh-{label}"))),
             expires_in: age + remaining,
             refresh_token_expires_in: refresh_token_lifetime,
-            scope: Some(SCOPES.into()),
+            scope: Some(scopes.into()),
         },
         ClaudeProfile {
             email: Some("person@example.test".into()),
@@ -337,6 +348,289 @@ async fn a_fresh_sign_in_is_used_as_stored_and_a_setup_token_never_refreshes() -
                 .await
                 .is_err()
         );
+        drop(broker);
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}
+
+fn claude_login_request(
+    recipient: &codewire_workload_secrets::ProjectionRecipient,
+) -> Result<codewire_daemon_proto::codewire::bridge::v1::ClaudeLoginRequest> {
+    Ok(
+        codewire_daemon_proto::codewire::bridge::v1::ClaudeLoginRequest {
+            request_id: Uuid::new_v4().to_string(),
+            recipient_public_key: recipient.public_key().to_vec(),
+            deadline_unix_ms: unix_now()? * 1_000 + 25_000,
+        },
+    )
+}
+
+/// Ask `broker` for the Claude login and open it as the daemon would.
+async fn deliver<U: BrokerUpstreamTransport + 'static>(
+    f: &Fixture,
+    broker: &OpenAiBroker<Adapter, U>,
+) -> Result<codewire_workload_secrets::OpenedClaudeLogin> {
+    let recipient = codewire_workload_secrets::ProjectionRecipient::new();
+    let request = claude_login_request(&recipient)?;
+    let sealed = broker
+        .claude_login(request.clone())
+        .await
+        .map_err(|error| anyhow::anyhow!("claude login refused: {error:?}"))?;
+    for secret in ["synthetic-refresh-", "synthetic-rotated-refresh-"] {
+        ensure!(
+            !sealed
+                .windows(secret.len())
+                .any(|part| part == secret.as_bytes())
+        );
+    }
+    Ok(recipient.open_claude_login(
+        &sealed,
+        &codewire_workload_secrets::CodexLoginContext {
+            environment_id: *Uuid::parse_str(f.context.environment_id.as_str())?.as_bytes(),
+            environment_generation: f.context.environment_generation,
+            request_id: *Uuid::parse_str(&request.request_id)?.as_bytes(),
+            deadline_unix_ms: request.deadline_unix_ms,
+        },
+        unix_now()? * 1_000,
+    )?)
+}
+
+/// The Claude login delivers only the creator's own Active Claude sign-in on
+/// a hosted Sandbox: never a setup token or an API key in the same slot, a
+/// sign-in that needs Reconnect, or one the creator did not confirm.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn the_claude_login_delivers_only_the_creators_own_active_sign_in() -> Result<()> {
+    for case in [
+        "deliver",
+        "setup token",
+        "api key",
+        "reconnect needed",
+        "revoked",
+        "another user's credential",
+        "organization profile",
+        "not confirmed by the creator",
+        "scopes outside the sign-in",
+    ] {
+        let f = Fixture::create_for_bridge().await?;
+        let result = async {
+            let material = if case == "scopes outside the sign-in" {
+                // A scope Claude might add on a later refresh.
+                sign_in_material_with_scopes(
+                    "widened",
+                    7_200,
+                    60,
+                    None,
+                    &format!("{SCOPES} user:billing"),
+                )
+            } else {
+                sign_in_material("fresh", 7_200, 60, None)
+            };
+            let sign_in = bind_sign_in(&f, &material).await?;
+            let outcome = match case {
+                "deliver" => {
+                    let provider = SyntheticClaude::default();
+                    let (pool, adapter) = hosted(&f).await?;
+                    // Only the dedicated path leases the login permission.
+                    let permission = claude_login_permission();
+                    ensure!(matches!(
+                        adapter
+                            .lease_operation(
+                                Uuid::new_v4(),
+                                CapabilitySlot::anthropic(),
+                                permission.operation,
+                                permission.route,
+                            )
+                            .await,
+                        Err(BrokerLeaseError::Denied)
+                    ));
+                    let lease = adapter.lease_claude_login(Uuid::new_v4()).await?;
+                    ensure!(lease.permission() == &claude_login_permission());
+                    ensure!(lease.credential_metadata().id == sign_in.metadata.id);
+                    drop(lease);
+                    let broker = OpenAiBroker::new(adapter, provider.clone())?;
+                    let opened = deliver(&f, &broker).await?;
+                    ensure!(opened.login.access_token() == "synthetic-access-fresh");
+                    ensure!(opened.login.scopes().join(" ") == SCOPES);
+                    ensure!(opened.login.subscription_type() == Some("max"));
+                    ensure!(opened.login.rate_limit_tier() == Some("default_claude_max_20x"));
+                    let stored = stored(&f, &sign_in).await?;
+                    ensure!(opened.login.expires_at_unix_ms() == stored.expires_at_unix() * 1_000);
+                    ensure!(opened.binding.credential_id == sign_in.metadata.id.as_str());
+                    ensure!(
+                        opened.binding.material_generation == sign_in.version.material_generation
+                    );
+                    // Valid for two hours: delivered as stored, no refresh.
+                    ensure!(provider.refreshes.load(Ordering::SeqCst) == 0);
+                    drop(broker);
+                    pool.close().await;
+                    return Ok(());
+                }
+                "setup token" | "api key" => {
+                    let (kind, material): (_, &[u8]) = if case == "setup token" {
+                        (
+                            CredentialAuthKind::OAuth,
+                            b"sk-ant-oat01-synthetic-setup-token-never-delivered",
+                        )
+                    } else {
+                        (
+                            CredentialAuthKind::ApiKey,
+                            b"sk-ant-api03-synthetic-key-never-delivered",
+                        )
+                    };
+                    let other = f
+                        .store
+                        .create(
+                            &f.owner,
+                            CredentialRegistration {
+                                provider: codewire_access::ProviderId::parse("anthropic")?,
+                                authentication_kind: kind,
+                                display_name: case.into(),
+                                account_hint: None,
+                                expires_at_unix: None,
+                            },
+                            &value(material),
+                        )
+                        .await?;
+                    let mut context = f.context.clone();
+                    context
+                        .authorized_credentials
+                        .insert(sign_in.metadata.id.clone());
+                    context
+                        .authorized_credentials
+                        .insert(other.metadata.id.clone());
+                    f.authority
+                        .change(|session| session.context = context.clone());
+                    let manager = PlatformAccessProfileStore::new(
+                        f.db.pool.clone(),
+                        builtin_provider_catalog(),
+                    );
+                    let current = manager.get(&f.owner, &f.profile.id).await?;
+                    let mut entries = current.entries.clone();
+                    entries.insert(CapabilitySlot::anthropic(), other.metadata.id.clone());
+                    let changed = manager
+                        .update(&f.owner, &current.id, current.revision, entries)
+                        .await?;
+                    manager
+                        .replace_binding(
+                            &context,
+                            &EnvironmentAccessBinding {
+                                environment_id: context.environment_id.clone(),
+                                profile_id: current.id.clone(),
+                                profile_revision: current.revision,
+                            },
+                            EnvironmentAccessBinding {
+                                environment_id: context.environment_id.clone(),
+                                profile_id: changed.id.clone(),
+                                profile_revision: changed.revision,
+                            },
+                            Some(&context.user_id),
+                        )
+                        .await?;
+                    let (_pool, adapter) = hosted(&f).await?;
+                    adapter.lease_claude_login(Uuid::new_v4()).await
+                }
+                "reconnect needed" => {
+                    sqlx::query(
+                        "UPDATE platform_credentials SET status='refresh_failed' WHERE id=$1",
+                    )
+                    .bind(sign_in.metadata.id.as_str())
+                    .execute(&f.db.pool)
+                    .await?;
+                    let (_pool, adapter) = hosted(&f).await?;
+                    adapter.lease_claude_login(Uuid::new_v4()).await
+                }
+                "revoked" => {
+                    f.store
+                        .revoke(&f.owner, &sign_in.metadata.id, sign_in.version)
+                        .await?;
+                    let (_pool, adapter) = hosted(&f).await?;
+                    adapter.lease_claude_login(Uuid::new_v4()).await
+                }
+                "another user's credential" => {
+                    f.db.user("synthetic-other-user").await?;
+                    sqlx::query("UPDATE platform_credentials SET user_id=$2 WHERE id=$1")
+                        .bind(sign_in.metadata.id.as_str())
+                        .bind("synthetic-other-user")
+                        .execute(&f.db.pool)
+                        .await?;
+                    let (_pool, adapter) = hosted(&f).await?;
+                    adapter.lease_claude_login(Uuid::new_v4()).await
+                }
+                // An organization's profile: never the creator's own login.
+                "organization profile" => {
+                    f.authority.change(|session| {
+                        session.credential_owner =
+                            Owner::Organization(OwnerId::parse("synthetic-org").unwrap());
+                    });
+                    match hosted(&f).await {
+                        Ok((_pool, adapter)) => adapter.lease_claude_login(Uuid::new_v4()).await,
+                        Err(_) => Err(BrokerLeaseError::Denied),
+                    }
+                }
+                "not confirmed by the creator" => {
+                    f.authority.change(|session| {
+                        session.context.allow_personal_credentials = false;
+                    });
+                    match hosted(&f).await {
+                        Ok((_pool, adapter)) => adapter.lease_claude_login(Uuid::new_v4()).await,
+                        Err(_) => Err(BrokerLeaseError::Denied),
+                    }
+                }
+                // The lease admits it, but the broker never seals a login
+                // whose scopes go beyond the sign-in's six.
+                "scopes outside the sign-in" => {
+                    let (pool, adapter) = hosted(&f).await?;
+                    let broker = OpenAiBroker::new(adapter, SyntheticClaude::default())?;
+                    let recipient = codewire_workload_secrets::ProjectionRecipient::new();
+                    let refused = broker.claude_login(claude_login_request(&recipient)?).await;
+                    drop(broker);
+                    pool.close().await;
+                    ensure!(matches!(refused, Err(crate::BrokerRequestError::Denied)));
+                    return Ok(());
+                }
+                _ => unreachable!(),
+            };
+            ensure!(
+                matches!(
+                    outcome,
+                    Err(BrokerLeaseError::Denied | BrokerLeaseError::ReconnectRequired)
+                ),
+                "{case} must not deliver a login"
+            );
+            Ok(())
+        }
+        .await;
+        f.finish(result).await?;
+    }
+    Ok(())
+}
+
+/// A sign-in with less than thirty minutes left is refreshed once through the
+/// durable journal before it is sealed, and the rotated refresh token stays in
+/// the store.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn an_expiring_claude_login_is_refreshed_once_before_delivery() -> Result<()> {
+    let f = Fixture::create_for_bridge().await?;
+    let result = async {
+        // Twenty minutes left of an eight-hour token.
+        let sign_in = bind_sign_in(&f, &sign_in_material("old", 1_200, 27_600, None)).await?;
+        let provider = SyntheticClaude::default();
+        let (pool, adapter) = hosted(&f).await?;
+        let broker = OpenAiBroker::new(adapter, provider.clone())?;
+        let opened = deliver(&f, &broker).await?;
+        ensure!(opened.login.access_token() == "synthetic-rotated-access-1");
+        ensure!(opened.login.expires_at_unix_ms() >= (unix_now()? + 28_000) * 1_000);
+        ensure!(opened.binding.material_generation == sign_in.version.material_generation + 1);
+        // A second delivery uses the rotated token without refreshing again.
+        let again = deliver(&f, &broker).await?;
+        ensure!(again.login.access_token() == "synthetic-rotated-access-1");
+        ensure!(provider.refreshes.load(Ordering::SeqCst) == 1);
+        ensure!(stored(&f, &sign_in).await?.refresh_token() == "synthetic-rotated-refresh-1");
         drop(broker);
         pool.close().await;
         Ok(())

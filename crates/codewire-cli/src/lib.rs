@@ -870,8 +870,10 @@ async fn serve_hosted_daemon(
     // unless `~/.claude.json` records it complete, and asks whether you trust
     // each folder; while the Anthropic client is selected the daemon marks
     // onboarding complete and the workspace root trusted, so Claude Code uses
-    // the managed credential at once in any checked-out repository. A
-    // selection change restarts the Sandbox.
+    // the managed credential at once in any checked-out repository. Unless
+    // the sign-in form is selected, it also removes Codewire's Claude login
+    // from `~/.claude/.credentials.json`. A selection change restarts the
+    // Sandbox.
     #[cfg(target_os = "linux")]
     codewire_daemon::claude_home::ClaudeHome::new(&config.home_root, &config.workspace_root)
         .prepare(config.managed_credential_clients);
@@ -910,7 +912,7 @@ async fn serve_hosted_daemon(
         local,
     );
     // Once listening, the hosted daemon also keeps Codex's own ChatGPT login
-    // while the broker delivers one, in the same home.
+    // and Claude Code's own claude.ai login while the broker delivers them.
     #[cfg(target_os = "linux")]
     return match app_ports.zip(pod_uid) {
         // A bound daemon also accepts orchestration's application-port pushes.

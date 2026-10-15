@@ -176,6 +176,13 @@ mod at {
                 Err(rustix::io::Errno::EXIST) => {}
                 Err(error) => return Err(error.into()),
             }
+            self.open_child(name)
+        }
+
+        /// Open the existing directory `name` here. `Ok(None)` when it is a
+        /// symlink, not a directory, or not the effective uid's; `NotFound`
+        /// passes through.
+        pub(crate) fn open_child(&self, name: &str) -> io::Result<Option<Self>> {
             let descriptor = match rustix::fs::openat(
                 &self.0,
                 name,
@@ -291,6 +298,29 @@ mod at {
                 }
                 Err(error) => Err(error.into()),
             }
+        }
+
+        /// The names here that start with `prefix`, at most `limit` of them.
+        /// Names that are not UTF-8 are skipped.
+        pub(crate) fn names_with_prefix(
+            &self,
+            prefix: &str,
+            limit: usize,
+        ) -> io::Result<Vec<String>> {
+            let mut names = Vec::new();
+            for item in rustix::fs::Dir::read_from(&self.0)? {
+                let entry = item?;
+                let Ok(name) = entry.file_name().to_str() else {
+                    continue;
+                };
+                if name.starts_with(prefix) && name != "." && name != ".." {
+                    names.push(name.to_owned());
+                    if names.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            Ok(names)
         }
 
         /// Remove `name`; an absent name is not an error.

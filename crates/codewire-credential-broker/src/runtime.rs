@@ -7,12 +7,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use codewire_access::{
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId,
-    DerivedGrant, GrantPermission, PROVIDER_REFRESH_TIMEOUT_SECONDS, codex_login_permission,
+    DerivedGrant, GrantPermission, PROVIDER_REFRESH_TIMEOUT_SECONDS, claude_login_permission,
+    codex_login_permission,
 };
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_workload_secrets::{
-    CodexLogin, CodexLoginBinding, CodexLoginContext, MAX_CODEX_LOGIN_LIFETIME_MS,
-    seal_codex_login, validate_projection_recipient,
+    ClaudeLogin, CodexLogin, CodexLoginBinding, CodexLoginContext, MAX_CODEX_LOGIN_LIFETIME_MS,
+    seal_claude_login, seal_codex_login, validate_projection_recipient,
 };
 #[cfg(feature = "local-broker-synthetic-smoke")]
 use futures::stream;
@@ -29,7 +30,9 @@ use crate::anthropic::{
     AnthropicApiKeyAdapter, AnthropicClaudeSignInAdapter, AnthropicStreamingResponse,
     AnthropicSubscriptionTokenAdapter,
 };
-use crate::claude_oauth::{CanonicalClaudeOAuthBundle, ClaudeOAuthCredential};
+use crate::claude_oauth::{
+    CLAUDE_LOGIN_MINIMUM_VALIDITY_SECONDS, CanonicalClaudeOAuthBundle, ClaudeOAuthCredential,
+};
 use crate::codex_oauth::{
     ACCESS_TOKEN_REFRESH_WINDOW_SECONDS, CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS,
     CanonicalCodexOAuthBundle, CodexOAuthCredential,
@@ -146,7 +149,7 @@ pub trait BrokerLeaseProvider: Send + Sync {
     ) -> Result<Self::Lease, BrokerLeaseError>;
 
     /// Lease the Codex slot's selected login for sealed delivery to the
-    /// workspace daemon: the one listed direct delivery exception
+    /// workspace daemon: a listed direct delivery exception
     /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions").
     /// The request names nothing; the placement rederives the grant, requires
     /// its dedicated `codex-login` permission, and admits only the Sandbox
@@ -154,6 +157,17 @@ pub trait BrokerLeaseProvider: Send + Sync {
     /// creator's own confirmed profile, rechecked around the material read.
     /// Placements that do not implement that whole predicate deny.
     async fn lease_codex_login(&self, _request_id: Uuid) -> Result<Self::Lease, BrokerLeaseError> {
+        Err(BrokerLeaseError::Denied)
+    }
+
+    /// [`Self::lease_codex_login`] for the Anthropic slot's Claude sign-in:
+    /// the other listed direct delivery exception. The placement requires the
+    /// dedicated `claude-login` permission and admits only the Sandbox
+    /// creator's own Active personal Claude sign-in (never an API key or a
+    /// Claude subscription token), selected by the creator's own confirmed
+    /// profile, rechecked around the material read. Placements that do not
+    /// implement that whole predicate deny.
+    async fn lease_claude_login(&self, _request_id: Uuid) -> Result<Self::Lease, BrokerLeaseError> {
         Err(BrokerLeaseError::Denied)
     }
 
@@ -1310,6 +1324,77 @@ struct GitHubRefreshPreparation<'a> {
     admitted_grant: &'a DerivedGrant,
 }
 
+/// One sealed login request's canonical identity, recipient and deadline.
+struct LoginRequest {
+    request_id: Uuid,
+    recipient: [u8; 32],
+    deadline_unix_ms: u64,
+}
+
+impl LoginRequest {
+    /// A canonical, non-nil request ID, a valid recipient key and a deadline
+    /// inside this broker's window. A deadline outside it is a clock or
+    /// timing fault, not a decision about the login: answer UNAVAILABLE, and
+    /// name the cause through `refused`, a secret-free line, so daemon clock
+    /// skew is diagnosable.
+    fn parse(
+        request_id: &str,
+        recipient_public_key: &[u8],
+        deadline_unix_ms: u64,
+        refused: fn(&'static str),
+    ) -> Result<Self, BrokerRequestError> {
+        let parsed = Uuid::parse_str(request_id)
+            .ok()
+            .filter(|id| !id.is_nil() && id.to_string() == request_id)
+            .ok_or(BrokerRequestError::InvalidRequest)?;
+        let recipient: [u8; 32] = recipient_public_key
+            .try_into()
+            .map_err(|_| BrokerRequestError::InvalidRequest)?;
+        validate_projection_recipient(recipient).map_err(|_| BrokerRequestError::InvalidRequest)?;
+        let now_ms = current_unix_time_ms()?;
+        if !deadline_unix_ms
+            .checked_sub(now_ms)
+            .is_some_and(|remaining| (1..=MAX_CODEX_LOGIN_LIFETIME_MS).contains(&remaining))
+        {
+            refused(if deadline_unix_ms <= now_ms {
+                "deadline_passed"
+            } else {
+                "deadline_too_far"
+            });
+            return Err(BrokerRequestError::AuthorityUnavailable);
+        }
+        Ok(Self {
+            request_id: parsed,
+            recipient,
+            deadline_unix_ms,
+        })
+    }
+
+    /// The exact credential version and the request context the login is
+    /// sealed to.
+    fn bind(
+        &self,
+        grant: &DerivedGrant,
+        generation: &RefreshCredentialGeneration,
+    ) -> Result<(CodexLoginBinding, CodexLoginContext), BrokerRequestError> {
+        let environment_id = Uuid::parse_str(grant.environment_id.as_str())
+            .map_err(|_| BrokerRequestError::Denied)?;
+        Ok((
+            CodexLoginBinding {
+                credential_id: generation.credential_id.as_str().to_owned(),
+                revocation_generation: generation.revocation_generation,
+                material_generation: generation.material_generation,
+            },
+            CodexLoginContext {
+                environment_id: *environment_id.as_bytes(),
+                environment_generation: grant.environment_generation,
+                request_id: *self.request_id.as_bytes(),
+                deadline_unix_ms: self.deadline_unix_ms,
+            },
+        ))
+    }
+}
+
 /// Which admission an OAuth lease answers. A proxied request's lease and a
 /// sealed login's lease have different permissions and predicates; one is
 /// never used in place of the other.
@@ -1323,6 +1408,9 @@ enum OAuthPurpose {
     /// The Codex login's direct delivery exception, leased only through
     /// [`BrokerLeaseProvider::lease_codex_login`].
     CodexLogin,
+    /// The Claude login's direct delivery exception, leased only through
+    /// [`BrokerLeaseProvider::lease_claude_login`].
+    ClaudeLogin,
 }
 
 impl OAuthPurpose {
@@ -1335,6 +1423,7 @@ impl OAuthPurpose {
                 route: route.clone(),
             },
             Self::CodexLogin => codex_login_permission(),
+            Self::ClaudeLogin => claude_login_permission(),
         }
     }
 }
@@ -1524,10 +1613,10 @@ where
     }
 
     /// Seal the Sandbox creator's own personal Codex ChatGPT login to the
-    /// workspace daemon's recipient key: the one listed direct delivery
-    /// exception (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
-    /// exceptions"). Codex enables `/usage`, analytics and account routing
-    /// only with its own login, which a proxy cannot supply.
+    /// workspace daemon's recipient key: a listed direct delivery exception
+    /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions").
+    /// Codex enables `/usage`, analytics and account routing only with its own
+    /// login, which a proxy cannot supply.
     ///
     /// The placement's `lease_codex_login` decides delivery. The access token
     /// is refreshed first, through the same serialized path proxied requests
@@ -1540,35 +1629,14 @@ where
         &self,
         request: v1::CodexLoginRequest,
     ) -> Result<Vec<u8>, BrokerRequestError> {
-        let request_id = Uuid::parse_str(&request.request_id)
-            .ok()
-            .filter(|id| !id.is_nil() && id.to_string() == request.request_id)
-            .ok_or(BrokerRequestError::InvalidRequest)?;
-        let recipient: [u8; 32] = request
-            .recipient_public_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| BrokerRequestError::InvalidRequest)?;
-        validate_projection_recipient(recipient).map_err(|_| BrokerRequestError::InvalidRequest)?;
-        // A deadline outside this broker's window is a clock or timing fault,
-        // not a decision about the login: answer UNAVAILABLE, and name the
-        // cause in a secret-free line so daemon clock skew is diagnosable.
-        let now_ms = current_unix_time_ms()?;
-        if !request
-            .deadline_unix_ms
-            .checked_sub(now_ms)
-            .is_some_and(|remaining| (1..=MAX_CODEX_LOGIN_LIFETIME_MS).contains(&remaining))
-        {
-            timing::codex_login_refused(if request.deadline_unix_ms <= now_ms {
-                "deadline_passed"
-            } else {
-                "deadline_too_far"
-            });
-            return Err(BrokerRequestError::AuthorityUnavailable);
-        }
-
+        let login = LoginRequest::parse(
+            &request.request_id,
+            &request.recipient_public_key,
+            request.deadline_unix_ms,
+            timing::codex_login_refused,
+        )?;
         let purpose = OAuthPurpose::CodexLogin;
-        let lease = self.lease_oauth(request_id, &purpose).await?;
+        let lease = self.lease_oauth(login.request_id, &purpose).await?;
         let admitted_grant = lease.grant().clone();
         let generation = refresh_generation(&lease);
         let credential = self.codex_oauth_credential(lease, &purpose)?;
@@ -1577,7 +1645,7 @@ where
         {
             drop(credential);
             self.fresh_oauth_credential(
-                request_id,
+                login.request_id,
                 &purpose,
                 |lease| self.codex_oauth_credential(lease, &purpose),
                 None,
@@ -1589,9 +1657,7 @@ where
             (credential, generation)
         };
 
-        let environment_id = Uuid::parse_str(admitted_grant.environment_id.as_str())
-            .map_err(|_| BrokerRequestError::Denied)?;
-        let login = CodexLogin::new(
+        let codex = CodexLogin::new(
             Zeroizing::new(credential.access_token().to_owned()),
             Zeroizing::new(credential.id_token().to_owned()),
             credential.account_id().to_owned(),
@@ -1599,27 +1665,102 @@ where
         )
         .map_err(|_| BrokerRequestError::Denied)?;
         drop(credential);
-        let binding = CodexLoginBinding {
-            credential_id: generation.credential_id.as_str().to_owned(),
-            revocation_generation: generation.revocation_generation,
-            material_generation: generation.material_generation,
-        };
-        let context = CodexLoginContext {
-            environment_id: *environment_id.as_bytes(),
-            environment_generation: admitted_grant.environment_generation,
-            request_id: *request_id.as_bytes(),
-            deadline_unix_ms: request.deadline_unix_ms,
-        };
+        let (binding, context) = login.bind(&admitted_grant, &generation)?;
         seal_codex_login(
-            &login,
+            &codex,
             &binding,
             &context,
-            recipient,
+            login.recipient,
             current_unix_time_ms()?,
         )
         .map_err(|error| match error {
             codewire_workload_secrets::CodexLoginError::InvalidContext => {
                 timing::codex_login_refused("deadline_passed_before_seal");
+                BrokerRequestError::AuthorityUnavailable
+            }
+            _ => BrokerRequestError::Denied,
+        })
+    }
+
+    /// Seal the Sandbox creator's own personal Claude sign-in to the workspace
+    /// daemon's recipient key, which writes it as `claudeAiOauth` in Claude
+    /// Code's `~/.claude/.credentials.json`: the other listed direct delivery
+    /// exception. Claude Code shows `/usage` and its plan only with its own
+    /// claude.ai login, whose account calls ignore `ANTHROPIC_BASE_URL`, so the
+    /// proxy cannot answer them.
+    ///
+    /// The placement's `lease_claude_login` decides delivery: never an API key
+    /// or a Claude subscription token. The access token is refreshed first,
+    /// through the same serialized path proxied requests use, unless it stays
+    /// valid for thirty minutes (capped at half its lifetime). The sealed
+    /// plaintext carries the access token, its expiry, the granted scopes, the
+    /// plan, the rate-limit tier and the refresh time, bound as the Codex
+    /// login is. The refresh token never leaves the broker.
+    pub(crate) async fn claude_login(
+        &self,
+        request: v1::ClaudeLoginRequest,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
+        let login = LoginRequest::parse(
+            &request.request_id,
+            &request.recipient_public_key,
+            request.deadline_unix_ms,
+            timing::claude_login_refused,
+        )?;
+        let purpose = OAuthPurpose::ClaudeLogin;
+        let lease = self.lease_oauth(login.request_id, &purpose).await?;
+        let admitted_grant = lease.grant().clone();
+        let generation = refresh_generation(&lease);
+        let credential = self.claude_oauth_credential(lease, &purpose)?;
+        let (credential, generation) = if credential
+            .should_refresh_within(current_unix_time()?, CLAUDE_LOGIN_MINIMUM_VALIDITY_SECONDS)
+        {
+            drop(credential);
+            self.fresh_oauth_credential(
+                login.request_id,
+                &purpose,
+                |lease| self.claude_oauth_credential(lease, &purpose),
+                None,
+                &admitted_grant,
+                CLAUDE_LOGIN_MINIMUM_VALIDITY_SECONDS,
+            )
+            .await?
+        } else {
+            (credential, generation)
+        };
+
+        // Deliver only the scopes the sign-in asks for: a refresh may replace
+        // the stored set, and a scope Claude adds later must not widen the
+        // exception.
+        if !crate::claude_oauth::within_sign_in_scopes(credential.scopes()) {
+            timing::claude_login_refused("scopes_outside_sign_in");
+            return Err(BrokerRequestError::Denied);
+        }
+        let claude = ClaudeLogin::new(
+            Zeroizing::new(credential.access_token().to_owned()),
+            credential
+                .expires_at_unix()
+                .checked_mul(1_000)
+                .ok_or(BrokerRequestError::Denied)?,
+            credential.scopes().to_vec(),
+            credential
+                .subscription_type()
+                .map(|plan| plan.as_str().to_owned()),
+            credential.rate_limit_tier().map(str::to_owned),
+            credential.refreshed_at_unix(),
+        )
+        .map_err(|_| BrokerRequestError::Denied)?;
+        drop(credential);
+        let (binding, context) = login.bind(&admitted_grant, &generation)?;
+        seal_claude_login(
+            &claude,
+            &binding,
+            &context,
+            login.recipient,
+            current_unix_time_ms()?,
+        )
+        .map_err(|error| match error {
+            codewire_workload_secrets::ClaudeLoginError::InvalidContext => {
+                timing::claude_login_refused("deadline_passed_before_seal");
                 BrokerRequestError::AuthorityUnavailable
             }
             _ => BrokerRequestError::Denied,
@@ -2069,6 +2210,7 @@ where
                     .await
             }
             OAuthPurpose::CodexLogin => self.leases.lease_codex_login(request_id).await,
+            OAuthPurpose::ClaudeLogin => self.leases.lease_claude_login(request_id).await,
         }
         .map_err(map_lease_error)
     }
@@ -2081,6 +2223,7 @@ where
         match purpose {
             OAuthPurpose::Operation { .. } => self.oauth_adapter.credential_from_lease(lease),
             OAuthPurpose::CodexLogin => self.oauth_adapter.login_credential_from_lease(lease),
+            OAuthPurpose::ClaudeLogin => return Err(BrokerRequestError::Denied),
         }
         .map_err(map_adapter_error)
     }
@@ -2094,6 +2237,10 @@ where
             OAuthPurpose::Operation { .. } => self
                 .anthropic_sign_in_adapter
                 .credential_from_lease(lease)
+                .map_err(map_adapter_error),
+            OAuthPurpose::ClaudeLogin => self
+                .anthropic_sign_in_adapter
+                .login_credential_from_lease(lease)
                 .map_err(map_adapter_error),
             OAuthPurpose::CodexLogin => Err(BrokerRequestError::Denied),
         }
@@ -2916,6 +3063,7 @@ mod tests {
     use super::*;
     use crate::openai::response_admission_test_cases::{accepted_encodings, denied_encodings};
 
+    mod claude_login;
     mod codex_login;
 
     #[cfg(feature = "local-broker-synthetic-smoke")]

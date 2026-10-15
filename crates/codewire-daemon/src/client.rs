@@ -1355,6 +1355,14 @@ impl CredentialBridgeResponseSender {
             .await
     }
 
+    pub async fn send_claude_login(
+        &self,
+        response: bridge_v1::ClaudeLoginResponse,
+    ) -> Result<(), SessionClientError> {
+        self.send(bridge_v1::credential_bridge_host_message::Payload::ClaudeLogin(response))
+            .await
+    }
+
     pub async fn send_response_start(
         &self,
         response: bridge_v1::CredentialBridgeResponseStart,

@@ -128,10 +128,14 @@ pub const CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER: &str = "x-codewire-credential-bri
 /// frame only when its epoch's Open lists this value: an older broker or
 /// relay ends the epoch on an unknown frame.
 pub const CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN: &str = "codex-login";
+/// The broker serves `ClaudeLoginRequest` on this epoch, under the same rule.
+pub const CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN: &str = "claude-login";
 /// Every optional operation a current host may list. Unknown values are
 /// ignored by the relay; an Open is bounded to this many entries.
-pub const CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES: &[&str] =
-    &[CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN];
+pub const CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES: &[&str] = &[
+    CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
+    CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+];
 pub const CREDENTIAL_BRIDGE_MAX_CAPABILITIES: usize = 8;
 pub const CREDENTIAL_BRIDGE_MAX_CAPABILITY_BYTES: usize = 64;
 
@@ -311,9 +315,13 @@ mod tests {
 
     #[test]
     fn credential_bridge_capabilities_are_bounded_canonical_names() {
-        assert!(valid_credential_bridge_capability(
-            CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN
-        ));
+        for capability in [
+            CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
+            CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+        ] {
+            assert!(valid_credential_bridge_capability(capability));
+            assert!(CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES.contains(&capability));
+        }
         for known in CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES {
             assert!(valid_credential_bridge_capability(known));
         }

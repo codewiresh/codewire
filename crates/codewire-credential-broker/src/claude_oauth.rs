@@ -32,6 +32,10 @@ const MAX_REFRESH_TOKEN_LIFETIME_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 /// profile for Claude Code's `/usage` and plan. A refresh that drops either is
 /// refused rather than stored.
 pub(crate) const REQUIRED_SCOPES: [&str; 2] = ["user:inference", "user:profile"];
+/// A delivered Claude login keeps at least this long (capped at half its
+/// lifetime): Claude Code itself refreshes only within five minutes of
+/// `expiresAt`, so while delivery works it never tries the placeholder.
+pub(crate) const CLAUDE_LOGIN_MINIMUM_VALIDITY_SECONDS: u64 = 30 * 60;
 
 /// Stable failures that never retain provider material or parser input.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -196,7 +200,6 @@ impl ClaudeOAuthCredential {
     }
 
     /// When the access token expires, as the provider reported its lifetime.
-    #[cfg(test)]
     pub(crate) fn expires_at_unix(&self) -> u64 {
         self.expires_at_unix
     }
@@ -212,18 +215,15 @@ impl ClaudeOAuthCredential {
         &self.scopes
     }
 
-    #[cfg(test)]
     pub(crate) fn subscription_type(&self) -> Option<ClaudeSubscriptionType> {
         self.subscription_type
     }
 
-    #[cfg(test)]
     pub(crate) fn rate_limit_tier(&self) -> Option<&str> {
         self.rate_limit_tier.as_deref()
     }
 
     /// When this material was imported or last rotated.
-    #[cfg(any(test, feature = "platform"))]
     pub(crate) fn refreshed_at_unix(&self) -> u64 {
         self.refreshed_at_unix
     }
@@ -376,6 +376,15 @@ fn refresh_token_expiry(
         .transpose()
 }
 
+/// Whether every granted scope is one Codewire's sign-in asks for (the six
+/// the owner accepted for delivery on 2026-10-14). A refresh may replace the
+/// stored set, so a scope Claude adds later is never delivered silently.
+pub(crate) fn within_sign_in_scopes(scopes: &[String]) -> bool {
+    scopes
+        .iter()
+        .all(|scope| crate::provider_oauth::claude::CLAUDE_SIGN_IN_SCOPES.contains(&scope.as_str()))
+}
+
 /// The granted scopes, in the provider's order, without duplicates. Every
 /// required scope must be present.
 pub(crate) fn parse_scopes(value: &str) -> Result<Vec<String>, ClaudeOAuthMaterialError> {
@@ -440,6 +449,31 @@ fn valid_account_hint(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_sign_in_scopes_are_deliverable() {
+        let scopes = |list: &[&str]| {
+            list.iter()
+                .map(|scope| (*scope).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(super::within_sign_in_scopes(&scopes(
+            &crate::provider_oauth::claude::CLAUDE_SIGN_IN_SCOPES
+        )));
+        assert!(super::within_sign_in_scopes(&scopes(&[
+            "user:inference",
+            "user:profile"
+        ])));
+        for widened in [
+            &["user:inference", "user:profile", "user:billing"][..],
+            &["user:inference", "user:profile", "org:create_api_key"],
+        ] {
+            assert!(
+                !super::within_sign_in_scopes(&scopes(widened)),
+                "{widened:?}"
+            );
+        }
+    }
+
     use super::*;
 
     const NOW: u64 = 1_800_000_000;

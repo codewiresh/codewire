@@ -1073,8 +1073,9 @@ async fn forward_host(
         Some(Payload::EnvironmentProjection(value)) => {
             sender.send_environment_projection(value).await
         }
-        // Opaque recipient-sealed ciphertext; this relay cannot open it.
+        // Opaque recipient-sealed ciphertext; this relay cannot open either.
         Some(Payload::CodexLogin(value)) => sender.send_codex_login(value).await,
+        Some(Payload::ClaudeLogin(value)) => sender.send_claude_login(value).await,
         Some(Payload::Open(_)) | None => {
             return Err(Status::unavailable("credential relay frame is invalid"));
         }
