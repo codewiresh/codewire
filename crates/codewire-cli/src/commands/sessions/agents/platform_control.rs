@@ -125,6 +125,10 @@ enum Request {
         route: Route,
         commit: bool,
     },
+    /// Undo an adoption whose agent never started in this Pod (#2769): the
+    /// envelope names this Pod at the generation the adoption moved to, and
+    /// `previous` is the predecessor it moves back to.
+    Revert { previous: Origin },
 }
 fn id(value: &str) -> anyhow::Result<()> {
     canonical_uuid(value)?;
@@ -724,8 +728,15 @@ fn handle_fixed(environment: &DriverEnvironment, request: Envelope) -> anyhow::R
         pin.check()?;
         return Ok(value);
     }
+    if let Request::Revert { previous } = &request.request {
+        let value = revert_adoption(environment, &dir, &request, previous)?;
+        pin.check()?;
+        return Ok(value);
+    }
     let native = match &request.request {
-        Request::Prepare { .. } | Request::Adopt { .. } => unreachable!(),
+        Request::Prepare { .. } | Request::Adopt { .. } | Request::Revert { .. } => {
+            unreachable!()
+        }
         Request::Queue {
             driver_id,
             session_id,
@@ -1072,6 +1083,65 @@ fn commit_adoption(
         },
     )?;
     Ok(next)
+}
+/// Undo the adoption of `previous`'s conversation when its agent never
+/// started in this Pod: the environment projection was refused before the
+/// launcher ran it (#2769). The markers must name this Pod at exactly the
+/// generation the adoption moved to, marked resumed from `previous`; no
+/// driver may hold the lock and none may have taken custody here. The
+/// generation moves back first, then the origin. Every partial state is
+/// still refused by the adopt check and the driver fence, and a later adopt
+/// rewrites the config's program, so it is left as the commit wrote it.
+fn revert_adoption(
+    environment: &DriverEnvironment,
+    dir: &Path,
+    request: &Envelope,
+    previous: &Origin,
+) -> anyhow::Result<Value> {
+    let current = &request.origin;
+    validate_origin(environment.id(), &request.session_id, previous, false)?;
+    ensure!(
+        previous.environment_id == current.environment_id
+            && previous.org_id == current.org_id
+            && previous.driver_id == current.driver_id
+            && previous.agent == current.agent
+            && previous.pod_uid != current.pod_uid
+            && previous.parent_generation.is_none()
+            && current.parent_generation.is_none(),
+        "platform resume differs"
+    );
+    let back = request
+        .launch_generation
+        .checked_sub(1)
+        .filter(|generation| *generation > 0)
+        .context("platform generation CAS refused")?;
+    let _control = StateLock::acquire(&dir.join("control.lock"))?;
+    let _driver = StateLock::try_acquire(&dir.join("driver.lock"))?
+        .context("a platform driver is still alive")?;
+    let old: Generation = private_record(&dir.join(GENERATION))?;
+    ensure!(
+        old.version == 1
+            && old.driver_id == current.driver_id
+            && old.session_id == request.session_id
+            && old.generation == request.launch_generation
+            && old.resumed_from_pod_uid.as_deref() == Some(previous.pod_uid.as_str()),
+        "platform generation CAS refused"
+    );
+    // A driver that started here took custody; its outcome is not undone.
+    ensure!(
+        optional_private(&dir.join("peer-current.json"))?.is_none(),
+        "a platform driver started in this Pod"
+    );
+    write_private_json(
+        &dir.join(GENERATION),
+        &Generation {
+            generation: back,
+            resumed_from_pod_uid: None,
+            ..old
+        },
+    )?;
+    write_private_json(&dir.join(ORIGIN), previous)?;
+    Ok(json!({"launch_generation": back}))
 }
 /// Whether this driver's current generation continues an earlier Pod's
 /// conversation, whose guardian custody ended with that Pod.

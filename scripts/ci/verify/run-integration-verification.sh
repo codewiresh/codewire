@@ -361,7 +361,7 @@ database_lane_credential_service() {
     cargo test --locked -p codewire-credential-service \
       --lib tests::database::projection:: \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform runtime projection matrix" "$logfile" 12
+  assert_passed_count "platform runtime projection matrix" "$logfile" 13
 
   logfile="$RUN_DIR/owner-local-delegation-authority.log"
   TMPDIR="$RUN_DIR" TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -511,7 +511,7 @@ database_lane_orchestration() {
     cargo test --locked -p codewire-orchestration --lib \
       'api::platform_agents::journal::database_tests::db_' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform managed agent journal matrix" "$logfile" 39
+  assert_passed_count "platform managed agent journal matrix" "$logfile" 40
 
   logfile="$RUN_DIR/environment-resize-admission.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
