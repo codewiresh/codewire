@@ -1275,7 +1275,11 @@ database_case!(
 async fn db_migration39_fresh_upgrade_rollback_and_retained_evidence_refusal() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
-        let migrator = application_migrator();
+        // The fixture database carries every embedded migration. Return it to
+        // version 39 and prove only this boundary, so a later migration can
+        // neither enter this proof nor be undone by it.
+        application_migrator().undo(&db.pool, 39).await?;
+        let migrator = boundary39_migrator();
         let fresh = schema(&db.pool).await?;
         ensure!(fresh == SCHEMA39);
         println!("MEASURED_PLATFORM_MANAGED_SCHEMA39={fresh}");
@@ -1320,6 +1324,20 @@ async fn db_migration39_fresh_upgrade_rollback_and_retained_evidence_refusal() -
     }
     .await;
     db.finish(result).await
+}
+
+/// Embedded migrations 1..=39, up and down: the managed-agent boundary.
+fn boundary39_migrator() -> sqlx::migrate::Migrator {
+    sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            application_migrator()
+                .iter()
+                .filter(|m| m.version <= 39)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    }
 }
 
 async fn wait_blocker(pool: &PgPool, pid: i32) -> Result<()> {

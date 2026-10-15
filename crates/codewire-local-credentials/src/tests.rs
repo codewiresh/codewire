@@ -1636,6 +1636,19 @@ fn a_claude_subscription_token_is_refused_by_the_local_authority() {
             }
         ))
     );
+    // A Claude sign-in is a platform credential too.
+    let mut sign_in = new_credential("claude-sign-in");
+    sign_in.provider = provider("anthropic");
+    sign_in.authentication_kind = CredentialAuthKind::ClaudeSignIn;
+    assert_eq!(
+        authority.add_credential(sign_in, material(b"synthetic-local-sign-in")),
+        Err(LocalCredentialError::Access(
+            AccessError::UnsupportedAuthenticationKind {
+                provider: provider("anthropic"),
+                kind: CredentialAuthKind::ClaudeSignIn,
+            }
+        ))
+    );
     assert_eq!(store.entry_count(), 0);
     assert!(
         authority

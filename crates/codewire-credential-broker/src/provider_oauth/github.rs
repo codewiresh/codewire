@@ -221,7 +221,7 @@ impl GitHubDeviceLogin {
                 ),
                 (header::USER_AGENT, HeaderValue::from_static(USER_AGENT)),
             ]),
-            body,
+            Zeroizing::new(body),
         )
         .await?;
         if let Ok(error) = decode_json::<ErrorResponse>(&body) {

@@ -208,6 +208,7 @@ pub(crate) fn auth_kind(kind: CredentialAuthKind) -> &'static str {
         CredentialAuthKind::AccessToken => "access_token",
         CredentialAuthKind::GitHubApp => "github_app",
         CredentialAuthKind::SshKey => "ssh_key",
+        CredentialAuthKind::ClaudeSignIn => "claude_sign_in",
     }
 }
 
@@ -218,6 +219,7 @@ pub(crate) fn parse_auth_kind(value: &str) -> Result<CredentialAuthKind, Error> 
         "access_token" => Ok(CredentialAuthKind::AccessToken),
         "github_app" => Ok(CredentialAuthKind::GitHubApp),
         "ssh_key" => Ok(CredentialAuthKind::SshKey),
+        "claude_sign_in" => Ok(CredentialAuthKind::ClaudeSignIn),
         _ => Err(Error::CorruptRecord),
     }
 }
@@ -522,10 +524,25 @@ mod tests {
             CredentialAuthKind::ApiKey,
             CredentialAuthKind::AccessToken,
             CredentialAuthKind::GitHubApp,
+            CredentialAuthKind::SshKey,
+            CredentialAuthKind::ClaudeSignIn,
         ] {
             assert_eq!(parse_auth_kind(auth_kind(kind)), Ok(kind));
         }
-        for value in ["OAuth", "token", "pat", "ssh", "", "enabled"] {
+        assert_eq!(
+            auth_kind(CredentialAuthKind::ClaudeSignIn),
+            "claude_sign_in"
+        );
+        for value in [
+            "OAuth",
+            "token",
+            "pat",
+            "ssh",
+            "",
+            "enabled",
+            "claude-sign-in",
+            "ClaudeSignIn",
+        ] {
             assert_eq!(parse_auth_kind(value), Err(Error::CorruptRecord));
             assert_eq!(parse_status(value), Err(Error::CorruptRecord));
         }
