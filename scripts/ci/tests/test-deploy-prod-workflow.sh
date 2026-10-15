@@ -74,31 +74,93 @@ if awk '/^      - name: / { capture = ($0 !~ /GHCR/) } capture' "$WORKFLOW" | gr
 fi
 
 support_job="$(sed -n '/^  publish-support-release-images:/,/^  publish-runtime-images:/p' "$WORKFLOW")"
-grep -Fq '    needs: [release-selection]' <<<"$support_job" ||
-  fail "support release job must depend only on release selection"
+grep -Fq '    needs: [release-selection, support-pair-selection, build-support-amd64, build-support-arm64]' <<<"$support_job" ||
+  fail "support release publication does not wait for the selection and both platform builds"
+# shellcheck disable=SC2016
+grep -Fq "    if: \${{ always() && needs.release-selection.result == 'success' && needs.support-pair-selection.result == 'success' && (needs.support-pair-selection.outputs.build == 'false' || (needs.build-support-amd64.result == 'success' && needs.build-support-arm64.result == 'success')) }}" <<<"$support_job" ||
+  fail "support release publication can run without a reused pair or both native platform builds"
 grep -Fq '        id: base' <<<"$support_job" ||
   fail "support release job does not retain the base step output"
 grep -Fq '        id: workspace' <<<"$support_job" ||
   fail "support release job does not retain the workspace step output"
 # shellcheck disable=SC2016
-grep -Fq 'CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}' \
-  <<<"$support_job" || fail "workspace does not consume the same-job base digest"
-# shellcheck disable=SC2016
 grep -Fq '"${{ steps.workspace.outputs.candidate_ref }}"' <<<"$support_job" ||
   fail "publisher does not consume the same-job workspace digest"
-if grep -Fq 'needs.build-' <<<"$support_job"; then
-  fail "support release publication still crosses a runner job-output boundary"
-fi
+# Publication consumes only same-job candidates. The platform digests cross
+# the job boundary only into the two joins, which verify the whole index.
+# shellcheck disable=SC2016
+[[ "$(grep -oF 'needs.build-support-' <<<"$support_job" | wc -l)" -eq 6 \
+  && "$(grep -Fc '          AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.base_digest }}' <<<"$support_job")" -eq 1 \
+  && "$(grep -Fc '          ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.base_digest }}' <<<"$support_job")" -eq 1 \
+  && "$(grep -Fc '          AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.workspace_digest }}' <<<"$support_job")" -eq 1 \
+  && "$(grep -Fc '          ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.workspace_digest }}' <<<"$support_job")" -eq 1 ]] ||
+  fail "support release publication consumes another job's output outside the verifying joins"
 workspace_line="$(grep -n 'id: workspace' <<<"$support_job" | cut -d: -f1)"
 support_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$support_job" | head -1 | cut -d: -f1)"
 [[ -n "$workspace_line" && -n "$support_copy_line" && "$workspace_line" -lt "$support_copy_line" ]] ||
-  fail "support release publication can run before the same-job workspace build"
+  fail "support release publication can run before the same-job workspace join"
+if grep -Fq 'build-support-platform.sh' <<<"$support_job"; then
+  fail "support release publication rebuilds a platform"
+fi
+selection_job="$(sed -n '/^  support-pair-selection:/,/^  build-support-amd64:/p' "$WORKFLOW")"
+# shellcheck disable=SC2016
+grep -Fq '        run: scripts/ci/images/release-support-pair-state.sh "$SOURCE_SHA"' <<<"$selection_job" ||
+  fail "the release support pair is not selected from what main published"
+for platform in amd64 arm64; do
+  case "$platform" in
+    amd64) next_job=build-support-arm64 ;;
+    arm64) next_job=publish-support-release-images ;;
+  esac
+  platform_job="$(sed -n "/^  build-support-$platform:/,/^  $next_job:/p" "$WORKFLOW")"
+  for expected in '    runs-on: ci-protected' '    timeout-minutes: 120' \
+      '    needs: [release-selection, support-pair-selection]' \
+      "    if: \${{ needs.support-pair-selection.outputs.build == 'true' }}" \
+      '          CODEWIRE_SOURCE_DIR: .release-source' \
+      "          SUPPORT_PLATFORM_BUDGET_MINUTES: '110'" \
+      "        run: scripts/ci/images/build-support-platform.sh linux/$platform"; do
+    grep -qxF -- "$expected" <<<"$platform_job" || fail "linux/$platform release support build omits: $expected"
+  done
+  if grep -Eq 'publish-image-to-|OPENBAO_GHCR|secrets\.' <<<"$platform_job"; then
+    fail "linux/$platform release support build crosses the publication boundary"
+  fi
+done
+
+# No deploy-prod job builds linux/arm64 under emulation: every support image
+# is built only by build-support-platform.sh (arm64 on the protected remote
+# node, failing closed) or joined from its digests; every other image call
+# must reuse an existing source image; nothing selects platforms or emulators.
+python3 - "$WORKFLOW" <<'PYCHECK' || fail "a deploy-prod job can build linux/arm64 without the protected remote builder"
+import re, sys, yaml
+workflow = yaml.safe_load(open(sys.argv[1]))
+arm64_builders = []
+for job_name, job in workflow["jobs"].items():
+    for step in job.get("steps", []):
+        run = step.get("run", "")
+        env = {**job.get("env", {}), **step.get("env", {})}
+        for key in ("CODEWIRE_IMAGE_PLATFORM", "CODEWIRE_EXTERNAL_BUILDX_BUILDER", "CODEWIRE_IMAGE_JOIN"):
+            if key in env:
+                sys.exit(f"{job_name}: sets {key} in the workflow")
+        if re.search(r"(--platform|platforms[:=]|setup-qemu|binfmt|tonistiigi|qemu-user)", run + " " + str(step.get("uses", ""))):
+            sys.exit(f"{job_name}: selects a platform or an emulator directly")
+        for match in re.finditer(r"build-support-platform\.sh (\S+)", run):
+            if match.group(1) == "linux/arm64":
+                arm64_builders.append(job_name)
+        if "build-push-image.sh" in run and env.get("REQUIRE_EXISTING_SOURCE_IMAGE") != "1":
+            sys.exit(f"{job_name}: may build an image instead of reusing its source image")
+        if re.search(r"build-push-image\.sh (base|workspace)\b", run):
+            sys.exit(f"{job_name}: builds a support image outside the native platform jobs")
+if arm64_builders != ["build-support-arm64"]:
+    sys.exit(f"linux/arm64 is built by {arm64_builders}, not exactly the native build-support-arm64 job")
+PYCHECK
 
 dispatch_job="$(sed -n '/^  dispatch-deploy-prod:/,$p' "$WORKFLOW")"
 grep -Fq '      - publish-runtime-images' <<<"$dispatch_job" ||
   fail "production dispatch can run before runtime publication"
 grep -Fq '      - publish-support-release-images' <<<"$dispatch_job" ||
   fail "production dispatch can run before support publication"
+# shellcheck disable=SC2016
+grep -Fq "    if: \${{ always() && needs.release-selection.result == 'success' && needs.publish-runtime-images.result == 'success' && needs.publish-support-release-images.result == 'success' }}" <<<"$dispatch_job" ||
+  fail "production dispatch does not require every direct prerequisite to succeed"
 # shellcheck disable=SC2016
 grep -Fq 'run: scripts/ci/deploy/dispatch-deploy-prod.sh "$RELEASE_TAG"' <<<"$dispatch_job" ||
   fail "production dispatch sends more than the signed source tag"
@@ -120,5 +182,77 @@ grep -Fq 'fetch-forgejo-deploy-prod-token.sh' \
 if grep -Eq 'promote-image-bundle|promotion-receipt|gitea-(upload|download)-artifact|CODEWIRE_DEPLOY_PROMOTION_USERNAME|observe-production:|deploy-prod-observer\.sh|setup-kubeconfig|kubectl|helm' "$WORKFLOW"; then
   fail "source production workflow retains desired-state writes, receipts, or cluster observation"
 fi
+
+# The join script never builds: a built pair is joined from both exact
+# platform digests, a reused pair must already exist.
+stub_tree="$(mktemp -d)"
+trap 'rm -rf -- "$stub_tree"' EXIT
+cat >"$stub_tree/builder" <<'STUB'
+#!/usr/bin/env bash
+printf 'join=%s require=%s platform=%s args=%s\n' "${CODEWIRE_IMAGE_JOIN:-}" "${REQUIRE_EXISTING_SOURCE_IMAGE:-}" \
+  "${CODEWIRE_IMAGE_PLATFORM:-}" "$*" >>"$STUB_CALLS"
+STUB
+chmod +x "$stub_tree/builder"
+digest_a=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+digest_b=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+join_case() {
+  : >"$stub_tree/calls"
+  if env -u CODEWIRE_IMAGE_JOIN -u REQUIRE_EXISTING_SOURCE_IMAGE "$@" STUB_CALLS="$stub_tree/calls" \
+      RELEASE_SUPPORT_IMAGE_BUILDER="$stub_tree/builder" CODEWIRE_IMAGE_PLATFORM=linux/arm64 \
+      "$ROOT/scripts/ci/images/join-release-support-image.sh" workspace .release-source/images/workspace/Dockerfile .release-source \
+      >"$stub_tree/out" 2>&1; then echo ok; else echo failed; fi
+}
+[[ "$(join_case BUILD_SUPPORT_PAIR=true AMD64_DIGEST="$digest_a" ARM64_DIGEST="$digest_b")" == ok \
+  && "$(cat "$stub_tree/calls")" == "join=$digest_a $digest_b require= platform= args=workspace .release-source/images/workspace/Dockerfile .release-source" ]] ||
+  fail "a built release pair is not joined from exactly its amd64 then arm64 digests"
+[[ "$(join_case BUILD_SUPPORT_PAIR=false)" == ok \
+  && "$(cat "$stub_tree/calls")" == "join= require=1 platform= args=workspace .release-source/images/workspace/Dockerfile .release-source" ]] ||
+  fail "a reused release pair can be built instead of required"
+for bad in 'BUILD_SUPPORT_PAIR=true AMD64_DIGEST=sha256:aaaa' "BUILD_SUPPORT_PAIR=true ARM64_DIGEST=$digest_b" \
+    "BUILD_SUPPORT_PAIR=false AMD64_DIGEST=$digest_a" 'BUILD_SUPPORT_PAIR=' 'BUILD_SUPPORT_PAIR=maybe'; do
+  read -r -a bad_env <<<"$bad"
+  [[ "$(join_case "${bad_env[@]}")" == failed && ! -s "$stub_tree/calls" ]] ||
+    fail "the join script accepted: $bad"
+done
+
+# The selection reads both source-SHA indexes with the pull robot.
+mkdir -p "$stub_tree/bin"
+cat >"$stub_tree/fetcher" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --pull ]] || exit 64
+printf 'robot\n' >"$2"; printf 'synthetic\n' >"$3"
+STUB
+cat >"$stub_tree/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  login) exit 0 ;;
+  buildx)
+    image="${*: -1}"; image="${image#registry.example.invalid/codewire/}"; image="${image%%:*}"
+    case " $STUB_PUBLISHED " in
+      *" $image "*) printf '{"digest":"sha256:%064d"}\n' 1 ;;
+      *" error "*) echo 'connection reset by peer' >&2; exit 1 ;;
+      *) echo 'ERROR: registry.example.invalid/codewire/x: not found' >&2; exit 1 ;;
+    esac ;;
+esac
+STUB
+chmod +x "$stub_tree/fetcher" "$stub_tree/bin/docker"
+state_case() {
+  : >"$stub_tree/output"
+  if env PATH="$stub_tree/bin:$PATH" STUB_PUBLISHED="$1" OPENBAO_HARBOR_CREDENTIAL_FETCHER="$stub_tree/fetcher" \
+      GITHUB_OUTPUT="$stub_tree/output" RUNNER_TEMP="$stub_tree" \
+      "$ROOT/scripts/ci/images/release-support-pair-state.sh" "$(printf '%040d' 7)" >"$stub_tree/out" 2>&1; then
+    cat "$stub_tree/output"
+  else
+    echo failed
+  fi
+}
+[[ "$(state_case 'base workspace')" == build=false ]] || fail "a published release pair is not reused"
+[[ "$(state_case '')" == build=true ]] || fail "an unpublished release pair is not built"
+if [[ "$(state_case 'base')" != failed ]] || ! grep -qF 'only part of the support pair' "$stub_tree/out"; then
+  fail "a partly published release pair was accepted"
+fi
+[[ "$(state_case 'error')" == failed ]] || fail "an unreadable registry was taken as an unpublished pair"
+[[ -z "$(find "$stub_tree" -maxdepth 1 -name 'codewire-release-support-pair.*' -print -quit)" ]] ||
+  fail "the selection left its pull credential behind"
 
 printf '[test-deploy-prod-workflow] signed-tag publication and dispatch contract passed\n'

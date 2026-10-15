@@ -713,6 +713,19 @@ grep -qxF "DOCKER_CONFIG=$docker_config buildx rm $remote_name" "$platform_tree/
 [[ "$(cat "$platform_tree/calls")" == "base|linux/arm64||$remote_name|base images/base/Dockerfile images/base
 workspace|linux/arm64|registry.example.invalid/codewire/base@$base_a|$remote_name|workspace images/workspace/Dockerfile ." ]] ||
   fail 'arm64 images were not built on the attached node'
+# deploy-prod.yaml builds a release tag's pair from its separate checkout with
+# this tree's scripts; arm64 still builds only on the attached native node.
+mkdir -p "$platform_tree/.release-source"
+[[ "$(cd "$platform_tree" && platform_case 110 linux/arm64 CODEWIRE_SOURCE_DIR=.release-source)" == ok ]] ||
+  { cat "$platform_tree/out" >&2; fail 'arm64 release-source build failed'; }
+remote_name="$(sed -n 's/^.* buildx create --name \([^ ]*\) .*$/\1/p' "$platform_tree/docker")"
+[[ -n "$remote_name" && "$(cat "$platform_tree/calls")" == "base|linux/arm64||$remote_name|base .release-source/images/base/Dockerfile .release-source/images/base
+workspace|linux/arm64|registry.example.invalid/codewire/base@$base_a|$remote_name|workspace .release-source/images/workspace/Dockerfile .release-source" ]] ||
+  fail 'a release-source arm64 build did not build that checkout on the attached node'
+for bad_source in /abs ../outside missing-dir; do
+  [[ "$(cd "$platform_tree" && platform_case 110 linux/amd64 CODEWIRE_SOURCE_DIR="$bad_source")" == failed* && ! -s "$platform_tree/calls" ]] ||
+    fail "a platform build accepted the source directory $bad_source"
+done
 # The arm64 build fails closed, never falling back to emulation.
 for arm64_failure in 'STUB_FETCH=fail|client certificate could not be read' \
     'STUB_NODE=down|did not answer as a running linux/arm64 builder' \
