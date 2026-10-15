@@ -4759,16 +4759,12 @@ async fn dynamic_exists(api: &Api<DynamicObject>, name: &str) -> anyhow::Result<
 
 /// Whether a listed or hinted object belongs to `env_id` for cleanup. A
 /// labelled object must carry this environment's label. An identity-free
-/// per-environment template (B2.4) carries no environment label, so the only
-/// unlabelled object accepted is the hinted one whose name is this
-/// environment's own derived name (`<base>-<env_id>`). Shared objects such as
-/// warm-pool templates (`cw-pool-*`) never end in an environment ID, so they
-/// are never taken for one environment's.
-fn owned_by_environment(
-    metadata: &kube::api::ObjectMeta,
-    env_id: &str,
-    name_hint: Option<&str>,
-) -> bool {
+/// per-environment template (B2.4) carries no environment label; its name is
+/// this environment's own derived name (`<base>-<env_id>`), so an unlabelled
+/// object is accepted when its name ends in `-<env_id>`. Shared objects such
+/// as warm-pool templates (`cw-pool-*`) never end in an environment ID, so
+/// they are never taken for one environment's.
+fn owned_by_environment(metadata: &kube::api::ObjectMeta, env_id: &str) -> bool {
     match metadata
         .labels
         .as_ref()
@@ -4776,13 +4772,11 @@ fn owned_by_environment(
     {
         Some(value) => value == env_id,
         None => {
-            let derived_suffix = format!("-{env_id}");
-            match (metadata.name.as_deref(), name_hint) {
-                (Some(name), Some(hint)) => {
-                    !env_id.trim().is_empty() && name == hint && name.ends_with(&derived_suffix)
-                }
-                _ => false,
-            }
+            !env_id.trim().is_empty()
+                && metadata
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.ends_with(&format!("-{env_id}")))
         }
     }
 }
@@ -4797,18 +4791,38 @@ async fn environment_owned_objects(
         !env_id.trim().is_empty(),
         "environment identity is required for cleanup"
     );
-    let mut objects = api
-        .list(&ListParams::default().labels(&format!("{LABEL_ENV_ID}={env_id}")))
+    // An identity-free template carries no environment label, so templates
+    // are listed whole and kept by ownership. Destroy then finds the
+    // environment's template by its own name, not only through the hint
+    // derived from its preset's current image: a preset whose image changed,
+    // or whose configuration was removed, after the environment was created
+    // names another template or none (#2831).
+    let listed = if kind == "SandboxTemplate" {
+        ListParams::default()
+    } else {
+        ListParams::default().labels(&format!("{LABEL_ENV_ID}={env_id}"))
+    };
+    let mut objects: Vec<DynamicObject> = api
+        .list(&listed)
         .await
         .map_err(|error| anyhow::anyhow!("list owned {kind} for {env_id}: {error}"))?
-        .items;
+        .items
+        .into_iter()
+        .filter(|object| owned_by_environment(&object.metadata, env_id))
+        .collect();
     if let Some(name) = name_hint
         && !objects
             .iter()
             .any(|object| object.metadata.name.as_deref() == Some(name))
     {
         match api.get(name).await {
-            Ok(object) => objects.push(object),
+            Ok(object) => {
+                anyhow::ensure!(
+                    owned_by_environment(&object.metadata, env_id),
+                    "hinted {kind} does not belong to the environment"
+                );
+                objects.push(object);
+            }
             Err(kube::Error::Api(error)) if error.code == 404 => {}
             Err(error) => return Err(anyhow::anyhow!("get hinted {kind}: {error}")),
         }
@@ -4816,10 +4830,6 @@ async fn environment_owned_objects(
     objects
         .into_iter()
         .map(|object| {
-            anyhow::ensure!(
-                owned_by_environment(&object.metadata, env_id, name_hint),
-                "listed {kind} does not belong to the environment"
-            );
             let name = object
                 .metadata
                 .name
@@ -7144,55 +7154,31 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_ownership_accepts_identity_free_per_environment_templates_only_by_derived_name() {
+    fn cleanup_ownership_takes_identity_free_templates_by_their_derived_name() {
         let env = "4f6c0a52-91d4-4c56-9e1f-3a2b7c1d0e9f";
         let derived = format!("codewire-workspace-{env}");
         // Labelled objects keep the label rule.
-        assert!(owned_by_environment(
-            &object_meta(&derived, Some(env)),
-            env,
-            None
-        ));
+        assert!(owned_by_environment(&object_meta(&derived, Some(env)), env));
         assert!(!owned_by_environment(
             &object_meta(&derived, Some("other-environment")),
             env,
-            Some(&derived),
         ));
         // An identity-free per-environment template has no label; its own
-        // derived name, given as the hint, proves ownership.
+        // derived name proves ownership, whichever base named it.
+        assert!(owned_by_environment(&object_meta(&derived, None), env));
         assert!(owned_by_environment(
-            &object_meta(&derived, None),
-            env,
-            Some(&derived)
+            &object_meta(&format!("workspace-{env}"), None),
+            env
         ));
-        // Without the hint, or with a hint that is not this environment's
-        // derived name, an unlabelled object is never taken.
-        assert!(!owned_by_environment(
-            &object_meta(&derived, None),
-            env,
-            None
-        ));
+        // Shared templates and other environments' templates are never taken.
         assert!(!owned_by_environment(
             &object_meta("cw-pool-1000m-4096mi-10gi-0a1b2c3d", None),
             env,
-            Some("cw-pool-1000m-4096mi-10gi-0a1b2c3d"),
         ));
         let other = "codewire-workspace-6d1e2f3a-0b4c-4d5e-8f9a-1b2c3d4e5f60";
-        assert!(!owned_by_environment(
-            &object_meta(other, None),
-            env,
-            Some(other)
-        ));
-        assert!(!owned_by_environment(
-            &object_meta(&derived, None),
-            env,
-            Some("something-else")
-        ));
-        assert!(!owned_by_environment(
-            &object_meta(&derived, None),
-            "",
-            Some(&derived)
-        ));
+        assert!(!owned_by_environment(&object_meta(other, None), env));
+        assert!(!owned_by_environment(&object_meta(env, None), env));
+        assert!(!owned_by_environment(&object_meta(&derived, None), ""));
     }
 
     fn warm_pool_list(items: Vec<Value>) -> Value {
