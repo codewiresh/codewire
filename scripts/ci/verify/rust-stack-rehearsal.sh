@@ -213,7 +213,7 @@ run_mesh_migration_ledger() {
   fi
 }
 
-# Connect probe smoke (codewire/plans:connect-rpc/03, WI-3): a binary started
+# Connect probe smoke (connect-rpc/03, WI-3): a binary started
 # with CONNECT_TESTING_SURFACE=1 must answer Connect JSON on the D8 probe —
 # PublicPing without a credential, Ping with the seeded contract session
 # cookie — through the same port that serves REST. The Rust shared serving-
@@ -243,7 +243,7 @@ probe_connect_surface() {
   log "${name}: Connect probe surface OK"
 }
 
-# Connect auth-layer acceptance matrix (codewire/plans:connect-rpc/03, WI-2):
+# Connect auth-layer acceptance matrix (connect-rpc/03, WI-2):
 # session cookie / cw_ API key / OIDC bearer admission plus raw session-bearer
 # rejection through ConnectAuthLayer, rejection wire shapes, admin mount, and
 # allowlist bypass.
