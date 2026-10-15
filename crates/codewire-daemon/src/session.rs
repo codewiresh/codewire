@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use codewire_daemon_proto::daemon::v1;
 use portable_pty::{PtySize, native_pty_system};
-use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -415,21 +414,18 @@ async fn end_process_group<W, T>(leader: Option<u32>, end: GroupEnd, grace: Dura
 where
     W: Future<Output = T>,
 {
-    let Some(group) = leader
-        .and_then(|pid| i32::try_from(pid).ok())
-        .and_then(Pid::from_raw)
-    else {
+    let Some(group) = leader.and_then(|pid| i32::try_from(pid).ok()) else {
         // Already reaped: nothing to signal.
         return wait.await;
     };
     tokio::pin!(wait);
     if end == GroupEnd::HangUp {
-        let _ = kill_process_group(group, Signal::HUP);
+        signal_process_group(group, GroupSignal::HangUp);
         if let Ok(result) = tokio::time::timeout(grace, &mut wait).await {
             return result;
         }
     }
-    let _ = kill_process_group(group, Signal::TERM);
+    signal_process_group(group, GroupSignal::Terminate);
     let deadline = tokio::time::Instant::now() + grace;
     let reaped = tokio::time::timeout_at(deadline, &mut wait).await.ok();
     if reaped.is_some() {
@@ -438,7 +434,7 @@ where
         }
     }
     if reaped.is_none() || process_group_has_members(group) {
-        let _ = kill_process_group(group, Signal::KILL);
+        signal_process_group(group, GroupSignal::Kill);
     }
     match reaped {
         Some(result) => result,
@@ -446,14 +442,47 @@ where
     }
 }
 
+#[derive(Clone, Copy)]
+enum GroupSignal {
+    HangUp,
+    Terminate,
+    Kill,
+}
+
+/// Send `signal` to the process group `group` leads.
+#[cfg(unix)]
+fn signal_process_group(group: i32, signal: GroupSignal) {
+    let signal = match signal {
+        GroupSignal::HangUp => libc::SIGHUP,
+        GroupSignal::Terminate => libc::SIGTERM,
+        GroupSignal::Kill => libc::SIGKILL,
+    };
+    // Group 0 would be the daemon's own, and -1 every process it may signal.
+    if group > 1 {
+        // SAFETY: kill takes no pointers; a negative id names exactly the
+        // process group `group`.
+        unsafe { libc::kill(-group, signal) };
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_process_group(_group: i32, _signal: GroupSignal) {}
+
+/// Whether any process, a zombie included, is still in `group`.
+#[cfg(unix)]
+fn process_group_exists(group: i32) -> bool {
+    // SAFETY: kill takes no pointers; signal 0 only checks that the group
+    // `group` has a member.
+    group > 1 && unsafe { libc::kill(-group, 0) } == 0
+}
+
 /// Whether a live process is still in `group`. A zombie is not: it waits
 /// only for its parent, or PID 1, to reap it.
 #[cfg(target_os = "linux")]
-fn process_group_has_members(group: Pid) -> bool {
+fn process_group_has_members(group: i32) -> bool {
     let Ok(processes) = std::fs::read_dir("/proc") else {
-        return test_kill_process_group(group).is_ok();
+        return process_group_exists(group);
     };
-    let group = group.as_raw_nonzero().get();
     processes.flatten().any(|process| {
         process
             .file_name()
@@ -464,9 +493,14 @@ fn process_group_has_members(group: Pid) -> bool {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
-fn process_group_has_members(group: Pid) -> bool {
-    test_kill_process_group(group).is_ok()
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_group_has_members(group: i32) -> bool {
+    process_group_exists(group)
+}
+
+#[cfg(not(unix))]
+fn process_group_has_members(_group: i32) -> bool {
+    false
 }
 
 /// Whether a `/proc/<pid>/stat` line is a live process in `group`.

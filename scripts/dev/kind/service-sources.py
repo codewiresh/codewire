@@ -4,7 +4,8 @@
 `make kind-test` deploys only the services a change feeds, and skips one whose
 current inputs the cluster already runs:
 
-  service-sources.py changes --base REF   changed crates and migrations, and
+  service-sources.py changes --base REF   crates changed outside their
+                                          migrations, changed migrations, and
                                           the services they feed, between the
                                           merge base and the working tree
   service-sources.py digest SERVICE       digest of SERVICE's current inputs
@@ -186,13 +187,14 @@ def command_changes(base: str) -> None:
     changed = [path for path in git("diff-tree", "-r", "-z", "--name-only", "--no-renames",
                                     merge_base, working_tree(paths)).split("\0") if path]
     names = {directory: name for name, (directory, _) in crates.items()}
-    for name in sorted({names[directory] for path in changed
+    migrations = [path for path in changed
+                  if len(path.split("/")) > 3 and path.split("/")[0] == "crates" and path.split("/")[2] == "migrations"]
+    # A deploy applies migrations to the cluster's database; they are not code.
+    for name in sorted({names[directory] for path in changed if path not in migrations
                         for directory in names if under(path, [directory])}):
         print("crate", name)
-    for path in changed:
-        parts = path.split("/")
-        if len(parts) > 3 and parts[0] == "crates" and parts[2] == "migrations":
-            print("migration", path)
+    for path in migrations:
+        print("migration", path)
     for service in SERVICES:
         if any(under(path, inputs[service]) for path in changed):
             print("service", service)

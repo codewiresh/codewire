@@ -291,6 +291,9 @@ run_paths_case kind_deploy_helper_main push refs/heads/main false \
   deployments/docker/kind-dev-binary.Dockerfile
 run_paths_case kind_dev_helper_main push refs/heads/main false \
   'edge_kind kind policy policy_shell security security_js' scripts/dev/kind/kind-forwards.sh
+# The retained cluster's database helper runs its hermetic fixture, not Kind.
+run_paths_case kind_database_helper_main push refs/heads/main false \
+  'edge_kind policy policy_shell security security_js' scripts/dev/kind/database.sh
 run_paths_case root_secret_authority_inputs pull_request refs/pull/20013/head false \
   'policy' .env.example secret-authority.example.json
 run_paths_case ci_tool_download_contract pull_request refs/pull/2002/head false \
