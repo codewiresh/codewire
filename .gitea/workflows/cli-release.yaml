@@ -39,7 +39,7 @@ env:
   OPENBAO_GITHUB_ROLE: codewire-source-cli-github-mirror
   OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-cli-github-mirror
   # The scoped R2 release route is admitted; publication and channel changes
-  # remain explicit dispatch inputs (docs/runbooks/cw-release-delivery.md).
+  # remain explicit dispatch inputs (runbooks/cw-release-delivery.md).
   CW_RELEASE_R2_ROUTE_ADMITTED: 'true'
 
 jobs:
@@ -196,7 +196,7 @@ jobs:
     # The macOS cw links Apple frameworks (Security, SystemConfiguration), so
     # it is built natively on the protected mac-runner runner: one ephemeral
     # registration per job, as the unprivileged ci account (infra
-    # docs/runbooks/macos-arm64-runner.md). Compilation only: no OIDC,
+    # runbooks/macos-arm64-runner.md). Compilation only: no OIDC,
     # signing, mirror or R2 capability exists in this job.
     name: Build the macOS cw natively
     needs: [release-selection, build-runtime-linux]

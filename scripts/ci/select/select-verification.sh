@@ -1423,12 +1423,18 @@ if [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
+      scripts/dev/kind/database.sh)
+        # The retained cluster's database upgrade, reset and restore. The Kind
+        # gate never runs it; its hermetic fixture runs with the edge family.
+        select_token edge_kind
+        recognized=true
+        ;;
       scripts/dev/kind/*)
         select_token edge_kind
         kind_relevant=true
         recognized=true
         ;;
-      scripts/runtime/*apikey*|docs/runbooks/connect-apikey-lifecycle-smoke.md)
+      scripts/runtime/*apikey*)
         select_token service_apikey_smoke
         recognized=true
         ;;

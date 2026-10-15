@@ -253,7 +253,7 @@ jobs:
     # The workspace-pin bot's token is the only capability: it pushes one
     # automation branch and opens or updates one pull request, which starts CI
     # like a person's. The bot cannot merge. The checkout keeps no job token,
-    # so git sends only the bot's credential (docs/runbooks/workspace-image-pin.md).
+    # so git sends only the bot's credential (runbooks/workspace-image-pin.md).
     name: Propose the published workspace image pin
     runs-on: ci-protected
     enable-openid-connect: true

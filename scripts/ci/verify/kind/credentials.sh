@@ -706,29 +706,48 @@ KIND_BRIDGE_RENEWAL_STOP_TIMEOUT=15s
 
 # The Codex session's rotation idle ends once the workspace token is replaced
 # and a fresh-token epoch is admitted, rather than after the full 600-second
-# epoch bound. The admission is what the credential fixture records: this
-# environment's first bridge authentication with a replaced workspace token
-# after the baseline response. Poll for it in the background of the calling
-# shell (KIND_ADMISSION_WATCH_PID) and mark it in the workspace; the session
+# epoch bound. The credential fixture records the broker authenticating this
+# environment's bridge with a replaced workspace token after the baseline
+# response. The broker authenticates a successor before the relay decides on
+# it, so the relay must also have admitted its latest successor: one that would
+# not outlive the current epoch is refused until kubelet replaces the relay's
+# own token too (run 14359). Poll for both in the background of the calling
+# shell (KIND_ADMISSION_WATCH_PID) and mark them in the workspace; the session
 # still requires the replaced token itself, and assert_kind_credential_rotation
 # still asserts the whole transcript.
 KIND_ADMISSION_WATCH_SECONDS=720
 start_kind_credential_admission_watch() {
-  local environment="$1" pod="$2" marker="$3"
+  local environment="$1" pod="$2" relay_pod="$3" marker="$4"
   [[ "$marker" =~ ^/tmp/codewire-kind-fresh-admission-[0-9]{1,12}$ ]] || return 1
-  watch_kind_credential_fresh_admission "$environment" "$pod" "$marker" &
+  watch_kind_credential_fresh_admission "$environment" "$pod" "$relay_pod" "$marker" &
   KIND_ADMISSION_WATCH_PID=$!
 }
 
+# Whether the relay Pod RELAY_POD admitted its latest successor epoch for
+# ENVIRONMENT, rather than refusing it.
+kind_credential_relay_admitted_successor() {
+  local environment="$1" relay_pod="$2"
+  kubectl -n "$NS" logs "pod/$relay_pod" -c orchestration | jq -Rne --arg environment "$environment" '
+    [inputs | fromjson? | select(type == "object"
+        and .target == "codewire_orchestration::worker::credential_relay::epoch"
+        and (.fields | type == "object")
+        and (.fields.event == "credential_bridge_epoch_overlap"
+          or .fields.event == "credential_bridge_successor_refused")
+        and .fields.environment_id == $environment)
+      | .fields.event] | last == "credential_bridge_epoch_overlap"' >/dev/null
+}
+
 watch_kind_credential_fresh_admission() {
-  local environment="$1" pod="$2" marker="$3" deadline=$((SECONDS + KIND_ADMISSION_WATCH_SECONDS))
+  local environment="$1" pod="$2" relay_pod="$3" marker="$4"
+  local deadline=$((SECONDS + KIND_ADMISSION_WATCH_SECONDS))
   while [ "$SECONDS" -lt "$deadline" ]; do
     if kind_credential_fixture_events 2>/dev/null | jq -e --arg environment "$environment" '
         (map(.event == "provider_response" and .scenario == "baseline"
           and .attempt == 1 and .status == 200) | index(true)) as $baseline |
         $baseline != null and (to_entries | any(.[]; .key > $baseline
           and .value.event == "bridge_authenticated" and .value.environment_id == $environment
-          and .value.workspace_token_changed == true))' >/dev/null 2>&1; then
+          and .value.workspace_token_changed == true))' >/dev/null 2>&1 &&
+        kind_credential_relay_admitted_successor "$environment" "$relay_pod" 2>/dev/null; then
       kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- touch "$marker" && return 0
     fi
     sleep 5
@@ -1283,7 +1302,7 @@ kind_credential_native_smoke() (
   # The proxy session forces the proxy provider; its broker refreshes rotate
   # the delivered login too.
   admission="/tmp/codewire-kind-fresh-admission-${RANDOM}${RANDOM}"
-  start_kind_credential_admission_watch "$environment" "$pod" "$admission" || return $?
+  start_kind_credential_admission_watch "$environment" "$pod" "$relay_pod" "$admission" || return $?
   admission_pid="$KIND_ADMISSION_WATCH_PID"
   kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - "$admission" \
     < "$ROOT/scripts/ci/verify/kind/codex_session.py" | tee "$RUN_DIR/credential-native-session.jsonl"

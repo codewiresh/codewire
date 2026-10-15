@@ -811,7 +811,7 @@ authorize no live reset.
 
 Migration `0034_workspace_claim_time_binding.sql` is additive. It changes no
 existing row, helper or earlier migration. It implements section 6 of the
-[claim-time binding design](../plans/2026-09-30-workspace-claim-time-binding.md)
+claim-time binding design (2026-09-30-workspace-claim-time-binding.md)
 for Program #2238 (slice B1).
 
 `sandbox_workspace_bindings` records which environment one exact workspace Pod
@@ -1007,7 +1007,7 @@ schema survives. These tests and instructions authorize no live reset.
 Migration `0037_sandbox_ssh_host_keys.sql` is additive. It adds one table,
 `sandbox_ssh_host_keys`, and changes no existing row, helper or earlier
 migration. It implements S3 of the
-[daemon-hosted access design](../plans/2026-10-06-daemon-hosted-access.md)
+daemon-hosted access design (2026-10-06-daemon-hosted-access.md)
 for Program #2238.
 
 A workspace daemon generates an Ed25519 host key when it binds and records the

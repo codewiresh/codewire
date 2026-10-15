@@ -291,6 +291,9 @@ run_paths_case kind_deploy_helper_main push refs/heads/main false \
   deployments/docker/kind-dev-binary.Dockerfile
 run_paths_case kind_dev_helper_main push refs/heads/main false \
   'edge_kind kind policy policy_shell security security_js' scripts/dev/kind/kind-forwards.sh
+# The retained cluster's database helper runs its hermetic fixture, not Kind.
+run_paths_case kind_database_helper_main push refs/heads/main false \
+  'edge_kind policy policy_shell security security_js' scripts/dev/kind/database.sh
 run_paths_case root_secret_authority_inputs pull_request refs/pull/20013/head false \
   'policy' .env.example secret-authority.example.json
 run_paths_case ci_tool_download_contract pull_request refs/pull/2002/head false \
@@ -1320,13 +1323,6 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
   docs/dev/DERP-STUN.md \
   docs/dev/KIND-E2E.md \
   docs/dev/LOCAL-DEV.md \
-  docs/dev/MESH-PROD-OPS.md \
-  docs/dev/SANDBOX-CAPACITY-OPS.md \
-  docs/dev/TAILNET-PARITY-HARNESS.md \
-  docs/runbooks/kata-dev-runtime-validation.md \
-  docs/runbooks/runtime-coco-trustee-test-resource.md \
-  docs/runbooks/runtime-dev-commodity-smoke.md \
-  docs/runbooks/rust-release-candidate-staging.md \
   libs/sdk-go/local.go \
   libs/sdk-go/local_files.go \
   libs/sdk-python/codewire/__init__.py \
