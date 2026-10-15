@@ -771,7 +771,7 @@ class InspectionTests(SyntheticSource):
 
 
 class VerificationProfileTests(unittest.TestCase):
-    def test_every_reader_pins_one_ci_profile_and_publication_stays_release(self):
+    def test_every_reader_pins_one_ci_profile_and_publication_keeps_its_profiles(self):
         root = HELPER.parents[3]
         shell = (root / "scripts/ci/images/workspace-cache.sh").read_text()
         pins = [line.split("=", 1)[1] for line in shell.splitlines()
@@ -785,9 +785,16 @@ class VerificationProfileTests(unittest.TestCase):
         self.assertEqual(report.WORKSPACE_CW_PROFILE, "ci")
         self.assertEqual(shell.count('cw-image-consumer.sh" "$WORKSPACE_CW_PROFILE" '), 2)
         self.assertNotIn('cw-image-consumer.sh" release', shell)
-        # Only verification changes; publication builds the release profile.
+        # Only verification changes. Publication builds the workspace image's
+        # cw with the release profile, and the runtime images' cw with the
+        # runtime profile (thin LTO, #2855).
         publish = (root / "scripts/ci/images/build-push-image.sh").read_text()
-        self.assertEqual(publish.count('cw-image-consumer.sh" release '), 3)
+        self.assertEqual(publish.count('cw-image-consumer.sh" '), 3)
+        self.assertEqual(publish.count('cw-image-consumer.sh" runtime '), 2)
+        self.assertEqual(publish.count('cw-image-consumer.sh" release '), 1)
+        release = publish.index('cw-image-consumer.sh" release ')
+        guard = publish[publish.rindex("  if [ ", 0, release):release]
+        self.assertIn('= workspace:images/workspace/Dockerfile ]; then', guard)
         self.assertNotIn("WORKSPACE_CW_PROFILE", publish)
 
 
