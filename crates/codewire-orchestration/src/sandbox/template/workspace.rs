@@ -661,10 +661,14 @@ fn daemon_mount(runtime_spec: &RuntimeProfileSpec) -> Value {
     }
 }
 
+/// The daemon-copy init writes the whole `cw` (about 160 MB) through the page
+/// cache, which its memory limit is charged for: under 128Mi a busy node could
+/// kill the copy before writeback caught up. The request is unchanged, so
+/// scheduling is unchanged.
 fn bootstrap_resources() -> Value {
     json!({
         "requests": { "cpu": "25m", "memory": "32Mi" },
-        "limits": { "cpu": "100m", "memory": "128Mi" },
+        "limits": { "cpu": "100m", "memory": "512Mi" },
     })
 }
 
