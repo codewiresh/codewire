@@ -59,6 +59,7 @@ pub(crate) use credential_repository::*;
 mod credential_input;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credentials;
+mod login_screen;
 mod platform_credentials;
 mod platform_profiles;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

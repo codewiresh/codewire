@@ -756,7 +756,19 @@ pub(crate) fn oauth_user_display_name(user: &OAuthUserInfo) -> String {
         .unwrap_or_else(|| "(unknown)".to_string())
 }
 
+/// Open `url` in the person's browser, fully detached from this command: the
+/// opener and the browser it starts get null stdin, stdout and stderr and
+/// their own process group, and are never waited on. A browser's own messages
+/// (an X11 socket notice, for example) therefore never land on a prompt this
+/// command is showing, and a Ctrl-C at that prompt does not reach the browser.
+/// Callers print the URL themselves first, so a browser that does not open
+/// changes nothing.
 pub(crate) fn open_browser(url: &str) -> anyhow::Result<()> {
+    browser_command(url).spawn().context("open browser")?;
+    Ok(())
+}
+
+fn browser_command(url: &str) -> ProcessCommand {
     let mut command = if cfg!(target_os = "macos") {
         let mut command = ProcessCommand::new("open");
         command.arg(url);
@@ -770,8 +782,16 @@ pub(crate) fn open_browser(url: &str) -> anyhow::Result<()> {
         command.arg(url);
         command
     };
-    command.spawn().context("open browser")?;
-    Ok(())
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    command
 }
 
 pub(crate) async fn handle_org_command(
