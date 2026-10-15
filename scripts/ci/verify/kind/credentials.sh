@@ -262,6 +262,37 @@ kind_credential_cli() {
     "$CARGO_CI_DIR/cw" "$@"
 }
 
+# A credential fixture environment that fails or stalls is removed right after
+# this wait returns, taking its Pods and their logs with it. Record what the
+# kubelet saw first: each of its Pods' phase and per-container states with
+# exit codes, its init and workspace logs, and its events. Pod specs are not
+# printed: their environment carries the daemon token.
+kind_credential_environment_diagnostics() {
+  local environment="$1" pod pods
+  echo "::group::credential fixture environment ${environment} Pods"
+  pods="$(kubectl -n "$SANDBOX_NS" get pods -l "codewire.sh/environment-id=$environment" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1)" || pods=''
+  kubectl -n "$SANDBOX_NS" get pods -l "codewire.sh/environment-id=$environment" -o json 2>&1 | jq '
+    [.items[]? | {name: .metadata.name, uid: .metadata.uid, created: .metadata.creationTimestamp,
+      deleting: .metadata.deletionTimestamp,
+      generation: .metadata.labels["codewire.sh/environment-operation-generation"],
+      phase: .status.phase, reason: .status.reason, message: .status.message,
+      conditions: [.status.conditions[]? | {type, status, reason, message}],
+      init: [.status.initContainerStatuses[]? | {name, image, imageID, restartCount, state, lastState}],
+      containers: [.status.containerStatuses[]? | {name, image, imageID, restartCount, state, lastState}]}]' \
+    2>&1 || true
+  for pod in $pods; do
+    for container in codewire-daemon-init workspace; do
+      echo "--- ${pod} ${container}"
+      kubectl -n "$SANDBOX_NS" logs "$pod" -c "$container" --tail=200 2>&1 || true
+    done
+    echo "--- ${pod} events"
+    kubectl -n "$SANDBOX_NS" get events --field-selector "involvedObject.name=${pod}" \
+      --sort-by=.lastTimestamp 2>&1 | tail -n 40 || true
+  done
+  echo '::endgroup::'
+}
+
 wait_kind_credential_environment() {
   local environment="$1" expected="$2" state attempt
   for ((attempt = 0; attempt < 180; attempt++)); do
@@ -288,11 +319,13 @@ SQL
     if [ "$state" = "$expected" ]; then return 0; fi
     if [ "$state" = error ]; then
       echo '::error::credential fixture environment entered error state' >&2
+      kind_credential_environment_diagnostics "$environment" >&2
       return 1
     fi
     sleep 2
   done
   echo "::error::credential fixture environment did not reach ${expected}" >&2
+  kind_credential_environment_diagnostics "$environment" >&2
   return 1
 }
 
@@ -344,6 +377,7 @@ wait_kind_credential_restarted_workspace() {
     sleep 2
   done
   echo "::error::credential fixture environment ${environment} did not materialize its generation-${generation} workspace Pod exec-ready after the managed restart" >&2
+  kind_credential_environment_diagnostics "$environment" >&2
   return 1
 }
 

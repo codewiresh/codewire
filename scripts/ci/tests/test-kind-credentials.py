@@ -1373,6 +1373,43 @@ wait_kind_credential_environment '%s' running
             '::error::credential fixture environment observation failed while waiting for running',
             result.stderr)
 
+    def test_error_state_records_the_failed_pod_before_cleanup_removes_it(self):
+        # The fixture environment is removed right after the wait fails; the
+        # failed Pod's container states and init log must be printed first,
+        # and nothing from the Pod spec (its environment holds a token).
+        pods = json.dumps({"items": [{
+            "metadata": {"name": "sandbox-%s" % ENVIRONMENT, "uid": "u1",
+                         "creationTimestamp": "t", "labels": {}},
+            "spec": {"containers": [{"env": [{"name": "TOKEN", "value": "spec-secret"}]}]},
+            "status": {"phase": "Failed", "initContainerStatuses": [{
+                "name": "codewire-daemon-init", "image": "codewire-daemon:e2e",
+                "imageID": "sha256:d", "restartCount": 0,
+                "state": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}},
+                "lastState": {}}]}}]})
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+kind_credential_cli() { printf '{%%s}' '"state":"error"'; }
+sleep() { :; }
+kubectl() {
+  case "$*" in
+    *"get pods -l codewire.sh/environment-id=%s -o jsonpath="*) printf 'sandbox-%s\\n' ;;
+    *"get pods -l codewire.sh/environment-id=%s -o json") printf '%%s' '%s' ;;
+    *"logs sandbox-%s -c codewire-daemon-init"*) echo 'cp: write error: No space left on device' ;;
+    *"logs sandbox-%s -c workspace"*) echo 'container "workspace" is waiting to start' ;;
+    *"get events"*) echo 'Warning PodFailed' ;;
+    *) return 99 ;;
+  esac
+}
+wait_kind_credential_environment '%s' running
+''' % ((ENVIRONMENT,) * 3 + (pods,) + (ENVIRONMENT,) * 3))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('::error::credential fixture environment entered error state', result.stderr)
+        self.assertIn('"exitCode": 137', result.stderr)
+        self.assertIn('"reason": "OOMKilled"', result.stderr)
+        self.assertIn('cp: write error: No space left on device', result.stderr)
+        self.assertIn('Warning PodFailed', result.stderr)
+        self.assertNotIn('spec-secret', result.stderr)
+
     def test_environment_observation_failure_survives_an_empty_successful_jq(self):
         # Older jq variants exit 0 with no output on empty input (the job
         # image's jq, where -e does not cover the empty stream). The empty

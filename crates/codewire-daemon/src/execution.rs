@@ -128,6 +128,8 @@ pub struct PreparedProcess {
     environment: Vec<(String, String)>,
     pending_process_spec: Option<PathBuf>,
     launch: Option<LaunchRendezvous>,
+    /// Set just before the launcher is told to execute (#2769).
+    launch_committed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for PreparedProcess {
@@ -171,6 +173,7 @@ impl PreparedProcess {
                 environment: split_environment(environment),
                 pending_process_spec: None,
                 launch: None,
+                launch_committed: Default::default(),
             }),
             ProcessExecution::Runc(config) => prepare_runc(
                 config,
@@ -223,6 +226,13 @@ impl PreparedProcess {
     /// this owner drops, including cancellation before the helper first runs.
     pub fn spawned(&mut self) {}
 
+    /// Whether the launcher was told to execute (#2769). After that, a
+    /// failure or cancellation is never a denial: the program may have
+    /// started.
+    pub(crate) fn launch_committed(&self) -> bool {
+        self.launch_committed
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
     /// Complete the exact-child rendezvous before the caller marks it Running.
     /// Cancellation drops the relay future and its existing bridge budget guard.
     pub(crate) async fn project_spawned(&mut self, pid: Option<u32>) -> io::Result<()> {
@@ -313,6 +323,7 @@ fn prepare_runc(
         environment: Vec::new(),
         pending_process_spec: Some(path),
         launch: None,
+        launch_committed: Default::default(),
     })
 }
 

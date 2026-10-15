@@ -5147,7 +5147,15 @@ fn terminal_pod_failure_reason(pod: &Pod) -> Option<(String, String)> {
             .clone()
             .filter(|reason| !reason.trim().is_empty())
             .unwrap_or_else(|| format!("Pod{phase}"));
-        let message = status.message.clone().unwrap_or_default();
+        // A Pod whose container failed carries no message of its own: name
+        // each terminated container and how it ended (exit code, reason such
+        // as OOMKilled, signal), so the failure is diagnosable after the Pod
+        // is gone.
+        let message = status
+            .message
+            .clone()
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| terminated_containers(status));
         return Some((reason, message));
     }
 
@@ -5167,6 +5175,39 @@ fn terminal_pod_failure_reason(pod: &Pod) -> Option<(String, String)> {
                 )
             })
         })
+}
+
+/// Each init and regular container that terminated, as
+/// `name exited CODE (REASON, signal N)`, joined by `; `.
+fn terminated_containers(status: &k8s_openapi::api::core::v1::PodStatus) -> String {
+    status
+        .init_container_statuses
+        .as_deref()
+        .into_iter()
+        .flatten()
+        .chain(status.container_statuses.as_deref().into_iter().flatten())
+        .filter_map(|container| {
+            let terminated = container.state.as_ref()?.terminated.as_ref()?;
+            let mut detail = Vec::new();
+            if let Some(reason) = terminated.reason.as_deref().filter(|r| !r.is_empty()) {
+                detail.push(reason.to_string());
+            }
+            if let Some(signal) = terminated.signal.filter(|signal| *signal != 0) {
+                detail.push(format!("signal {signal}"));
+            }
+            Some(if detail.is_empty() {
+                format!("{} exited {}", container.name, terminated.exit_code)
+            } else {
+                format!(
+                    "{} exited {} ({})",
+                    container.name,
+                    terminated.exit_code,
+                    detail.join(", ")
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Mirrors `isClaimReady`: (ready, reason).
@@ -6117,6 +6158,45 @@ mod tests {
             Some(("StartError".into(), "start failed".into()))
         );
         assert!(pod_requires_product_replacement(&failed_phase));
+
+        // A Pod failed by its init container has no message of its own; the
+        // terminated containers name the cause.
+        let failed_init: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "workspace", "uid": "uid-4"},
+            "spec": {
+                "initContainers": [{"name": "codewire-daemon-init", "image": "init:test"}],
+                "containers": [{"name": "workspace", "image": "workspace:test"}]
+            },
+            "status": {
+                "phase": "Failed",
+                "initContainerStatuses": [{
+                    "name": "codewire-daemon-init",
+                    "image": "init:test",
+                    "imageID": "",
+                    "ready": false,
+                    "restartCount": 0,
+                    "state": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}}
+                }],
+                "containerStatuses": [{
+                    "name": "workspace",
+                    "image": "workspace:test",
+                    "imageID": "",
+                    "ready": false,
+                    "restartCount": 0,
+                    "state": {"waiting": {"reason": "PodInitializing"}}
+                }]
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            terminal_pod_failure_reason(&failed_init),
+            Some((
+                "PodFailed".into(),
+                "codewire-daemon-init exited 137 (OOMKilled)".into()
+            ))
+        );
     }
 
     fn timeline_pod(workspace_restarts: i32, dind_state: Value) -> Pod {

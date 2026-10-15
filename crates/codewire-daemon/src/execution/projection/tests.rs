@@ -203,3 +203,29 @@ async fn selected_projection_never_falls_back_when_identity_or_native_helper_is_
     assert!(prepare(&configuration).is_err());
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
 }
+
+#[tokio::test]
+async fn a_launch_is_committed_before_its_commit_byte_so_a_later_failure_is_never_a_denial() {
+    // #2769: a Resume is undone only for a launch denied before the launcher
+    // was told to execute. `committed` is set first, so a commit write that
+    // fails (or is cancelled) still counts as committed: unknown, never a
+    // denial.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (mut daemon, launcher) = tokio::net::UnixStream::pair().unwrap();
+    drop(launcher);
+    let committed = AtomicBool::new(false);
+    assert!(commit_launch(&mut daemon, &committed).await.is_err());
+    assert!(committed.load(Ordering::SeqCst));
+    assert_eq!(
+        crate::durable_session::launch_failure_status(committed.load(Ordering::SeqCst)),
+        crate::durable_session::LAUNCH_COMMITTED_UNKNOWN
+    );
+    // Delivered: the launcher reads exactly the commit byte, then the end.
+    let (mut daemon, mut launcher) = tokio::net::UnixStream::pair().unwrap();
+    let committed = AtomicBool::new(false);
+    commit_launch(&mut daemon, &committed).await.unwrap();
+    assert!(committed.load(Ordering::SeqCst));
+    let mut sent = Vec::new();
+    launcher.read_to_end(&mut sent).await.unwrap();
+    assert_eq!(sent, [LAUNCH_COMMIT]);
+}
