@@ -116,16 +116,17 @@ jobs:
     # #2733): the arm64 guest root, the arm64 kernel (from the release parts
     # cache, or built in its pinned container), the aarch64 cw runtime and
     # the Linux-side GPL sources; and the Linux x86_64 target as the linux
-    # fragment, which build-darwin merges into the one document. Each comes
+    # fragment, which pack-runtime merges into the one document. Each comes
     # from the release source's own scripts and pins. A source that predates
     # the runtime embeds none. Compilation and pinned downloads only: no
     # OIDC, signing, mirror or R2 write capability exists in this job.
     name: Build the local runtime's Linux side
     needs: [release-selection]
     runs-on: ci-protected
-    # Both kernels (about 25 min each when not cached), both guest roots and
-    # both cw runtimes (about 15 min each): bounded well below the pool's
-    # limit, so a wedged build cannot hold a release for hours.
+    # Both kernels (about 20 min, side by side, when not cached), then each
+    # target's guest root and cw runtime beside the other's (about 25 min):
+    # bounded well below the pool's limit, so a wedged build cannot hold a
+    # release for hours.
     timeout-minutes: 165
     outputs:
       present: ${{ steps.build.outputs.present }}
@@ -351,20 +352,21 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  build-darwin:
-    # The macOS cw links Apple frameworks (Security, SystemConfiguration), so
-    # it is built natively on the protected mac-runner runner: one ephemeral
-    # registration per job, as the unprivileged ci account (infra
-    # runbooks/macos-arm64-runner.md). Compilation only: no OIDC,
-    # signing, mirror or R2 capability exists in this job.
-    name: Build the macOS cw natively
+  pack-runtime:
+    # The one local runtime document every release cw embeds, and the only
+    # output the four cw builds wait for: the macOS target packed on the Mac
+    # from the Linux side and the signed helper, merged with the Linux job's
+    # linux-x86_64 fragment. Packed in its own short job, so the macOS pair
+    # and both Linux cws then build at the same time. Compilation only: no
+    # OIDC, signing, mirror or R2 capability exists in this job.
+    name: Pack the local runtime
     needs: [release-selection, build-runtime-linux, build-helper-darwin, sign-helper]
     runs-on: macos-arm64
+    timeout-minutes: 45
     outputs:
-      darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
+      present: ${{ steps.runtime.outputs.present }}
       records_sha256: ${{ steps.runtime.outputs.records_sha256 }}
-      # The one local runtime document every release cw embeds; build-release
-      # requires the runtime it imports to be exactly this one.
+      # Every release cw embeds exactly this document; it binds every blob.
       document_sha256: ${{ steps.runtime.outputs.document_sha256 }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -381,16 +383,6 @@ jobs:
         run: |
           set -euo pipefail
           [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
-
-      - name: Install protoc (pinned)
-        run: |
-          set -euo pipefail
-          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip" \
-            193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2 "$HOME/protoc.zip"
-          mkdir -p "$HOME/.proto-tools/protoc"
-          unzip -o -q "$HOME/protoc.zip" -d "$HOME/.proto-tools/protoc"
-          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
-          "$HOME/.proto-tools/protoc/bin/protoc" --version
 
       - name: Receive the local runtime's Linux side
         if: needs.build-runtime-linux.outputs.present == 'true'
@@ -448,13 +440,25 @@ jobs:
           fi
           scripts/ci/release/build-local-runtime.sh macos --linux "$work/linux" \
             --source-sha "$SOURCE_SHA" ${helper[@]+"${helper[@]}"} --output "$work/macos"
-          echo "CW_RELEASE_LOCAL_RUNTIME_DIR=$work/macos/runtime" >> "$GITHUB_ENV"
+          mkdir -m 0700 ../.local-runtime
+          cp -R "$work/macos/runtime/." ../.local-runtime/
+          printf 'present=true\n' >> "$GITHUB_OUTPUT"
           mkdir -m 0700 ../.runtime-records
           tar -C "$work/macos/built" -cf ../.runtime-records/runtime-records.tar .
           printf 'records_sha256=%s\n' \
             "$(shasum -a 256 ../.runtime-records/runtime-records.tar | cut -c1-64)" >> "$GITHUB_OUTPUT"
           printf 'document_sha256=%s\n' \
-            "$(shasum -a 256 "$work/macos/runtime/local-runtime.json" | cut -c1-64)" >> "$GITHUB_OUTPUT"
+            "$(shasum -a 256 ../.local-runtime/local-runtime.json | cut -c1-64)" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the local runtime to the cw builds
+        if: steps.runtime.outputs.present == 'true'
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-release-runtime-${{ github.run_id }}
+          path: .local-runtime/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Hand the runtime part records to publication
         if: steps.runtime.outputs.records_sha256 != ''
@@ -465,6 +469,64 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
+
+  build-darwin:
+    # The macOS cw links Apple frameworks (Security, SystemConfiguration), so
+    # it is built natively on the protected mac-runner runner: one ephemeral
+    # registration per job, as the unprivileged ci account (infra
+    # runbooks/macos-arm64-runner.md). Both targets
+    # build in one Cargo invocation, side by side, beside the two Linux cws.
+    # Compilation only: no OIDC, signing, mirror or R2 capability exists in
+    # this job.
+    name: Build the macOS cw natively
+    needs: [release-selection, pack-runtime]
+    runs-on: macos-arm64
+    timeout-minutes: 60
+    outputs:
+      darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+          fetch-depth: 0
+
+      - name: Confirm selected release checkout
+        env:
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+
+      - name: Install protoc (pinned)
+        run: |
+          set -euo pipefail
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip" \
+            193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2 "$HOME/protoc.zip"
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q "$HOME/protoc.zip" -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Receive the local runtime
+        if: needs.pack-runtime.outputs.present == 'true'
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-release-runtime-${{ github.run_id }}
+          path: .local-runtime
+
+      # Its document binds every blob; packaging checks them against it.
+      - name: Verify the received runtime is the packed runtime
+        if: needs.pack-runtime.outputs.present == 'true'
+        env:
+          DOCUMENT_SHA256: ${{ needs.pack-runtime.outputs.document_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$DOCUMENT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(shasum -a 256 .local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]
+          echo "CW_RELEASE_LOCAL_RUNTIME_DIR=$PWD/.local-runtime" >> "$GITHUB_ENV"
 
       - name: Build the macOS pair
         id: build
@@ -561,15 +623,16 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  build-release:
-    # Compilation and packaging only: no OIDC, signing, mirror or R2
-    # capability exists in this job.
-    name: Build four-target cw release delivery
-    needs: [release-selection, build-darwin, sign-darwin]
+  build-linux-musl:
+    # One Linux cw, built from the runtime document beside the macOS pair
+    # and the other Linux cw. Compilation only: no OIDC, signing, mirror or
+    # R2 capability exists in this job.
+    name: Build the Linux x86_64 cw
+    needs: [release-selection, pack-runtime]
     runs-on: ci-protected
+    timeout-minutes: 60
     outputs:
-      delivery_sha256: ${{ steps.prepare.outputs.delivery_sha256 }}
-      verifier_sha256: ${{ steps.verifier.outputs.verifier_sha256 }}
+      cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
@@ -611,30 +674,236 @@ jobs:
 
           cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
 
+      - name: Receive the local runtime
+        if: needs.pack-runtime.outputs.present == 'true'
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-release-runtime-${{ github.run_id }}
+          path: .local-runtime
+
+      # Its document binds every blob; packaging checks them against it.
+      - name: Verify the received runtime is the packed runtime
+        if: needs.pack-runtime.outputs.present == 'true'
+        env:
+          DOCUMENT_SHA256: ${{ needs.pack-runtime.outputs.document_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$DOCUMENT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(sha256sum .local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]
+          echo "CW_RELEASE_LOCAL_RUNTIME_DIR=$PWD/.local-runtime" >> "$GITHUB_ENV"
+
+      - name: Build the cw
+        id: build
+        working-directory: .release-source
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: |
+          set -euo pipefail
+          CW_RELEASE_BUILD_CMD='cargo zigbuild' CW_RELEASE_TARGETS='x86_64-unknown-linux-musl' \
+            ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"
+          mkdir -m 0700 ../.cw-linux
+          cp "dist/cw-release/cw-$RELEASE_TAG-x86_64-unknown-linux-musl" ../.cw-linux/
+          printf 'cw_sha256=%s\n' \
+            "$(sha256sum "../.cw-linux/cw-$RELEASE_TAG-x86_64-unknown-linux-musl" | cut -c1-64)" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the cw to packaging
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-release-x86_64-unknown-linux-musl-${{ github.run_id }}
+          path: .cw-linux/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  build-linux-gnu:
+    # One Linux cw, built from the runtime document beside the macOS pair
+    # and the other Linux cw. Compilation only: no OIDC, signing, mirror or
+    # R2 capability exists in this job.
+    name: Build the Linux arm64 cw
+    needs: [release-selection, pack-runtime]
+    runs-on: ci-protected
+    timeout-minutes: 60
+    outputs:
+      cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+          fetch-depth: 0
+
+      - name: Confirm selected release checkout
+        env:
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+
+      - name: Verify sealed Rust toolchain and release targets
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Install protoc (pinned)
+        run: |
+          set -euo pipefail
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Set up cross-build tools
+        run: |
+          set -euo pipefail
+          scripts/ci/setup/assert-ci-runner-image.sh
+
+          zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          scripts/ci/release/fetch-pinned.sh "$zig_url" "$ZIG_X86_64_LINUX_SHA256" zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+          cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
+
+      - name: Receive the local runtime
+        if: needs.pack-runtime.outputs.present == 'true'
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-release-runtime-${{ github.run_id }}
+          path: .local-runtime
+
+      # Its document binds every blob; packaging checks them against it.
+      - name: Verify the received runtime is the packed runtime
+        if: needs.pack-runtime.outputs.present == 'true'
+        env:
+          DOCUMENT_SHA256: ${{ needs.pack-runtime.outputs.document_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$DOCUMENT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(sha256sum .local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]
+          echo "CW_RELEASE_LOCAL_RUNTIME_DIR=$PWD/.local-runtime" >> "$GITHUB_ENV"
+
+      - name: Build the cw
+        id: build
+        working-directory: .release-source
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: |
+          set -euo pipefail
+          CW_RELEASE_BUILD_CMD='cargo zigbuild' CW_RELEASE_TARGETS='aarch64-unknown-linux-gnu' \
+            ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"
+          mkdir -m 0700 ../.cw-linux
+          cp "dist/cw-release/cw-$RELEASE_TAG-aarch64-unknown-linux-gnu" ../.cw-linux/
+          printf 'cw_sha256=%s\n' \
+            "$(sha256sum "../.cw-linux/cw-$RELEASE_TAG-aarch64-unknown-linux-gnu" | cut -c1-64)" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the cw to packaging
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-release-aarch64-unknown-linux-gnu-${{ github.run_id }}
+          path: .cw-linux/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  build-release:
+    # Packaging once all four cws exist: the signed macOS pair and the two
+    # Linux cws, each bound to the bytes its job built; it compiles only cw's
+    # signature verifier. No OIDC, signing, mirror or R2 capability exists in
+    # this job.
+    name: Build four-target cw release delivery
+    needs: [release-selection, pack-runtime, sign-darwin, build-linux-musl, build-linux-gnu]
+    runs-on: ci-protected
+    timeout-minutes: 30
+    outputs:
+      delivery_sha256: ${{ steps.prepare.outputs.delivery_sha256 }}
+      verifier_sha256: ${{ steps.verifier.outputs.verifier_sha256 }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+          fetch-depth: 0
+
+      - name: Confirm selected release checkout
+        env:
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+
+      - name: Verify sealed Rust toolchain and release targets
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Install protoc (pinned)
+        run: |
+          set -euo pipefail
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
       - name: Receive the signed macOS pair
         uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-release-darwin-signed-${{ github.run_id }}
           path: .release-source/dist-darwin
 
+      - name: Receive the Linux x86_64 cw
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-release-x86_64-unknown-linux-musl-${{ github.run_id }}
+          path: .release-source/dist-linux
+
+      - name: Receive the Linux arm64 cw
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-release-aarch64-unknown-linux-gnu-${{ github.run_id }}
+          path: .release-source/dist-linux
+
       - name: Verify the received macOS pair is the signed pair
         working-directory: .release-source
         env:
           DARWIN_SUMS_SHA256: ${{ needs.sign-darwin.outputs.darwin_sums_sha256 }}
-          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}
+          DOCUMENT_SHA256: ${{ needs.pack-runtime.outputs.document_sha256 }}
         run: |
           set -euo pipefail
           [[ "$DARWIN_SUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]
           (cd dist-darwin && sha256sum --check SHA256SUMS)
-          # The runtime the Linux cws embed is exactly the one the macOS job
-          # packed and its cws embed; its blobs are bound by that document.
+          # The pair carries exactly the runtime pack-runtime packed and every
+          # cw embeds; its blobs are bound by that document.
           if [ -n "$DOCUMENT_SHA256" ]; then
             [[ "$DOCUMENT_SHA256" =~ ^[0-9a-f]{64}$ ]]
             [ "$(sha256sum dist-darwin/local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]
           else
             [ ! -e dist-darwin/local-runtime ]
           fi
+
+      - name: Verify the received Linux cws are the built cws
+        working-directory: .release-source
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          MUSL_SHA256: ${{ needs.build-linux-musl.outputs.cw_sha256 }}
+          GNU_SHA256: ${{ needs.build-linux-gnu.outputs.cw_sha256 }}
+        run: |
+          set -euo pipefail
+          for pair in "x86_64-unknown-linux-musl=$MUSL_SHA256" "aarch64-unknown-linux-gnu=$GNU_SHA256"; do
+            asset="cw-$RELEASE_TAG-${pair%%=*}"
+            [[ "${pair#*=}" =~ ^[0-9a-f]{64}$ ]]
+            [ "$(sha256sum "dist-linux/$asset" | cut -c1-64)" = "${pair#*=}" ]
+            # Packaging imports all four cws from beside the signed pair.
+            install -m 0755 "dist-linux/$asset" "dist-darwin/$asset"
+          done
 
       - name: Package unsigned release delivery
         id: prepare
@@ -643,16 +912,15 @@ jobs:
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
-          DOCUMENT_SHA256: ${{ needs.build-darwin.outputs.document_sha256 }}
+          DOCUMENT_SHA256: ${{ needs.pack-runtime.outputs.document_sha256 }}
         run: |
           set -euo pipefail
-          # The macOS pair comes from build-darwin, signed by sign-darwin;
-          # preparation admits each by its build record exactly as a local
-          # build, and signing leaves that record unchanged. The Linux cws
-          # embed the imported runtime, and every cw must embed exactly it.
-          CW_RELEASE_BUILD_CMD='cargo zigbuild' \
-            CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu' \
-            CW_RELEASE_IMPORT_DIR=dist-darwin \
+          # The macOS pair comes from build-darwin, signed by sign-darwin, and
+          # each Linux cw from its own job; each was admitted where it was
+          # built, preparation admits each by its build record again, and
+          # signing leaves that record unchanged. Every cw must embed exactly
+          # the runtime pack-runtime packed.
+          CW_RELEASE_TARGETS=none CW_RELEASE_IMPORT_DIR=dist-darwin \
             ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"
           verified="$(python3 ../scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned)"
           printf '%s\n' "$verified"
@@ -700,7 +968,7 @@ jobs:
   package-release:
     # Signing, mirror and R2 capabilities exist only after a successful build.
     name: Sign and publish cw release
-    needs: [release-selection, build-darwin, build-release]
+    needs: [release-selection, pack-runtime, build-release]
     runs-on: ci-protected
     enable-openid-connect: true
     permissions:
@@ -823,7 +1091,7 @@ jobs:
             --promote "$PROMOTE_CHANNEL"
 
       - name: Receive the runtime part records
-        if: ${{ inputs.r2_publication == 'immutable' && needs.build-darwin.outputs.records_sha256 != '' }}
+        if: ${{ inputs.r2_publication == 'immutable' && needs.pack-runtime.outputs.records_sha256 != '' }}
         uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-release-runtime-records-${{ github.run_id }}
@@ -832,10 +1100,10 @@ jobs:
       # A record names blobs this release published, so it is written after
       # them; a later release with the same recipe then reuses those bytes.
       - name: Record the runtime parts this release built
-        if: ${{ inputs.r2_publication == 'immutable' && needs.build-darwin.outputs.records_sha256 != '' }}
+        if: ${{ inputs.r2_publication == 'immutable' && needs.pack-runtime.outputs.records_sha256 != '' }}
         working-directory: .release-source
         env:
-          RECORDS_SHA256: ${{ needs.build-darwin.outputs.records_sha256 }}
+          RECORDS_SHA256: ${{ needs.pack-runtime.outputs.records_sha256 }}
         run: |
           set -euo pipefail
           [ "$CW_RELEASE_R2_ROUTE_ADMITTED" = 'true' ]
