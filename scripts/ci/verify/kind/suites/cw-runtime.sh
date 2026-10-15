@@ -233,6 +233,161 @@ retained_managed_workspace_image() {
   printf '%s\n' "$reference"
 }
 
+# The credential-service replica count the denied-Resume step scaled to
+# zero, and the suite's EXIT trap it runs after restoring it. Empty while
+# nothing is to restore.
+CW_RUNTIME_CREDENTIAL_SERVICE_REPLICAS=""
+CW_RUNTIME_OUTAGE_PREVIOUS_EXIT=""
+
+# Scales the credential service back to the count the step read and waits
+# until that many replicas are ready. Running it again is harmless.
+cw_runtime_restore_credential_service() {
+  local replicas="$CW_RUNTIME_CREDENTIAL_SERVICE_REPLICAS" ready
+  [ -n "$replicas" ] || return 0
+  kubectl -n "$NS" scale deployment/codewire-credential-service --replicas="$replicas" >/dev/null \
+    || return 1
+  kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s >/dev/null \
+    || return 1
+  ready="$(kubectl -n "$NS" get deployment/codewire-credential-service \
+    -o 'jsonpath={.status.readyReplicas}')" || return 1
+  [ "${ready:-0}" = "$replicas" ] || {
+    echo "::error::the credential service has ${ready:-0} of ${replicas} replicas ready" >&2
+    return 1
+  }
+  CW_RUNTIME_CREDENTIAL_SERVICE_REPLICAS=""
+}
+
+# The EXIT trap while the credential service is scaled down: restore it,
+# then run the suite's own EXIT trap with the original status.
+cw_runtime_credential_outage_exit() {
+  local status=$?
+  cw_runtime_restore_credential_service \
+    || echo '::error::the credential service was not restored to its replica count' >&2
+  if [ -n "$CW_RUNTIME_OUTAGE_PREVIOUS_EXIT" ]; then
+    (exit "$status")
+    eval "$CW_RUNTIME_OUTAGE_PREVIOUS_EXIT"
+  fi
+}
+
+# Fails the step during the outage: says why, then restores the credential
+# service, so it is back before the step returns.
+cw_runtime_outage_failed() {
+  echo "::error::$1" >&2
+  cw_runtime_restore_credential_service
+  return 1
+}
+
+# Every platform-managed request this environment's journal holds, oldest
+# first: action, phase and the target's receipt reason.
+cw_runtime_agent_requests() {
+  kubectl -n "$NS" exec -i deploy/postgres -- psql -U codewire -d codewire \
+    -v ON_ERROR_STOP=1 -v environment="$1" -At <<'SQL'
+SELECT coalesce(json_agg(json_build_object(
+    'action', r.mutation_json->>'action', 'phase', r.phase,
+    'reason', r.receipt_json->>'reason_code') ORDER BY r.admitted_at), '[]')
+FROM public.environment_platform_agent_requests AS r
+WHERE r.environment_id = :'environment';
+SQL
+}
+
+# A Resume denied before its agent runs (#2769): after Stop/Start, the
+# credential service is unavailable, so the launch's environment
+# projection is refused. `cw msg` is refused definitely ("nothing ran"),
+# never unknown; the journal holds that Resume as Rejected denied-before-run
+# and nothing else; and once the service is back, `cw msg` resumes the
+# conversation at the next generation. The service's replica count is read,
+# and restored, by traps too, before this step returns.
+cw_runtime_managed_resume_denied_before_run() {
+  local environment="$1" session="$2" generation="$3" previous pods requests count
+  local output sent message attempt resumed refused
+  kind_credential_cli env --platform stop "$environment" --output json >/dev/null
+  wait_kind_credential_environment "$environment" stopped
+  kind_credential_cli env --platform start "$environment" --output json >/dev/null
+  wait_kind_credential_environment "$environment" running
+  wait_kind_credential_setup_complete "$environment"
+  refused="$(mktemp)"
+  requests="$(cw_runtime_agent_requests "$environment")"
+  count="$(jq -er 'length' <<<"$requests")"
+
+  CW_RUNTIME_CREDENTIAL_SERVICE_REPLICAS="$(kubectl -n "$NS" \
+    get deployment/codewire-credential-service -o 'jsonpath={.spec.replicas}')"
+  [[ "$CW_RUNTIME_CREDENTIAL_SERVICE_REPLICAS" =~ ^[1-9][0-9]*$ ]] || {
+    echo "::error::the credential service runs ${CW_RUNTIME_CREDENTIAL_SERVICE_REPLICAS:-no} replicas" >&2
+    CW_RUNTIME_CREDENTIAL_SERVICE_REPLICAS=""
+    return 1
+  }
+  previous="$(trap -p EXIT)"
+  previous="${previous#trap -- }"
+  eval "CW_RUNTIME_OUTAGE_PREVIOUS_EXIT=${previous% EXIT}"
+  trap cw_runtime_credential_outage_exit EXIT
+  trap 'cw_runtime_restore_credential_service || true; exit 130' INT
+  trap 'cw_runtime_restore_credential_service || true; exit 143' TERM
+  pods="$(kubectl -n "$NS" get pods \
+    -l app.kubernetes.io/name=codewire,app.kubernetes.io/component=credential-service -o name)"
+  kubectl -n "$NS" scale deployment/codewire-credential-service --replicas=0 >/dev/null
+  if [ -n "$pods" ]; then
+    # shellcheck disable=SC2086 # one argument for each captured Pod
+    kubectl -n "$NS" wait --for=delete $pods --timeout=120s >/dev/null
+  fi
+
+  # Only the refusal on standard error is kept.
+  if output="$(kind_credential_cli msg "$environment" "$session" \
+      'Return the synthetic reply while the credential service is down.' \
+      --output json 2>&1 >/dev/null)"; then
+    cw_runtime_outage_failed 'a message was delivered while the credential service was down'
+    return 1
+  fi
+  grep -Fq 'nothing ran, so send the message again' <<<"$output" || {
+    cw_runtime_outage_failed "the denied Resume was not refused definitely: ${output}"
+    return 1
+  }
+  requests="$(cw_runtime_agent_requests "$environment")"
+  jq -e --argjson count "$count" '
+    length == $count + 1
+    and (.[-1] | .action == "resume" and .phase == "rejected" and .reason == "denied-before-run")' \
+    <<<"$requests" >/dev/null || {
+    cw_runtime_outage_failed "the journal does not hold exactly one Rejected denied-before-run Resume: $(jq -c ".[${count}:]" <<<"$requests")"
+    return 1
+  }
+
+  cw_runtime_restore_credential_service
+  if [ -n "$CW_RUNTIME_OUTAGE_PREVIOUS_EXIT" ]; then
+    trap -- "$CW_RUNTIME_OUTAGE_PREVIOUS_EXIT" EXIT
+  else
+    trap - EXIT
+  fi
+  trap - INT TERM
+  CW_RUNTIME_OUTAGE_PREVIOUS_EXIT=""
+
+  # The refusal says to send the message again. Each attempt the returning
+  # service is not yet ready for is refused the same way, never unknown.
+  for ((attempt = 1; ; attempt++)); do
+    if sent="$(kind_credential_cli msg "$environment" "$session" \
+        'Return the synthetic reply after the credential service returned.' \
+        --output json 2>"$refused")"; then
+      break
+    fi
+    grep -Fq 'nothing ran, so send the message again' "$refused" && [ "$attempt" -lt 12 ] || {
+      echo "::error::the conversation did not resume after the credential service returned: $(cat "$refused")" >&2
+      return 1
+    }
+    sleep 5
+  done
+  rm -f -- "$refused"
+  message="$(jq -er '(.messageId // .message_id)' <<<"$sent")"
+  kind_credential_cli wait --message "$message" --timeout 5m --output json | jq -e \
+    '.state == "completed" and ((.result // "") | contains("CWOPENAI"))' >/dev/null || {
+    echo '::error::the conversation resumed after the denied Resume did not answer' >&2
+    return 1
+  }
+  resumed="$(kind_credential_cli list "$environment" --output json | jq -er --arg id "$session" \
+    '[.[] | select(.session_id == $id)][0].launch_generation')"
+  [ "$resumed" = "$((generation + 1))" ] || {
+    echo "::error::after the denied Resume the conversation is at generation ${resumed}, not $((generation + 1))" >&2
+    return 1
+  }
+}
+
 # The OpenAI API-key attempts the synthetic fixture has served so far.
 cw_runtime_openai_attempts() {
   kind_credential_fixture_events | jq -er \
@@ -342,6 +497,8 @@ cw_runtime_managed_resume_continues() {
     echo "::error::the provider saw $((after - before - 1)) calls for ${back_to_back} back-to-back turns" >&2
     return 1
   }
+  log "checking that a Resume denied before its agent runs is refused and can resume again"
+  cw_runtime_managed_resume_denied_before_run "$environment" "$session" "$resumed"
   kind_credential_cli stop "$environment" "$session" --output json >/dev/null
   pod="$(kind_credential_workspace "$environment")"
   kind_credential_cli env --platform rm "$environment" --yes --output json >/dev/null
