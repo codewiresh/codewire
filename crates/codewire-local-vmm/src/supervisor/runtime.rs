@@ -2146,7 +2146,7 @@ mod tests {
             cw_runtime_catalog_generation: binding.bootstrap_catalog_sha256.clone(),
         };
         let service = ObservedRunnerFixture {
-            protocol: Arc::new(std::sync::atomic::AtomicU32::new(5)),
+            protocol: Arc::new(std::sync::atomic::AtomicU32::new(6)),
             info: Arc::new(std::sync::Mutex::new(info.clone())),
             reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             access_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -2186,7 +2186,7 @@ mod tests {
         assert_eq!(access.guest_port, DAEMON_VSOCK_PORT);
         assert_eq!(service.reads.load(Ordering::SeqCst), 2);
         assert_eq!(service.access_reads.load(Ordering::SeqCst), 1);
-        for protocol in [0, 4, 6] {
+        for protocol in [0, 5, 7] {
             service.protocol.store(protocol, Ordering::SeqCst);
             let reads = service.reads.load(Ordering::SeqCst);
             assert!(
@@ -2196,7 +2196,7 @@ mod tests {
             );
             assert_eq!(service.reads.load(Ordering::SeqCst), reads);
         }
-        service.protocol.store(5, Ordering::SeqCst);
+        service.protocol.store(6, Ordering::SeqCst);
         for mismatch in 0..6 {
             let mut changed = info.clone();
             match mismatch {

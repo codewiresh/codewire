@@ -415,10 +415,17 @@ pub(crate) async fn create_native_environment(
             eprintln!("{notice}");
         }
         eprintln!("Workspace: {}", workspace.description);
+        if let Some(kept_in_vm) = &workspace.kept_in_vm {
+            eprintln!("{kept_in_vm}");
+        }
+        for note in &workspace.vm_only_notes {
+            eprintln!("{note}");
+        }
     }
     let NativeWorkspace {
         source_path: request_source_path,
         path_mode: implicit_path_mode,
+        vm_only: implicit_vm_only,
         ..
     } = workspace;
     let vcpus = match args.cpu.as_deref() {
@@ -523,6 +530,7 @@ pub(crate) async fn create_native_environment(
             .unwrap_or_default(),
         platform_source_authority: selected.platform,
         local_mounts,
+        implicit_vm_only,
     };
     let progress = native_progress();
     let created = match &progress {
@@ -715,6 +723,14 @@ fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
             args.name.as_deref().unwrap_or_default()
         ),
         format!("  Workspace    {}", workspace.description),
+    ];
+    if let Some(kept_in_vm) = &workspace.kept_in_vm {
+        lines.push(format!("               {kept_in_vm}"));
+    }
+    for note in &workspace.vm_only_notes {
+        lines.push(format!("               {note}"));
+    }
+    lines.extend([
         format!("  Image        {image}"),
         format!(
             "  Resources    {cpus} vCPU · {} memory · {} disk",
@@ -724,7 +740,7 @@ fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
         format!("  Docker       {docker}"),
         format!("  Credentials  {profile}"),
         format!("  Ports        {ports}"),
-    ];
+    ]);
     if let Some(notice) = workspace.notice {
         lines.push(format!("  {notice}"));
     } else if workspace.description.starts_with("mount ") {
@@ -2258,6 +2274,10 @@ struct NativeProjectPlan {
     spec: codewire_project::ProjectSpec,
     host_ports: Vec<codewire_project::HostPortBinding>,
     local_mounts: Vec<v1::LocalMountInput>,
+    /// The project folder's kept (`vm_only`) paths.
+    vm_only: Vec<String>,
+    /// Why a default kept path was dropped, for the review.
+    vm_only_notes: Vec<String>,
     vcpus: Option<u32>,
     memory_mib: Option<u32>,
     disk_bytes: Option<u64>,
@@ -2281,7 +2301,12 @@ fn native_codewire_yaml(
     let file = match std::fs::File::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && requested_file.is_none() => {
-            return Ok(NativeProjectPlan::default());
+            let (vm_only, vm_only_notes) = native_vm_only(source_path, None);
+            return Ok(NativeProjectPlan {
+                vm_only,
+                vm_only_notes,
+                ..NativeProjectPlan::default()
+            });
         }
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
@@ -2302,7 +2327,13 @@ fn native_codewire_yaml(
     let config_directory = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("native codewire.yaml has no parent directory"))?;
-    let local_mounts = resolve_native_local_mounts(config_directory, &document.local.mounts)?;
+    let (vm_only, vm_only_notes) = native_vm_only(source_path, document.local.vm_only.as_deref());
+    let local_mounts = resolve_native_local_mounts(
+        config_directory,
+        source_path,
+        &document.local.mounts,
+        &vm_only,
+    )?;
     let resources = &document.spec.resources;
     let vcpus = resources
         .cpu_millicores
@@ -2318,6 +2349,8 @@ fn native_codewire_yaml(
         spec: document.spec,
         host_ports: document.local.host_ports,
         local_mounts,
+        vm_only,
+        vm_only_notes,
         vcpus,
         memory_mib,
         disk_bytes,
@@ -2359,9 +2392,67 @@ fn apply_native_setup_overrides(
     spec.validate().context("validate native project setup")
 }
 
+/// The project folder's kept (`vm_only`) paths, from `workspace.vm_only` as
+/// written or the default list, and why a default path was dropped: one Git
+/// tracks there stays, since hiding it would show its files as deleted.
+fn native_vm_only(source_path: &Path, declared: Option<&[String]>) -> (Vec<String>, Vec<String>) {
+    let paths = codewire_project::effective_vm_only(declared);
+    if declared.is_some() || paths.is_empty() {
+        return (paths, Vec::new());
+    }
+    let tracked = codewire_local_vmm::workspace::tracked_paths(source_path, &paths);
+    let notes = tracked
+        .iter()
+        .map(|path| format!("{path} is tracked by Git, so it is not kept in the VM"))
+        .collect();
+    (
+        paths
+            .into_iter()
+            .filter(|path| !tracked.contains(path))
+            .collect(),
+        notes,
+    )
+}
+
+/// Kept paths a live mount of `source_path` cannot bind, which the guest
+/// leaves shared: a symlink or file at the path, or a parent that is not a
+/// plain folder.
+fn vm_only_share_notes(source_path: &Path, paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            let mut current = source_path.to_path_buf();
+            let components = path.split('/').collect::<Vec<_>>();
+            for (index, component) in components.iter().enumerate() {
+                current.push(component);
+                let last = index + 1 == components.len();
+                let reason = match std::fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => "is a symlink",
+                    Ok(metadata) if !metadata.is_dir() => "is a file",
+                    Ok(_) => continue,
+                    Err(_) if last => return None,
+                    Err(_) => "is missing",
+                };
+                let shown = components[..=index].join("/");
+                return Some(if shown == *path {
+                    format!("{path} {reason}, so it stays shared with the host")
+                } else {
+                    format!("{path} stays shared with the host: {shown} {reason}")
+                });
+            }
+            None
+        })
+        .collect()
+}
+
+/// codewire.yaml mounts for the request. The project folder's kept paths
+/// apply to a copy or read-write direct mount of the project folder itself;
+/// any other mount, and a read-only one, keeps nothing in the VM.
 fn resolve_native_local_mounts(
     config_directory: &Path,
+    project_directory: &Path,
     mounts: &[codewire_project::LocalMountIntent],
+    vm_only: &[String],
 ) -> anyhow::Result<Vec<v1::LocalMountInput>> {
     mounts
         .iter()
@@ -2400,6 +2491,14 @@ fn resolve_native_local_mounts(
                     codewire_project::LocalMountMode::Direct => v1::LocalMountMode::Direct as i32,
                 },
                 read_only: mount.read_only,
+                vm_only: if mount.read_only != Some(true)
+                    && std::fs::canonicalize(project_directory).ok().as_deref()
+                        == Some(source.as_path())
+                {
+                    vm_only.to_vec()
+                } else {
+                    Vec::new()
+                },
             })
         })
         .collect()
@@ -2481,6 +2580,13 @@ struct NativeWorkspace {
     description: String,
     /// Why the default mount was not used, when it was not.
     notice: Option<String>,
+    /// The implicit copy's skipped `vm_only` paths; empty for a clone, a
+    /// mount (whose mount input carries them) and an empty workspace.
+    vm_only: Vec<String>,
+    /// The review's `vm_only` line, when the list applies to host content.
+    kept_in_vm: Option<String>,
+    /// Kept paths that are dropped or stay shared, and why.
+    vm_only_notes: Vec<String>,
 }
 
 /// Mount the project directory live by default. A snapshot (clone or copy) or
@@ -2494,14 +2600,36 @@ fn resolve_native_workspace(
     empty_workspace: Option<&Path>,
     mounts_supported: bool,
 ) -> anyhow::Result<NativeWorkspace> {
+    let vm_only = project.vm_only.clone();
     if !project.spec.repositories.is_empty() || !project.local_mounts.is_empty() {
         if requested_mode.is_some() {
             anyhow::bail!(
                 "--path-mode applies only when codewire.yaml has no repositories or mounts"
             );
         }
+        let mut vm_only_notes = Vec::new();
+        for mount in &project.local_mounts {
+            if mount.mode == v1::LocalMountMode::Direct as i32 && !mount.vm_only.is_empty() {
+                vm_only_notes.extend(vm_only_share_notes(source_path, &mount.vm_only));
+            }
+        }
+        let applies = project
+            .local_mounts
+            .iter()
+            .any(|mount| !mount.vm_only.is_empty());
         return Ok(NativeWorkspace {
             description: "as declared in codewire.yaml".to_owned(),
+            kept_in_vm: applies.then(|| codewire_project::vm_only_summary(&vm_only)),
+            vm_only_notes: if applies {
+                project
+                    .vm_only_notes
+                    .iter()
+                    .cloned()
+                    .chain(vm_only_notes)
+                    .collect()
+            } else {
+                Vec::new()
+            },
             ..NativeWorkspace::default()
         });
     }
@@ -2540,17 +2668,27 @@ fn resolve_native_workspace(
                 return Ok(workspace);
             }
             let destination = format!("/workspace/{}", workspace_directory_name(source_path));
+            let kept_in_vm = Some(codewire_project::vm_only_summary(&vm_only));
+            let vm_only_notes = project
+                .vm_only_notes
+                .iter()
+                .cloned()
+                .chain(vm_only_share_notes(source_path, &vm_only))
+                .collect();
             project.local_mounts.push(v1::LocalMountInput {
                 source_path: source_path.as_os_str().as_bytes().to_vec(),
                 destination: destination.clone(),
                 mode: v1::LocalMountMode::Direct as i32,
                 read_only: Some(false),
+                vm_only,
             });
             if !project.working_directory_explicit {
                 project.spec.working_directory = destination.clone();
             }
             Ok(NativeWorkspace {
                 description: format!("mount {shown} at {destination} (live, read-write)"),
+                kept_in_vm,
+                vm_only_notes,
                 ..NativeWorkspace::default()
             })
         }
@@ -2561,11 +2699,21 @@ fn resolve_native_workspace(
             let mode = resolve_workspace_mode(source_path, workspace_selection_from_arg(mode))
                 .context("resolve native workspace preparation mode")?;
             let path_mode = workspace_source_mode_name(mode).to_owned();
+            // A clone takes only committed files, so it skips nothing.
+            let kept_in_vm = Some(codewire_project::vm_only_summary(&vm_only));
+            let vm_only = if mode == WorkspaceSourceMode::Copy {
+                vm_only
+            } else {
+                Vec::new()
+            };
             Ok(NativeWorkspace {
                 source_path: source_path.to_string_lossy().into_owned(),
                 description: format!("snapshot of {shown} ({path_mode})"),
                 path_mode,
                 notice: None,
+                vm_only,
+                kept_in_vm,
+                vm_only_notes: project.vm_only_notes.clone(),
             })
         }
     }
@@ -2624,6 +2772,7 @@ fn empty_native_workspace(
         path_mode: workspace_source_mode_name(WorkspaceSourceMode::Copy).to_owned(),
         description: "empty".to_owned(),
         notice,
+        ..NativeWorkspace::default()
     })
 }
 
@@ -3568,6 +3717,8 @@ mod tests {
             v1::LocalMountMode::Copy as i32
         );
         assert_eq!(project.local_mounts[0].read_only, None);
+        // A mount of another folder keeps nothing in the VM.
+        assert!(project.local_mounts[0].vm_only.is_empty());
         assert_eq!(
             resolve_native_workspace(temp.path(), &mut project, None, None, true).unwrap(),
             NativeWorkspace {
@@ -3593,6 +3744,8 @@ mod tests {
             v1::LocalMountMode::Direct as i32
         );
         assert_eq!(project.local_mounts[0].read_only, Some(true));
+        // A read-only direct mount keeps nothing in the VM.
+        assert!(project.local_mounts[0].vm_only.is_empty());
         assert_eq!(
             resolve_native_workspace(temp.path(), &mut project, None, None, true).unwrap(),
             NativeWorkspace {
@@ -3734,8 +3887,18 @@ working_directory: /workspace/github
                 destination: "/workspace/My-App".to_owned(),
                 mode: v1::LocalMountMode::Direct as i32,
                 read_only: Some(false),
+                vm_only: vec![
+                    "node_modules".to_owned(),
+                    "target".to_owned(),
+                    ".venv".to_owned()
+                ],
             }]
         );
+        assert_eq!(
+            workspace.kept_in_vm.as_deref(),
+            Some("Kept in the VM: node_modules, target, .venv")
+        );
+        assert!(workspace.vm_only.is_empty());
         assert_eq!(project.spec.working_directory, "/workspace/My-App");
         assert_eq!(native_direct_mount_warning(&[]), None);
     }
@@ -3765,6 +3928,7 @@ working_directory: /workspace/github
         assert!(project.local_mounts.is_empty());
         assert_eq!(workspace.source_path, source.to_string_lossy());
         assert_eq!(workspace.path_mode, "copy");
+        assert_eq!(workspace.vm_only, ["node_modules", "target", ".venv"]);
         assert!(workspace.notice.unwrap().contains("no virtiofsd"));
         let error =
             resolve_native_workspace(&source, &mut project, Some(PathModeArg::Mount), None, false)
@@ -3773,6 +3937,152 @@ working_directory: /workspace/github
             error.to_string().contains("--path-mode snapshot"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn vm_only_reaches_each_workspace_input_it_applies_to() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = std::fs::canonicalize(temp.path()).unwrap();
+        let mount = |yaml: &str| {
+            std::fs::write(source.join("codewire.yaml"), yaml).unwrap();
+            let mut project = native_codewire_yaml(&source, None).unwrap();
+            let workspace =
+                resolve_native_workspace(&source, &mut project, None, None, true).unwrap();
+            (project, workspace)
+        };
+
+        let (project, workspace) = mount("workspace: {vm_only: []}\n");
+        assert!(project.local_mounts[0].vm_only.is_empty());
+        assert_eq!(
+            workspace.kept_in_vm.as_deref(),
+            Some("Kept in the VM: none")
+        );
+
+        let (project, workspace) = mount("workspace: {vm_only: [dist, web/node_modules]}\n");
+        assert_eq!(
+            project.local_mounts[0].vm_only,
+            ["dist", "web/node_modules"]
+        );
+        assert_eq!(
+            workspace.kept_in_vm.as_deref(),
+            Some("Kept in the VM: dist, web/node_modules")
+        );
+
+        // A copy snapshot skips the list; a clone takes only committed files.
+        std::fs::write(source.join("codewire.yaml"), "version: 1\n").unwrap();
+        let mut project = native_codewire_yaml(&source, None).unwrap();
+        let copy =
+            resolve_native_workspace(&source, &mut project, Some(PathModeArg::Copy), None, true)
+                .unwrap();
+        assert_eq!(copy.path_mode, "copy");
+        assert_eq!(copy.vm_only, ["node_modules", "target", ".venv"]);
+        assert!(project.local_mounts.is_empty());
+        let clone =
+            resolve_native_workspace(&source, &mut project, Some(PathModeArg::Clone), None, true)
+                .unwrap();
+        assert_eq!(clone.path_mode, "clone");
+        assert!(clone.vm_only.is_empty());
+
+        // An empty workspace has no host content to keep apart.
+        let empty =
+            resolve_native_workspace(&source, &mut project, Some(PathModeArg::Empty), None, true)
+                .unwrap();
+        assert!(empty.vm_only.is_empty());
+        assert_eq!(empty.kept_in_vm, None);
+
+        // codewire.yaml mounts: the list applies to a read-write direct or a
+        // copy mount of the project folder itself; any other folder and any
+        // read-only mount keep nothing in the VM.
+        for directory in ["other", "ro"] {
+            std::fs::create_dir(source.join(directory)).unwrap();
+        }
+        let (project, workspace) = mount(
+            "workspace: {vm_only: [target]}\nmounts:\n  - {source: ., destination: /workspace/rw, mode: direct, read_only: false}\n  - {source: ., destination: /workspace/ro, mode: direct, read_only: true}\n  - {source: ., destination: /workspace/copied, mode: copy}\n  - {source: ./other, destination: /workspace/other, mode: direct, read_only: false}\n",
+        );
+        let lists = project
+            .local_mounts
+            .iter()
+            .map(|mount| mount.vm_only.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lists,
+            [
+                vec!["target".to_owned()],
+                Vec::new(),
+                vec!["target".to_owned()],
+                Vec::new()
+            ]
+        );
+        assert_eq!(
+            workspace.kept_in_vm.as_deref(),
+            Some("Kept in the VM: target")
+        );
+        let (project, workspace) = mount(
+            "mounts: [{source: ./other, destination: /workspace/other, mode: direct, read_only: false}]\n",
+        );
+        assert!(project.local_mounts[0].vm_only.is_empty());
+        assert_eq!(workspace.kept_in_vm, None);
+    }
+
+    #[test]
+    fn vm_only_notes_name_paths_the_share_leaves_shared() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::create_dir(source.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", source.join("node_modules")).unwrap();
+        std::fs::write(source.join("target"), b"a file").unwrap();
+        std::fs::create_dir(source.join("packages")).unwrap();
+        let paths = [
+            "node_modules",
+            "target",
+            ".venv",
+            "packages/web/node_modules",
+            "node_modules/x",
+            "packages/node_modules",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            vm_only_share_notes(&source, &paths),
+            [
+                "node_modules is a symlink, so it stays shared with the host",
+                "target is a file, so it stays shared with the host",
+                "packages/web/node_modules stays shared with the host: packages/web is missing",
+                "node_modules/x stays shared with the host: node_modules is a symlink",
+            ]
+        );
+
+        // The default list drops a path Git tracks; a declared list is kept.
+        let git = Path::new("/usr/bin/git");
+        if git.exists() {
+            let run = |arguments: &[&str]| {
+                let status = std::process::Command::new(git)
+                    .args(arguments)
+                    .current_dir(&source)
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "{arguments:?}");
+            };
+            std::fs::remove_file(source.join("target")).unwrap();
+            std::fs::create_dir(source.join("target")).unwrap();
+            std::fs::write(source.join("target/committed"), b"x").unwrap();
+            run(&["init", "-q"]);
+            run(&["add", "target/committed"]);
+            let (paths, notes) = native_vm_only(&source, None);
+            assert_eq!(paths, ["node_modules", ".venv"]);
+            assert_eq!(
+                notes,
+                ["target is tracked by Git, so it is not kept in the VM"]
+            );
+            let declared = ["target".to_owned()];
+            assert_eq!(
+                native_vm_only(&source, Some(&declared)),
+                (vec!["target".to_owned()], Vec::new())
+            );
+        }
     }
 
     #[test]

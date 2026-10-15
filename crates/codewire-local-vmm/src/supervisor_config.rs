@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 12;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 13;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -32,6 +32,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
     (
         12,
         "RetireSupervisor (for its own protocol or a newer one); a stopped environment's runner of another cw is retired; the pre-#2735 runners directory is removed only under the lock",
+    ),
+    (
+        13,
+        "create keeps codewire.yaml workspace.vm_only paths on the VM's own disk (LocalMountInput.vm_only, CreateEnvironmentRequest.implicit_vm_only); an older supervisor would ignore them",
     ),
 ];
 
@@ -339,7 +343,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 12);
+        assert_eq!(info.protocol_version, 13);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

@@ -359,6 +359,24 @@ impl AdmittedArtifacts {
         Ok(())
     }
 
+    /// The guest init binds `workspace.vm_only` paths (#vm_only); an older one
+    /// would refuse such a plan only at boot.
+    pub(crate) fn require_vm_only_guest(&self) -> Result<(), ArtifactError> {
+        let init = read_canonical_initramfs_entry(&self.initramfs, b"init")?;
+        let marker = codewire_vmm_guest_probe::VM_ONLY_CAPABILITY_MARKER;
+        if init
+            .windows(marker.len())
+            .filter(|bytes| *bytes == marker)
+            .count()
+            != 1
+        {
+            return Err(ArtifactError::GuestVmOnlyUnsupported(
+                self.initramfs.path().to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn require_live_cw_runtime_publisher(&self) -> Result<(), ArtifactError> {
         let init = read_canonical_initramfs_entry(&self.initramfs, b"init")?;
         let marker = codewire_vmm_guest_probe::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER;
@@ -386,6 +404,10 @@ pub enum ArtifactError {
         "retained boot assets do not support the current startup protocol; explicitly upgrade the environment boot assets before starting or updating cw: {0}"
     )]
     GuestSeedProtocolUnsupported(PathBuf),
+    #[error(
+        "this local VM runtime cannot keep codewire.yaml workspace.vm_only folders on the VM's disk; reinstall it with `cw setup --local --replace`, or set `workspace: {{vm_only: []}}`: {0}"
+    )]
+    GuestVmOnlyUnsupported(PathBuf),
     #[error("read artifact lock {path}: {source}")]
     ReadLock { path: PathBuf, source: io::Error },
     #[error("decode artifact lock {path}: {source}")]
@@ -1616,6 +1638,47 @@ mod tests {
                 assert!(matches!(
                     artifacts.require_current_guest_seed_abi(),
                     Err(ArtifactError::IdentityChanged(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn vm_only_capability_requires_exactly_one_marker() {
+        let task = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = PrivateRoot::open(task.path()).unwrap();
+        let marker = codewire_vmm_guest_probe::VM_ONLY_CAPABILITY_MARKER;
+        for (index, capability) in [
+            Vec::new(),
+            marker.to_vec(),
+            [marker, marker].concat(),
+            b"CODEWIRE_GUEST_VM_ONLY_V0\0".to_vec(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut init = vec![0; 64];
+            init[..4].copy_from_slice(b"\x7fELF");
+            init.extend(codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER);
+            init.extend(capability);
+            let archive = canonical_newc(&init).unwrap();
+            let name = format!("vm-only-{index}");
+            write_artifact(&root.path().join(&name), &archive, 0o400);
+            let artifacts = AdmittedArtifacts::for_test(
+                AdmittedArtifact::for_test("/unused/ch"),
+                AdmittedArtifact::for_test("/unused/kernel"),
+                admit_one(&root, &spec(&name, &archive), false).unwrap(),
+            );
+            artifacts.require_current_guest_seed_abi().unwrap();
+            if index == 1 {
+                artifacts.require_vm_only_guest().unwrap();
+            } else {
+                assert!(matches!(
+                    artifacts.require_vm_only_guest(),
+                    Err(ArtifactError::GuestVmOnlyUnsupported(_))
                 ));
             }
         }

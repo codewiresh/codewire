@@ -72,6 +72,7 @@ use crate::{
 
 mod bootstrap;
 mod shutdown;
+mod vm_only;
 use bootstrap::{BootstrapChild, BootstrapParent};
 use codewire_daemon::execution::BootstrapPhase;
 
@@ -291,6 +292,7 @@ pub fn run_init() -> Result<()> {
     // preflight reads it from the admitted boot image without executing it.
     std::hint::black_box(crate::GUEST_RUNTIME_ABI_MARKER);
     std::hint::black_box(crate::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER);
+    std::hint::black_box(crate::VM_ONLY_CAPABILITY_MARKER);
     ensure!(
         unsafe { libc::getpid() } == 1,
         "guest init must run as PID 1"
@@ -464,10 +466,13 @@ pub fn run_init() -> Result<()> {
         bail!("Docker is enabled but the workspace image has no dockerd or xtables-nft-multi");
     }
     record_boot_stage("root-generation-ready")?;
-    if let Err(error) = mount_direct_shares(&seed) {
-        record_boot_stage("workspace-direct-share-failed")?;
-        return Err(error);
-    }
+    let vm_only = match mount_direct_shares(&seed, &plan.identity) {
+        Ok(vm_only) => vm_only,
+        Err(error) => {
+            record_boot_stage("workspace-direct-share-failed")?;
+            return Err(error);
+        }
+    };
     if let Err(error) = expose_persistent_layout(&plan) {
         record_boot_stage("workspace-layout-failed")?;
         return Err(error);
@@ -506,7 +511,14 @@ pub fn run_init() -> Result<()> {
 
     record_boot_stage("daemon-started")?;
     let daemon = daemon.0.take().expect("daemon start child is present");
-    supervise_guest(daemon, workspace, network.into_child()?, docker, poweroff)
+    supervise_guest(
+        daemon,
+        workspace,
+        network.into_child()?,
+        docker,
+        poweroff,
+        vm_only,
+    )
 }
 
 /// Run only the entitlement-gated macOS `/dev/fd` hardware fixture.
@@ -2861,7 +2873,13 @@ fn load_workspace_plan() -> Result<Option<WorkspacePlan>> {
     require_persisted_workspace_plan(Some(plan)).map(Some)
 }
 
-fn mount_direct_shares(seed: &Seed) -> Result<()> {
+/// Mount the seed-bound direct shares, then bind each kept (`vm_only`) path
+/// over its read-write share. The returned keeper rebinds a kept path whose
+/// bind a host-side change detached.
+fn mount_direct_shares(
+    seed: &Seed,
+    identity: &WorkspaceIdentity,
+) -> Result<Option<vm_only::Keeper>> {
     let expected = seed.direct_shares_sha256();
     let metadata = match fs::symlink_metadata(DIRECT_SHARE_PLAN_PATH) {
         Ok(metadata) => Some(metadata),
@@ -2869,7 +2887,7 @@ fn mount_direct_shares(seed: &Seed) -> Result<()> {
         Err(error) => return Err(error).context("inspect direct-share guest plan"),
     };
     let (expected, metadata) = match (expected, metadata) {
-        (None, None) => return Ok(()),
+        (None, None) => return Ok(None),
         (Some(expected), Some(metadata)) => (expected, metadata),
         _ => bail!("direct-share guest plan does not match its seed binding"),
     };
@@ -2901,6 +2919,7 @@ fn mount_direct_shares(seed: &Seed) -> Result<()> {
         RustixMode::empty(),
     )
     .context("open persistent workspace for direct-share admission")?;
+    let mut kept = Vec::new();
     for share in plan.mounts() {
         let relative = Path::new(share.destination())
             .strip_prefix(WORKSPACE_PATH)
@@ -2949,8 +2968,19 @@ fn mount_direct_shares(seed: &Seed) -> Result<()> {
                 "direct-share mount is not read-only"
             );
         }
+        if !share.vm_only().is_empty() {
+            kept.push(vm_only::admit_share(
+                &workspace,
+                relative,
+                target_path,
+                share,
+            )?);
+        }
     }
-    Ok(())
+    if kept.is_empty() {
+        return Ok(None);
+    }
+    vm_only::Keeper::bind_at_boot(kept, identity.uid, identity.gid).map(Some)
 }
 
 fn mount_skill_snapshots(seed: &Seed, workspace: &WorkspacePlan) -> Result<()> {
@@ -3557,6 +3587,7 @@ fn create_state_layout() -> Result<()> {
     // direct-share plan beneath this directory. Restore the trusted runtime
     // owner before capability-dropped guest helpers publish bounded status.
     lchown(Path::new(CONTROL_PATH), 0, 0)?;
+    vm_only::create_layout()?;
     File::open(STATE_MOUNT_PATH)
         .context("open state mount for fsync")?
         .sync_all()
@@ -3709,6 +3740,11 @@ fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
         PathBuf::from(PERSISTENT_CODEX_HOME_PATH),
         PathBuf::from(PERSISTENT_PROBE_PATH),
     ];
+    // The walk stays on the state disk: it runs before any share is mounted,
+    // and refuses to chown through a mount if that order ever changed.
+    let state_device = fs::symlink_metadata(STATE_MOUNT_PATH)
+        .context("inspect the state disk for the ownership walk")?
+        .dev();
     let mut visited = 0_usize;
     while let Some(path) = pending.pop() {
         visited = visited
@@ -3719,6 +3755,10 @@ fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
             "persistent workspace exceeds its initial ownership entry bound"
         );
         let metadata = fs::symlink_metadata(&path).context("inspect persistent workspace entry")?;
+        ensure!(
+            metadata.dev() == state_device,
+            "persistent workspace ownership walk reached another filesystem"
+        );
         let kind = metadata.file_type();
         ensure!(
             kind.is_dir()
@@ -5727,9 +5767,13 @@ fn supervise_guest(
     mut network: std::process::Child,
     mut docker: Option<std::process::Child>,
     poweroff: UnixDatagram,
+    mut vm_only: Option<vm_only::Keeper>,
 ) -> Result<()> {
     loop {
         validate_runc_log()?;
+        if let Some(vm_only) = vm_only.as_mut() {
+            vm_only.tick();
+        }
         if POWEROFF_REQUESTED.load(Ordering::Acquire) || container_poweroff_requested(&poweroff)? {
             // The workload, sessions included, gets SIGTERM and its grace
             // before the daemon stops: a session's processes end with it.

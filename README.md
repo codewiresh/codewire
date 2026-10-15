@@ -148,6 +148,44 @@ ports:
 A running local environment can publish or withdraw ports without a restart,
 including guest ports `codewire.yaml` does not declare. A stopped one records
 the change and binds it at its next start; changes persist across restarts.
+
+Small files on the live project mount are 10–140× slower to create than on
+the VM's own disk, so dependency and build folders stay in the VM.
+`workspace.vm_only` lists them, relative to the project folder:
+
+```yaml
+workspace:
+  vm_only:          # stored on the VM's own disk, never shared with the host
+    - node_modules
+    - target
+    - .venv
+```
+
+Without the key the list is `node_modules`, `target` and `.venv`, less any
+that Git tracks in the project; `vm_only: []` turns it off. Entries are plain
+relative paths: no absolute paths, `..`, `.git`, empty entries, duplicates or
+nesting, and at most 32. `cw env create --local` shows the list in its review
+("Kept in the VM: node_modules, target, .venv"); a change applies to VMs
+created after it.
+
+- With the default live mount, the guest binds a folder on the VM's disk over
+  each listed path, so installs and builds there run at VM-disk speed. The VM
+  never sees the host's copy and the host never sees the VM's; the VM's copy
+  survives stop and start. A listed folder the host lacks is created on the
+  host, empty, as the mount point (its parent must exist). A symlink or a file
+  at the path, or a missing parent, stays shared, and create says so.
+- Inside the VM a kept folder is a mount point: its contents can be deleted,
+  but the folder itself cannot be removed or renamed (`rm -rf node_modules`
+  empties it and then reports that it is busy).
+- If the host deletes or replaces a kept folder while the VM runs, for example
+  with `cargo clean` or `rm -rf node_modules` on the host, the guest binds it
+  again within about a second (and recreates the empty host folder). Files the
+  VM writes there in that second land on the host.
+- A copy (`--path-mode copy`, a snapshot of a folder that is not a Git root,
+  or a `mode: copy` mount of the project folder) leaves the listed folders
+  out; a clone already takes only committed files. Read-only mounts and
+  mounts of other folders keep nothing in the VM.
+- If the workspace image's user changes, the kept folders start empty.
 Only declared ports are reachable over Mesh.
 
 ```bash

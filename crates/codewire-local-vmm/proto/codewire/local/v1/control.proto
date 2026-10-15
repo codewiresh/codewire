@@ -304,6 +304,11 @@ message CreateEnvironmentRequest {
   // history before binding. Never used as a fallback identity lookup.
   string access_profile_reference = 16;
   PlatformSourceAuthority platform_source_authority = 17;
+  // Paths relative to the implicit source that a copy skips (codewire.yaml
+  // workspace.vm_only); they live only on the VM's own disk. Empty when
+  // implicit_path_mode is clone, which takes only committed files, and when
+  // the project declares repositories or mounts.
+  repeated string implicit_vm_only = 18;
 }
 
 // Authenticated storage identity pinned at selection time, not mutable CLI
@@ -374,6 +379,11 @@ message LocalMountInput {
   string destination = 2;
   LocalMountMode mode = 3;
   optional bool read_only = 4;
+  // Paths relative to source_path kept only on the VM's own disk
+  // (codewire.yaml workspace.vm_only): a copy skips them, and the guest binds
+  // a VM-disk directory over each in a read-write direct share. Empty for a
+  // read-only direct mount.
+  repeated string vm_only = 5;
 }
 
 message EnvironmentSelector {
@@ -631,6 +641,9 @@ message DirectShareAttachment {
   sint64 filesystem_magic = 7;
   string destination = 8;
   bool read_only = 9;
+  // Share-relative paths the guest backs with its own disk and binds over the
+  // share; part of the digest-bound guest plan. Empty when read_only.
+  repeated string vm_only = 10;
 }
 
 message StopVmRequest {}

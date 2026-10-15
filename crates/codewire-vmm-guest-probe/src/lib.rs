@@ -43,7 +43,8 @@ mod workspace_plan;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use direct_share::{
     DIRECT_SHARE_PLAN_PATH, DIRECT_SHARE_PLAN_RELATIVE_PATH, DirectShareMount, DirectSharePlan,
-    DirectSharePlanError, MAX_DIRECT_SHARE_PLAN_BYTES, MAX_DIRECT_SHARES,
+    DirectSharePlanError, MAX_DIRECT_SHARE_PLAN_BYTES, MAX_DIRECT_SHARES, MAX_VM_ONLY_PATHS,
+    VM_ONLY_CAPABILITY_MARKER, valid_vm_only_paths,
 };
 pub use network::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN,

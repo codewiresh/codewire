@@ -102,13 +102,14 @@ use crate::uds::{UdsError, bind_owner_only_listener, remove_bound_socket};
 use crate::workspace::{
     WorkspaceError, WorkspaceSelection, WorkspaceSourceMode,
     cleanup_interrupted_workspace_provisioning, ensure_docker_data_disk, ensure_workspace_plan,
-    inspect_workspace, workspace_content_limit,
+    inspect_workspace_skipping, workspace_content_limit,
 };
 use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
 use crate::workspace_plan::{
     RepositoryCredentialAccess, WorkspaceInput, WorkspacePlan, WorkspacePlanError,
     prepare_direct_input, prepare_repository_plan, validate_local_mount_destination,
 };
+use codewire_vmm_guest_probe::valid_vm_only_paths;
 
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1160,11 +1161,13 @@ impl SupervisorCore {
             let requested_source = PathBuf::from(&request.source_path);
             let path_mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
             let maximum_copy_bytes = workspace_content_limit(request.disk_bytes);
+            let vm_only = request.implicit_vm_only.clone();
             let source = tokio::task::spawn_blocking(move || {
-                inspect_workspace(
+                inspect_workspace_skipping(
                     &requested_source,
                     workspace_selection(path_mode),
                     maximum_copy_bytes,
+                    &vm_only,
                 )
             })
             .await
@@ -1215,14 +1218,16 @@ impl SupervisorCore {
                                 &requested_source,
                                 &mount.destination,
                                 mount.read_only.ok_or(WorkspacePlanError::InvalidPlan)?,
+                                mount.vm_only.clone(),
                                 &forbidden_roots,
                             )
                             .map_err(SupervisorError::from);
                         }
-                        let source = inspect_workspace(
+                        let source = inspect_workspace_skipping(
                             &requested_source,
                             WorkspaceSelection::Copy,
                             maximum_copy_bytes,
+                            &mount.vm_only,
                         )
                         .map_err(SupervisorError::from)?;
                         if source.source_path.as_os_str().as_bytes() != mount.source_path {
@@ -1718,6 +1723,8 @@ impl SupervisorCore {
                         }
                     } else {
                         let artifact_generation = self.preflight().await?;
+                        self.require_vm_only_guest_for_plan(&artifact_generation, workspace_plan)
+                            .await?;
                         let cw_runtime =
                             self.admit_installed_cw_runtime().await?.map(|generation| {
                                 CwRuntimeBinding {
@@ -3154,6 +3161,29 @@ impl SupervisorCore {
             .await
     }
 
+    /// A plan that keeps paths on the VM's disk boots only a guest that binds
+    /// them; checked before a create or start rather than failing at boot.
+    async fn require_vm_only_guest_for_plan(
+        &mut self,
+        generation: &str,
+        workspace_plan: &WorkspacePlan,
+    ) -> Result<(), SupervisorError> {
+        let keeps_paths = workspace_plan.inputs.iter().any(
+            |input| matches!(input, WorkspaceInput::Direct { vm_only, .. } if !vm_only.is_empty()),
+        );
+        if !keeps_paths {
+            return Ok(());
+        }
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        RuntimeArtifactStore::create(&engine)
+            .map_err(|_| SupervisorError::ArtifactStore)?
+            .open_generation(generation)
+            .await
+            .map_err(|_| SupervisorError::ArtifactStore)?
+            .require_vm_only_guest()?;
+        Ok(())
+    }
+
     async fn require_guest_seed_abi_for_generation(
         &mut self,
         generation: &str,
@@ -3188,6 +3218,9 @@ impl SupervisorCore {
         }
         .to_owned();
         self.require_guest_seed_abi_for_generation(&generation)
+            .await?;
+        let workspace_plan = self.environment(name)?.workspace_plan.clone();
+        self.require_vm_only_guest_for_plan(&generation, &workspace_plan)
             .await?;
         if self.environment(name)?.cw_runtime.is_some() {
             let engine = PrivateRoot::open(&self.config.engine_root())?;
@@ -6118,6 +6151,7 @@ fn direct_share_attachments_to_proto(
                 identity,
                 destination,
                 read_only,
+                vm_only,
             } => Some(v1::DirectShareAttachment {
                 source_path: source_path.clone(),
                 device_major: identity.device_major(),
@@ -6128,6 +6162,7 @@ fn direct_share_attachments_to_proto(
                 filesystem_magic: identity.filesystem_magic(),
                 destination: destination.clone(),
                 read_only: *read_only,
+                vm_only: vm_only.clone(),
             }),
             WorkspaceInput::Local { .. } | WorkspaceInput::Repository { .. } => None,
         })
@@ -6251,11 +6286,18 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
     validate_local_mount_requests(&request.local_mounts)?;
     validate_request_destinations(&project, &request.local_mounts)?;
     if project.repositories.is_empty() && request.local_mounts.is_empty() {
-        parse_implicit_path_mode(&request.implicit_path_mode)?;
-        if request.source_path.is_empty() || !Path::new(&request.source_path).is_absolute() {
+        let mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
+        if request.source_path.is_empty()
+            || !Path::new(&request.source_path).is_absolute()
+            || !valid_vm_only_paths(&request.implicit_vm_only)
+            || (mode == WorkspaceSourceMode::Clone && !request.implicit_vm_only.is_empty())
+        {
             return Err(SupervisorError::InvalidRequest);
         }
-    } else if !request.source_path.is_empty() || !request.implicit_path_mode.is_empty() {
+    } else if !request.source_path.is_empty()
+        || !request.implicit_path_mode.is_empty()
+        || !request.implicit_vm_only.is_empty()
+    {
         return Err(SupervisorError::InvalidRequest);
     }
     parse_request_id(&request.request_id)
@@ -6277,8 +6319,13 @@ fn validate_local_mount_requests(mounts: &[v1::LocalMountInput]) -> Result<(), S
         }
         match v1::LocalMountMode::try_from(mount.mode) {
             Ok(v1::LocalMountMode::Copy) if mount.read_only.is_none() => {}
-            Ok(v1::LocalMountMode::Direct) if mount.read_only.is_some() => {}
+            Ok(v1::LocalMountMode::Direct) if mount.read_only == Some(false) => {}
+            Ok(v1::LocalMountMode::Direct)
+                if mount.read_only == Some(true) && mount.vm_only.is_empty() => {}
             _ => return Err(SupervisorError::InvalidRequest),
+        }
+        if !valid_vm_only_paths(&mount.vm_only) {
+            return Err(SupervisorError::InvalidRequest);
         }
         let path = PathBuf::from(OsString::from_vec(mount.source_path.clone()));
         if !path.is_absolute() || path == Path::new("/") {
@@ -6662,6 +6709,16 @@ fn create_request_from_operation(
         project.repositories.len(),
         &workspace_plan,
     )?;
+    // The implicit source's skipped paths are recorded in its one plan input.
+    let implicit_vm_only = if source_path.is_empty() {
+        Vec::new()
+    } else {
+        workspace_plan
+            .inputs
+            .first()
+            .map(|input| input.vm_only().to_vec())
+            .unwrap_or_default()
+    };
     let request = v1::CreateEnvironmentRequest {
         name,
         source_path,
@@ -6674,6 +6731,7 @@ fn create_request_from_operation(
         project_spec_sha256,
         implicit_path_mode,
         local_mounts,
+        implicit_vm_only,
         host_ports: host_ports_to_proto(&host_ports),
         mesh: mesh_attachment_to_proto(mesh.as_ref()),
         access_profile_id,
@@ -6711,6 +6769,7 @@ fn validate_request_workspace_plan(
                 source_path,
                 mode,
                 destination,
+                vm_only,
                 ..
             },
         ] = workspace_plan.inputs.as_slice()
@@ -6720,6 +6779,7 @@ fn validate_request_workspace_plan(
         if source_path != OsStr::new(&request.source_path).as_bytes()
             || *mode != parse_implicit_path_mode(&request.implicit_path_mode)?
             || destination != "/workspace"
+            || *vm_only != request.implicit_vm_only
             || !request.local_mounts.is_empty()
         {
             return Err(SupervisorError::InvalidRequest);
@@ -6740,19 +6800,23 @@ fn validate_request_workspace_plan(
                 source_path,
                 mode,
                 destination,
+                vm_only,
                 ..
             } if source_path == &mount.source_path
                 && *mode == WorkspaceSourceMode::Copy
                 && destination == &mount.destination
+                && *vm_only == mount.vm_only
                 && mount.mode == v1::LocalMountMode::Copy as i32
                 && mount.read_only.is_none() => {}
             WorkspaceInput::Direct {
                 source_path,
                 destination,
                 read_only,
+                vm_only,
                 ..
             } if source_path == &mount.source_path
                 && destination == &mount.destination
+                && *vm_only == mount.vm_only
                 && mount.mode == v1::LocalMountMode::Direct as i32
                 && mount.read_only == Some(*read_only) => {}
             _ => return Err(SupervisorError::InvalidRequest),
@@ -6779,6 +6843,7 @@ fn local_mounts_from_workspace_plan(
                 source_path,
                 mode: WorkspaceSourceMode::Copy,
                 destination,
+                vm_only,
                 ..
             } => {
                 validate_local_mount_destination(destination)
@@ -6788,12 +6853,14 @@ fn local_mounts_from_workspace_plan(
                     destination: destination.clone(),
                     mode: v1::LocalMountMode::Copy as i32,
                     read_only: None,
+                    vm_only: vm_only.clone(),
                 })
             }
             WorkspaceInput::Direct {
                 source_path,
                 destination,
                 read_only,
+                vm_only,
                 ..
             } => {
                 validate_local_mount_destination(destination)
@@ -6803,6 +6870,7 @@ fn local_mounts_from_workspace_plan(
                     destination: destination.clone(),
                     mode: v1::LocalMountMode::Direct as i32,
                     read_only: Some(*read_only),
+                    vm_only: vm_only.clone(),
                 })
             }
             _ => Err(SupervisorError::InvalidState),
@@ -7909,7 +7977,8 @@ impl From<SupervisorError> for Status {
                 Status::failed_precondition(error.to_string())
             }
             SupervisorError::Artifact(
-                crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_),
+                crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_)
+                | crate::artifact::ArtifactError::GuestVmOnlyUnsupported(_),
             ) => Status::failed_precondition(error.to_string()),
             SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::VmStart(_)
@@ -8604,6 +8673,7 @@ mod tests {
             host_ports: Vec::new(),
             mesh: None,
             workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+                vm_only: Vec::new(),
                 source_path: PathBuf::from("/workspace/source"),
                 commit: "a".repeat(40),
                 mode: WorkspaceSourceMode::Clone,
@@ -8630,6 +8700,7 @@ mod tests {
             &admitted,
             "/workspace/fixtures",
             true,
+            Vec::new(),
         )])
         .unwrap()
     }
@@ -9400,7 +9471,7 @@ mod tests {
         );
         let live = child.capture(&executable);
         let service = TestRunnerProtocolService {
-            reply: TestRunnerProtocolReply::Version(5),
+            reply: TestRunnerProtocolReply::Version(6),
             useful_calls: Arc::new(AtomicUsize::new(0)),
             shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
         };
@@ -9438,7 +9509,7 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("unresponsive.sock");
         let (identity, calls, stop, server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(5));
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(6));
         let executable = fs::canonicalize("/bin/sleep").unwrap();
         let mut child = ShutdownTestChild(
             crate::test_child(&mut Command::new(&executable))
@@ -11483,6 +11554,7 @@ mod tests {
             let name = format!("secret-{index}");
             let request_id = Uuid::new_v4();
             let request = v1::CreateEnvironmentRequest {
+                implicit_vm_only: Vec::new(),
                 name: name.clone(),
                 source_path: "/workspace/source".to_owned(),
                 vcpus: u32::from(selected.vcpus),
@@ -11834,6 +11906,7 @@ mod tests {
         let project_spec_json = project.canonical_json().unwrap();
         let project_spec_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "dev".to_owned(),
             source_path: "/workspace/source".to_owned(),
             vcpus: 2,
@@ -11876,6 +11949,7 @@ mod tests {
             Err(SupervisorError::InvalidRequest)
         ));
         let workspace_plan = WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+            vm_only: Vec::new(),
             source_path: PathBuf::from("/workspace/source"),
             commit: "a".repeat(40),
             mode: WorkspaceSourceMode::Clone,
@@ -12119,6 +12193,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "copy".to_owned(),
             source_path: String::new(),
             vcpus: 2,
@@ -12130,6 +12205,7 @@ mod tests {
             project_spec_json,
             implicit_path_mode: String::new(),
             local_mounts: vec![v1::LocalMountInput {
+                vm_only: Vec::new(),
                 source_path: b"/host/fixtures".to_vec(),
                 destination: "/workspace/fixtures".to_owned(),
                 mode: v1::LocalMountMode::Copy as i32,
@@ -12145,6 +12221,7 @@ mod tests {
         validate_create(&request).unwrap();
         let workspace_plan = WorkspacePlan::from_inputs(vec![WorkspaceInput::local(
             &crate::workspace::WorkspaceSource {
+                vm_only: Vec::new(),
                 source_path: PathBuf::from("/host/fixtures"),
                 commit: "a".repeat(40),
                 mode: WorkspaceSourceMode::Copy,
@@ -12199,6 +12276,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "copy".to_owned(),
             source_path: String::new(),
             vcpus: 2,
@@ -12210,6 +12288,7 @@ mod tests {
             project_spec_json,
             implicit_path_mode: String::new(),
             local_mounts: vec![v1::LocalMountInput {
+                vm_only: Vec::new(),
                 source_path: source.as_os_str().as_bytes().to_vec(),
                 destination: "/workspace/fixtures".to_owned(),
                 mode: v1::LocalMountMode::Copy as i32,
@@ -12261,6 +12340,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "direct".to_owned(),
             source_path: String::new(),
             vcpus: 2,
@@ -12272,6 +12352,7 @@ mod tests {
             project_spec_json,
             implicit_path_mode: String::new(),
             local_mounts: vec![v1::LocalMountInput {
+                vm_only: vec!["node_modules".to_owned(), "web/target".to_owned()],
                 source_path: source.as_os_str().as_bytes().to_vec(),
                 destination: "/workspace/fixtures".to_owned(),
                 mode: v1::LocalMountMode::Direct as i32,
@@ -12305,6 +12386,12 @@ mod tests {
         plan.validate_for_project(&project).unwrap();
         let guest = plan.direct_share_plan().unwrap().unwrap();
         assert_eq!(guest.mounts()[0].tag(), "cw-direct-00");
+        // The kept paths reach the digest-bound guest plan and the runner.
+        assert_eq!(guest.mounts()[0].vm_only(), ["node_modules", "web/target"]);
+        assert_eq!(
+            direct_share_attachments_to_proto(&plan).unwrap()[0].vm_only,
+            ["node_modules", "web/target"]
+        );
         assert!(
             !guest
                 .encode_canonical()
@@ -12329,8 +12416,127 @@ mod tests {
         };
         assert_eq!(
             create_request_from_operation(&operation).unwrap(),
-            (request, plan)
+            (request.clone(), plan.clone())
         );
+
+        // The request and its plan must agree on the kept paths.
+        let mut mismatched = request.clone();
+        mismatched.local_mounts[0].vm_only = vec!["node_modules".to_owned()];
+        assert!(matches!(
+            validate_request_workspace_plan(&mismatched, &project, &plan),
+            Err(SupervisorError::InvalidRequest)
+        ));
+        // A read-only share keeps nothing in the VM.
+        let mut read_only = request;
+        read_only.local_mounts[0].read_only = Some(true);
+        assert!(matches!(
+            validate_create(&read_only),
+            Err(SupervisorError::InvalidRequest)
+        ));
+        read_only.local_mounts[0].vm_only.clear();
+        validate_create(&read_only).unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_copies_the_implicit_source_without_its_kept_paths() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("main.rs"), b"fn main() {}\n").unwrap();
+        fs::create_dir_all(source.path().join("node_modules/pkg")).unwrap();
+        fs::write(source.path().join("node_modules/pkg/index.js"), b"1").unwrap();
+        let source = fs::canonicalize(source.path()).unwrap();
+        let project = codewire_project::ProjectSpec {
+            image: "registry.example/codewire/workspace:latest".to_owned(),
+            resources: codewire_project::ResourceSpec {
+                cpu_millicores: Some(2_000),
+                memory_mib: Some(16 * 1024),
+                disk_gib: Some(20),
+            },
+            ..Default::default()
+        };
+        let project_spec_json = project.canonical_json().unwrap();
+        let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: vec!["node_modules".to_owned(), ".venv".to_owned()],
+            name: "copy".to_owned(),
+            source_path: source.to_string_lossy().into_owned(),
+            vcpus: 2,
+            memory_mib: 16 * 1024,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+            docker_disk_bytes: 0,
+            request_id: Uuid::new_v4().to_string(),
+            project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
+            project_spec_json,
+            implicit_path_mode: "copy".to_owned(),
+            local_mounts: Vec::new(),
+            host_ports: Vec::new(),
+            mesh: None,
+            access_profile_id: String::new(),
+            access_profile_revision: 0,
+            access_profile_reference: String::new(),
+            platform_source_authority: None,
+        };
+        validate_create(&request).unwrap();
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let plan = core
+            .prepare_create_workspace_plan(&request, Uuid::new_v4())
+            .await
+            .unwrap();
+        assert_eq!(plan.inputs[0].vm_only(), ["node_modules", ".venv"]);
+        let unskipped = crate::workspace::inspect_workspace(
+            &source,
+            WorkspaceSelection::Copy,
+            workspace_content_limit(request.disk_bytes),
+        )
+        .unwrap();
+        let WorkspaceInput::Local { identity, .. } = &plan.inputs[0] else {
+            panic!("expected the implicit copy input");
+        };
+        assert_ne!(*identity, unskipped.commit);
+        assert!(plan.direct_share_plan().unwrap().is_none());
+
+        let operation = OperationRecord {
+            operation_id: Uuid::new_v4(),
+            request_id: Uuid::parse_str(&request.request_id).unwrap(),
+            environment_id: Some(Uuid::new_v4()),
+            kind: OperationKind::Create,
+            phase: OperationPhase::Intent,
+            checkpoint: 0,
+            payload: create_operation_payload(&request, &plan).unwrap(),
+            result: None,
+            error_code: None,
+            created_unix_ms: 1,
+            updated_unix_ms: 1,
+        };
+        assert_eq!(
+            create_request_from_operation(&operation).unwrap(),
+            (request.clone(), plan.clone())
+        );
+
+        let mut mismatched = request.clone();
+        mismatched.implicit_vm_only = vec!["node_modules".to_owned()];
+        assert!(matches!(
+            validate_request_workspace_plan(&mismatched, &project, &plan),
+            Err(SupervisorError::InvalidRequest)
+        ));
+        // A clone takes only committed files and skips nothing.
+        let mut clone = request.clone();
+        clone.implicit_path_mode = "clone".to_owned();
+        assert!(matches!(
+            validate_create(&clone),
+            Err(SupervisorError::InvalidRequest)
+        ));
+        for invalid in [
+            vec!["../escape".to_owned()],
+            vec!["/abs".to_owned()],
+            vec!["a".to_owned(), "a/b".to_owned()],
+            vec![".git".to_owned()],
+        ] {
+            let mut unsafe_request = request.clone();
+            unsafe_request.implicit_vm_only = invalid;
+            assert!(matches!(
+                validate_create(&unsafe_request),
+                Err(SupervisorError::InvalidRequest)
+            ));
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -12341,6 +12547,7 @@ mod tests {
         let workspace_plan = direct_workspace_plan(&source);
         let fixture = project_environment_with_access();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "new-environment".to_owned(),
             source_path: String::new(),
             vcpus: u32::from(fixture.vcpus),
@@ -12352,6 +12559,7 @@ mod tests {
             project_spec_sha256: fixture.project_spec_sha256.unwrap(),
             implicit_path_mode: String::new(),
             local_mounts: vec![v1::LocalMountInput {
+                vm_only: Vec::new(),
                 source_path: source.as_os_str().as_bytes().to_vec(),
                 destination: "/workspace/fixtures".to_owned(),
                 mode: v1::LocalMountMode::Direct as i32,
@@ -12410,6 +12618,7 @@ mod tests {
         environment.workspace_plan = workspace_plan.clone();
         let environment_id = environment.id;
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "dev".to_owned(),
             source_path: String::new(),
             vcpus: u32::from(environment.vcpus),
@@ -12421,6 +12630,7 @@ mod tests {
             project_spec_json: environment.project_spec_json.clone().unwrap(),
             implicit_path_mode: String::new(),
             local_mounts: vec![v1::LocalMountInput {
+                vm_only: Vec::new(),
                 source_path: source.as_os_str().as_bytes().to_vec(),
                 destination: "/workspace/fixtures".to_owned(),
                 mode: v1::LocalMountMode::Direct as i32,
@@ -13917,6 +14127,7 @@ mod tests {
         let environment_id = environment.id;
         let workspace_plan = environment.workspace_plan.clone();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: environment.name.clone(),
             source_path: "/workspace/source".to_owned(),
             vcpus: u32::from(environment.vcpus),
@@ -15280,6 +15491,7 @@ mod tests {
                 &fs::canonicalize(private.path()).unwrap(),
                 "/workspace/private",
                 true,
+                Vec::new(),
                 &forbidden_roots,
             ),
             Err(WorkspacePlanError::DirectShareInvalid)
@@ -15289,6 +15501,7 @@ mod tests {
                 &fs::canonicalize(&real_platform).unwrap(),
                 "/workspace/private",
                 true,
+                Vec::new(),
                 &forbidden_roots,
             ),
             Err(WorkspacePlanError::DirectShareInvalid)
@@ -15326,7 +15539,13 @@ mod tests {
         assert!(forbidden_roots.contains(&base), "{forbidden_roots:?}");
         for source in [&base, &sockets] {
             assert!(matches!(
-                prepare_direct_input(source, "/workspace/private", true, &forbidden_roots),
+                prepare_direct_input(
+                    source,
+                    "/workspace/private",
+                    true,
+                    Vec::new(),
+                    &forbidden_roots
+                ),
                 Err(WorkspacePlanError::DirectShareInvalid)
             ));
         }
@@ -15719,6 +15938,7 @@ mod tests {
         let project_spec_json = project.canonical_json().unwrap();
         let request_id = Uuid::new_v4();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "pending".to_owned(),
             source_path: String::new(),
             vcpus: 2,
@@ -16253,6 +16473,7 @@ mod tests {
             host_ports: Vec::new(),
             mesh: None,
             workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+                vm_only: Vec::new(),
                 source_path: PathBuf::from("/workspace/source"),
                 commit: "a".repeat(40),
                 mode: WorkspaceSourceMode::Clone,
