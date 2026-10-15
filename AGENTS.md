@@ -356,23 +356,24 @@ weakening of the required local hardware gate.
 - Direct delivery of provider material into a sandbox is allowed only where the
   proxy cannot work, with owner approval, listed with its reason in
   docs/dev/SECRETS-AND-CREDENTIALS.md "Direct delivery exceptions" and cited at
-  the delivering code. The only exceptions are the Sandbox creator's own
-  personal sign-ins for Codex and Claude Code: the Codex ChatGPT access token
-  and ID token, written as Codex's `~/.codex/auth.json`, and the Claude access
-  token, written as Claude Code's `~/.claude/.credentials.json`
-  (`claudeAiOauth`), each with a non-empty placeholder refresh token, because
-  each agent enables `/usage` and its plan and account features only with its
-  own login. The Claude token carries exactly the six scopes Claude Code's
-  own login has (`user:inference`, `user:profile`,
-  `user:sessions:claude_code`, `user:mcp_servers`, `user:file_upload`,
-  `user:plugins`) and never a scope beyond them; the owner accepted that on
-  2026-10-14 so Claude Code in a Sandbox behaves like their own login.
-  Refresh tokens, API keys, Claude setup tokens, GitHub and SSH material and
-  organization-owned credentials are never delivered. A delivered token is a
-  bearer token for the creator's account, usable from anywhere, and stays
-  valid at the provider until it expires (about 8 hours for Claude); every
-  process in the Sandbox, and anyone who can open the Sandbox's terminal, can
-  read it.
+  the delivering code. The only exceptions are the environment creator's own
+  personal sign-ins for Codex and Claude Code, in a hosted Sandbox and in the
+  creator's own local VM: the Codex ChatGPT access token and ID token, written
+  as Codex's `auth.json`, and the Claude access token, written as Claude
+  Code's `~/.claude/.credentials.json` (`claudeAiOauth`), each with a
+  non-empty placeholder refresh token, because each agent enables `/usage` and
+  its plan and account features only with its own login. The Claude token
+  carries exactly the six scopes Claude Code's own login has (`user:inference`,
+  `user:profile`, `user:sessions:claude_code`, `user:mcp_servers`,
+  `user:file_upload`, `user:plugins`) and never a scope beyond them; the owner
+  accepted that on 2026-10-14 so Claude Code in a Sandbox behaves like their
+  own login. Refresh tokens, API keys, Claude setup tokens, GitHub and SSH
+  material and organization-owned credentials are never delivered. A delivered
+  token is a bearer token for the creator's account, usable from anywhere, and
+  stays valid at the provider until it expires (about 8 hours for Claude); every
+  process in the Sandbox or VM, and anyone who can open its terminal, can read
+  it, and a stopped local VM keeps it on its state disk until its next boot's
+  check removes it or it expires.
 - A hosted platform broker bridge epoch may reuse one authority decision (its
   runtime session and derived grants, never material) for at most 60 seconds,
   and releases nothing under an older one. Only epoch admission creates it, and
