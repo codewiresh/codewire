@@ -856,3 +856,154 @@ fn a_launch_is_denied_before_run_only_when_its_projection_failed_and_cleanup_is_
         assert!(!denied_before_run(&record));
     }
 }
+
+#[tokio::test]
+async fn platform_managed_resume_admits_only_the_named_earlier_pod_of_this_environment() {
+    // #2705: a Resume continues a record whose origin names exactly the
+    // earlier Pod the control plane proved absent, in this environment and
+    // organization, for the same driver and agent, at the expected generation.
+    use crate::platform_managed::Agent;
+    use v1::SessionLifecycleState as S;
+    let temp = tempfile::tempdir().unwrap();
+    let config = retained_config(temp.path());
+    let writer = SessionEngine::new(&config, CredentialBridge::new(None));
+    let (session, origin) = retain(&writer, Agent::Codex, "0.160.0", S::Running).await;
+    writer.shutdown().await.unwrap();
+    let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+    let generation = engine.get(&session).await.unwrap().launch_generation;
+    let this_pod = v1::PlatformManagedScope {
+        pod_uid: Uuid::new_v4().to_string(),
+        binding_generation: 1,
+        ..retained_scope(&origin)
+    };
+    let resume = v1::PlatformManagedControl {
+        action: v1::PlatformManagedAction::Resume as i32,
+        session_id: session.clone(),
+        driver_id: origin.driver_id.clone(),
+        expected_launch_generation: generation,
+        predecessor_pod_uid: origin.pod_uid.clone(),
+        agent: v1::PlatformManagedAgent::Codex as i32,
+        ..Default::default()
+    };
+    engine.platform_resumable(&this_pod, &resume).await.unwrap();
+    let refused = |scope: v1::PlatformManagedScope, control: v1::PlatformManagedControl| {
+        let engine = &engine;
+        async move {
+            assert!(matches!(
+                engine.platform_resumable(&scope, &control).await,
+                Err(Error::Refused)
+            ));
+        }
+    };
+    // Its own Pod stays Restart's.
+    refused(retained_scope(&origin), resume.clone()).await;
+    // Another environment or organization.
+    refused(
+        v1::PlatformManagedScope {
+            environment_id: Uuid::new_v4().to_string(),
+            ..this_pod.clone()
+        },
+        resume.clone(),
+    )
+    .await;
+    refused(
+        v1::PlatformManagedScope {
+            org_id: "another-org".into(),
+            ..this_pod.clone()
+        },
+        resume.clone(),
+    )
+    .await;
+    for control in [
+        // Not the Pod the control plane proved absent.
+        v1::PlatformManagedControl {
+            predecessor_pod_uid: Uuid::new_v4().to_string(),
+            ..resume.clone()
+        },
+        // A stale generation.
+        v1::PlatformManagedControl {
+            expected_launch_generation: generation + 1,
+            ..resume.clone()
+        },
+        // Another agent.
+        v1::PlatformManagedControl {
+            agent: v1::PlatformManagedAgent::Claude as i32,
+            ..resume.clone()
+        },
+        // Another driver.
+        v1::PlatformManagedControl {
+            driver_id: Uuid::new_v4().to_string(),
+            ..resume.clone()
+        },
+        // Not a Resume.
+        v1::PlatformManagedControl {
+            action: v1::PlatformManagedAction::Restart as i32,
+            ..resume.clone()
+        },
+    ] {
+        refused(this_pod.clone(), control).await;
+    }
+    // A driver this daemon runs for the conversation is alive here; that
+    // refusal names its plain reason.
+    let (control, _held) = tokio::sync::mpsc::channel(1);
+    lock(&engine.inner.active).insert(
+        session.clone(),
+        ActiveSession {
+            token: Uuid::new_v4(),
+            control,
+            task: tokio::spawn(async {}),
+        },
+    );
+    assert!(matches!(
+        engine.platform_resumable(&this_pod, &resume).await,
+        Err(Error::ResumeRefused("resume-driver-alive"))
+    ));
+    lock(&engine.inner.active).remove(&session);
+    // The single write before the helper commits: the record names this Pod
+    // at g+1. A crash anywhere after it leaves nothing to resume again, at
+    // either generation, before or after the daemon restarts.
+    {
+        let handle = engine.handle(&session).unwrap();
+        let mut metadata = handle.metadata.lock().await;
+        let mut moved = origin.clone();
+        moved.pod_uid = this_pod.pod_uid.clone();
+        moved.binding_generation = this_pod.binding_generation;
+        metadata.platform_managed_origin = Some(moved);
+        metadata.launch_generation = generation + 1;
+        metadata.state = S::Starting as i32;
+        metadata.cleanup_unknown = true;
+        metadata.cleanup_confirmed = false;
+        persist_metadata(&engine.inner.root, &metadata)
+            .await
+            .unwrap();
+    }
+    for expected in [generation, generation + 1] {
+        refused(
+            this_pod.clone(),
+            v1::PlatformManagedControl {
+                expected_launch_generation: expected,
+                ..resume.clone()
+            },
+        )
+        .await;
+    }
+    // The crash: an unconfirmed launch cleanup refuses a clean shutdown.
+    assert!(engine.shutdown().await.is_err());
+    drop(engine);
+    let restarted = SessionEngine::new(&config, CredentialBridge::new(None));
+    for expected in [generation, generation + 1] {
+        assert!(matches!(
+            restarted
+                .platform_resumable(
+                    &this_pod,
+                    &v1::PlatformManagedControl {
+                        expected_launch_generation: expected,
+                        ..resume.clone()
+                    },
+                )
+                .await,
+            Err(Error::Refused)
+        ));
+    }
+    let _ = restarted.shutdown().await;
+}

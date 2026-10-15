@@ -248,10 +248,33 @@ cw stop "$ENV" implement --cleanup-request-id "$ORIGINAL_REQUEST_ID" --output js
 Confirm that cleanup completed before restarting. Retain the original task's
 unknown result; cleanup does not authorize replaying it.
 
-A managed conversation in a platform sandbox ends when the sandbox stops.
-After Start, `cw list` still shows it, but `cw msg`, `cw restart` and
-`cw wait --message` for it say that it ended with the environment; start a new
-conversation with `cw run "$ENV" --agent ...`.
+A managed conversation in a platform sandbox stops with the sandbox. After
+Start, `cw list` still shows it, and `cw msg` or `cw restart` resumes it in the
+new sandbox first: its agent starts again from its saved session, with its
+earlier turns, and the message goes to it. What was in flight when the sandbox
+stopped is not replayed; the agent may see an interrupted step and redo it.
+`cw wait --message` for a message sent before the Stop reads it in the new
+sandbox once the conversation has resumed there. Until then it says that the
+conversation stopped with its environment and that `cw msg` or `cw restart`
+continues it.
+
+A conversation waits, and `cw msg` says to try again shortly, while:
+
+- the sandbox's previous Pod is still stopping;
+- another resume of it is already starting in this sandbox;
+- its agent is still running in this sandbox.
+
+A conversation cannot resume, and `cw msg` says why, when:
+
+- the environment's selected credentials or secret sources changed since it
+  started, or the agent's credential changed (for example from an API key to
+  a sign-in);
+- its working directory no longer exists in the sandbox;
+- the sandbox's agent provider is not admitted for it;
+- its last start, restart or resume has an unknown outcome;
+- it is a child conversation (resume its parent instead).
+
+Start a new conversation with `cw run "$ENV" --agent ...` then.
 
 A launch that the platform refuses, for example because a selected secret
 source was removed, reports that it was refused: nothing was started or
