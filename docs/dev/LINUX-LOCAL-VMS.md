@@ -116,6 +116,27 @@ the VM comes from the runtime that `cw setup --local` installed.
 parent and child agents, and [SECRETS.md](../SECRETS.md) covers credentials
 and profiles.
 
+## SSH keys in a local VM
+
+A local VM has no SSH key unless its credential profile has one. The key stays
+on your host: the VM's `ssh`, `scp` and Git use `SSH_AUTH_SOCK`, the local
+credential authority makes each signature, and only signatures reach the VM.
+
+```sh
+# Generate a key and set it in profile work in one step; prints the public key
+# and GitHub's "add SSH key" link.
+cw credentials --local --profile work generate ssh --name work-ssh
+# Or use a key you already have.
+cw credentials --local add ssh --name my-key --key-file ~/.ssh/id_ed25519
+cw credentials --local --profile work set ssh my-key
+```
+
+`cw env create --local --profile local:NAME` in a terminal asks whether to add
+an SSH key when that profile has none (the default is no), then lets you pick
+one of your local SSH keys or generate a new one, and sets it in the profile.
+Every VM that uses the profile then gets the key. There is no question
+without a local profile, and scripts, `--yes` and JSON output never see it.
+
 ## After a cw update
 
 `cw update` never stops your local VMs. The previous cw's local VM supervisor

@@ -28,6 +28,18 @@ pub(super) async fn handle_platform_credentials(
         CredentialOperation::Credential(command) => {
             super::platform_credentials::handle(&client, command).await
         }
+        CredentialOperation::GenerateIntoProfile(args, profile) => {
+            let credential = super::platform_credentials::generate_ssh(&client, &args).await?;
+            handle_profile(
+                &client,
+                CredentialProfileCommand::Set(CredentialProfileSetArgs {
+                    profile,
+                    slot: "ssh".to_owned(),
+                    credential: Some(format!("id:{}", credential.id)),
+                }),
+            )
+            .await
+        }
     }
 }
 
