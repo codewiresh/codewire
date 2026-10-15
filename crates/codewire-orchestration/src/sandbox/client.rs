@@ -343,7 +343,7 @@ fn workspace_owned_environment_keys() -> BTreeSet<String> {
         .map(str::to_owned)
         .collect();
     const SLOTS: [&str; 5] = ["codex", "openai", "anthropic", "ssh", "github"];
-    // Every name any selection projects in either Anthropic form, and every
+    // Every name any selection projects in any Anthropic form, and every
     // name a selected client reserves: an Anthropic name of the form that
     // is not selected is owned too, and never rendered. Some names depend on
     // the combination (the GitHub client alone rewrites more Git URL forms
@@ -360,6 +360,7 @@ fn workspace_owned_environment_keys() -> BTreeSet<String> {
         [
             Some(selection),
             selection.with_anthropic_subscription_token().ok(),
+            selection.with_anthropic_sign_in().ok(),
         ]
         .into_iter()
         .flatten()

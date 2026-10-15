@@ -739,7 +739,7 @@ for profile_input in src/access_profiles.rs src/connect/access_profiles.rs tests
 done
 run_paths_case credential_kind_fixtures pull_request refs/pull/721/head false \
   'policy security security_js' scripts/ci/tests/test-kind-codex-session.py scripts/ci/tests/test-kind-codex-login.py \
-  scripts/ci/tests/test-kind-credentials.py
+  scripts/ci/tests/test-kind-claude-login.py scripts/ci/tests/test-kind-credentials.py
 run_paths_case orchestration_wire_contract pull_request refs/pull/71/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/tests/wire_contract.rs \
@@ -1732,7 +1732,7 @@ grep -qF -- '-- --ignored --exact --nocapture' <<<"$destroy_hint_block"
 grep -qF 'assert_passed_count "environment destroy template hint matrix" "$logfile" 1' <<<"$destroy_hint_block"
 grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
 grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 47' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 49' "$integration_runner"
 grep -qF -- '--features platform,ssh-agent --lib platform::tests::ssh::' "$integration_runner"
 grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
@@ -1747,7 +1747,7 @@ grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfil
 grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"
 grep -qF 'assert_passed_count "public access profile restricted API matrix" "$logfile" 8' "$integration_runner"
 grep -qF 'assert_passed_count "public credential metadata matrix" "$logfile" 3' "$integration_runner"
-grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 27' "$integration_runner"
+grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 28' "$integration_runner"
 grep -qF -- '--lib runtime::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
 grep -qF 'assert_passed_count "isolated credential runtime matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- '--lib runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority' "$integration_runner"

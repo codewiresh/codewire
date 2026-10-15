@@ -688,7 +688,7 @@ async fn native_clients_full_flow_against_postgres() {
         .await;
 }
 
-/// WI-1/WI-1a contract gate (docs/plans/connect-rpc/15-auth-policy.md):
+/// WI-1/WI-1a contract gate (codewire/plans:connect-rpc/15-auth-policy.md):
 /// flavor-2 user bearers are opaque OIDC access tokens validated by direct
 /// lookup against `oidc_access_tokens` (joined to `users` and
 /// `oidc_clients`). A product-scoped token authenticates while a valid

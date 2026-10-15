@@ -1,5 +1,5 @@
-//! Codex's own ChatGPT login in a hosted Sandbox: Codewire's one listed direct
-//! delivery exception (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
+//! Codex's own ChatGPT login in a hosted Sandbox: a listed direct delivery
+//! exception (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
 //! exceptions"). Codex enables `/usage`, analytics and account routing only
 //! with its own login and has no hook for a login held elsewhere, so the proxy
 //! cannot provide them.
@@ -29,21 +29,28 @@
 //! generation). A daemon restart keeps it.
 //!
 //! No token, file content or path is logged: only [`CodexLoginSync`] states.
+//! The records, the zeroizing document and the check loop are shared with the
+//! Claude login writer ([`crate::agent_login`]).
 
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::io;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use codewire_access::ManagedCredentialClientPlacement;
-use codewire_credential_bridge::CodexLoginFailure;
+use codewire_credential_bridge::LoginFailure;
 use codewire_workload_secrets::{CodexLogin, CodexLoginBinding, OpenedCodexLogin};
 use serde_json::{Map, Value};
 use tokio::sync::watch;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{CODEX_HOME_MODE, CodexHome};
+pub use crate::agent_login::Removal;
+use crate::agent_login::{
+    Document, LoginOutcome, LoginState, LoginWriter, run_login_writer, scrub, unix_now,
+};
+#[cfg(test)]
+use crate::agent_login::{LOGIN_RETRY_MIN, Retry};
 use crate::private_files::{Entry, OwnedEntry, PrivateDirectory, ensure_private_directory};
 
 /// Codex's login file in its home.
@@ -60,17 +67,12 @@ pub const CODEX_LOGIN_STATE_DIRECTORY: &str = "/tmp/codewire-codex-login";
 /// the Kind test deployment selects a shorter period
 /// ([`crate::config::CODEX_LOGIN_CHECK_PERIOD_ENV`]).
 pub use crate::config::CODEX_LOGIN_CHECK_PERIOD;
-/// With no delivery for this long while the bridge fails (no epoch, no
-/// capability, or unavailable), Codewire's login is removed: when the whole
-/// Sandbox loses credential authority, the relay reports the broker's
-/// refusal as an epoch failure, never as an explicit denial.
-pub const CODEX_LOGIN_LAPSE: Duration = Duration::from_secs(600);
-const CODEX_LOGIN_RETRY_MIN: Duration = Duration::from_secs(2);
-const AUTH_FILE_MODE: u32 = 0o600;
-const STATE_DIRECTORY_MODE: u32 = 0o700;
+/// With no delivery for this long while the bridge fails, Codewire's login is
+/// removed ([`crate::agent_login::LOGIN_LAPSE`]).
+pub const CODEX_LOGIN_LAPSE: Duration = crate::agent_login::LOGIN_LAPSE;
+const AUTH_FILE_MODE: u32 = crate::agent_login::PRIVATE_FILE_MODE;
 /// Real logins are a few kilobytes; a larger file is never Codewire's.
 const MAX_AUTH_BYTES: u64 = 1024 * 1024;
-const MAX_STATE_BYTES: u64 = 4096;
 
 /// What one check did. It names no token, file content or path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,13 +117,13 @@ pub enum CodexLoginDelivery {
     Unsupported,
 }
 
-impl From<Result<OpenedCodexLogin, CodexLoginFailure>> for CodexLoginDelivery {
-    fn from(result: Result<OpenedCodexLogin, CodexLoginFailure>) -> Self {
+impl From<Result<OpenedCodexLogin, LoginFailure>> for CodexLoginDelivery {
+    fn from(result: Result<OpenedCodexLogin, LoginFailure>) -> Self {
         match result {
             Ok(opened) => Self::Delivered(opened),
-            Err(CodexLoginFailure::Denied) => Self::Denied,
-            Err(CodexLoginFailure::Unavailable) => Self::Unavailable,
-            Err(CodexLoginFailure::Unsupported) => Self::Unsupported,
+            Err(LoginFailure::Denied) => Self::Denied,
+            Err(LoginFailure::Unavailable) => Self::Unavailable,
+            Err(LoginFailure::Unsupported) => Self::Unsupported,
         }
     }
 }
@@ -152,7 +154,7 @@ impl CodexLoginWriter {
         Self {
             home,
             proxy_config,
-            state: LoginState::load(state_directory.into(), generation),
+            state: LoginState::load(state_directory.into(), generation, "codex"),
             failing_since: Some(now_unix),
         }
     }
@@ -311,15 +313,6 @@ impl CodexHome {
     }
 }
 
-/// What removing Codewire's `auth.json` found.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Removal {
-    Removed,
-    Absent,
-    /// The user's login, or Codewire's that the caller chose to keep.
-    Kept,
-}
-
 enum AuthFile {
     Absent,
     User,
@@ -422,35 +415,8 @@ fn temporary_name(purpose: &str) -> String {
     )
 }
 
-/// A parsed `auth.json`. Every string in it is zeroized on drop.
-struct Document(Value);
-
-impl Drop for Document {
-    fn drop(&mut self) {
-        scrub(&mut self.0);
-    }
-}
-
-fn scrub(value: &mut Value) {
-    match value {
-        Value::String(text) => text.zeroize(),
-        Value::Array(values) => values.iter_mut().for_each(scrub),
-        Value::Object(object) => object.values_mut().for_each(scrub),
-        _ => {}
-    }
-}
-
+/// `auth.json` as Codex writes it.
 impl Document {
-    fn parse(bytes: &[u8]) -> Option<Self> {
-        let document = Self(serde_json::from_slice(bytes).ok()?);
-        document.object()?;
-        Some(document)
-    }
-
-    fn object(&self) -> Option<&Map<String, Value>> {
-        self.0.as_object()
-    }
-
     fn tokens(&self) -> Option<&Map<String, Value>> {
         self.object()?.get("tokens")?.as_object()
     }
@@ -466,29 +432,6 @@ impl Document {
                 .and_then(|tokens| tokens.get("refresh_token"))
                 .and_then(Value::as_str)
                 == Some(CODEX_MANAGED_REFRESH_TOKEN)
-    }
-
-    fn to_bytes(&self) -> io::Result<Zeroizing<Vec<u8>>> {
-        // Sized so serialization does not reallocate and leave a copy behind.
-        let mut bytes = Zeroizing::new(Vec::with_capacity(2 * json_size(&self.0) + 4096));
-        serde_json::to_writer_pretty(&mut *bytes, &self.0).map_err(io::Error::other)?;
-        bytes.push(b'\n');
-        Ok(bytes)
-    }
-}
-
-fn json_size(value: &Value) -> usize {
-    match value {
-        Value::String(text) => text.len() + 2,
-        Value::Array(values) => values.iter().map(json_size).sum::<usize>() + 2,
-        Value::Object(object) => {
-            object
-                .iter()
-                .map(|(key, value)| key.len() + 8 + json_size(value))
-                .sum::<usize>()
-                + 2
-        }
-        _ => 8,
     }
 }
 
@@ -646,133 +589,34 @@ fn rfc3339_utc(unix: u64) -> String {
     )
 }
 
-/// The container-local records: which login Codewire last wrote, and which
-/// credentials the user logged out of, for one environment generation. Kept
-/// in memory and, best effort, under [`CODEX_LOGIN_STATE_DIRECTORY`].
-#[derive(Debug)]
-struct LoginState {
-    directory: PathBuf,
-    generation: u64,
-    written: Option<CodexLoginBinding>,
-    logged_out: BTreeSet<String>,
-}
+/// The most leftover temporaries one start removes.
+const MAX_LEFTOVERS: usize = 64;
 
-impl LoginState {
-    fn load(directory: PathBuf, generation: u64) -> Self {
-        let mut state = Self {
-            directory,
-            generation,
-            written: None,
-            logged_out: BTreeSet::new(),
+impl CodexLoginWriter {
+    /// Remove what an interrupted write or removal left beside `auth.json`,
+    /// so no stray copy of a token outlives a crash or a revocation: every
+    /// `.auth.json.codewire.*` temporary that is a write in progress (`.new`)
+    /// or holds Codewire's login. A file set aside because it was the user's
+    /// stays. Returns how many were removed.
+    pub fn remove_leftovers(&self) -> io::Result<usize> {
+        let Some(home) = self.home.open_for_login(false)? else {
+            return Ok(0);
         };
-        if let Some(records) = state.open(false)
-            && let Ok(Entry::Owned(entry)) = records.read(&state.written_name(), MAX_STATE_BYTES)
-        {
-            state.written = parse_written(&entry.contents);
-        }
-        state
-    }
-
-    fn written_name(&self) -> String {
-        format!("generation-{}.written", self.generation)
-    }
-
-    fn logout_name(&self, credential_id: &str) -> String {
-        format!("generation-{}.logged-out.{credential_id}", self.generation)
-    }
-
-    fn open(&self, create: bool) -> Option<PrivateDirectory> {
-        match PrivateDirectory::open(&self.directory) {
-            Ok(records) => records,
-            Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
-                ensure_private_directory(&self.directory, STATE_DIRECTORY_MODE).ok()?;
-                PrivateDirectory::open(&self.directory).ok().flatten()
+        let prefix = format!(".{CODEX_AUTH_FILE_NAME}.codewire.");
+        let mut removed = 0;
+        for name in home.names_with_prefix(&prefix, MAX_LEFTOVERS)? {
+            let codewire = name.ends_with(".new")
+                || matches!(classify(&home, &name)?, AuthFile::Codewire { .. });
+            if codewire {
+                home.unlink(&name)?;
+                removed += 1;
             }
-            Err(_) => None,
         }
+        if removed > 0 {
+            home.sync()?;
+        }
+        Ok(removed)
     }
-
-    fn is_logged_out(&mut self, credential_id: &str) -> bool {
-        if self.logged_out.contains(credential_id) {
-            return true;
-        }
-        let marked = self.open(false).is_some_and(|records| {
-            matches!(
-                records.read(&self.logout_name(credential_id), MAX_STATE_BYTES),
-                Ok(Entry::Owned(_))
-            )
-        });
-        if marked {
-            self.logged_out.insert(credential_id.to_owned());
-        }
-        marked
-    }
-
-    fn record_logout(&mut self, credential_id: &str) {
-        self.logged_out.insert(credential_id.to_owned());
-        let name = self.logout_name(credential_id);
-        let persisted = self.open(true).is_some_and(|records| {
-            match records.write_new(&name, b"", AUTH_FILE_MODE) {
-                Ok(()) => records.sync().is_ok(),
-                Err(error) => error.kind() == io::ErrorKind::AlreadyExists,
-            }
-        });
-        if !persisted {
-            tracing::warn!(
-                "Codex logout recorded for this daemon only; its container record is unavailable"
-            );
-        }
-    }
-
-    fn record_written(&mut self, binding: CodexLoginBinding) {
-        if self.written.as_ref() == Some(&binding) {
-            return;
-        }
-        let record = format!(
-            "{}\n{}\n{}\n",
-            binding.credential_id, binding.revocation_generation, binding.material_generation
-        );
-        self.written = Some(binding);
-        let name = self.written_name();
-        let persisted = self.open(true).is_some_and(|records| {
-            let temporary = format!(".{name}.{}", uuid::Uuid::new_v4().simple());
-            let result = records
-                .write_new(&temporary, record.as_bytes(), AUTH_FILE_MODE)
-                .and_then(|()| records.rename(&temporary, &name))
-                .and_then(|()| records.sync());
-            if result.is_err() {
-                let _ = records.unlink(&temporary);
-            }
-            result.is_ok()
-        });
-        if !persisted {
-            tracing::warn!("Codex login record kept for this daemon only");
-        }
-    }
-
-    fn forget_written(&mut self) {
-        self.written = None;
-        if let Some(records) = self.open(false) {
-            let _ = records
-                .unlink(&self.written_name())
-                .and_then(|()| records.sync());
-        }
-    }
-}
-
-fn parse_written(bytes: &[u8]) -> Option<CodexLoginBinding> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let mut lines = text.strip_suffix('\n')?.split('\n');
-    let (Some(credential_id), Some(revocation), Some(material), None) =
-        (lines.next(), lines.next(), lines.next(), lines.next())
-    else {
-        return None;
-    };
-    Some(CodexLoginBinding {
-        credential_id: credential_id.to_owned(),
-        revocation_generation: revocation.parse().ok()?,
-        material_generation: material.parse().ok()?,
-    })
 }
 
 /// The login writer of a hosted daemon serving `config` in `home`, or `None`:
@@ -787,27 +631,56 @@ pub(crate) fn hosted_writer(config: &crate::Config, home: CodexHome) -> Option<C
         .for_placement(ManagedCredentialClientPlacement::Platform)
         .codex?
         .into_config_toml();
-    Some(CodexLoginWriter::new(
+    let writer = CodexLoginWriter::new(
         home,
         proxy_config,
         CODEX_LOGIN_STATE_DIRECTORY,
         bridge.environment_generation,
         unix_now(),
-    ))
+    );
+    if let Err(error) = writer.remove_leftovers() {
+        tracing::warn!(error_kind = ?error.kind(), "hosted Codex login leftovers could not be removed");
+    }
+    Some(writer)
 }
 
 /// Where the writer gets a login: the shared bridge, or a test double.
 pub(crate) trait CodexLoginSource: Send + Sync + 'static {
-    fn codex_login(
-        &self,
-    ) -> impl Future<Output = Result<OpenedCodexLogin, CodexLoginFailure>> + Send;
+    fn codex_login(&self) -> impl Future<Output = Result<OpenedCodexLogin, LoginFailure>> + Send;
 }
 
 impl CodexLoginSource for codewire_credential_bridge::CredentialBridge {
-    fn codex_login(
-        &self,
-    ) -> impl Future<Output = Result<OpenedCodexLogin, CodexLoginFailure>> + Send {
+    fn codex_login(&self) -> impl Future<Output = Result<OpenedCodexLogin, LoginFailure>> + Send {
         codewire_credential_bridge::CredentialBridge::codex_login(self)
+    }
+}
+
+impl LoginOutcome for CodexLoginSync {
+    const FAILED: Self = Self::Unavailable;
+
+    fn retries_soon(self) -> bool {
+        matches!(self, Self::Unavailable | Self::Expired | Self::Lapsed)
+    }
+}
+
+impl LoginWriter for CodexLoginWriter {
+    type Delivery = CodexLoginDelivery;
+    type Outcome = CodexLoginSync;
+
+    fn apply(&mut self, delivery: CodexLoginDelivery, now_unix: u64) -> io::Result<CodexLoginSync> {
+        CodexLoginWriter::apply(self, delivery, now_unix)
+    }
+
+    fn checked(outcome: CodexLoginSync) {
+        tracing::info!(codex_login = ?outcome, "hosted Codex login checked");
+    }
+
+    fn failed(error: &io::Error) {
+        tracing::warn!(error_kind = ?error.kind(), "hosted Codex login check failed");
+    }
+
+    fn stopped_unexpectedly() {
+        tracing::warn!("hosted Codex login check stopped unexpectedly");
     }
 }
 
@@ -816,105 +689,16 @@ impl CodexLoginSource for codewire_credential_bridge::CredentialBridge {
 /// with jittered backoff while no epoch is admitted or the broker is
 /// unavailable. Stops when `shutdown` turns true.
 pub(crate) async fn run_codex_login_writer(
-    mut writer: CodexLoginWriter,
+    writer: CodexLoginWriter,
     source: impl CodexLoginSource,
     check_period: Duration,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) {
-    let mut retry = Retry::new(check_period);
-    let mut previous = None;
-    loop {
-        let delivery = tokio::select! {
-            biased;
-            () = stopped(&mut shutdown) => return,
-            result = source.codex_login() => CodexLoginDelivery::from(result),
-        };
-        let checked = tokio::task::spawn_blocking(move || {
-            let result = writer.apply(delivery, unix_now());
-            (writer, result)
-        })
-        .await;
-        let Ok((returned, result)) = checked else {
-            tracing::warn!("hosted Codex login check stopped unexpectedly");
-            return;
-        };
-        writer = returned;
-        let delay = match result {
-            Ok(outcome) => {
-                if previous != Some(outcome) {
-                    tracing::info!(codex_login = ?outcome, "hosted Codex login checked");
-                    previous = Some(outcome);
-                }
-                retry.after(outcome)
-            }
-            Err(error) => {
-                tracing::warn!(error_kind = ?error.kind(), "hosted Codex login check failed");
-                previous = None;
-                retry.after(CodexLoginSync::Unavailable)
-            }
-        };
-        tokio::select! {
-            biased;
-            () = stopped(&mut shutdown) => return,
-            () = tokio::time::sleep(delay) => {}
-        }
-    }
-}
-
-async fn stopped(shutdown: &mut watch::Receiver<bool>) {
-    while !*shutdown.borrow() {
-        if shutdown.changed().await.is_err() {
-            return;
-        }
-    }
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
-
-/// When to check next: the period after a decision, jittered backoff from
-/// [`CODEX_LOGIN_RETRY_MIN`] up to the period while nothing was delivered.
-#[derive(Debug)]
-struct Retry {
-    failures: u32,
-    period: Duration,
-}
-
-impl Retry {
-    fn new(period: Duration) -> Self {
-        Self {
-            failures: 0,
-            period,
-        }
-    }
-
-    fn after(&mut self, outcome: CodexLoginSync) -> Duration {
-        match outcome {
-            CodexLoginSync::Unavailable | CodexLoginSync::Expired | CodexLoginSync::Lapsed => {
-                let ceiling = CODEX_LOGIN_RETRY_MIN
-                    .saturating_mul(1 << self.failures.min(16))
-                    .min(self.period);
-                self.failures = self.failures.saturating_add(1);
-                jitter(ceiling, 50)
-            }
-            _ => {
-                self.failures = 0;
-                jitter(self.period, 90)
-            }
-        }
-    }
-}
-
-/// A uniformly random duration between `floor_percent`% of `ceiling` and
-/// `ceiling`, so many Sandboxes do not check in step.
-fn jitter(ceiling: Duration, floor_percent: u32) -> Duration {
-    let floor = ceiling * floor_percent / 100;
-    let span = ceiling.saturating_sub(floor).as_millis().max(1);
-    let random = uuid::Uuid::new_v4().as_u128() % span;
-    floor + Duration::from_millis(u64::try_from(random).unwrap_or(0))
+    let ask = || {
+        let login = source.codex_login();
+        async move { CodexLoginDelivery::from(login.await) }
+    };
+    run_login_writer(writer, ask, check_period, shutdown).await;
 }
 
 #[cfg(test)]

@@ -39,7 +39,7 @@ http = { workspace = true }
 http-body-util = { workspace = true }
 tokio = { workspace = true }
 
-# Connect-RPC serving (docs/plans/connect-rpc/03-connect-server-infrastructure.md
+# Connect-RPC serving (codewire/plans:connect-rpc/03-connect-server-infrastructure.md
 # WI-1). The `axum` feature provides the tower-service mount used by
 # `connect::connect_router`; message/client codegen lives in codewire-proto.
 connectrpc = { workspace = true, features = ["axum"] }

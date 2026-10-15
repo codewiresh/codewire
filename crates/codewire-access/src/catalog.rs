@@ -5,10 +5,10 @@ use crate::{
     GrantPermission, ProviderCatalog, ProviderDefinition, ProviderId,
 };
 
-/// Operation of the dedicated Codex login permission. It names the one listed
-/// direct delivery exception (docs/dev/SECRETS-AND-CREDENTIALS.md): the
-/// Sandbox creator's own personal Codex ChatGPT access and ID tokens, sealed to
-/// the workspace daemon. No HTTP route or other operation implies it.
+/// Operation of the dedicated Codex login permission. It names a listed direct
+/// delivery exception (docs/dev/SECRETS-AND-CREDENTIALS.md): the Sandbox
+/// creator's own personal Codex ChatGPT access and ID tokens, sealed to the
+/// workspace daemon. No HTTP route or other operation implies it.
 pub const CODEX_LOGIN_OPERATION: &str = "codex-login";
 /// Route of the dedicated Codex login permission. It is not an HTTP route.
 pub const CODEX_LOGIN_ROUTE: &str = "codex-login";
@@ -22,6 +22,27 @@ pub fn codex_login_permission() -> GrantPermission {
         operation: BrokerOperationId::parse(CODEX_LOGIN_OPERATION)
             .expect("built-in Codex login operation ID"),
         route: BrokerRouteId::parse(CODEX_LOGIN_ROUTE).expect("built-in Codex login route ID"),
+    }
+}
+
+/// Operation of the dedicated Claude login permission, the other listed direct
+/// delivery exception: the Sandbox creator's own personal Claude sign-in
+/// access token, sealed to the workspace daemon. No HTTP route or other
+/// operation implies it.
+pub const CLAUDE_LOGIN_OPERATION: &str = "claude-login";
+/// Route of the dedicated Claude login permission. It is not an HTTP route.
+pub const CLAUDE_LOGIN_ROUTE: &str = "claude-login";
+
+/// The Anthropic slot's dedicated permission for sealed login delivery.
+/// Holding it is necessary, never sufficient: the broker also requires a
+/// hosted Sandbox, an Active Claude sign-in (never an API key or a Claude
+/// subscription token), and the creator as credential owner, profile owner and
+/// confirming user.
+pub fn claude_login_permission() -> GrantPermission {
+    GrantPermission {
+        operation: BrokerOperationId::parse(CLAUDE_LOGIN_OPERATION)
+            .expect("built-in Claude login operation ID"),
+        route: BrokerRouteId::parse(CLAUDE_LOGIN_ROUTE).expect("built-in Claude login route ID"),
     }
 }
 
@@ -94,14 +115,22 @@ pub fn builtin_provider_catalog() -> ProviderCatalog {
             ]),
             capabilities: BTreeMap::from([(
                 CapabilitySlot::anthropic(),
-                policy(
-                    &[
+                CapabilityPolicy {
+                    authentication_kinds: BTreeSet::from([
                         CredentialAuthKind::OAuth,
                         CredentialAuthKind::ApiKey,
                         CredentialAuthKind::ClaudeSignIn,
-                    ],
-                    &[("messages", "anthropic-api")],
-                ),
+                    ]),
+                    permissions: BTreeSet::from([
+                        GrantPermission {
+                            operation: BrokerOperationId::parse("messages")
+                                .expect("built-in Messages operation ID"),
+                            route: BrokerRouteId::parse("anthropic-api")
+                                .expect("built-in Anthropic route ID"),
+                        },
+                        claude_login_permission(),
+                    ]),
+                },
             )]),
         },
         ProviderDefinition {
@@ -300,7 +329,7 @@ mod tests {
                 },
             ])
         );
-        // The dedicated login permission belongs to the Codex slot alone.
+        // Each dedicated login permission belongs to its own slot alone.
         for (id, provider) in [
             ("openai", provider),
             (
@@ -319,6 +348,11 @@ mod tests {
                 assert_eq!(
                     policy.permissions.contains(&codex_login_permission()),
                     id == "openai" && *slot == CapabilitySlot::codex(),
+                    "{id}/{slot}"
+                );
+                assert_eq!(
+                    policy.permissions.contains(&claude_login_permission()),
+                    id == "anthropic" && *slot == CapabilitySlot::anthropic(),
                     "{id}/{slot}"
                 );
             }
@@ -369,7 +403,10 @@ mod tests {
                     CredentialAuthKind::ApiKey,
                     CredentialAuthKind::ClaudeSignIn,
                 ],
-                &[("messages", "anthropic-api")]
+                &[
+                    ("messages", "anthropic-api"),
+                    ("claude-login", "claude-login")
+                ]
             )
         );
         // The Claude sign-in is an Anthropic form only.

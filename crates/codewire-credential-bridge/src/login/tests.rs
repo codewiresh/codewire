@@ -52,7 +52,7 @@ impl Harness {
     async fn submit(
         &mut self,
     ) -> (
-        tokio::task::JoinHandle<Result<OpenedCodexLogin, CodexLoginFailure>>,
+        tokio::task::JoinHandle<Result<OpenedCodexLogin, LoginFailure>>,
         v1::CodexLoginRequest,
     ) {
         let bridge = self.bridge.clone();
@@ -127,21 +127,21 @@ async fn an_epoch_without_the_capability_is_never_sent_the_operation() {
     assert!(!bridge.supports_codex_login().await);
     assert_eq!(
         bridge.codex_login().await.unwrap_err(),
-        CodexLoginFailure::Unavailable
+        LoginFailure::Unavailable
     );
     // An older broker or gateway lists nothing: refuse without sending.
     let mut old = Harness::new(bridge.clone(), &[]).await;
     assert!(!bridge.supports_codex_login().await);
     assert_eq!(
         bridge.codex_login().await.unwrap_err(),
-        CodexLoginFailure::Unsupported
+        LoginFailure::Unsupported
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(20), old.output.next())
             .await
             .is_err()
     );
-    assert!(bridge.inner.lock().await.codex_logins.is_empty());
+    assert!(bridge.inner.lock().await.logins.is_empty());
     // An unknown capability enables nothing either.
     let unknown = Harness::new(bridge.clone(), &["future-op".to_owned()]).await;
     assert!(!bridge.supports_codex_login().await);
@@ -185,7 +185,7 @@ async fn sealed_login_round_trips_to_the_requesting_recipient_only() {
     let remaining = request
         .deadline_unix_ms
         .saturating_sub(login_now_unix_ms().unwrap());
-    assert!(remaining > 0 && remaining <= CODEX_LOGIN_REQUEST_LIFETIME.as_millis() as u64);
+    assert!(remaining > 0 && remaining <= LOGIN_REQUEST_LIFETIME.as_millis() as u64);
     let sealed = harness.seal(&request, &request_id);
     assert!(
         !sealed
@@ -198,7 +198,7 @@ async fn sealed_login_round_trips_to_the_requesting_recipient_only() {
     let opened = bounded(task).await.unwrap().unwrap();
     assert_eq!(opened.login.access_token(), ACCESS);
     assert_eq!(opened.binding.material_generation, 3);
-    assert!(harness.bridge.inner.lock().await.codex_logins.is_empty());
+    assert!(harness.bridge.inner.lock().await.logins.is_empty());
 
     // A login sealed for a different request does not open for this one.
     let (task, request) = harness.submit().await;
@@ -208,7 +208,7 @@ async fn sealed_login_round_trips_to_the_requesting_recipient_only() {
         .await;
     assert_eq!(
         bounded(task).await.unwrap().unwrap_err(),
-        CodexLoginFailure::Unavailable
+        LoginFailure::Unavailable
     );
     harness.stop().await;
 }
@@ -219,11 +219,11 @@ async fn denied_and_unavailable_answers_stay_distinct_and_keep_the_epoch() {
     for (reason, expected) in [
         (
             v1::CredentialBridgeFailureReason::Denied,
-            CodexLoginFailure::Denied,
+            LoginFailure::Denied,
         ),
         (
             v1::CredentialBridgeFailureReason::Unavailable,
-            CodexLoginFailure::Unavailable,
+            LoginFailure::Unavailable,
         ),
     ] {
         let (task, request) = harness.submit().await;
@@ -245,9 +245,9 @@ async fn pending_logins_fail_when_their_epoch_is_lost_or_replaced() {
     harness.stop().await;
     assert_eq!(
         bounded(task).await.unwrap().unwrap_err(),
-        CodexLoginFailure::Unavailable
+        LoginFailure::Unavailable
     );
-    assert!(bridge.inner.lock().await.codex_logins.is_empty());
+    assert!(bridge.inner.lock().await.logins.is_empty());
 
     // Replacement by a newer epoch; its late answer is never released.
     let mut first = Harness::new(bridge.clone(), &capabilities()).await;
@@ -255,9 +255,9 @@ async fn pending_logins_fail_when_their_epoch_is_lost_or_replaced() {
     let second = Harness::new(bridge.clone(), &capabilities()).await;
     assert_eq!(
         bounded(task).await.unwrap().unwrap_err(),
-        CodexLoginFailure::Unavailable
+        LoginFailure::Unavailable
     );
-    assert!(bridge.inner.lock().await.codex_logins.is_empty());
+    assert!(bridge.inner.lock().await.logins.is_empty());
     let sealed = first.seal(&request, &request.request_id);
     let _ = first
         .input
@@ -283,7 +283,7 @@ async fn cancellation_keeps_the_slot_until_the_late_answer_drains() {
         cancel.payload,
         Some(GuestPayload::Cancel(ref cancel)) if cancel.request_id == request.request_id
     ));
-    assert_eq!(harness.bridge.inner.lock().await.codex_logins.len(), 1);
+    assert_eq!(harness.bridge.inner.lock().await.logins.len(), 1);
     let sealed = harness.seal(&request, &request.request_id);
     harness
         .reply(&request.request_id, LoginResult::SealedLogin(sealed))
@@ -298,9 +298,9 @@ async fn cancellation_keeps_the_slot_until_the_late_answer_drains() {
         .await;
     assert_eq!(
         bounded(task).await.unwrap().unwrap_err(),
-        CodexLoginFailure::Denied
+        LoginFailure::Denied
     );
-    assert!(harness.bridge.inner.lock().await.codex_logins.is_empty());
+    assert!(harness.bridge.inner.lock().await.logins.is_empty());
     harness.stop().await;
 }
 
@@ -348,7 +348,7 @@ async fn malformed_or_unsolicited_login_answers_end_the_epoch() {
         assert_eq!(status.code(), tonic::Code::InvalidArgument, "case {case}");
         assert_eq!(
             bounded(task).await.unwrap().unwrap_err(),
-            CodexLoginFailure::Unavailable
+            LoginFailure::Unavailable
         );
         harness.stop().await;
     }
@@ -372,7 +372,7 @@ async fn application_http_ingress_cannot_request_a_login() {
             .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
-    assert!(harness.bridge.inner.lock().await.codex_logins.is_empty());
+    assert!(harness.bridge.inner.lock().await.logins.is_empty());
     harness.stop().await;
 }
 
@@ -391,11 +391,11 @@ async fn a_login_answered_on_a_draining_epoch_is_unavailable() {
     // ...but a login answered on a replaced epoch is never released.
     assert_eq!(
         bounded(task).await.unwrap().unwrap_err(),
-        CodexLoginFailure::Unavailable
+        LoginFailure::Unavailable
     );
     {
         let state = bridge.inner.lock().await;
-        assert!(state.codex_logins.is_empty());
+        assert!(state.logins.is_empty());
         assert!(state.draining.is_some());
     }
     assert!(!first.task.is_finished());
@@ -443,14 +443,14 @@ async fn a_login_answer_on_the_wrong_epoch_leaves_the_other_request() {
         bounded(wrong.task).await.unwrap();
         assert_eq!(
             bounded(wrong_task).await.unwrap().unwrap_err(),
-            CodexLoginFailure::Unavailable
+            LoginFailure::Unavailable
         );
         assert!(
             bridge
                 .inner
                 .lock()
                 .await
-                .codex_logins
+                .logins
                 .contains_key(&kept_request.request_id)
         );
         kept.reply(&kept_request.request_id, LoginResult::SealedLogin(sealed))
@@ -460,10 +460,10 @@ async fn a_login_answer_on_the_wrong_epoch_leaves_the_other_request() {
             assert_eq!(result.unwrap().login.access_token(), ACCESS);
         } else {
             // Its own epoch accepts the answer but no longer releases it.
-            assert_eq!(result.unwrap_err(), CodexLoginFailure::Unavailable);
+            assert_eq!(result.unwrap_err(), LoginFailure::Unavailable);
         }
         assert!(!kept.task.is_finished());
-        assert!(bridge.inner.lock().await.codex_logins.is_empty());
+        assert!(bridge.inner.lock().await.logins.is_empty());
         kept.stop().await;
     }
 }

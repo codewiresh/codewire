@@ -13,7 +13,8 @@ use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
 };
 use codewire_workload_secrets::{
-    MAX_SEALED_CODEX_LOGIN_BYTES, MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES,
+    MAX_SEALED_CLAUDE_LOGIN_BYTES, MAX_SEALED_CODEX_LOGIN_BYTES,
+    MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES,
 };
 use futures::StreamExt as _;
 use thiserror::Error;
@@ -63,8 +64,63 @@ impl<B: CredentialBridgeTransport> AdmittedCredentialBridge<B> {
 struct ActiveRequest {
     incarnation: u64,
     ssh_cancellation: Option<CancellationToken>,
-    /// A Codex login; an epoch runs at most one at a time.
-    codex_login: bool,
+    /// A sealed login; an epoch runs at most one of each kind at a time.
+    login: Option<LoginKind>,
+}
+
+/// Which sealed login a request asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoginKind {
+    Codex,
+    Claude,
+}
+
+impl LoginKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "codex_login",
+            Self::Claude => "claude_login",
+        }
+    }
+
+    fn in_flight_label(self) -> &'static str {
+        match self {
+            Self::Codex => "codex_login_in_flight",
+            Self::Claude => "claude_login_in_flight",
+        }
+    }
+}
+
+/// One sealed login request, as received.
+enum LoginRequest {
+    Codex(v1::CodexLoginRequest),
+    Claude(v1::ClaudeLoginRequest),
+}
+
+impl LoginRequest {
+    fn kind(&self) -> LoginKind {
+        match self {
+            Self::Codex(_) => LoginKind::Codex,
+            Self::Claude(_) => LoginKind::Claude,
+        }
+    }
+
+    fn request_id(&self) -> &str {
+        match self {
+            Self::Codex(request) => &request.request_id,
+            Self::Claude(request) => &request.request_id,
+        }
+    }
+
+    async fn serve<B: BrokerRequestExecutor + ?Sized>(
+        self,
+        broker: &B,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
+        match self {
+            Self::Codex(request) => broker.codex_login(request).await,
+            Self::Claude(request) => broker.claude_login(request).await,
+        }
+    }
 }
 
 impl Drop for ActiveRequest {
@@ -102,12 +158,21 @@ pub(crate) trait BrokerRequestExecutor: Send + Sync {
         Err(BrokerRequestError::Denied)
     }
 
-    /// The sealed Codex login, the one listed direct delivery exception. Only
+    /// The sealed Codex login, a listed direct delivery exception. Only
     /// an executor whose placement implements the whole delivery predicate
     /// overrides this; every other executor denies.
     async fn codex_login(
         &self,
         _request: v1::CodexLoginRequest,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
+        Err(BrokerRequestError::Denied)
+    }
+
+    /// The sealed Claude login, the other listed direct delivery exception,
+    /// under the same rule as [`Self::codex_login`].
+    async fn claude_login(
+        &self,
+        _request: v1::ClaudeLoginRequest,
     ) -> Result<Vec<u8>, BrokerRequestError> {
         Err(BrokerRequestError::Denied)
     }
@@ -155,6 +220,13 @@ where
         request: v1::CodexLoginRequest,
     ) -> Result<Vec<u8>, BrokerRequestError> {
         OpenAiBroker::codex_login(self, request).await
+    }
+
+    async fn claude_login(
+        &self,
+        request: v1::ClaudeLoginRequest,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
+        OpenAiBroker::claude_login(self, request).await
     }
 
     async fn execute_request(
@@ -235,6 +307,9 @@ impl CredentialBridgeResponseSink for CredentialBridgeResponseSender {
             }
             v1::credential_bridge_host_message::Payload::CodexLogin(response) => {
                 self.send_codex_login(response).await
+            }
+            v1::credential_bridge_host_message::Payload::ClaudeLogin(response) => {
+                self.send_claude_login(response).await
             }
             v1::credential_bridge_host_message::Payload::ResponseStart(response) => {
                 self.send_response_start(response).await
@@ -444,7 +519,7 @@ where
                         active.insert(request_id, ActiveRequest {
                             incarnation,
                             ssh_cancellation: Some(cancellation),
-                            codex_login: false,
+                            login: None,
                         });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::EnvironmentProjection(request)) => {
@@ -481,29 +556,38 @@ where
                             };
                             (completed_id, incarnation, result)
                         });
-                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, codex_login: false });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, login: None });
                     }
-                    Some(v1::credential_bridge_guest_message::Payload::CodexLogin(request)) => {
-                        let request_id = request.request_id.clone();
+                    Some(
+                        payload @ (v1::credential_bridge_guest_message::Payload::CodexLogin(_)
+                        | v1::credential_bridge_guest_message::Payload::ClaudeLogin(_)),
+                    ) => {
+                        let login = match payload {
+                            v1::credential_bridge_guest_message::Payload::CodexLogin(request) => LoginRequest::Codex(request),
+                            v1::credential_bridge_guest_message::Payload::ClaudeLogin(request) => LoginRequest::Claude(request),
+                            _ => unreachable!("matched a login payload"),
+                        };
+                        let kind = login.kind();
+                        let request_id = login.request_id().to_owned();
                         if !Uuid::parse_str(&request_id).is_ok_and(|id| !id.is_nil() && id.to_string() == request_id)
                             || active.contains_key(&request_id)
                         {
                             tasks.shutdown().await;
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
-                        // The daemon needs one login at a time; a second
-                        // concurrent one is refused before any lease.
-                        if active.values().any(|request| request.codex_login) {
-                            timing::capacity_rejected("codex_login_in_flight", "codex_login", 1, 1);
-                            if send_codex_login_response(&sender, request_id, Err(BrokerRequestError::AuthorityUnavailable)).await.is_err() {
+                        // The daemon needs one login of each kind at a time; a
+                        // second concurrent one is refused before any lease.
+                        if active.values().any(|request| request.login == Some(kind)) {
+                            timing::capacity_rejected(kind.in_flight_label(), kind.label(), 1, 1);
+                            if send_login_response(&sender, kind, request_id, Err(BrokerRequestError::AuthorityUnavailable)).await.is_err() {
                                 tasks.shutdown().await;
                                 return Err(BrokerBridgeError::Unavailable);
                             }
                             continue;
                         }
                         if active.len() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
-                            timing::capacity_rejected("bridge_in_flight", "codex_login", CREDENTIAL_BRIDGE_MAX_IN_FLIGHT, active.len());
-                            if send_codex_login_response(&sender, request_id, Err(BrokerRequestError::AuthorityUnavailable)).await.is_err() {
+                            timing::capacity_rejected("bridge_in_flight", kind.label(), CREDENTIAL_BRIDGE_MAX_IN_FLIGHT, active.len());
+                            if send_login_response(&sender, kind, request_id, Err(BrokerRequestError::AuthorityUnavailable)).await.is_err() {
                                 tasks.shutdown().await;
                                 return Err(BrokerBridgeError::Unavailable);
                             }
@@ -518,11 +602,11 @@ where
                         let sender = sender.clone();
                         let completed_id = request_id.clone();
                         tasks.spawn(async move {
-                            let response = broker.codex_login(request).await;
-                            let result = send_codex_login_response(&sender, completed_id.clone(), response).await;
+                            let response = login.serve(&*broker).await;
+                            let result = send_login_response(&sender, kind, completed_id.clone(), response).await;
                             (completed_id, incarnation, result)
                         });
-                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, codex_login: true });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, login: Some(kind) });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::Request(request)) => {
                         let request_id = request.request_id.clone();
@@ -561,7 +645,7 @@ where
                             let result = serve_request(&*broker, &sender, &response_id, request).await;
                             (completed_id, incarnation, result)
                         });
-                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, codex_login: false });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, login: None });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::Cancel(cancel)) => {
                         if !Uuid::parse_str(&cancel.request_id).is_ok_and(|id| {
@@ -625,50 +709,67 @@ async fn send_projection_response<S: CredentialBridgeResponseSink>(
 }
 
 /// Only a bounded sealed login, DENIED or UNAVAILABLE. DENIED means no login
-/// is deliverable now (an API key, a credential needing Reconnect, a revoked,
-/// organization-owned or another user's credential, Codex not selected), so
-/// the daemon removes the one it wrote; UNAVAILABLE changes nothing.
+/// is deliverable now (another credential form, a credential needing
+/// Reconnect, a revoked, organization-owned or another user's credential, the
+/// agent not selected), so the daemon removes the one it wrote; UNAVAILABLE
+/// changes nothing.
 ///
 /// Unlike an HTTP request's `AuthorityUnavailable` (`request_failure_ends_epoch`),
-/// neither answer ends the epoch. That is safe only because the platform placement is the one
-/// implementing `BrokerLeaseProvider::lease_codex_login`: a refresh the login
-/// started is drained by the shared refresh owner, and a refresh Start that
-/// fails is fenced by the platform store's durable reservation and execution
-/// deadlines rather than by this epoch's lease channel. A local placement
-/// whose reservations are released when its lease channel closes (see
-/// `complete_oauth_refresh`) must revisit this before implementing
-/// `lease_codex_login`.
-async fn send_codex_login_response<S: CredentialBridgeResponseSink>(
+/// neither answer ends the epoch. That is safe only because the platform
+/// placement is the one implementing `BrokerLeaseProvider::lease_codex_login`
+/// and `lease_claude_login`: a refresh the login started is drained by the
+/// shared refresh owner, and a refresh Start that fails is fenced by the
+/// platform store's durable reservation and execution deadlines rather than by
+/// this epoch's lease channel. A local placement whose reservations are
+/// released when its lease channel closes (see `complete_oauth_refresh`) must
+/// revisit this before implementing either.
+async fn send_login_response<S: CredentialBridgeResponseSink>(
     sender: &S,
+    kind: LoginKind,
     request_id: String,
     response: Result<Vec<u8>, BrokerRequestError>,
 ) -> Result<(), ()> {
-    use v1::codex_login_response::Result as LoginResult;
+    let max_sealed_bytes = match kind {
+        LoginKind::Codex => MAX_SEALED_CODEX_LOGIN_BYTES,
+        LoginKind::Claude => MAX_SEALED_CLAUDE_LOGIN_BYTES,
+    };
     let result = match response {
-        Ok(sealed) if !sealed.is_empty() && sealed.len() <= MAX_SEALED_CODEX_LOGIN_BYTES => {
-            LoginResult::SealedLogin(sealed)
-        }
+        Ok(sealed) if !sealed.is_empty() && sealed.len() <= max_sealed_bytes => Ok(sealed),
         Ok(_)
         | Err(
             BrokerRequestError::InvalidRequest
             | BrokerRequestError::Denied
             | BrokerRequestError::ReconnectRequired,
-        ) => LoginResult::Failure(v1::CredentialBridgeFailureReason::Denied as i32),
+        ) => Err(v1::CredentialBridgeFailureReason::Denied as i32),
         Err(
             BrokerRequestError::AuthorityUnavailable
             | BrokerRequestError::UpstreamFailed
             | BrokerRequestError::ResponseTooLarge,
-        ) => LoginResult::Failure(v1::CredentialBridgeFailureReason::Unavailable as i32),
+        ) => Err(v1::CredentialBridgeFailureReason::Unavailable as i32),
     };
-    sender
-        .send(v1::credential_bridge_host_message::Payload::CodexLogin(
-            v1::CodexLoginResponse {
+    let payload = match kind {
+        LoginKind::Codex => {
+            use v1::codex_login_response::Result as LoginResult;
+            v1::credential_bridge_host_message::Payload::CodexLogin(v1::CodexLoginResponse {
                 request_id,
-                result: Some(result),
-            },
-        ))
-        .await
-        .map_err(|_| ())
+                result: Some(match result {
+                    Ok(sealed) => LoginResult::SealedLogin(sealed),
+                    Err(reason) => LoginResult::Failure(reason),
+                }),
+            })
+        }
+        LoginKind::Claude => {
+            use v1::claude_login_response::Result as LoginResult;
+            v1::credential_bridge_host_message::Payload::ClaudeLogin(v1::ClaudeLoginResponse {
+                request_id,
+                result: Some(match result {
+                    Ok(sealed) => LoginResult::SealedLogin(sealed),
+                    Err(reason) => LoginResult::Failure(reason),
+                }),
+            })
+        }
+    };
+    sender.send(payload).await.map_err(|_| ())
 }
 
 async fn send_composition_response<S: CredentialBridgeResponseSink>(
@@ -865,6 +966,7 @@ async fn send_failure<S: CredentialBridgeResponseSink>(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod claude_login;
     mod codex_login;
     mod projection;
     mod ssh;
@@ -1426,7 +1528,7 @@ pub(crate) mod tests {
             ActiveRequest {
                 incarnation: 2,
                 ssh_cancellation: None,
-                codex_login: false,
+                login: None,
             },
         )]);
         remove_completed_request(&mut active, "request", 1);

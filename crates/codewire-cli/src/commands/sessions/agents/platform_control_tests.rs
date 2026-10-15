@@ -458,12 +458,14 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
     struct Case {
         slots: &'static [&'static str],
         claude_subscription: bool,
+        claude_sign_in: bool,
         launches: &'static [(AgentKind, Route)],
     }
     fn case(slots: &'static [&'static str], launches: &'static [(AgentKind, Route)]) -> Case {
         Case {
             slots,
             claude_subscription: false,
+            claude_sign_in: false,
             launches,
         }
     }
@@ -500,12 +502,21 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
                 &[(AgentKind::Claude, Route::Anthropic)],
             )
         },
+        // So is the sign-in form, whose login the daemon writes in the home.
+        Case {
+            claude_sign_in: true,
+            ..case(
+                &["anthropic", "github", "ssh"],
+                &[(AgentKind::Claude, Route::Anthropic)],
+            )
+        },
         // The signer alone uses no HTTP route, and no agent can launch.
         case(&["ssh"], &[]),
     ];
     for Case {
         slots,
         claude_subscription,
+        claude_sign_in,
         launches,
     } in cases
     {
@@ -513,6 +524,9 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
             ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap();
         if claude_subscription {
             selected = selected.with_anthropic_subscription_token().unwrap();
+        }
+        if claude_sign_in {
+            selected = selected.with_anthropic_sign_in().unwrap();
         }
         for (declared, home, daemon) in [
             (false, plain_home.path(), &PLAIN[..]),

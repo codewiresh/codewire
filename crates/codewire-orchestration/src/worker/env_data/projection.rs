@@ -19,9 +19,10 @@ use codewire_project::{
 // the profile's current_revision/name. Slot allocation is capped at 64; a
 // separate bounded existence probe rejects, rather than truncates, excess rows.
 // The pinned revision's Anthropic entry also fixes its client form: a Claude
-// subscription token (the provider's OAuth kind) selects Claude Code's
-// subscription mode. A credential's kind never changes, so this is as
-// immutable as the revision's slots; it is client configuration, not authority.
+// subscription token (the provider's OAuth kind) or a Claude sign-in selects
+// Claude Code's subscription mode, in which the broker injects the stored
+// token. A credential's kind never changes, so this is as immutable as the
+// revision's slots; it is client configuration, not authority.
 pub(super) const ENVIRONMENT_QUERY: &str = r#"
     SELECT e.id, e.org_id, e.preset_id, e.type, e.state, e.desired_state,
            e.external_cleanup_completed_at,
@@ -55,8 +56,18 @@ pub(super) const ENVIRONMENT_QUERY: &str = r#"
                JOIN platform_credentials AS c ON c.id = entry.credential_id
                WHERE entry.profile_id = b.profile_id AND entry.revision = b.profile_revision
                  AND entry.capability_slot = 'anthropic'
-                 AND c.provider = 'anthropic' AND c.authentication_kind = 'oauth'
+                 AND c.provider = 'anthropic'
+                 AND c.authentication_kind = 'oauth'
            ) AS anthropic_subscription_token,
+           EXISTS(
+               SELECT 1
+               FROM platform_access_profile_entries AS entry
+               JOIN platform_credentials AS c ON c.id = entry.credential_id
+               WHERE entry.profile_id = b.profile_id AND entry.revision = b.profile_revision
+                 AND entry.capability_slot = 'anthropic'
+                 AND c.provider = 'anthropic'
+                 AND c.authentication_kind = 'claude_sign_in'
+           ) AS anthropic_sign_in,
            (p.user_id IS NOT NULL OR b.environment_id IS NULL) AND EXISTS(
                SELECT 1 FROM platform_credentials AS c
                WHERE c.user_id = e.created_by AND c.organization_id IS NULL
@@ -83,6 +94,8 @@ pub(super) struct ProjectionCapture {
     pub github_connected: bool,
     /// The pinned revision's Anthropic slot holds a Claude subscription token.
     pub anthropic_subscription_token: bool,
+    /// The pinned revision's Anthropic slot holds a Claude sign-in.
+    pub anthropic_sign_in: bool,
 }
 
 impl ProjectionCapture {
@@ -98,12 +111,14 @@ impl ProjectionCapture {
                 .chain(self.account_github(project).then_some("github")),
         )
         .map_err(|_| Error)?;
-        let clients = if self.anthropic_subscription_token {
-            clients
+        let clients = match (self.anthropic_subscription_token, self.anthropic_sign_in) {
+            (false, false) => clients,
+            (true, false) => clients
                 .with_anthropic_subscription_token()
-                .map_err(|_| Error)?
-        } else {
-            clients
+                .map_err(|_| Error)?,
+            (false, true) => clients.with_anthropic_sign_in().map_err(|_| Error)?,
+            // One slot holds one credential.
+            (true, true) => return Err(Error),
         };
         clients
             .check_collisions(project.environment.keys().map(String::as_str))

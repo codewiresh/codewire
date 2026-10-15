@@ -870,6 +870,7 @@ run_edge() {
   scripts/ci/tests/test-kind-trust-roots.sh
   python3 -B scripts/ci/tests/test-kind-codex-session.py
   python3 -B scripts/ci/tests/test-kind-codex-login.py
+  python3 -B scripts/ci/tests/test-kind-claude-login.py
   python3 -B scripts/ci/tests/test-kind-credentials.py
   )
 }

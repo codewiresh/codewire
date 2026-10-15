@@ -13,7 +13,8 @@ mod model;
 mod projection;
 
 pub use catalog::{
-    CODEX_LOGIN_OPERATION, CODEX_LOGIN_ROUTE, builtin_provider_catalog, codex_login_permission,
+    CLAUDE_LOGIN_OPERATION, CLAUDE_LOGIN_ROUTE, CODEX_LOGIN_OPERATION, CODEX_LOGIN_ROUTE,
+    builtin_provider_catalog, claude_login_permission, codex_login_permission,
 };
 pub use grant::{
     AvailableGrants, DerivedGrant, GrantContext, GrantPlacement, GrantProfile,

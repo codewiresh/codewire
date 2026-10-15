@@ -29,7 +29,7 @@ use codewire_access::{
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
     CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
     GrantContext, GrantPermission, GrantPlacement, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS,
-    Placement, codex_login_permission,
+    Placement, claude_login_permission, codex_login_permission,
 };
 use codewire_platform_credentials::{
     CredentialRecord, CredentialVersion, EpochMaterialCache, OAuthRefreshState,
@@ -843,6 +843,10 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         if admission.permission == codex_login_permission() {
             codex_login_admissible(&self.session, Some(&admission)).map_err(refresh_lease_error)?;
         }
+        if admission.permission == claude_login_permission() {
+            claude_login_admissible(&self.session, Some(&admission))
+                .map_err(refresh_lease_error)?;
+        }
         let requested_deadline = request
             .grant
             .expires_at_unix
@@ -1032,20 +1036,32 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         route: BrokerRouteId,
     ) -> Result<Self::Lease, BrokerLeaseError> {
         let permission = GrantPermission { operation, route };
-        // The login permission is leased only with its delivery predicate.
-        if permission == codex_login_permission() {
+        // A login permission is leased only with its delivery predicate.
+        if permission == codex_login_permission() || permission == claude_login_permission() {
             return Err(BrokerLeaseError::Denied);
         }
         self.lease(request_id, slot, permission, None).await
     }
 
-    /// The one listed direct delivery exception; see [`codex_login_admissible`].
+    /// A listed direct delivery exception; see [`codex_login_admissible`].
     async fn lease_codex_login(&self, request_id: Uuid) -> Result<Self::Lease, BrokerLeaseError> {
         self.lease(
             request_id,
             CapabilitySlot::codex(),
             codex_login_permission(),
             Some(codex_login_admissible),
+        )
+        .await
+    }
+
+    /// The other listed direct delivery exception; see
+    /// [`claude_login_admissible`].
+    async fn lease_claude_login(&self, request_id: Uuid) -> Result<Self::Lease, BrokerLeaseError> {
+        self.lease(
+            request_id,
+            CapabilitySlot::anthropic(),
+            claude_login_permission(),
+            Some(claude_login_admissible),
         )
         .await
     }
@@ -1304,7 +1320,7 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
 type DeliveryPredicate =
     fn(&PlatformRuntimeSession, Option<&Admission>) -> Result<(), BrokerLeaseError>;
 
-/// Delivery predicate of the one listed direct delivery exception
+/// Delivery predicate of a listed direct delivery exception
 /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions"): the
 /// Sandbox creator's own personal Codex ChatGPT login, sealed to the
 /// workspace daemon. Every condition must hold:
@@ -1331,6 +1347,52 @@ fn codex_login_admissible(
     session: &PlatformRuntimeSession,
     admission: Option<&Admission>,
 ) -> Result<(), BrokerLeaseError> {
+    personal_login_admissible(
+        session,
+        admission,
+        &PersonalLogin {
+            permission: codex_login_permission(),
+            slot: CapabilitySlot::codex(),
+            provider: "openai",
+            kind: CredentialAuthKind::OAuth,
+        },
+    )
+}
+
+/// [`codex_login_admissible`] for the other listed exception, the Sandbox
+/// creator's own personal Claude sign-in: the Anthropic grant carries the
+/// dedicated `claude-login` permission, and the credential is the creator's
+/// own Active Claude sign-in on the platform. An Anthropic API key or Claude
+/// subscription token (`claude setup-token`) is never delivered.
+fn claude_login_admissible(
+    session: &PlatformRuntimeSession,
+    admission: Option<&Admission>,
+) -> Result<(), BrokerLeaseError> {
+    personal_login_admissible(
+        session,
+        admission,
+        &PersonalLogin {
+            permission: claude_login_permission(),
+            slot: CapabilitySlot::anthropic(),
+            provider: "anthropic",
+            kind: CredentialAuthKind::ClaudeSignIn,
+        },
+    )
+}
+
+/// The one personal login form a delivery predicate admits.
+struct PersonalLogin {
+    permission: GrantPermission,
+    slot: CapabilitySlot,
+    provider: &'static str,
+    kind: CredentialAuthKind,
+}
+
+fn personal_login_admissible(
+    session: &PlatformRuntimeSession,
+    admission: Option<&Admission>,
+    login: &PersonalLogin,
+) -> Result<(), BrokerLeaseError> {
     let RuntimeIdentity::Hosted { .. } = &session.identity else {
         return Err(BrokerLeaseError::Denied);
     };
@@ -1345,15 +1407,15 @@ fn codex_login_admissible(
         return Ok(());
     };
     let metadata = &admission.record.metadata;
-    if admission.permission != codex_login_permission()
-        || admission.grant.capability_slot != CapabilitySlot::codex()
+    if admission.permission != login.permission
+        || admission.grant.capability_slot != login.slot
         || !admission.grant.permissions.contains(&admission.permission)
         || admission.grant.profile.is_none()
         || admission.grant.credential_id != metadata.id
         || metadata.owner != creator
         || metadata.placement != Placement::Platform
-        || metadata.provider.as_str() != "openai"
-        || metadata.authentication_kind != CredentialAuthKind::OAuth
+        || metadata.provider.as_str() != login.provider
+        || metadata.authentication_kind != login.kind
         || metadata.status != CredentialStatus::Active
     {
         return Err(BrokerLeaseError::Denied);

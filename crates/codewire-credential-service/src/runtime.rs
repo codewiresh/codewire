@@ -24,6 +24,7 @@ use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticator, PlatformCredentialBridgeService,
 };
 use codewire_credential_broker::platform::keepalive::OAuthKeepAlive;
+use codewire_credential_broker::provider_oauth::claude::ClaudeSignIn;
 use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
 use codewire_credential_broker::provider_oauth::github::GitHubDeviceLogin;
 use codewire_credential_broker::{BrokerUpstreamTransport, ProviderHttpsTransport};
@@ -240,6 +241,15 @@ async fn run_connected(
         .await
         .map_err(|_| RuntimeError::Provider)?,
     ));
+    // The Claude sign-in has its own family: Claude's token endpoint and the
+    // OAuth profile read only, never the Anthropic route.
+    let claude_sign_in = ClaudeSignIn::new(Arc::new(
+        ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
+            HttpProvider::ClaudeSignInEnrollment,
+        ]))
+        .await
+        .map_err(|_| RuntimeError::Provider)?,
+    ));
     let store = authorities.credential_store(pool.clone());
     // Idle rotating OAuth credentials are refreshed by this same process,
     // through the same journal, transport and App owner as on-demand refresh.
@@ -278,6 +288,7 @@ async fn run_connected(
         pool.clone(),
         store,
         codex_login,
+        claude_sign_in,
         github_login,
         github_app_authorization,
     ));
