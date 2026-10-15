@@ -677,6 +677,166 @@ async fn retain(
 }
 
 #[tokio::test]
+async fn platform_managed_a_resume_denied_before_run_is_reverted_and_can_resume_again() {
+    // #2769: the adoption committed (this Pod's origin at g+1), then the
+    // environment projection was refused before the agent ran. Only an exact
+    // denial whose helper revert answers the predecessor's generation moves
+    // the record back; anything else leaves the outcome unknown, unchanged.
+    use crate::platform_managed::Agent;
+    use std::os::unix::fs::PermissionsExt as _;
+    use v1::SessionLifecycleState as S;
+    let temp = tempfile::tempdir().unwrap();
+    let config = retained_config(temp.path());
+    let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+    let (session, previous) = retain(&engine, Agent::Codex, "0.160.0", S::Stopped).await;
+    let generation = engine.get(&session).await.unwrap().launch_generation;
+    let this_pod = v1::PlatformManagedScope {
+        pod_uid: Uuid::new_v4().to_string(),
+        binding_generation: 1,
+        ..retained_scope(&previous)
+    };
+    let origin = Origin {
+        pod_uid: this_pod.pod_uid.clone(),
+        binding_generation: 1,
+        ..previous.clone()
+    };
+    let resume = v1::PlatformManagedControl {
+        action: v1::PlatformManagedAction::Resume as i32,
+        session_id: session.clone(),
+        driver_id: previous.driver_id.clone(),
+        expected_launch_generation: generation,
+        predecessor_pod_uid: previous.pod_uid.clone(),
+        agent: v1::PlatformManagedAgent::Codex as i32,
+        ..Default::default()
+    };
+    let handle = engine.handle(&session).unwrap();
+    // The record as the Resume found it: the predecessor's, stopped.
+    let before = handle.metadata.lock().await.clone();
+    let next = generation + 1;
+    let denied = || async {
+        let mut metadata = handle.metadata.lock().await;
+        metadata.platform_managed_origin = Some(origin.clone());
+        metadata.launch_generation = next;
+        metadata.state = S::Failed as i32;
+        metadata.started_at = None;
+        metadata.exit_code = None;
+        metadata.cleanup_unknown = false;
+        metadata.cleanup_confirmed = true;
+        metadata.status_message = crate::durable_session::LAUNCH_PROJECTION_DENIED.into();
+        persist_metadata(&engine.inner.root, &metadata)
+            .await
+            .unwrap();
+    };
+    let unchanged = || async {
+        let record = engine.get(&session).await.unwrap();
+        let metadata = handle.metadata.lock().await;
+        assert_eq!(metadata.platform_managed_origin.as_ref(), Some(&origin));
+        assert_eq!(record.launch_generation, next);
+    };
+    let operation = handle.operation.lock().await;
+    denied().await;
+    // The helper refuses, for example because a driver took custody here.
+    let refused = engine
+        .revert_resume_with(&handle, &before, &origin, &resume, next, || async {
+            Err(Error::Refused)
+        })
+        .await;
+    assert!(matches!(refused, Err(Error::Unknown)));
+    unchanged().await;
+    // The helper answers another generation.
+    let skewed = engine
+        .revert_resume_with(&handle, &before, &origin, &resume, next, || async {
+            Ok(json!({"launch_generation": next}))
+        })
+        .await;
+    assert!(matches!(skewed, Err(Error::Unknown)));
+    unchanged().await;
+    // A record that is not this exact denial is never reverted, nor is the
+    // helper asked.
+    for edit in 0..3 {
+        denied().await;
+        {
+            let mut metadata = handle.metadata.lock().await;
+            match edit {
+                0 => metadata.status_message = "launch committed elsewhere".into(),
+                1 => metadata.cleanup_unknown = true,
+                _ => metadata.state = S::Running as i32,
+            }
+        }
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        let result = engine
+            .revert_resume_with(&handle, &before, &origin, &resume, next, || async {
+                asked.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(json!({"launch_generation": generation}))
+            })
+            .await;
+        assert!(matches!(result, Err(Error::Unknown)), "{edit}");
+        assert!(!asked.load(std::sync::atomic::Ordering::SeqCst), "{edit}");
+    }
+    denied().await;
+    // The record cannot be saved: unknown, and memory keeps the saved state.
+    let directory = session_directory(&engine.inner.root, &session).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let unsaved = engine
+        .revert_resume_with(&handle, &before, &origin, &resume, next, || async {
+            Ok(json!({"launch_generation": generation}))
+        })
+        .await;
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(unsaved, Err(Error::Unknown)));
+    unchanged().await;
+    // Reverted: a definite refusal, and the record names the predecessor at
+    // its generation again.
+    let reverted = engine
+        .revert_resume_with(&handle, &before, &origin, &resume, next, || async {
+            Ok(json!({"launch_generation": generation}))
+        })
+        .await;
+    assert!(matches!(reverted, Err(Error::DeniedBeforeRun)));
+    drop(operation);
+    assert_eq!(
+        engine.get(&session).await.unwrap().launch_generation,
+        generation
+    );
+    // The lifecycle the Resume overwrote returns with the predecessor, so the
+    // record is as resumable, and as retained, as before: not a failed launch
+    // with confirmed cleanup, which record room could prune.
+    {
+        let metadata = handle.metadata.lock().await;
+        assert_eq!(metadata.platform_managed_origin.as_ref(), Some(&previous));
+        assert_eq!(
+            (
+                metadata.state,
+                metadata.cleanup_unknown,
+                metadata.cleanup_confirmed,
+                metadata.exit_code,
+                &metadata.status_message,
+            ),
+            (
+                before.state,
+                before.cleanup_unknown,
+                before.cleanup_confirmed,
+                before.exit_code,
+                &before.status_message,
+            )
+        );
+        assert_eq!(
+            format!("{:?}", (metadata.started_at, metadata.finished_at)),
+            format!("{:?}", (before.started_at, before.finished_at))
+        );
+    }
+    // The next Resume is admitted again, also after a daemon restart.
+    engine.platform_resumable(&this_pod, &resume).await.unwrap();
+    engine.shutdown().await.unwrap();
+    let restarted = SessionEngine::new(&config, CredentialBridge::new(None));
+    restarted
+        .platform_resumable(&this_pod, &resume)
+        .await
+        .unwrap();
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn platform_managed_records_an_earlier_provider_wrote_load_list_and_refuse_only_restart() {
     use crate::platform_managed::Agent;
     use v1::SessionLifecycleState as S;
@@ -852,9 +1012,21 @@ fn a_launch_is_denied_before_run_only_when_its_projection_failed_and_cleanup_is_
     exited.exit_code = Some(1);
     let mut interrupted = denied.clone();
     interrupted.state = v1::SessionLifecycleState::Interrupted as i32;
-    for record in [unconfirmed, started, other, exited, interrupted] {
+    // A failure after the launcher was told to execute may have started the
+    // program, so it is never a denial, for a launch or a Resume (#2769).
+    let mut committed = denied.clone();
+    committed.status_message = crate::durable_session::launch_failure_status(true).into();
+    for record in [unconfirmed, started, other, exited, interrupted, committed] {
         assert!(!denied_before_run(&record));
     }
+    assert_eq!(
+        crate::durable_session::launch_failure_status(false),
+        crate::durable_session::LAUNCH_PROJECTION_DENIED
+    );
+    assert_eq!(
+        crate::durable_session::launch_failure_status(true),
+        crate::durable_session::LAUNCH_COMMITTED_UNKNOWN
+    );
 }
 
 #[tokio::test]

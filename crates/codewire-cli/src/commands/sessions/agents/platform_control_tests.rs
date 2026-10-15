@@ -1608,6 +1608,165 @@ fn platform_adopt_commit_crash_points_never_open_either_pod() {
 }
 
 #[test]
+fn platform_revert_undoes_only_an_adoption_no_driver_started() {
+    // #2769: the environment projection was refused before the agent ran in
+    // this Pod, so the adoption is undone and the conversation can resume
+    // again. Every refusal comes before any file changes.
+    let f = Fixture::new();
+    f.clean_peer();
+    let next = successor(&f);
+    let old: Generation = private_record(&f.dir.join(GENERATION)).unwrap();
+    let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+    commit_adoption(
+        &f.dir,
+        &f.origin,
+        &next,
+        old,
+        config,
+        Path::new("/usr/bin/true"),
+    )
+    .unwrap();
+    let revert = |previous: Origin, generation: u64| Envelope {
+        origin: next.clone(),
+        launch_generation: generation,
+        request: Request::Revert { previous },
+        ..f.request()
+    };
+    let markers = || {
+        (
+            fs::read(f.dir.join(ORIGIN)).unwrap(),
+            fs::read(f.dir.join(GENERATION)).unwrap(),
+        )
+    };
+    let adopted = markers();
+    let refused = |request: Envelope| {
+        assert!(handle_fixed(&f.environment, request).is_err());
+        assert_eq!(markers(), adopted);
+    };
+    // Another predecessor, organization or agent, or this Pod itself.
+    for previous in [
+        Origin {
+            pod_uid: uuid::Uuid::new_v4().to_string(),
+            ..f.origin.clone()
+        },
+        Origin {
+            org_id: "another-org".into(),
+            ..f.origin.clone()
+        },
+        Origin {
+            agent: AgentKind::Claude,
+            ..f.origin.clone()
+        },
+        next.clone(),
+    ] {
+        refused(revert(previous, 2));
+    }
+    // Not the generation the adoption moved to.
+    refused(revert(f.origin.clone(), 1));
+    refused(revert(f.origin.clone(), 3));
+    // A driver is alive here.
+    let driver = StateLock::acquire(&f.dir.join("driver.lock")).unwrap();
+    refused(revert(f.origin.clone(), 2));
+    drop(driver);
+    // A driver started here and took custody.
+    let peer = f.clean_peer();
+    refused(revert(f.origin.clone(), 2));
+    fs::remove_file(f.dir.join("peer-current.json")).unwrap();
+    let _ = peer;
+    // The generation is not marked resumed from this predecessor.
+    let marked: Generation = private_record(&f.dir.join(GENERATION)).unwrap();
+    write_private_json(
+        &f.dir.join(GENERATION),
+        &Generation {
+            resumed_from_pod_uid: None,
+            ..marked.clone()
+        },
+    )
+    .unwrap();
+    assert!(handle_fixed(&f.environment, revert(f.origin.clone(), 2)).is_err());
+    write_private_json(&f.dir.join(GENERATION), &marked).unwrap();
+    assert_eq!(markers(), adopted);
+    // Undone: the predecessor at its generation, unmarked, so the adopt
+    // check holds again and the resumed fence is closed.
+    assert_eq!(
+        handle_fixed(&f.environment, revert(f.origin.clone(), 2)).unwrap(),
+        json!({"launch_generation": 1})
+    );
+    let origin: Origin = private_record(&f.dir.join(ORIGIN)).unwrap();
+    assert!(origin == f.origin);
+    let generation: Generation = private_record(&f.dir.join(GENERATION)).unwrap();
+    assert_eq!(generation.generation, 1);
+    assert!(generation.resumed_from_pod_uid.is_none());
+    assert!(!resumed(&f.environment, &f.origin.driver_id).unwrap());
+    check_markers(
+        &f.dir,
+        &adopt_request(&f, next.clone(), Route::Codex, false),
+    )
+    .unwrap();
+    // A second revert finds nothing to undo.
+    assert!(handle_fixed(&f.environment, revert(f.origin.clone(), 2)).is_err());
+}
+
+#[test]
+fn platform_revert_crash_point_never_opens_either_pod() {
+    // #2769: the generation moves back before the origin. A crash between
+    // them leaves the origin on this Pod at the predecessor's generation,
+    // unmarked: the adoption's own crash point 3, which neither Pod opens.
+    let f = Fixture::new();
+    f.clean_peer();
+    let next = successor(&f);
+    let old: Generation = private_record(&f.dir.join(GENERATION)).unwrap();
+    let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+    commit_adoption(
+        &f.dir,
+        &f.origin,
+        &next,
+        old,
+        config,
+        Path::new("/usr/bin/true"),
+    )
+    .unwrap();
+    let marked: Generation = private_record(&f.dir.join(GENERATION)).unwrap();
+    write_private_json(
+        &f.dir.join(GENERATION),
+        &Generation {
+            generation: 1,
+            resumed_from_pod_uid: None,
+            ..marked
+        },
+    )
+    .unwrap();
+    let at = |origin: &Origin, generation: u64| Envelope {
+        origin: origin.clone(),
+        launch_generation: generation,
+        request: Request::Adopt {
+            origin: next.clone(),
+            route: Route::Codex,
+            commit: false,
+        },
+        ..f.request()
+    };
+    assert!(check_markers(&f.dir, &at(&next, 2)).is_err());
+    assert!(check_markers(&f.dir, &at(&f.origin, 1)).is_err());
+    assert!(!resumed(&f.environment, &f.origin.driver_id).unwrap());
+    // Nor can the revert be repeated from there.
+    assert!(
+        handle_fixed(
+            &f.environment,
+            Envelope {
+                origin: next.clone(),
+                launch_generation: 2,
+                request: Request::Revert {
+                    previous: f.origin.clone()
+                },
+                ..f.request()
+            }
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn platform_generation_records_without_the_resumed_mark_still_decode() {
     let f = Fixture::new();
     let bytes = fs::read(f.dir.join(GENERATION)).unwrap();
