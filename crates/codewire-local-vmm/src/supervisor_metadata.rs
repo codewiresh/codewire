@@ -438,6 +438,44 @@ pub(crate) struct PlatformSourceAuthority {
     pub(crate) user_id: String,
     #[serde(with = "canonical_profile_slots")]
     pub(crate) profile_slots: BTreeSet<String>,
+    /// Absent from records written before the form was pinned, which keep the
+    /// API-key form.
+    #[serde(default, skip_serializing_if = "AnthropicForm::is_api_key")]
+    pub(crate) anthropic_form: AnthropicForm,
+}
+
+/// Which Anthropic credential kind the pinned profile revision's Anthropic
+/// slot holds, and so which form Claude Code runs in.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AnthropicForm {
+    #[default]
+    ApiKey,
+    SubscriptionToken,
+    SignIn,
+}
+
+impl AnthropicForm {
+    fn is_api_key(&self) -> bool {
+        *self == Self::ApiKey
+    }
+
+    fn from_proto(value: &str) -> Result<Self, SupervisorMetadataError> {
+        match value {
+            "" => Ok(Self::ApiKey),
+            "subscription_token" => Ok(Self::SubscriptionToken),
+            "sign_in" => Ok(Self::SignIn),
+            _ => Err(SupervisorMetadataError::InvalidRequest),
+        }
+    }
+
+    fn proto(self) -> String {
+        match self {
+            Self::ApiKey => String::new(),
+            Self::SubscriptionToken => "subscription_token".into(),
+            Self::SignIn => "sign_in".into(),
+        }
+    }
 }
 
 impl PlatformSourceAuthority {
@@ -458,6 +496,7 @@ impl PlatformSourceAuthority {
             organization_id: value.organization_id.clone(),
             user_id: value.user_id.clone(),
             profile_slots,
+            anthropic_form: AnthropicForm::from_proto(&value.anthropic_form)?,
         };
         result.validate()?;
         Ok(result)
@@ -480,6 +519,7 @@ impl PlatformSourceAuthority {
                 self.profile_slots.iter().map(String::as_str),
             )
             .is_err()
+            || (!self.anthropic_form.is_api_key() && !self.profile_slots.contains("anthropic"))
         {
             return Err(SupervisorMetadataError::InvalidRequest);
         }
@@ -492,6 +532,7 @@ impl PlatformSourceAuthority {
             organization_id: self.organization_id.clone(),
             user_id: self.user_id.clone(),
             profile_slots: self.profile_slots.iter().cloned().collect(),
+            anthropic_form: self.anthropic_form.proto(),
         }
     }
 }

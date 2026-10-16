@@ -2229,6 +2229,7 @@ mod tests {
         running.platform_source_authority = Some(
             crate::supervisor_metadata::PlatformSourceAuthority::from_proto(
                 &crate::control::v1::PlatformSourceAuthority {
+                    anthropic_form: String::new(),
                     server_url: "https://synthetic.invalid".to_owned(),
                     organization_id: "synthetic-org".to_owned(),
                     user_id: "synthetic-owner".to_owned(),

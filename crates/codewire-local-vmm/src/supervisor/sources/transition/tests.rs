@@ -64,6 +64,7 @@ fn profile_target(request: &mut v1::UpdateEnvironmentSourcesRequest, placement: 
     request.access_profile_reference = "user/work".into();
     if placement == "platform" {
         request.platform_source_authority = Some(v1::PlatformSourceAuthority {
+            anthropic_form: String::new(),
             server_url: "https://synthetic.invalid".into(),
             organization_id: "org".into(),
             user_id: "owner".into(),
@@ -458,6 +459,7 @@ async fn running_source_admission_journals_mixed_delivery_before_stop() {
                 project.secrets.project = format!("local:id:{}", Uuid::new_v4());
             });
             request.platform_source_authority = Some(v1::PlatformSourceAuthority {
+                anthropic_form: String::new(),
                 server_url: "https://synthetic.invalid".into(),
                 organization_id: "org".into(),
                 user_id: "owner".into(),
@@ -507,6 +509,7 @@ async fn stopped_mixed_targets_require_local_profile_authority_and_can_be_cleare
             }
         });
         request.platform_source_authority = Some(v1::PlatformSourceAuthority {
+            anthropic_form: String::new(),
             server_url: "https://synthetic.invalid".into(),
             organization_id: "org".into(),
             user_id: "owner".into(),

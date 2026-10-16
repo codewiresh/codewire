@@ -21,6 +21,7 @@ fn args(flags: &[&str]) -> EnvUpdateArgs {
 
 fn profile() -> ResolvedProfile {
     ResolvedProfile {
+        anthropic_form: String::new(),
         id: PROFILE_ID.into(),
         reference: "user/work".into(),
         revision: REVISION,
@@ -30,6 +31,7 @@ fn profile() -> ResolvedProfile {
 
 fn authority() -> v1::PlatformSourceAuthority {
     v1::PlatformSourceAuthority {
+        anthropic_form: String::new(),
         server_url: "https://platform.example.test".into(),
         organization_id: "org_test".into(),
         user_id: "user_test".into(),
@@ -88,6 +90,7 @@ fn environment(spec: &ProjectSpec) -> v1::Environment {
 
 fn candidate(placement: StoragePlacement, name: &str) -> Candidate {
     Candidate {
+        anthropic_credential: None,
         placement,
         id: PROJECT_ID.into(),
         name: name.into(),
@@ -348,6 +351,50 @@ fn unrelated_platform_source_edit_retains_pinned_profile_slots_without_refresh()
     .unwrap();
     assert_eq!(retained.profile_slots, ["codex", "ssh"]);
     assert!(platform_profile_slots(&target, None, true).is_err());
+}
+
+#[test]
+fn a_platform_profile_pins_its_anthropic_form_with_its_slots() {
+    let mut target = spec();
+    target.credentials = Some(CredentialBinding {
+        profile: format!("platform:id:{PROFILE_ID}"),
+    });
+    target.secrets.project = String::new();
+    target.secrets.user = None;
+    let pinned = ResolvedProfile {
+        profile_slots: BTreeSet::from(["anthropic".into(), "codex".into()]),
+        anthropic_form: "sign_in".into(),
+        ..profile()
+    };
+    let selected =
+        select_platform_authority(None, Some(authority()), false, &target, Some(&pinned))
+            .unwrap()
+            .unwrap();
+    assert_eq!(selected.profile_slots, ["anthropic", "codex"]);
+    assert_eq!(selected.anthropic_form, "sign_in");
+    validate_exact_sources(&target, Some(&pinned), Some(&selected)).unwrap();
+    // The pinned record and the exact profile metadata must agree on the form.
+    let mut other = selected.clone();
+    other.anthropic_form = "subscription_token".into();
+    assert!(validate_exact_sources(&target, Some(&pinned), Some(&other)).is_err());
+    // A retained profile keeps its form from the environment's record.
+    let environment = v1::Environment {
+        access_profile_id: PROFILE_ID.into(),
+        access_profile: "user/work".into(),
+        access_profile_revision: REVISION,
+        platform_source_authority: Some(selected.clone()),
+        ..Default::default()
+    };
+    assert_eq!(
+        profile_from_environment(&environment)
+            .unwrap()
+            .anthropic_form,
+        "sign_in"
+    );
+    // A local profile never carries a platform form.
+    let local =
+        select_platform_authority(None, Some(authority()), false, &spec(), Some(&pinned)).unwrap();
+    assert!(local.is_none_or(|authority| authority.anthropic_form.is_empty()));
 }
 
 #[test]

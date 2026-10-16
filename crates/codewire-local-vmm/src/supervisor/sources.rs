@@ -235,6 +235,7 @@ mod tests {
             let mut environment = environment_for(&project);
             assert!(local_launch_projection(&environment).is_err());
             environment.platform_source_authority = Some(PlatformSourceAuthority {
+                anthropic_form: Default::default(),
                 server_url: "https://platform.invalid".into(),
                 organization_id: "synthetic-org".into(),
                 user_id: "synthetic-owner".into(),
@@ -292,6 +293,7 @@ mod tests {
     #[test]
     fn platform_source_identity_is_required_only_for_selected_platform_sources() {
         let mut authority = v1::PlatformSourceAuthority {
+            anthropic_form: String::new(),
             server_url: "https://synthetic.invalid".into(),
             organization_id: "test-org".into(),
             user_id: "test-owner".into(),
@@ -344,6 +346,7 @@ mod tests {
     #[test]
     fn platform_source_json_requires_canonical_profile_slots() {
         let authority = PlatformSourceAuthority {
+            anthropic_form: Default::default(),
             server_url: "https://synthetic.invalid".into(),
             organization_id: "test-org".into(),
             user_id: "test-owner".into(),

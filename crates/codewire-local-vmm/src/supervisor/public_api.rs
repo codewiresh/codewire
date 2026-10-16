@@ -2922,6 +2922,7 @@ mod tests {
         project.secrets.user = Some(codewire_project::StoragePlacement::Platform);
         assert!(native_platform_source_authority(&project, &environment).is_err());
         let authority = v1::PlatformSourceAuthority {
+            anthropic_form: String::new(),
             server_url: "https://synthetic.invalid".into(),
             organization_id: "org".into(),
             user_id: "owner".into(),

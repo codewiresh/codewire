@@ -26,6 +26,7 @@ fn environment(profile: bool) -> EnvironmentRecord {
         BTreeSet::new()
     };
     environment.platform_source_authority = Some(PlatformSourceAuthority {
+        anthropic_form: Default::default(),
         server_url: "https://platform.invalid".into(),
         organization_id: "synthetic-org".into(),
         user_id: "synthetic-owner".into(),
@@ -655,4 +656,26 @@ async fn a_start_without_pinned_github_never_asks_the_platform() {
         assert_eq!(clients, without);
     }
     assert_eq!(asked.get(), 0);
+}
+
+#[test]
+fn the_pinned_anthropic_form_chooses_claude_codes_form() {
+    let mut environment = environment(true);
+    for (form, sign_in, subscription_token) in [
+        (AnthropicForm::ApiKey, false, false),
+        (AnthropicForm::SubscriptionToken, false, true),
+        (AnthropicForm::SignIn, true, false),
+    ] {
+        let authority = environment.platform_source_authority.as_mut().unwrap();
+        authority.profile_slots = ["anthropic", "codex", "github"].map(str::to_owned).into();
+        authority.anthropic_form = form;
+        let clients = managed_clients(&environment).unwrap().unwrap();
+        assert!(clients.contains(codewire_access::ManagedCredentialClient::Anthropic));
+        assert_eq!(clients.anthropic_sign_in(), sign_in, "{form:?}");
+        assert_eq!(
+            clients.anthropic_subscription_token(),
+            subscription_token,
+            "{form:?}"
+        );
+    }
 }

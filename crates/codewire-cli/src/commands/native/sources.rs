@@ -19,6 +19,11 @@ pub(super) struct ResolvedProfile {
     pub(super) reference: String,
     pub(super) revision: u64,
     pub(super) profile_slots: BTreeSet<String>,
+    /// The platform profile revision's Anthropic credential kind:
+    /// "subscription_token", "sign_in", or empty for an API key or no
+    /// Anthropic slot.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(super) anthropic_form: String,
 }
 
 #[derive(Default)]
@@ -59,6 +64,8 @@ struct Candidate {
     id: String,
     name: String,
     profile: Option<ResolvedProfile>,
+    /// A platform profile's Anthropic credential, read only once selected.
+    anthropic_credential: Option<String>,
 }
 
 struct PlatformMetadata {
@@ -205,6 +212,7 @@ async fn platform_metadata(
             organization_id,
             user_id: user.sub,
             profile_slots: Vec::new(),
+            anthropic_form: String::new(),
         },
         config: platform,
         client,
@@ -273,7 +281,9 @@ async fn profile_candidates(
                     reference: format!("user/{name}"),
                     revision: record.profile.revision,
                     profile_slots: BTreeSet::new(),
+                    anthropic_form: String::new(),
                 }),
+                anthropic_credential: None,
             });
         }
     }
@@ -325,6 +335,11 @@ async fn profile_candidates(
                         .is_ok(),
                     "platform profile metadata has no exact revision or canonical capability slots"
                 );
+                let anthropic_credential = profile
+                    .entries
+                    .iter()
+                    .find(|entry| entry.capability_slot == "anthropic")
+                    .map(|entry| entry.credential_id.clone());
                 candidates.push(Candidate {
                     placement: StoragePlacement::Platform,
                     id: profile.id.clone(),
@@ -334,7 +349,9 @@ async fn profile_candidates(
                         reference: format!("user/{name}"),
                         revision: profile.revision,
                         profile_slots,
+                        anthropic_form: String::new(),
                     }),
+                    anthropic_credential,
                 });
             }
             if response.next_page_token.is_empty() {
@@ -372,6 +389,7 @@ async fn project_candidates(
                 id,
                 name: project.name,
                 profile: None,
+                anthropic_credential: None,
             });
         }
     }
@@ -393,6 +411,7 @@ async fn project_candidates(
                 id: project.id,
                 name: project.name,
                 profile: None,
+                anthropic_credential: None,
             });
         }
     }
@@ -487,11 +506,20 @@ pub(super) async fn resolve_requested_sources(
     }
     if let Some(reference) = profile {
         let candidates = profile_candidates(local, platform.as_ref(), reference).await?;
-        let candidate = select_candidate(candidates, reference)?;
+        let mut candidate = select_candidate(candidates, reference)?;
         used_platform |= candidate.placement == StoragePlacement::Platform;
         spec.credentials = Some(CredentialBinding {
             profile: canonical_reference(&candidate),
         });
+        if let (Some(credential_id), Some(profile)) = (
+            candidate.anthropic_credential.take(),
+            candidate.profile.as_mut(),
+        ) {
+            let platform = platform
+                .as_ref()
+                .context("platform profile metadata has no authenticated platform")?;
+            profile.anthropic_form = anthropic_form(&platform.client, credential_id).await?;
+        }
         selected.profile = candidate.profile;
     }
     if used_platform {
@@ -500,9 +528,57 @@ pub(super) async fn resolve_requested_sources(
             .authority;
         authority.profile_slots =
             platform_profile_slots(spec, selected.profile.as_ref(), changes.profile)?;
+        authority.anthropic_form = if authority.profile_slots.is_empty() {
+            String::new()
+        } else {
+            selected
+                .profile
+                .as_ref()
+                .map(|profile| profile.anthropic_form.clone())
+                .unwrap_or_default()
+        };
         selected.platform = Some(authority);
     }
     Ok(selected)
+}
+
+/// The form Claude Code runs in for a platform profile's Anthropic credential,
+/// chosen as hosted orchestration chooses it: "subscription_token" for a
+/// Claude subscription token (the anthropic provider's OAuth kind), "sign_in"
+/// for a Claude sign-in, and empty for an API key. Reads metadata only.
+async fn anthropic_form(
+    client: &codewire_client::CodewireClient,
+    credential_id: String,
+) -> anyhow::Result<String> {
+    let credential = client
+        .get_credential(codewire_client::GetCredentialRequest {
+            selector: Some(
+                codewire_client::get_credential_request::Selector::CredentialId(credential_id),
+            ),
+            ..Default::default()
+        })
+        .await
+        .context("read the platform profile's Anthropic credential metadata")?
+        .credential
+        .into_option()
+        .context("platform omitted the profile's Anthropic credential metadata")?;
+    anyhow::ensure!(
+        credential.provider == "anthropic",
+        "the platform profile's Anthropic slot holds another provider's credential"
+    );
+    let kind = &credential.authentication_kind;
+    Ok(
+        if *kind == codewire_client::CredentialAuthenticationKind::Oauth {
+            "subscription_token"
+        } else if *kind == codewire_client::CredentialAuthenticationKind::ClaudeSignIn {
+            "sign_in"
+        } else if *kind == codewire_client::CredentialAuthenticationKind::ApiKey {
+            ""
+        } else {
+            anyhow::bail!("the platform profile's Anthropic credential has an unsupported kind")
+        }
+        .to_owned(),
+    )
 }
 
 fn platform_profile_slots(
@@ -595,19 +671,18 @@ pub(super) fn select_platform_authority(
     let mut authority = requested
         .or_else(|| current.cloned())
         .context("platform source selection has no authenticated origin descriptor")?;
-    authority.profile_slots = if target
+    (authority.profile_slots, authority.anthropic_form) = if target
         .credentials
         .as_ref()
         .is_some_and(|binding| binding.profile.starts_with("platform:"))
     {
-        profile
-            .context("platform profile selection has no exact metadata")?
-            .profile_slots
-            .iter()
-            .cloned()
-            .collect()
+        let profile = profile.context("platform profile selection has no exact metadata")?;
+        (
+            profile.profile_slots.iter().cloned().collect(),
+            profile.anthropic_form.clone(),
+        )
     } else {
-        Vec::new()
+        (Vec::new(), String::new())
     };
     Ok(Some(authority))
 }
@@ -621,6 +696,11 @@ pub(super) fn profile_from_environment(environment: &v1::Environment) -> Option<
             .platform_source_authority
             .as_ref()
             .map(|authority| authority.profile_slots.iter().cloned().collect())
+            .unwrap_or_default(),
+        anthropic_form: environment
+            .platform_source_authority
+            .as_ref()
+            .map(|authority| authority.anthropic_form.clone())
             .unwrap_or_default(),
     })
 }
@@ -688,7 +768,9 @@ pub(super) fn validate_exact_sources(
             } else {
                 anyhow::ensure!(
                     binding.profile.starts_with("platform:")
-                        && platform.is_some()
+                        && platform.is_some_and(|authority| {
+                            authority.anthropic_form == profile.anthropic_form
+                        })
                         && profile.profile_slots == authority_slots,
                     "platform profile capability slots differ from the exact selected metadata"
                 );

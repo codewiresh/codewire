@@ -3,6 +3,7 @@
 //! The supervisor configures routing only. Authentication, live grant checks,
 //! and recipient sealing happen through the existing credential authority.
 
+use crate::supervisor_metadata::AnthropicForm;
 use codewire_access::ManagedCredentialClients;
 use codewire_local_credentials::PlatformCredentialBinding;
 use codewire_project::{PlatformProjectionSelection, platform_projection_reserved_keys};
@@ -97,15 +98,17 @@ pub(in crate::supervisor) fn managed_clients(
         .platform_source_authority
         .as_ref()
         .ok_or(SupervisorError::EnvironmentAccessUnavailable)?;
-    // TODO(native-claude-subscription-form): the platform source authority
-    // carries slot names only, so a platform profile whose Anthropic slot holds
-    // a Claude subscription token projects the API-key form here. That is safe
-    // (placeholder only; the platform broker injects the token) but runs Claude
-    // Code in API-key mode. Carry the form and call
-    // `with_anthropic_subscription_token` as hosted orchestration does.
+    // The Anthropic slot's pinned credential kind chooses Claude Code's form,
+    // as hosted orchestration does: a sign-in gets Claude Code's own login,
+    // a subscription token its token form, and an API key the default.
     let clients = ManagedCredentialClients::from_profile_slots(
         authority.profile_slots.iter().map(String::as_str),
     )
+    .and_then(|clients| match authority.anthropic_form {
+        AnthropicForm::ApiKey => Ok(clients),
+        AnthropicForm::SubscriptionToken => clients.with_anthropic_subscription_token(),
+        AnthropicForm::SignIn => clients.with_anthropic_sign_in(),
+    })
     .map_err(|_| SupervisorError::EnvironmentAccessUnavailable)?;
     // Include runtime and GitHub names, not just the managed-client subset.
     let reserved = reserved_keys(authority)?;

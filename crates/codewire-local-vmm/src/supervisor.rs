@@ -1000,10 +1000,10 @@ impl SupervisorCore {
             .await
             .map_err(credential_control_error)?
             .contains("github");
-        // Local profiles never hold a Claude subscription token: the local
-        // authority refuses Anthropic OAuth, so slot names fix every form here.
-        // TODO(native-claude-subscription-form): revisit with the platform
-        // source path in sources::platform::managed_clients.
+        // Local profiles never hold a Claude subscription token or sign-in:
+        // the local authority refuses Anthropic OAuth, so slot names fix every
+        // form here. A platform profile pins its form with its slots
+        // (sources::platform::managed_clients).
         let clients = codewire_access::ManagedCredentialClients::from_profile_slots(
             revision
                 .profile
@@ -8746,6 +8746,7 @@ mod tests {
         {
             environment.platform_source_authority = Some(
                 sources::PlatformSourceAuthority::from_proto(&v1::PlatformSourceAuthority {
+                    anthropic_form: String::new(),
                     server_url: "https://codewire.example".into(),
                     organization_id: "synthetic-org".into(),
                     user_id: "synthetic-user".into(),

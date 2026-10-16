@@ -3136,6 +3136,7 @@ mod tests {
         use codewire_access::ManagedAgent::{Claude, Codex};
         let environment = |slots: &[&str]| v1::Environment {
             platform_source_authority: Some(v1::PlatformSourceAuthority {
+                anthropic_form: String::new(),
                 server_url: "https://codewire.example".into(),
                 organization_id: "org-synthetic".into(),
                 user_id: "user-synthetic".into(),

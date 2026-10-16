@@ -323,6 +323,11 @@ message PlatformSourceAuthority {
   // platform profile. The supervisor persists this immutable selection; it
   // never infers client routing from environment variable names.
   repeated string profile_slots = 4;
+  // The pinned revision's Anthropic credential kind, captured with the slots:
+  // "subscription_token" for a Claude subscription token, "sign_in" for a
+  // Claude sign-in, empty for an API key or no Anthropic slot. It chooses
+  // Claude Code's form as hosted orchestration does. Never material.
+  string anthropic_form = 5;
 }
 
 // Narrow source edit. All non-source ProjectSpec fields must remain byte-for-

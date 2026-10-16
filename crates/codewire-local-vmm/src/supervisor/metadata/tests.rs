@@ -102,6 +102,7 @@ fn complete_environment() -> EnvironmentRecord {
     });
     environment.platform_source_authority = Some(
         PlatformSourceAuthority::from_proto(&v1::PlatformSourceAuthority {
+            anthropic_form: String::new(),
             server_url: "https://synthetic.invalid".to_owned(),
             organization_id: "synthetic-org".to_owned(),
             user_id: "synthetic-owner".to_owned(),
@@ -331,4 +332,38 @@ fn runtime_generations_validate_independently_of_boot_and_workspace_identity() {
         .cw_runtime_catalog_generation = Some("3".repeat(64));
     environment.cw_runtime.as_mut().unwrap().schema_version = 2;
     assert!(environment.validate(&environment.name).is_err());
+}
+
+#[test]
+fn the_anthropic_form_round_trips_and_older_records_keep_the_api_key_form() {
+    let proto = |slots: &[&str], form: &str| v1::PlatformSourceAuthority {
+        server_url: "https://synthetic.invalid".into(),
+        organization_id: "test-org".into(),
+        user_id: "test-owner".into(),
+        profile_slots: slots.iter().map(|slot| (*slot).to_owned()).collect(),
+        anthropic_form: form.into(),
+    };
+    for form in ["", "subscription_token", "sign_in"] {
+        let authority =
+            PlatformSourceAuthority::from_proto(&proto(&["anthropic", "codex"], form)).unwrap();
+        assert_eq!(authority.proto().anthropic_form, form);
+        let json = serde_json::to_string(&authority).unwrap();
+        assert_eq!(json.contains("anthropic_form"), !form.is_empty(), "{json}");
+        assert_eq!(
+            serde_json::from_str::<PlatformSourceAuthority>(&json).unwrap(),
+            authority
+        );
+    }
+    // A form needs an Anthropic slot, and only the three spellings exist.
+    assert!(PlatformSourceAuthority::from_proto(&proto(&["codex"], "sign_in")).is_err());
+    assert!(PlatformSourceAuthority::from_proto(&proto(&["anthropic"], "oauth")).is_err());
+    // A record written before the form was pinned keeps the API-key form.
+    let older: PlatformSourceAuthority = serde_json::from_str(
+        r#"{"server_url":"https://synthetic.invalid","organization_id":"test-org","user_id":"test-owner","profile_slots":["anthropic"]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        older.anthropic_form,
+        crate::supervisor_metadata::AnthropicForm::ApiKey
+    );
 }
