@@ -24,6 +24,7 @@ esac
 export CODEWIRE_PREFLIGHT_MODE="$preflight_mode"
 
 push_count=0
+delete_count=0
 local_ref=""
 head_sha=""
 base_sha=""
@@ -32,6 +33,7 @@ if [ ! -t 0 ]; then
   while read -r candidate_local_ref candidate_head candidate_remote_ref candidate_base; do
     [ -n "${candidate_head:-}" ] || continue
     push_count=$((push_count + 1))
+    [[ "$candidate_head" =~ ^0+$ ]] && delete_count=$((delete_count + 1))
     local_ref="$candidate_local_ref"
     head_sha="$candidate_head"
     base_sha="$candidate_base"
@@ -41,7 +43,15 @@ fi
 # Every check below runs with stdin closed; the ref list is consumed.
 exec </dev/null
 
-if [ "$push_count" -gt 1 ]; then
+if [ "$push_count" -gt 1 ] && [ "$delete_count" -eq "$push_count" ]; then
+  # Deleting refs needs no verification, so a push of deletions only may name
+  # any number of them; it carries no commit to check.
+  if [ "$preflight_mode" = ci ]; then
+    echo "pre-push: CI-owned verification does not authorize ref deletion" >&2
+    exit 1
+  fi
+  exit 0
+elif [ "$push_count" -gt 1 ]; then
   echo "pre-push: multi-ref pushes are unsupported; push one ref at a time" >&2
   exit 1
 elif [ "$push_count" -eq 1 ]; then
