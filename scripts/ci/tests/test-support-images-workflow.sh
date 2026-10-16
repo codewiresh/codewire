@@ -428,7 +428,7 @@ PY
   fail 'workspace agents are not one exact, registry-pinned lockfile'
 grep -qF 'npm ci --strict-allow-scripts --no-audit --no-fund' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace does not install the agent lockfile under its strict script policy'
-grep -qF 'env -u NPM_CONFIG_ALLOW_SCRIPTS -u NPM_CONFIG_PREFIX' "$WORKSPACE_DOCKERFILE" ||
+grep -qF 'env -u NPM_CONFIG_PREFIX' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace agent install inherits the user-facing global npm configuration'
 if grep -Eq 'npm install .*(@openai/codex|@anthropic-ai/claude-code|@google/gemini-cli|@moonshot-ai/kimi-code|@earendil-works/pi-coding-agent)' \
     "$WORKSPACE_DOCKERFILE"; then
@@ -438,11 +438,10 @@ grep -qF 'npm@12.2.0 pnpm@12.9.0 yarn@1.22.22' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace does not pin the Node archive npm together with its package managers'
 grep -qF 'npm cache clean --force' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace retains the root package-manager installer cache'
-grep -qFx -- 'ENV NPM_CONFIG_ALLOW_SCRIPTS="@anthropic-ai/claude-code"' \
-  "$WORKSPACE_DOCKERFILE" ||
-  fail 'workspace does not persist the narrow Claude update policy under current npm'
-[[ "$(grep -Ec -- 'allow-scripts=|NPM_CONFIG_ALLOW_SCRIPTS=' "$WORKSPACE_DOCKERFILE")" -eq 1 ]] ||
-  fail 'workspace grants lifecycle-script permission beyond the Claude installer'
+# Project and user npm installs keep npm's default lifecycle-script policy; a
+# global allowlist made every project install fail (#2876).
+[[ "$(grep -Ec -- 'allow-scripts=|NPM_CONFIG_ALLOW_SCRIPTS' "$WORKSPACE_DOCKERFILE")" -eq 0 ]] ||
+  fail 'workspace sets a global npm lifecycle-script policy for project installs'
 
 # Harbor is the required publication; the GHCR mirror never gates delivery.
 for job_name in publish_job probe_job; do

@@ -222,10 +222,11 @@ ENV CARGO_HOME="/home/codewire/.cargo"
 ENV RUSTUP_HOME="/home/codewire/.rustup"
 # User installations persist in the mounted home and take precedence over the
 # shipped agents. Image configuration, not a hidden ~/.npmrc, selects their
-# npm prefix and the sole admitted lifecycle-script package. The upgrade
-# commands of shipped agents that would update in place come next.
+# npm prefix. npm's install-script policy is left at its default, so project
+# and user installs behave like stock npm; only the shipped agents' own install
+# below runs under a strict allowlist. The upgrade commands of shipped agents
+# that would update in place come next.
 ENV NPM_CONFIG_PREFIX="/home/codewire/.npm-global"
-ENV NPM_CONFIG_ALLOW_SCRIPTS="@anthropic-ai/claude-code"
 ENV PATH="/home/codewire/.npm-global/bin:/home/codewire/.local/bin:/opt/codewire/agents/upgrade:/opt/codewire/agents/npm/bin:/opt/codewire/agents/bin:${CARGO_HOME}/bin:${PATH}"
 
 # Reuse the exact toolchain and explicitly selected components from the
@@ -274,7 +275,7 @@ RUN --mount=type=bind,source=images/workspace/agents,target=/tmp/codewire-agents
     cp /tmp/codewire-agents/package.json /tmp/codewire-agents/package-lock.json \
       /opt/codewire/agents/npm/lib/ && \
     cd /opt/codewire/agents/npm/lib && \
-    env -u NPM_CONFIG_ALLOW_SCRIPTS -u NPM_CONFIG_PREFIX \
+    env -u NPM_CONFIG_PREFIX \
       npm ci --strict-allow-scripts --no-audit --no-fund && \
     npm cache clean --force && \
     for agent in claude codex gemini kimi pi; do \
