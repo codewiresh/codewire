@@ -198,6 +198,11 @@ def delivered(now_ms=None):
     if login is None:
         return None
     refresh = login.get("refreshToken") if isinstance(login, dict) else None
+    if refresh == "" and document.get(MARKER_KEY) == 1:
+        # Claude Code cleared the refresh token after its own refresh was
+        # refused; the login is still Codewire's and the daemon's next check
+        # rewrites it (claude_home/login.rs).
+        return None
     if not isinstance(refresh, str) or not refresh.startswith(PLACEHOLDER_PREFIX):
         raise Failure("login_not_codewires")
     if not NONCE.fullmatch(refresh[len(PLACEHOLDER_PREFIX):]):

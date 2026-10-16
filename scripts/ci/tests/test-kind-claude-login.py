@@ -229,6 +229,14 @@ class LoginFile(unittest.TestCase):
         self.assertIsNone(driver.delivered())
         self.workspace.deliver(login()[:30])
         self.assertIsNone(driver.delivered())
+        # Claude Code cleared the refresh token after a refused refresh: still
+        # Codewire's, waiting for the daemon's next write. Without the marker
+        # it is not Codewire's.
+        self.workspace.deliver(login(refresh=""))
+        self.assertIsNone(driver.delivered())
+        self.workspace.deliver(login(refresh="", marker=False))
+        with self.assertRaisesRegex(driver.Failure, "^login_not_codewires$"):
+            driver.delivered()
 
     def test_anything_but_codewires_exact_login_fails_closed(self):
         cases = {
