@@ -443,6 +443,7 @@ class OwnedFailureDiagnostics(unittest.TestCase):
                 status, stderr = self.solve(operation, 0)
                 self.assertEqual(status, 1)
                 self.assertIn(b"build refused; owned outputs retained", stderr)
+                self.assertRegex(stderr, rb"cw-image-consumer: refused: Refused: [^\n]+\n")
                 self.assertNotIn(b"solve failed", stderr)
 
 

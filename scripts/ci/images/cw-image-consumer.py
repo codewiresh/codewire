@@ -527,6 +527,13 @@ if __name__ == "__main__":
             # cache owner's one diagnosed read-failure retry predicate.
             failed_solve_log(error.log, terminal=True)
         sys.exit(error.code)
-    except (OSError, ValueError, KeyError, TypeError, release.ReleaseError, asset.release.ReleaseError):
-        print("cw-image-consumer: build refused; owned outputs retained", file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError, release.ReleaseError, asset.release.ReleaseError) as error:
+        # The reason is a fixed check message or an OS error; it names which
+        # check refused without printing any file contents.
+        reason = "".join(c if c.isprintable() else "?" for c in f"{type(error).__name__}: {error}")[:300]
+        try:
+            print(f"cw-image-consumer: refused: {reason}", file=sys.stderr)
+            print("cw-image-consumer: build refused; owned outputs retained", file=sys.stderr)
+        except OSError:
+            pass
         sys.exit(1)
