@@ -156,7 +156,8 @@ def arm_custody():
     active = ctypes.c_int()
     require(libc.prctl(37, ctypes.byref(active), 0, 0, 0) == 0 and active.value == 1,
             "build-family subreaper was not enabled")
-    Path("/proc/thread-self/children").read_text()
+    # children() scans /proc, so /proc must be this PID namespace's.
+    require(os.readlink("/proc/self") == str(os.getpid()), "/proc does not show this process")
     try:
         os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT | WALL)
     except ChildProcessError:
@@ -165,12 +166,20 @@ def arm_custody():
 
 
 def children():
+    """Every process whose parent is this one. Scanning /proc works on every
+    Linux kernel; the per-task children file needs CONFIG_PROC_CHILDREN,
+    which a Kata guest kernel lacks."""
+    me = os.getpid()
     result = set()
-    for task in Path("/proc/self/task").iterdir():
-        try:
-            result.update(int(pid) for pid in (task / "children").read_text().split())
-        except FileNotFoundError:
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
             continue
+        try:
+            stat = Path(f"/proc/{entry.name}/stat").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if int(stat.rsplit(") ", 1)[1].split()[1]) == me:
+            result.add(int(entry.name))
     return result
 
 
