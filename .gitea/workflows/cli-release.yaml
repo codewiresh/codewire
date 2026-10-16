@@ -238,7 +238,7 @@ jobs:
           fi
           work="${RUNNER_TEMP:?}/codewire-vz-runner"
           scripts/ci/release/build-local-runtime.sh helper --output "$work"
-          printf 'present=true\nrecipe=%s\nbuild_runner=%s\n' "$(cat "$work/recipe")" "${RUNNER_NAME:?}" \
+          printf 'present=true\nrecipe=%s\nbuild_runner=%s\n' "$(cat "$work/recipe")" "${RUNNER_NAME:-$(hostname -s)}" \
             >> "$GITHUB_OUTPUT"
           if [ -f "$work/codewire-vz-runner" ]; then
             mkdir -m 0700 ../.vz-runner-unsigned
@@ -338,7 +338,7 @@ jobs:
           cleanup_macos_keys
           trap - EXIT
           printf 'signed_sha256=%s\nsign_runner=%s\n' \
-            "$(sha256sum vz-runner-signed/codewire-vz-runner | cut -c1-64)" "${RUNNER_NAME:?}" >> "$GITHUB_OUTPUT"
+            "$(sha256sum vz-runner-signed/codewire-vz-runner | cut -c1-64)" "${RUNNER_NAME:-$(hostname -s)}" >> "$GITHUB_OUTPUT"
           if [ -f vz-runner-signed/notary-submission-id ]; then
             printf 'notary_submission_id=%s\n' "$(cat vz-runner-signed/notary-submission-id)" >> "$GITHUB_OUTPUT"
           fi
