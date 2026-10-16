@@ -368,7 +368,7 @@ database_lane_credential_service() {
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib delegation::authority::tests:: \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "owner-local delegation authority matrix" "$logfile" 7
+  assert_passed_count "owner-local delegation authority matrix" "$logfile" 8
 }
 
 database_lane_credential_broker() {
