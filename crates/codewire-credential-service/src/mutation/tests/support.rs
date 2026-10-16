@@ -57,6 +57,9 @@ impl DeviceProvider {
     }
 
     fn answer(&self, target: &str, body: &[u8]) -> Option<(http::StatusCode, Value)> {
+        if body.len() > 64 * 1024 {
+            return None;
+        }
         let suffix = self.suffix.lock().unwrap().clone();
         let approved = self.approved.load(Ordering::SeqCst);
         Some(match target {
@@ -114,7 +117,9 @@ impl DeviceProvider {
                     && request["code"] == CLAUDE_CODE
                     && request["client_id"] == "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
                     && request["redirect_uri"] == "https://platform.claude.com/oauth/code/callback"
-                    && request["code_verifier"].as_str().is_some_and(|v| v.len() == 43)
+                    && request["code_verifier"]
+                        .as_str()
+                        .is_some_and(|v| v.len() == 43)
                     && request["state"].as_str().is_some_and(|v| v.len() == 43)
                 {
                     (
@@ -141,7 +146,6 @@ impl DeviceProvider {
             ),
             _ => return None,
         })
-        .filter(|_| body.len() <= 64 * 1024)
     }
 }
 

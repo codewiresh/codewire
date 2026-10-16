@@ -13,14 +13,14 @@ reach as errors; `cw list ENV` lists one environment.
 | --- | --- | --- | --- |
 | Trusted Linux host | `--local --type host` | Owner daemon and private Unix socket | Codex, Claude and noel |
 | Native Linux sandbox | `--local --type sandbox` | Native supervisor and guest daemon | Codex/Claude implementation; VM qualification pending |
-| Platform sandbox | `--platform --type sandbox` | Authenticated platform API | Qualification pending |
+| Platform sandbox | `--cloud --type sandbox` | Authenticated platform API | Qualification pending |
 | macOS trusted host | `--local --type host` | Owner daemon and private Unix socket | Codex and Claude |
 | macOS local sandbox | `--local --type sandbox` on Apple Silicon | Shared supervisor, VZ helper and arm64 guest daemon | Same host route as a native Linux sandbox; needs a local credential profile, see [MACOS-CLI.md](MACOS-CLI.md) |
 
 ```sh
 cw env create --local --type host --name host-team --path .
 cw env create --local --type sandbox --name vm-team --path .
-cw env create --platform --type sandbox --name cloud-team --repo REPOSITORY_URL
+cw env create --cloud --type sandbox --name cloud-team --repo REPOSITORY_URL
 ```
 
 A trusted host runs as the local user with their ordinary HOME and installed
@@ -33,9 +33,16 @@ admitted host implementations. Other hosts fail before creation effects.
 Native sandboxes retain their protected credential and workspace contracts.
 Creating a host does not copy authentication files into a sandbox.
 
-Managed Linux VM sessions require a selected local credential profile with a
-typed Codex or Anthropic provider. Provider material stays in the host broker;
-the guest receives its generated proxy configuration. VM sessions use the same
+Managed Linux VM sessions require a selected credential profile, local or
+platform, with a provider for the agent, chosen by the rule a hosted Sandbox
+uses: Codex takes the Codex slot, and the OpenAI API-key slot only without one;
+Claude takes the Anthropic slot. A platform profile qualifies by the slots the
+VM pinned when its sources were selected. Provider material stays outside the
+VM (the host broker, or the platform broker for a platform profile); the guest
+receives its generated proxy configuration. The VM's Codex home is configured
+for the slot the rule picks, with the same provider configuration a hosted
+managed Codex agent gets, so a profile with only the OpenAI API-key slot runs
+Codex through that route. VM sessions use the same
 `run --agent`, `msg`, `steer`, `interrupt`, `inbox` and `wait --message` commands.
 Their parent must be a running managed session in the same VM. A worker writes
 one deterministic notification into that parent's private inbox; the parent

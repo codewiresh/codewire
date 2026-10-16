@@ -16,6 +16,11 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
 
     let repositories = normalize_repositories(raw.repositories, RepositoryTrust::Required)?;
     let mounts = normalize_mounts(raw.mounts)?;
+    let vm_only = raw
+        .workspace
+        .and_then(|workspace| workspace.vm_only)
+        .map(normalize_vm_only)
+        .transpose()?;
     let working_directory_explicit = !raw.working_directory.trim().is_empty();
     let working_directory =
         normalize_working_directory(&raw.working_directory, &repositories, &mounts)?;
@@ -49,7 +54,11 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
             secrets,
             credentials,
         },
-        local: LocalProjectIntent { mounts, host_ports },
+        local: LocalProjectIntent {
+            mounts,
+            host_ports,
+            vm_only,
+        },
         working_directory_explicit,
     };
     document.spec.validate()?;
@@ -519,6 +528,26 @@ fn normalize_mounts(mounts: Vec<RawMountBlock>) -> Result<Vec<LocalMountIntent>,
             })
         })
         .collect()
+}
+
+/// Canonical `.dockerignore`-style patterns, each naming project folders kept
+/// on the VM's own disk. Order is kept; see [`VmOnlyPatterns`].
+fn normalize_vm_only(patterns: Vec<String>) -> Result<Vec<String>, ProjectError> {
+    if patterns.len() > MAX_VM_ONLY_PATTERNS {
+        return Err(ProjectError::TooManyEntries {
+            field: VM_ONLY_FIELD,
+            maximum: MAX_VM_ONLY_PATTERNS,
+        });
+    }
+    let normalized = patterns
+        .iter()
+        .map(|pattern| normalize_vm_only_pattern(pattern))
+        .collect::<Vec<_>>();
+    VmOnlyPatterns::parse(&normalized).map_err(|error| ProjectError::InvalidField {
+        field: VM_ONLY_FIELD,
+        detail: error.to_string(),
+    })?;
+    Ok(normalized)
 }
 
 fn validate_workspace_input_destinations(

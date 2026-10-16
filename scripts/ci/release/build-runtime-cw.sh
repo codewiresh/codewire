@@ -11,7 +11,7 @@ Builds a sealed cw runtime, DIR/cw-runtime.lock.json and DIR/runtime.pack, for
 the local VM runtime of one host architecture (#2733): TARGET is
 x86_64-unknown-linux-musl (Linux hosts) or aarch64-unknown-linux-musl (Apple
 silicon Macs). scripts/dev/build-native-managed-agent.py builds the static cw
-inside the pinned Rust 1.93.0 image from
+inside the pinned Rust image from
 scripts/ci/release/local-runtime-sources.json, cross-compiled and linked by
 the pinned zig and cargo-zigbuild as release delivery builds its Linux cws;
 then scripts/dev/cw-runtime-image.py builds its image and packs it. No host
@@ -104,7 +104,9 @@ for each in $targets; do
     [ "$(sha256sum "$file" | cut -c1-64)" = "$(pin guest_root_builder rust_std "$each" sha256)" ] && found="$file"
   done
   [ -n "$found" ] || die "no --rust-std is the pinned $each tarball"
-  members="$members $found=rust-std-1.93.0-$each/rust-std-$each/lib/rustlib/$each"
+  # The tarball's top directory is its pinned file name without the suffix.
+  archive="$(basename "$(pin guest_root_builder rust_std "$each" url)" .tar.xz)"
+  members="$members $found=$archive/rust-std-$each/lib/rustlib/$each"
 done
 [ "${#rust_std[@]}" = "$(wc -w <<<"$targets")" ] || die "give exactly one --rust-std per pinned target"
 [ "$(sha256sum "$protoc_zip" | cut -c1-64)" = "$(pin guest_root_builder protoc sha256)" ] ||

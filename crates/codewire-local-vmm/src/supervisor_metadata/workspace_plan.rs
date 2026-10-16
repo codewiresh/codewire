@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::PathBuf;
 
+use codewire_project::valid_vm_only_patterns;
 use codewire_project::{ProjectSpec, parse_repository_ssh_host};
 use codewire_vmm_guest_probe::{DirectShareMount, DirectSharePlan};
 use serde::{Deserialize, Serialize};
@@ -33,12 +34,20 @@ pub(crate) enum WorkspaceInput {
         identity: String,
         mode: WorkspaceSourceMode,
         destination: String,
+        /// Source-relative paths a copy skips; never set for a clone. Empty
+        /// is not encoded, so earlier plans keep their exact bytes.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        vm_only: Vec<String>,
     },
     Direct {
         source_path: Vec<u8>,
         identity: DirectShareIdentity,
         destination: String,
         read_only: bool,
+        /// Share-relative paths the guest backs with its own disk; never set
+        /// for a read-only share.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        vm_only: Vec<String>,
     },
     Repository {
         source: String,
@@ -79,11 +88,14 @@ impl WorkspacePlan {
                     identity,
                     mode,
                     destination,
+                    vm_only,
                 } => {
                     let path = PathBuf::from(OsString::from_vec(source_path.clone()));
                     if !path.is_absolute()
                         || !valid_object_id(identity)
                         || (*mode == WorkspaceSourceMode::Clone && destination != "/workspace")
+                        || (*mode == WorkspaceSourceMode::Clone && !vm_only.is_empty())
+                        || !valid_vm_only_patterns(vm_only)
                     {
                         return Err(WorkspacePlanError::InvalidPlan);
                     }
@@ -221,13 +233,15 @@ impl WorkspacePlan {
                 WorkspaceInput::Direct {
                     destination,
                     read_only,
+                    vm_only,
                     ..
-                } => Some((destination, *read_only)),
+                } => Some((destination, *read_only, vm_only)),
                 WorkspaceInput::Local { .. } | WorkspaceInput::Repository { .. } => None,
             })
             .enumerate()
-            .map(|(index, (destination, read_only))| {
+            .map(|(index, (destination, read_only, vm_only))| {
                 DirectShareMount::for_index(index, destination.clone(), read_only)
+                    .and_then(|mount| mount.with_vm_only(vm_only.clone()))
                     .map_err(|_| WorkspacePlanError::InvalidPlan)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -247,6 +261,15 @@ impl WorkspaceInput {
             Self::Local { destination, .. }
             | Self::Direct { destination, .. }
             | Self::Repository { destination, .. } => destination,
+        }
+    }
+
+    /// The paths kept on the VM's own disk: skipped by a copy, bound over a
+    /// direct share. Empty for repositories.
+    pub(crate) fn vm_only(&self) -> &[String] {
+        match self {
+            Self::Local { vm_only, .. } | Self::Direct { vm_only, .. } => vm_only,
+            Self::Repository { .. } => &[],
         }
     }
 }

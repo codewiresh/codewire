@@ -32,6 +32,26 @@ pub(crate) async fn handle_cost_command(globals: &Globals, args: CostArgs) -> an
     print_cost_reports(&reports, args.output)
 }
 
+/// A name that is no local VM, with no cloud to look in: say that, not only
+/// why the cloud is unavailable.
+fn unknown_environment_without_cloud(target_ref: &str, error: anyhow::Error) -> anyhow::Error {
+    let cloud = match error.downcast_ref::<config::ConfigError>() {
+        Some(config::ConfigError::NoPlatformServer { .. }) => {
+            "no Codewire server is set up for cloud environments (`cw login`)"
+        }
+        Some(config::ConfigError::NoPlatformToken { .. }) => {
+            "you are not logged in for cloud environments (`cw login`)"
+        }
+        _ => return error,
+    };
+    let local = if cfg!(any(target_os = "linux", target_os = "macos")) {
+        "no local VM has that name (`cw env --local list` shows yours)"
+    } else {
+        "local VMs are not available on this platform"
+    };
+    anyhow::anyhow!("no environment named {target_ref:?}: {local}, and {cloud}")
+}
+
 pub(crate) async fn resolve_named_execution_target(
     globals: &Globals,
     paths: &ResolvePaths,
@@ -79,7 +99,7 @@ pub(crate) async fn resolve_named_execution_target(
                     name: environment.name.clone(),
                 });
             }
-            return Err(error);
+            return Err(unknown_environment_without_cloud(target_ref, error));
         }
         Err(error) => return Err(error),
     };
@@ -117,7 +137,7 @@ pub(crate) async fn resolve_named_execution_target(
             if environment.name == target_ref =>
         {
             anyhow::bail!(
-                "environment {target_ref:?} exists in both placements; use `cw use --local {target_ref}` or `cw use --platform {target_ref}`"
+                "environment {target_ref:?} exists in both placements; use `cw use --local {target_ref}` or `cw use --cloud {target_ref}`"
             )
         }
         (Some(environment), _) => Ok(config::CurrentTargetConfig {
@@ -756,7 +776,19 @@ pub(crate) fn oauth_user_display_name(user: &OAuthUserInfo) -> String {
         .unwrap_or_else(|| "(unknown)".to_string())
 }
 
+/// Open `url` in the person's browser, fully detached from this command: the
+/// opener and the browser it starts get null stdin, stdout and stderr and
+/// their own process group, and are never waited on. A browser's own messages
+/// (an X11 socket notice, for example) therefore never land on a prompt this
+/// command is showing, and a Ctrl-C at that prompt does not reach the browser.
+/// Callers print the URL themselves first, so a browser that does not open
+/// changes nothing.
 pub(crate) fn open_browser(url: &str) -> anyhow::Result<()> {
+    browser_command(url).spawn().context("open browser")?;
+    Ok(())
+}
+
+fn browser_command(url: &str) -> ProcessCommand {
     let mut command = if cfg!(target_os = "macos") {
         let mut command = ProcessCommand::new("open");
         command.arg(url);
@@ -770,8 +802,16 @@ pub(crate) fn open_browser(url: &str) -> anyhow::Result<()> {
         command.arg(url);
         command
     };
-    command.spawn().context("open browser")?;
-    Ok(())
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    command
 }
 
 pub(crate) async fn handle_org_command(
@@ -2485,5 +2525,60 @@ impl CompletionShell {
             CompletionShell::Fish => Shell::Fish,
             CompletionShell::Powershell => Shell::PowerShell,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read_error(kind: std::io::ErrorKind) -> Option<Box<config::ConfigError>> {
+        Some(Box::new(config::ConfigError::ReadConfig {
+            path: std::path::PathBuf::from("/synthetic/config.json"),
+            source: std::io::Error::from(kind),
+        }))
+    }
+
+    #[test]
+    fn an_unknown_name_without_a_cloud_says_no_local_vm_has_it() {
+        let missing = anyhow::Error::from(config::ConfigError::NoPlatformServer {
+            cause: read_error(std::io::ErrorKind::NotFound),
+        });
+        let message = format!("{:#}", unknown_environment_without_cloud("gh", missing));
+        assert_eq!(
+            message,
+            "no environment named \"gh\": no local VM has that name (`cw env --local list` shows yours), and no Codewire server is set up for cloud environments (`cw login`)"
+        );
+        let logged_out = anyhow::Error::from(config::ConfigError::NoPlatformToken { cause: None });
+        assert!(
+            format!("{:#}", unknown_environment_without_cloud("gh", logged_out))
+                .ends_with("and you are not logged in for cloud environments (`cw login`)")
+        );
+        let other = anyhow::anyhow!("list environments failed");
+        assert_eq!(
+            unknown_environment_without_cloud("gh", other).to_string(),
+            "list environments failed"
+        );
+    }
+
+    #[test]
+    fn a_missing_config_file_is_not_repeated_and_a_real_problem_is_named_once() {
+        let missing = anyhow::Error::from(config::ConfigError::NoPlatformServer {
+            cause: read_error(std::io::ErrorKind::NotFound),
+        });
+        assert_eq!(
+            format!("{missing:#}"),
+            "no server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login')"
+        );
+        let unreadable = anyhow::Error::from(config::ConfigError::NoPlatformServer {
+            cause: read_error(std::io::ErrorKind::PermissionDenied),
+        });
+        let message = format!("{unreadable:#}");
+        assert_eq!(
+            message.matches("/synthetic/config.json").count(),
+            1,
+            "{message}"
+        );
+        assert_eq!(message.matches("permission denied").count(), 1, "{message}");
     }
 }

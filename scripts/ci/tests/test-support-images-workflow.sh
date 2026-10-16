@@ -203,7 +203,7 @@ tool_stage_inputs=(
 )
 # shellcheck disable=SC2016 # Match literal Dockerfile commands.
 compiler_inputs=(
-  'FROM --platform=$BUILDPLATFORM rust:1.93.0-bookworm@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382 AS cw-cross-compiler'
+  'FROM --platform=$BUILDPLATFORM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS cw-cross-compiler'
   'COPY --from=build-protoc /protoc.zip /tmp/protoc.zip'
   'COPY --from=build-sccache /sccache.tar.gz /tmp/sccache.tar.gz'
   'COPY --from=build-zig /zig.tar.xz /tmp/zig.tar.xz'
@@ -212,7 +212,7 @@ compiler_inputs=(
   'test "$(sccache --version)" = '\''sccache 0.17.0'\'''
   'test "$(/opt/zig/zig version)" = '\''0.15.2'\'''
   'ENV PROTOC=/opt/protoc/bin/protoc'
-  'rustup target add --toolchain 1.93.0 aarch64-unknown-linux-musl'
+  'rustup target add --toolchain 1.99.0 aarch64-unknown-linux-musl'
   'cargo install --locked cargo-zigbuild --version 0.23.0'
   'test "$(cargo-zigbuild --version)" = '\''cargo-zigbuild 0.23.0'\'''
   'COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build'
@@ -230,7 +230,7 @@ workspace_cross_contract() {
   for input in "${builder_inputs[@]}"; do grep -qF -- "$input" <<<"$builder" || return 1; done
   # The image-platform toolchain only adds the shipped developer components.
   [[ "$(grep -c '^RUN ' <<<"$toolchain")" == 1 ]] || return 1
-  grep -qxF 'RUN rustup component add --toolchain 1.93.0 rustfmt clippy' <<<"$toolchain" || return 1
+  grep -qxF 'RUN rustup component add --toolchain 1.99.0 rustfmt clippy' <<<"$toolchain" || return 1
   ! grep -Eq '^(ADD|COPY) ' <<<"$toolchain" || return 1
   # Compiler tools follow the build platform, and only cross builds run Cargo.
   ! grep -Eq '^FROM (sccache|protoc|zig)-\$\{TARGETARCH\}' <<<"$recipe" || return 1
@@ -292,7 +292,7 @@ done
 # The Go tools cross-compile natively on the build platform, never under
 # emulation, still at @latest when the image is built.
 # shellcheck disable=SC2016 # Match the Dockerfile's literal variables.
-go_stage="$(sed -n '/^FROM --platform=$BUILDPLATFORM rust:1.93.0-bookworm@sha256:[0-9a-f]\{64\} AS workspace-floating-go$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
+go_stage="$(sed -n '/^FROM --platform=$BUILDPLATFORM rust:1.99.0-bookworm@sha256:[0-9a-f]\{64\} AS workspace-floating-go$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
 # shellcheck disable=SC2016
 for go_input in 'GOOS=linux GOARCH="$TARGETARCH" CGO_ENABLED=0' \
   '/usr/local/go/bin/go install golang.org/x/tools/gopls@latest' \
@@ -373,7 +373,7 @@ if grep -qF 'ghcr.io/codewiresh/base:latest' "$WORKSPACE_DOCKERFILE"; then
 fi
 grep -Eq '^FROM ubuntu:noble@sha256:[0-9a-f]{64}$' "$ROOT/images/base/Dockerfile" ||
   fail 'base image foundation is not digest-pinned'
-grep -Eq '^FROM rust:1\.93\.0-slim-bookworm@sha256:[0-9a-f]{64} AS cw-toolchain$' \
+grep -Eq '^FROM rust:1\.99\.0-slim-bookworm@sha256:[0-9a-f]{64} AS cw-toolchain$' \
   "$WORKSPACE_DOCKERFILE" || fail 'workspace builder foundation is not digest-pinned'
 for dockerfile in "$ROOT/images/base/Dockerfile" "$WORKSPACE_DOCKERFILE"; do
   grep -qF 'amd64)' "$dockerfile" || fail "$dockerfile omits amd64 installers"
@@ -428,7 +428,7 @@ PY
   fail 'workspace agents are not one exact, registry-pinned lockfile'
 grep -qF 'npm ci --strict-allow-scripts --no-audit --no-fund' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace does not install the agent lockfile under its strict script policy'
-grep -qF 'env -u NPM_CONFIG_ALLOW_SCRIPTS -u NPM_CONFIG_PREFIX' "$WORKSPACE_DOCKERFILE" ||
+grep -qF 'env -u NPM_CONFIG_PREFIX' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace agent install inherits the user-facing global npm configuration'
 if grep -Eq 'npm install .*(@openai/codex|@anthropic-ai/claude-code|@google/gemini-cli|@moonshot-ai/kimi-code|@earendil-works/pi-coding-agent)' \
     "$WORKSPACE_DOCKERFILE"; then
@@ -438,11 +438,10 @@ grep -qF 'npm@12.2.0 pnpm@12.9.0 yarn@1.22.22' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace does not pin the Node archive npm together with its package managers'
 grep -qF 'npm cache clean --force' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace retains the root package-manager installer cache'
-grep -qFx -- 'ENV NPM_CONFIG_ALLOW_SCRIPTS="@anthropic-ai/claude-code"' \
-  "$WORKSPACE_DOCKERFILE" ||
-  fail 'workspace does not persist the narrow Claude update policy under current npm'
-[[ "$(grep -Ec -- 'allow-scripts=|NPM_CONFIG_ALLOW_SCRIPTS=' "$WORKSPACE_DOCKERFILE")" -eq 1 ]] ||
-  fail 'workspace grants lifecycle-script permission beyond the Claude installer'
+# Project and user npm installs keep npm's default lifecycle-script policy; a
+# global allowlist made every project install fail (#2876).
+[[ "$(grep -Ec -- 'allow-scripts=|NPM_CONFIG_ALLOW_SCRIPTS' "$WORKSPACE_DOCKERFILE")" -eq 0 ]] ||
+  fail 'workspace sets a global npm lifecycle-script policy for project installs'
 
 # Harbor is the required publication; the GHCR mirror never gates delivery.
 for job_name in publish_job probe_job; do
@@ -713,6 +712,30 @@ grep -qxF "DOCKER_CONFIG=$docker_config buildx rm $remote_name" "$platform_tree/
 [[ "$(cat "$platform_tree/calls")" == "base|linux/arm64||$remote_name|base images/base/Dockerfile images/base
 workspace|linux/arm64|registry.example.invalid/codewire/base@$base_a|$remote_name|workspace images/workspace/Dockerfile ." ]] ||
   fail 'arm64 images were not built on the attached node'
+# deploy-prod.yaml builds a release tag's pair from its separate checkout with
+# this tree's scripts; arm64 still builds only on the attached native node.
+mkdir -p "$platform_tree/.release-source"
+[[ "$(cd "$platform_tree" && platform_case 110 linux/arm64 CODEWIRE_SOURCE_DIR=.release-source)" == ok ]] ||
+  { cat "$platform_tree/out" >&2; fail 'arm64 release-source build failed'; }
+remote_name="$(sed -n 's/^.* buildx create --name \([^ ]*\) .*$/\1/p' "$platform_tree/docker")"
+[[ -n "$remote_name" && "$(cat "$platform_tree/calls")" == "base|linux/arm64||$remote_name|base .release-source/images/base/Dockerfile .release-source/images/base
+workspace|linux/arm64|registry.example.invalid/codewire/base@$base_a|$remote_name|workspace .release-source/images/workspace/Dockerfile .release-source" ]] ||
+  fail 'a release-source arm64 build did not build that checkout on the attached node'
+for bad_source in /abs ../outside missing-dir; do
+  [[ "$(cd "$platform_tree" && platform_case 110 linux/amd64 CODEWIRE_SOURCE_DIR="$bad_source")" == failed* && ! -s "$platform_tree/calls" ]] ||
+    fail "a platform build accepted the source directory $bad_source"
+done
+# A base index already published for the release source is not rebuilt: the
+# workspace is built from exactly that platform image.
+published_base=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+[[ "$(platform_case 110 linux/amd64 SUPPORT_PLATFORM_BASE_DIGEST="$published_base")" == ok ]] ||
+  { cat "$platform_tree/out" >&2; fail 'platform build from a published base failed'; }
+[[ "$(cat "$platform_tree/calls")" == "workspace|linux/amd64|registry.example.invalid/codewire/base@$published_base||workspace images/workspace/Dockerfile ." ]] ||
+  fail 'a published base was rebuilt or not used for the workspace'
+grep -qxF "base_digest=$published_base" "$platform_tree/output" ||
+  fail 'a platform build from a published base does not report that base'
+[[ "$(platform_case 110 linux/amd64 SUPPORT_PLATFORM_BASE_DIGEST=sha256:short)" == failed* && ! -s "$platform_tree/calls" ]] ||
+  fail 'a malformed published base digest was accepted'
 # The arm64 build fails closed, never falling back to emulation.
 for arm64_failure in 'STUB_FETCH=fail|client certificate could not be read' \
     'STUB_NODE=down|did not answer as a running linux/arm64 builder' \

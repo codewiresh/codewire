@@ -34,7 +34,7 @@ use codewire_access::{
     EnvironmentId,
 };
 use codewire_local_credentials::{
-    AuthorityRuntimeConfig, EnvironmentBrokerRuntime as AuthorityBrokerRuntime,
+    AuthorityFeature, AuthorityRuntimeConfig, EnvironmentBrokerRuntime as AuthorityBrokerRuntime,
     LocalCredentialControlClient,
 };
 use futures::Stream;
@@ -102,13 +102,14 @@ use crate::uds::{UdsError, bind_owner_only_listener, remove_bound_socket};
 use crate::workspace::{
     WorkspaceError, WorkspaceSelection, WorkspaceSourceMode,
     cleanup_interrupted_workspace_provisioning, ensure_docker_data_disk, ensure_workspace_plan,
-    inspect_workspace, workspace_content_limit,
+    inspect_workspace_skipping, workspace_content_limit,
 };
 use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
 use crate::workspace_plan::{
     RepositoryCredentialAccess, WorkspaceInput, WorkspacePlan, WorkspacePlanError,
     prepare_direct_input, prepare_repository_plan, validate_local_mount_destination,
 };
+use codewire_project::valid_vm_only_patterns;
 
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -128,9 +129,24 @@ const _: () = assert!(
 const OPERATION_WATCH_BUFFER: usize = 8;
 const OPERATION_PROGRESS_CAPACITY: usize = 256;
 const RUNNER_EVENT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+/// A start's GitHub question to the credential authority: the authority's
+/// own 15-second bound plus a margin, so a stalled authority cannot hold a
+/// start; past it the start omits GitHub.
+const PLATFORM_GITHUB_STATE_CALL_BOUND: Duration = Duration::from_secs(20);
 const MAXIMUM_RUNNER_EVENTS: usize = 128;
 const DAEMON_VSOCK_PORT: u32 = 7777;
 const DEFAULT_OCI_ROOT_DISK_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+
+/// An authority older than the GitHub question still serves the VMs that ran
+/// across a cw update. It would ignore the question's `platform` and evaluate
+/// a local binding instead, so it is not asked and the start omits GitHub.
+fn platform_github_askable(authority_protocol: u32) -> Result<(), &'static str> {
+    if AuthorityFeature::PlatformGithub.served_by(authority_protocol) {
+        Ok(())
+    } else {
+        Err("authority_older")
+    }
+}
 
 async fn request_runner_shutdown_and_observe(
     client: &mut RunnerClient,
@@ -328,6 +344,12 @@ impl NativeSupervisorClient {
                 });
             }
         }
+        // A supervisor from before #2735 (protocol 10) listens in the root
+        // itself and holds its lock until it exits: it keeps serving.
+        let legacy = config.legacy_supervisor_socket();
+        if std::os::unix::net::UnixStream::connect(&legacy).is_ok() {
+            return Self::connect_for_config(&legacy, config).await;
+        }
         let root = prepare_runtime_root(&config.root)?;
         let mut child = spawn_supervisor(config, &root)?;
         let deadline = tokio::time::Instant::now() + RUNNER_START_TIMEOUT;
@@ -389,10 +411,12 @@ impl NativeSupervisorClient {
         socket: &Path,
         config: &NativeRuntimeConfig,
     ) -> Result<Self, SupervisorError> {
-        if socket != config.supervisor_socket() {
+        if socket != config.supervisor_socket() && socket != config.legacy_supervisor_socket() {
             return Err(SupervisorError::InvalidConfiguration);
         }
-        Self::connect_configured(config).await.map_err(Into::into)
+        Self::connect_configured_at(socket, config)
+            .await
+            .map_err(Into::into)
     }
 
     pub(crate) async fn reconnect_after_watch_failure(
@@ -436,6 +460,12 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     config.validate()?;
     let root = prepare_runtime_root(&config.root)?;
     let lock = SupervisorLock::acquire(&root)?;
+    // Releases before #2735 kept runner sockets here, and their supervisor
+    // opens this directory for every runner it starts. Only the lock holder
+    // may remove it, as an empty leftover (one still holding a live runner's
+    // socket stays): a CLI or a losing supervisor never touches it while an
+    // older supervisor may still serve this root.
+    let _ = root.remove_empty_private_directory(Path::new("runners"));
     // Only the lock holder logs; a losing supervisor's exit error still
     // reaches the same file through stderr.
     let log = DiagnosticLog::inherited();
@@ -464,6 +494,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         live_runners: HashMap::new(),
         runtime_operations: BTreeSet::new(),
         incompatible_runners: BTreeSet::new(),
+        retiring: false,
         operation_progress: operation_progress.clone(),
         log,
         _lock: lock,
@@ -647,6 +678,9 @@ struct SupervisorCore {
     // Observation only: an unsupported protocol never grants runner RPC or
     // retirement authority, and does not rewrite the durable lifecycle state.
     incompatible_runners: BTreeSet<Uuid>,
+    // Set once RetireSupervisor admits a handoff: every later request and
+    // pending-operation run is refused while this supervisor exits.
+    retiring: bool,
     operation_progress: broadcast::Sender<OperationProgress>,
     // The bounded owner-only log its spawner gave this supervisor, if any.
     log: Option<DiagnosticLog>,
@@ -846,6 +880,68 @@ impl SupervisorCore {
         Ok(())
     }
 
+    /// Ask the credential authority, which asks the platform as the pinned
+    /// creator, whether that account's GitHub connection is usable now.
+    /// Material-free. `None` when it cannot answer at this start; the
+    /// supervisor's log then records why, as a closed reason only.
+    async fn platform_github_connected(
+        &mut self,
+        environment: &EnvironmentRecord,
+        generation: u64,
+    ) -> Option<bool> {
+        match self.ask_platform_github(environment, generation).await {
+            Ok(connected) => Some(connected),
+            Err(reason) => {
+                if let Some(log) = &self.log {
+                    log.record(
+                        "platform_github_unanswered",
+                        &[
+                            ("environment", LogField::Id(environment.id)),
+                            ("reason", LogField::Name(reason)),
+                        ],
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    /// [`Self::platform_github_connected`]'s question, or the closed reason
+    /// it went unanswered: no platform binding, the pinned configuration,
+    /// the authority unreachable, older than the question or past its bound,
+    /// the platform refusing the saved login (not the creator's, an API key,
+    /// another server), or the platform unavailable.
+    async fn ask_platform_github(
+        &mut self,
+        environment: &EnvironmentRecord,
+        generation: u64,
+    ) -> Result<bool, &'static str> {
+        let mut binding =
+            sources::platform::broker_binding(environment, &self.config.platform_config_dir)
+                .map_err(|_| "binding_invalid")?
+                .ok_or("no_platform_binding")?;
+        sources::platform::resolve_config_directory(&mut binding)
+            .map_err(|_| "config_directory")?;
+        let environment_id = access_environment_id(environment.id).map_err(|_| "environment")?;
+        let mut client = self
+            .access_control_client()
+            .await
+            .map_err(|_| "authority_unreachable")?;
+        platform_github_askable(client.info().protocol_version)?;
+        tokio::time::timeout(
+            PLATFORM_GITHUB_STATE_CALL_BOUND,
+            client.platform_github_connected(&environment_id, generation, binding),
+        )
+        .await
+        .map_err(|_| "timed_out")?
+        .map_err(|status| match status.code() {
+            tonic::Code::DeadlineExceeded => "timed_out",
+            tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => "login_refused",
+            tonic::Code::Unavailable => "unavailable",
+            _ => "failed",
+        })
+    }
+
     /// Capture only client-slot metadata from the exact selected revision.
     /// This configures clients; each broker request still evaluates live grants.
     async fn managed_credential_clients_for_boot(
@@ -865,8 +961,11 @@ impl SupervisorCore {
         if project.environment.contains_key("CODEX_HOME") {
             return Err(SupervisorError::InvalidRequest);
         }
-        if let Some(clients) = sources::platform::managed_clients(environment)? {
-            return Ok(clients);
+        if let Some(pinned) = sources::platform::managed_clients(environment)? {
+            return Ok(sources::platform::clients_for_start(pinned, || {
+                self.platform_github_connected(environment, generation)
+            })
+            .await);
         }
         let Some(expected) = &environment.access_binding else {
             return Ok(codewire_access::ManagedCredentialClients::default());
@@ -1062,11 +1161,13 @@ impl SupervisorCore {
             let requested_source = PathBuf::from(&request.source_path);
             let path_mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
             let maximum_copy_bytes = workspace_content_limit(request.disk_bytes);
+            let vm_only = request.implicit_vm_only.clone();
             let source = tokio::task::spawn_blocking(move || {
-                inspect_workspace(
+                inspect_workspace_skipping(
                     &requested_source,
                     workspace_selection(path_mode),
                     maximum_copy_bytes,
+                    &vm_only,
                 )
             })
             .await
@@ -1117,14 +1218,16 @@ impl SupervisorCore {
                                 &requested_source,
                                 &mount.destination,
                                 mount.read_only.ok_or(WorkspacePlanError::InvalidPlan)?,
+                                mount.vm_only.clone(),
                                 &forbidden_roots,
                             )
                             .map_err(SupervisorError::from);
                         }
-                        let source = inspect_workspace(
+                        let source = inspect_workspace_skipping(
                             &requested_source,
                             WorkspaceSelection::Copy,
                             maximum_copy_bytes,
+                            &mount.vm_only,
                         )
                         .map_err(SupervisorError::from)?;
                         if source.source_path.as_os_str().as_bytes() != mount.source_path {
@@ -1620,6 +1723,8 @@ impl SupervisorCore {
                         }
                     } else {
                         let artifact_generation = self.preflight().await?;
+                        self.require_vm_only_guest_for_plan(&artifact_generation, workspace_plan)
+                            .await?;
                         let cw_runtime =
                             self.admit_installed_cw_runtime().await?.map(|generation| {
                                 CwRuntimeBinding {
@@ -1755,6 +1860,9 @@ impl SupervisorCore {
     }
 
     async fn run_pending_operations(&mut self, recovering: bool) -> Result<(), SupervisorError> {
+        if self.retiring {
+            return Err(SupervisorError::Retiring);
+        }
         for operation in self.store.pending_operations()? {
             if operation.kind.cw_runtime() {
                 if !self.runtime_operations.contains(&operation.operation_id) {
@@ -2596,6 +2704,15 @@ impl SupervisorCore {
             self.mark_runner_dead(name)?;
             return Ok(());
         }
+        // A stopped environment's runner from another cw (an older supervisor
+        // started it, and on Linux it outlives that supervisor) holds no VM:
+        // end it and clear its record, so the next start runs this cw's
+        // runner. It is never adopted.
+        if self.environment(name)?.state == StoredEnvironmentState::Stopped
+            && record.process.executable != self.config.executable
+        {
+            return self.retire_idle_runner(name, &record).await;
+        }
         let socket_trusted = record.socket.revalidate(&expected_socket).is_ok();
         match direct_share_validation {
             Some(Ok(())) => {}
@@ -3044,6 +3161,29 @@ impl SupervisorCore {
             .await
     }
 
+    /// A plan that keeps paths on the VM's disk boots only a guest that binds
+    /// them; checked before a create or start rather than failing at boot.
+    async fn require_vm_only_guest_for_plan(
+        &mut self,
+        generation: &str,
+        workspace_plan: &WorkspacePlan,
+    ) -> Result<(), SupervisorError> {
+        let keeps_paths = workspace_plan.inputs.iter().any(
+            |input| matches!(input, WorkspaceInput::Direct { vm_only, .. } if !vm_only.is_empty()),
+        );
+        if !keeps_paths {
+            return Ok(());
+        }
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        RuntimeArtifactStore::create(&engine)
+            .map_err(|_| SupervisorError::ArtifactStore)?
+            .open_generation(generation)
+            .await
+            .map_err(|_| SupervisorError::ArtifactStore)?
+            .require_vm_only_guest()?;
+        Ok(())
+    }
+
     async fn require_guest_seed_abi_for_generation(
         &mut self,
         generation: &str,
@@ -3078,6 +3218,9 @@ impl SupervisorCore {
         }
         .to_owned();
         self.require_guest_seed_abi_for_generation(&generation)
+            .await?;
+        let workspace_plan = self.environment(name)?.workspace_plan.clone();
+        self.require_vm_only_guest_for_plan(&generation, &workspace_plan)
             .await?;
         if self.environment(name)?.cw_runtime.is_some() {
             let engine = PrivateRoot::open(&self.config.engine_root())?;
@@ -3633,6 +3776,33 @@ impl SupervisorCore {
         };
         // Once the exact runner has exited, clear its durable identity even if
         // cleanup of a previously trusted socket reports an I/O failure.
+        self.mark_runner_dead(name)?;
+        socket_cleanup
+    }
+
+    /// End a stopped environment's idle runner, which holds no VM: one from
+    /// another cw (see `reconcile_runner`), or this cw's own before it hands
+    /// the root over (`retire_supervisor`). Its exact recorded process, then
+    /// its socket, at this root's runner path or the pre-#2735 one, removed
+    /// only while it is still the recorded socket; the record is cleared, so
+    /// the next start runs the runner of whichever cw starts it.
+    async fn retire_idle_runner(
+        &mut self,
+        name: &str,
+        record: &RunnerRecord,
+    ) -> Result<(), SupervisorError> {
+        let environment_id = self.environment(name)?.id;
+        self.terminate_recorded_runner_process(name).await?;
+        let socket = [
+            self.config.runner_socket(environment_id),
+            self.config.legacy_runner_socket(environment_id),
+        ]
+        .into_iter()
+        .find(|socket| record.socket.revalidate(socket).is_ok());
+        let socket_cleanup = match socket {
+            Some(socket) => remove_bound_socket(&socket, &record.socket).map_err(Into::into),
+            None => Ok(()),
+        };
         self.mark_runner_dead(name)?;
         socket_cleanup
     }
@@ -5408,6 +5578,81 @@ impl LocalSupervisorService for SupervisorRpc {
             cw_runtime_catalog_generation: runtime_generation,
         }))
     }
+
+    /// Hand this state root to a newer cw's supervisor (supervisor_handoff).
+    /// Every pending operation runs first, under the one core lock every
+    /// request takes. While any environment may still run a VM nothing
+    /// changes; otherwise every later request is refused and the supervisor
+    /// shuts down, as after a fatal worker error.
+    async fn retire_supervisor(
+        &self,
+        request: Request<v1::RetireSupervisorRequest>,
+    ) -> Result<Response<v1::RetireSupervisorResponse>, Status> {
+        // The same protocol too: `cw env --local upgrade` moves idle VMs from
+        // another cw of this protocol to its own supervisor (#2549 keeps that
+        // one serving otherwise). Never for an older one.
+        if request.into_inner().successor_protocol < NATIVE_SUPERVISOR_PROTOCOL_VERSION {
+            return Err(Status::invalid_argument(
+                "a local VM supervisor retires only for its own protocol or a newer one",
+            ));
+        }
+        let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
+        if let Some((name, _)) = core
+            .state
+            .environments
+            .iter()
+            .find(|(_, environment)| may_run_a_vm(environment))
+        {
+            return Err(Status::from(SupervisorError::RetireRefused(name.clone())));
+        }
+        // A stopped environment's runner holds no VM, but on Linux it outlives
+        // this supervisor, and an older successor (`cw update rollback`)
+        // cannot use a newer runner: end each one this supervisor tracks
+        // before handing over. A newer successor would end it anyway.
+        let idle: Vec<(String, RunnerRecord)> = core
+            .state
+            .environments
+            .iter()
+            .filter(|(_, environment)| {
+                environment.state == StoredEnvironmentState::Stopped
+                    && core.live_runners.contains_key(&environment.id)
+            })
+            .filter_map(|(name, environment)| {
+                environment
+                    .runner
+                    .clone()
+                    .map(|runner| (name.clone(), runner))
+            })
+            .collect();
+        for (name, runner) in idle {
+            core.retire_idle_runner(&name, &runner)
+                .await
+                .map_err(Status::from)?;
+        }
+        core.retiring = true;
+        diagnostic_log::record(core.log.as_ref(), "supervisor_retiring", &[]);
+        drop(core);
+        let _ = self.shutdown.send(true);
+        Ok(Response::new(v1::RetireSupervisorResponse {}))
+    }
+}
+
+/// Whether an environment may still have a VM: one running or starting, one
+/// whose runner still owns it after a failure (an error with a runner record
+/// keeps its VM; `runner_service` reports such failures without stopping it),
+/// or, on macOS, one whose ownership is unknown.
+fn may_run_a_vm(environment: &EnvironmentRecord) -> bool {
+    match environment.state {
+        StoredEnvironmentState::Stopped => false,
+        StoredEnvironmentState::Error => environment.runner.is_some(),
+        StoredEnvironmentState::Starting | StoredEnvironmentState::Running => true,
+        // A supervisor's exit stops its VMs only on macOS; a Linux orphan's
+        // runner outlives it.
+        StoredEnvironmentState::Orphaned => cfg!(target_os = "macos"),
+    }
 }
 
 fn parse_operation_id(value: &str) -> Result<Uuid, Status> {
@@ -5932,6 +6177,7 @@ fn direct_share_attachments_to_proto(
                 identity,
                 destination,
                 read_only,
+                vm_only,
             } => Some(v1::DirectShareAttachment {
                 source_path: source_path.clone(),
                 device_major: identity.device_major(),
@@ -5942,6 +6188,7 @@ fn direct_share_attachments_to_proto(
                 filesystem_magic: identity.filesystem_magic(),
                 destination: destination.clone(),
                 read_only: *read_only,
+                vm_only: vm_only.clone(),
             }),
             WorkspaceInput::Local { .. } | WorkspaceInput::Repository { .. } => None,
         })
@@ -6065,11 +6312,18 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
     validate_local_mount_requests(&request.local_mounts)?;
     validate_request_destinations(&project, &request.local_mounts)?;
     if project.repositories.is_empty() && request.local_mounts.is_empty() {
-        parse_implicit_path_mode(&request.implicit_path_mode)?;
-        if request.source_path.is_empty() || !Path::new(&request.source_path).is_absolute() {
+        let mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
+        if request.source_path.is_empty()
+            || !Path::new(&request.source_path).is_absolute()
+            || !valid_vm_only_patterns(&request.implicit_vm_only)
+            || (mode == WorkspaceSourceMode::Clone && !request.implicit_vm_only.is_empty())
+        {
             return Err(SupervisorError::InvalidRequest);
         }
-    } else if !request.source_path.is_empty() || !request.implicit_path_mode.is_empty() {
+    } else if !request.source_path.is_empty()
+        || !request.implicit_path_mode.is_empty()
+        || !request.implicit_vm_only.is_empty()
+    {
         return Err(SupervisorError::InvalidRequest);
     }
     parse_request_id(&request.request_id)
@@ -6091,8 +6345,13 @@ fn validate_local_mount_requests(mounts: &[v1::LocalMountInput]) -> Result<(), S
         }
         match v1::LocalMountMode::try_from(mount.mode) {
             Ok(v1::LocalMountMode::Copy) if mount.read_only.is_none() => {}
-            Ok(v1::LocalMountMode::Direct) if mount.read_only.is_some() => {}
+            Ok(v1::LocalMountMode::Direct) if mount.read_only == Some(false) => {}
+            Ok(v1::LocalMountMode::Direct)
+                if mount.read_only == Some(true) && mount.vm_only.is_empty() => {}
             _ => return Err(SupervisorError::InvalidRequest),
+        }
+        if !valid_vm_only_patterns(&mount.vm_only) {
+            return Err(SupervisorError::InvalidRequest);
         }
         let path = PathBuf::from(OsString::from_vec(mount.source_path.clone()));
         if !path.is_absolute() || path == Path::new("/") {
@@ -6476,6 +6735,16 @@ fn create_request_from_operation(
         project.repositories.len(),
         &workspace_plan,
     )?;
+    // The implicit source's skipped paths are recorded in its one plan input.
+    let implicit_vm_only = if source_path.is_empty() {
+        Vec::new()
+    } else {
+        workspace_plan
+            .inputs
+            .first()
+            .map(|input| input.vm_only().to_vec())
+            .unwrap_or_default()
+    };
     let request = v1::CreateEnvironmentRequest {
         name,
         source_path,
@@ -6488,6 +6757,7 @@ fn create_request_from_operation(
         project_spec_sha256,
         implicit_path_mode,
         local_mounts,
+        implicit_vm_only,
         host_ports: host_ports_to_proto(&host_ports),
         mesh: mesh_attachment_to_proto(mesh.as_ref()),
         access_profile_id,
@@ -6525,6 +6795,7 @@ fn validate_request_workspace_plan(
                 source_path,
                 mode,
                 destination,
+                vm_only,
                 ..
             },
         ] = workspace_plan.inputs.as_slice()
@@ -6534,6 +6805,7 @@ fn validate_request_workspace_plan(
         if source_path != OsStr::new(&request.source_path).as_bytes()
             || *mode != parse_implicit_path_mode(&request.implicit_path_mode)?
             || destination != "/workspace"
+            || *vm_only != request.implicit_vm_only
             || !request.local_mounts.is_empty()
         {
             return Err(SupervisorError::InvalidRequest);
@@ -6554,19 +6826,23 @@ fn validate_request_workspace_plan(
                 source_path,
                 mode,
                 destination,
+                vm_only,
                 ..
             } if source_path == &mount.source_path
                 && *mode == WorkspaceSourceMode::Copy
                 && destination == &mount.destination
+                && *vm_only == mount.vm_only
                 && mount.mode == v1::LocalMountMode::Copy as i32
                 && mount.read_only.is_none() => {}
             WorkspaceInput::Direct {
                 source_path,
                 destination,
                 read_only,
+                vm_only,
                 ..
             } if source_path == &mount.source_path
                 && destination == &mount.destination
+                && *vm_only == mount.vm_only
                 && mount.mode == v1::LocalMountMode::Direct as i32
                 && mount.read_only == Some(*read_only) => {}
             _ => return Err(SupervisorError::InvalidRequest),
@@ -6593,6 +6869,7 @@ fn local_mounts_from_workspace_plan(
                 source_path,
                 mode: WorkspaceSourceMode::Copy,
                 destination,
+                vm_only,
                 ..
             } => {
                 validate_local_mount_destination(destination)
@@ -6602,12 +6879,14 @@ fn local_mounts_from_workspace_plan(
                     destination: destination.clone(),
                     mode: v1::LocalMountMode::Copy as i32,
                     read_only: None,
+                    vm_only: vm_only.clone(),
                 })
             }
             WorkspaceInput::Direct {
                 source_path,
                 destination,
                 read_only,
+                vm_only,
                 ..
             } => {
                 validate_local_mount_destination(destination)
@@ -6617,6 +6896,7 @@ fn local_mounts_from_workspace_plan(
                     destination: destination.clone(),
                     mode: v1::LocalMountMode::Direct as i32,
                     read_only: Some(*read_only),
+                    vm_only: vm_only.clone(),
                 })
             }
             _ => Err(SupervisorError::InvalidState),
@@ -7565,9 +7845,6 @@ fn prepare_runtime_root(path: &Path) -> Result<PrivateRoot, SupervisorError> {
     };
     root.ensure_dir(Path::new("engine"), 0o700)?;
     prepare_runner_socket_dir(root.path())?;
-    // Releases before #2735 kept runner sockets here; an empty directory is a
-    // leftover (one still holding a live runner's socket stays).
-    let _ = root.remove_empty_private_directory(Path::new("runners"));
     Ok(root)
 }
 
@@ -7706,9 +7983,10 @@ impl From<SupervisorError> for Status {
             | SupervisorError::WorkloadSecretDeliveryUnavailable => {
                 Status::failed_precondition(error.to_string())
             }
-            SupervisorError::CredentialAuthorityUnavailable => {
+            SupervisorError::CredentialAuthorityUnavailable | SupervisorError::Retiring => {
                 Status::unavailable(error.to_string())
             }
+            SupervisorError::RetireRefused(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::Workspace(workspace) => {
                 Status::failed_precondition(workspace.to_string())
             }
@@ -7725,7 +8003,8 @@ impl From<SupervisorError> for Status {
                 Status::failed_precondition(error.to_string())
             }
             SupervisorError::Artifact(
-                crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_),
+                crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_)
+                | crate::artifact::ArtifactError::GuestVmOnlyUnsupported(_),
             ) => Status::failed_precondition(error.to_string()),
             SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::VmStart(_)
@@ -7839,9 +8118,7 @@ pub enum SupervisorError {
     EndpointNotReplaced(PathBuf),
     #[error("the running native supervisor does not implement the required compatibility protocol")]
     SupervisorProtocolUnavailable,
-    #[error(
-        "native supervisor protocol version mismatch: expected {expected}, running supervisor reported {actual}"
-    )]
+    #[error("{}", crate::supervisor_config::unsupported_protocol_message(*.actual))]
     SupervisorProtocolMismatch { expected: u32, actual: u32 },
     #[error("the running native supervisor returned invalid compatibility information")]
     InvalidSupervisorInfo,
@@ -7849,6 +8126,10 @@ pub enum SupervisorError {
     SupervisorInfoUnavailable,
     #[error("the running native supervisor uses a different runtime configuration")]
     SupervisorConfigurationMismatch,
+    #[error("the local VM supervisor is handing this state root to a newer cw")]
+    Retiring,
+    #[error("local environment {0:?} may still run a VM, so the local VM supervisor stays")]
+    RetireRefused(String),
     #[error("spawn native environment runner failed")]
     SpawnRunner,
     #[error("native environment runner startup timed out")]
@@ -8052,6 +8333,8 @@ fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         SupervisorError::InvalidSupervisorInfo => "supervisor_info_invalid",
         SupervisorError::SupervisorInfoUnavailable => "supervisor_info_unavailable",
         SupervisorError::SupervisorConfigurationMismatch => "supervisor_configuration_mismatch",
+        SupervisorError::Retiring => "supervisor_retiring",
+        SupervisorError::RetireRefused(_) => "supervisor_retire_refused",
         SupervisorError::SpawnRunner => "runner_spawn",
         SupervisorError::RunnerStartTimeout => "runner_start_timeout",
         SupervisorError::RunnerAdoption => "runner_adoption",
@@ -8416,6 +8699,7 @@ mod tests {
             host_ports: Vec::new(),
             mesh: None,
             workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+                vm_only: Vec::new(),
                 source_path: PathBuf::from("/workspace/source"),
                 commit: "a".repeat(40),
                 mode: WorkspaceSourceMode::Clone,
@@ -8442,6 +8726,7 @@ mod tests {
             &admitted,
             "/workspace/fixtures",
             true,
+            Vec::new(),
         )])
         .unwrap()
     }
@@ -8691,6 +8976,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
             _lock: lock,
@@ -9211,7 +9497,7 @@ mod tests {
         );
         let live = child.capture(&executable);
         let service = TestRunnerProtocolService {
-            reply: TestRunnerProtocolReply::Version(5),
+            reply: TestRunnerProtocolReply::Version(7),
             useful_calls: Arc::new(AtomicUsize::new(0)),
             shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
         };
@@ -9249,7 +9535,7 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("unresponsive.sock");
         let (identity, calls, stop, server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(5));
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(7));
         let executable = fs::canonicalize("/bin/sleep").unwrap();
         let mut child = ShutdownTestChild(
             crate::test_child(&mut Command::new(&executable))
@@ -9275,7 +9561,7 @@ mod tests {
         remove_bound_socket(&socket, &identity).unwrap();
     }
 
-    fn attach_named_test_runner_process(
+    pub(super) fn attach_named_test_runner_process(
         core: &mut SupervisorCore,
         name: &str,
         socket_identity: SocketIdentity,
@@ -9377,6 +9663,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
             _lock: lock,
@@ -11293,6 +11580,7 @@ mod tests {
             let name = format!("secret-{index}");
             let request_id = Uuid::new_v4();
             let request = v1::CreateEnvironmentRequest {
+                implicit_vm_only: Vec::new(),
                 name: name.clone(),
                 source_path: "/workspace/source".to_owned(),
                 vcpus: u32::from(selected.vcpus),
@@ -11644,6 +11932,7 @@ mod tests {
         let project_spec_json = project.canonical_json().unwrap();
         let project_spec_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "dev".to_owned(),
             source_path: "/workspace/source".to_owned(),
             vcpus: 2,
@@ -11686,6 +11975,7 @@ mod tests {
             Err(SupervisorError::InvalidRequest)
         ));
         let workspace_plan = WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+            vm_only: Vec::new(),
             source_path: PathBuf::from("/workspace/source"),
             commit: "a".repeat(40),
             mode: WorkspaceSourceMode::Clone,
@@ -11929,6 +12219,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "copy".to_owned(),
             source_path: String::new(),
             vcpus: 2,
@@ -11940,6 +12231,7 @@ mod tests {
             project_spec_json,
             implicit_path_mode: String::new(),
             local_mounts: vec![v1::LocalMountInput {
+                vm_only: Vec::new(),
                 source_path: b"/host/fixtures".to_vec(),
                 destination: "/workspace/fixtures".to_owned(),
                 mode: v1::LocalMountMode::Copy as i32,
@@ -11955,6 +12247,7 @@ mod tests {
         validate_create(&request).unwrap();
         let workspace_plan = WorkspacePlan::from_inputs(vec![WorkspaceInput::local(
             &crate::workspace::WorkspaceSource {
+                vm_only: Vec::new(),
                 source_path: PathBuf::from("/host/fixtures"),
                 commit: "a".repeat(40),
                 mode: WorkspaceSourceMode::Copy,
@@ -12009,6 +12302,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "copy".to_owned(),
             source_path: String::new(),
             vcpus: 2,
@@ -12020,6 +12314,7 @@ mod tests {
             project_spec_json,
             implicit_path_mode: String::new(),
             local_mounts: vec![v1::LocalMountInput {
+                vm_only: Vec::new(),
                 source_path: source.as_os_str().as_bytes().to_vec(),
                 destination: "/workspace/fixtures".to_owned(),
                 mode: v1::LocalMountMode::Copy as i32,
@@ -12071,6 +12366,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "direct".to_owned(),
             source_path: String::new(),
             vcpus: 2,
@@ -12082,6 +12378,7 @@ mod tests {
             project_spec_json,
             implicit_path_mode: String::new(),
             local_mounts: vec![v1::LocalMountInput {
+                vm_only: vec!["node_modules".to_owned(), "web/target".to_owned()],
                 source_path: source.as_os_str().as_bytes().to_vec(),
                 destination: "/workspace/fixtures".to_owned(),
                 mode: v1::LocalMountMode::Direct as i32,
@@ -12115,6 +12412,12 @@ mod tests {
         plan.validate_for_project(&project).unwrap();
         let guest = plan.direct_share_plan().unwrap().unwrap();
         assert_eq!(guest.mounts()[0].tag(), "cw-direct-00");
+        // The kept paths reach the digest-bound guest plan and the runner.
+        assert_eq!(guest.mounts()[0].vm_only(), ["node_modules", "web/target"]);
+        assert_eq!(
+            direct_share_attachments_to_proto(&plan).unwrap()[0].vm_only,
+            ["node_modules", "web/target"]
+        );
         assert!(
             !guest
                 .encode_canonical()
@@ -12139,8 +12442,133 @@ mod tests {
         };
         assert_eq!(
             create_request_from_operation(&operation).unwrap(),
-            (request, plan)
+            (request.clone(), plan.clone())
         );
+
+        // The request and its plan must agree on the kept paths.
+        let mut mismatched = request.clone();
+        mismatched.local_mounts[0].vm_only = vec!["node_modules".to_owned()];
+        assert!(matches!(
+            validate_request_workspace_plan(&mismatched, &project, &plan),
+            Err(SupervisorError::InvalidRequest)
+        ));
+        // A read-only share keeps nothing in the VM.
+        let mut read_only = request;
+        read_only.local_mounts[0].read_only = Some(true);
+        assert!(matches!(
+            validate_create(&read_only),
+            Err(SupervisorError::InvalidRequest)
+        ));
+        read_only.local_mounts[0].vm_only.clear();
+        validate_create(&read_only).unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_copies_the_implicit_source_without_its_kept_paths() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("main.rs"), b"fn main() {}\n").unwrap();
+        fs::create_dir_all(source.path().join("node_modules/pkg")).unwrap();
+        fs::write(source.path().join("node_modules/pkg/index.js"), b"1").unwrap();
+        let source = fs::canonicalize(source.path()).unwrap();
+        let project = codewire_project::ProjectSpec {
+            image: "registry.example/codewire/workspace:latest".to_owned(),
+            resources: codewire_project::ResourceSpec {
+                cpu_millicores: Some(2_000),
+                memory_mib: Some(16 * 1024),
+                disk_gib: Some(20),
+            },
+            ..Default::default()
+        };
+        let project_spec_json = project.canonical_json().unwrap();
+        let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: vec!["node_modules".to_owned(), ".venv".to_owned()],
+            name: "copy".to_owned(),
+            source_path: source.to_string_lossy().into_owned(),
+            vcpus: 2,
+            memory_mib: 16 * 1024,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+            docker_disk_bytes: 0,
+            request_id: Uuid::new_v4().to_string(),
+            project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
+            project_spec_json,
+            implicit_path_mode: "copy".to_owned(),
+            local_mounts: Vec::new(),
+            host_ports: Vec::new(),
+            mesh: None,
+            access_profile_id: String::new(),
+            access_profile_revision: 0,
+            access_profile_reference: String::new(),
+            platform_source_authority: None,
+        };
+        validate_create(&request).unwrap();
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let plan = core
+            .prepare_create_workspace_plan(&request, Uuid::new_v4())
+            .await
+            .unwrap();
+        assert_eq!(plan.inputs[0].vm_only(), ["node_modules", ".venv"]);
+        let unskipped = crate::workspace::inspect_workspace(
+            &source,
+            WorkspaceSelection::Copy,
+            workspace_content_limit(request.disk_bytes),
+        )
+        .unwrap();
+        let WorkspaceInput::Local { identity, .. } = &plan.inputs[0] else {
+            panic!("expected the implicit copy input");
+        };
+        assert_ne!(*identity, unskipped.commit);
+        assert!(plan.direct_share_plan().unwrap().is_none());
+
+        let operation = OperationRecord {
+            operation_id: Uuid::new_v4(),
+            request_id: Uuid::parse_str(&request.request_id).unwrap(),
+            environment_id: Some(Uuid::new_v4()),
+            kind: OperationKind::Create,
+            phase: OperationPhase::Intent,
+            checkpoint: 0,
+            payload: create_operation_payload(&request, &plan).unwrap(),
+            result: None,
+            error_code: None,
+            created_unix_ms: 1,
+            updated_unix_ms: 1,
+        };
+        assert_eq!(
+            create_request_from_operation(&operation).unwrap(),
+            (request.clone(), plan.clone())
+        );
+
+        let mut mismatched = request.clone();
+        mismatched.implicit_vm_only = vec!["node_modules".to_owned()];
+        assert!(matches!(
+            validate_request_workspace_plan(&mismatched, &project, &plan),
+            Err(SupervisorError::InvalidRequest)
+        ));
+        // A clone takes only committed files and skips nothing.
+        let mut clone = request.clone();
+        clone.implicit_path_mode = "clone".to_owned();
+        assert!(matches!(
+            validate_create(&clone),
+            Err(SupervisorError::InvalidRequest)
+        ));
+        // Overlapping patterns are valid: the outermost match wins.
+        let mut patterns = request.clone();
+        patterns.implicit_vm_only = vec!["node_modules".to_owned(), "**/node_modules".to_owned()];
+        validate_create(&patterns).unwrap();
+        for invalid in [
+            vec!["../escape".to_owned()],
+            vec!["/abs".to_owned()],
+            vec!["a".to_owned(), "a".to_owned()],
+            vec![".git".to_owned()],
+            vec!["**".to_owned()],
+            vec!["*/.git".to_owned()],
+        ] {
+            let mut unsafe_request = request.clone();
+            unsafe_request.implicit_vm_only = invalid;
+            assert!(matches!(
+                validate_create(&unsafe_request),
+                Err(SupervisorError::InvalidRequest)
+            ));
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -12151,6 +12579,7 @@ mod tests {
         let workspace_plan = direct_workspace_plan(&source);
         let fixture = project_environment_with_access();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "new-environment".to_owned(),
             source_path: String::new(),
             vcpus: u32::from(fixture.vcpus),
@@ -12162,6 +12591,7 @@ mod tests {
             project_spec_sha256: fixture.project_spec_sha256.unwrap(),
             implicit_path_mode: String::new(),
             local_mounts: vec![v1::LocalMountInput {
+                vm_only: Vec::new(),
                 source_path: source.as_os_str().as_bytes().to_vec(),
                 destination: "/workspace/fixtures".to_owned(),
                 mode: v1::LocalMountMode::Direct as i32,
@@ -12220,6 +12650,7 @@ mod tests {
         environment.workspace_plan = workspace_plan.clone();
         let environment_id = environment.id;
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "dev".to_owned(),
             source_path: String::new(),
             vcpus: u32::from(environment.vcpus),
@@ -12231,6 +12662,7 @@ mod tests {
             project_spec_json: environment.project_spec_json.clone().unwrap(),
             implicit_path_mode: String::new(),
             local_mounts: vec![v1::LocalMountInput {
+                vm_only: Vec::new(),
                 source_path: source.as_os_str().as_bytes().to_vec(),
                 destination: "/workspace/fixtures".to_owned(),
                 mode: v1::LocalMountMode::Direct as i32,
@@ -12843,6 +13275,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
             _lock: lock,
@@ -13726,6 +14159,7 @@ mod tests {
         let environment_id = environment.id;
         let workspace_plan = environment.workspace_plan.clone();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: environment.name.clone(),
             source_path: "/workspace/source".to_owned(),
             vcpus: u32::from(environment.vcpus),
@@ -14355,6 +14789,33 @@ mod tests {
         shutdown_tx.send(()).unwrap();
         server.await.unwrap();
         remove_bound_socket(&socket, &socket_identity).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_listening_on_the_roots_own_socket_is_admitted_not_replaced() {
+        let (parent, core) = test_supervisor_core(project_environment());
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let config = core.config.clone();
+        drop(core);
+        // Where a supervisor from before #2735 (protocol 10) listens.
+        let legacy = config.legacy_supervisor_socket();
+        let _listener = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = match NativeSupervisorClient::connect_or_start(&config).await {
+            Ok(_) => panic!("this test process was admitted as a supervisor"),
+            Err(error) => error,
+        };
+        // Admission ran against it (this process is no supervisor), and no
+        // replacement started at the current socket.
+        assert!(
+            matches!(
+                &error,
+                SupervisorError::Uds(UdsError::SupervisorPeerAdmission(_))
+            ),
+            "{error:?}"
+        );
+        assert!(!config.supervisor_socket().exists());
+        assert!(legacy.exists());
     }
 
     #[tokio::test]
@@ -15011,7 +15472,7 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_info_requires_the_exact_protocol_and_valid_digest_shape() {
+    fn supervisor_info_refuses_outside_the_supported_range_and_a_bad_digest_shape() {
         let config = test_supervisor_core(project_environment()).1.config;
         let mut info = supervisor_info(&config);
         info.protocol_version = NATIVE_SUPERVISOR_PROTOCOL_VERSION + 1;
@@ -15023,9 +15484,13 @@ mod tests {
                 actual,
             } if actual == NATIVE_SUPERVISOR_PROTOCOL_VERSION + 1
         ));
-        assert!(error.to_string().contains("protocol version mismatch"));
+        assert!(
+            error
+                .to_string()
+                .starts_with("a newer cw runs your local VMs")
+        );
 
-        info.protocol_version = NATIVE_SUPERVISOR_PROTOCOL_VERSION - 1;
+        info.protocol_version = crate::supervisor_config::MINIMUM_SUPERVISOR_PROTOCOL_VERSION - 1;
         assert!(matches!(
             admit_supervisor_info(&info, None),
             Err(SupervisorError::SupervisorProtocolMismatch { .. })
@@ -15058,6 +15523,7 @@ mod tests {
                 &fs::canonicalize(private.path()).unwrap(),
                 "/workspace/private",
                 true,
+                Vec::new(),
                 &forbidden_roots,
             ),
             Err(WorkspacePlanError::DirectShareInvalid)
@@ -15067,6 +15533,7 @@ mod tests {
                 &fs::canonicalize(&real_platform).unwrap(),
                 "/workspace/private",
                 true,
+                Vec::new(),
                 &forbidden_roots,
             ),
             Err(WorkspacePlanError::DirectShareInvalid)
@@ -15104,7 +15571,13 @@ mod tests {
         assert!(forbidden_roots.contains(&base), "{forbidden_roots:?}");
         for source in [&base, &sockets] {
             assert!(matches!(
-                prepare_direct_input(source, "/workspace/private", true, &forbidden_roots),
+                prepare_direct_input(
+                    source,
+                    "/workspace/private",
+                    true,
+                    Vec::new(),
+                    &forbidden_roots
+                ),
                 Err(WorkspacePlanError::DirectShareInvalid)
             ));
         }
@@ -15497,6 +15970,7 @@ mod tests {
         let project_spec_json = project.canonical_json().unwrap();
         let request_id = Uuid::new_v4();
         let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
             name: "pending".to_owned(),
             source_path: String::new(),
             vcpus: 2,
@@ -16031,6 +16505,7 @@ mod tests {
             host_ports: Vec::new(),
             mesh: None,
             workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
+                vm_only: Vec::new(),
                 source_path: PathBuf::from("/workspace/source"),
                 commit: "a".repeat(40),
                 mode: WorkspaceSourceMode::Clone,
@@ -16079,6 +16554,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
             _lock: lock,
@@ -16148,6 +16624,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
             _lock: lock,
@@ -16521,5 +16998,163 @@ mod runner_exit_tests {
             StoredEnvironmentState::Running,
             Some(RUNNER_EXIT_ERROR_CODE)
         ));
+    }
+}
+
+#[cfg(test)]
+mod retire_tests {
+    use super::tests::{
+        attach_named_test_runner_process, project_environment, test_supervisor_core,
+        test_supervisor_service,
+    };
+    use super::*;
+
+    fn with_runner(core: &mut SupervisorCore, state: StoredEnvironmentState) {
+        let environment = core.environment_mut("dev").unwrap();
+        environment.state = state;
+        environment.runner = Some(RunnerRecord {
+            cw_runtime_catalog_generation: None,
+            process: ProcessIdentity {
+                pid: 42,
+                boot_id: "boot".to_owned(),
+                start_time_ticks: 7,
+                executable: PathBuf::from("/proc/self/exe"),
+                executable_file: crate::host::path::FileIdentity {
+                    device: 1,
+                    inode: 2,
+                    size: 3,
+                    uid: 4,
+                    mode: 0o100500,
+                    links: 1,
+                },
+                executable_sha256: "f".repeat(64),
+            },
+            socket: SocketIdentity {
+                device: 1,
+                inode: 2,
+                uid: 4,
+                mode: 0o140600,
+            },
+            artifact_generation: "a".repeat(64),
+            error_code: Some(RUNNER_EXIT_ERROR_CODE.to_owned()),
+        });
+    }
+
+    async fn retire(service: &SupervisorRpc, successor: u32) -> Result<(), Status> {
+        service
+            .retire_supervisor(Request::new(v1::RetireSupervisorRequest {
+                successor_protocol: successor,
+            }))
+            .await
+            .map(drop)
+    }
+
+    #[test]
+    fn only_a_stopped_environment_or_one_whose_runner_is_gone_has_no_vm() {
+        let mut environment = project_environment();
+        for (state, may_run) in [
+            (StoredEnvironmentState::Stopped, false),
+            (StoredEnvironmentState::Error, false),
+            (StoredEnvironmentState::Starting, true),
+            (StoredEnvironmentState::Running, true),
+            (StoredEnvironmentState::Orphaned, cfg!(target_os = "macos")),
+        ] {
+            environment.state = state;
+            assert_eq!(may_run_a_vm(&environment), may_run, "{state:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retiring_supervisor_ends_its_idle_runners_first() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let socket = SocketIdentity {
+            device: 1,
+            inode: 2,
+            uid: 4,
+            mode: 0o140600,
+        };
+        let (environment_id, process) = attach_named_test_runner_process(&mut core, "dev", socket);
+        core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
+        core.save().unwrap();
+        let service = test_supervisor_service(core);
+        retire(&service, NATIVE_SUPERVISOR_PROTOCOL_VERSION)
+            .await
+            .unwrap();
+        let core = service.core.lock().await;
+        let environment = core.environment("dev").unwrap();
+        assert!(environment.runner.is_none());
+        assert_eq!(environment.state, StoredEnvironmentState::Stopped);
+        assert!(!core.live_runners.contains_key(&environment_id));
+        assert!(
+            rustix::process::test_kill_process(
+                rustix::process::Pid::from_raw(process.pid as i32).unwrap()
+            )
+            .is_err(),
+            "the idle runner {} still runs",
+            process.pid
+        );
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_retires_only_for_its_protocol_or_newer_and_with_no_vm() {
+        let ours = NATIVE_SUPERVISOR_PROTOCOL_VERSION;
+        for state in [
+            StoredEnvironmentState::Running,
+            StoredEnvironmentState::Starting,
+            // A failure its runner reports keeps the VM (runner_service).
+            StoredEnvironmentState::Error,
+            #[cfg(target_os = "macos")]
+            StoredEnvironmentState::Orphaned,
+        ] {
+            let (_parent, mut core) = test_supervisor_core(project_environment());
+            with_runner(&mut core, state);
+            let service = test_supervisor_service(core);
+            let shutdown = service.shutdown.subscribe();
+            let refused = retire(&service, ours + 1).await.unwrap_err();
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition, "{state:?}");
+            assert!(
+                refused.message().contains("\"dev\" may still run a VM"),
+                "{refused:?}"
+            );
+            assert!(!*shutdown.borrow(), "{state:?}");
+            assert!(!service.core.lock().await.retiring, "{state:?}");
+        }
+
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let service = test_supervisor_service(core);
+        let shutdown = service.shutdown.subscribe();
+        assert_eq!(
+            retire(&service, ours - 1).await.unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        assert!(!*shutdown.borrow());
+        retire(&service, ours).await.unwrap();
+        assert!(*shutdown.borrow());
+        // Every later request is refused while it exits.
+        let listed = service
+            .list_environments(Request::new(v1::ListEnvironmentsRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(listed.code(), tonic::Code::Unavailable);
+        let started = service
+            .start_environment(Request::new(v1::EnvironmentSelector {
+                name: "dev".to_owned(),
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(started.code(), tonic::Code::Unavailable);
+    }
+}
+
+#[cfg(test)]
+mod platform_github_tests {
+    use super::*;
+
+    #[test]
+    fn a_start_does_not_ask_an_authority_older_than_the_github_question() {
+        assert_eq!(platform_github_askable(15), Err("authority_older"));
+        assert_eq!(platform_github_askable(16), Ok(()));
     }
 }

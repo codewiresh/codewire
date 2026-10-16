@@ -44,6 +44,7 @@ mod workspace_plan;
 pub use direct_share::{
     DIRECT_SHARE_PLAN_PATH, DIRECT_SHARE_PLAN_RELATIVE_PATH, DirectShareMount, DirectSharePlan,
     DirectSharePlanError, MAX_DIRECT_SHARE_PLAN_BYTES, MAX_DIRECT_SHARES,
+    VM_ONLY_CAPABILITY_MARKER,
 };
 pub use network::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN,

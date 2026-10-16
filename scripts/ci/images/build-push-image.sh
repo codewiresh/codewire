@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# shellcheck source=scripts/ci/images/pipeline-identity.sh
+source "$ROOT/scripts/ci/images/pipeline-identity.sh"
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
   echo "Usage: $0 IMAGE_NAME DOCKERFILE [CONTEXT]" >&2
@@ -36,8 +38,8 @@ readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5
 # multi-platform index (docker/buildkit-syft-scanner 1.12.0, promoted by
 # infra#1383): the native arm64 support build runs its arm64 variant.
 readonly SBOM_GENERATOR_IMAGE='registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9'
-readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
-readonly EXPECTED_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+readonly PROVENANCE_SOURCE_URL="$PIPELINE_SOURCE_URL"
+readonly EXPECTED_PROVENANCE_BUILDER_ID="$PIPELINE_BUILDER_ID"
 
 provenance_builder_id="${CODEWIRE_PROVENANCE_BUILDER_ID:-$EXPECTED_PROVENANCE_BUILDER_ID}"
 if [ "$provenance_builder_id" != "$EXPECTED_PROVENANCE_BUILDER_ID" ]; then
@@ -766,12 +768,16 @@ if [ "$build_runtime_set" = 1 ] && [ "$product_bake_target" != services ]; then
   exit 2
 fi
 
-# Build every missing release target in one Bake transaction. Inspect exact
-# source tags first so a retry never overwrites an immutable target that was
-# already published by a partially successful attempt.
+# Build every missing service runtime target in one Bake transaction. The
+# daemon is not part of it: its static CW producer is the longest build, so
+# the daemon builds alone on its own protected worker and the two jobs never
+# race for the same immutable tag. Inspect exact source tags first so a retry
+# never overwrites an immutable target that a partially successful attempt
+# already published.
+readonly SERVICE_RUNTIME_TARGETS=(dashboard services mesh derp)
 if [ "$build_runtime_set" = 1 ]; then
   missing_runtime_targets=()
-  for runtime_target in dashboard services mesh daemon derp; do
+  for runtime_target in "${SERVICE_RUNTIME_TARGETS[@]}"; do
     runtime_source_tag="${REGISTRY_REPOSITORY_PREFIX}/${runtime_target}:${source_sha}"
     if inspect_manifest_digest "$runtime_source_tag" >/dev/null; then
       continue
@@ -816,9 +822,6 @@ if [ "$build_runtime_set" = 1 ]; then
       fi
     done
     bake_targets=("${missing_runtime_targets[@]}")
-    if [ "${#missing_runtime_targets[@]}" -eq 5 ]; then
-      bake_targets=(default)
-    fi
     cw_selected_source_dir="$(cd "$source_dir" && pwd -P)"
     [ "$(cd "$context" && pwd -P)" = "$cw_selected_source_dir" ] || {
       echo 'Protected CW image context differs from the selected release source' >&2
@@ -828,9 +831,9 @@ if [ "$build_runtime_set" = 1 ]; then
     DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
-      CODEWIRE_RUST_PROFILE=release \
+      CODEWIRE_RUST_PROFILE=runtime \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
-      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
+      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" runtime "$cw_selected_source_dir" "$cw_image_work" -- \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
         "${bake_targets[@]}"
 
@@ -912,9 +915,9 @@ else
     DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
-      CODEWIRE_RUST_PROFILE=release \
+      CODEWIRE_RUST_PROFILE=runtime \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
-      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
+      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" runtime "$cw_selected_source_dir" "$cw_image_work" -- \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
         "$product_bake_target"
     jq -e --arg target "$product_bake_target" '

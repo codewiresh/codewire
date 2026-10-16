@@ -36,6 +36,12 @@ supervisor. An explicit `--local --type host` environment runs as the local
 user under its host daemon. The workspace image is the supported sandbox
 runtime image; the retired full image is not used.
 
+Updating `cw` keeps local VMs running. The previous version's local
+supervisor keeps serving them until they stop; the next command that starts a
+VM after that switches to the new version by itself. `cw env --local upgrade`
+restarts them on the new version now, after asking, since a restart ends the
+work running in them; `cw update --restart-vms` does it without asking.
+
 ## Platform environment
 
 ```bash

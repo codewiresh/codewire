@@ -212,10 +212,43 @@ jobs:
           REQUIRE_EXISTING_SOURCE_IMAGE: '1'
         run: scripts/ci/images/build-push-image.sh dashboard .release-source/apps/dashboard/Dockerfile .release-source
 
-  publish-support-release-images:
-    name: Build and Publish Exact Support Release Images
+  # A release reuses the support pair main published for its exact source.
+  # Otherwise the pair is built here exactly as support-images.yaml builds it:
+  # one job per platform, linux/arm64 on the protected arm64 BuildKit node over
+  # mutual TLS, never under emulation, then one join that verifies the whole
+  # index before it is tagged and published.
+  support-pair-selection:
+    name: Select the release support pair
     runs-on: ci-protected
+    timeout-minutes: 15
     needs: [release-selection]
+    outputs:
+      build: ${{ steps.select.outputs.build }}
+      base_amd64_digest: ${{ steps.select.outputs.base_amd64_digest }}
+      base_arm64_digest: ${{ steps.select.outputs.base_arm64_digest }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Reuse the published support pair or build it natively
+        id: select
+        env:
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+        run: scripts/ci/images/release-support-pair-state.sh "$SOURCE_SHA"
+
+  build-support-amd64:
+    name: Build the release support pair (linux/amd64)
+    runs-on: ci-protected
+    timeout-minutes: 120
+    needs: [release-selection, support-pair-selection]
+    if: ${{ needs.support-pair-selection.outputs.build == 'true' }}
+    outputs:
+      base_digest: ${{ steps.build.outputs.base_digest }}
+      workspace_digest: ${{ steps.build.outputs.workspace_digest }}
+    env:
+      # In-cluster cache of the dated apt snapshots, passed to BuildKit as a
+      # secret. The arm64 leg builds on the remote node and keeps the
+      # canonical snapshots.
+      CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
@@ -224,22 +257,85 @@ jobs:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
 
-      - name: Reuse or build and alias base image
+      - name: Build the linux/amd64 base and workspace by digest
+        id: build
+        env:
+          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CODEWIRE_SOURCE_DIR: .release-source
+          SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
+          # Set only when a base index for this source is already published.
+          SUPPORT_PLATFORM_BASE_DIGEST: ${{ needs.support-pair-selection.outputs.base_amd64_digest }}
+        run: scripts/ci/images/build-support-platform.sh linux/amd64
+
+  build-support-arm64:
+    name: Build the release support pair (linux/arm64)
+    runs-on: ci-protected
+    timeout-minutes: 120
+    needs: [release-selection, support-pair-selection]
+    if: ${{ needs.support-pair-selection.outputs.build == 'true' }}
+    outputs:
+      base_digest: ${{ steps.build.outputs.base_digest }}
+      workspace_digest: ${{ steps.build.outputs.workspace_digest }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      # The production publisher reads the arm64 node's client certificate.
+      - name: Build the linux/arm64 base and workspace by digest
+        id: build
+        env:
+          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CODEWIRE_SOURCE_DIR: .release-source
+          SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
+          # Set only when a base index for this source is already published.
+          SUPPORT_PLATFORM_BASE_DIGEST: ${{ needs.support-pair-selection.outputs.base_arm64_digest }}
+        run: scripts/ci/images/build-support-platform.sh linux/arm64
+
+  publish-support-release-images:
+    # The platform digests are only pointers: each join verifies the whole
+    # index (both platforms, and only those, with the release source's
+    # protected provenance and an SBOM each) before it tags or reports a
+    # candidate. A reused pair must already exist; this job never builds.
+    name: Join and Publish Exact Support Release Images
+    runs-on: ci-protected
+    timeout-minutes: 30
+    needs: [release-selection, support-pair-selection, build-support-amd64, build-support-arm64]
+    if: ${{ always() && needs.release-selection.result == 'success' && needs.support-pair-selection.result == 'success' && (needs.support-pair-selection.outputs.build == 'false' || (needs.build-support-amd64.result == 'success' && needs.build-support-arm64.result == 'success')) }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+
+      - name: Join and verify the base index, or reuse the published one
         id: base
         env:
           CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CODEWIRE_SOURCE_DIR: .release-source
-        run: scripts/ci/images/build-push-image.sh base .release-source/images/base/Dockerfile .release-source/images/base
+          BUILD_SUPPORT_PAIR: ${{ needs.support-pair-selection.outputs.build }}
+          AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.base_digest }}
+          ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.base_digest }}
+        run: scripts/ci/images/join-release-support-image.sh base .release-source/images/base/Dockerfile .release-source/images/base
 
-      - name: Reuse or build workspace from the exact release base
+      - name: Join and verify the workspace index, or reuse the published one
         id: workspace
         env:
-          CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}
           CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CODEWIRE_SOURCE_DIR: .release-source
-        run: scripts/ci/images/build-push-image.sh workspace .release-source/images/workspace/Dockerfile .release-source
+          BUILD_SUPPORT_PAIR: ${{ needs.support-pair-selection.outputs.build }}
+          AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.workspace_digest }}
+          ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.workspace_digest }}
+        run: scripts/ci/images/join-release-support-image.sh workspace .release-source/images/workspace/Dockerfile .release-source
 
       - name: Publish both support release manifests to Harbor without rebuilding
         env:
@@ -247,6 +343,8 @@ jobs:
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
         run: |
           set -euo pipefail
+          [[ "${{ steps.base.outputs.source_sha }}" == "$SOURCE_SHA" ]]
+          [[ "${{ steps.workspace.outputs.source_sha }}" == "$SOURCE_SHA" ]]
           scripts/ci/images/publish-image-to-harbor.sh \
             "${{ steps.base.outputs.candidate_ref }}" \
             registry.example.invalid/codewire/base \
@@ -310,6 +408,11 @@ jobs:
             --candidate daemon "${{ needs.build-daemon-image.outputs.source_sha }}" "${{ needs.build-daemon-image.outputs.candidate_ref }}" \
             --candidate services "${{ needs.build-services-image.outputs.source_sha }}" "${{ needs.build-services-image.outputs.candidate_ref }}" \
             --candidate mesh "${{ needs.build-mesh-image.outputs.source_sha }}" "${{ needs.build-mesh-image.outputs.candidate_ref }}"
+          # Production reuses the images the protected Dev delivery built. A
+          # delivery can push and then stop before signing, so every image
+          # must carry its delivery signature for this exact source.
+          scripts/ci/images/verify-runtime-image-signatures.sh \
+            "$bundle" scripts/ci/trust/codewire-runtime-signing.pub
           scripts/ci/images/publish-image-to-harbor.sh \
             "${{ needs.build-dashboard-image.outputs.candidate_ref }}" \
             registry.example.invalid/codewire/dashboard \
@@ -367,6 +470,9 @@ jobs:
       - release-selection
       - publish-runtime-images
       - publish-support-release-images
+    # A reused support pair skips both platform builds; the release still
+    # dispatches only after every direct prerequisite succeeded.
+    if: ${{ always() && needs.release-selection.result == 'success' && needs.publish-runtime-images.result == 'success' && needs.publish-support-release-images.result == 'success' }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 

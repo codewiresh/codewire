@@ -25,16 +25,16 @@
     "sha256": "36cb337928452e9379f349f11a3095e36a9b3aed8cefc50e2ae060bf9c6cf70f"
   },
   "guest_root_builder": {
-    "origin": "docker.io/library/rust:1.93.0-bookworm (rustc 1.93.0 254b59607 2026-01-19, the sealed CI toolchain's release); a build-time tool only, never shipped",
-    "image": "docker.io/library/rust@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382",
+    "origin": "docker.io/library/rust:1.99.0-bookworm (rustc 1.99.0 b940084d7 2026-09-28, the sealed CI toolchain's release); a build-time tool only, never shipped",
+    "image": "docker.io/library/rust@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6",
     "rust_std": {
       "aarch64-unknown-linux-musl": {
-        "url": "https://static.rust-lang.org/dist/2026-01-22/rust-std-1.93.0-aarch64-unknown-linux-musl.tar.xz",
-        "sha256": "bab885a87da586040064064bd1c314d707164d8dc0fefee39d59be7f15ce6f7d"
+        "url": "https://static.rust-lang.org/dist/2026-10-01/rust-std-1.99.0-aarch64-unknown-linux-musl.tar.xz",
+        "sha256": "ea8fd309578a09c9e12401621a470e6d6b1047f25933207fb8a39d66647d4561"
       },
       "x86_64-unknown-linux-musl": {
-        "url": "https://static.rust-lang.org/dist/2026-01-22/rust-std-1.93.0-x86_64-unknown-linux-musl.tar.xz",
-        "sha256": "874658d2ced1ed2b9bf66c148b78a2e10cad475d0a4db32e68a08900905b89b8"
+        "url": "https://static.rust-lang.org/dist/2026-10-01/rust-std-1.99.0-x86_64-unknown-linux-musl.tar.xz",
+        "sha256": "b106b0aa4565cc3525fd3161c69203a9e39044e6e6b4d618f261c3eeda14ad50"
       }
     },
     "protoc": {

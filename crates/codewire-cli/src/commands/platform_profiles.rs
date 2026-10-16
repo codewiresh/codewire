@@ -2,7 +2,6 @@
 //! The current service is personal-only. Organization selectors fail explicitly
 //! until the owner-aware public contract is composed; no fallback is permitted.
 
-use anyhow::Context as _;
 use codewire_access::{AccessProfileScope, CredentialAuthKind, ProviderId};
 use codewire_client::{self as rpc, CodewireClient};
 
@@ -28,6 +27,18 @@ pub(super) async fn handle_platform_credentials(
         CredentialOperation::Profile(command) => handle_profile(&client, command).await,
         CredentialOperation::Credential(command) => {
             super::platform_credentials::handle(&client, command).await
+        }
+        CredentialOperation::GenerateIntoProfile(args, profile) => {
+            let credential = super::platform_credentials::generate_ssh(&client, &args).await?;
+            handle_profile(
+                &client,
+                CredentialProfileCommand::Set(CredentialProfileSetArgs {
+                    profile,
+                    slot: "ssh".to_owned(),
+                    credential: Some(format!("id:{}", credential.id)),
+                }),
+            )
+            .await
         }
     }
 }

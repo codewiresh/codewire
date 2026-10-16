@@ -116,6 +116,63 @@ the VM comes from the runtime that `cw setup --local` installed.
 parent and child agents, and [SECRETS.md](../SECRETS.md) covers credentials
 and profiles.
 
+## SSH keys in a local VM
+
+A local VM has no SSH key unless its credential profile has one. The key stays
+on your host: the VM's `ssh`, `scp` and Git use `SSH_AUTH_SOCK`, the local
+credential authority makes each signature, and only signatures reach the VM.
+
+```sh
+# Generate a key and set it in profile work in one step; prints the public key
+# and GitHub's "add SSH key" link.
+cw credentials --local --profile work generate ssh --name work-ssh
+# Or use a key you already have.
+cw credentials --local add ssh --name my-key --key-file ~/.ssh/id_ed25519
+cw credentials --local --profile work set ssh my-key
+```
+
+`cw env create --local --profile local:NAME` in a terminal asks whether to add
+an SSH key when that profile has none (the default is no), then lets you pick
+one of your local SSH keys or generate a new one, and sets it in the profile.
+Every VM that uses the profile then gets the key. There is no question
+without a local profile, and scripts, `--yes` and JSON output never see it.
+
+## After a cw update
+
+`cw update` never stops your local VMs. The previous cw's local VM supervisor
+keeps serving them, and this cw uses it for everything that does not boot or
+reconfigure a VM: listing, `cw run`, `cw shell`, sessions and logs, stopping,
+removing and host ports. Starting, creating, restarting or resizing a VM,
+updating its sources and refreshing its skills need this cw's own supervisor.
+Once none of your VMs runs, the next such command switches over by itself,
+without a message, and installs this cw's runtime. While one still runs, the
+command says so instead:
+
+```text
+your local VMs dev, web still run on the cw you updated from; this cw starts and changes local VMs once they stop (`cw env --local stop NAME`)
+cw: restart them with `cw env --local upgrade`
+```
+
+At a terminal that command also offers to restart them now. To move them
+yourself, run `cw env --local upgrade`: it names the VMs that still run on the
+previous cw and asks before it restarts them, because a restart ends the work
+running in them. Each stops the ordinary way, the previous supervisor hands
+over, and each starts again on this cw; `--yes` skips the question. If a stop
+or the handover fails, the VMs it already stopped start again on the previous
+cw. A VM in an error state is stopped and stays stopped. Updating from a cw
+that already has this command asks right after the update, and
+`cw update --restart-vms` restarts them without asking; without a terminal,
+both only list them and change nothing.
+
+Or stop them when it suits you and run the command again. `cw setup --local`
+waits the same way, because the previous supervisor would start its next VM
+from the new runtime's files. This cw works with supervisors back to
+v0.3.388's; an older one, or a newer one after `cw update rollback`, is
+refused with a message that names it. A rollback to a cw without
+`cw env --local upgrade` (v0.3.389 and earlier) hands the state root to it
+while no local VM runs. While one does, it names them: select the newer cw
+again (`cw update rollback`), stop them, then roll back.
+
 ## Troubleshooting
 
 **`this host cannot run local VMs yet`**: fix each listed item, then rerun the
@@ -129,25 +186,32 @@ firewall, allow the `cw` executable (installed under
 HTTPS for the runtime, and `ghcr.io` and `pkg-containers.githubusercontent.com`
 for the workspace image (`ghcr.io/codewiresh/workspace`).
 
+**`your local VMs ... still run on the cw you updated from`**: see
+[After a cw update](#after-a-cw-update). Restart them on this cw with
+`cw env --local upgrade`, or stop them, then rerun the command.
+
 **`this cw is a development build with no pinned local VM runtime`**: install a
 release with the install script, or pass `--from DIR` with a runtime directory
 built from the same source.
 
 **`Local VMs aren't available on Linux arm64 yet`**: this `cw` release has no
 local VM runtime for your host. Local VMs run on x86_64 Linux and on Macs with
-Apple silicon. Elsewhere, use hosted Sandboxes with `cw env create --platform`.
+Apple silicon. Elsewhere, use hosted Sandboxes with `cw env create --cloud`.
 
 **`this local VM runtime was built from X, but this cw from Y`**: the directory
 given to `--from` belongs to another build. Use the runtime from the same
 release or source as your `cw`.
 
-**`managed VM agents require a selected local credential profile`**: the VM has
-no profile. Select one that has a `codex` slot for Codex or an `anthropic` slot
-for Claude: `cw env update ENV --profile local:NAME`. If the error says the
-profile has no `codex` (or `anthropic`) provider, add that slot with
+**`managed VM agents require a selected credential profile`**: the VM has no
+profile. Select a local or platform profile with a provider for the agent: a
+`codex` slot (or, without one, an `openai` slot) for Codex, or an `anthropic`
+slot for Claude: `cw env update ENV --profile local:NAME` or
+`--profile platform:NAME`. If the error says the profile has no "Codex or
+OpenAI" (or "Anthropic") provider, add that slot, for a local profile with
 `cw credentials --local --profile NAME set codex CREDENTIAL`. Editing a profile
 makes a new revision, and a VM keeps the revision it selected, so run
-`cw env update ENV --profile local:NAME` again afterwards.
+`cw env update ENV --profile local:NAME` again afterwards. A platform profile
+counts the slots the VM pinned when its sources were selected.
 
 **A credential command fails to reach the Secret Service**: start or unlock
 your keyring. Over SSH or on a headless host, make sure a session bus and a

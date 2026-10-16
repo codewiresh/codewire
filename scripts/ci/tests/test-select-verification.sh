@@ -291,6 +291,9 @@ run_paths_case kind_deploy_helper_main push refs/heads/main false \
   deployments/docker/kind-dev-binary.Dockerfile
 run_paths_case kind_dev_helper_main push refs/heads/main false \
   'edge_kind kind policy policy_shell security security_js' scripts/dev/kind/kind-forwards.sh
+# The retained cluster's database helper runs its hermetic fixture, not Kind.
+run_paths_case kind_database_helper_main push refs/heads/main false \
+  'edge_kind policy policy_shell security security_js' scripts/dev/kind/database.sh
 run_paths_case root_secret_authority_inputs pull_request refs/pull/20013/head false \
   'policy' .env.example secret-authority.example.json
 run_paths_case ci_tool_download_contract pull_request refs/pull/2002/head false \
@@ -318,6 +321,20 @@ run_paths_case protected_runtime_signing pull_request refs/pull/2005/head false 
   scripts/ci/images/sign-runtime-image-set.sh \
   scripts/ci/tests/test-sign-runtime-image-set.sh \
   scripts/ci/trust/codewire-runtime-signing.pub
+# The protected Dev runtime builder and its contract never build a Kind image:
+# they select Deploy and release verification, not Kind, even on main.
+run_paths_case protected_runtime_builder push refs/heads/main false \
+  'deploy go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
+  scripts/ci/images/build-push-runtime-images.sh \
+  scripts/ci/tests/test-build-push-runtime-images.sh
+run_paths_case dev_delivery_supersession push refs/heads/main false \
+  'deploy policy policy_shell security security_js' \
+  scripts/ci/deploy/delivery-superseded.sh \
+  scripts/ci/tests/test-delivery-superseded.sh
+run_paths_case production_signature_reuse pull_request refs/pull/2007/head false \
+  'deploy go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
+  scripts/ci/images/verify-runtime-image-signatures.sh \
+  scripts/ci/tests/test-verify-runtime-image-signatures.sh
 run_paths_case runtime_plan_ci pull_request refs/pull/201/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/deploy/resolve-deployed-source.sh \
@@ -538,6 +555,12 @@ run_paths_case rust_root_manifest pull_request refs/pull/50/head false \
 run_paths_case rust_root_toolchain pull_request refs/pull/500/head false \
   'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   rust-toolchain.toml
+run_paths_case rust_workspace_hack_config pull_request refs/pull/5021/head false \
+  'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  .config/hakari.toml
+run_paths_case rust_workspace_hack pull_request refs/pull/5022/head false \
+  'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  crates/codewire-workspace-hack/Cargo.toml crates/codewire-workspace-hack/src/lib.rs
 run_paths_case curated_gateway_member_manifest pull_request refs/pull/501/head false \
   'policy rust rust_curated_locks rust_pkg_codewire_credential_broker transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-daemon/Cargo.toml
@@ -897,6 +920,13 @@ run_paths_case proto_breaking_policy pull_request refs/pull/1141/head false \
   'contracts contracts_proto policy security security_js' \
   scripts/checks/proto_breaking.py \
   scripts/checks/contracts/proto-breaking-preimages.sha256
+run_paths_case local_runtime_contract pull_request refs/pull/1143/head false \
+  'contracts contracts_proto policy transport transport_pkg_codewire_local_vmm' \
+  crates/codewire-local-vmm/proto/buf.yaml \
+  crates/codewire-local-vmm/proto/codewire/local/v1/control.proto
+run_paths_case local_runtime_oldest_contract pull_request refs/pull/1144/head false \
+  'contracts contracts_proto policy security security_js' \
+  scripts/checks/contracts/local-runtime-oldest/codewire/local/v1/control.proto
 run_paths_case proto_retirement_ledger_transition pull_request refs/pull/1142/head false \
   'contracts contracts_proto policy security security_js' \
   scripts/checks/contracts/proto-retirements.sha256
@@ -1182,7 +1212,8 @@ run_paths_case cw_release_delivery_shell pull_request refs/pull/2255/head false 
   scripts/ci/tests/test-fetch-openbao-release-signing-key.sh \
   scripts/ci/release/sign-macos-cw.sh scripts/ci/setup/fetch-openbao-macos-signing.sh \
   scripts/ci/tests/test-fetch-openbao-macos-signing.sh scripts/ci/tests/test-sign-macos-cw.sh \
-  scripts/ci/tests/fixtures/rcodesign-stand-in.sh
+  scripts/ci/release/sign-macos-helper.sh scripts/ci/release/macos-signing.sh \
+  scripts/ci/tests/test-sign-macos-helper.sh scripts/ci/tests/fixtures/rcodesign-stand-in.sh
 run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \
@@ -1340,6 +1371,8 @@ run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy security security_js" scripts/dev/dashboard-watch.py
 run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
   "$policy security security_js" scripts/dev/macos-cli.py scripts/dev/test-macos-cli.py
+run_present_paths_case macos_command_owner pull_request refs/pull/2064/head false \
+  "$policy security security_js" scripts/dev/macos-command-owner.py
 run_present_paths_case macos_formatter_developer_tool pull_request refs/pull/2064/head false \
   "$policy security security_js" scripts/dev/macos-ext4-tool.py scripts/dev/test-macos-ext4-tool.py
 run_present_paths_case macos_git_developer_tool pull_request refs/pull/2064/head false \
@@ -1477,6 +1510,11 @@ contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1911/head \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
 assert_contract_field edge "$contract_output" required_local_mode kind
+printf '%s\n' scripts/ci/images/build-push-runtime-images.sh > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1914/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field protected_runtime_builder "$contract_output" required_local_mode default
 printf '%s\n' scripts/ci/tests/test-kind-e2e-suites.sh > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1912/head \

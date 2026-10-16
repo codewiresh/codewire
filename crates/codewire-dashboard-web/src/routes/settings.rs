@@ -96,6 +96,7 @@ pub(super) async fn settings(
 /// Read everything the Account page shows. Factor mutations call this before
 /// they mutate: a confirmed replacement revokes the session the request
 /// arrived with, so nothing can be read with it afterwards.
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn account_page(
     state: &AppState,
     headers: &HeaderMap,
@@ -232,6 +233,7 @@ enum FactorChange {
 
 /// The same boundary as session revocation, plus an enrolled factor. Every
 /// page read happens here, before the IdP is asked to change anything.
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn factor_change_page(
     state: &AppState,
     headers: &HeaderMap,
@@ -626,6 +628,7 @@ async fn section_redirect(
     private(redirect(format!("{SETTINGS_PATH}#{section}"), headers))
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn mutation_cookie(
     state: &AppState,
     headers: &HeaderMap,
@@ -637,6 +640,7 @@ pub(super) async fn mutation_cookie(
 
 // The caller supplies a closed, route-owned continuation. It changes only
 // login/2FA navigation, never organization selection or mutation authority.
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn mutation_cookie_with_continuation(
     state: &AppState,
     headers: &HeaderMap,

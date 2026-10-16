@@ -27,7 +27,7 @@ password_file="$2"
 : "${OPENBAO_ROLE:?OpenBao role is required}"
 : "${OPENBAO_AUDIENCE:?OpenBao audience is required}"
 
-readonly OPENBAO_ADDR='https://openbao.example.invalid'
+readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
 case "${OPENBAO_ROLE}|${OPENBAO_AUDIENCE}" in
   codewire-source-dev-publisher\|openbao-codewire-source-dev-publisher | \

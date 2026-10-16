@@ -458,7 +458,7 @@ pub enum ContentStoreError {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+    use std::os::unix::fs::{MetadataExt as _, symlink};
 
     use super::*;
 

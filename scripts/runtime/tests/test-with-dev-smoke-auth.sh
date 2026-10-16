@@ -104,7 +104,7 @@ run_case() {
   assert_redacted "$dir/err"
 }
 
-grep -F 'readonly OPENBAO_ADDR="https://openbao.example.invalid"' "$WRAPPER" >/dev/null
+grep -F 'readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"' "$WRAPPER" >/dev/null
 grep -F 'readonly OPENBAO_PATH="apps/codewire/dev/ci-smoke"' "$WRAPPER" >/dev/null
 if grep -Eqi 'secret-tool|platform_project' "$WRAPPER"; then
   fail 'auth wrapper still contains an unreviewed credential source'

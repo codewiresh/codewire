@@ -30,7 +30,7 @@ use rustls_pki_types::PrivateKeyDer;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream, UdpSocket, lookup_host};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
@@ -56,6 +56,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("writer task: {0}")]
     Join(#[from] tokio::task::JoinError),
+    #[error("limit: {0}")]
+    Limit(&'static str),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -74,6 +76,21 @@ const PEER_PRESENT_FRAME_LEN: usize = KEY_LEN + 16 + 2 + 1;
 const PEER_GONE_REASON_DISCONNECTED: u8 = 0x00;
 const PEER_PRESENT_IS_REGULAR: u8 = 1 << 0;
 
+// DERP handshakes are unauthenticated by design, so the relay bounds what an
+// anonymous client can hold (#2505 M2).
+
+/// Each step before relaying (TLS handshake, HTTP request head, DERP
+/// handshake) must finish within this budget, so a client that stalls or
+/// trickles bytes cannot keep its connection.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connections one relay serves at once across its listeners. A connection
+/// holds its slot from TCP accept until it closes, and one past the cap is
+/// closed at once. Every registered peer belongs to a live connection, so
+/// this also bounds the peer table.
+const MAX_CONNECTIONS: usize = 10_000;
+/// Largest HTTP request head the relay reads before the upgrade.
+const MAX_HTTP_HEAD_BYTES: usize = 8_192;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MeshKey([u8; MESH_KEY_LEN]);
 
@@ -84,7 +101,7 @@ impl MeshKey {
             return Err(Error::Mesh("mesh key must be 64 hex characters"));
         }
         let mut out = [0u8; MESH_KEY_LEN];
-        for (i, chunk) in raw.as_bytes().chunks_exact(2).enumerate() {
+        for (i, chunk) in raw.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             out[i] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
         }
         Ok(Self(out))
@@ -124,6 +141,7 @@ pub struct Relay {
     public: NodePublic,
     mesh_key: Option<MeshKey>,
     inner: Arc<RelayInner>,
+    connections: Arc<Semaphore>,
 }
 
 #[derive(Default)]
@@ -170,6 +188,7 @@ impl Relay {
             public,
             mesh_key: None,
             inner: Arc::new(RelayInner::default()),
+            connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
         }
     }
 
@@ -180,6 +199,7 @@ impl Relay {
             public,
             mesh_key: Some(mesh_key),
             inner: Arc::new(RelayInner::default()),
+            connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
         }
     }
 
@@ -187,11 +207,23 @@ impl Relay {
         &self.public
     }
 
+    /// A connection slot, or `None` when the relay already serves
+    /// [`MAX_CONNECTIONS`]. The connection keeps the slot until it drops.
+    fn admit(&self, peer_addr: SocketAddr) -> Option<OwnedSemaphorePermit> {
+        let slot = self.connections.clone().try_acquire_owned().ok();
+        if slot.is_none() {
+            tracing::warn!(%peer_addr, "derp connection refused: relay at capacity");
+        }
+        slot
+    }
+
     pub async fn accept<S>(&self, mut stream: S) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let handshake = self.handshake(&mut stream).await?;
+        let handshake = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.handshake(&mut stream))
+            .await
+            .map_err(|_| Error::Limit("derp handshake timed out"))??;
         let peer = handshake.peer;
         let registered = !handshake.is_mesh;
         let (tx, rx) = mpsc::channel(64);
@@ -436,10 +468,14 @@ impl Relay {
 pub async fn serve_plain(listener: TcpListener, relay: Relay) -> Result<()> {
     loop {
         let (stream, peer_addr) = listener.accept().await?;
+        let Some(slot) = relay.admit(peer_addr) else {
+            continue;
+        };
         let relay = relay.clone();
         tokio::spawn(async move {
+            let _slot = slot;
             if let Err(err) = accept_http_io(relay, stream, peer_addr).await {
-                tracing::warn!(error = ?err, %peer_addr, "derp connection failed");
+                log_connection_error(&err, peer_addr, "derp connection failed");
             }
         });
     }
@@ -449,21 +485,34 @@ pub async fn serve_tls(listener: TcpListener, relay: Relay, config: ServerConfig
     let acceptor = TlsAcceptor::from(Arc::new(config));
     loop {
         let (stream, peer_addr) = listener.accept().await?;
+        let Some(slot) = relay.admit(peer_addr) else {
+            continue;
+        };
         let relay = relay.clone();
         let acceptor = acceptor.clone();
         tokio::spawn(async move {
+            let _slot = slot;
             let result = async {
-                let stream = acceptor
-                    .accept(stream)
+                let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
                     .await
+                    .map_err(|_| Error::Limit("tls handshake timed out"))?
                     .map_err(|err| Error::Tls(err.to_string()))?;
                 accept_http_io(relay, stream, peer_addr).await
             }
             .await;
             if let Err(err) = result {
-                tracing::warn!(error = ?err, %peer_addr, "derp tls connection failed");
+                log_connection_error(&err, peer_addr, "derp tls connection failed");
             }
         });
+    }
+}
+
+/// A client that runs out its handshake budget is routine under load or
+/// attack, so it logs at debug; every other failure stays a warning.
+fn log_connection_error(err: &Error, peer_addr: SocketAddr, message: &'static str) {
+    match err {
+        Error::Limit(reason) => tracing::debug!(%peer_addr, reason, "derp connection closed"),
+        _ => tracing::warn!(error = ?err, %peer_addr, "{message}"),
     }
 }
 
@@ -797,18 +846,24 @@ async fn read_http_head<S>(stream: &mut S) -> Result<HttpHead>
 where
     S: AsyncRead + Unpin,
 {
-    let mut head = Vec::with_capacity(256);
-    let mut byte = [0u8; 1];
-    loop {
-        stream.read_exact(&mut byte).await?;
-        head.push(byte[0]);
-        if head.ends_with(b"\r\n\r\n") {
-            break;
+    // Byte by byte, so nothing after the head is consumed before the
+    // upgrade; the deadline stops a client that trickles it.
+    let head = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        let mut head = Vec::with_capacity(256);
+        let mut byte = [0u8; 1];
+        loop {
+            stream.read_exact(&mut byte).await?;
+            head.push(byte[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                return Ok(head);
+            }
+            if head.len() > MAX_HTTP_HEAD_BYTES {
+                return Err(Error::Http("request header too large"));
+            }
         }
-        if head.len() > 8192 {
-            return Err(Error::Http("request header too large"));
-        }
-    }
+    })
+    .await
+    .map_err(|_| Error::Limit("request head timed out"))??;
 
     let head = std::str::from_utf8(&head).map_err(|_| Error::Http("invalid request head"))?;
     parse_http_head(head)
@@ -1666,5 +1721,96 @@ mod tests {
         })
         .await
         .expect("mesh forwarder registered");
+    }
+
+    /// Read everything the relay sends until it closes the connection. A
+    /// reset counts as a close: the relay may drop a socket with unread
+    /// input.
+    async fn read_until_closed(sock: &mut TcpStream) -> Vec<u8> {
+        let mut received = Vec::new();
+        let mut buf = [0u8; 512];
+        tokio::time::timeout(HANDSHAKE_TIMEOUT + Duration::from_secs(5), async {
+            loop {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => received.extend_from_slice(&buf[..n]),
+                }
+            }
+        })
+        .await
+        .expect("relay must close the connection");
+        received
+    }
+
+    /// #2505 M2: a client that never finishes its request head loses the
+    /// connection at the handshake deadline. Takes the deadline in real time.
+    #[tokio::test]
+    async fn stalled_request_head_is_closed_at_the_deadline() {
+        let relay = Relay::new(NodePrivate::generate(&mut OsRng));
+        let (addr, _task) = spawn_plain_relay(relay.clone()).await;
+
+        let mut sock = TcpStream::connect(addr).await.expect("connect");
+        sock.write_all(b"GET /derp HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .expect("partial head");
+        let started = tokio::time::Instant::now();
+        assert!(read_until_closed(&mut sock).await.is_empty());
+        assert!(started.elapsed() >= HANDSHAKE_TIMEOUT - Duration::from_secs(1));
+        wait_for_free_slots(&relay).await;
+    }
+
+    /// #2505 M2: a request head over the size bound is refused at once.
+    #[tokio::test]
+    async fn oversized_request_head_is_refused() {
+        let relay = Relay::new(NodePrivate::generate(&mut OsRng));
+        let (addr, _task) = spawn_plain_relay(relay).await;
+
+        let mut sock = TcpStream::connect(addr).await.expect("connect");
+        let filler = "X-Pad: aaaa\r\n".repeat(MAX_HTTP_HEAD_BYTES / 8);
+        sock.write_all(format!("GET /derp HTTP/1.1\r\nHost: x\r\n{filler}").as_bytes())
+            .await
+            .expect("oversized head");
+        let started = tokio::time::Instant::now();
+        assert!(read_until_closed(&mut sock).await.is_empty());
+        assert!(started.elapsed() < HANDSHAKE_TIMEOUT);
+    }
+
+    /// #2505 M2: past the connection cap the relay closes new connections
+    /// without serving them, and serves again once a slot frees. A served
+    /// connection returns its slot when it closes.
+    #[tokio::test]
+    async fn connections_past_the_cap_are_closed_until_a_slot_frees() {
+        let relay = Relay::new(NodePrivate::generate(&mut OsRng));
+        let (addr, _task) = spawn_plain_relay(relay.clone()).await;
+        let request = b"GET /derp HTTP/1.1\r\nHost: x\r\n\r\n";
+
+        let every_slot = relay
+            .connections
+            .clone()
+            .try_acquire_many_owned(MAX_CONNECTIONS as u32)
+            .expect("take every slot");
+        let mut refused = TcpStream::connect(addr).await.expect("connect");
+        assert!(read_until_closed(&mut refused).await.is_empty());
+
+        drop(every_slot);
+        let mut served = TcpStream::connect(addr).await.expect("connect");
+        served.write_all(request).await.expect("request");
+        let response = read_until_closed(&mut served).await;
+        assert!(
+            response.starts_with(b"HTTP/1.1 426 "),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+        wait_for_free_slots(&relay).await;
+    }
+
+    async fn wait_for_free_slots(relay: &Relay) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while relay.connections.available_permits() != MAX_CONNECTIONS {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a closed connection returns its slot");
     }
 }

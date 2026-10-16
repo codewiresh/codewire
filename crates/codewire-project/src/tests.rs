@@ -586,3 +586,101 @@ fn local_source_paths_are_explicit_but_not_resolved_by_the_parser() {
         assert!(parse_project_yaml(&yaml).is_err(), "accepted {source:?}");
     }
 }
+
+#[test]
+fn vm_only_defaults_turns_off_and_stays_out_of_the_portable_spec() {
+    let absent = parse_project_yaml("version: 1\n").unwrap();
+    assert_eq!(absent.local.vm_only, None);
+    assert_eq!(
+        absent.local.effective_vm_only(),
+        ["node_modules", "target", ".venv"]
+    );
+
+    let off = parse_project_yaml("workspace: {vm_only: []}\n").unwrap();
+    assert_eq!(off.local.vm_only, Some(Vec::new()));
+    assert!(off.local.effective_vm_only().is_empty());
+
+    let declared = parse_project_yaml(
+        "workspace:\n  vm_only:\n    - target\n    - ' packages/web/node_modules '\n    - .venv\n",
+    )
+    .unwrap();
+    assert_eq!(
+        declared.local.effective_vm_only(),
+        ["target", "packages/web/node_modules", ".venv"]
+    );
+    // Local-only: the portable spec is unchanged and platform placement
+    // ignores it, since a platform workspace already lives on its own disk.
+    assert_eq!(
+        declared.canonical_json().unwrap(),
+        absent.canonical_json().unwrap()
+    );
+    declared.ensure_platform_compatible().unwrap();
+}
+
+#[test]
+fn vm_only_accepts_dockerignore_patterns_and_refuses_unsafe_ones() {
+    let document = parse_project_yaml(
+        "workspace:\n  vm_only:\n    - node_modules\n    - '**/node_modules'\n    - packages/*/dist/\n    - '[bt]arget'\n",
+    )
+    .unwrap();
+    // Overlapping patterns are fine, and a trailing / is dropped.
+    assert_eq!(
+        document.local.effective_vm_only(),
+        [
+            "node_modules",
+            "**/node_modules",
+            "packages/*/dist",
+            "[bt]arget"
+        ]
+    );
+    for (yaml, detail) in [
+        ("workspace: {vm_only: ['']}\n", "is empty"),
+        ("workspace: {vm_only: ['  ']}\n", "is empty"),
+        ("workspace: {vm_only: [/abs]}\n", "relative"),
+        ("workspace: {vm_only: [../up]}\n", ". or .."),
+        ("workspace: {vm_only: [a/../b]}\n", ". or .."),
+        ("workspace: {vm_only: [./a]}\n", ". or .."),
+        ("workspace: {vm_only: [a//b]}\n", "empty segment"),
+        ("workspace: {vm_only: [\"a\\tb\"]}\n", "control"),
+        ("workspace: {vm_only: [a, a]}\n", "listed twice"),
+        ("workspace: {vm_only: [.git]}\n", "Git repository"),
+        ("workspace: {vm_only: ['**/.GIT']}\n", "Git repository"),
+        ("workspace: {vm_only: ['**']}\n", "whole project"),
+        ("workspace: {vm_only: ['!keep']}\n", "exception"),
+        ("workspace: {vm_only: ['[ab']}\n", "unclosed"),
+    ] {
+        let error = parse_project_yaml(yaml).unwrap_err().to_string();
+        assert!(
+            error.contains("workspace.vm_only") && error.contains(detail),
+            "{yaml:?}: {error}"
+        );
+    }
+    let wide = (0..9)
+        .map(|index| format!("{index}{}", "y".repeat(250)))
+        .collect::<Vec<_>>();
+    let error = parse_project_yaml(&format!("workspace: {{vm_only: [{}]}}\n", wide.join(", ")))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("2 KiB"), "{error}");
+    let long = "x".repeat(256);
+    assert!(parse_project_yaml(&format!("workspace: {{vm_only: [{long}]}}\n")).is_err());
+
+    let many = (0..33).map(|index| format!("d{index}")).collect::<Vec<_>>();
+    let error = parse_project_yaml(&format!("workspace: {{vm_only: [{}]}}\n", many.join(", ")))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProjectError::TooManyEntries {
+            field: "workspace.vm_only",
+            maximum: 32
+        }
+    ));
+    for yaml in [
+        "workspace: {vm-only: [a]}\n",
+        "workspace: {unshared: [a]}\n",
+        "workspace: [a]\n",
+        "workspace: {vm_only: a}\n",
+    ] {
+        assert!(parse_project_yaml(yaml).is_err(), "accepted {yaml:?}");
+    }
+}

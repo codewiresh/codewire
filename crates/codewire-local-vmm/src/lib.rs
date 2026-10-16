@@ -62,6 +62,8 @@ mod supervisor_store_codec;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod supervisor_store_error;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod supervisor_upgrade;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod workspace;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod workspace_plan;

@@ -1,0 +1,11 @@
+version: v2
+
+# The private contract between cw and its local VM supervisor and runners. A
+# cw keeps working with a supervisor back to the oldest supported release
+# (MINIMUM_SUPERVISOR_PROTOCOL_VERSION in src/supervisor_config.rs), so every
+# change stays wire compatible with that release's file:
+# scripts/checks/proto_breaking.py compares it with the pinned copy in
+# scripts/checks/contracts/local-runtime-oldest/.
+breaking:
+  use:
+    - WIRE

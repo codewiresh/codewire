@@ -62,15 +62,22 @@ impl WorkspaceInput {
             identity: source.commit.clone(),
             mode: source.mode,
             destination: destination.to_owned(),
+            vm_only: source.vm_only.clone(),
         }
     }
 
-    pub(crate) fn direct(source: &AdmittedDirectShare, destination: &str, read_only: bool) -> Self {
+    pub(crate) fn direct(
+        source: &AdmittedDirectShare,
+        destination: &str,
+        read_only: bool,
+        vm_only: Vec<String>,
+    ) -> Self {
         Self::Direct {
             source_path: source.path().as_os_str().as_bytes().to_vec(),
             identity: source.identity().clone(),
             destination: destination.to_owned(),
             read_only,
+            vm_only,
         }
     }
 
@@ -80,11 +87,13 @@ impl WorkspaceInput {
                 source_path,
                 identity,
                 mode,
+                vm_only,
                 ..
             } => Some(WorkspaceSource {
                 source_path: PathBuf::from(OsString::from_vec(source_path.clone())),
                 commit: identity.clone(),
                 mode: *mode,
+                vm_only: vm_only.clone(),
             }),
             Self::Repository { .. } => None,
             Self::Direct { .. } => None,
@@ -114,12 +123,18 @@ pub(crate) fn prepare_direct_input(
     requested_source: &Path,
     destination: &str,
     read_only: bool,
+    vm_only: Vec<String>,
     forbidden_roots: &[PathBuf],
 ) -> Result<WorkspaceInput, WorkspacePlanError> {
     validate_local_mount_destination(destination)?;
     let admitted = admit_direct_share(requested_source, forbidden_roots)
         .map_err(|_| WorkspacePlanError::DirectShareInvalid)?;
-    Ok(WorkspaceInput::direct(&admitted, destination, read_only))
+    Ok(WorkspaceInput::direct(
+        &admitted,
+        destination,
+        read_only,
+        vm_only,
+    ))
 }
 
 pub(crate) fn validate_local_mount_destination(
@@ -898,6 +913,7 @@ mod tests {
     #[test]
     fn canonical_plan_round_trip_preserves_non_utf8_local_paths() {
         let source = WorkspaceSource {
+            vm_only: Vec::new(),
             source_path: PathBuf::from(OsString::from_vec(vec![b'/', b'w', 0xff])),
             commit: "d".repeat(40),
             mode: WorkspaceSourceMode::Clone,
@@ -910,6 +926,7 @@ mod tests {
     #[test]
     fn mixed_plans_bind_project_destinations_and_working_directory() {
         let source = WorkspaceSource {
+            vm_only: Vec::new(),
             source_path: PathBuf::from("/host/fixtures"),
             commit: "d".repeat(40),
             mode: WorkspaceSourceMode::Copy,

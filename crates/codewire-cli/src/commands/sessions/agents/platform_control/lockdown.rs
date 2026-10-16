@@ -15,7 +15,7 @@
 //! with exact configuration and fixed arguments, and never opens `~/.codex` or
 //! `auth.json`.
 use super::*;
-use codewire_access::{CodexProviderProjection, MANAGED_HTTP_PORT};
+use codewire_access::{CodexProviderProjection, ManagedCredentialClient};
 
 /// Codex's sign-in lockdown, as `(key, TOML value)`: only the configured
 /// provider, never a ChatGPT login, and no operating-system credential store.
@@ -23,16 +23,17 @@ const CODEX_LOGIN_LOCKDOWN: [(&str, &str); 2] = [
     ("forced_login_method", "\"api\""),
     ("cli_auth_credentials_store", "\"file\""),
 ];
-/// The shared provider configuration a Codex `route` names. The Codex slot's
-/// names no key, so Codex sends no credential and the broker adds the owner's
+/// The shared provider configuration a Codex `route` names, the same one a
+/// local VM's native Codex home holds for that client
+/// ([`CodexProviderProjection::for_managed_client`]). The Codex slot's names
+/// no key, so Codex sends no credential and the broker adds the owner's
 /// ChatGPT sign-in, or the API key held in that slot.
 fn codex_provider(route: Route) -> Option<CodexProviderProjection> {
-    let provider = match route {
-        Route::Codex => CodexProviderProjection::for_loopback_port(MANAGED_HTTP_PORT),
-        Route::OpenAi => CodexProviderProjection::for_openai_api_loopback_port(MANAGED_HTTP_PORT),
+    CodexProviderProjection::for_managed_client(match route {
+        Route::Codex => ManagedCredentialClient::Codex,
+        Route::OpenAi => ManagedCredentialClient::OpenAi,
         Route::Anthropic => return None,
-    };
-    Some(provider.expect("fixed managed HTTP port is unprivileged"))
+    })
 }
 /// The private Codex configuration: the login lockdown, then the shared
 /// provider configuration byte for byte.

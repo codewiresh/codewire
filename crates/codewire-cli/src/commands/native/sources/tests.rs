@@ -142,17 +142,17 @@ fn source_selectors_prove_unique_origin_and_never_pick_the_first_match() {
 #[test]
 fn only_a_missing_platform_configuration_proves_an_ineligible_backend() {
     let missing = config::ConfigError::NoPlatformServer {
-        source: Some(Box::new(config::ConfigError::ReadConfig {
+        cause: Some(Box::new(config::ConfigError::ReadConfig {
             path: PathBuf::from("/synthetic/missing/config.json"),
             source: std::io::Error::from(std::io::ErrorKind::NotFound),
         })),
     };
     assert!(platform_is_proven_unconfigured(&missing));
     for error in [
-        config::ConfigError::NoPlatformServer { source: None },
-        config::ConfigError::NoPlatformToken { source: None },
+        config::ConfigError::NoPlatformServer { cause: None },
+        config::ConfigError::NoPlatformToken { cause: None },
         config::ConfigError::NoPlatformServer {
-            source: Some(Box::new(config::ConfigError::ReadConfig {
+            cause: Some(Box::new(config::ConfigError::ReadConfig {
                 path: PathBuf::from("/synthetic/unreadable/config.json"),
                 source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             })),
@@ -491,34 +491,16 @@ fn create_and_update_accept_only_the_reviewed_source_flag_names() {
     assert!(validate_update_args(&args(&["--secrets="])).is_err());
 }
 
+/// A personal platform profile always selects GitHub, connected or not, so the
+/// VM reserves GitHub's names; whether the guest is configured for GitHub is
+/// decided at each start from the account's connection then. Creating the VM
+/// therefore reads no credential metadata at all.
 #[tokio::test]
 async fn platform_metadata_resolution_is_authenticated_exact_and_material_free() {
-    use codewire_client as rpc;
-    let github = |status: rpc::CredentialStatus, expires_at_unix: Option<u64>| rpc::Credential {
-        id: "github-credential".into(),
-        provider: "github".into(),
-        authentication_kind: rpc::CredentialAuthenticationKind::Oauth.into(),
-        status: status.into(),
-        expires_at_unix,
-        ..Default::default()
-    };
-    // An active, unexpired connection makes GitHub a launch slot.
-    resolve_platform_metadata(
-        vec![github(rpc::CredentialStatus::Active, None)],
-        &["codex", "github", "openai"],
-    )
-    .await;
-    // A missing, revoked, or expired connection is omitted, never fabricated.
-    for credentials in [
-        Vec::new(),
-        vec![github(rpc::CredentialStatus::Revoked, None)],
-        vec![github(rpc::CredentialStatus::Active, Some(1))],
-    ] {
-        resolve_platform_metadata(credentials, &["codex", "openai"]).await;
-    }
+    resolve_platform_metadata(&["codex", "github", "openai"]).await;
 }
 
-async fn resolve_platform_metadata(credentials: Vec<codewire_client::Credential>, slots: &[&str]) {
+async fn resolve_platform_metadata(slots: &[&str]) {
     use buffa::Message as _;
     use codewire_client as rpc;
     use wiremock::matchers::{header, method, path};
@@ -605,14 +587,6 @@ async fn resolve_platform_metadata(credentials: Vec<codewire_client::Credential>
             }
             .encode_to_vec(),
         ),
-        (
-            "/codewire.v1.CredentialService/ListCredentials",
-            rpc::ListCredentialsResponse {
-                credentials,
-                ..Default::default()
-            }
-            .encode_to_vec(),
-        ),
     ] {
         Mock::given(method("POST"))
             .and(path(rpc_path))
@@ -673,10 +647,11 @@ async fn resolve_platform_metadata(credentials: Vec<codewire_client::Credential>
     assert_eq!(bound.organization_id, "org_test");
     assert_eq!(bound.user_id, "user_test");
     assert_eq!(bound.profile_slots, slots);
+    // Identity, membership, and source metadata only: no credential listing.
     assert_eq!(
         server.received_requests().await.unwrap().len(),
-        5,
-        "only identity, membership, and metadata reads are allowed"
+        4,
+        "only identity, membership, and source metadata reads are allowed"
     );
 }
 

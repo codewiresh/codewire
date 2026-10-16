@@ -2711,7 +2711,7 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
             let mut events = vec![ExpectedAudit::CodexAdmitted];
             record_stock_ssh_audit(&mut events);
             assert_eq!(events.len(), 13);
-            for pair in events[..12].chunks_exact(2) {
+            for pair in events[..12].as_chunks::<2>().0 {
                 assert!(matches!(pair[0], ExpectedAudit::SshSignAdmitted));
                 assert!(matches!(pair[1], ExpectedAudit::SshIdentities));
             }

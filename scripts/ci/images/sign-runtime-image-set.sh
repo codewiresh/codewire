@@ -17,16 +17,18 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# shellcheck source=scripts/ci/images/pipeline-identity.sh
+source "$ROOT/scripts/ci/images/pipeline-identity.sh"
 readonly BUNDLE_INPUT="$1"
 readonly PUBLIC_KEY_INPUT="$2"
-readonly OPENBAO_ADDR='https://openbao.example.invalid'
+readonly OPENBAO_ADDR="$PIPELINE_OPENBAO_ADDR"
 readonly OPENBAO_ROLE='codewire-source-dev-publisher'
 readonly OPENBAO_AUDIENCE='openbao-codewire-source-dev-publisher'
 readonly OPENBAO_KEY='openbao://codewire-runtime'
 readonly GHCR_HOST='ghcr.io'
 readonly HARBOR_HOST='registry.example.invalid'
-readonly PROVENANCE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
-readonly PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+readonly PROVENANCE_SOURCE_URL="$PIPELINE_SOURCE_URL"
+readonly PROVENANCE_BUILDER_ID="$PIPELINE_BUILDER_ID"
 readonly COSIGN_IMAGE='registry.example.invalid/oci-approved/sigstore/cosign/cosign@sha256:6ca1127dc1e9ff19f3f2bfa214936813a86fbbf52919652eda49d393c888ad3c'
 readonly SIGNING_CONFIG_SOURCE="$ROOT/scripts/ci/images/cosign-private-signing-config.json"
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
@@ -58,7 +60,9 @@ docker_config="$work/docker-config"
 bundle="$work/image-bundle.json"
 public_key="$work/codewire-runtime-signing.pub"
 signing_config="$work/signing-config.json"
-openbao_token="$work/openbao.token"
+# Each family signs in its own background process with its own short-lived
+# identity files; token_dir names this process's directory.
+token_dir="$work"
 cosign_binary="$work/cosign"
 cosign_container=''
 
@@ -129,38 +133,38 @@ refresh_openbao_token() {
     printf 'header = "Authorization: bearer '
     printf '%s' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN"
     printf '"\nsilent\nshow-error\nfail\n'
-  } >"$work/forgejo.curl"
-  chmod 0600 "$work/forgejo.curl"
-  curl --config "$work/forgejo.curl" "${CURL_BOUNDS[@]}" \
-    --output "$work/forgejo-response.json" \
+  } >"$token_dir/forgejo.curl"
+  chmod 0600 "$token_dir/forgejo.curl"
+  curl --config "$token_dir/forgejo.curl" "${CURL_BOUNDS[@]}" \
+    --output "$token_dir/forgejo-response.json" \
     "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENBAO_AUDIENCE}"
   jq -er '.value | strings | select(length > 0)' \
-    "$work/forgejo-response.json" >"$work/forgejo.jwt"
-  chmod 0600 "$work/forgejo.jwt"
+    "$token_dir/forgejo-response.json" >"$token_dir/forgejo.jwt"
+  chmod 0600 "$token_dir/forgejo.jwt"
 
-  jq -n --arg role "$OPENBAO_ROLE" --rawfile jwt "$work/forgejo.jwt" \
-    '{role:$role, jwt:($jwt | rtrimstr("\n"))}' >"$work/openbao-login.json"
+  jq -n --arg role "$OPENBAO_ROLE" --rawfile jwt "$token_dir/forgejo.jwt" \
+    '{role:$role, jwt:($jwt | rtrimstr("\n"))}' >"$token_dir/openbao-login.json"
   curl --silent --show-error --fail "${CURL_BOUNDS[@]}" \
     --header 'Content-Type: application/json' \
-    --data-binary @"$work/openbao-login.json" \
-    --output "$work/openbao-response.json" \
+    --data-binary @"$token_dir/openbao-login.json" \
+    --output "$token_dir/openbao-response.json" \
     "$OPENBAO_ADDR/v1/auth/forgejo-jwt/login"
   jq -er '.auth.client_token | strings | select(length > 0)' \
-    "$work/openbao-response.json" >"$openbao_token"
-  chmod 0600 "$openbao_token"
+    "$token_dir/openbao-response.json" >"$token_dir/openbao.token"
+  chmod 0600 "$token_dir/openbao.token"
 
   {
     printf 'header = "X-Vault-Token: '
-    tr -d '\n' <"$openbao_token"
+    tr -d '\n' <"$token_dir/openbao.token"
     printf '"\nsilent\nshow-error\nfail\n'
-  } >"$work/openbao.curl"
-  chmod 0600 "$work/openbao.curl"
+  } >"$token_dir/openbao.curl"
+  chmod 0600 "$token_dir/openbao.curl"
 }
 
 # Log in to one registry with an OpenBao KV credential: PATH HOST SECRET_FIELD.
 registry_login() {
   local path="$1" host="$2" secret_field="$3" name="${2%%.*}"
-  curl --config "$work/openbao.curl" "${CURL_BOUNDS[@]}" \
+  curl --config "$token_dir/openbao.curl" "${CURL_BOUNDS[@]}" \
     --output "$work/$name.json" "$OPENBAO_ADDR/v1/$path"
   jq -er '.data.data.username | strings | select(length > 0)' \
     "$work/$name.json" >"$work/$name.username"
@@ -235,7 +239,7 @@ run_cosign() {
   shift
   if [[ "$with_openbao" == true ]]; then
     BAO_ADDR="$OPENBAO_ADDR" \
-      BAO_TOKEN="$(<"$openbao_token")" \
+      BAO_TOKEN="$(<"$token_dir/openbao.token")" \
       DOCKER_CONFIG="$docker_config" \
       GOMAXPROCS=2 \
       "$cosign_binary" "$@"
@@ -282,19 +286,54 @@ sign_reference() {
   printf 'Runtime signature accepted: family=%s ref=%s\n' "$family" "$reference"
 }
 
-while IFS=$'\t' read -r family harbor_ref; do
+sign_family() {
+  local family="$1" harbor_ref="$2" digest built_from reference
+  token_dir="$work/sign-$family"
+  mkdir -m 0700 "$token_dir"
   digest="${harbor_ref##*@}"
   built_from="$(built_from_for "$family")"
   if [[ "$sign_target" == delivery ]]; then
-    references=("$harbor_ref")
+    reference="$harbor_ref"
   else
-    references=("$GHCR_HOST/codewiresh/${family}@${digest}")
+    reference="$GHCR_HOST/codewiresh/${family}@${digest}"
   fi
-  for reference in "${references[@]}"; do
-    verify_native_attestations "$family" "$reference" "$built_from"
-    sign_reference "$family" "$reference" "$built_from"
-  done
+  verify_native_attestations "$family" "$reference" "$built_from"
+  sign_reference "$family" "$reference" "$built_from"
+}
+
+# The five families are independent: verify and sign them concurrently, each
+# with its own identity exchange, then report them in bundle order. Any
+# failure fails the whole set; nothing downstream runs on a partial set.
+families=()
+pids=()
+while IFS=$'\t' read -r family harbor_ref; do
+  [[ "$family" =~ ^(dashboard|derp|daemon|services|mesh)$ ]] || {
+    echo "Runtime image bundle names an unknown family: $family" >&2
+    exit 1
+  }
+  ( sign_family "$family" "$harbor_ref" ) \
+    >"$work/sign-$family.out" 2>"$work/sign-$family.err" &
+  families+=("$family")
+  pids+=("$!")
 done < <(jq -r '.images[] | [.family, .ref] | @tsv' "$bundle")
+[[ "${#families[@]}" -eq 5 ]] || {
+  echo 'Runtime image bundle must name exactly five families' >&2
+  exit 1
+}
+failed=()
+for index in "${!families[@]}"; do
+  if ! wait "${pids[$index]}"; then
+    failed+=("${families[$index]}")
+  fi
+done
+for family in "${families[@]}"; do
+  cat "$work/sign-$family.out"
+  cat "$work/sign-$family.err" >&2
+done
+if [[ "${#failed[@]}" -gt 0 ]]; then
+  printf 'Runtime signing failed for: %s\n' "${failed[*]}" >&2
+  exit 1
+fi
 
 if [[ "$sign_target" == delivery ]]; then
   echo 'Verified and signed the exact five-image runtime set in Harbor'

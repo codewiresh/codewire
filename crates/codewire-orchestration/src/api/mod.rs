@@ -74,6 +74,14 @@ pub struct ApiState {
     pub environment_daemon_endpoints: environment_daemon::EnvironmentDaemonEndpointOverrides,
     /// Shared session secret for daemon tokens and preview authorization.
     pub session_secret: String,
+    /// Single-use enforcement for terminal/SSH/preview `?ticket=` redemptions
+    /// (#2505 L3). Process-local; see [`terminal::TerminalTicketReplayCache`].
+    pub terminal_ticket_replays: std::sync::Arc<terminal::TerminalTicketReplayCache>,
+    /// Short-TTL cache of the `(id, slug)` organization list used to resolve
+    /// preview hosts (#2505 L5). Preview host resolution previously scanned
+    /// the full organizations table per request on a pre-auth path; this
+    /// bounds that to one query per TTL window per replica.
+    pub org_slugs: Arc<preview::OrgSlugCache>,
     /// Sandbox/runtime config slice: the daemon support image and the
     /// workspace-binding listener's namespace and relay endpoints.
     pub sandbox_cfg: SandboxWorkerCfg,

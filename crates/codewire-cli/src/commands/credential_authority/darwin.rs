@@ -383,8 +383,6 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
 
 #[cfg(test)]
 mod tests {
-    use std::os::fd::AsRawFd as _;
-
     use super::*;
 
     fn run(script: &str, directory: &Path) -> (SpawnedProcess, std::path::PathBuf) {

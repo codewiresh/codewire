@@ -116,7 +116,8 @@ for agent in codex claude gemini kimi pi aider; do
 done
 
 test "$(npm config get prefix)" = /home/codewire/.npm-global
-test "$(npm config get allow-scripts)" = @anthropic-ai/claude-code
+# Project installs use npm's default lifecycle-script policy (#2876).
+test -z "${NPM_CONFIG_ALLOW_SCRIPTS:-}"
 # The persistent prefix starts empty: update would silently prove nothing.
 # Plan an explicit pinned user install without installing packages or running
 # lifecycle scripts. This proves neither a completed install nor an upgrade.

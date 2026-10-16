@@ -25,8 +25,9 @@ use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector};
 use crate::service::REPOSITORY_PREPARATION_TIMEOUT;
 use crate::service::auth_kind_to_proto;
 use crate::transport::{
-    AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError, connect_owner_only,
-    connect_owner_only_with_timeout, store_error_from_exit_status,
+    AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError,
+    MINIMUM_AUTHORITY_PROTOCOL_VERSION, connect_owner_only, connect_owner_only_with_timeout,
+    store_error_from_exit_status,
 };
 use crate::{
     AccessProfileRecord, AccessProfileRevisionRecord, AuthorityProtectedStore,
@@ -329,7 +330,10 @@ impl LocalCredentialClient {
             .await
             .map_err(|_| AuthorityRuntimeError::Connect)?
             .into_inner();
-        if response.protocol_version != AUTHORITY_PROTOCOL_VERSION {
+        // An authority in the supported range keeps serving after an update.
+        if !(MINIMUM_AUTHORITY_PROTOCOL_VERSION..=AUTHORITY_PROTOCOL_VERSION)
+            .contains(&response.protocol_version)
+        {
             return Err(AuthorityRuntimeError::ProtocolMismatch);
         }
         let info = AuthorityInfo {
@@ -345,6 +349,12 @@ impl LocalCredentialClient {
 
     pub fn info(&self) -> AuthorityInfo {
         self.info.clone()
+    }
+
+    /// An authority older than this cw still serves after an update; one a
+    /// boot command may replace once no local VM uses it.
+    pub fn is_older(&self) -> bool {
+        self.info.protocol_version < AUTHORITY_PROTOCOL_VERSION
     }
 
     pub async fn shutdown(mut self) -> Result<(), Status> {
@@ -860,6 +870,7 @@ impl LocalCredentialClient {
             .evaluate_environment_grants(v1::EvaluateEnvironmentGrantsRequest {
                 environment_id: environment_id.to_string(),
                 environment_generation,
+                platform: None,
             })
             .await?
             .into_inner()
@@ -897,6 +908,7 @@ impl LocalCredentialControlClient {
             .evaluate_environment_grants(v1::EvaluateEnvironmentGrantsRequest {
                 environment_id: environment_id.to_string(),
                 environment_generation,
+                platform: None,
             })
             .await?
             .into_inner()
@@ -904,6 +916,27 @@ impl LocalCredentialControlClient {
             .into_iter()
             .map(|grant| grant.capability_slot)
             .collect())
+    }
+
+    /// Whether a platform-sourced environment's creator has an active GitHub
+    /// connection now, asked of the platform as that creator. Material-free:
+    /// a start configures its guest for GitHub exactly when this holds.
+    pub async fn platform_github_connected(
+        &mut self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        platform: crate::PlatformCredentialBinding,
+    ) -> Result<bool, Status> {
+        Ok(self
+            .inner
+            .evaluate_environment_grants(v1::EvaluateEnvironmentGrantsRequest {
+                environment_id: environment_id.to_string(),
+                environment_generation,
+                platform: Some(platform.into_proto()),
+            })
+            .await?
+            .into_inner()
+            .platform_github_connected)
     }
 
     /// Read material-free client-slot metadata from an exact immutable profile

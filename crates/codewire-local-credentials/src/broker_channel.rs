@@ -855,7 +855,7 @@ impl<S: ProtectedStore> BrokerChannelRefreshLifetime<S> {
             return None;
         }
         self.active_operations
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_add(1)
             })
             .ok()?;

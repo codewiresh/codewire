@@ -19,7 +19,7 @@ token_file="$2"
 : "${OPENBAO_GHCR_ROLE:?OpenBao GHCR role is required}"
 : "${OPENBAO_GHCR_AUDIENCE:?OpenBao GHCR audience is required}"
 
-readonly OPENBAO_ADDR='https://openbao.example.invalid'
+readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
 case "${OPENBAO_GHCR_ROLE}|${OPENBAO_GHCR_AUDIENCE}" in
   codewire-source-dev-publisher\|openbao-codewire-source-dev-publisher | \

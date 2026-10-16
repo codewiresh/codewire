@@ -34,7 +34,7 @@ esac
 [[ -d "$(dirname "$credentials_file")" && ! -e "$credentials_file" && ! -L "$credentials_file" ]] ||
   fail 'credential output must be a new nonsymlink path in an existing directory'
 
-readonly openbao_addr='https://openbao.example.invalid'
+readonly openbao_addr="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly secret_path='platform/data/ci/codewire/sccache-r2/untrusted'
 readonly -a curl_bounds=(--connect-timeout 10 --max-time 30)
 oidc_request_token="$ACTIONS_ID_TOKEN_REQUEST_TOKEN"

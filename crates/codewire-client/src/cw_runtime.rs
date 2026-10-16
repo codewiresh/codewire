@@ -31,8 +31,9 @@ const MUTATION_TIMEOUT: Duration = Duration::from_secs(960);
 #[error("cw runtime outcome is uncertain; observe the original request {request_id}")]
 pub struct CwRuntimeMutationError {
     pub request_id: String,
+    /// Boxed so the error stays small beside the response it replaces.
     #[source]
-    pub source: ClientError,
+    pub source: Box<ClientError>,
 }
 
 fn invalid() -> ClientError {
@@ -164,7 +165,7 @@ where
     let id = header.request_id.clone();
     let frames = Frames::new(header, source).map_err(|source| CwRuntimeMutationError {
         request_id: id.clone(),
-        source,
+        source: Box::new(source),
     })?;
     let local_error = frames.error.clone();
     let response = client
@@ -177,13 +178,13 @@ where
     {
         return Err(CwRuntimeMutationError {
             request_id: id,
-            source,
+            source: Box::new(source),
         });
     }
     let response = response
         .map_err(|e| CwRuntimeMutationError {
             request_id: id.clone(),
-            source: e.into(),
+            source: Box::new(e.into()),
         })?
         .into_owned();
     if response
@@ -193,10 +194,10 @@ where
     {
         return Err(CwRuntimeMutationError {
             request_id: id,
-            source: ClientError::new(
+            source: Box::new(ClientError::new(
                 ErrorCode::Internal,
                 "cw runtime response omitted original request",
-            ),
+            )),
         });
     }
     Ok(response)
@@ -244,14 +245,14 @@ impl CodewireClient {
             .cw_runtime_client()
             .map_err(|source| CwRuntimeMutationError {
                 request_id: id.clone(),
-                source,
+                source: Box::new(source),
             })?;
         let options = self
             .auth_options()
             .await
             .map_err(|source| CwRuntimeMutationError {
                 request_id: id,
-                source,
+                source: Box::new(source),
             })?;
         update(&client, header, source, options).await
     }
@@ -264,14 +265,14 @@ impl CodewireClient {
             .cw_runtime_client()
             .map_err(|source| CwRuntimeMutationError {
                 request_id: id.clone(),
-                source,
+                source: Box::new(source),
             })?;
         let options = self
             .auth_options()
             .await
             .map_err(|source| CwRuntimeMutationError {
                 request_id: id.clone(),
-                source,
+                source: Box::new(source),
             })?
             .with_timeout(MUTATION_TIMEOUT);
         let response = client
@@ -279,7 +280,7 @@ impl CodewireClient {
             .await
             .map_err(|e| CwRuntimeMutationError {
                 request_id: id.clone(),
-                source: e.into(),
+                source: Box::new(e.into()),
             })?
             .into_owned();
         if response
@@ -289,10 +290,10 @@ impl CodewireClient {
         {
             return Err(CwRuntimeMutationError {
                 request_id: id,
-                source: ClientError::new(
+                source: Box::new(ClientError::new(
                     ErrorCode::Internal,
                     "cw runtime response omitted original request",
-                ),
+                )),
             });
         }
         Ok(response)

@@ -15,7 +15,7 @@ use crate::control::v1;
 use crate::control::v1::local_supervisor_service_client::LocalSupervisorServiceClient;
 use crate::host::supervisor_peer::SupervisorPeerPin;
 use crate::supervisor_config::NativeRuntimeConfig;
-use crate::supervisor_config::{SupervisorConfigError, admit_supervisor_info};
+use crate::supervisor_config::{SupervisorConfigError, SupervisorFeature, admit_supervisor_info};
 pub use crate::uds::UdsError;
 use crate::uds::{capture_supervisor_peer, connect_supervisor_peer};
 use std::sync::Arc;
@@ -28,6 +28,8 @@ pub struct NativeSupervisorClient {
     pub(crate) peer_pin: Arc<SupervisorPeerPin>,
     pub(crate) expected_configuration_digest: [u8; 32],
     pub(crate) reconnect_enabled: bool,
+    /// The admitted supervisor's protocol, in the supported range.
+    protocol: u32,
 }
 
 impl NativeSupervisorClient {
@@ -48,11 +50,15 @@ impl NativeSupervisorClient {
         Self::connect_pinned(pin, expected_configuration_digest, false).await
     }
 
-    pub(crate) async fn connect_configured(
+    /// Admit the supervisor at `socket` for exactly this configuration: this
+    /// root's socket, or the root's own socket a supervisor from before #2735
+    /// listens on.
+    pub(crate) async fn connect_configured_at(
+        socket: &Path,
         config: &NativeRuntimeConfig,
     ) -> Result<Self, SupervisorClientError> {
         config.validate()?;
-        let pin = capture_supervisor_peer(&config.supervisor_socket(), Some(config)).await?;
+        let pin = capture_supervisor_peer(socket, Some(config)).await?;
         let expected = pin
             .configuration_digest()
             .ok_or(SupervisorConfigError::InvalidConfiguration)?;
@@ -66,14 +72,36 @@ impl NativeSupervisorClient {
     ) -> Result<Self, SupervisorClientError> {
         let channel = connect_supervisor_peer(peer_pin.clone()).await?;
         let mut inner = LocalSupervisorServiceClient::new(channel);
-        let expected_configuration_digest =
+        let (expected_configuration_digest, protocol) =
             query_supervisor_info(&mut inner, expected_configuration_digest).await?;
         Ok(Self {
             inner,
             peer_pin,
             expected_configuration_digest,
             reconnect_enabled,
+            protocol,
         })
+    }
+
+    /// The protocol of the supervisor this client admitted. One older than
+    /// this cw's still serves its VMs after a cw update.
+    pub fn protocol(&self) -> u32 {
+        self.protocol
+    }
+
+    /// Whether the admitted supervisor has `feature`.
+    pub fn supports(&self, feature: SupervisorFeature) -> bool {
+        self.protocol >= feature.since()
+    }
+
+    /// Ask this older supervisor to hand the state root to this cw's and
+    /// exit (protocol 12 on, `SupervisorFeature::Retire`). It refuses while
+    /// any environment may still run a VM.
+    pub(crate) async fn retire(&mut self, successor_protocol: u32) -> Result<(), Status> {
+        self.inner
+            .retire_supervisor(v1::RetireSupervisorRequest { successor_protocol })
+            .await?;
+        Ok(())
     }
 
     pub(crate) fn supervisor_peer_pin(&self) -> Arc<SupervisorPeerPin> {
@@ -354,13 +382,21 @@ impl NativeSupervisorClient {
             .await
             .map_err(|_| Status::failed_precondition("retained native supervisor changed"))?;
         let mut supervisor = LocalSupervisorServiceClient::new(channel.clone());
-        query_supervisor_info(&mut supervisor, Some(self.expected_configuration_digest))
-            .await
-            .map_err(|_| {
-                Status::failed_precondition(
-                    "native runtime update requires exact Linux supervisor protocol9",
-                )
-            })?;
+        let (_, protocol) =
+            query_supervisor_info(&mut supervisor, Some(self.expected_configuration_digest))
+                .await
+                .map_err(|_| {
+                    Status::failed_precondition(
+                        "native runtime update requires exact Linux supervisor protocol9",
+                    )
+                })?;
+        // Only this cw's supervisor changes cw in a running VM; an older one
+        // keeps serving its VMs until they stop.
+        if protocol != crate::supervisor_config::NATIVE_SUPERVISOR_PROTOCOL_VERSION {
+            return Err(Status::failed_precondition(
+                "your local VMs run on an older cw's supervisor; changing cw in a running VM needs this cw's, which takes over once they stop",
+            ));
+        }
         Ok(v1::linux_cw_runtime_service_client::LinuxCwRuntimeServiceClient::new(channel))
     }
 
@@ -626,7 +662,7 @@ fn mutation_selector(name: &str) -> v1::EnvironmentSelector {
 async fn query_supervisor_info(
     inner: &mut LocalSupervisorServiceClient<tonic::transport::Channel>,
     expected_configuration_digest: Option<[u8; 32]>,
-) -> Result<[u8; 32], SupervisorClientError> {
+) -> Result<([u8; 32], u32), SupervisorClientError> {
     let info = tokio::time::timeout(
         SUPERVISOR_INFO_TIMEOUT,
         inner.get_supervisor_info(v1::GetSupervisorInfoRequest {}),
@@ -636,10 +672,12 @@ async fn query_supervisor_info(
     .map_err(supervisor_info_rpc_error)?
     .into_inner();
     admit_supervisor_info(&info, expected_configuration_digest.as_ref())?;
-    info.configuration_sha256
+    let digest = info
+        .configuration_sha256
         .as_slice()
         .try_into()
-        .map_err(|_| SupervisorConfigError::InvalidSupervisorInfo.into())
+        .map_err(|_| SupervisorClientError::from(SupervisorConfigError::InvalidSupervisorInfo))?;
+    Ok((digest, info.protocol_version))
 }
 
 fn supervisor_info_rpc_error(status: Status) -> SupervisorClientError {

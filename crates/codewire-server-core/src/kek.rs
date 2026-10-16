@@ -334,7 +334,7 @@ fn decode_lower_hex_key(encoded: &[u8]) -> Option<[u8; 32]> {
         return None;
     }
     let mut key = [0u8; 32];
-    for (index, pair) in encoded.chunks_exact(2).enumerate() {
+    for (index, pair) in encoded.as_chunks::<2>().0.iter().enumerate() {
         key[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Some(key)

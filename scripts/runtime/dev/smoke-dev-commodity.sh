@@ -1030,10 +1030,10 @@ create_environment() {
     if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
       verify_application_all_scope_metadata
     fi
-    source_args=(--platform --file "$APP_SECRET_DOCUMENT")
+    source_args=(--cloud --file "$APP_SECRET_DOCUMENT")
     APP_SECRET_CREATE_ATTEMPTED=1
   elif [[ -n "$PROVIDER_SSH_DOCUMENT" ]]; then
-    source_args=(--platform --file "$PROVIDER_SSH_DOCUMENT")
+    source_args=(--cloud --file "$PROVIDER_SSH_DOCUMENT")
     PROVIDER_SSH_CREATE_ATTEMPTED=1
   fi
 
@@ -1336,10 +1336,10 @@ create_application_secret_project() {
   # Retain exact intent before the request so a committed create with a lost
   # response is still reconciled by cleanup.
   APP_SECRET_PROJECTS+=("$project")
-  cw_with_timeout 30 secrets --platform projects create "$project" \
+  cw_with_timeout 30 secrets --cloud projects create "$project" \
     >"$TMPDIR_SMOKE/app-create-project-$index.out" 2>"$TMPDIR_SMOKE/app-create-project-$index.err" ||
     die 'dedicated smoke identity cannot create its disposable secret project'
-  cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-projects.json" ||
+  cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-projects.json" ||
     die 'cannot resolve the created platform secret project'
   project_id="$(jq -er --arg name "$project" '
     [.[] | select(.name == $name)] | if length == 1 then .[0].id else error("ambiguous project") end
@@ -1358,9 +1358,9 @@ prepare_application_all_scope_secrets() {
   APP_SECRET_ALL_KEYS=("${prefix}_ORG" "${prefix}_PROJECT" "${prefix}_USER"
     "${prefix}_ORG_PROJECT" "${prefix}_PROJECT_USER" "${prefix}_CONFIG")
 
-  cw_with_timeout 30 secrets --platform --user list --output json >"$TMPDIR_SMOKE/app-user-before.json" ||
+  cw_with_timeout 30 secrets --cloud --user list --output json >"$TMPDIR_SMOKE/app-user-before.json" ||
     die 'dedicated all-scope identity cannot list personal secret metadata'
-  cw_with_timeout 30 secrets --platform --organization list --output json >"$TMPDIR_SMOKE/app-org-before.json" ||
+  cw_with_timeout 30 secrets --cloud --organization list --output json >"$TMPDIR_SMOKE/app-org-before.json" ||
     die 'dedicated all-scope identity cannot list organization secret metadata'
   if ! jq -es 'length == 1 and (.[0] | type == "array" and length == 0)' \
       "$TMPDIR_SMOKE/app-user-before.json" >/dev/null ||
@@ -1368,9 +1368,9 @@ prepare_application_all_scope_secrets() {
       "$TMPDIR_SMOKE/app-org-before.json" >/dev/null; then
     die 'all-scope acceptance requires initially empty personal and organization scopes'
   fi
-  cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-projects-before.json" ||
+  cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-projects-before.json" ||
     die 'dedicated all-scope identity cannot list platform secret projects'
-  cw_with_timeout 30 env --platform list --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
+  cw_with_timeout 30 env --cloud list --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
     die 'dedicated all-scope identity cannot inspect its environment names'
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/app-environments-before.json" >/dev/null ||
@@ -1391,14 +1391,14 @@ prepare_application_all_scope_secrets() {
   for index in "${!org_keys[@]}"; do
     key="${org_keys[$index]}"; value="${org_values[$index]}"
     APP_SECRET_ORG_ATTEMPTS+=("$key")
-    printf '%s' "$value" | cw_with_timeout 30 secrets --platform --organization set "$key" \
+    printf '%s' "$value" | cw_with_timeout 30 secrets --cloud --organization set "$key" \
       >"$TMPDIR_SMOKE/app-set-org-$index.out" 2>"$TMPDIR_SMOKE/app-set-org-$index.err" ||
       die 'cannot write an owned organization secret via protected stdin'
   done
   for index in "${!user_keys[@]}"; do
     key="${user_keys[$index]}"; value="${user_values[$index]}"
     APP_SECRET_USER_ATTEMPTS+=("$key")
-    printf '%s' "$value" | cw_with_timeout 30 secrets --platform --user set "$key" \
+    printf '%s' "$value" | cw_with_timeout 30 secrets --cloud --user set "$key" \
       >"$TMPDIR_SMOKE/app-set-user-$index.out" 2>"$TMPDIR_SMOKE/app-set-user-$index.err" ||
       die 'cannot write an owned personal secret via protected stdin'
   done
@@ -1418,12 +1418,12 @@ prepare_application_all_scope_secrets() {
       "${project_pu[$index]}" "${project_cfg[$index]}")
     local key_index
     for key_index in "${!project_keys[@]}"; do
-      printf '%s' "${project_values[$key_index]}" | cw_with_timeout 30 secrets --platform \
+      printf '%s' "${project_values[$key_index]}" | cw_with_timeout 30 secrets --cloud \
         --project "id:${APP_SECRET_IDS[$index]}" set "${project_keys[$key_index]}" \
         >"$TMPDIR_SMOKE/app-set-$index-$key_index.out" 2>"$TMPDIR_SMOKE/app-set-$index-$key_index.err" ||
         die 'cannot write an owned project secret via protected stdin'
     done
-    cw_with_timeout 30 secrets --platform --project "id:${APP_SECRET_IDS[$index]}" list --output json \
+    cw_with_timeout 30 secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" list --output json \
       >"$TMPDIR_SMOKE/app-keys-$index.json" || die 'cannot inspect write-only application key metadata'
     assert_application_scope_metadata "$TMPDIR_SMOKE/app-keys-$index.json" "${project_keys[@]}" ||
       die 'application project key metadata is malformed or contains unknown fields'
@@ -1460,9 +1460,9 @@ prepare_application_all_scope_secrets() {
 }
 
 verify_application_all_scope_metadata() {
-  cw_with_timeout 30 secrets --platform --user list --output json >"$TMPDIR_SMOKE/app-user-final.json" ||
+  cw_with_timeout 30 secrets --cloud --user list --output json >"$TMPDIR_SMOKE/app-user-final.json" ||
     die 'cannot re-list owned personal secret metadata before environment creation'
-  cw_with_timeout 30 secrets --platform --organization list --output json >"$TMPDIR_SMOKE/app-org-final.json" ||
+  cw_with_timeout 30 secrets --cloud --organization list --output json >"$TMPDIR_SMOKE/app-org-final.json" ||
     die 'cannot re-list owned organization secret metadata before environment creation'
   if ! assert_application_scope_metadata "$TMPDIR_SMOKE/app-user-final.json" "${APP_SECRET_USER_ATTEMPTS[@]}" ||
      ! assert_application_scope_metadata "$TMPDIR_SMOKE/app-org-final.json" "${APP_SECRET_ORG_ATTEMPTS[@]}"; then
@@ -1479,9 +1479,9 @@ prepare_application_secrets() {
   nonce="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 'synthetic application identity generation failed'
   # Use only the already checked dedicated smoke org, never a personal scope.
-  cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-projects-before.json" ||
+  cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-projects-before.json" ||
     die 'dedicated smoke identity cannot list platform secret projects'
-  cw_with_timeout 30 env --platform list --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
+  cw_with_timeout 30 env --cloud list --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
     die 'dedicated smoke identity cannot inspect its environment names'
   jq -e --arg name "$SMOKE_NAME" 'all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/app-environments-before.json" >/dev/null ||
@@ -1493,11 +1493,11 @@ prepare_application_secrets() {
     value="${APP_SECRET_VALUES[$index]}"
     APP_SECRET_HASHES+=("$(printf '%s' "$value" | sha256sum | cut -d ' ' -f 1)")
     for key in DATABASE_URL CW_DEV_PRECEDENCE; do
-      printf '%s' "$value" | cw_with_timeout 30 secrets --platform --project "id:${APP_SECRET_IDS[$index]}" set "$key" \
+      printf '%s' "$value" | cw_with_timeout 30 secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" set "$key" \
         >"$TMPDIR_SMOKE/app-set-$index-$key.out" 2>"$TMPDIR_SMOKE/app-set-$index-$key.err" ||
         die 'dedicated smoke identity cannot write its synthetic project secret via protected stdin'
     done
-    cw_with_timeout 30 secrets --platform --project "id:${APP_SECRET_IDS[$index]}" list --output json \
+    cw_with_timeout 30 secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" list --output json \
       >"$TMPDIR_SMOKE/app-keys-$index.json" || die 'cannot inspect write-only application key metadata'
     jq -e 'map(.key) | sort == ["CW_DEV_PRECEDENCE", "DATABASE_URL"]' \
       "$TMPDIR_SMOKE/app-keys-$index.json" >/dev/null || die 'application key metadata changed names'
@@ -1515,7 +1515,7 @@ prepare_application_secrets() {
 
 application_environment_ready() {
   local project="$1" previous_generation="$2"
-  cw_with_timeout 30 env --platform info "$ENV_ID" --output json \
+  cw_with_timeout 30 env --cloud info "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/app-environment.json" 2>"$TMPDIR_SMOKE/app-info.err" || return 1
   if jq -e '.setup_error | type == "string" and length > 0' \
       "$TMPDIR_SMOKE/app-environment.json" >/dev/null; then
@@ -1879,7 +1879,7 @@ run_application_secrets_smoke() {
         if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
           scope_args=(--user-secrets platform --org-secrets)
         fi
-        if cw_with_timeout 30 env --platform update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --output json </dev/null \
+        if cw_with_timeout 30 env --cloud update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --output json </dev/null \
             >"$TMPDIR_SMOKE/app-unconfirmed.out" 2>"$TMPDIR_SMOKE/app-unconfirmed.err"; then
           die 'unconfirmed application source replacement unexpectedly succeeded'
         fi
@@ -1891,7 +1891,7 @@ run_application_secrets_smoke() {
         if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
           start_application_restart_witness APP_SECRET_ALL_HASHES_A "$phase"
         fi
-        cw_with_timeout 30 env --platform update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --yes --output json \
+        cw_with_timeout 30 env --cloud update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --yes --output json \
           >"$TMPDIR_SMOKE/app-update-b.json" 2>"$TMPDIR_SMOKE/app-update-b.err" || die 'application source replacement failed'
         assert_application_source_update "$TMPDIR_SMOKE/app-update-b.json" "$project" "$generation"
         ;;
@@ -1901,7 +1901,7 @@ run_application_secrets_smoke() {
         if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
           start_application_restart_witness APP_SECRET_ALL_HASHES_B "$phase"
         fi
-        cw_with_timeout 30 env --platform update "$ENV_ID" --clear-secrets --yes --output json \
+        cw_with_timeout 30 env --cloud update "$ENV_ID" --clear-secrets --yes --output json \
           >"$TMPDIR_SMOKE/app-update-clear.json" 2>"$TMPDIR_SMOKE/app-update-clear.err" || die 'application source clear failed'
         assert_application_source_update "$TMPDIR_SMOKE/app-update-clear.json" "$project" "$generation"
         ;;
@@ -1952,7 +1952,7 @@ run_application_secrets_smoke() {
 
 application_environment_destroyed() {
   local state
-  cw_with_timeout 30 env --platform list --all --output json \
+  cw_with_timeout 30 env --cloud list --all --output json \
     >"$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null || return 1
   # info deliberately resolves only live environments. Retained terminal rows
   # are visible through list --all; absence is not terminal cleanup proof.
@@ -1973,7 +1973,7 @@ cleanup_application_shared_scope() {
   local -a scope_args=("--$scope")
   for index in "${!attempts[@]}"; do
     key="${attempts[$index]}"
-    if cw_with_timeout 30 secrets --platform "${scope_args[@]}" list --output json >"$metadata" \
+    if cw_with_timeout 30 secrets --cloud "${scope_args[@]}" list --output json >"$metadata" \
         2>"$TMPDIR_SMOKE/app-cleanup-$scope-list-$index.err"; then status=0; else status=$?; fi
     printf 'list\t%s\t%s\n' "$index" "$status" >>"$classification"
     if [[ "$status" != 0 ]]; then
@@ -1990,13 +1990,13 @@ cleanup_application_shared_scope() {
     fi
     if jq -es --arg key "$key" '.[0] | any(.[]; .key == $key)' "$metadata" >/dev/null \
         2>>"$TMPDIR_SMOKE/app-cleanup-$scope-metadata-$index.err"; then
-      if cw_with_timeout 30 secrets --platform "${scope_args[@]}" delete "$key" \
+      if cw_with_timeout 30 secrets --cloud "${scope_args[@]}" delete "$key" \
         >"$TMPDIR_SMOKE/app-cleanup-$scope-$index.out" \
         2>"$TMPDIR_SMOKE/app-cleanup-$scope-$index.err"; then status=0; else status=$?; rc=1; fi
       printf 'delete\t%s\t%s\n' "$index" "$status" >>"$classification"
     fi
   done
-  if cw_with_timeout 30 secrets --platform "${scope_args[@]}" list --output json >"$metadata" \
+  if cw_with_timeout 30 secrets --cloud "${scope_args[@]}" list --output json >"$metadata" \
       2>"$TMPDIR_SMOKE/app-cleanup-$scope-list-final.err"; then status=0; else status=$?; fi
   printf 'list\tfinal\t%s\n' "$status" >>"$classification"
   if [[ "$status" != 0 ]]; then
@@ -2015,7 +2015,7 @@ cleanup_application_shared_scope() {
 cleanup_application_secrets() {
   local project project_id selector index status rc=0 deadline
   if [[ -z "$ENV_ID" && "$APP_SECRET_CREATE_ATTEMPTED" == 1 ]]; then
-    if cw_with_timeout 30 env --platform list --all --output json >"$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null; then
+    if cw_with_timeout 30 env --cloud list --all --output json >"$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null; then
       ENV_ID="$(jq -ers --arg name "$SMOKE_NAME" '
         if length != 1 or (.[0] | type) != "array" then error("expected environment array") else .[0] end |
         [.[] | select(.name == $name)] |
@@ -2025,7 +2025,7 @@ cleanup_application_secrets() {
     else rc=1; fi
   fi
   if [[ -n "$ENV_ID" ]]; then
-    cw_with_timeout 60 env --platform rm --yes "$ENV_ID" >"$TMPDIR_SMOKE/app-cleanup-env.out" 2>"$TMPDIR_SMOKE/app-cleanup-env.err" || rc=1
+    cw_with_timeout 60 env --cloud rm --yes "$ENV_ID" >"$TMPDIR_SMOKE/app-cleanup-env.out" 2>"$TMPDIR_SMOKE/app-cleanup-env.err" || rc=1
     deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
     while :; do
       if application_environment_destroyed; then break; else status=$?; fi
@@ -2039,13 +2039,13 @@ cleanup_application_secrets() {
     project_id="${APP_SECRET_IDS[$index]:-}"
     selector="$project"
     [[ -z "$project_id" ]] || selector="id:$project_id"
-    cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-cleanup-projects.json" 2>/dev/null || { rc=1; continue; }
+    cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-cleanup-projects.json" 2>/dev/null || { rc=1; continue; }
     jq -e 'type == "array"' "$TMPDIR_SMOKE/app-cleanup-projects.json" >/dev/null || { rc=1; continue; }
     if jq -e --arg name "$project" --arg id "$project_id" \
         'any(.[]; if $id == "" then .name == $name else .id == $id end)' "$TMPDIR_SMOKE/app-cleanup-projects.json" >/dev/null; then
-      cw_with_timeout 30 secrets --platform projects delete "$selector" --yes >"$TMPDIR_SMOKE/app-cleanup-project.out" 2>"$TMPDIR_SMOKE/app-cleanup-project.err" || rc=1
+      cw_with_timeout 30 secrets --cloud projects delete "$selector" --yes >"$TMPDIR_SMOKE/app-cleanup-project.out" 2>"$TMPDIR_SMOKE/app-cleanup-project.err" || rc=1
     fi
-    cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-cleanup-projects.json" 2>/dev/null &&
+    cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-cleanup-projects.json" 2>/dev/null &&
       jq -e --arg name "$project" --arg id "$project_id" 'type == "array" and all(.[]; .name != $name and .id != $id)' "$TMPDIR_SMOKE/app-cleanup-projects.json" >/dev/null || rc=1
   done
   if ((${#APP_SECRET_USER_ATTEMPTS[@]} > 0)); then

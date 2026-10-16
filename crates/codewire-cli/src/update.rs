@@ -75,6 +75,10 @@ struct SelectionArgs {
     /// Refuse unless the selection generation is still N.
     #[arg(long, value_name = "N")]
     expect_generation: Option<u64>,
+    /// Restart local VMs still running on the previous cw without asking;
+    /// a restart ends the work running in them.
+    #[arg(long)]
+    restart_vms: bool,
     #[command(flatten)]
     store: StoreArgs,
 }
@@ -148,7 +152,9 @@ pub(crate) async fn run(args: UpdateArgs) -> anyhow::Result<()> {
                     identity: None,
                 },
                 rollback.selection.store.json,
-            )
+            )?;
+            hand_off_local_vms(&store, &selected.current, &rollback.selection).await;
+            Ok(())
         }
         (None, Some(directory), Some(sha256), None, None) => {
             let store = open_store(args.selection.store.store.as_deref())?;
@@ -170,7 +176,9 @@ pub(crate) async fn run(args: UpdateArgs) -> anyhow::Result<()> {
                     identity: None,
                 },
                 args.selection.store.json,
-            )
+            )?;
+            hand_off_local_vms(&store, &published.sha256, &args.selection).await;
+            Ok(())
         }
         (None, None, None, Some(version), None) => {
             public_release(public_fetch::Selection::Version(version), args.selection).await
@@ -234,7 +242,77 @@ async fn public_release(
             identity: Some(&identity),
         },
         options.store.json,
-    )
+    )?;
+    hand_off_local_vms(&store, &published.sha256, &options).await;
+    Ok(())
+}
+
+/// After a selection, let the selected cw offer to restart local VMs still
+/// running on the previous one: it runs that version's own `env --local
+/// upgrade --after-update`, since this cw's code may be the older. A version
+/// without that command is asked silently first and skipped. Never for an
+/// explicit --store, which the user's `cw` may not resolve to. It never fails
+/// the update, which has already succeeded.
+async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs) {
+    use std::process::{Command, Stdio};
+    if !cfg!(any(target_os = "linux", target_os = "macos")) || options.store.store.is_some() {
+        return;
+    }
+    let Ok(record) = store.verify(sha256) else {
+        return;
+    };
+    let executable = store.version_executable(sha256);
+    let supported = Command::new(&executable)
+        .args(["env", "--local", "upgrade", "--help"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !supported {
+        // An older cw, from before #2870: it refuses this cw's local VM
+        // supervisor and cannot retire it, so hand the root back now.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        crate::commands::release_local_vms_for_older_cw(&record.package_version).await;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let _ = record;
+        return;
+    }
+    let mut command = Command::new(&executable);
+    command.args(["env", "--local", "upgrade", "--after-update"]);
+    if options.restart_vms {
+        command.arg("--yes");
+    }
+    if options.store.json {
+        // stdout carries the JSON report alone.
+        match std::os::fd::AsFd::as_fd(&io::stderr()).try_clone_to_owned() {
+            Ok(stderr) => {
+                command.stdout(Stdio::from(stderr));
+            }
+            Err(_) => return,
+        }
+    }
+    if !command.status().is_ok_and(|status| status.success()) {
+        eprintln!("cw: restart local VMs still on the previous cw with `cw env --local upgrade`");
+    }
+}
+
+/// Whether this cw is the version its store selects now. The hand-off acts
+/// only then, so a later update or rollback is never undone by an older one.
+pub(crate) fn this_cw_is_selected() -> bool {
+    let Ok(executable) = std::env::current_exe().and_then(fs::canonicalize) else {
+        return false;
+    };
+    let Some(store) =
+        Store::locate(&executable).and_then(|root| Store::open(&root, DEFAULT_LOCK_TIMEOUT).ok())
+    else {
+        return false;
+    };
+    store.status().is_ok_and(|status| {
+        status
+            .current
+            .is_some_and(|current| store.version_executable(&current) == executable)
+    })
 }
 
 fn admit_public_selection(
@@ -841,6 +919,7 @@ mod tests {
             channel: None,
             selection: SelectionArgs {
                 expect_generation: None,
+                restart_vms: false,
                 store: StoreArgs {
                     store: Some(store.clone()),
                     json: false,

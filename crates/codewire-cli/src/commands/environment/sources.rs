@@ -1,6 +1,6 @@
 //! Hosted source selection is metadata-only. Material remains behind the
 //! environment operation, and every mutation uses the exact previewed inputs.
-use std::io::{BufRead, IsTerminal as _, Read as _, Write as _};
+use std::io::{BufRead, Read as _};
 
 use super::*;
 use crate::environment_client::validate_source_selection;

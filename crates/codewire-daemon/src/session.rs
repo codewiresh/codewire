@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use codewire_daemon_proto::daemon::v1;
 use portable_pty::{PtySize, native_pty_system};
-use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -18,8 +17,14 @@ use crate::env::{build_process_env, default_shell_for};
 use crate::execution::{PreparedProcess, ProcessExecution};
 
 const BUFFER_SIZE: usize = 32 * 1024;
-const MAX_PRELAUNCH_PTY_CONTROLS: usize = 32;
+/// Input a PTY session holds before its launch completes. The session reads
+/// its input promptly up to this bound, joining consecutive Stdin, and only
+/// then stops reading until the launch completes: flow control pauses the
+/// client instead of the launch failing (#2830).
 const MAX_PRELAUNCH_PTY_INPUT_BYTES: usize = 64 * 1024;
+/// What a held resize or end of input counts against that bound, so a stream
+/// of them is bounded too.
+const PRELAUNCH_PTY_CONTROL_COST: usize = 64;
 /// How long a session's process group has after each signal before the next
 /// one, when the session's client is gone.
 const PROCESS_GROUP_GRACE: Duration = Duration::from_secs(2);
@@ -30,10 +35,11 @@ enum PtyControl {
     CloseStdin,
 }
 
+/// Input that arrived before the launch completed, in order, replayed once
+/// it does.
 #[derive(Default)]
 struct PrelaunchPtyInput {
     controls: Vec<PtyControl>,
-    frames: usize,
     bytes: usize,
     stdin_closed: bool,
     stream_ended: bool,
@@ -415,21 +421,18 @@ async fn end_process_group<W, T>(leader: Option<u32>, end: GroupEnd, grace: Dura
 where
     W: Future<Output = T>,
 {
-    let Some(group) = leader
-        .and_then(|pid| i32::try_from(pid).ok())
-        .and_then(Pid::from_raw)
-    else {
+    let Some(group) = leader.and_then(|pid| i32::try_from(pid).ok()) else {
         // Already reaped: nothing to signal.
         return wait.await;
     };
     tokio::pin!(wait);
     if end == GroupEnd::HangUp {
-        let _ = kill_process_group(group, Signal::HUP);
+        signal_process_group(group, GroupSignal::HangUp);
         if let Ok(result) = tokio::time::timeout(grace, &mut wait).await {
             return result;
         }
     }
-    let _ = kill_process_group(group, Signal::TERM);
+    signal_process_group(group, GroupSignal::Terminate);
     let deadline = tokio::time::Instant::now() + grace;
     let reaped = tokio::time::timeout_at(deadline, &mut wait).await.ok();
     if reaped.is_some() {
@@ -438,7 +441,7 @@ where
         }
     }
     if reaped.is_none() || process_group_has_members(group) {
-        let _ = kill_process_group(group, Signal::KILL);
+        signal_process_group(group, GroupSignal::Kill);
     }
     match reaped {
         Some(result) => result,
@@ -446,14 +449,47 @@ where
     }
 }
 
+#[derive(Clone, Copy)]
+enum GroupSignal {
+    HangUp,
+    Terminate,
+    Kill,
+}
+
+/// Send `signal` to the process group `group` leads.
+#[cfg(unix)]
+fn signal_process_group(group: i32, signal: GroupSignal) {
+    let signal = match signal {
+        GroupSignal::HangUp => libc::SIGHUP,
+        GroupSignal::Terminate => libc::SIGTERM,
+        GroupSignal::Kill => libc::SIGKILL,
+    };
+    // Group 0 would be the daemon's own, and -1 every process it may signal.
+    if group > 1 {
+        // SAFETY: kill takes no pointers; a negative id names exactly the
+        // process group `group`.
+        unsafe { libc::kill(-group, signal) };
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_process_group(_group: i32, _signal: GroupSignal) {}
+
+/// Whether any process, a zombie included, is still in `group`.
+#[cfg(unix)]
+fn process_group_exists(group: i32) -> bool {
+    // SAFETY: kill takes no pointers; signal 0 only checks that the group
+    // `group` has a member.
+    group > 1 && unsafe { libc::kill(-group, 0) } == 0
+}
+
 /// Whether a live process is still in `group`. A zombie is not: it waits
 /// only for its parent, or PID 1, to reap it.
 #[cfg(target_os = "linux")]
-fn process_group_has_members(group: Pid) -> bool {
+fn process_group_has_members(group: i32) -> bool {
     let Ok(processes) = std::fs::read_dir("/proc") else {
-        return test_kill_process_group(group).is_ok();
+        return process_group_exists(group);
     };
-    let group = group.as_raw_nonzero().get();
     processes.flatten().any(|process| {
         process
             .file_name()
@@ -464,9 +500,14 @@ fn process_group_has_members(group: Pid) -> bool {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
-fn process_group_has_members(group: Pid) -> bool {
-    test_kill_process_group(group).is_ok()
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_group_has_members(group: i32) -> bool {
+    process_group_exists(group)
+}
+
+#[cfg(not(unix))]
+fn process_group_has_members(_group: i32) -> bool {
+    false
 }
 
 /// Whether a `/proc/<pid>/stat` line is a live process in `group`.
@@ -501,6 +542,14 @@ fn pty_wait_result(
 /// reader or reconstructing/retrying the projection. A retained response can
 /// therefore observe cancellation while withholding all command stdin until
 /// projection commits. Explicit stdin half-close remains a normal launch.
+///
+/// Input is read promptly and held in order. A burst of keystroke-sized
+/// frames, such as a fast paste or `ssh -tt host < file` at connect, is
+/// therefore never left unread in HTTP/2, whose flood guard ends the whole
+/// connection after about a hundred unread small DATA frames (#2822). Only at
+/// the byte bound does the session stop reading, still watching for
+/// cancellation, until the launch completes; the client then waits behind
+/// flow control rather than the launch being cancelled (#2830).
 async fn await_pty_projection<P, S>(
     projection: P,
     stream: &mut S,
@@ -516,8 +565,8 @@ where
         tokio::select! {
             biased;
             _ = output.closed() => return Err(pty_launch_cancelled()),
-            message = stream.next(), if !input.stream_ended => match message {
-                Some(Ok(message)) => input.queue(message)?,
+            message = stream.next(), if !input.stream_ended && !input.is_full() => match message {
+                Some(Ok(message)) => input.queue(message),
                 Some(Err(_)) => return Err(pty_launch_cancelled()),
                 None if !input.stdin_closed => return Err(pty_launch_cancelled()),
                 None => input.stream_ended = true,
@@ -531,25 +580,30 @@ where
 }
 
 impl PrelaunchPtyInput {
-    fn queue(&mut self, message: v1::PtyMessage) -> io::Result<()> {
-        self.frames += 1;
-        if self.frames > MAX_PRELAUNCH_PTY_CONTROLS {
-            return Err(pty_launch_cancelled());
-        }
+    /// Whether the session must stop reading input until the launch
+    /// completes. It is checked before each read, so the queue never holds
+    /// more than the bound plus the one frame that reached it, which the
+    /// transport's message limit bounds.
+    fn is_full(&self) -> bool {
+        self.bytes >= MAX_PRELAUNCH_PTY_INPUT_BYTES
+    }
+
+    /// Hold one input frame. Stdin joins the Stdin held right before it, so
+    /// it never passes a resize or end of input; Stdin after end of input is
+    /// dropped, as the terminal writer drops it.
+    fn queue(&mut self, message: v1::PtyMessage) {
         match message.payload {
-            Some(v1::pty_message::Payload::Stdin(data)) if !data.is_empty() => {
-                self.bytes = self
-                    .bytes
-                    .checked_add(data.len())
-                    .ok_or_else(pty_launch_cancelled)?;
-                if self.bytes > MAX_PRELAUNCH_PTY_INPUT_BYTES {
-                    return Err(pty_launch_cancelled());
-                }
-                if !self.stdin_closed {
-                    self.controls.push(PtyControl::Stdin(data));
+            Some(v1::pty_message::Payload::Stdin(data))
+                if !data.is_empty() && !self.stdin_closed =>
+            {
+                self.bytes = self.bytes.saturating_add(data.len());
+                match self.controls.last_mut() {
+                    Some(PtyControl::Stdin(held)) => held.extend_from_slice(&data),
+                    _ => self.controls.push(PtyControl::Stdin(data)),
                 }
             }
             Some(v1::pty_message::Payload::Resize(resize)) => {
+                self.bytes = self.bytes.saturating_add(PRELAUNCH_PTY_CONTROL_COST);
                 self.controls.push(PtyControl::Resize {
                     width: resize.width,
                     height: resize.height,
@@ -557,11 +611,11 @@ impl PrelaunchPtyInput {
             }
             Some(v1::pty_message::Payload::CloseStdin(_)) if !self.stdin_closed => {
                 self.stdin_closed = true;
+                self.bytes = self.bytes.saturating_add(PRELAUNCH_PTY_CONTROL_COST);
                 self.controls.push(PtyControl::CloseStdin);
             }
             _ => {}
         }
-        Ok(())
     }
 }
 
@@ -704,6 +758,10 @@ fn copy_pty_output(
     }
 }
 
+/// Forward a running session's input to its terminal writer. It reads every
+/// frame as it arrives, never waiting on the terminal: a frame left unread
+/// in HTTP/2 counts against the connection's small DATA frame flood guard
+/// (#2822).
 async fn forward_pty_control<S>(
     mut stream: S,
     control_tx: std_mpsc::Sender<PtyControl>,

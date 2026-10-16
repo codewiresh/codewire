@@ -39,6 +39,16 @@ const WINDOW_BYTES: u64 = 256 * 1024;
 const WINDOW_FRAMES: usize = 64;
 const INPUT_QUEUE_BYTES: usize = 256 * 1024;
 const INPUT_QUEUE_FRAMES: usize = 64;
+/// Daemon output the relay holds beyond the browser's window. The relay
+/// reads the daemon attachment as output arrives, up to this bound, even
+/// while the browser has not acknowledged its window: output left unread in
+/// HTTP/2 as small DATA frames counts against the daemon connection's flood
+/// guard, which ends that connection and every attachment on it (#2822).
+/// At the bound the relay stops reading, and flow control pauses the daemon.
+const DAEMON_BACKLOG_BYTES: usize = 1024 * 1024;
+/// What one held daemon message counts against that bound besides its
+/// output bytes, so many small ones are bounded too.
+const DAEMON_BACKLOG_MESSAGE_COST: usize = 64;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -579,7 +589,28 @@ where
     let mut pending_input: VecDeque<PendingInput> = VecDeque::new();
     let mut input_bytes = 0;
     let mut terminal_seen = false;
+    // Daemon output read ahead of the browser window, in order; `None` is
+    // the end of the daemon stream, or its failure.
+    let mut backlog: VecDeque<Option<v1::SessionAttachMessage>> = VecDeque::new();
+    let mut backlog_bytes = 0;
     loop {
+        while pending_frame.is_none() && window.has_capacity() {
+            let Some(message) = backlog.pop_front() else {
+                break;
+            };
+            backlog_bytes -= daemon_backlog_cost(message.as_ref());
+            let frame = match daemon_frame(message, &mut window, &mut terminal_seen, &coordinates) {
+                Ok(frame) => frame,
+                Err(end) => return end,
+            };
+            let Ok(encoded) = serde_json::to_string(&frame) else {
+                return End::Invalid;
+            };
+            if encoded.len() > FRAME_BYTES {
+                return End::Invalid;
+            }
+            pending_frame = Some((Message::Text(encoded.into()), Instant::now() + io_timeout));
+        }
         if let Ok(mut stats) = stats.lock() {
             stats.issued = window.issued;
             stats.acknowledged = window.acknowledged;
@@ -662,48 +693,77 @@ where
                     stats.last_output_sent = Some(Instant::now());
                 }
             }
-            message = output.next(), if pending_frame.is_none() && window.has_capacity() => {
-                let frame = match message {
-                    Some(Ok(v1::SessionAttachMessage { payload: Some(v1::session_attach_message::Payload::Output(chunk)) })) => {
-                        if terminal_seen {
-                            return End::Invalid;
-                        }
-                        match window.output(chunk) {
-                            Ok(frame) => frame,
-                            Err(end) => return end,
-                        }
-                    }
-                    Some(Ok(v1::SessionAttachMessage { payload: Some(v1::session_attach_message::Payload::HistoryGap(gap)) })) => {
-                        if terminal_seen { return End::Invalid; }
-                        match window.history_gap(gap) {
-                            Ok(frame) => frame,
-                            Err(end) => return end,
-                        }
-                    }
-                    Some(Ok(v1::SessionAttachMessage { payload: Some(v1::session_attach_message::Payload::Status(status)) })) => {
-                        if status.session_id != coordinates.session_id || status.output_end_offset < window.issued {
-                            return End::Invalid;
-                        }
-                        let Some(state) = lifecycle(status.state) else { return End::Invalid };
-                        let terminal = !matches!(state, "starting" | "running" | "stopping");
-                        if terminal_seen || (!terminal && status.exit_code.is_some())
-                            || (terminal && status.output_end_offset != window.issued)
-                        {
-                            return End::Invalid;
-                        }
-                        terminal_seen = terminal;
-                        ServerFrame::Status { state, exit_code: status.exit_code }
-                    }
-                    None if terminal_seen => return End::Complete,
-                    _ => return End::DaemonClosed,
+            message = output.next(), if backlog.back().is_none_or(Option::is_some) && backlog_bytes < DAEMON_BACKLOG_BYTES => {
+                let message = match message {
+                    Some(Ok(message)) => Some(message),
+                    Some(Err(_)) | None => None,
                 };
-                let Ok(encoded) = serde_json::to_string(&frame) else { return End::Invalid };
-                if encoded.len() > FRAME_BYTES {
-                    return End::Invalid;
-                }
-                pending_frame = Some((Message::Text(encoded.into()), Instant::now() + io_timeout));
+                backlog_bytes += daemon_backlog_cost(message.as_ref());
+                backlog.push_back(message);
             }
         }
+    }
+}
+
+fn daemon_backlog_cost(message: Option<&v1::SessionAttachMessage>) -> usize {
+    let output = match message.and_then(|message| message.payload.as_ref()) {
+        Some(v1::session_attach_message::Payload::Output(chunk)) => chunk.data.len(),
+        _ => 0,
+    };
+    DAEMON_BACKLOG_MESSAGE_COST + output
+}
+
+/// The browser frame for one daemon message, in order, or how the relay ends.
+/// `None` is the end, or failure, of the daemon stream.
+fn daemon_frame(
+    message: Option<v1::SessionAttachMessage>,
+    window: &mut Window,
+    terminal_seen: &mut bool,
+    coordinates: &Coordinates,
+) -> Result<ServerFrame, End> {
+    let Some(message) = message else {
+        return Err(if *terminal_seen {
+            End::Complete
+        } else {
+            End::DaemonClosed
+        });
+    };
+    match message.payload {
+        Some(v1::session_attach_message::Payload::Output(chunk)) => {
+            if *terminal_seen {
+                return Err(End::Invalid);
+            }
+            window.output(chunk)
+        }
+        Some(v1::session_attach_message::Payload::HistoryGap(gap)) => {
+            if *terminal_seen {
+                return Err(End::Invalid);
+            }
+            window.history_gap(gap)
+        }
+        Some(v1::session_attach_message::Payload::Status(status)) => {
+            if status.session_id != coordinates.session_id
+                || status.output_end_offset < window.issued
+            {
+                return Err(End::Invalid);
+            }
+            let Some(state) = lifecycle(status.state) else {
+                return Err(End::Invalid);
+            };
+            let terminal = !matches!(state, "starting" | "running" | "stopping");
+            if *terminal_seen
+                || (!terminal && status.exit_code.is_some())
+                || (terminal && status.output_end_offset != window.issued)
+            {
+                return Err(End::Invalid);
+            }
+            *terminal_seen = terminal;
+            Ok(ServerFrame::Status {
+                state,
+                exit_code: status.exit_code,
+            })
+        }
+        _ => Err(End::DaemonClosed),
     }
 }
 

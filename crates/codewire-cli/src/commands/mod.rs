@@ -59,6 +59,7 @@ pub(crate) use credential_repository::*;
 mod credential_input;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credentials;
+mod login_screen;
 mod platform_credentials;
 mod platform_profiles;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -216,9 +217,9 @@ pub(crate) struct UseTargetArgs {
     )]
     pub(crate) local: bool,
     #[arg(
-        long,
+        long = "cloud",
         conflicts_with = "local",
-        help = "Select a platform environment explicitly"
+        help = "Select a cloud environment explicitly"
     )]
     pub(crate) platform: bool,
     #[arg(value_name = "TARGET")]
@@ -241,10 +242,10 @@ pub(crate) struct EnvArgs {
     )]
     pub(crate) local: bool,
     #[arg(
-        long,
+        long = "cloud",
         global = true,
         conflicts_with = "local",
-        help = "Operate on current-organization platform environments only"
+        help = "Operate on current-organization cloud environments only"
     )]
     pub(crate) platform: bool,
     #[command(subcommand)]
@@ -442,9 +443,9 @@ pub(crate) struct CredentialsArgs {
     )]
     pub(crate) local: bool,
     #[arg(
-        long,
+        long = "cloud",
         conflicts_with = "local",
-        help = "Use platform protected storage (prompts when omitted interactively)"
+        help = "Use cloud protected storage (prompts when omitted interactively)"
     )]
     pub(crate) platform: bool,
     #[arg(
@@ -653,6 +654,18 @@ pub(crate) struct CredentialProfileSlotArgs {
     pub(crate) profile: String,
     #[arg(value_name = "PROVIDER", value_parser = ["codex", "openai", "github", "anthropic", "ssh"])]
     pub(crate) slot: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnvUpgradeArgs {
+    /// Restart them without asking; a restart ends the work running in them.
+    #[arg(long)]
+    pub(crate) yes: bool,
+    /// The hand-off a `cw update` runs: silent when nothing needs a restart.
+    /// Every later cw keeps accepting `env --local upgrade --after-update
+    /// [--yes]`, since the cw being updated from builds that command line.
+    #[arg(long, hide = true)]
+    pub(crate) after_update: bool,
 }
 
 #[derive(Debug)]
@@ -874,6 +887,8 @@ pub(crate) enum EnvCommand {
         about = "Refresh immutable skills for a native local environment"
     )]
     RefreshSkills(EnvTargetArgs),
+    #[command(about = "Restart the local VMs still running on a previous cw so they use this one")]
+    Upgrade(EnvUpgradeArgs),
     #[command(about = "Delete an environment")]
     Rm(EnvDeleteArgs),
     #[command(
@@ -1760,9 +1775,9 @@ pub(crate) struct SecretsArgs {
     )]
     pub(crate) local: bool,
     #[arg(
-        long,
+        long = "cloud",
         conflicts_with = "local",
-        help = "Use platform protected storage (prompts when omitted interactively)"
+        help = "Use cloud protected storage (prompts when omitted interactively)"
     )]
     pub(crate) platform: bool,
     #[arg(long, value_name = "NAME", conflicts_with_all = ["user", "organization"], value_parser = parse_secret_project_reference, help = "Explicit named project for key operations; never inferred from cw use or YAML")]

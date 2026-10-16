@@ -103,6 +103,9 @@ impl Fixture {
             // Isolate the locking/refusal model while retaining an actual child.
             // The test does not present the shell as a verified CW driver image.
             metadata.platform_managed_origin = Some(origin.clone());
+            handle
+                .platform_managed
+                .store(true, std::sync::atomic::Ordering::Release);
             metadata.command = origin.command();
             persist_metadata(&engine.inner.root, &metadata)
                 .await

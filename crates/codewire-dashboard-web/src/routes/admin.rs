@@ -636,6 +636,7 @@ async fn price_action(
     )
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn admin_context(
     state: &AppState,
     headers: &HeaderMap,
@@ -661,6 +662,7 @@ async fn admin_context(
     Ok((dashboard, cookie))
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn admin_action_context(
     state: &AppState,
     headers: &HeaderMap,
@@ -672,6 +674,7 @@ async fn admin_action_context(
         .map(|(_, cookie)| cookie)
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn admin_action_page_context(
     state: &AppState,
     headers: &HeaderMap,
@@ -681,6 +684,7 @@ async fn admin_action_page_context(
     admin_action_page_context_for(state, headers, csrf, selected_slug, BILLING_PATH).await
 }
 
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn admin_action_page_context_for(
     state: &AppState,
     headers: &HeaderMap,

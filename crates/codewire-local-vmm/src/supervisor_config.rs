@@ -15,7 +15,67 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 11;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 14;
+/// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
+/// update, a supervisor in [minimum, current] keeps serving its VMs; only an
+/// idle older one is replaced (`supervisor_upgrade`).
+pub const MINIMUM_SUPERVISOR_PROTOCOL_VERSION: u32 = 10;
+
+/// What each protocol after the minimum changed, oldest first. Every protocol
+/// in (minimum, current] has a row, so a bump says what an older supervisor
+/// lacks; a client checks [`SupervisorFeature`] before using anything newer.
+pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
+    (
+        11,
+        "sockets in the short per-user socket directory (#2735); no RPC change",
+    ),
+    (
+        12,
+        "RetireSupervisor (for its own protocol or a newer one); a stopped environment's runner of another cw is retired; the pre-#2735 runners directory is removed only under the lock",
+    ),
+    (
+        13,
+        "create keeps codewire.yaml workspace.vm_only paths on the VM's own disk (LocalMountInput.vm_only, CreateEnvironmentRequest.implicit_vm_only); an older supervisor would ignore them",
+    ),
+    (
+        14,
+        "workspace.vm_only entries are .dockerignore-style patterns: a copy skips every matching folder and the guest expands them at every boot; an older supervisor would treat them as plain paths",
+    ),
+];
+
+/// A supervisor capability newer than the minimum protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisorFeature {
+    /// `RetireSupervisor`: an idle supervisor hands its root to a newer one.
+    Retire,
+}
+
+impl SupervisorFeature {
+    pub const ALL: [Self; 1] = [Self::Retire];
+
+    /// The protocol that introduced it.
+    pub const fn since(self) -> u32 {
+        match self {
+            Self::Retire => 12,
+        }
+    }
+}
+
+/// Why a supervisor outside the supported range cannot serve this cw.
+pub(crate) fn unsupported_protocol_message(actual: u32) -> String {
+    let supported = format!(
+        "this cw works with {MINIMUM_SUPERVISOR_PROTOCOL_VERSION} to {NATIVE_SUPERVISOR_PROTOCOL_VERSION}"
+    );
+    if actual > NATIVE_SUPERVISOR_PROTOCOL_VERSION {
+        format!(
+            "a newer cw runs your local VMs (local VM supervisor protocol {actual}; {supported}); use that cw, or update this one"
+        )
+    } else {
+        format!(
+            "an older cw runs your local VMs (local VM supervisor protocol {actual}; {supported}); stop its VMs with that cw, then end its `cw __native-supervisor` process"
+        )
+    }
+}
 const NATIVE_SUPERVISOR_CONFIG_DIGEST_DOMAIN: &[u8] =
     b"codewire.native-supervisor.runtime-config.sha256.v1";
 
@@ -59,6 +119,44 @@ impl NativeRuntimeConfig {
 
     pub fn runner_socket(&self, environment_id: impl std::fmt::Display) -> PathBuf {
         self.socket_dir()
+            .join("runners")
+            .join(format!("{environment_id}.sock"))
+    }
+
+    /// The exact arguments a supervisor for this configuration runs with, as
+    /// `spawn_supervisor` starts it. Peer admission compares them.
+    pub(crate) fn supervisor_argv(&self) -> Vec<std::ffi::OsString> {
+        let mut argv = vec![
+            self.executable.as_os_str().to_owned(),
+            "__native-supervisor".into(),
+        ];
+        for (flag, path) in [
+            ("--root", &self.root),
+            ("--artifact-root", &self.artifact_root),
+            ("--artifact-lock", &self.artifact_lock),
+            ("--mesh-data-dir", &self.mesh_data_dir),
+            ("--platform-config-dir", &self.platform_config_dir),
+            (
+                "--credential-authority-root",
+                &self.credential_authority_root,
+            ),
+        ] {
+            argv.push(flag.into());
+            argv.push(path.as_os_str().to_owned());
+        }
+        argv
+    }
+
+    /// Where a supervisor from before #2735 (protocol 10 and earlier) listens
+    /// until it exits: in the state root itself.
+    pub fn legacy_supervisor_socket(&self) -> PathBuf {
+        self.root.join("supervisor.sock")
+    }
+
+    /// Where a runner a supervisor from before #2735 started listens until it
+    /// exits. On Linux it outlives that supervisor.
+    pub fn legacy_runner_socket(&self, environment_id: impl std::fmt::Display) -> PathBuf {
+        self.root
             .join("runners")
             .join(format!("{environment_id}.sock"))
     }
@@ -175,7 +273,9 @@ pub fn admit_supervisor_info(
     info: &v1::SupervisorInfo,
     expected_configuration_digest: Option<&[u8; 32]>,
 ) -> Result<(), SupervisorConfigError> {
-    if info.protocol_version != NATIVE_SUPERVISOR_PROTOCOL_VERSION {
+    if !(MINIMUM_SUPERVISOR_PROTOCOL_VERSION..=NATIVE_SUPERVISOR_PROTOCOL_VERSION)
+        .contains(&info.protocol_version)
+    {
         return Err(SupervisorConfigError::SupervisorProtocolMismatch {
             expected: NATIVE_SUPERVISOR_PROTOCOL_VERSION,
             actual: info.protocol_version,
@@ -205,9 +305,7 @@ pub fn supervisor_info(config: &NativeRuntimeConfig) -> v1::SupervisorInfo {
 pub enum SupervisorConfigError {
     #[error("native runtime configuration is invalid")]
     InvalidConfiguration,
-    #[error(
-        "native supervisor protocol version mismatch: expected {expected}, running supervisor reported {actual}"
-    )]
+    #[error("{}", unsupported_protocol_message(*.actual))]
     SupervisorProtocolMismatch { expected: u32, actual: u32 },
     #[error("the running native supervisor returned invalid compatibility information")]
     InvalidSupervisorInfo,
@@ -249,7 +347,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 11);
+        assert_eq!(info.protocol_version, 14);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(
@@ -326,9 +424,13 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_info_requires_the_exact_protocol_and_valid_digest_shape() {
+    fn supervisor_info_admits_the_supported_range_and_a_valid_digest_shape() {
         let config = test_config();
         let mut info = supervisor_info(&config);
+        for protocol in MINIMUM_SUPERVISOR_PROTOCOL_VERSION..=NATIVE_SUPERVISOR_PROTOCOL_VERSION {
+            info.protocol_version = protocol;
+            assert!(admit_supervisor_info(&info, None).is_ok(), "{protocol}");
+        }
         info.protocol_version = NATIVE_SUPERVISOR_PROTOCOL_VERSION + 1;
         let error = admit_supervisor_info(&info, None).unwrap_err();
         assert!(matches!(
@@ -338,13 +440,23 @@ mod tests {
                 actual,
             } if actual == NATIVE_SUPERVISOR_PROTOCOL_VERSION + 1
         ));
-        assert!(error.to_string().contains("protocol version mismatch"));
+        assert!(
+            error
+                .to_string()
+                .starts_with("a newer cw runs your local VMs")
+        );
 
-        info.protocol_version = NATIVE_SUPERVISOR_PROTOCOL_VERSION - 1;
+        info.protocol_version = MINIMUM_SUPERVISOR_PROTOCOL_VERSION - 1;
+        let error = admit_supervisor_info(&info, None).unwrap_err();
         assert!(matches!(
-            admit_supervisor_info(&info, None),
-            Err(SupervisorConfigError::SupervisorProtocolMismatch { .. })
+            error,
+            SupervisorConfigError::SupervisorProtocolMismatch { .. }
         ));
+        assert!(
+            error
+                .to_string()
+                .starts_with("an older cw runs your local VMs")
+        );
 
         info.protocol_version = NATIVE_SUPERVISOR_PROTOCOL_VERSION;
         info.configuration_sha256.pop();
@@ -416,5 +528,31 @@ mod tests {
         let raw_digest = raw.configuration_digest();
         raw.credential_authority_root = PathBuf::from("/tmp/codewire-credentials-�");
         assert_ne!(raw.configuration_digest(), raw_digest);
+    }
+
+    #[test]
+    fn every_protocol_after_the_minimum_says_what_it_changed() {
+        let protocols: Vec<u32> = SUPERVISOR_PROTOCOL_CHANGES
+            .iter()
+            .map(|(protocol, _)| *protocol)
+            .collect();
+        assert_eq!(
+            protocols,
+            ((MINIMUM_SUPERVISOR_PROTOCOL_VERSION + 1)..=NATIVE_SUPERVISOR_PROTOCOL_VERSION)
+                .collect::<Vec<_>>(),
+            "a supervisor protocol bump needs a SUPERVISOR_PROTOCOL_CHANGES row"
+        );
+        assert!(
+            SUPERVISOR_PROTOCOL_CHANGES
+                .iter()
+                .all(|(_, change)| !change.trim().is_empty())
+        );
+        for feature in SupervisorFeature::ALL {
+            assert!(
+                (MINIMUM_SUPERVISOR_PROTOCOL_VERSION + 1..=NATIVE_SUPERVISOR_PROTOCOL_VERSION)
+                    .contains(&feature.since()),
+                "{feature:?}"
+            );
+        }
     }
 }

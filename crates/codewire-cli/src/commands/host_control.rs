@@ -128,7 +128,9 @@ fn control_key(value: &str) -> Result<ControlKey, String> {
     }
     let key = value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| nibble(pair[0]) * 16 + nibble(pair[1]))
         .collect::<Vec<_>>();
     if key.iter().all(|byte| *byte == 0) {

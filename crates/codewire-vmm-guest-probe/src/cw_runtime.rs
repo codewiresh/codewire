@@ -162,6 +162,20 @@ impl CwRuntimeCatalog {
     }
 }
 
+/// The sealed release toolchains a cw payload may name. A catalog retains the
+/// payloads of earlier releases for their conversations, and a rollback
+/// selects the previous release's payload, so a toolchain move adds its
+/// release here. An earlier one leaves when no supported release ships a
+/// payload built with it.
+const CW_RUNTIME_RUSTC_RELEASES: [&str; 2] = ["1.93.0", "1.99.0"];
+
+fn sealed_rustc(identity: &str) -> bool {
+    identity
+        .strip_prefix("rustc ")
+        .and_then(|rest| rest.split_once(' '))
+        .is_some_and(|(release, _)| CW_RUNTIME_RUSTC_RELEASES.contains(&release))
+}
+
 fn hex(value: &str, size: usize) -> bool {
     value.len() == size
         && value
@@ -204,7 +218,7 @@ impl CwRuntimeProvenance {
             || !hex(&payload.source_revision, 40)
             || !hex(&payload.source_tree_sha256, 64)
             || !hex(&payload.sha256, 64)
-            || !payload.rustc.starts_with("rustc 1.93.0 ")
+            || !sealed_rustc(&payload.rustc)
             || payload.rustc.len() > 128
             || !(64..=CW_RUNTIME_MAX_BYTES as u64).contains(&payload.size)
         {
@@ -268,7 +282,7 @@ pub fn validate_static_cw(bytes: &[u8]) -> Result<(), &'static str> {
                 if !length.is_multiple_of(16) {
                     return Err(invalid);
                 }
-                for entry in dynamic.chunks_exact(16) {
+                for entry in dynamic.as_chunks::<16>().0 {
                     match i64::from_le_bytes(entry[..8].try_into().unwrap()) {
                         0 => break,
                         1 => return Err(invalid),
@@ -356,6 +370,9 @@ mod tests {
         let mut current = old.clone();
         current.payload.sha256 = "f".repeat(64);
         current.payload.source_revision = "e".repeat(40);
+        // The retained payload was built by the previous sealed toolchain.
+        assert_eq!(old.payload.rustc, "rustc 1.93.0 (synthetic fixture)");
+        current.payload.rustc = "rustc 1.99.0 (synthetic fixture)".to_owned();
         let catalog = CwRuntimeCatalog {
             schema_version: 1,
             active_sha256: current.payload.sha256.clone(),
@@ -376,6 +393,35 @@ mod tests {
         changed = catalog;
         changed.runtimes = vec![old; CW_RUNTIME_MAX_VERSIONS + 1];
         assert!(changed.validate().is_err());
+    }
+    #[test]
+    fn cw_payload_admits_only_the_sealed_release_toolchains() {
+        let (_, bytes) = fixture();
+        let provenance = CwRuntimeProvenance::decode(&bytes).unwrap();
+        for sealed in [
+            "rustc 1.93.0 (254b59607 2026-01-19)",
+            "rustc 1.99.0 (b940084d7 2026-09-28)",
+        ] {
+            let mut admitted = provenance.clone();
+            admitted.payload.rustc = sealed.to_owned();
+            admitted.validate().unwrap();
+        }
+        for refused in [
+            "rustc 1.91.1 (synthetic fixture)",
+            "rustc 1.98.1 (synthetic fixture)",
+            "rustc 1.99.1 (synthetic fixture)",
+            "rustc 1.100.0 (synthetic fixture)",
+            "rustc 1.99.0-beta.1 (synthetic fixture)",
+            "rustc 1.99.0",
+            "rustc  1.99.0 (synthetic fixture)",
+            "cargo 1.99.0 (synthetic fixture)",
+            "1.99.0 (synthetic fixture)",
+            "",
+        ] {
+            let mut changed = provenance.clone();
+            changed.payload.rustc = refused.to_owned();
+            assert!(changed.validate().is_err(), "{refused:?}");
+        }
     }
     #[test]
     fn cw_provenance_binds_image_payload_and_protocol() {

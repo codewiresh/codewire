@@ -362,19 +362,20 @@ if grep -Eq 'build-(base|workspace)-support-image' "$deploy_workflow"; then
   echo 'production support publication still crosses a runner job-output boundary' >&2
   exit 1
 fi
-# shellcheck disable=SC2016
-grep -Fq 'CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.candidate_ref }}' \
-  "$deploy_workflow"
-[[ "$(grep -Fc '          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}' "$deploy_workflow")" -eq 7 ]]
-[[ "$(grep -Fc '          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}' "$deploy_workflow")" -eq 7 ]]
-[[ "$(grep -Fc '          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}' "$deploy_workflow")" -eq 7 ]]
-[[ "$(grep -Fc '          CODEWIRE_SOURCE_DIR: .release-source' "$deploy_workflow")" -eq 7 ]]
+# The support pair is reused, or built natively per platform from the tag
+# checkout and joined without rebuilding (test-deploy-prod-workflow.sh).
+[[ "$(grep -Fc '        run: scripts/ci/images/join-release-support-image.sh' "$deploy_workflow")" -eq 2 ]]
+[[ "$(grep -Fc '        run: scripts/ci/images/build-support-platform.sh linux/' "$deploy_workflow")" -eq 2 ]]
+[[ "$(grep -Fc '          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}' "$deploy_workflow")" -eq 9 ]]
+[[ "$(grep -Fc '          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}' "$deploy_workflow")" -eq 9 ]]
+[[ "$(grep -Fc '          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}' "$deploy_workflow")" -eq 9 ]]
+[[ "$(grep -Fc '          CODEWIRE_SOURCE_DIR: .release-source' "$deploy_workflow")" -eq 9 ]]
 [[ "$(grep -Fc "          REQUIRE_EXISTING_SOURCE_IMAGE: '1'" "$deploy_workflow")" -eq 5 ]]
 if grep -Fq 'CODEWIRE_PUBLISH_LATEST' "$deploy_workflow"; then
   echo 'production image workflow still publishes a moving latest alias' >&2
   exit 1
 fi
-[[ "$(grep -Fc '        run: scripts/ci/images/build-push-image.sh' "$deploy_workflow")" -eq 7 ]]
+[[ "$(grep -Fc '        run: scripts/ci/images/build-push-image.sh' "$deploy_workflow")" -eq 5 ]]
 [[ "$(grep -Fc 'Dockerfile .release-source' "$deploy_workflow")" -eq 7 ]]
 grep -Fq '  publish-runtime-images:' "$deploy_workflow"
 grep -Fq 'scripts/ci/images/image-bundle.py create' "$deploy_workflow"
@@ -415,7 +416,7 @@ grep -Fq '  release-selection:' "$cli_workflow"
 grep -Fq '  build-release:' "$cli_workflow"
 grep -Fq '  package-release:' "$cli_workflow"
 grep -Fq '    needs: [release-selection]' "$cli_workflow"
-grep -Fq '    needs: [release-selection, build-darwin, build-release]' "$cli_workflow"
+grep -Fq '    needs: [release-selection, pack-runtime, build-release]' "$cli_workflow"
 grep -Fq "[ \"\$GITHUB_REF\" = 'refs/heads/main' ]" "$cli_workflow"
 grep -Fq '          path: .release-source' "$cli_workflow"
 grep -Fq '+refs/heads/main:refs/remotes/origin/main' "$cli_workflow"
@@ -550,6 +551,7 @@ python3 -B "$ROOT/scripts/ci/tests/test-local-runtime-parts.py" >/dev/null 2>&1 
 "$ROOT/scripts/ci/tests/test-fetch-openbao-release-signing-key.sh"
 "$ROOT/scripts/ci/tests/test-fetch-openbao-macos-signing.sh"
 "$ROOT/scripts/ci/tests/test-sign-macos-cw.sh"
+"$ROOT/scripts/ci/tests/test-sign-macos-helper.sh"
 
 compiled_fingerprint="$(
   sed -n 's/^const TRUST_FINGERPRINT: &str = "\([0-9A-F]*\)";$/\1/p' \

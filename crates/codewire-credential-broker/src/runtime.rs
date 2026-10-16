@@ -3059,7 +3059,7 @@ mod tests {
         EphemeralProtectedStore, ProtectedEntryId, ProtectedStore, ProtectedStoreError,
         ProtectedStorePersistence, ProtectedValue,
     };
-    use futures::{StreamExt as _, stream};
+    use futures::stream;
     use serde_json::json;
     use tokio::sync::{Notify, mpsc};
 

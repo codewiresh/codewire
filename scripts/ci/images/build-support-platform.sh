@@ -15,7 +15,13 @@
 #
 # Usage: build-support-platform.sh linux/amd64|linux/arm64
 # Requires SUPPORT_PLATFORM_BUDGET_MINUTES; writes base_digest and
-# workspace_digest to $GITHUB_OUTPUT.
+# workspace_digest to $GITHUB_OUTPUT. CODEWIRE_SOURCE_DIR (default .) names
+# the checkout whose images are built: deploy-prod.yaml builds a release
+# tag's pair from .release-source with this tree's scripts, and passes the
+# tag's CODEWIRE_SOURCE_SHA and CODEWIRE_RELEASE_TAG through to the builder.
+# SUPPORT_PLATFORM_BASE_DIGEST, when set, is this platform's image in a base
+# index main already published for the same source: the base is not rebuilt
+# and the workspace is built from exactly that digest.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -39,6 +45,19 @@ esac
 budget="${SUPPORT_PLATFORM_BUDGET_MINUTES:-}"
 [[ "$budget" =~ ^[1-9][0-9]{0,2}$ ]] || fail 'SUPPORT_PLATFORM_BUDGET_MINUTES must be a whole number of minutes'
 output="${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
+source_dir="${CODEWIRE_SOURCE_DIR:-.}"
+[[ "$source_dir" =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ && "$source_dir" != *..* && -d "$source_dir" ]] ||
+  fail "CODEWIRE_SOURCE_DIR must name a relative checkout directory: $source_dir"
+# The image paths the builder receives, relative to the job's directory.
+if [[ "$source_dir" == . ]]; then
+  base_dockerfile=images/base/Dockerfile base_context=images/base
+  workspace_dockerfile=images/workspace/Dockerfile workspace_context=.
+else
+  source_dir="${source_dir%/}"
+  base_dockerfile="$source_dir/images/base/Dockerfile" base_context="$source_dir/images/base"
+  workspace_dockerfile="$source_dir/images/workspace/Dockerfile" workspace_context="$source_dir"
+fi
+readonly base_dockerfile base_context workspace_dockerfile workspace_context
 
 umask 077
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/codewire-support-platform.XXXXXX")"
@@ -114,8 +133,16 @@ build() {
   printf '%s\n' "$digest"
 }
 
-base_digest="$(build base images/base/Dockerfile images/base)"
-workspace_digest="$(build workspace images/workspace/Dockerfile . \
+published_base="${SUPPORT_PLATFORM_BASE_DIGEST:-}"
+if [[ -n "$published_base" ]]; then
+  [[ "$published_base" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    fail "SUPPORT_PLATFORM_BASE_DIGEST is not an exact digest: $published_base"
+  base_digest="$published_base"
+  printf 'Building the %s workspace from the published base %s\n' "$PLATFORM" "$base_digest" >&2
+else
+  base_digest="$(build base "$base_dockerfile" "$base_context")"
+fi
+workspace_digest="$(build workspace "$workspace_dockerfile" "$workspace_context" \
   "CODEWIRE_BASE_IMAGE_REF=registry.example.invalid/codewire/base@$base_digest")"
 printf 'base_digest=%s\nworkspace_digest=%s\n' "$base_digest" "$workspace_digest" >>"$output"
 printf 'Built and verified the %s support pair in %s minutes: base %s, workspace %s\n' \

@@ -9,13 +9,13 @@ usage: build-runtime-guest-root.sh --target TARGET --busybox FILE --runc FILE --
 
 Builds one of the local VM runtime's guest roots with
 scripts/ci/verify/build-local-vmm-initramfs.sh --verify-root --target TARGET,
-inside the pinned Rust 1.93.0 image from
+inside the pinned Rust image from
 scripts/ci/release/local-runtime-sources.json: aarch64-unknown-linux-musl for
-macOS hosts (#2539), x86_64-unknown-linux-musl for Linux hosts (#2733). The CI
-runner's sealed toolchain has no aarch64-unknown-linux-musl, and no host
-toolchain is changed: the container installs the standard libraries of both
-musl targets the recipe builds (the guest and the x86_64 archive packer)
-from their pinned tarballs, offline, and protoc 35.1 from its pinned zip.
+macOS hosts (#2539), x86_64-unknown-linux-musl for Linux hosts (#2733). It does
+not use the CI runner's sealed toolchain, and no host toolchain is changed: the
+container installs the standard libraries of both musl targets the recipe
+builds (the guest and the x86_64 archive packer) from their pinned tarballs,
+offline, and protoc 35.1 from its pinned zip.
 
 FILE inputs are the target's BusyBox and runc the guest root seals (checked
 against their pins here and by the recipe), each pinned rust-std tarball and
@@ -83,7 +83,9 @@ for pinned in $targets; do
     [ "$(sha256sum "$file" | cut -c1-64)" = "$(pin guest_root_builder rust_std "$pinned" sha256)" ] && found="$file"
   done
   [ -n "$found" ] || die "no --rust-std is the pinned $pinned tarball"
-  members="$members $found=rust-std-1.93.0-$pinned/rust-std-$pinned/lib/rustlib/$pinned"
+  # The tarball's top directory is its pinned file name without the suffix.
+  archive="$(basename "$(pin guest_root_builder rust_std "$pinned" url)" .tar.xz)"
+  members="$members $found=$archive/rust-std-$pinned/lib/rustlib/$pinned"
 done
 [ "${#rust_std[@]}" = "$(wc -w <<<"$targets")" ] || die "give exactly one --rust-std per pinned target"
 [ "$(sha256sum "$protoc_zip" | cut -c1-64)" = "$(pin guest_root_builder protoc sha256)" ] ||

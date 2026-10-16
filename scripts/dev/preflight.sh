@@ -263,6 +263,12 @@ if [ -n "${PREFLIGHT_RELEASE_TAG_REF:-}" ]; then
   python3 "$REPO_ROOT/scripts/ci/images/workspace-image-pin.py" check --release \
     --commit "$release_commit" ||
     fail 'release commit pins a stale workspace image; land the proposed pin before tagging'
+  # deploy-prod reuses the support pair main published for the release commit.
+  # A commit support-images never published (base and workspace, linux/amd64
+  # and linux/arm64) cannot be tagged.
+  printf '==> release tag support pair\n'
+  "$REPO_ROOT/scripts/ci/release/verify-release-support-pair.sh" "$release_commit" ||
+    fail 'release commit has no published support pair; tag a commit support-images published'
   printf '==> release tag tested-tree receipt\n'
   if ! receipt_output="$($RELEASE_TAG_RECEIPT 2>&1)"; then
     printf 'release-tag receipt: checker failed unexpectedly; full local verification required\n' >&2

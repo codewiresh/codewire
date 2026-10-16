@@ -1,4 +1,4 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-list kind-down kind-deploy kind-trust-roots kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-list kind-down kind-deploy kind-trust-roots kind-db-reset kind-db-restore kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
 .PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system macos-local-runtime scan-supply-chain verify-dashboard-image sync-local-secrets accept-secrets-credentials
 
 # The older codewire/default-namespace topology has its own fixed endpoints.
@@ -236,6 +236,17 @@ kind-deploy:
 # does this), e.g. after the 72-hour root renewal. Restarts nothing.
 kind-trust-roots:
 	./scripts/dev/kind/trust-roots.sh
+
+# The retained cluster's databases are disposable. A deploy applies new
+# migrations after a backup; reset recreates the databases, reruns every
+# migration and reloads the gate's fixtures; restore returns to a backup, e.g.
+# `make kind-db-restore BACKUP=~/.cache/codewire/kind/<cluster>/database-backups/<time>-upgrade`.
+kind-db-reset:
+	./scripts/dev/kind/database.sh reset
+
+kind-db-restore:
+	@test -n "$(BACKUP)" || { echo "usage: make kind-db-restore BACKUP=<backup directory>" >&2; exit 2; }
+	./scripts/dev/kind/database.sh restore "$(BACKUP)"
 
 # Deploy the services the current change feeds, then run only the retained
 # Kind suites that cover it (SUITES=... to choose explicitly). Exit 3: only the

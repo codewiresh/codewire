@@ -391,7 +391,7 @@ cw_with_timeout() {
       [[ "${10}" == "$HOST_KEY" ]] || fail 'waiter changed host trust'
       touch "$TMPDIR_SMOKE/admitted"
       printf '{"session_id":"owned-session","state":"Running"}\n' ;;
-    'credentials --platform revoke '*" --output json")
+    'credentials --cloud revoke '*" --output json")
       [[ "$4" == "id:$KEY_ID" && -e "$TMPDIR_SMOKE/ready" ]] || fail 'revoke identity/order'
       touch "$TMPDIR_SMOKE/revoked"
       if [[ "$FAILURE" == bad-revoke ]]; then printf '[]\n'; else

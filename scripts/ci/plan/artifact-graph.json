@@ -23,9 +23,12 @@
     "CLAUDE.md",
     "docs/**",
     "scripts/ci/images/cosign-private-signing-config.json",
+    "scripts/ci/images/pipeline-identity.sh",
     "scripts/ci/images/sign-runtime-image-set.sh",
+    "scripts/ci/images/verify-runtime-image-signatures.sh",
     "scripts/ci/tests/test-kind-e2e-suites.sh",
     "scripts/ci/tests/test-sign-runtime-image-set.sh",
+    "scripts/ci/tests/test-verify-runtime-image-signatures.sh",
     "scripts/ci/trust/codewire-runtime-signing.pub",
     "scripts/runtime/dev/provider-anthropic-output.py",
     "scripts/runtime/dev/provider-anthropic-smoke.sh",
@@ -238,7 +241,8 @@
         "scripts/ci/images/build-kind-images.sh",
         "scripts/ci/images/build-local-image.sh",
         "scripts/ci/images/build-push-image.sh",
-        "scripts/ci/images/build-push-runtime-images.sh"
+        "scripts/ci/images/build-push-runtime-images.sh",
+        "scripts/ci/images/pipeline-identity.sh"
       ]
     },
     "derp_image": {
@@ -365,6 +369,7 @@
         "scripts/ci/images/build-local-image.sh",
         "scripts/ci/images/build-push-image.sh",
         "scripts/ci/images/build-push-runtime-images.sh",
+        "scripts/ci/images/pipeline-identity.sh",
         "scripts/ci/images/build-support-platform.sh"
       ]
     }

@@ -51,6 +51,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::fmt;
+use std::net::{IpAddr, Ipv4Addr};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use argon2::password_hash::SaltString;
@@ -175,7 +177,7 @@ fn decode_sha256_digest(encoded: &str) -> anyhow::Result<[u8; SHA256_DIGEST_BYTE
     }
 
     let mut digest = [0u8; SHA256_DIGEST_BYTES];
-    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+    for (index, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
         digest[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
     }
     Ok(digest)
@@ -442,19 +444,62 @@ pub(crate) fn format_time(t: NaiveDateTime) -> String {
 /// Best-effort request metadata for the audit/IP columns (matches the
 /// device-flow handler's reading of `r.RemoteAddr`/`r.UserAgent()`).
 /// Never echoed in a body, so only the column writes matter.
+///
+/// Client IP trust model (issue #2505, M1): we read the LAST entry of
+/// `X-Forwarded-For` that parses as an IP, never the first. The first entry
+/// is trivially client-controlled (any request may carry a forged header),
+/// so the old first-hop read let anyone forge `audit_logs.ip_address` for
+/// sign-in, sign-up, sign-out, and 2FA flows. The last hop is the only one
+/// attributable to our own edge:
+/// - Caddy 2.10's default proxy posture is REPLACE: the client chain is
+///   discarded and the peer IP is forwarded as the sole hop (verified
+///   against caddy 2.10.2; see the comments in the Caddyfiles).
+/// - An APPEND-mode proxy (e.g. Caddy with `trusted_proxies`, or a chain of
+///   proxies) adds the real peer at the END of the chain, so the last hop
+///   is still ours; earlier hops stay attacker-controlled and are ignored.
+///
+/// Residual risk: a request that reaches the service DIRECTLY with a forged
+/// header (bypassing the edge) cannot be distinguished here — the edge's
+/// replace posture is the primary control; this parsing is the backstop.
+/// Unparseable junk (or no header) records an empty IP, never a spoofed
+/// one. `strip_forwarded_port` tolerates `:port`/bracketed-v6 suffixes a
+/// sloppy proxy may leave in.
 pub(crate) fn request_info(headers: &HeaderMap) -> (String, String) {
-    let ip = headers
+    let forwarded = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string())
+        .and_then(|v| {
+            v.rsplit(',').map(str::trim).find_map(|hop| {
+                let ip = strip_forwarded_port(hop);
+                IpAddr::from_str(ip).ok().map(|_| ip.to_string())
+            })
+        })
         .unwrap_or_default();
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    (ip, ua)
+    (forwarded, ua)
+}
+
+/// Drop a trailing `:port` (or bracketed-IPv6 `]:port`) from one forwarded
+/// hop. `"http"`/`"https"` scheme suffixes from RFC 7239-style proxies are
+/// left in place and fail IP parsing upstream, which is the conservative
+/// outcome for a value we cannot attribute.
+fn strip_forwarded_port(hop: &str) -> &str {
+    if let Some(stripped) = hop.strip_prefix('[') {
+        // `[2001:db8::1]:443` -> `2001:db8::1`
+        let Some(end) = stripped.find(']') else {
+            return hop;
+        };
+        return &stripped[..end];
+    }
+    match hop.rfind(':') {
+        // `203.0.113.9:443` -> `203.0.113.9`; bare IPv6 has no port to strip.
+        Some(colon) if hop[..colon].parse::<Ipv4Addr>().is_ok() => &hop[..colon],
+        _ => hop,
+    }
 }
 
 /// The shared Argon2id configuration: `m=65536,t=3,p=2`, 32-byte hash,
@@ -1680,6 +1725,57 @@ mod tests {
         ));
         assert!(!turnstile_bypassed_for_email("", ""));
         assert!(!turnstile_bypassed_for_email("", "other@example.test"));
+    }
+
+    fn request_info_headers(xff: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(xff) = xff {
+            headers.insert("x-forwarded-for", xff.parse().unwrap());
+        }
+        headers.insert(header::USER_AGENT, "synthetic-agent/1".parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn request_info_uses_the_edge_appended_hop_not_the_client_supplied_first() {
+        // M1 (#2505): a client can prepend arbitrary hops; the proxy we run
+        // behind appends the real peer, so the LAST parseable hop is the only
+        // attributable one. The first entry must never reach audit_logs.
+        let (ip, ua) = request_info(&request_info_headers(Some("1.2.3.4, 5.6.7.8, 203.0.113.9")));
+        assert_eq!(ip, "203.0.113.9");
+        assert_eq!(ua, "synthetic-agent/1");
+    }
+
+    #[test]
+    fn request_info_prefers_the_nearest_parseable_hop_over_farther_spoofed_ones() {
+        // If the nearest hop carries a port or junk a sloppy proxy left in,
+        // fall back to the next hop toward the client rather than recording
+        // an unparseable string.
+        let (ip, _) = request_info(&request_info_headers(Some(
+            "198.51.100.7, not-an-ip:443, 203.0.113.9:8443",
+        )));
+        assert_eq!(ip, "203.0.113.9");
+    }
+
+    #[test]
+    fn request_info_accepts_ipv6_hops_with_and_without_brackets() {
+        let (ip, _) = request_info(&request_info_headers(Some(
+            "2001:db8::1, [2001:db8::2]:443",
+        )));
+        assert_eq!(ip, "2001:db8::2");
+
+        let (ip, _) = request_info(&request_info_headers(Some("2001:db8::3")));
+        assert_eq!(ip, "2001:db8::3");
+    }
+
+    #[test]
+    fn request_info_rejects_wholly_spoofed_chains_and_missing_headers() {
+        // Nothing attributable: record an empty IP, never the attacker's pick.
+        for xff in [Some("definitely-not-an-ip, also-not"), None] {
+            let (ip, ua) = request_info(&request_info_headers(xff));
+            assert_eq!(ip, "");
+            assert_eq!(ua, "synthetic-agent/1");
+        }
     }
 
     #[tokio::test]

@@ -231,7 +231,7 @@ def canonical_plan(command, source_dir, cwd, profile, docker_bin="docker"):
                 name = field.removeprefix("args.")
                 asset.require(name in BUILD_ARGS, "consumer Bake build argument refused")
                 if name == "CODEWIRE_RUST_PROFILE":
-                    asset.require(value in ("ci", "release"), "consumer Bake profile refused")
+                    asset.require(value in ("ci", "release", "runtime"), "consumer Bake profile refused")
                     for target in affected:
                         if target in effective_profiles:
                             effective_profiles[target] = value
@@ -485,7 +485,7 @@ def arguments(argv):
 
 def main(argv=None):
     args, command = arguments(list(sys.argv[1:] if argv is None else argv))
-    asset.require(args.profile in ("ci", "release") and release.is_hex(args.source_sha, 40), "consumer source/profile refused")
+    asset.require(args.profile in ("ci", "release", "runtime") and release.is_hex(args.source_sha, 40), "consumer source/profile refused")
     if args.operation == "check":
         source_dir = asset.path_arg(args.source_dir)
         image_dir = asset.path_arg(args.image_source_dir) if args.image_source_dir else source_dir

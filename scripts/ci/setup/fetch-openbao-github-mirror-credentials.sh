@@ -32,7 +32,7 @@ for output in "$app_id_file" "$installation_id_file" "$private_key_file"; do
     fail 'credential output must be a new nonsymlink path in an existing directory'
 done
 
-readonly openbao_addr='https://openbao.example.invalid'
+readonly openbao_addr="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly -a curl_bounds=(--connect-timeout 10 --max-time 30)
 oidc_request_token="$ACTIONS_ID_TOKEN_REQUEST_TOKEN"
 unset ACTIONS_ID_TOKEN_REQUEST_TOKEN

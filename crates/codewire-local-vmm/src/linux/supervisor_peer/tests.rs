@@ -100,7 +100,7 @@ while time.monotonic() < end:
         crate::socket_dir::prepare(&config.root).unwrap();
         let mut command = Command::new(&config.executable);
         command
-            .args(supervisor_argv(&config).into_iter().skip(1))
+            .args(config.supervisor_argv().into_iter().skip(1))
             .args(extra)
             .env_clear()
             .env("CW_TEST_SUPERVISOR_SOCKET", config.supervisor_socket())
@@ -199,7 +199,7 @@ async fn retained_peer_binds_real_birth_image_role_provenance_and_all_configurat
         pin.configuration_digest(),
         Some(request.configuration_digest())
     );
-    assert_eq!(pin.argv, supervisor_argv(&fixture.config));
+    assert_eq!(pin.argv, fixture.config.supervisor_argv());
     // Another version than the requested one: its provenance was admitted.
     assert_ne!(request.executable, fixture.config.executable);
     // SAFETY: inspect our retained owned descriptor without changing it.
@@ -410,4 +410,44 @@ async fn same_birth_exec_divergence_refuses_without_signalling_an_unrelated_proc
     assert!(pin.revalidate(Instant::now() + ADMISSION_TIMEOUT).is_err());
     assert!(fixture.child.try_wait().unwrap().is_none());
     assert!(sentinel.0.try_wait().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_handoff_ends_only_the_admitted_supervisor_and_sees_it_exit() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let mut fixture = Fixture::start(true, &[]);
+    let pin = pin(&fixture).await;
+    pin.require_role().unwrap();
+    let watch = pin.watch_exit().unwrap();
+    assert!(!watch.exited().unwrap());
+    let ended = pin.terminate().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ended.exited().unwrap() {
+        assert!(
+            Instant::now() < deadline,
+            "the ended supervisor did not exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(watch.exited().unwrap());
+    assert_eq!(fixture.child.wait().unwrap().signal(), Some(libc::SIGTERM));
+    // An exited supervisor is never signalled again; the socket it left goes
+    // only while it is the one this pin admitted.
+    assert!(pin.terminate().is_err());
+    assert!(fixture.config.supervisor_socket().exists());
+    pin.remove_stale_socket().unwrap();
+    assert!(!fixture.config.supervisor_socket().exists());
+}
+
+#[tokio::test]
+async fn a_peer_admitted_without_a_configuration_is_never_ended() {
+    let mut fixture = Fixture::start(true, &[]);
+    let unpinned = capture_supervisor_peer(&fixture.config.supervisor_socket(), None)
+        .await
+        .unwrap();
+    assert!(matches!(unpinned.require_role(), Err(PeerError::Role)));
+    assert!(matches!(unpinned.watch_exit(), Err(PeerError::Role)));
+    assert!(matches!(unpinned.terminate(), Err(PeerError::Role)));
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(fixture.child.try_wait().unwrap().is_none());
 }

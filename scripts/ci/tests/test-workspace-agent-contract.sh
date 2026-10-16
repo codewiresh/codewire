@@ -75,10 +75,6 @@ fi
 EOF
 cat >"$work/bin/npm" <<'EOF'
 #!/bin/sh
-if [ "$*" = "config get allow-scripts" ]; then
-  printf '@anthropic-ai/claude-code\n'
-  exit 0
-fi
 case "$*" in
   'config get prefix') printf '/home/codewire/.npm-global\n' ;;
   'install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.160.0')

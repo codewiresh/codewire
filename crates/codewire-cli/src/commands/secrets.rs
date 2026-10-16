@@ -58,7 +58,7 @@ pub(crate) async fn handle_secrets_command(
     validate_secret_operation_placement(&operation, placement)?;
     if placement == StoragePlacement::Local && matches!(operation, SecretOperation::Organization(_))
     {
-        anyhow::bail!("organization workload secrets are unsupported locally; use --platform");
+        anyhow::bail!("organization workload secrets are unsupported locally; use --cloud");
     }
     match placement {
         StoragePlacement::Platform => handle_platform_secrets_command(globals, operation).await,
@@ -250,7 +250,7 @@ pub(crate) fn validate_secret_preview_placement(
     );
     anyhow::ensure!(
         placement != StoragePlacement::Local || !intent.organization,
-        "organization workload secrets are unsupported in local preview; use --platform"
+        "organization workload secrets are unsupported in local preview; use --cloud"
     );
     Ok(())
 }
@@ -632,8 +632,6 @@ fn read_workload_secret_bytes<R: std::io::BufRead>(
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser as _;
-
     use super::*;
 
     #[test]
@@ -652,7 +650,7 @@ mod tests {
 
     #[test]
     fn canonical_secret_key_grammar_requires_an_explicit_scope() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             for scope in ["--project=development", "--user", "--organization"] {
                 for tail in [
                     vec!["set", "DATABASE_URL"],
@@ -712,9 +710,9 @@ mod tests {
                 "KEY",
             ],
             vec!["cw", "secrets", "--local", "user", "list"],
-            vec!["cw", "secrets", "--platform", "organization", "list"],
+            vec!["cw", "secrets", "--cloud", "organization", "list"],
             vec!["cw", "secrets", "--all-placements", "list"],
-            vec!["cw", "secrets", "--local", "--platform", "--user", "list"],
+            vec!["cw", "secrets", "--local", "--cloud", "--user", "list"],
             vec![
                 "cw",
                 "secrets",
@@ -726,7 +724,7 @@ mod tests {
             vec![
                 "cw",
                 "secrets",
-                "--platform",
+                "--cloud",
                 "--user",
                 "--organization",
                 "list",
@@ -767,7 +765,7 @@ mod tests {
 
     #[test]
     fn key_deletion_never_becomes_project_deletion_for_missing_or_blank_keys() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             for scope in ["--project=development", "--user", "--organization"] {
                 assert!(
                     Cli::try_parse_from(["cw", "secrets", placement, scope, "delete"]).is_err()
@@ -797,7 +795,7 @@ mod tests {
 
     #[test]
     fn project_lifecycle_requires_its_own_nonblank_name_and_no_scope_flags() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             for command in ["create", "delete"] {
                 assert!(
                     Cli::try_parse_from(["cw", "secrets", placement, "projects", command]).is_err()
@@ -891,7 +889,7 @@ mod tests {
 
     #[test]
     fn metadata_preview_stays_explicit_read_only_and_json_never_prompts() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             let Command::Secrets(args) = Cli::try_parse_from([
                 "cw",
                 "secrets",

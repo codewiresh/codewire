@@ -265,6 +265,7 @@ run_policy_core_one() {
   scripts/ci/tests/test-select-protected-rust-cache.sh
   scripts/ci/tests/test-run-host-rust-build.sh
   scripts/ci/tests/test-local-rust-cache.sh
+  scripts/ci/tests/test-check-workspace-hack.sh
   scripts/ci/tests/test-retired-local-sdk-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
   python3 -B scripts/ci/tests/test-integration-lane.py
@@ -287,6 +288,7 @@ run_policy_core_one() {
   python3 scripts/checks/repo_checks.py identity-free-workspace --self-test
   python3 scripts/checks/repo_checks.py workspace-image-pin --self-test
   python3 scripts/checks/repo_checks.py workspace-image-pin
+  python3 scripts/checks/repo_checks.py mcp-settings --self-test
   python3 scripts/checks/repo_checks.py epoch-material-cache-owner --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
@@ -887,6 +889,7 @@ run_release() {
   scripts/ci/tests/test-harbor-runtime-pull-contract.sh
   scripts/ci/tests/test-verify-release-tag-ref.sh
   scripts/ci/tests/test-verify-release-tag-receipt.sh
+  scripts/ci/tests/test-verify-release-support-pair.sh
   scripts/ci/tests/test-mirror-git-tags.sh
   scripts/ci/tests/test-mint-github-app-token.sh
   scripts/ci/tests/test-copy-image-to-ghcr.sh
@@ -895,6 +898,7 @@ run_release() {
   scripts/ci/tests/test-publish-image-to-ghcr.sh
   scripts/ci/tests/test-publish-image-to-harbor.sh
   scripts/ci/tests/test-sign-runtime-image-set.sh
+  scripts/ci/tests/test-verify-runtime-image-signatures.sh
   scripts/ci/tests/test-resolve-published-support-pair.sh
   scripts/ci/tests/test-run-skopeo-container.sh
   scripts/ci/tests/test-fetch-pinned.sh
@@ -950,6 +954,7 @@ run_deploy() {
   scripts/ci/plan/test.sh
   scripts/ci/tests/test-deploy-dev.sh
   scripts/ci/tests/test-build-push-runtime-images.sh
+  scripts/ci/tests/test-delivery-superseded.sh
   install_kustomize
   python3 scripts/checks/repo_checks.py orchestration-authz --self-test
 

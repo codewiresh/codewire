@@ -1155,8 +1155,8 @@ exit "$rc"
                 self.assertEqual(result.returncode, expected, result.stderr)
                 steps = result.stdout.splitlines()
                 self.assertEqual(steps[:4], [
-                    f"env --platform stop {ENVIRONMENT} --output json", "wait stopped",
-                    f"env --platform start {ENVIRONMENT} --output json", "wait running"])
+                    f"env --cloud stop {ENVIRONMENT} --output json", "wait stopped",
+                    f"env --cloud start {ENVIRONMENT} --output json", "wait running"])
                 # The new epoch must deliver the login again before the
                 # journey uses it.
                 self.assertEqual(steps[4:], ["login redelivered"] if expected == 0 else [])
@@ -1233,8 +1233,8 @@ kind_credential_bound_revision '%s'
         source = HELPERS.read_text()
         flow = source.split("kind_credential_native_smoke() (", 1)[1]
         self.assertNotIn("configmap", flow.lower())
-        stop = flow.index('env --platform stop "$environment"')
-        start = flow.index('env --platform start "$environment"')
+        stop = flow.index('env --cloud stop "$environment"')
+        start = flow.index('env --cloud start "$environment"')
         self.assertLess(flow.index("/home/codewire/.codex/kind-persistence"), stop)
         self.assertLess(start, flow.index('cat /home/codewire/.codex/kind-persistence'))
 
@@ -1286,8 +1286,8 @@ kind_credential_codex_login '%s' %s %s
         rotation = index('kind_credential_codex_login "$environment" rotation "$login_generation" || return $?')
         own = index('kind_credential_codex_login "$environment" own-login || return $?')
         logout = index('kind_credential_codex_login "$environment" logout || return $?')
-        stop = index('env --platform stop "$environment"')
-        start = index('env --platform start "$environment"')
+        stop = index('env --cloud stop "$environment"')
+        start = index('env --cloud start "$environment"')
         redelivered = index('kind_credential_codex_login "$environment" redelivered || return $?')
         daemon = 'kind_credential_daemon_probe "$environment" '
         bounded = ' "$KIND_AUTHORITY_CHANGE_WITHIN_MS"'
@@ -1296,7 +1296,7 @@ kind_credential_codex_login '%s' %s %s
         counted = index("assert_kind_credential_provider_counts 2", gateway)
         warm = index(daemon + "success\n", counted)
         reuse = index(daemon + "success\n", warm + 1)
-        reconnect = index('credentials --platform connect codex --name "$credential_name" --yes')
+        reconnect = index('credentials --cloud connect codex --name "$credential_name" --yes')
         reconnected = index(daemon + "success\n", reconnect)
         six = index("assert_kind_credential_provider_counts 5")
         reused = index("assert_kind_credential_material_reuse")
@@ -1316,14 +1316,14 @@ kind_credential_codex_login '%s' %s %s
         replaced = index('replace_kind_credential_sandbox "$environment"', recovered)
         marker = index("printf '%s\\n' '{\"event\":\"sandbox_replaced\"}' >> \"$KIND_DAEMON_PROBE_LOG\"", replaced)
         fresh = index(daemon + "success\n", marker)
-        revoke = index('credentials --platform revoke "$credential_name"')
+        revoke = index('credentials --cloud revoke "$credential_name"')
         revoked_daemon = index(daemon + "revoked\n", revoke)
         changes = index('assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG"')
         revoked_gateway = index('kind_credential_probe "$environment" selected', revoke)
         revoked = index('kind_credential_codex_login "$environment" revoked || return $?')
         served = index('served="$(jq -s \'map(.served // 0) | add\' "$KIND_DAEMON_PROBE_LOG")" || return $?')
         final = index('assert_kind_credential_provider_counts "$((5 + served))"')
-        destroy = index('env --platform rm "$environment"')
+        destroy = index('env --cloud rm "$environment"')
         # An unselected projection first; delivery before the proxy session
         # whose refreshes rotate it; the user's own login and logout after
         # rotation; Stop/Start, where a new container forgets the logout; the
@@ -1613,10 +1613,10 @@ kind_credential_cli() {
     'org list --output json')
       printf '[{"id":"org_contract_1","role":"member"},{"id":"org_contract_2","role":"owner"}]\\n' ;;
     'org current') printf 'ID: org_contract_1\\n' ;;
-    'credentials --platform get'*)
+    'credentials --cloud get'*)
       printf '[{"name":"%%s","provider":"openai","status":"CREDENTIAL_STATUS_ACTIVE"}]\\n' "$4" ;;
-    'env --platform create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
-    'env --platform update'*) printf '{"operation_generation":1}\\n' ;;
+    'env --cloud create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
+    'env --cloud update'*) printf '{"operation_generation":1}\\n' ;;
     *) return 0 ;;
   esac
 }
@@ -1650,10 +1650,10 @@ kind_credential_cli() {
     'org list --output json')
       printf '[{"id":"org_contract_1","role":"member"},{"id":"org_contract_2","role":"owner"}]\\n' ;;
     'org current') printf 'ID: org_contract_1\\n' ;;
-    'credentials --platform get'*)
+    'credentials --cloud get'*)
       printf '[{"name":"%%s","provider":"openai","status":"CREDENTIAL_STATUS_ACTIVE"}]\\n' "$4" ;;
-    'env --platform create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
-    'env --platform update'*) printf '{"operation_generation":1}\\n' ;;
+    'env --cloud create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
+    'env --cloud update'*) printf '{"operation_generation":1}\\n' ;;
     *) return 0 ;;
   esac
 }
@@ -1691,7 +1691,7 @@ kind_credential_native_smoke
         flow = HELPERS.read_text().split("kind_credential_native_smoke() (", 1)[1]
         unselected = flow.index('kind_credential_probe "$environment" unselected')
         restart = flow.index("\n  restart_kind_orchestration\n")
-        update = flow.index('kind_credential_cli env --platform update "$environment"')
+        update = flow.index('kind_credential_cli env --cloud update "$environment"')
         relay = flow.index('relay_pod="$(sed -n \'1p\' <<<"$relay")"')
         lead = flow.index('token_lead="$(kind_credential_relay_token_lead "$pod" "$relay_pod")" || return $?')
         deliver = flow.index('kind_credential_codex_login "$environment" deliver')
@@ -1744,7 +1744,7 @@ kind_credential_relay_token_lead sandbox-x codewire-orchestration-a
         flow = source.split("kind_credential_native_smoke() (", 1)[1]
         for retired in ("wait_kind_credential_sandbox_pair", "gateway_uid", "codewire-gateway"):
             self.assertNotIn(retired, flow)
-        update = flow.index('update="$(kind_credential_cli env --platform update "$environment"')
+        update = flow.index('update="$(kind_credential_cli env --cloud update "$environment"')
         generation = flow.index('restart_generation="$(jq -er')
         pod = flow.index('pod="$(wait_kind_credential_restarted_workspace '
                          '"$environment" "$restart_generation")"')
@@ -2349,7 +2349,7 @@ exit 0
         rebind = index(awaited + recorded + opened, role_closed)
         unset = index('--profile "$profile_name" unset codex', rebind)
         self.assertEqual(flow[rebind + len(awaited + recorded + opened):unset],
-                         '  kind_credential_cli credentials --platform ')
+                         '  kind_credential_cli credentials --cloud ')
         recovered = index('kind_credential_daemon_probe "$environment" success '
                           '"$KIND_AUTHORITY_CHANGE_WITHIN_MS"', unset)
         rebind_closed = index(closed, recovered)
@@ -3068,7 +3068,7 @@ kind_credential_claude_run env-1 {driver} {form} {outcome}
 
 TOKEN_GET_STUB = r"""
 kind_credential_cli() {{
-  [ "$*" = "credentials --platform get claude --output json" ] || return 99
+  [ "$*" = "credentials --cloud get claude --output json" ] || return 99
   jq -nc --arg status {status} --arg revision {revision} --argjson left {left} '[{{
     name: "claude", provider: "anthropic", status: $status,
     authenticationKind: "CREDENTIAL_AUTHENTICATION_KIND_OAUTH",
@@ -3310,9 +3310,9 @@ kind_credential_codex_request_count
             "\n)\n", 1)[0]
         self.assertLess(flow.index("set -E"), flow.index("kind_workspace_runtime_image"))
         self.assertIn('printf \'%s\' "$KIND_ANTHROPIC_API_KEY" |\n'
-                      '    kind_credential_cli credentials --platform add anthropic', flow)
+                      '    kind_credential_cli credentials --cloud add anthropic', flow)
         self.assertIn('printf \'%s\' "$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |\n'
-                      '    kind_credential_cli credentials --platform add claude-subscription',
+                      '    kind_credential_cli credentials --cloud add claude-subscription',
                       flow)
         # No value is ever an argument of a command; each reaches stdin only.
         self.assertEqual(flow.count('"$KIND_ANTHROPIC_API_KEY"'), 1)
@@ -3327,7 +3327,7 @@ kind_credential_codex_request_count
         # Claude Code never runs through kubectl exec: only the driver is staged.
         self.assertNotIn("python3 -B -u -", flow)
         ordered = [
-            'update="$(kind_credential_cli env --platform update "$environment"',
+            'update="$(kind_credential_cli env --cloud update "$environment"',
             'pod="$(wait_kind_credential_restarted_workspace "$environment" "$generation")"',
             'clients="$(kind_credential_managed_clients "$environment" "$pod_uid")"',
             'assert_kind_credential_claude_selection "$form" "$clients"',
@@ -3335,19 +3335,19 @@ kind_credential_codex_request_count
             'kind_credential_claude_run "$environment" "$driver" "$form" success',
             'baseline="$(assert_kind_credential_anthropic_events "$baseline" "$form" 200)"',
             'printf \'%s\' "$KIND_CLAUDE_REFUSED_TOKEN" |\n'
-            '    kind_credential_cli credentials --platform rotate "$token_name"',
+            '    kind_credential_cli credentials --cloud rotate "$token_name"',
             'assert_kind_credential_claude_token "$token_name" 2',
             'kind_credential_claude_run "$environment" "$driver" subscription_token refused',
             'assert_kind_credential_anthropic_events "$baseline" subscription_token 401',
             'printf \'%s\' "$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |\n'
-            '    kind_credential_cli credentials --platform rotate "$token_name"',
+            '    kind_credential_cli credentials --cloud rotate "$token_name"',
             'assert_kind_credential_claude_token "$token_name" 3',
             'kind_credential_claude_run "$environment" "$driver" subscription_token success',
             'assert_kind_credential_anthropic_events "$baseline" subscription_token 200',
-            'kind_credential_cli env --platform rm "$environment"',
+            'kind_credential_cli env --cloud rm "$environment"',
             'wait_kind_credential_environment "$environment" destroyed',
-            'kind_credential_cli credentials --platform revoke "$credential"',
-            'kind_credential_cli credentials --platform delete "$credential" --yes',
+            'kind_credential_cli credentials --cloud revoke "$credential"',
+            'kind_credential_cli credentials --cloud delete "$credential" --yes',
         ]
         positions = [flow.index(step) for step in ordered]
         self.assertEqual(positions, sorted(positions))
@@ -3490,7 +3490,7 @@ kind_credential_claude_rotation env-1 kind-claude 3
             'kind_credential_claude_connect "$name" match',
             'assert_kind_credential_claude_sign_in "$name" 1',
             'latest="$(kind_credential_claude_latest_token)"',
-            'kind_credential_cli credentials --platform --profile "$profile" set anthropic "$name"',
+            'kind_credential_cli credentials --cloud --profile "$profile" set anthropic "$name"',
             'assert_kind_credential_claude_selection sign_in "$clients"',
             'kind_credential_claude_login "$environment" deliver "$((exchanged + 1))"',
             '[ "$(kind_credential_claude_latest_token)" = "$delivered refresh_token" ]',
@@ -3500,17 +3500,17 @@ kind_credential_claude_rotation env-1 kind-claude 3
             'rotated="$(kind_credential_claude_rotation "$environment" "$name" "$delivered")"',
             'kind_credential_claude_login "$environment" own-login',
             'kind_credential_claude_login "$environment" logout',
-            'kind_credential_cli env --platform stop "$environment"',
-            'kind_credential_cli env --platform start "$environment"',
+            'kind_credential_cli env --cloud stop "$environment"',
+            'kind_credential_cli env --cloud start "$environment"',
             'kind_credential_claude_login "$environment" redelivered',
-            'kind_credential_cli credentials --platform revoke "$name"',
+            'kind_credential_cli credentials --cloud revoke "$name"',
             'kind_credential_claude_login "$environment" revoked',
             'driver="$(kind_credential_claude_stage "$pod")"',
             'kind_credential_claude_run "$environment" "$driver" sign_in logged_out',
             'length == $baseline',
-            'kind_credential_cli env --platform rm "$environment"',
-            'kind_credential_cli credentials --platform --profile "$profile" delete --yes',
-            'kind_credential_cli credentials --platform delete "$name" --yes',
+            'kind_credential_cli env --cloud rm "$environment"',
+            'kind_credential_cli credentials --cloud --profile "$profile" delete --yes',
+            'kind_credential_cli credentials --cloud delete "$name" --yes',
         ]
         positions = []
         cursor = 0

@@ -529,7 +529,7 @@ local_platform_ssh_revoke() {
   session_id="$(jq -er 'select(.state == "Running") | .session_id | select(type == "string" and length > 0)' \
     "$TMPDIR_SMOKE/local-waiter.json")" || die 'local revocation probe was not acknowledged'
   wait_until 'local revocation probe ready' "$(( $(seconds_now) + 30 ))" provider_ssh_waiter_ready "$session_id"
-  cw_with_timeout 30 credentials --platform revoke "id:$PROVIDER_SSH_CREDENTIAL_ID" --output json \
+  cw_with_timeout 30 credentials --cloud revoke "id:$PROVIDER_SSH_CREDENTIAL_ID" --output json \
     >"$TMPDIR_SMOKE/local-revoked.json" || die 'cannot revoke the owned platform SSH identity'
   jq -e --arg id "$PROVIDER_SSH_CREDENTIAL_ID" 'length == 1 and .[0].id == $id and
     .[0].status == "CREDENTIAL_STATUS_REVOKED" and .[0].revocationGeneration == "2"' \

@@ -157,12 +157,22 @@ write_stub_tree() {
     "$repo/scripts/ci/verify/dashboard-image.sh"
   # As in the repository, .tmp/ holds ignored local state (merge passes, logs).
   printf '.tmp/\n' > "$repo/.gitignore"
-  # One workspace crate for the push check's changed-crate cases.
-  mkdir -p "$repo/crates/codewire-cli/src"
-  printf '[workspace]\nmembers = [\n    "crates/codewire-cli",\n]\n' > "$repo/Cargo.toml"
+  # One workspace crate for the push check's changed-crate cases, and the
+  # detached desktop and its component library, which the root manifest
+  # excludes as the repository's does.
+  mkdir -p "$repo/crates/codewire-cli/src" "$repo/crates/codewire-desktop/src" \
+    "$repo/crates/codewire-ui/src"
+  printf '[workspace]\nmembers = [\n    "crates/codewire-cli",\n]\nexclude = [\n    "crates/codewire-desktop",\n    "crates/codewire-ui",\n]\n' \
+    > "$repo/Cargo.toml"
   printf '[package]\nname = "codewire-cli"\nversion = "0.0.0"\n' > \
     "$repo/crates/codewire-cli/Cargo.toml"
   printf '// fixture crate\n' > "$repo/crates/codewire-cli/src/lib.rs"
+  printf '[package]\nname = "codewire-desktop"\nversion = "0.0.0"\n' > \
+    "$repo/crates/codewire-desktop/Cargo.toml"
+  printf '// fixture crate\n' > "$repo/crates/codewire-desktop/src/main.rs"
+  printf '[package]\nname = "codewire-ui"\nversion = "0.0.0"\n' > \
+    "$repo/crates/codewire-ui/Cargo.toml"
+  printf '// fixture crate\n' > "$repo/crates/codewire-ui/src/lib.rs"
   mkdir -p "$repo/scripts/ci/images"
   cat > "$repo/scripts/ci/images/workspace-image-pin.py" <<'EOF'
 #!/usr/bin/env python3
@@ -174,6 +184,17 @@ if os.environ.get("PREFLIGHT_TEST_PIN_STALE") == "1":
     print("workspace image pin: synthetic stale pin", file=sys.stderr)
     sys.exit(1)
 EOF
+mkdir -p "$repo/scripts/ci/release"
+cat > "$repo/scripts/ci/release/verify-release-support-pair.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'release-support-pair %s\n' "$1" >> "${PREFLIGHT_TEST_TOOL_LOG:?}"
+if [ "${PREFLIGHT_TEST_SUPPORT_PAIR_MISSING:-0}" = 1 ]; then
+  echo 'release support pair: synthetic unpublished pair' >&2
+  exit 1
+fi
+EOF
+chmod 0755 "$repo/scripts/ci/release/verify-release-support-pair.sh"
 cat > "$repo/scripts/ci/receipts/verify-release-tag-receipt.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -201,6 +222,10 @@ printf 'environment %s\n' "$*" >> "${PREFLIGHT_TEST_TOOL_LOG:?}"
 if [ "${PREFLIGHT_TEST_ENV_FAIL:-0}" = 1 ]; then
   echo '[preflight-environment] FAILED: synthetic environment failure' >&2
   exit 1
+fi
+# Canonical main moving while a check runs, as another worktree's fetch does.
+if [ -n "${PREFLIGHT_TEST_MOVE_MAIN_TO:-}" ]; then
+  git update-ref refs/remotes/origin/main "$PREFLIGHT_TEST_MOVE_MAIN_TO"
 fi
 EOF
   cat > "$repo/scripts/ci/verify/run-product-verification.sh" <<'EOF'
@@ -505,6 +530,50 @@ hook_push "$repo" normal-docs-push "$normal_hook_log" >/dev/null
 [ "$normal_hook_lines" = "$(wc -l < "$normal_hook_log")" ] ||
   fail 'a retried push reran the push check'
 
+# Canonical main moves while a push check runs. Newer commits that touch none
+# of the change's paths keep the receipt; one that touches them needs the
+# check again, against the newer main.
+newer_main() {
+  local parent="$1" path="$2" index blob tree
+  index="$TMP/newer-main.index"
+  GIT_INDEX_FILE="$index" git -C "$repo" read-tree "$parent"
+  blob="$(printf 'newer main: %s\n' "$path" | git -C "$repo" hash-object -w --stdin)"
+  GIT_INDEX_FILE="$index" git -C "$repo" update-index --add --cacheinfo "100644,$blob,$path"
+  tree="$(GIT_INDEX_FILE="$index" git -C "$repo" write-tree)"
+  rm -f "$index"
+  printf 'test: newer main touching %s\n' "$path" |
+    git -C "$repo" commit-tree "$tree" -p "$parent"
+}
+normal_checked_base="$(git -C "$repo" rev-parse origin/main)"
+normal_push_receipt="$(
+  cd "$repo" && scripts/ci/receipts/local-prepush-receipt.py path --scope push --remote-name origin
+)"
+rm "$normal_push_receipt"
+moved_output="$(
+  PREFLIGHT_TEST_MOVE_MAIN_TO="$(newer_main "$normal_checked_base" docs/elsewhere.md)" \
+    hook_push "$repo" normal-docs-moved "$normal_hook_log"
+)" || {
+  printf '%s\n' "$moved_output" >&2
+  fail 'main moving outside the change during the push check refused the push'
+}
+assert_contains moved_main "$moved_output" \
+  'pre-push: no valid receipt (missing); running the fast push check'
+assert_contains moved_main "$moved_output" \
+  "pre-push: local push receipt accepted for $(git -C "$repo" rev-parse HEAD); checked against main at $normal_checked_base, which has since moved outside the change"
+# The retry after main moved reuses the receipt and runs nothing.
+normal_hook_lines="$(wc -l < "$normal_hook_log")"
+hook_push "$repo" normal-docs-moved-retry "$normal_hook_log" >/dev/null
+[ "$normal_hook_lines" = "$(wc -l < "$normal_hook_log")" ] ||
+  fail 'main moving outside the change reran the push check'
+git -C "$repo" update-ref refs/remotes/origin/main \
+  "$(newer_main "$normal_checked_base" docs/normal.md)"
+overlap_output="$(hook_push "$repo" normal-docs-overlap "$normal_hook_log")"
+assert_contains moved_overlap "$overlap_output" \
+  'pre-push: no valid receipt (main-moved-into-change); running the fast push check'
+assert_contains moved_overlap "$overlap_output" \
+  'pre-push: exact-tree local push receipt accepted'
+git -C "$repo" update-ref refs/remotes/origin/main "$normal_checked_base"
+
 # A direct canonical-main update needs merge qualification; a push receipt
 # never satisfies it.
 if main_output="$({
@@ -774,6 +843,28 @@ assert_contains release_tag_tools "$(cat "$tag_log")" \
   'receipt-ref=refs/tags/v1.2.3 remote=origin'
 assert_contains release_tag_tools "$(cat "$tag_log")" \
   'workspace-image-pin check --release --commit'
+assert_contains release_tag_tools "$(cat "$tag_log")" \
+  "release-support-pair $(git -C "$repo" rev-parse 'refs/tags/v1.2.3^{commit}')"
+
+# A release commit without its published support pair is refused before any
+# receipt or gate.
+missing_pair_log="$TMP/missing-pair-tools.log"
+if missing_pair_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" \
+    PREFLIGHT_TEST_TOOL_LOG="$missing_pair_log" \
+    PREFLIGHT_TEST_SUPPORT_PAIR_MISSING=1 \
+    PREFLIGHT_RELEASE_TAG_REF=refs/tags/v1.2.3 \
+    PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$(git rev-parse refs/tags/v1.2.3)" \
+    PREFLIGHT_PUSH_REMOTE_NAME=origin \
+    PREFLIGHT_HEAD_SHA="$(git rev-parse refs/tags/v1.2.3)" \
+    "$repo/scripts/dev/preflight.sh"
+} 2>&1)"; then
+  fail 'release preflight accepted a commit without its published support pair'
+fi
+assert_contains missing_pair "$missing_pair_output" \
+  'release commit has no published support pair; tag a commit support-images published'
+assert_not_contains missing_pair_tools "$(cat "$missing_pair_log")" 'receipt-ref='
 
 # A stale workspace image pin refuses the release before any receipt or gate.
 stale_pin_log="$TMP/stale-pin-tools.log"
@@ -928,6 +1019,21 @@ fi
 assert_contains detached_push "$detached_push" \
   'the pushed commit is not checked out here. Run exactly: scripts/dev/preflight.sh --for-push --emit-receipt'
 git -C "$linked_source" reset -q --hard HEAD~1
+
+# The desktop's component library is in the root manifest's exclude list, not
+# its members: a change to it runs the detached desktop checks, which compile
+# it, never a workspace `-p codewire-ui` that Cargo cannot resolve.
+linked_ui="$TMP/linked-ui"
+git -C "$repo" worktree add -q -b linked-ui "$linked_ui" main
+printf 'rust-version = "0.0.0"\n' >> "$linked_ui/crates/codewire-ui/Cargo.toml"
+commit_all "$linked_ui" 'test: detached desktop library fixture'
+ui_push_log="$TMP/ui-push-tools.log"
+ui_push_output="$(hook_push "$linked_ui" linked-ui-push "$ui_push_log")"
+assert_contains ui_push "$ui_push_output" \
+  '[push-check] passed: environment,desktop-fmt,desktop-check'
+assert_contains ui_push_tools "$(cat "$ui_push_log")" \
+  'cargo check --locked --manifest-path crates/codewire-desktop/Cargo.toml'
+assert_not_contains ui_push_tools "$(cat "$ui_push_log")" '-p codewire-ui'
 
 # Compile errors fail first: the compile gate stops the slower policy lane
 # beside it, and no other lane starts.

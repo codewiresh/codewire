@@ -16,9 +16,9 @@ prepare_provider_openai_identity() {
   [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 'cannot generate disposable OpenAI fixture names'
   credential_name="dev-openai-$nonce"
   profile_name="dev-openai-profile-$nonce"
-  cw_with_timeout 30 credentials --platform list --output json \
+  cw_with_timeout 30 credentials --cloud list --output json \
     >"$TMPDIR_SMOKE/provider-openai-credentials-before.json" || die 'cannot inspect personal credential metadata'
-  cw_with_timeout 30 credentials --platform profiles list --output json \
+  cw_with_timeout 30 credentials --cloud profiles list --output json \
     >"$TMPDIR_SMOKE/provider-openai-profiles-before.json" || die 'cannot inspect personal profile metadata'
   jq -e --arg name "$credential_name" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/provider-openai-credentials-before.json" >/dev/null || die 'disposable OpenAI credential name collision'
@@ -30,9 +30,9 @@ prepare_provider_openai_identity() {
 
   # Inherit the terminal so the existing CLI reads one key through its
   # echo-disabled protected prompt. Neither input nor command output is captured.
-  cw_with_timeout 600 credentials --platform add openai --name "$PROVIDER_OPENAI_CREDENTIAL_NAME" ||
+  cw_with_timeout 600 credentials --cloud add openai --name "$PROVIDER_OPENAI_CREDENTIAL_NAME" ||
     die 'fresh owner-operated platform OpenAI enrollment failed'
-  cw_with_timeout 30 credentials --platform get "$PROVIDER_OPENAI_CREDENTIAL_NAME" --output json \
+  cw_with_timeout 30 credentials --cloud get "$PROVIDER_OPENAI_CREDENTIAL_NAME" --output json \
     >"$TMPDIR_SMOKE/provider-openai-credential.json" || die 'created OpenAI metadata is unavailable'
   PROVIDER_OPENAI_CREDENTIAL_ID="$(provider_ssh_metadata_id \
     "$TMPDIR_SMOKE/provider-openai-credential.json" "$PROVIDER_OPENAI_CREDENTIAL_NAME")" ||
@@ -42,11 +42,11 @@ prepare_provider_openai_identity() {
     .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE" and
     .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"
   ' "$TMPDIR_SMOKE/provider-openai-credential.json" >/dev/null || die 'created OpenAI public metadata is invalid'
-  cw_with_timeout 30 credentials --platform --profile "$PROVIDER_OPENAI_PROFILE_NAME" \
+  cw_with_timeout 30 credentials --cloud --profile "$PROVIDER_OPENAI_PROFILE_NAME" \
     set openai "id:$PROVIDER_OPENAI_CREDENTIAL_ID" \
     >"$TMPDIR_SMOKE/provider-openai-profile-set.out" 2>"$TMPDIR_SMOKE/provider-openai-profile-set.err" ||
     die 'cannot select the created OpenAI identity in its disposable profile'
-  cw_with_timeout 30 credentials --platform --profile "$PROVIDER_OPENAI_PROFILE_NAME" get --output json \
+  cw_with_timeout 30 credentials --cloud --profile "$PROVIDER_OPENAI_PROFILE_NAME" get --output json \
     >"$TMPDIR_SMOKE/provider-openai-profile.json" || die 'created OpenAI profile metadata is unavailable'
   PROVIDER_OPENAI_PROFILE_ID="$(provider_ssh_metadata_id \
     "$TMPDIR_SMOKE/provider-openai-profile.json" "$PROVIDER_OPENAI_PROFILE_NAME")" ||
@@ -109,7 +109,7 @@ cleanup_provider_openai() {
 cleanup_provider_openai_profile() {
   local rc=0 resolved
   if [[ -n "$PROVIDER_OPENAI_PROFILE_NAME" ]]; then
-    cw_with_timeout 30 credentials --platform profiles list --output json \
+    cw_with_timeout 30 credentials --cloud profiles list --output json \
       >"$TMPDIR_SMOKE/provider-openai-cleanup-profiles.json" 2>/dev/null || return 1
     jq -e 'type == "array"' "$TMPDIR_SMOKE/provider-openai-cleanup-profiles.json" >/dev/null || return 1
     if jq -e --arg name "$PROVIDER_OPENAI_PROFILE_NAME" 'any(.[]; .name == $name)' \
@@ -118,10 +118,10 @@ cleanup_provider_openai_profile() {
         "$PROVIDER_OPENAI_PROFILE_NAME")" || return 1
       [[ -z "$PROVIDER_OPENAI_PROFILE_ID" || "$PROVIDER_OPENAI_PROFILE_ID" == "$resolved" ]] || return 1
       PROVIDER_OPENAI_PROFILE_ID="$resolved"
-      cw_with_timeout 30 credentials --platform --profile "id:$PROVIDER_OPENAI_PROFILE_ID" delete --yes \
+      cw_with_timeout 30 credentials --cloud --profile "id:$PROVIDER_OPENAI_PROFILE_ID" delete --yes \
         >"$TMPDIR_SMOKE/provider-openai-cleanup-profile.out" 2>&1 || rc=1
     fi
-    cw_with_timeout 30 credentials --platform profiles list --output json \
+    cw_with_timeout 30 credentials --cloud profiles list --output json \
       >"$TMPDIR_SMOKE/provider-openai-cleanup-profiles.json" 2>/dev/null &&
       jq -e --arg name "$PROVIDER_OPENAI_PROFILE_NAME" --arg id "$PROVIDER_OPENAI_PROFILE_ID" '
         type == "array" and all(.[]; .name != $name and .id != $id)
@@ -133,7 +133,7 @@ cleanup_provider_openai_profile() {
 cleanup_provider_openai_credential() {
   local rc=0 resolved
   if [[ -n "$PROVIDER_OPENAI_CREDENTIAL_NAME" ]]; then
-    cw_with_timeout 30 credentials --platform list --output json \
+    cw_with_timeout 30 credentials --cloud list --output json \
       >"$TMPDIR_SMOKE/provider-openai-cleanup-credentials.json" 2>/dev/null || return 1
     jq -e 'type == "array"' "$TMPDIR_SMOKE/provider-openai-cleanup-credentials.json" >/dev/null || return 1
     if jq -e --arg name "$PROVIDER_OPENAI_CREDENTIAL_NAME" 'any(.[]; .name == $name)' \
@@ -142,7 +142,7 @@ cleanup_provider_openai_credential() {
         "$PROVIDER_OPENAI_CREDENTIAL_NAME")" || return 1
       [[ -z "$PROVIDER_OPENAI_CREDENTIAL_ID" || "$PROVIDER_OPENAI_CREDENTIAL_ID" == "$resolved" ]] || return 1
       PROVIDER_OPENAI_CREDENTIAL_ID="$resolved"
-      cw_with_timeout 30 credentials --platform get "id:$PROVIDER_OPENAI_CREDENTIAL_ID" --output json \
+      cw_with_timeout 30 credentials --cloud get "id:$PROVIDER_OPENAI_CREDENTIAL_ID" --output json \
         >"$TMPDIR_SMOKE/provider-openai-cleanup-credential.json" 2>/dev/null || return 1
       jq -e --arg id "$PROVIDER_OPENAI_CREDENTIAL_ID" --arg name "$PROVIDER_OPENAI_CREDENTIAL_NAME" '
         type == "array" and length == 1 and .[0].id == $id and .[0].name == $name and
@@ -152,13 +152,13 @@ cleanup_provider_openai_credential() {
       ' "$TMPDIR_SMOKE/provider-openai-cleanup-credential.json" >/dev/null || return 1
       if ! jq -e 'length == 1 and .[0].status == "CREDENTIAL_STATUS_REVOKED"' \
           "$TMPDIR_SMOKE/provider-openai-cleanup-credential.json" >/dev/null; then
-        cw_with_timeout 30 credentials --platform revoke "id:$PROVIDER_OPENAI_CREDENTIAL_ID" \
+        cw_with_timeout 30 credentials --cloud revoke "id:$PROVIDER_OPENAI_CREDENTIAL_ID" \
           >"$TMPDIR_SMOKE/provider-openai-cleanup-revoke.out" 2>&1 || rc=1
       fi
-      cw_with_timeout 30 credentials --platform delete "id:$PROVIDER_OPENAI_CREDENTIAL_ID" --yes \
+      cw_with_timeout 30 credentials --cloud delete "id:$PROVIDER_OPENAI_CREDENTIAL_ID" --yes \
         >"$TMPDIR_SMOKE/provider-openai-cleanup-credential.out" 2>&1 || rc=1
     fi
-    cw_with_timeout 30 credentials --platform list --output json \
+    cw_with_timeout 30 credentials --cloud list --output json \
       >"$TMPDIR_SMOKE/provider-openai-cleanup-credentials.json" 2>/dev/null &&
       jq -e --arg name "$PROVIDER_OPENAI_CREDENTIAL_NAME" --arg id "$PROVIDER_OPENAI_CREDENTIAL_ID" '
         type == "array" and all(.[]; .name != $name and .id != $id)

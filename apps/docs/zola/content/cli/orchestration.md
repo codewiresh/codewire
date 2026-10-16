@@ -101,7 +101,7 @@ the Sandbox's own Claude settings and the same local route as your terminal:
 
 ```bash
 cw setup
-cw env create --platform --type sandbox --name cloud-team \
+cw env create --cloud --type sandbox --name cloud-team \
   --image workspace --repo "$REPO_URL" --profile platform:agent-team
 ENV=cloud-team
 ```

@@ -10,7 +10,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.93.0"
+rust-version = "1.99.0"
 license = "BSD-3-Clause"
 authors = ["Sonica"]
 
@@ -41,3 +41,8 @@ tower = { version = "0.5", features = ["util"] }
 lto = true
 codegen-units = 1
 strip = true
+
+[profile.runtime]
+inherits = "release"
+lto = "thin"
+codegen-units = 16

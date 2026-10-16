@@ -149,10 +149,10 @@ Manage write-only stored values and inspect value-blind metadata. Select the
 platform placement explicitly:
 
 ```bash
-cw secrets --platform list
-cw secrets --platform organization list
-cw secrets --platform organization set DATABASE_URL
-cw secrets --platform organization delete DATABASE_URL
+cw secrets --cloud list
+cw secrets --cloud organization list
+cw secrets --cloud organization set DATABASE_URL
+cw secrets --cloud organization delete DATABASE_URL
 ```
 
 `set` reads the value from a hidden prompt on an interactive terminal or from

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly OPENBAO_ADDR="https://openbao.example.invalid"
+readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 
 TARGET=""
 ALLOW_PROD_MUTATION=0

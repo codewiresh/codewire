@@ -306,7 +306,7 @@ fn admit_static_elf(file: &File, size: u64) -> anyhow::Result<()> {
             'table: while position < length {
                 let n = (length - position).min(buffer.len() as u64) as usize;
                 file.read_exact_at(&mut buffer[..n], start + position)?;
-                for entry in buffer[..n].chunks_exact(16) {
+                for entry in buffer[..n].as_chunks::<16>().0 {
                     let tag = i64::from_le_bytes(entry[..8].try_into().expect("dynamic tag"));
                     if tag == 0 {
                         break 'table;

@@ -18,9 +18,9 @@ use super::storage_placement::{
     StoragePlacement, require_reference_placement, resolve_storage_placement,
 };
 use super::{
-    CredentialProfileCommand, CredentialProfileDeleteArgs, CredentialProfileSelectorArgs,
-    CredentialProfilesCommand, CredentialsArgs, CredentialsCommand, EchoGuard, Globals,
-    OutputFormat, trimmed_required,
+    CredentialGenerateArgs, CredentialProfileCommand, CredentialProfileDeleteArgs,
+    CredentialProfileSelectorArgs, CredentialProfilesCommand, CredentialsArgs, CredentialsCommand,
+    EchoGuard, Globals, OutputFormat, trimmed_required,
 };
 
 pub(super) const CODEX_DEVICE_AUTHORIZATION_GUIDANCE: &str = "Before connecting, turn on \"Enable device code authorization for Codex\" in ChatGPT Security settings: https://chatgpt.com/#settings/Security. For a managed workspace, your administrator may need to allow device code login.";
@@ -32,7 +32,14 @@ const MAX_SSH_PASSPHRASE_BYTES: usize = 1024;
 pub(super) enum CredentialOperation {
     Credential(CredentialsCommand),
     Profile(CredentialProfileCommand),
+    /// `--profile NAME generate ssh`: generate the identity, then set it as
+    /// the profile's SSH key.
+    GenerateIntoProfile(CredentialGenerateArgs, String),
 }
+
+/// Printed after a generated SSH public key.
+pub(super) const SSH_PUBLIC_KEY_GITHUB_HINT: &str =
+    "Add the public key above to GitHub: https://github.com/settings/ssh/new";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CredentialDispatch {
@@ -114,7 +121,7 @@ fn credential_dispatch(
         StoragePlacement::Platform => Ok(CredentialDispatch::Platform),
         StoragePlacement::Local if local_supported => Ok(CredentialDispatch::Local),
         StoragePlacement::Local => anyhow::bail!(
-            "local protected credential storage is available only on Linux and macOS; use --platform explicitly for platform storage"
+            "local protected credential storage is available only on Linux and macOS; use --cloud explicitly for cloud storage"
         ),
     }
 }
@@ -215,8 +222,11 @@ pub(super) fn resolve_credential_operation(
                 yes: args.yes,
             })
         }
+        CredentialsCommand::Generate(args) => {
+            return Ok(CredentialOperation::GenerateIntoProfile(args, profile));
+        }
         _ => anyhow::bail!(
-            "--profile supports set, unset, list, get, revisions and delete; enrollment never binds a profile"
+            "--profile supports set, unset, list, get, revisions, delete and generate ssh; connect and add never bind a profile"
         ),
     };
     Ok(CredentialOperation::Profile(command))
@@ -320,11 +330,22 @@ fn reject_unknown_selector_prefix(selector: &str, kind: &str) -> anyhow::Result<
     Ok(())
 }
 
+/// What `connect claude` says before it prints Claude's sign-in link.
+pub(super) const CLAUDE_SIGN_IN_GUIDANCE: &str = "Sign in to Claude in your browser with the account whose Claude Pro, Max, Team or Enterprise plan you want to use, then paste the code Claude shows. Platform only.";
+
+/// A pasted value that is not Claude's `code#state`; one retry follows at a
+/// terminal.
+pub(super) const CLAUDE_CODE_SHAPE_HINT: &str = "That doesn't look like Claude's code (expected text with a # in the middle, like abc…#xyz…); copy the whole code and paste it again.";
+
+/// The longest code or state part accepted from a paste.
+const MAX_CLAUDE_CODE_PART_BYTES: usize = 4096;
+
 /// The one paste-based enrollment step for a Claude subscription token. The
 /// owner runs Claude Code's own command; Codewire never drives its OAuth.
-pub(super) const CLAUDE_SIGN_IN_GUIDANCE: &str = "Sign in to Claude in your browser with the account whose Claude Pro, Max, Team or Enterprise plan you want to use, then paste the code Claude shows (code#state). Platform only.";
+pub(super) const CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE: &str = "Run `claude setup-token` (requires a Claude Pro, Max, Team or Enterprise plan), then copy the freshly printed token, paste it here and press Enter (what you paste stays hidden). Codewire records an expiry one year from now; the token stays in Codewire and is never delivered to a Sandbox.";
 
-pub(super) const CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE: &str = "Run `claude setup-token` (requires a Claude Pro, Max, Team or Enterprise plan), then paste the freshly printed token here. Codewire records an expiry one year from now; the token stays in Codewire and is never delivered to a Sandbox.";
+/// The hidden prompt for a Claude subscription token.
+pub(super) const CLAUDE_SUBSCRIPTION_TOKEN_PROMPT: &str = "Paste the token from claude setup-token";
 
 /// Every profile includes the account's one GitHub connection, so GitHub is
 /// never set or unset on a profile.
@@ -367,11 +388,19 @@ pub(super) fn prompt_credential_material() -> anyhow::Result<ProtectedValue> {
 }
 
 /// Read one write-only value from a no-echo terminal prompt, or all of a piped
-/// stdin. The value is never taken from argv.
+/// stdin. The value is never taken from argv. At a terminal, nothing shows
+/// while the value is pasted, so its length is confirmed once it is read; the
+/// value itself is never echoed.
 pub(super) fn prompt_named_material(label: &str) -> anyhow::Result<ProtectedValue> {
+    prompt_hidden(&format!("{label}: "), "")
+}
+
+/// [`prompt_named_material`] with the prompt shown exactly as given, and its
+/// confirmation under `indent`.
+pub(super) fn prompt_hidden(prompt: &str, indent: &str) -> anyhow::Result<ProtectedValue> {
     let interactive = std::io::stdin().is_terminal();
     if interactive {
-        eprint!("{label}: ");
+        eprint!("{prompt}");
         std::io::stderr()
             .flush()
             .context("flush credential prompt")?;
@@ -384,7 +413,138 @@ pub(super) fn prompt_named_material(label: &str) -> anyhow::Result<ProtectedValu
     let stdin = std::io::stdin();
     let value = read_protected_value(stdin.lock(), interactive);
     drop(echo_guard);
+    if interactive {
+        // The Enter that ended the hidden line was not echoed either.
+        eprintln!();
+        if let Ok(value) = &value {
+            eprintln!("{indent}{}", received_confirmation(value.expose_secret()));
+        }
+    }
     value
+}
+
+/// What the hidden prompt says once it has read a value: its length only.
+fn received_confirmation(value: &[u8]) -> String {
+    let characters = std::str::from_utf8(value).map_or(value.len(), |text| text.chars().count());
+    format!(
+        "Got it ({characters} character{}).",
+        if characters == 1 { "" } else { "s" }
+    )
+}
+
+/// Read the code Claude shows after sign-in from the hidden prompt (or piped
+/// stdin) and return it as `code#state`. Accepted, see [`normalize_claude_code`]:
+/// the `code#state` itself with surrounding whitespace and a line ending, or
+/// the full callback URL Claude's page was opened at. At a terminal a value of
+/// another shape gets one retry; nothing is sent to Claude until it parses.
+pub(super) fn prompt_claude_code() -> anyhow::Result<ProtectedValue> {
+    let interactive = std::io::stdin().is_terminal();
+    claude_code_with_retry(
+        interactive,
+        || {
+            prompt_hidden(
+                super::login_screen::PASTE_CODE_PROMPT,
+                super::login_screen::INDENT,
+            )
+        },
+        &mut std::io::stderr(),
+    )
+}
+
+fn claude_code_with_retry(
+    interactive: bool,
+    mut read: impl FnMut() -> anyhow::Result<ProtectedValue>,
+    out: &mut impl std::io::Write,
+) -> anyhow::Result<ProtectedValue> {
+    let attempts = if interactive { 2 } else { 1 };
+    for attempt in 1..=attempts {
+        let pasted = read()?;
+        if let Some(mut code) = normalize_claude_code(pasted.expose_secret()) {
+            return ProtectedValue::new(std::mem::take(&mut *code))
+                .context("invalid code from Claude");
+        }
+        drop(pasted);
+        if attempt < attempts {
+            writeln!(
+                out,
+                "{}{CLAUDE_CODE_SHAPE_HINT}",
+                super::login_screen::INDENT
+            )
+            .context("write the paste hint")?;
+        }
+    }
+    anyhow::bail!(
+        "that doesn't look like Claude's code (expected text with a # in the middle, like abc…#xyz…); nothing was sent to Claude. Run the command again and paste the whole code"
+    )
+}
+
+/// Claude's `code#state` from what was pasted, or `None` for any other shape.
+/// Accepted: `code#state` with surrounding whitespace, or an `http(s)` URL
+/// whose query carries `code` and `state` (the callback page's address). Both
+/// parts must be non-empty URL-safe text (`A-Z a-z 0-9 - _ . ~`), as Claude
+/// issues them.
+pub(super) fn normalize_claude_code(pasted: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+    let text = std::str::from_utf8(pasted).ok()?.trim();
+    let (code, state) = match text
+        .strip_prefix("https://")
+        .or_else(|| text.strip_prefix("http://"))
+    {
+        Some(rest) => {
+            let query = rest.split_once('?')?.1;
+            let query = query.split('#').next().unwrap_or_default();
+            let (mut code, mut state) = (None, None);
+            for pair in query.split('&') {
+                match pair.split_once('=') {
+                    Some(("code", value)) if code.is_none() => code = Some(percent_decode(value)?),
+                    Some(("state", value)) if state.is_none() => {
+                        state = Some(percent_decode(value)?);
+                    }
+                    _ => {}
+                }
+            }
+            (code?, state?)
+        }
+        None => {
+            let (code, state) = text.split_once('#')?;
+            (
+                Zeroizing::new(code.as_bytes().to_vec()),
+                Zeroizing::new(state.as_bytes().to_vec()),
+            )
+        }
+    };
+    let url_safe = |part: &[u8]| {
+        !part.is_empty()
+            && part.len() <= MAX_CLAUDE_CODE_PART_BYTES
+            && part.iter().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+            })
+    };
+    if !url_safe(&code) || !url_safe(&state) {
+        return None;
+    }
+    let mut normalized = Zeroizing::new(Vec::with_capacity(code.len() + 1 + state.len()));
+    normalized.extend_from_slice(&code);
+    normalized.push(b'#');
+    normalized.extend_from_slice(&state);
+    Some(normalized)
+}
+
+/// `%XX` decoding of one query value; any other byte is kept as is.
+fn percent_decode(value: &str) -> Option<Zeroizing<Vec<u8>>> {
+    let bytes = value.as_bytes();
+    let mut decoded = Zeroizing::new(Vec::with_capacity(bytes.len()));
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(index + 1..index + 3)?).ok()?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    Some(decoded)
 }
 
 pub(super) fn read_protected_value<R: std::io::BufRead>(
@@ -638,7 +798,7 @@ mod tests {
 
     #[test]
     fn credential_parser_is_available_for_both_explicit_placements() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             let parsed = crate::Cli::try_parse_from([
                 "cw",
                 "credentials",
@@ -708,6 +868,105 @@ mod tests {
         for invalid in ["id:", "id:not-a-uuid", "provider:work", "name: work"] {
             assert!(parse_credential_selector(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn claude_code_accepts_the_shown_code_and_its_callback_url() {
+        let normalized = |pasted: &str| {
+            normalize_claude_code(pasted.as_bytes())
+                .map(|code| String::from_utf8(code.to_vec()).unwrap())
+        };
+        assert_eq!(
+            normalized("abc-DEF_1.2~3#st4te").as_deref(),
+            Some("abc-DEF_1.2~3#st4te")
+        );
+        assert_eq!(normalized("  abc#xyz \r\n").as_deref(), Some("abc#xyz"));
+        assert_eq!(
+            normalized("https://platform.claude.com/oauth/code/callback?code=abc&state=xyz")
+                .as_deref(),
+            Some("abc#xyz")
+        );
+        assert_eq!(
+            normalized(
+                " https://platform.claude.com/oauth/code/callback?state=x%79z&code=a%62c#top\n"
+            )
+            .as_deref(),
+            Some("abc#xyz")
+        );
+        for invalid in [
+            "",
+            "   ",
+            "abc",
+            "#xyz",
+            "abc#",
+            "abc#x#y",
+            "ab c#xyz",
+            "abc#xy z",
+            "abc#xyz\u{e9}",
+            "https://platform.claude.com/oauth/code/callback",
+            "https://platform.claude.com/oauth/code/callback?code=abc",
+            "https://platform.claude.com/oauth/code/callback?code=abc&state=%zz",
+            "https://platform.claude.com/oauth/code/callback?code=abc&state=x%2",
+        ] {
+            assert!(normalized(invalid).is_none(), "{invalid:?}");
+        }
+        let long = format!("{}#xyz", "a".repeat(MAX_CLAUDE_CODE_PART_BYTES + 1));
+        assert!(normalized(&long).is_none());
+        let longest = format!("{}#xyz", "a".repeat(MAX_CLAUDE_CODE_PART_BYTES));
+        assert!(normalized(&longest).is_some());
+    }
+
+    #[test]
+    fn a_misshapen_claude_code_gets_one_retry_at_a_terminal_only() {
+        let value = |text: &str| ProtectedValue::new(text.as_bytes().to_vec()).unwrap();
+
+        let mut pastes = vec![value("not-a-code"), value(" abc#xyz ")].into_iter();
+        let mut out = Vec::new();
+        let code = claude_code_with_retry(true, || Ok(pastes.next().unwrap()), &mut out).unwrap();
+        assert_eq!(code.expose_secret(), b"abc#xyz");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("   {CLAUDE_CODE_SHAPE_HINT}\n")
+        );
+
+        let mut pastes = vec![value("first-paste"), value("second-paste")].into_iter();
+        let mut out = Vec::new();
+        let error =
+            claude_code_with_retry(true, || Ok(pastes.next().unwrap()), &mut out).unwrap_err();
+        assert!(error.to_string().contains("nothing was sent to Claude"));
+        assert!(!error.to_string().contains("first-paste"));
+        assert!(!error.to_string().contains("second-paste"));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("   {CLAUDE_CODE_SHAPE_HINT}\n")
+        );
+
+        let mut reads = 0;
+        let mut out = Vec::new();
+        assert!(
+            claude_code_with_retry(
+                false,
+                || {
+                    reads += 1;
+                    Ok(value("piped-not-a-code"))
+                },
+                &mut out
+            )
+            .is_err()
+        );
+        assert_eq!(reads, 1);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn the_hidden_prompt_confirms_only_the_length() {
+        assert_eq!(received_confirmation(b"abc#xyz"), "Got it (7 characters).");
+        assert_eq!(received_confirmation(b"x"), "Got it (1 character).");
+        assert_eq!(
+            received_confirmation("\u{e9}#\u{fc}".as_bytes()),
+            "Got it (3 characters)."
+        );
+        assert!(!received_confirmation(b"synthetic-secret").contains("synthetic"));
     }
 
     #[test]

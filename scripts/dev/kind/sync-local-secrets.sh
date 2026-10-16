@@ -11,7 +11,7 @@ esac
 readonly kube_context="${KUBE_CONTEXT:-kind-codewire}"
 readonly kube_namespace="${KUBE_NAMESPACE:-default}"
 readonly secret_name="codewire-local-anthropic"
-readonly openbao_addr="https://openbao.example.invalid"
+readonly openbao_addr="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly openbao_path="apps/codewire/dev/runtime"
 
 declare -a openbao_env_unsets=()

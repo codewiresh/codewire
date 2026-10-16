@@ -9,7 +9,7 @@
 # fake: the gate's synthetic fixture, exactly as `make e2e-kind` leaves it.
 
 KIND_PUBLIC_ORIGIN="${KIND_PUBLIC_ORIGIN:-}"
-KIND_GITHUB_APP_OPENBAO_ADDR="https://openbao.example.invalid"
+KIND_GITHUB_APP_OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 KIND_GITHUB_APP_OPENBAO_PATH="${KIND_GITHUB_APP_OPENBAO_PATH:-apps/codewire/dev/runtime}"
 KIND_REAL_CREDENTIAL_DATABASE_URL="postgres://codewire_credential_broker:kind-credential-broker-synthetic-only@postgres.${NS}.svc.cluster.local:5432/codewire?sslmode=verify-full&sslrootcert=/run/codewire-credential-db-roots/ca.pem"
 

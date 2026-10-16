@@ -32,7 +32,7 @@ use:
 4. Add the GitHub connection to a credential profile, and create the
    environment with that profile.
 
-From the CLI, `cw credentials --platform connect github` connects the same
+From the CLI, `cw credentials --cloud connect github` connects the same
 account and prints the installation link.
 
 **Why only select repositories.** The App can read and push code and open pull

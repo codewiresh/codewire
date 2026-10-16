@@ -5,8 +5,8 @@ ARG BASE_IMAGE_REF
 
 # The developer Rust toolchain shipped in the workspace, for the image's own
 # platform. The workspace copies only its Cargo and Rustup homes.
-FROM rust:1.93.0-slim-bookworm@sha256:776861219cd851131c1cec3bbd7cbeb16b99a794048097eb69ad9682a8ed0d57 AS cw-toolchain
-RUN rustup component add --toolchain 1.93.0 rustfmt clippy
+FROM rust:1.99.0-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a16627bc841228151faa2d4de2644ac9987e4a2f1f2fa AS cw-toolchain
+RUN rustup component add --toolchain 1.99.0 rustfmt clippy
 
 # Checksum-pinned compiler tools, selected for the build platform. None of
 # these archives enters the runtime.
@@ -34,7 +34,7 @@ FROM zig-${BUILDARCH} AS build-zig
 
 # The arm64 cw is cross-compiled natively on the build platform, never under
 # emulation, to the same static musl form as the admitted amd64 asset.
-FROM --platform=$BUILDPLATFORM rust:1.93.0-bookworm@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382 AS cw-cross-compiler
+FROM --platform=$BUILDPLATFORM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS cw-cross-compiler
 COPY --from=build-protoc /protoc.zip /tmp/protoc.zip
 COPY --from=build-sccache /sccache.tar.gz /tmp/sccache.tar.gz
 COPY --from=build-zig /zig.tar.xz /tmp/zig.tar.xz
@@ -64,8 +64,8 @@ RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     test "$(/opt/zig/zig version)" = '0.15.2'
 ENV PROTOC=/opt/protoc/bin/protoc
 ENV PATH="/opt/zig:${PATH}"
-RUN test "$(rustc --version)" = 'rustc 1.93.0 (254b59607 2026-01-19)' && \
-    rustup target add --toolchain 1.93.0 aarch64-unknown-linux-musl && \
+RUN test "$(rustc --version)" = 'rustc 1.99.0 (b940084d7 2026-09-28)' && \
+    rustup target add --toolchain 1.99.0 aarch64-unknown-linux-musl && \
     cargo install --locked cargo-zigbuild --version 0.23.0 && \
     test "$(cargo-zigbuild --version)" = 'cargo-zigbuild 0.23.0'
 COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build
@@ -75,7 +75,7 @@ COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-ru
 # them under emulation. They still resolve @latest at image-build time (every
 # builder bypasses this stage's cache, like workspace-floating-tools), and the
 # build information Go embeds in each binary keeps them visible to the SBOM.
-FROM --platform=$BUILDPLATFORM rust:1.93.0-bookworm@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382 AS workspace-floating-go
+FROM --platform=$BUILDPLATFORM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS workspace-floating-go
 SHELL ["/bin/bash", "-c"]
 ARG BUILDARCH
 ARG TARGETARCH
@@ -222,10 +222,11 @@ ENV CARGO_HOME="/home/codewire/.cargo"
 ENV RUSTUP_HOME="/home/codewire/.rustup"
 # User installations persist in the mounted home and take precedence over the
 # shipped agents. Image configuration, not a hidden ~/.npmrc, selects their
-# npm prefix and the sole admitted lifecycle-script package. The upgrade
-# commands of shipped agents that would update in place come next.
+# npm prefix. npm's install-script policy is left at its default, so project
+# and user installs behave like stock npm; only the shipped agents' own install
+# below runs under a strict allowlist. The upgrade commands of shipped agents
+# that would update in place come next.
 ENV NPM_CONFIG_PREFIX="/home/codewire/.npm-global"
-ENV NPM_CONFIG_ALLOW_SCRIPTS="@anthropic-ai/claude-code"
 ENV PATH="/home/codewire/.npm-global/bin:/home/codewire/.local/bin:/opt/codewire/agents/upgrade:/opt/codewire/agents/npm/bin:/opt/codewire/agents/bin:${CARGO_HOME}/bin:${PATH}"
 
 # Reuse the exact toolchain and explicitly selected components from the
@@ -274,7 +275,7 @@ RUN --mount=type=bind,source=images/workspace/agents,target=/tmp/codewire-agents
     cp /tmp/codewire-agents/package.json /tmp/codewire-agents/package-lock.json \
       /opt/codewire/agents/npm/lib/ && \
     cd /opt/codewire/agents/npm/lib && \
-    env -u NPM_CONFIG_ALLOW_SCRIPTS -u NPM_CONFIG_PREFIX \
+    env -u NPM_CONFIG_PREFIX \
       npm ci --strict-allow-scripts --no-audit --no-fund && \
     npm cache clean --force && \
     for agent in claude codex gemini kimi pi; do \

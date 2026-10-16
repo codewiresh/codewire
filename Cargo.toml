@@ -42,6 +42,7 @@ members = [
     "crates/codewire-vmm-guest-probe",
     "crates/codewire-workload-secrets",
     "crates/codewire-workspace-access",
+    "crates/codewire-workspace-hack",
     "crates/codewire-workspace-image",
 ]
 exclude = [
@@ -52,7 +53,7 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.93.0"
+rust-version = "1.99.0"
 license = "AGPL-3.0-only"
 authors = ["Sonica"]
 
@@ -95,6 +96,9 @@ codewire-cw-release = { path = "crates/codewire-cw-release" }
 codewire-local-credentials = { path = "crates/codewire-local-credentials" }
 codewire-platform-credentials = { path = "crates/codewire-platform-credentials" }
 codewire-workload-secrets = { path = "crates/codewire-workload-secrets" }
+# Managed by cargo-hakari (.config/hakari.toml): unifies third-party features
+# so every package and feature selection shares one build of each dependency.
+codewire-workspace-hack = { path = "crates/codewire-workspace-hack" }
 
 # AI/HTTP
 av-credential-proxy = { git = "https://github.com/noeljackson/av.git", rev = "32ef60cbbe58dfb00a3ffda76f7b2e3b8900baaa", default-features = false }
@@ -271,6 +275,15 @@ wry = "0.54"
 lto = true
 codegen-units = 1
 strip = true
+
+# Runtime images (dashboard, services, mesh, derp, and the daemon's static cw):
+# release semantics with thin LTO and parallel codegen. Full LTO with one
+# codegen unit made every Dev delivery relink each shipped binary on one core.
+# The cw CLI release assets keep [profile.release].
+[profile.runtime]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
 
 # Native tests hash the actual CW image at admission and custody checks. Keep
 # those hashes inside the same deadlines even with an unoptimized debug CW.

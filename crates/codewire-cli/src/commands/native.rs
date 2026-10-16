@@ -5,7 +5,6 @@ use std::pin::Pin;
 
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 
-use anyhow::Context as _;
 use codewire_access::{AccessProfileReference, EnvironmentId};
 use codewire_client::TokenProvider as _;
 use codewire_local_credentials::LocalCredentialClient;
@@ -366,7 +365,9 @@ pub(crate) async fn create_native_environment(
 ) -> anyhow::Result<Option<v1::Environment>> {
     host_support::require_local_vm_host()?;
     reject_unsupported_native_create_options(&args)?;
-    ensure_pinned_runtime().await?;
+    // Before the review: a VM of the cw this one updated from that still runs
+    // refuses the create.
+    let mut client = native_boot_client().await?;
     if args.name.as_deref().and_then(trimmed_str).is_none() {
         args.name = Some(default_native_name(
             args.path.as_deref(),
@@ -376,6 +377,9 @@ pub(crate) async fn create_native_environment(
     let reviewed = native_create_is_interactive(&args);
     if reviewed && !review_native_create(&mut args).await? {
         return Ok(None);
+    }
+    if reviewed && let Some(profile) = args.profile.as_deref().and_then(local_profile_selector) {
+        super::credentials::offer_local_profile_ssh_key(profile).await?;
     }
     let name = args
         .name
@@ -411,10 +415,17 @@ pub(crate) async fn create_native_environment(
             eprintln!("{notice}");
         }
         eprintln!("Workspace: {}", workspace.description);
+        if let Some(kept_in_vm) = &workspace.kept_in_vm {
+            eprintln!("{kept_in_vm}");
+        }
+        for note in &workspace.vm_only_notes {
+            eprintln!("{note}");
+        }
     }
     let NativeWorkspace {
         source_path: request_source_path,
         path_mode: implicit_path_mode,
+        vm_only: implicit_vm_only,
         ..
     } = workspace;
     let vcpus = match args.cpu.as_deref() {
@@ -488,7 +499,7 @@ pub(crate) async fn create_native_environment(
     } = project;
     let (project_spec_json, project_spec_sha256) =
         canonical_native_project_intent(spec, vcpus, memory_mib, disk_bytes)?;
-    let mut client = native_client().await?;
+    ensure_pinned_runtime().await?;
     let request = v1::CreateEnvironmentRequest {
         name,
         source_path: request_source_path,
@@ -519,6 +530,7 @@ pub(crate) async fn create_native_environment(
             .unwrap_or_default(),
         platform_source_authority: selected.platform,
         local_mounts,
+        implicit_vm_only,
     };
     let progress = native_progress();
     let created = match &progress {
@@ -555,6 +567,14 @@ fn native_direct_mount_warning(mounts: &[v1::LocalMountInput]) -> Option<String>
     Some(format!(
         "Warning: direct mounts let guest root inspect every file beneath each selected host directory.{write_warning} The explicit mode: direct and read_only choice acknowledges this grant."
     ))
+}
+
+/// The selector of an explicitly local credential profile reference.
+fn local_profile_selector(reference: &str) -> Option<&str> {
+    codewire_project::StorageReference::profile(reference)
+        .ok()
+        .filter(|reference| reference.placement == Some(codewire_project::StoragePlacement::Local))
+        .map(|reference| reference.selector)
 }
 
 /// A create in a terminal shows the settings it will use and lets the person
@@ -703,6 +723,14 @@ fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
             args.name.as_deref().unwrap_or_default()
         ),
         format!("  Workspace    {}", workspace.description),
+    ];
+    if let Some(kept_in_vm) = &workspace.kept_in_vm {
+        lines.push(format!("               {kept_in_vm}"));
+    }
+    for note in &workspace.vm_only_notes {
+        lines.push(format!("               {note}"));
+    }
+    lines.extend([
         format!("  Image        {image}"),
         format!(
             "  Resources    {cpus} vCPU · {} memory · {} disk",
@@ -712,7 +740,7 @@ fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
         format!("  Docker       {docker}"),
         format!("  Credentials  {profile}"),
         format!("  Ports        {ports}"),
-    ];
+    ]);
     if let Some(notice) = workspace.notice {
         lines.push(format!("  {notice}"));
     } else if workspace.description.starts_with("mount ") {
@@ -856,7 +884,7 @@ pub(crate) async fn handle_native_environment_update(
     args: EnvUpdateArgs,
 ) -> anyhow::Result<()> {
     sources::validate_update_args(&args)?;
-    let mut supervisor = native_client().await?;
+    let mut supervisor = native_boot_client().await?;
     let environment = supervisor
         .get(&args.environment)
         .await
@@ -1031,8 +1059,14 @@ pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::
 
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     host_support::require_local_vm_host()?;
+    start_native_environment_with(native_boot_client().await?, name).await
+}
+
+async fn start_native_environment_with(
+    mut client: NativeSupervisorClient,
+    name: &str,
+) -> anyhow::Result<v1::Environment> {
     ensure_pinned_runtime().await?;
-    let mut client = native_client().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
     let progress = native_progress();
     let started = match &progress {
@@ -1056,8 +1090,8 @@ pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::En
 
 pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     host_support::require_local_vm_host()?;
+    let mut client = native_boot_client().await?;
     ensure_pinned_runtime().await?;
-    let mut client = native_client().await?;
     let environment = get_native_environment_with_required_authority(&mut client, name).await?;
     client
         .restart(name, &environment.id)
@@ -1068,7 +1102,7 @@ pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1:
 pub(crate) async fn refresh_native_environment_skills(
     name: &str,
 ) -> anyhow::Result<v1::Environment> {
-    let mut client = native_client().await?;
+    let mut client = native_boot_client().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
     client.refresh_skills(name).await.map_err(native_status)
 }
@@ -1079,7 +1113,7 @@ pub(crate) async fn resize_native_environment(
     memory_mib: u32,
     disk_bytes: u64,
 ) -> anyhow::Result<v1::Environment> {
-    let mut client = native_client().await?;
+    let mut client = native_boot_client().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
     client
         .resize(name, vcpus, memory_mib, disk_bytes)
@@ -1166,9 +1200,16 @@ fn native_environment_name_for_id<'a>(
 }
 
 /// Managed guests use a selected typed proxy, never the host agent's login.
+/// A local VM qualifies a managed agent by the rule hosted Sandboxes use
+/// ([`codewire_access::ManagedCredentialClients::managed_agent_client`]), over
+/// the slots its selected profile pinned: a platform profile's slots as the
+/// environment captured them, a local profile's from its exact revision. The
+/// VM's native Codex home is configured for the client the rule picks, so a
+/// profile with only the OpenAI API-key slot runs Codex through that route, as
+/// a hosted managed Codex agent does.
 pub(crate) async fn require_native_agent_profile(
     environment_id: &str,
-    provider: &str,
+    agent: codewire_access::ManagedAgent,
 ) -> anyhow::Result<()> {
     let environment_id = uuid::Uuid::parse_str(environment_id)?.to_string();
     let environment = native_environments()
@@ -1179,21 +1220,47 @@ pub(crate) async fn require_native_agent_profile(
     let spec = sources::project_from_environment(&environment)?;
     let selected = spec
         .credentials
-        .context("managed VM agents require a selected local credential profile")?;
-    if selected.profile.starts_with("platform:") {
-        anyhow::bail!("managed native agents currently require a local credential profile");
-    }
-    let profile_id = codewire_access::AccessProfileId::parse(environment.access_profile_id)?;
-    let mut credentials = connect_local_credential_authority().await?;
-    let bound = credentials
-        .get_profile_revision(&profile_id, environment.access_profile_revision)
-        .await?;
-    if !bound
-        .profile
-        .entries
-        .keys()
-        .any(|slot| slot.as_str() == provider)
-    {
+        .context("managed VM agents require a selected credential profile")?;
+    let clients = if selected.profile.starts_with("platform:") {
+        pinned_platform_clients(&environment)?
+    } else {
+        let profile_id = codewire_access::AccessProfileId::parse(environment.access_profile_id)?;
+        let mut credentials = connect_local_credential_authority().await?;
+        let bound = credentials
+            .get_profile_revision(&profile_id, environment.access_profile_revision)
+            .await?;
+        codewire_access::ManagedCredentialClients::from_profile_slots(
+            bound.profile.entries.keys().map(|slot| slot.as_str()),
+        )?
+    };
+    require_managed_agent_client(clients, agent)
+}
+
+/// The client slots a platform-profile environment pinned when its sources
+/// were selected. They name provider identities only, never credentials.
+fn pinned_platform_clients(
+    environment: &v1::Environment,
+) -> anyhow::Result<codewire_access::ManagedCredentialClients> {
+    let authority = environment
+        .platform_source_authority
+        .as_ref()
+        .context("the native environment's platform profile has no pinned selection")?;
+    Ok(
+        codewire_access::ManagedCredentialClients::from_profile_slots(
+            authority.profile_slots.iter().map(String::as_str),
+        )?,
+    )
+}
+
+fn require_managed_agent_client(
+    clients: codewire_access::ManagedCredentialClients,
+    agent: codewire_access::ManagedAgent,
+) -> anyhow::Result<()> {
+    if clients.managed_agent_client(agent).is_none() {
+        let provider = match agent {
+            codewire_access::ManagedAgent::Codex => "Codex or OpenAI",
+            codewire_access::ManagedAgent::Claude => "Anthropic",
+        };
         anyhow::bail!(
             "the native environment's selected credential profile has no {provider} provider"
         );
@@ -1704,6 +1771,244 @@ async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
     .await
 }
 
+/// The client for a command that boots or reconfigures a VM. After a cw
+/// update the previous cw's supervisor may still serve its VMs: this cw takes
+/// the state root over once it runs none, and refuses the command with one
+/// line while it may (supervisor_upgrade). A command that boots installs
+/// this cw's runtime only after this, so an older supervisor never starts a
+/// VM from it.
+async fn native_boot_client() -> anyhow::Result<NativeSupervisorClient> {
+    match native_boot_client_here().await {
+        Err(error) => Err(offer_restart_when_refused(error).await),
+        client => client,
+    }
+}
+
+/// [`native_boot_client`] without the restart offer, for the restart itself.
+async fn native_boot_client_here() -> anyhow::Result<NativeSupervisorClient> {
+    let config = native_runtime_config()?;
+    let mut client = connect_native_after_authority_admission(
+        || async { admit_existing_local_credential_authority().await },
+        || async {
+            codewire_local_vmm::supervisor_upgrade::connect_for_boot(&config)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+    )
+    .await?;
+    replace_older_local_credential_authority(async {
+        codewire_local_vmm::supervisor_upgrade::may_replace_older_authority(&mut client)
+            .await
+            .map_err(anyhow::Error::from)
+    })
+    .await?;
+    Ok(client)
+}
+
+/// `cw update` selected an older cw, one without `cw env --local upgrade`. It
+/// refuses this cw's local VM supervisor ("a newer cw runs your local VMs")
+/// and cannot retire it, so hand the state root back while no VM runs on it.
+/// Anything but a confirmed idle supervisor changes nothing, and says how to
+/// hand the VMs over: this cw stops them, and a rollback while none runs
+/// hands the root over. Never fails the update.
+pub(crate) async fn release_local_vms_for_older_cw(version: &str) {
+    use codewire_local_vmm::supervisor_upgrade::{OlderCwRelease, release_for_older_cw};
+    let Ok(config) = native_runtime_config() else {
+        return;
+    };
+    let hand_over = "to hand them over, select this cw again (`cw update rollback`), stop them (`cw env --local stop NAME`), then roll back";
+    match release_for_older_cw(&config).await {
+        Ok(OlderCwRelease::Nothing | OlderCwRelease::Released) => {}
+        Ok(OlderCwRelease::Busy(names)) => eprintln!(
+            "cw: local VMs {} run on the local VM supervisor of the cw you rolled back from, which cw {version} cannot use; {hand_over}",
+            names.join(", ")
+        ),
+        Err(error) => eprintln!(
+            "cw: the local VM supervisor of the cw you rolled back from keeps running ({error}); cw {version} cannot use it; {hand_over}"
+        ),
+    }
+}
+
+/// `cw env --local upgrade`: move the local VMs a previous cw's supervisor
+/// still runs to this cw. Each stops through that supervisor, the ordinary
+/// stop; the supervisor then hands the state root over, and each starts again
+/// here. With `after_update`, the hand-off `cw update` runs, nothing is
+/// printed when nothing moves, and nothing moves unless this cw is still the
+/// store's selection.
+pub(crate) async fn upgrade_native_environments(
+    yes: bool,
+    after_update: bool,
+) -> anyhow::Result<()> {
+    if after_update && !crate::update::this_cw_is_selected() {
+        return Ok(());
+    }
+    let config = native_runtime_config()?;
+    let Some(previous) = codewire_local_vmm::supervisor_upgrade::previous_cw(&config).await? else {
+        if !after_update {
+            println!("No local VMs run on a previous cw.");
+        }
+        return Ok(());
+    };
+    refuse_orphaned(&previous)?;
+    match restart_consent(&previous, yes) {
+        Consent::Yes => move_previous_environments(&config, &previous, !after_update)
+            .await
+            .map(drop),
+        Consent::Declined | Consent::NoTerminal => {
+            for name in previous.stopping() {
+                eprintln!("cw: local VM {name} still runs on the cw you updated from");
+            }
+            eprintln!("cw: restart them with `cw env --local upgrade`");
+            Ok(())
+        }
+    }
+}
+
+enum Consent {
+    Yes,
+    Declined,
+    NoTerminal,
+}
+
+/// Restarting ends the work running in a VM, so only `--yes` or an answer at
+/// a terminal moves them; never a script without one. Nothing to restart
+/// needs no consent: an idle previous supervisor just hands the root over.
+fn restart_consent(
+    previous: &codewire_local_vmm::supervisor_upgrade::PreviousCw,
+    yes: bool,
+) -> Consent {
+    use std::io::{IsTerminal as _, Write as _};
+    let names: Vec<&str> = previous.stopping().collect();
+    if yes || names.is_empty() {
+        return Consent::Yes;
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Consent::NoTerminal;
+    }
+    let noun = if names.len() == 1 { "VM" } else { "VMs" };
+    eprint!(
+        "Restart {} local {noun} ({}) now to use cw {}? [y/N] ",
+        names.len(),
+        names.join(", "),
+        crate::CLI_VERSION
+    );
+    let mut response = String::new();
+    if std::io::stderr().flush().is_err() || std::io::stdin().read_line(&mut response).is_err() {
+        return Consent::Declined;
+    }
+    if matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Consent::Yes
+    } else {
+        Consent::Declined
+    }
+}
+
+/// Stop, hand over and start again; true once some VM moved. A VM in an
+/// error state is stopped and stays stopped. `report` says when nothing
+/// needed to move.
+async fn move_previous_environments(
+    config: &NativeRuntimeConfig,
+    previous: &codewire_local_vmm::supervisor_upgrade::PreviousCw,
+    report: bool,
+) -> anyhow::Result<bool> {
+    refuse_orphaned(previous)?;
+    let names: Vec<&str> = previous.stopping().collect();
+    if names.is_empty() {
+        // An idle previous supervisor hands the root over; nothing restarts.
+        codewire_local_vmm::supervisor_upgrade::stop_and_retire(config, previous, |_| {}).await?;
+        if report {
+            println!("No local VMs run on a previous cw.");
+        }
+        return Ok(false);
+    }
+    host_support::require_local_vm_host()?;
+    eprintln!(
+        "Stopping {} to restart on cw {}.",
+        names.join(", "),
+        crate::CLI_VERSION
+    );
+    codewire_local_vmm::supervisor_upgrade::stop_and_retire(config, previous, |name| {
+        eprintln!("Stopped {name}.");
+    })
+    .await?;
+    let mut failed = Vec::new();
+    for name in &previous.restart {
+        let started = match native_boot_client_here().await {
+            Ok(client) => start_native_environment_with(client, name).await,
+            Err(error) => Err(error),
+        };
+        match started {
+            Ok(_) => eprintln!("Started {name}."),
+            Err(error) => {
+                eprintln!("cw: local VM {name} did not start: {error:#}");
+                failed.push(name.as_str());
+            }
+        }
+    }
+    for name in &previous.stop_only {
+        eprintln!(
+            "cw: local VM {name} was in an error state and stays stopped; start it with `cw env --local start {name}`"
+        );
+    }
+    anyhow::ensure!(
+        failed.is_empty(),
+        "local VMs {} stopped but did not start on this cw; start them with `cw env --local start NAME`",
+        failed.join(", ")
+    );
+    Ok(true)
+}
+
+/// A VM no stop reaches keeps the previous supervisor serving; refuse before
+/// stopping anything.
+fn refuse_orphaned(
+    previous: &codewire_local_vmm::supervisor_upgrade::PreviousCw,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        previous.blocked.is_empty(),
+        "local VMs {} have orphaned ownership, so nothing moved to this cw; inspect them with `cw doctor local`",
+        previous.blocked.join(", ")
+    );
+    Ok(())
+}
+
+/// A boot command or `cw setup --local` refused while a previous cw's
+/// supervisor may run a VM (#2826): at a terminal, offer to move them here.
+/// The refused command itself does not continue; it runs again by hand.
+async fn offer_restart_when_refused(error: anyhow::Error) -> anyhow::Error {
+    use codewire_local_vmm::supervisor_upgrade::{TakeoverError, previous_cw};
+    if !matches!(
+        error.downcast_ref::<TakeoverError>(),
+        Some(TakeoverError::Busy(_))
+    ) {
+        return error;
+    }
+    let hint = || anyhow::anyhow!("{error}\ncw: restart them with `cw env --local upgrade`");
+    let config = match native_runtime_config() {
+        Ok(config) => config,
+        Err(_) => return hint(),
+    };
+    let previous = match previous_cw(&config).await {
+        Ok(Some(previous)) => previous,
+        _ => return hint(),
+    };
+    if let Err(orphaned) = refuse_orphaned(&previous) {
+        return orphaned;
+    }
+    if !matches!(restart_consent(&previous, false), Consent::Yes) {
+        return hint();
+    }
+    match move_previous_environments(&config, &previous, false).await {
+        Ok(_) if previous.restart.is_empty() => {
+            anyhow::anyhow!("The previous cw's local VMs are stopped. Run the command again.")
+        }
+        Ok(_) => anyhow::anyhow!(
+            "Local VMs {} now run on this cw. Run the command again.",
+            previous.restart.join(", ")
+        ),
+        Err(failure) => failure,
+    }
+}
+
 async fn connect_native_after_authority_admission<T, A, AF, C, CF>(
     admit_authority: A,
     connect_supervisor: C,
@@ -1761,6 +2066,12 @@ pub(crate) async fn setup_local_runtime(
     use codewire_local_vmm::runtime_install::{self, DirectoryBlobSource, RuntimePaths};
     host_support::require_local_vm_host()?;
     let config = native_runtime_config()?;
+    // An older cw's supervisor would start its next VM from the new files.
+    if let Err(error) =
+        codewire_local_vmm::supervisor_upgrade::refuse_while_older_serves(&config).await
+    {
+        return Err(offer_restart_when_refused(error.into()).await);
+    }
     let paths = RuntimePaths {
         artifact_root: config.artifact_root,
         artifact_lock: config.artifact_lock,
@@ -1810,7 +2121,7 @@ fn no_pinned_runtime(
         && codewire_cw_release::release::valid_release_tag(&record.package_version)
     {
         format!(
-            "Local VMs aren't available on {} yet; hosted Sandboxes work (`cw env create --platform`).",
+            "Local VMs aren't available on {} yet; hosted Sandboxes work (`cw env create --cloud`).",
             host_name(host)
         )
     } else {
@@ -1987,6 +2298,10 @@ struct NativeProjectPlan {
     spec: codewire_project::ProjectSpec,
     host_ports: Vec<codewire_project::HostPortBinding>,
     local_mounts: Vec<v1::LocalMountInput>,
+    /// The project folder's kept (`vm_only`) paths.
+    vm_only: Vec<String>,
+    /// Why a default kept path was dropped, for the review.
+    vm_only_notes: Vec<String>,
     vcpus: Option<u32>,
     memory_mib: Option<u32>,
     disk_bytes: Option<u64>,
@@ -2010,7 +2325,12 @@ fn native_codewire_yaml(
     let file = match std::fs::File::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && requested_file.is_none() => {
-            return Ok(NativeProjectPlan::default());
+            let (vm_only, vm_only_notes) = native_vm_only(source_path, None);
+            return Ok(NativeProjectPlan {
+                vm_only,
+                vm_only_notes,
+                ..NativeProjectPlan::default()
+            });
         }
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
@@ -2031,7 +2351,13 @@ fn native_codewire_yaml(
     let config_directory = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("native codewire.yaml has no parent directory"))?;
-    let local_mounts = resolve_native_local_mounts(config_directory, &document.local.mounts)?;
+    let (vm_only, vm_only_notes) = native_vm_only(source_path, document.local.vm_only.as_deref());
+    let local_mounts = resolve_native_local_mounts(
+        config_directory,
+        source_path,
+        &document.local.mounts,
+        &vm_only,
+    )?;
     let resources = &document.spec.resources;
     let vcpus = resources
         .cpu_millicores
@@ -2047,6 +2373,8 @@ fn native_codewire_yaml(
         spec: document.spec,
         host_ports: document.local.host_ports,
         local_mounts,
+        vm_only,
+        vm_only_notes,
         vcpus,
         memory_mib,
         disk_bytes,
@@ -2088,9 +2416,217 @@ fn apply_native_setup_overrides(
     spec.validate().context("validate native project setup")
 }
 
+/// The project folder's kept (`vm_only`) paths, from `workspace.vm_only` as
+/// written or the default list, and why a default path was dropped: one Git
+/// tracks there stays, since hiding it would show its files as deleted.
+fn native_vm_only(source_path: &Path, declared: Option<&[String]>) -> (Vec<String>, Vec<String>) {
+    let paths = codewire_project::effective_vm_only(declared);
+    if declared.is_some() || paths.is_empty() {
+        return (paths, Vec::new());
+    }
+    let tracked = codewire_local_vmm::workspace::tracked_paths(source_path, &paths);
+    let notes = tracked
+        .iter()
+        .map(|path| format!("{path} is tracked by Git, so it is not kept in the VM"))
+        .collect();
+    (
+        paths
+            .into_iter()
+            .filter(|path| !tracked.contains(path))
+            .collect(),
+        notes,
+    )
+}
+
+/// The project folder's folders, for the review: listed and inspected
+/// without following symlinks or leaving its filesystem, as the guest does.
+struct HostVmOnlyTree {
+    device: u64,
+}
+
+impl codewire_project::VmOnlyTree for HostVmOnlyTree {
+    type Folder = PathBuf;
+
+    fn names(&mut self, folder: &PathBuf) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect()
+    }
+
+    fn open(&mut self, folder: &PathBuf, name: &str) -> Option<PathBuf> {
+        let child = folder.join(name);
+        std::fs::symlink_metadata(&child)
+            .ok()
+            .filter(|metadata| metadata.is_dir() && metadata.dev() == self.device)
+            .map(|_| child)
+    }
+
+    fn holds_repository(&mut self, folder: &PathBuf) -> bool {
+        std::fs::symlink_metadata(folder.join(".git")).is_ok()
+    }
+}
+
+/// A path as the review shows it: bidirectional and other invisible format
+/// characters escaped, so a name cannot disguise itself.
+fn shown_vm_only_path(path: &str) -> String {
+    path.chars()
+        .map(|character| match character {
+            '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}' => format!("\\u{{{:04x}}}", u32::from(character)),
+            character => character.to_string(),
+        })
+        .collect()
+}
+
+/// The review lines for the project folder's kept patterns: each pattern
+/// with the folders it matches now, folders left shared and why, and folders
+/// holding files Git tracks. `live` is the mount, which the guest expands
+/// again at every start; otherwise the one-time copy.
+fn vm_only_review(source_path: &Path, patterns: &[String], live: bool) -> Vec<String> {
+    let Ok(parsed) = codewire_project::VmOnlyPatterns::parse(patterns) else {
+        return Vec::new();
+    };
+    let Ok(root) = std::fs::symlink_metadata(source_path) else {
+        return Vec::new();
+    };
+    let expansion = codewire_project::expand_vm_only(
+        &parsed,
+        &mut HostVmOnlyTree { device: root.dev() },
+        &source_path.to_path_buf(),
+    );
+    let mut kept_paths = Vec::new();
+    let mut lines = Vec::new();
+    for (index, pattern) in patterns.iter().enumerate() {
+        let mut found = Vec::new();
+        let mut notes = Vec::new();
+        for kept in expansion
+            .matches
+            .iter()
+            .filter(|kept| kept.pattern == index)
+        {
+            if kept.exists {
+                found.push(kept.path.clone());
+                continue;
+            }
+            let folder = source_path.join(&kept.path);
+            let is_folder =
+                std::fs::symlink_metadata(&folder).is_ok_and(|metadata| metadata.is_dir());
+            if is_folder && std::fs::symlink_metadata(folder.join(".git")).is_ok() {
+                notes.push(format!(
+                    "{} holds a Git repository, so it {}",
+                    shown_vm_only_path(&kept.path),
+                    if live {
+                        "stays shared with the host"
+                    } else {
+                        "is copied"
+                    }
+                ));
+            } else if is_folder {
+                found.push(kept.path.clone());
+            } else {
+                notes.push(match vm_only_blocked(source_path, &kept.path) {
+                    Some(reason) if live => format!("{reason}, so it stays shared with the host"),
+                    Some(reason) => format!("{reason}, so it is copied"),
+                    None if live => format!("{} is created empty", shown_vm_only_path(&kept.path)),
+                    None => format!("no {} to leave out", shown_vm_only_path(&kept.path)),
+                });
+            }
+        }
+        kept_paths.extend(found.iter().cloned());
+        let mut parts = Vec::new();
+        if !found.is_empty() {
+            let shown = found
+                .iter()
+                .take(5)
+                .map(|path| shown_vm_only_path(path))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(if found.len() > 5 {
+                format!("{shown} and {} more", found.len() - 5)
+            } else {
+                shown
+            });
+        }
+        parts.extend(notes);
+        if parts.is_empty() {
+            parts.push("no folder matches yet".to_owned());
+        }
+        lines.push(format!("  {pattern}: {}", parts.join("; ")));
+    }
+    for repository in &expansion.repositories {
+        lines.push(format!(
+            "  {} holds a Git repository, so it {}",
+            shown_vm_only_path(repository),
+            if live {
+                "stays shared with the host"
+            } else {
+                "is copied"
+            }
+        ));
+    }
+    for tracked in codewire_local_vmm::workspace::tracked_paths(source_path, &kept_paths) {
+        lines.push(format!(
+            "  {} holds files Git tracks: in the VM they look deleted, so do not commit there",
+            shown_vm_only_path(&tracked)
+        ));
+    }
+    if expansion.truncated {
+        lines.push(format!(
+            "A limit stopped the search: at most {} folders are kept, from at most {} folders and {} names searched {} deep.",
+            codewire_project::MAX_VM_ONLY_MATCHES,
+            codewire_project::MAX_VM_ONLY_WALK_DIRECTORIES,
+            codewire_project::MAX_VM_ONLY_WALK_ENTRIES,
+            codewire_project::MAX_VM_ONLY_DEPTH
+        ));
+    }
+    if live {
+        lines.push(
+            "Folders that match later are kept from the next start; what is written into them before then stays on the host, hidden from the VM, so install again."
+                .to_owned(),
+        );
+    }
+    lines
+}
+
+/// Why the guest leaves a pattern's folder shared: a symlink or file at the
+/// path, or a parent that is not a plain folder. None when it can be created.
+fn vm_only_blocked(source_path: &Path, path: &str) -> Option<String> {
+    let mut current = source_path.to_path_buf();
+    let components = path.split('/').collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        current.push(component);
+        let last = index + 1 == components.len();
+        let reason = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => "is a symlink",
+            Ok(metadata) if !metadata.is_dir() => "is a file",
+            Ok(_) => continue,
+            Err(_) if last => return None,
+            Err(_) => "is missing",
+        };
+        return Some(format!(
+            "{} {reason}",
+            shown_vm_only_path(&components[..=index].join("/"))
+        ));
+    }
+    None
+}
+
+/// codewire.yaml mounts for the request. The project folder's kept paths
+/// apply to a copy or read-write direct mount of the project folder itself;
+/// any other mount, and a read-only one, keeps nothing in the VM.
 fn resolve_native_local_mounts(
     config_directory: &Path,
+    project_directory: &Path,
     mounts: &[codewire_project::LocalMountIntent],
+    vm_only: &[String],
 ) -> anyhow::Result<Vec<v1::LocalMountInput>> {
     mounts
         .iter()
@@ -2129,6 +2665,14 @@ fn resolve_native_local_mounts(
                     codewire_project::LocalMountMode::Direct => v1::LocalMountMode::Direct as i32,
                 },
                 read_only: mount.read_only,
+                vm_only: if mount.read_only != Some(true)
+                    && std::fs::canonicalize(project_directory).ok().as_deref()
+                        == Some(source.as_path())
+                {
+                    vm_only.to_vec()
+                } else {
+                    Vec::new()
+                },
             })
         })
         .collect()
@@ -2210,6 +2754,13 @@ struct NativeWorkspace {
     description: String,
     /// Why the default mount was not used, when it was not.
     notice: Option<String>,
+    /// The implicit copy's skipped `vm_only` paths; empty for a clone, a
+    /// mount (whose mount input carries them) and an empty workspace.
+    vm_only: Vec<String>,
+    /// The review's `vm_only` line, when the list applies to host content.
+    kept_in_vm: Option<String>,
+    /// Kept paths that are dropped or stay shared, and why.
+    vm_only_notes: Vec<String>,
 }
 
 /// Mount the project directory live by default. A snapshot (clone or copy) or
@@ -2223,14 +2774,40 @@ fn resolve_native_workspace(
     empty_workspace: Option<&Path>,
     mounts_supported: bool,
 ) -> anyhow::Result<NativeWorkspace> {
+    let vm_only = project.vm_only.clone();
     if !project.spec.repositories.is_empty() || !project.local_mounts.is_empty() {
         if requested_mode.is_some() {
             anyhow::bail!(
                 "--path-mode applies only when codewire.yaml has no repositories or mounts"
             );
         }
+        let kept = project
+            .local_mounts
+            .iter()
+            .filter(|mount| !mount.vm_only.is_empty())
+            .collect::<Vec<_>>();
+        let applies = !kept.is_empty();
+        let live = kept
+            .iter()
+            .any(|mount| mount.mode == v1::LocalMountMode::Direct as i32);
+        let vm_only_notes = if applies {
+            vm_only_review(source_path, &vm_only, live)
+        } else {
+            Vec::new()
+        };
         return Ok(NativeWorkspace {
             description: "as declared in codewire.yaml".to_owned(),
+            kept_in_vm: applies.then(|| codewire_project::vm_only_summary(&vm_only)),
+            vm_only_notes: if applies {
+                project
+                    .vm_only_notes
+                    .iter()
+                    .cloned()
+                    .chain(vm_only_notes)
+                    .collect()
+            } else {
+                Vec::new()
+            },
             ..NativeWorkspace::default()
         });
     }
@@ -2269,17 +2846,27 @@ fn resolve_native_workspace(
                 return Ok(workspace);
             }
             let destination = format!("/workspace/{}", workspace_directory_name(source_path));
+            let kept_in_vm = Some(codewire_project::vm_only_summary(&vm_only));
+            let vm_only_notes = project
+                .vm_only_notes
+                .iter()
+                .cloned()
+                .chain(vm_only_review(source_path, &vm_only, true))
+                .collect();
             project.local_mounts.push(v1::LocalMountInput {
                 source_path: source_path.as_os_str().as_bytes().to_vec(),
                 destination: destination.clone(),
                 mode: v1::LocalMountMode::Direct as i32,
                 read_only: Some(false),
+                vm_only,
             });
             if !project.working_directory_explicit {
                 project.spec.working_directory = destination.clone();
             }
             Ok(NativeWorkspace {
                 description: format!("mount {shown} at {destination} (live, read-write)"),
+                kept_in_vm,
+                vm_only_notes,
                 ..NativeWorkspace::default()
             })
         }
@@ -2290,11 +2877,27 @@ fn resolve_native_workspace(
             let mode = resolve_workspace_mode(source_path, workspace_selection_from_arg(mode))
                 .context("resolve native workspace preparation mode")?;
             let path_mode = workspace_source_mode_name(mode).to_owned();
+            // A clone takes only committed files, so it skips nothing.
+            let kept_in_vm = Some(codewire_project::vm_only_summary(&vm_only));
+            let vm_only = if mode == WorkspaceSourceMode::Copy {
+                vm_only
+            } else {
+                Vec::new()
+            };
+            let vm_only_notes = project
+                .vm_only_notes
+                .iter()
+                .cloned()
+                .chain(vm_only_review(source_path, &vm_only, false))
+                .collect();
             Ok(NativeWorkspace {
                 source_path: source_path.to_string_lossy().into_owned(),
                 description: format!("snapshot of {shown} ({path_mode})"),
                 path_mode,
                 notice: None,
+                vm_only,
+                kept_in_vm,
+                vm_only_notes,
             })
         }
     }
@@ -2353,6 +2956,7 @@ fn empty_native_workspace(
         path_mode: workspace_source_mode_name(WorkspaceSourceMode::Copy).to_owned(),
         description: "empty".to_owned(),
         notice,
+        ..NativeWorkspace::default()
     })
 }
 
@@ -2514,6 +3118,64 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A platform profile qualifies a managed agent in a local VM by its
+    /// pinned slots and the rule hosted Sandboxes use; before, any platform
+    /// profile was refused.
+    #[test]
+    fn create_offers_an_ssh_key_only_for_explicitly_local_profiles() {
+        assert_eq!(local_profile_selector("local:work"), Some("work"));
+        assert_eq!(local_profile_selector("local:user/work"), Some("user/work"));
+        assert_eq!(local_profile_selector("platform:work"), None);
+        assert_eq!(local_profile_selector("work"), None);
+        assert_eq!(local_profile_selector("local:"), None);
+    }
+
+    #[test]
+    fn a_platform_profile_qualifies_managed_agents_by_its_pinned_slots() {
+        use codewire_access::ManagedAgent::{Claude, Codex};
+        let environment = |slots: &[&str]| v1::Environment {
+            platform_source_authority: Some(v1::PlatformSourceAuthority {
+                server_url: "https://codewire.example".into(),
+                organization_id: "org-synthetic".into(),
+                user_id: "user-synthetic".into(),
+                profile_slots: slots.iter().map(|slot| (*slot).to_owned()).collect(),
+            }),
+            ..Default::default()
+        };
+        for (slots, codex, claude) in [
+            (&["codex", "anthropic", "github"][..], true, true),
+            (&["openai", "github"], true, false),
+            (&["codex", "openai"], true, false),
+            (&["anthropic"], false, true),
+            (&["ssh", "github"], false, false),
+            (&[], false, false),
+        ] {
+            let clients = pinned_platform_clients(&environment(slots)).unwrap();
+            assert_eq!(
+                require_managed_agent_client(clients, Codex).is_ok(),
+                codex,
+                "{slots:?}"
+            );
+            assert_eq!(
+                require_managed_agent_client(clients, Claude).is_ok(),
+                claude,
+                "{slots:?}"
+            );
+        }
+        let refused = require_managed_agent_client(
+            pinned_platform_clients(&environment(&["ssh"])).unwrap(),
+            Claude,
+        )
+        .unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "the native environment's selected credential profile has no Anthropic provider"
+        );
+        // No pinned selection, or an unknown slot, is never a qualification.
+        assert!(pinned_platform_clients(&v1::Environment::default()).is_err());
+        assert!(pinned_platform_clients(&environment(&["telnet"])).is_err());
+    }
 
     #[test]
     fn only_an_undecodable_runtime_document_suggests_packing_again() {
@@ -3239,6 +3901,8 @@ mod tests {
             v1::LocalMountMode::Copy as i32
         );
         assert_eq!(project.local_mounts[0].read_only, None);
+        // A mount of another folder keeps nothing in the VM.
+        assert!(project.local_mounts[0].vm_only.is_empty());
         assert_eq!(
             resolve_native_workspace(temp.path(), &mut project, None, None, true).unwrap(),
             NativeWorkspace {
@@ -3264,6 +3928,8 @@ mod tests {
             v1::LocalMountMode::Direct as i32
         );
         assert_eq!(project.local_mounts[0].read_only, Some(true));
+        // A read-only direct mount keeps nothing in the VM.
+        assert!(project.local_mounts[0].vm_only.is_empty());
         assert_eq!(
             resolve_native_workspace(temp.path(), &mut project, None, None, true).unwrap(),
             NativeWorkspace {
@@ -3405,8 +4071,18 @@ working_directory: /workspace/github
                 destination: "/workspace/My-App".to_owned(),
                 mode: v1::LocalMountMode::Direct as i32,
                 read_only: Some(false),
+                vm_only: vec![
+                    "node_modules".to_owned(),
+                    "target".to_owned(),
+                    ".venv".to_owned()
+                ],
             }]
         );
+        assert_eq!(
+            workspace.kept_in_vm.as_deref(),
+            Some("Kept in the VM: node_modules, target, .venv")
+        );
+        assert!(workspace.vm_only.is_empty());
         assert_eq!(project.spec.working_directory, "/workspace/My-App");
         assert_eq!(native_direct_mount_warning(&[]), None);
     }
@@ -3436,6 +4112,7 @@ working_directory: /workspace/github
         assert!(project.local_mounts.is_empty());
         assert_eq!(workspace.source_path, source.to_string_lossy());
         assert_eq!(workspace.path_mode, "copy");
+        assert_eq!(workspace.vm_only, ["node_modules", "target", ".venv"]);
         assert!(workspace.notice.unwrap().contains("no virtiofsd"));
         let error =
             resolve_native_workspace(&source, &mut project, Some(PathModeArg::Mount), None, false)
@@ -3444,6 +4121,193 @@ working_directory: /workspace/github
             error.to_string().contains("--path-mode snapshot"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn vm_only_reaches_each_workspace_input_it_applies_to() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = std::fs::canonicalize(temp.path()).unwrap();
+        let mount = |yaml: &str| {
+            std::fs::write(source.join("codewire.yaml"), yaml).unwrap();
+            let mut project = native_codewire_yaml(&source, None).unwrap();
+            let workspace =
+                resolve_native_workspace(&source, &mut project, None, None, true).unwrap();
+            (project, workspace)
+        };
+
+        let (project, workspace) = mount("workspace: {vm_only: []}\n");
+        assert!(project.local_mounts[0].vm_only.is_empty());
+        assert_eq!(
+            workspace.kept_in_vm.as_deref(),
+            Some("Kept in the VM: none")
+        );
+
+        let (project, workspace) = mount("workspace: {vm_only: [dist, web/node_modules]}\n");
+        assert_eq!(
+            project.local_mounts[0].vm_only,
+            ["dist", "web/node_modules"]
+        );
+        assert_eq!(
+            workspace.kept_in_vm.as_deref(),
+            Some("Kept in the VM: dist, web/node_modules")
+        );
+
+        // A copy snapshot skips the list; a clone takes only committed files.
+        std::fs::write(source.join("codewire.yaml"), "version: 1\n").unwrap();
+        let mut project = native_codewire_yaml(&source, None).unwrap();
+        let copy =
+            resolve_native_workspace(&source, &mut project, Some(PathModeArg::Copy), None, true)
+                .unwrap();
+        assert_eq!(copy.path_mode, "copy");
+        assert_eq!(copy.vm_only, ["node_modules", "target", ".venv"]);
+        assert!(project.local_mounts.is_empty());
+        let clone =
+            resolve_native_workspace(&source, &mut project, Some(PathModeArg::Clone), None, true)
+                .unwrap();
+        assert_eq!(clone.path_mode, "clone");
+        assert!(clone.vm_only.is_empty());
+
+        // An empty workspace has no host content to keep apart.
+        let empty =
+            resolve_native_workspace(&source, &mut project, Some(PathModeArg::Empty), None, true)
+                .unwrap();
+        assert!(empty.vm_only.is_empty());
+        assert_eq!(empty.kept_in_vm, None);
+
+        // codewire.yaml mounts: the list applies to a read-write direct or a
+        // copy mount of the project folder itself; any other folder and any
+        // read-only mount keep nothing in the VM.
+        for directory in ["other", "ro"] {
+            std::fs::create_dir(source.join(directory)).unwrap();
+        }
+        let (project, workspace) = mount(
+            "workspace: {vm_only: [target]}\nmounts:\n  - {source: ., destination: /workspace/rw, mode: direct, read_only: false}\n  - {source: ., destination: /workspace/ro, mode: direct, read_only: true}\n  - {source: ., destination: /workspace/copied, mode: copy}\n  - {source: ./other, destination: /workspace/other, mode: direct, read_only: false}\n",
+        );
+        let lists = project
+            .local_mounts
+            .iter()
+            .map(|mount| mount.vm_only.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lists,
+            [
+                vec!["target".to_owned()],
+                Vec::new(),
+                vec!["target".to_owned()],
+                Vec::new()
+            ]
+        );
+        assert_eq!(
+            workspace.kept_in_vm.as_deref(),
+            Some("Kept in the VM: target")
+        );
+        let (project, workspace) = mount(
+            "mounts: [{source: ./other, destination: /workspace/other, mode: direct, read_only: false}]\n",
+        );
+        assert!(project.local_mounts[0].vm_only.is_empty());
+        assert_eq!(workspace.kept_in_vm, None);
+    }
+
+    #[test]
+    fn vm_only_review_lists_each_pattern_with_the_folders_it_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = std::fs::canonicalize(temp.path()).unwrap();
+        for folder in [
+            "real",
+            "packages/web/node_modules",
+            "packages/api/node_modules/x/node_modules",
+            "apps/a/node_modules",
+            "apps/b/node_modules",
+            "apps/c/node_modules",
+            "apps/d/node_modules",
+            "apps/e/node_modules",
+            "apps/f/node_modules",
+            ".git/node_modules",
+        ] {
+            std::fs::create_dir_all(source.join(folder)).unwrap();
+        }
+        std::os::unix::fs::symlink("real", source.join("node_modules")).unwrap();
+        std::fs::write(source.join("target"), b"a file").unwrap();
+        let patterns = [
+            "node_modules",
+            "target",
+            ".venv",
+            "**/node_modules",
+            "lib/x/node_modules",
+            "dist-*",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            vm_only_review(&source, &patterns, true),
+            [
+                "  node_modules: node_modules is a symlink, so it stays shared with the host",
+                "  target: target is a file, so it stays shared with the host",
+                "  .venv: .venv is created empty",
+                "  **/node_modules: apps/a/node_modules, apps/b/node_modules, apps/c/node_modules, apps/d/node_modules, apps/e/node_modules and 3 more",
+                "  lib/x/node_modules: lib is missing, so it stays shared with the host",
+                "  dist-*: no folder matches yet",
+                "Folders that match later are kept from the next start; what is written into them before then stays on the host, hidden from the VM, so install again.",
+            ]
+        );
+        assert_eq!(
+            vm_only_review(&source, &["packages/*/node_modules".to_owned()], false),
+            ["  packages/*/node_modules: packages/api/node_modules, packages/web/node_modules"]
+        );
+
+        // The default list drops a path Git tracks; a declared list is kept.
+        // On macOS cw asks the runtime's own git, which only
+        // codewire-local-vmm's tests admit; its `tracked_paths` test covers
+        // that side.
+        let git = Path::new("/usr/bin/git");
+        if cfg!(target_os = "linux") && git.exists() {
+            let run = |arguments: &[&str]| {
+                let status = std::process::Command::new(git)
+                    .args(arguments)
+                    .current_dir(&source)
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "{arguments:?}");
+            };
+            std::fs::remove_file(source.join("target")).unwrap();
+            std::fs::create_dir(source.join("target")).unwrap();
+            std::fs::write(source.join("target/committed"), b"x").unwrap();
+            run(&["init", "-q"]);
+            run(&["add", "target/committed"]);
+            let (paths, notes) = native_vm_only(&source, None);
+            assert_eq!(paths, ["node_modules", ".venv"]);
+            assert_eq!(
+                notes,
+                ["target is tracked by Git, so it is not kept in the VM"]
+            );
+            let declared = ["target".to_owned()];
+            assert_eq!(
+                native_vm_only(&source, Some(&declared)),
+                (vec!["target".to_owned()], Vec::new())
+            );
+            // A declared pattern over tracked files is kept, with a warning;
+            // a match holding its own repository stays shared.
+            std::fs::create_dir_all(source.join("apps/nested/.git")).unwrap();
+            let review = vm_only_review(&source, &["target".to_owned(), "apps/*".to_owned()], true);
+            assert!(
+                review.contains(
+                    &"  target holds files Git tracks: in the VM they look deleted, so do not commit there"
+                        .to_owned()
+                ),
+                "{review:#?}"
+            );
+            assert!(
+                review.contains(
+                    &"  apps/nested holds a Git repository, so it stays shared with the host"
+                        .to_owned()
+                ),
+                "{review:#?}"
+            );
+        }
+        assert_eq!(shown_vm_only_path("a\u{202e}b"), "a\\u{202e}b");
     }
 
     #[test]
@@ -3523,7 +4387,7 @@ working_directory: /workspace/github
         let release = no_pinned_runtime(&record("v0.3.389", Some(&revision)), "linux-aarch64");
         assert_eq!(
             release,
-            "Local VMs aren't available on Linux arm64 yet; hosted Sandboxes work (`cw env create --platform`)."
+            "Local VMs aren't available on Linux arm64 yet; hosted Sandboxes work (`cw env create --cloud`)."
         );
         let release = no_pinned_runtime(&record("v0.3.389", Some(&revision)), "linux-x86_64");
         assert!(

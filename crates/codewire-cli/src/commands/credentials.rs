@@ -24,9 +24,9 @@ use super::CredentialsArgs;
 use super::credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE;
 use super::credential_input::{
     CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedCredentialSelector, ParsedProfileSelector,
-    parse_credential_selector, parse_profile_selector, profile_set_credential,
-    prompt_credential_material, read_ssh_import, supported_profile_slot, validate_ssh_generation,
-    validate_ssh_import,
+    SSH_PUBLIC_KEY_GITHUB_HINT, parse_credential_selector, parse_profile_selector,
+    profile_set_credential, prompt_credential_material, read_ssh_import, supported_profile_slot,
+    validate_ssh_generation, validate_ssh_import,
 };
 #[cfg(test)]
 use super::credential_input::{
@@ -52,16 +52,16 @@ pub(crate) async fn handle_local_credentials_command(
         CredentialOperation::Profile(command) => {
             return profile_command(&mut client, command).await;
         }
+        CredentialOperation::GenerateIntoProfile(args, profile) => {
+            return generate_local_ssh_into_profile(&mut client, &args, profile).await;
+        }
         CredentialOperation::Credential(command) => command,
     };
     match command {
         CredentialsCommand::Connect(args) => connect_credential(&mut client, args).await,
         CredentialsCommand::Add(args) => add_credential(&mut client, args).await,
         CredentialsCommand::Generate(args) => {
-            let name = validate_ssh_generation(&args)?;
-            let record = client.generate_ssh_credential(name, args.expires_at).await
-                .context("generate local SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
-            print_credentials(&[record], OutputFormat::Text)
+            generate_local_ssh(&mut client, &args).await.map(drop)
         }
         CredentialsCommand::List(args) => list_credentials(&mut client, args).await,
         CredentialsCommand::Get(args) => {
@@ -97,7 +97,7 @@ async fn connect_credential(
         CredentialConnectProviderArg::Codex => connect_codex(client, args).await,
         CredentialConnectProviderArg::Github => connect_github(client, args).await,
         CredentialConnectProviderArg::Claude => anyhow::bail!(
-            "Claude sign-ins are stored only on the Codewire platform; connect one with --platform"
+            "Claude sign-ins are stored only on the Codewire platform; connect one with --cloud"
         ),
     }
 }
@@ -192,7 +192,7 @@ pub(crate) fn report_github_pending<'a>(
     }
 }
 
-/// The notice for each installation, as `cw credentials --platform list`
+/// The notice for each installation, as `cw credentials --cloud list`
 /// shows it.
 pub(crate) fn github_pending_notices<'a>(
     pending: impl IntoIterator<Item = (&'a str, u64, codewire_credential_broker::GitHubAccountKind)>,
@@ -615,6 +615,110 @@ async fn delete_credential(
     Ok(())
 }
 
+/// Generates a local SSH identity and prints it with its public key.
+async fn generate_local_ssh(
+    client: &mut LocalCredentialClient,
+    args: &super::CredentialGenerateArgs,
+) -> anyhow::Result<CredentialRecord> {
+    let name = validate_ssh_generation(args)?;
+    let record = client.generate_ssh_credential(name, args.expires_at).await
+        .context("generate local SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
+    print_credentials(std::slice::from_ref(&record), OutputFormat::Text)?;
+    eprintln!("{SSH_PUBLIC_KEY_GITHUB_HINT}");
+    Ok(record)
+}
+
+/// `--profile NAME generate ssh`: generates the identity, then sets it as the
+/// profile's SSH key, creating the profile on first use.
+async fn generate_local_ssh_into_profile(
+    client: &mut LocalCredentialClient,
+    args: &super::CredentialGenerateArgs,
+    profile: String,
+) -> anyhow::Result<()> {
+    let record = generate_local_ssh(client, args).await?;
+    set_profile_entry(
+        client,
+        CredentialProfileSetArgs {
+            profile,
+            slot: "ssh".to_owned(),
+            credential: Some(format!("id:{}", record.metadata.id)),
+        },
+    )
+    .await
+}
+
+/// Before a local VM is created in a terminal with a local profile that has
+/// no SSH key, asks whether to give the profile one (default no), then sets an
+/// existing local SSH key or a newly generated one. VMs get SSH keys only
+/// through their profile, so a VM without a profile key gets none.
+pub(crate) async fn offer_local_profile_ssh_key(profile: &str) -> anyhow::Result<()> {
+    let ssh = CapabilitySlot::parse("ssh").context("ssh capability slot")?;
+    let mut client = connect_local_credential_authority().await?;
+    let (existing, _) = local_profile_for_set(&mut client, profile).await?;
+    if existing
+        .as_ref()
+        .is_some_and(|record| record.profile.entries.contains_key(&ssh))
+    {
+        return Ok(());
+    }
+    if !super::prompt_confirm_default_no(&format!(
+        "Profile local:{profile} has no SSH key. Add one for VMs that use it?"
+    ))? {
+        return Ok(());
+    }
+    let keys = client
+        .list_credentials()
+        .await
+        .context("list local credentials")?
+        .into_iter()
+        .filter(|record| {
+            record.metadata.ssh_public_key.is_some()
+                && record.metadata.status == CredentialStatus::Active
+        })
+        .collect::<Vec<_>>();
+    for (index, record) in keys.iter().enumerate() {
+        let fingerprint = record
+            .metadata
+            .ssh_public_key
+            .as_ref()
+            .map(|key| key.fingerprint.as_str())
+            .unwrap_or_default();
+        eprintln!(
+            "  {}) {} {fingerprint}",
+            index + 1,
+            record.metadata.display_name
+        );
+    }
+    let generate = keys.len() + 1;
+    eprintln!("  {generate}) Generate a new key");
+    let choice = super::prompt_default("SSH key", &generate.to_string())?;
+    let index = choice
+        .parse::<usize>()
+        .ok()
+        .filter(|choice| (1..=generate).contains(choice))
+        .with_context(|| format!("choose a number from 1 to {generate}"))?;
+    let credential = if index == generate {
+        let name = super::prompt_default("New SSH key name", &format!("{profile}-ssh"))?;
+        let args = super::CredentialGenerateArgs {
+            provider: "ssh".to_owned(),
+            name,
+            expires_at: None,
+        };
+        generate_local_ssh(&mut client, &args).await?.metadata.id
+    } else {
+        keys[index - 1].metadata.id.clone()
+    };
+    set_profile_entry(
+        &mut client,
+        CredentialProfileSetArgs {
+            profile: profile.to_owned(),
+            slot: "ssh".to_owned(),
+            credential: Some(format!("id:{credential}")),
+        },
+    )
+    .await
+}
+
 async fn profile_command(
     client: &mut LocalCredentialClient,
     command: CredentialProfileCommand,
@@ -854,7 +958,7 @@ fn api_key_enrollment_kind(provider: &str) -> anyhow::Result<CredentialAuthKind>
     match provider {
         "openai" | "anthropic" => Ok(CredentialAuthKind::ApiKey),
         "claude-subscription" => anyhow::bail!(
-            "Claude subscription tokens are stored only on the Codewire platform; add one with --platform"
+            "Claude subscription tokens are stored only on the Codewire platform; add one with --cloud"
         ),
         "codex" | "github" => {
             anyhow::bail!("use connect {provider} --name NAME for OAuth credentials")
@@ -1108,7 +1212,7 @@ mod tests {
 
     #[test]
     fn codex_connect_help_explains_device_authorization_for_both_placements() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             let error = Cli::try_parse_from(["cw", "credentials", placement, "connect", "--help"])
                 .unwrap_err();
             assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
@@ -1247,7 +1351,7 @@ mod tests {
 
     #[test]
     fn oauth_connect_parser_accepts_explicit_reconnect_confirmation() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             for provider in ["codex", "github"] {
                 let parsed = Cli::try_parse_from([
                     "cw",
@@ -1271,6 +1375,61 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn generate_ssh_binds_a_profile_only_when_one_is_named() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = codewire_local_credentials::AuthorityRuntimeConfig {
+            root: temp.path().join("authority"),
+            executable: std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
+            socket_dir: temp.path().join("authority"),
+        };
+        let server = tokio::spawn(
+            codewire_local_credentials::serve_local_credential_authority(
+                config.clone(),
+                codewire_protected_store::EphemeralProtectedStore::default(),
+                builtin_provider_catalog(),
+            ),
+        );
+        let mut client = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(client) = LocalCredentialClient::connect(&config).await {
+                    break client;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("synthetic authority ready");
+        let generate = |name: &str| super::super::CredentialGenerateArgs {
+            provider: "ssh".to_owned(),
+            name: name.to_owned(),
+            expires_at: None,
+        };
+
+        let loose = generate_local_ssh(&mut client, &generate("loose-ssh"))
+            .await
+            .unwrap();
+        assert!(loose.metadata.ssh_public_key.is_some());
+        assert!(client.list_profiles().await.unwrap().is_empty());
+
+        generate_local_ssh_into_profile(&mut client, &generate("work-ssh"), "work".to_owned())
+            .await
+            .unwrap();
+        let profiles = client.list_profiles().await.unwrap();
+        assert_eq!(profiles.len(), 1);
+        let work = &profiles[0].profile;
+        assert_eq!(work.name.to_string(), "work");
+        let bound = &work.entries[&CapabilitySlot::parse("ssh").unwrap()];
+        let credentials = client.list_credentials().await.unwrap();
+        let bound = credentials
+            .iter()
+            .find(|record| &record.metadata.id == bound)
+            .unwrap();
+        assert_eq!(bound.metadata.display_name, "work-ssh");
+        assert_ne!(bound.metadata.id, loose.metadata.id);
+        server.abort();
     }
 
     #[tokio::test]
@@ -1601,7 +1760,7 @@ mod tests {
 
     #[test]
     fn ssh_enrollment_uses_one_generate_or_explicit_import_in_both_stores() {
-        for placement in ["--local", "--platform"] {
+        for placement in ["--local", "--cloud"] {
             let generated = Cli::try_parse_from([
                 "cw",
                 "credentials",
@@ -1654,7 +1813,7 @@ mod tests {
                 api_key_enrollment_kind(provider).unwrap(),
                 CredentialAuthKind::ApiKey
             );
-            for placement in ["--local", "--platform"] {
+            for placement in ["--local", "--cloud"] {
                 let parsed = Cli::try_parse_from([
                     "cw",
                     "credentials",
@@ -1693,7 +1852,7 @@ mod tests {
         let parsed = Cli::try_parse_from([
             "cw",
             "credentials",
-            "--platform",
+            "--cloud",
             "add",
             "claude-subscription",
             "--name=claude",
@@ -1710,7 +1869,7 @@ mod tests {
             Cli::try_parse_from([
                 "cw",
                 "credentials",
-                "--platform",
+                "--cloud",
                 "add",
                 "claude-subscription",
                 "--name=claude",
@@ -1719,7 +1878,7 @@ mod tests {
             .is_err()
         );
         let error = api_key_enrollment_kind("claude-subscription").unwrap_err();
-        assert!(error.to_string().contains("--platform"));
+        assert!(error.to_string().contains("--cloud"));
     }
 
     #[test]
@@ -1865,6 +2024,29 @@ mod tests {
                     resolve_credential_operation(args.profile, args.command, placement).is_err()
                 );
             }
+            let Command::Credentials(args) = Cli::try_parse_from([
+                "cw",
+                "credentials",
+                "--profile=work",
+                "generate",
+                "ssh",
+                "--name",
+                "work-ssh",
+            ])
+            .unwrap()
+            .command
+            else {
+                panic!("credentials")
+            };
+            let CredentialOperation::GenerateIntoProfile(generate, profile) =
+                resolve_credential_operation(args.profile, args.command, placement).unwrap()
+            else {
+                panic!("generate ssh with --profile binds that profile")
+            };
+            assert_eq!(
+                (generate.name.as_str(), profile.as_str()),
+                ("work-ssh", "work")
+            );
             for tail in [
                 vec!["connect", "codex", "--name", "new"],
                 vec!["add", "openai", "--name", "new"],

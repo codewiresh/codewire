@@ -78,6 +78,10 @@ pub struct WorkspaceSource {
     pub source_path: PathBuf,
     pub commit: String,
     pub mode: WorkspaceSourceMode,
+    /// Source-relative paths a copy skips (`vm_only`): its identity covers
+    /// only what is copied. Always empty for a clone, which takes only
+    /// committed files.
+    pub vm_only: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,11 +133,24 @@ pub fn inspect_workspace(
     requested_mode: WorkspaceSelection,
     maximum_copy_bytes: u64,
 ) -> Result<WorkspaceSource, WorkspaceError> {
+    inspect_workspace_skipping(requested_source, requested_mode, maximum_copy_bytes, &[])
+}
+
+/// [`inspect_workspace`] for a copy that skips the `vm_only` paths, which stay
+/// on the VM's own disk. A clone takes only committed files and skips nothing.
+pub fn inspect_workspace_skipping(
+    requested_source: &Path,
+    requested_mode: WorkspaceSelection,
+    maximum_copy_bytes: u64,
+    vm_only: &[String],
+) -> Result<WorkspaceSource, WorkspaceError> {
     match resolve_workspace_mode(requested_source, requested_mode)? {
         WorkspaceSourceMode::Clone => inspect_clean_git_workspace(requested_source),
-        WorkspaceSourceMode::Copy => {
-            inspect_copy_workspace(requested_source, maximum_copy_bytes.min(MAXIMUM_COPY_BYTES))
-        }
+        WorkspaceSourceMode::Copy => inspect_copy_workspace(
+            requested_source,
+            maximum_copy_bytes.min(MAXIMUM_COPY_BYTES),
+            vm_only,
+        ),
     }
 }
 
@@ -200,6 +217,7 @@ fn provision_workspace(
                 Some(&workspace),
                 content_limit,
                 MAXIMUM_COPY_ENTRIES,
+                &source.vm_only,
             )?;
             manifest.sha256
         }
@@ -241,6 +259,33 @@ fn provision_workspace(
         mode: source.mode,
         state_disk: paths.state_disk,
     })
+}
+
+/// The `paths`, relative to `source`, under which Git tracks a file, from
+/// one `git ls-files`. When the answer is too large to read, every path
+/// counts as tracked; a path Git cannot answer for (no Git, not a
+/// repository) is left out.
+pub fn tracked_paths(source: &Path, paths: &[String]) -> Vec<String> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let mut arguments = vec!["--literal-pathspecs", "ls-files", "-z", "--cached", "--"];
+    arguments.extend(paths.iter().map(String::as_str));
+    let files = match git_output(source, &arguments, 1024 * 1024) {
+        Ok(output) => output.stdout,
+        Err(WorkspaceError::GitOutputTooLarge) => return paths.to_vec(),
+        Err(_) => return Vec::new(),
+    };
+    paths
+        .iter()
+        .filter(|path| {
+            files.split(|byte| *byte == 0).any(|file| {
+                file.strip_prefix(path.as_bytes())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/"))
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 pub fn inspect_clean_git_workspace(
@@ -300,19 +345,23 @@ pub fn inspect_clean_git_workspace(
         source_path: top_level,
         commit,
         mode: WorkspaceSourceMode::Clone,
+        vm_only: Vec::new(),
     })
 }
 
 fn inspect_copy_workspace(
     requested_source: &Path,
     maximum_bytes: u64,
+    vm_only: &[String],
 ) -> Result<WorkspaceSource, WorkspaceError> {
     let source = open_source_directory(requested_source)?;
-    let manifest = copy_directory_manifest(&source, None, maximum_bytes, MAXIMUM_COPY_ENTRIES)?;
+    let manifest =
+        copy_directory_manifest(&source, None, maximum_bytes, MAXIMUM_COPY_ENTRIES, vm_only)?;
     Ok(WorkspaceSource {
         source_path: source.path,
         commit: manifest.sha256,
         mode: WorkspaceSourceMode::Copy,
+        vm_only: vm_only.to_vec(),
     })
 }
 
@@ -350,10 +399,11 @@ pub fn ensure_workspace(
                 WorkspaceSourceMode::Clone => WorkspaceSelection::Clone,
                 WorkspaceSourceMode::Copy => WorkspaceSelection::Copy,
             };
-            let admitted = inspect_workspace(
+            let admitted = inspect_workspace_skipping(
                 &source.source_path,
                 selection,
                 workspace_content_limit(disk_bytes),
+                &source.vm_only,
             )?;
             if admitted != *source {
                 return Err(WorkspaceError::SourceChanged);
@@ -549,13 +599,14 @@ fn provision_workspace_plan(
                 let source = input
                     .local_source()
                     .ok_or(WorkspaceError::InvalidWorkspacePlan)?;
-                let admitted = inspect_workspace(
+                let admitted = inspect_workspace_skipping(
                     &source.source_path,
                     match mode {
                         WorkspaceSourceMode::Clone => WorkspaceSelection::Clone,
                         WorkspaceSourceMode::Copy => WorkspaceSelection::Copy,
                     },
                     workspace_content_limit(disk_bytes),
+                    &source.vm_only,
                 )?;
                 if admitted != source {
                     return Err(WorkspaceError::SourceChanged);
@@ -697,6 +748,7 @@ fn prepare_copy_input(
         Some(destination),
         remaining_bytes,
         MAXIMUM_COPY_ENTRIES,
+        &source.vm_only,
     )?;
     if manifest.sha256 != identity {
         return Err(WorkspaceError::SourceChanged);
@@ -914,6 +966,12 @@ struct CopyWalk {
     entries: u64,
     maximum_bytes: u64,
     maximum_entries: u64,
+    /// `vm_only` patterns: a directory they match is left out, not copied,
+    /// hashed or walked, unless it holds a `.git`. None leaves the manifest
+    /// exactly as before.
+    skip: Option<codewire_project::VmOnlyPatterns>,
+    /// Character comparisons spent matching `skip`.
+    steps: u64,
 }
 
 fn copy_directory_manifest(
@@ -921,6 +979,7 @@ fn copy_directory_manifest(
     destination: Option<&Path>,
     maximum_bytes: u64,
     maximum_entries: u64,
+    skip: &[String],
 ) -> Result<DirectorySnapshot, WorkspaceError> {
     let mut walk = CopyWalk {
         hasher: Sha256::new(),
@@ -928,14 +987,28 @@ fn copy_directory_manifest(
         entries: 0,
         maximum_bytes,
         maximum_entries,
+        skip: if skip.is_empty() {
+            None
+        } else {
+            Some(
+                codewire_project::VmOnlyPatterns::parse(skip)
+                    .map_err(|_| WorkspaceError::InvalidWorkspacePlan)?,
+            )
+        },
+        steps: 0,
     };
     walk.hasher.update(COPY_MANIFEST_SCHEMA);
+    let cursor = walk
+        .skip
+        .as_ref()
+        .map(codewire_project::VmOnlyPatterns::cursor);
     copy_directory_level(
         source,
         &source.directory,
         Path::new(""),
         destination,
         0,
+        cursor.as_ref(),
         &mut walk,
     )?;
     verify_source_root(source)?;
@@ -1007,7 +1080,13 @@ fn snapshot_confined_source_directory(
     maximum_entries: u64,
 ) -> Result<DirectorySnapshot, WorkspaceError> {
     if relative.as_os_str().is_empty() {
-        return copy_directory_manifest(&root, Some(destination), maximum_bytes, maximum_entries);
+        return copy_directory_manifest(
+            &root,
+            Some(destination),
+            maximum_bytes,
+            maximum_entries,
+            &[],
+        );
     }
     validate_copy_path(relative)?;
     let selected_path = root.path.join(relative);
@@ -1035,8 +1114,13 @@ fn snapshot_confined_source_directory(
         device: metadata.dev(),
         inode: metadata.ino(),
     };
-    let snapshot =
-        copy_directory_manifest(&source, Some(destination), maximum_bytes, maximum_entries)?;
+    let snapshot = copy_directory_manifest(
+        &source,
+        Some(destination),
+        maximum_bytes,
+        maximum_entries,
+        &[],
+    )?;
 
     let reopened = open_beneath(
         root.directory.as_fd(),
@@ -1068,15 +1152,18 @@ pub(crate) fn manifest_directory(
     if source.path != requested_root {
         return Err(WorkspaceError::SourceRootChanged(requested_root.to_owned()));
     }
-    copy_directory_manifest(&source, None, maximum_bytes, maximum_entries)
+    copy_directory_manifest(&source, None, maximum_bytes, maximum_entries, &[])
 }
 
+/// `cursor` is where the `vm_only` patterns stand at `relative`; None when
+/// no pattern can match beneath it.
 fn copy_directory_level(
     source: &SourceDirectory,
     directory: &File,
     relative: &Path,
     destination_root: Option<&Path>,
     depth: usize,
+    cursor: Option<&codewire_project::VmOnlyCursor>,
     walk: &mut CopyWalk,
 ) -> Result<(), WorkspaceError> {
     if depth > MAXIMUM_COPY_DEPTH {
@@ -1114,6 +1201,7 @@ fn copy_directory_level(
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
 
     for name in names {
+        let entry_relative = relative.join(&name);
         walk.entries = walk
             .entries
             .checked_add(1)
@@ -1121,7 +1209,6 @@ fn copy_directory_level(
         if walk.entries > walk.maximum_entries {
             return Err(WorkspaceError::CopyEntryLimitExceeded);
         }
-        let entry_relative = relative.join(&name);
         validate_copy_path(&entry_relative)?;
         let identity = open_source_entry(directory, Path::new(&name), &entry_relative)?;
         let metadata = identity
@@ -1130,6 +1217,24 @@ fn copy_directory_level(
                 path: source.path.join(&entry_relative),
                 source: source_error,
             })?;
+        // A kept (vm_only) directory stays on the VM's disk, with all it
+        // holds, unless it holds its own repository; a file or symlink is
+        // copied, as a direct share leaves it shared.
+        let mut child_cursor = None;
+        if metadata.is_dir()
+            && let (Some(patterns), Some(cursor), Some(name)) = (&walk.skip, cursor, name.to_str())
+        {
+            let next = patterns.step(cursor, name, &mut walk.steps);
+            if walk.steps > codewire_project::MAX_VM_ONLY_MATCH_STEPS {
+                return Err(WorkspaceError::VmOnlyPatternsTooCostly);
+            }
+            if patterns.accepts(&next).is_some() && !holds_repository(directory, Path::new(name)) {
+                continue;
+            }
+            if patterns.alive(&next) {
+                child_cursor = Some(next);
+            }
+        }
         if metadata.dev() != source.device {
             return Err(WorkspaceError::SourceMountBoundary(entry_relative));
         }
@@ -1156,6 +1261,7 @@ fn copy_directory_level(
                 &entry_relative,
                 destination_root,
                 depth + 1,
+                child_cursor.as_ref(),
                 walk,
             )?;
             if let Some(destination) = destination.as_ref() {
@@ -1239,6 +1345,20 @@ fn copy_directory_level(
         return Err(WorkspaceError::SourceEntryChanged(relative.to_owned()));
     }
     Ok(())
+}
+
+/// Whether directory `name` beneath `directory` holds a `.git` entry of any
+/// kind. A lookup that fails otherwise counts as one, so the folder is copied.
+fn holds_repository(directory: &File, name: &Path) -> bool {
+    !matches!(
+        open_beneath(
+            directory.as_fd(),
+            &name.join(".git"),
+            IDENTITY_ONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            true,
+        ),
+        Err(rustix::io::Errno::NOENT)
+    )
 }
 
 /// Open beneath a retained source directory: openat2 on Linux; on Darwin,
@@ -2117,6 +2237,10 @@ impl Drop for ProvisionCleanup {
 pub enum WorkspaceError {
     #[error("workspace disk size is invalid: {0}")]
     InvalidDiskSize(u64),
+    #[error(
+        "codewire.yaml workspace.vm_only patterns take too long to match in this folder; simplify them"
+    )]
+    VmOnlyPatternsTooCostly,
     #[error("Docker data disk size is invalid: {0}")]
     InvalidDockerDiskSize(u64),
     #[error("Docker data disk staging path is unsafe: {0}")]
@@ -2260,7 +2384,7 @@ pub enum WorkspaceError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Seek as _, SeekFrom, Write as _};
+    use std::io::{Seek as _, SeekFrom};
     use std::os::unix::fs::symlink;
 
     use super::*;
@@ -2295,6 +2419,7 @@ mod tests {
         fs::set_permissions(&interrupted_staging, fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(interrupted_staging.join("partial-object"), b"partial").unwrap();
         let source = WorkspaceSource {
+            vm_only: Vec::new(),
             source_path: PathBuf::from("/source/no-longer-required"),
             commit: "a".repeat(40),
             mode: WorkspaceSourceMode::Clone,
@@ -2331,6 +2456,7 @@ mod tests {
         let staging = engine.join(provisioning_staging_name(vm_id));
         symlink(&outside, &staging).unwrap();
         let source = WorkspaceSource {
+            vm_only: Vec::new(),
             source_path: PathBuf::from("/source/no-longer-required"),
             commit: "a".repeat(40),
             mode: WorkspaceSourceMode::Clone,
@@ -2457,6 +2583,19 @@ mod tests {
     }
 
     #[test]
+    fn tracked_paths_names_only_the_paths_git_tracks() {
+        let repository = tempfile::tempdir().unwrap();
+        git(repository.path(), &["init", "-q"]);
+        fs::create_dir(repository.path().join("target")).unwrap();
+        fs::write(repository.path().join("target/committed"), b"x").unwrap();
+        fs::create_dir(repository.path().join("node_modules")).unwrap();
+        fs::write(repository.path().join("node_modules/untracked"), b"x").unwrap();
+        git(repository.path(), &["add", "target/committed"]);
+        let paths = ["node_modules", "target", ".venv", "targ"].map(str::to_owned);
+        assert_eq!(tracked_paths(repository.path(), &paths), ["target"]);
+    }
+
+    #[test]
     fn copy_snapshot_includes_hidden_files_and_materializes_hardlinks() {
         let source = tempfile::tempdir().unwrap();
         fs::create_dir(source.path().join("sub")).unwrap();
@@ -2478,6 +2617,7 @@ mod tests {
             Some(destination.path()),
             MAXIMUM_COPY_BYTES,
             MAXIMUM_COPY_ENTRIES,
+            &[],
         )
         .unwrap();
         assert_eq!(copied.sha256, admitted.commit);
@@ -2597,6 +2737,8 @@ mod tests {
             .write_all(b"-after")
             .unwrap();
         let mut walk = CopyWalk {
+            steps: 0,
+            skip: None,
             hasher: Sha256::new(),
             regular_bytes: expected.len(),
             entries: 1,
@@ -2850,6 +2992,244 @@ mod tests {
             fs::metadata(&snapshot.state_disk).unwrap().len(),
             MINIMUM_STATE_DISK_BYTES
         );
+    }
+
+    #[test]
+    fn copy_skips_vm_only_paths_and_keeps_the_unskipped_manifest() {
+        let source = tempfile::tempdir().unwrap();
+        for directory in [
+            "src",
+            "node_modules/pkg",
+            "target/debug",
+            "packages/web/node_modules",
+            "packages/web/src",
+        ] {
+            fs::create_dir_all(source.path().join(directory)).unwrap();
+        }
+        fs::write(source.path().join("src/main.rs"), b"fn main() {}\n").unwrap();
+        fs::write(source.path().join("node_modules/pkg/index.js"), b"1").unwrap();
+        fs::write(source.path().join("target/debug/app"), b"elf").unwrap();
+        fs::write(source.path().join("packages/web/node_modules/x"), b"x").unwrap();
+        fs::write(source.path().join("packages/web/src/app.ts"), b"app").unwrap();
+        // A file named like a skipped path elsewhere is copied, and a link
+        // into a skipped directory stays a dangling internal link.
+        fs::write(source.path().join("src/target"), b"not skipped").unwrap();
+        // A file at a listed path is copied: only a directory is kept apart.
+        fs::write(source.path().join(".venv"), b"a file").unwrap();
+        symlink("node_modules/pkg", source.path().join("pkg-link")).unwrap();
+        // An entry the copy refuses is never reached inside a skipped path.
+        std::os::unix::net::UnixListener::bind(source.path().join("target/socket")).unwrap();
+
+        // Without a skip list the manifest is exactly today's.
+        assert!(matches!(
+            inspect_workspace(source.path(), WorkspaceSelection::Copy, MAXIMUM_COPY_BYTES),
+            Err(WorkspaceError::UnsupportedCopyEntry(_))
+        ));
+        let vm_only = [
+            "node_modules",
+            "target",
+            "packages/web/node_modules",
+            ".venv",
+        ]
+        .map(str::to_owned);
+        let admitted = inspect_workspace_skipping(
+            source.path(),
+            WorkspaceSelection::Copy,
+            MAXIMUM_COPY_BYTES,
+            &vm_only,
+        )
+        .unwrap();
+        assert_eq!(admitted.vm_only, vm_only);
+        // Writes inside a skipped path do not change what is copied.
+        fs::write(source.path().join("node_modules/pkg/new.js"), b"2").unwrap();
+        fs::remove_file(source.path().join("target/debug/app")).unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let copied = copy_directory_manifest(
+            &open_source_directory(source.path()).unwrap(),
+            Some(destination.path()),
+            MAXIMUM_COPY_BYTES,
+            MAXIMUM_COPY_ENTRIES,
+            &vm_only,
+        )
+        .unwrap();
+        assert_eq!(copied.sha256, admitted.commit);
+        for skipped in ["node_modules", "target", "packages/web/node_modules"] {
+            assert!(
+                fs::symlink_metadata(destination.path().join(skipped)).is_err(),
+                "{skipped}"
+            );
+        }
+        assert_eq!(
+            fs::read(destination.path().join("src/target")).unwrap(),
+            b"not skipped"
+        );
+        assert_eq!(
+            fs::read(destination.path().join(".venv")).unwrap(),
+            b"a file"
+        );
+        assert_eq!(
+            fs::read(destination.path().join("packages/web/src/app.ts")).unwrap(),
+            b"app"
+        );
+        assert_eq!(
+            fs::read_link(destination.path().join("pkg-link")).unwrap(),
+            Path::new("node_modules/pkg")
+        );
+
+        // The skipped tree is out of the identity; the rest is still in it.
+        fs::remove_file(source.path().join("target/socket")).unwrap();
+        let plain =
+            inspect_workspace(source.path(), WorkspaceSelection::Copy, MAXIMUM_COPY_BYTES).unwrap();
+        assert!(plain.vm_only.is_empty());
+        assert_ne!(plain.commit, admitted.commit);
+        assert_eq!(
+            inspect_workspace_skipping(
+                source.path(),
+                WorkspaceSelection::Copy,
+                MAXIMUM_COPY_BYTES,
+                &[],
+            )
+            .unwrap(),
+            plain
+        );
+        fs::write(source.path().join("src/main.rs"), b"changed").unwrap();
+        assert_ne!(
+            inspect_workspace_skipping(
+                source.path(),
+                WorkspaceSelection::Copy,
+                MAXIMUM_COPY_BYTES,
+                &vm_only,
+            )
+            .unwrap()
+            .commit,
+            admitted.commit
+        );
+
+        // A plan's copy input carries the list, and provisioning applies it.
+        let plan = WorkspacePlan::from_inputs(vec![WorkspaceInput::local(
+            &inspect_workspace_skipping(
+                source.path(),
+                WorkspaceSelection::Copy,
+                MAXIMUM_COPY_BYTES,
+                &vm_only,
+            )
+            .unwrap(),
+            "/workspace/fixtures",
+        )])
+        .unwrap();
+        assert_eq!(plan.inputs[0].vm_only(), vm_only);
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        ensure_workspace_plan(
+            engine.path(),
+            Uuid::new_v4(),
+            &plan,
+            MINIMUM_STATE_DISK_BYTES,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn copy_skips_every_folder_a_pattern_matches_like_dockerignore() {
+        let source = tempfile::tempdir().unwrap();
+        for directory in [
+            "node_modules/a",
+            "packages/web/node_modules/x/node_modules",
+            "packages/web/dist",
+            "packages/web/src",
+            "packages/api/node_modules",
+            "apps/deep/er/node_modules",
+            ".git/node_modules",
+        ] {
+            fs::create_dir_all(source.path().join(directory)).unwrap();
+        }
+        fs::write(source.path().join("packages/web/src/app.ts"), b"app").unwrap();
+        fs::write(source.path().join("packages/web/dist/app.js"), b"built").unwrap();
+        fs::write(source.path().join("apps/node_modules"), b"a file").unwrap();
+        fs::write(source.path().join(".git/node_modules/keep"), b"git").unwrap();
+        // A matching folder that holds its own repository is copied.
+        fs::create_dir_all(source.path().join("vendor/node_modules/.git")).unwrap();
+        fs::write(source.path().join("vendor/node_modules/.git/HEAD"), b"ref").unwrap();
+        let patterns = ["**/node_modules", "packages/*/dist"].map(str::to_owned);
+        let admitted = inspect_workspace_skipping(
+            source.path(),
+            WorkspaceSelection::Copy,
+            MAXIMUM_COPY_BYTES,
+            &patterns,
+        )
+        .unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let copied = copy_directory_manifest(
+            &open_source_directory(source.path()).unwrap(),
+            Some(destination.path()),
+            MAXIMUM_COPY_BYTES,
+            MAXIMUM_COPY_ENTRIES,
+            &patterns,
+        )
+        .unwrap();
+        assert_eq!(copied.sha256, admitted.commit);
+        for skipped in [
+            "node_modules",
+            "packages/web/node_modules",
+            "packages/web/dist",
+            "packages/api/node_modules",
+            "apps/deep/er/node_modules",
+        ] {
+            assert!(
+                fs::symlink_metadata(destination.path().join(skipped)).is_err(),
+                "{skipped}"
+            );
+        }
+        assert_eq!(
+            fs::read(destination.path().join("packages/web/src/app.ts")).unwrap(),
+            b"app"
+        );
+        // A file that matches is copied, and .git is never matched.
+        assert_eq!(
+            fs::read(destination.path().join("apps/node_modules")).unwrap(),
+            b"a file"
+        );
+        assert_eq!(
+            fs::read(destination.path().join(".git/node_modules/keep")).unwrap(),
+            b"git"
+        );
+        assert_eq!(
+            fs::read(destination.path().join("vendor/node_modules/.git/HEAD")).unwrap(),
+            b"ref"
+        );
+        // Leaving folders out hashes exactly like a tree without them.
+        let with_skip = inspect_workspace_skipping(
+            source.path(),
+            WorkspaceSelection::Copy,
+            MAXIMUM_COPY_BYTES,
+            &patterns,
+        )
+        .unwrap()
+        .commit;
+        for skipped in [
+            "node_modules",
+            "packages/web/node_modules",
+            "packages/web/dist",
+            "packages/api/node_modules",
+            "apps/deep/er/node_modules",
+        ] {
+            fs::remove_dir_all(source.path().join(skipped)).unwrap();
+        }
+        assert_eq!(
+            inspect_workspace(source.path(), WorkspaceSelection::Copy, MAXIMUM_COPY_BYTES)
+                .unwrap()
+                .commit,
+            with_skip
+        );
+        assert!(matches!(
+            inspect_workspace_skipping(
+                source.path(),
+                WorkspaceSelection::Copy,
+                MAXIMUM_COPY_BYTES,
+                &["../escape".to_owned()],
+            ),
+            Err(WorkspaceError::InvalidWorkspacePlan)
+        ));
     }
 
     #[test]

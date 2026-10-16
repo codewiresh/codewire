@@ -52,7 +52,9 @@ const MAXIMUM_GUEST_PROGRESS_FRAMES: usize = 64;
 const RUNNER_WATCH_BUFFER: usize = 8;
 // Bump for every detached-runner behavior change, even if the protobuf
 // message layout itself remains wire-compatible.
-const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 5;
+// 6: direct shares carry vm_only paths into the digest-bound guest plan.
+// 7: those entries are patterns the guest expands at every boot.
+const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 7;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -508,7 +510,7 @@ impl RunnerEvents {
         }
         let sequence = self
             .sequence
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |sequence| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |sequence| {
                 sequence.checked_add(1)
             })
             .map_err(|_| Status::internal("runner event sequence overflow"))?
@@ -1741,6 +1743,7 @@ fn parse_direct_shares(request: &v1::StartVmRequest) -> Result<Vec<DirectShareRe
             )
             .map_err(|_| Status::invalid_argument("invalid direct share"))?;
             let mount = DirectShareMount::for_index(index, raw.destination.clone(), raw.read_only)
+                .and_then(|mount| mount.with_vm_only(raw.vm_only.clone()))
                 .map_err(|_| Status::invalid_argument("invalid direct share"))?;
             DirectShareRequest::new(
                 PathBuf::from(OsString::from_vec(raw.source_path.clone())),
@@ -3363,6 +3366,7 @@ mod tests {
         let admitted = crate::direct_share::admit_direct_share(&source_path, &[]).unwrap();
         let identity = admitted.identity();
         let raw = v1::DirectShareAttachment {
+            vm_only: Vec::new(),
             source_path: std::os::unix::ffi::OsStrExt::as_bytes(source_path.as_os_str()).to_vec(),
             device_major: identity.device_major(),
             device_minor: identity.device_minor(),
