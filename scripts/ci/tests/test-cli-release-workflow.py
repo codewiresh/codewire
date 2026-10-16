@@ -179,6 +179,10 @@ def external_download_errors(text):
 
 def check(text, ci_text):
     errors = []
+    # Forgejo runners set no RUNNER_NAME: a step that requires it fails the
+    # first release whose source signs the VZ helper.
+    if "${RUNNER_NAME:?}" in text or text.count("${RUNNER_NAME:-$(hostname -s)}") != 2:
+        errors.append("runner provenance must fall back to the host name, never require RUNNER_NAME")
 
     def need(condition, message):
         if not condition:
@@ -511,6 +515,8 @@ def check(text, ci_text):
 
 
 MUTATIONS = {
+    "helper build requires RUNNER_NAME": lambda t: t.replace(
+        "${RUNNER_NAME:-$(hostname -s)}", "${RUNNER_NAME:?}", 1),
     "release Linux side without a job limit": lambda t: t.replace("    timeout-minutes: 165\n", "", 1),
     "release Linux side at the pool limit": lambda t: t.replace(
         "    timeout-minutes: 165\n", "    timeout-minutes: 330\n", 1),

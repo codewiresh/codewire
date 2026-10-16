@@ -480,6 +480,37 @@ printf '%s\n' "(delete) $zero_sha refs/heads/obsolete $multi_ref_head" |
   }
 [ ! -s "$delete_ref_log" ] || fail 'single-ref deletion ran verification tools'
 
+# A push of deletions only may name many refs and runs nothing; CI mode never
+# authorizes deletion, and a deletion beside an update stays ambiguous.
+multi_delete_log="$TMP/multi-delete-tools.log"
+printf '%s\n' \
+  "(delete) $zero_sha refs/heads/obsolete-one $multi_ref_head" \
+  "(delete) $zero_sha refs/heads/obsolete-two $multi_ref_head" \
+  "(delete) $zero_sha refs/heads/obsolete-three $multi_ref_head" |
+  {
+    cd "$repo"
+    PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$multi_delete_log" \
+      "$dispatcher"
+  } || fail 'pre-push refused a push of deletions only'
+[ ! -s "$multi_delete_log" ] || fail 'multi-ref deletion ran verification tools'
+
+multi_delete_ci_log="$TMP/multi-delete-ci-tools.log"
+if multi_delete_ci_output="$({
+  printf '%s\n' \
+    "(delete) $zero_sha refs/heads/obsolete-one $multi_ref_head" \
+    "(delete) $zero_sha refs/heads/obsolete-two $multi_ref_head" |
+    {
+      cd "$repo"
+      CODEWIRE_PREFLIGHT_MODE=ci PATH="$TMP/bin:$PATH" \
+        PREFLIGHT_TEST_TOOL_LOG="$multi_delete_ci_log" "$dispatcher"
+    }
+} 2>&1)"; then
+  fail 'CI mode accepted a push of deletions'
+fi
+assert_contains multi_delete_ci "$multi_delete_ci_output" \
+  'CI-owned verification does not authorize ref deletion'
+[ ! -s "$multi_delete_ci_log" ] || fail 'CI-mode deletion ran verification tools'
+
 # Old behaviour, kept for older worktrees: a worktree without its own
 # scripts/dev/pre-push.sh still gets the legacy receipt-only dispatcher, which
 # refuses a push without a receipt and runs nothing.
