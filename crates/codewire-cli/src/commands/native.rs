@@ -4231,8 +4231,11 @@ working_directory: /workspace/github
         );
 
         // The default list drops a path Git tracks; a declared list is kept.
+        // On macOS cw asks the runtime's own git, which only
+        // codewire-local-vmm's tests admit; its `tracked_paths` test covers
+        // that side.
         let git = Path::new("/usr/bin/git");
-        if git.exists() {
+        if cfg!(target_os = "linux") && git.exists() {
             let run = |arguments: &[&str]| {
                 let status = std::process::Command::new(git)
                     .args(arguments)

@@ -2583,6 +2583,19 @@ mod tests {
     }
 
     #[test]
+    fn tracked_paths_names_only_the_paths_git_tracks() {
+        let repository = tempfile::tempdir().unwrap();
+        git(repository.path(), &["init", "-q"]);
+        fs::create_dir(repository.path().join("target")).unwrap();
+        fs::write(repository.path().join("target/committed"), b"x").unwrap();
+        fs::create_dir(repository.path().join("node_modules")).unwrap();
+        fs::write(repository.path().join("node_modules/untracked"), b"x").unwrap();
+        git(repository.path(), &["add", "target/committed"]);
+        let paths = ["node_modules", "target", ".venv", "targ"].map(str::to_owned);
+        assert_eq!(tracked_paths(repository.path(), &paths), ["target"]);
+    }
+
+    #[test]
     fn copy_snapshot_includes_hidden_files_and_materializes_hardlinks() {
         let source = tempfile::tempdir().unwrap();
         fs::create_dir(source.path().join("sub")).unwrap();
