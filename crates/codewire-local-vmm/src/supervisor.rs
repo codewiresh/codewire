@@ -2711,7 +2711,7 @@ impl SupervisorCore {
         if self.environment(name)?.state == StoredEnvironmentState::Stopped
             && record.process.executable != self.config.executable
         {
-            return self.retire_foreign_runner(name, &record).await;
+            return self.retire_idle_runner(name, &record).await;
         }
         let socket_trusted = record.socket.revalidate(&expected_socket).is_ok();
         match direct_share_validation {
@@ -3780,11 +3780,13 @@ impl SupervisorCore {
         socket_cleanup
     }
 
-    /// End a stopped environment's idle runner from another cw (see
-    /// `reconcile_runner`): its exact recorded process, then its socket, at
-    /// this root's runner path or the pre-#2735 one, removed only while it is
-    /// still the recorded socket.
-    async fn retire_foreign_runner(
+    /// End a stopped environment's idle runner, which holds no VM: one from
+    /// another cw (see `reconcile_runner`), or this cw's own before it hands
+    /// the root over (`retire_supervisor`). Its exact recorded process, then
+    /// its socket, at this root's runner path or the pre-#2735 one, removed
+    /// only while it is still the recorded socket; the record is cleared, so
+    /// the next start runs the runner of whichever cw starts it.
+    async fn retire_idle_runner(
         &mut self,
         name: &str,
         record: &RunnerRecord,
@@ -5605,6 +5607,30 @@ impl LocalSupervisorService for SupervisorRpc {
             .find(|(_, environment)| may_run_a_vm(environment))
         {
             return Err(Status::from(SupervisorError::RetireRefused(name.clone())));
+        }
+        // A stopped environment's runner holds no VM, but on Linux it outlives
+        // this supervisor, and an older successor (`cw update rollback`)
+        // cannot use a newer runner: end each one this supervisor tracks
+        // before handing over. A newer successor would end it anyway.
+        let idle: Vec<(String, RunnerRecord)> = core
+            .state
+            .environments
+            .iter()
+            .filter(|(_, environment)| {
+                environment.state == StoredEnvironmentState::Stopped
+                    && core.live_runners.contains_key(&environment.id)
+            })
+            .filter_map(|(name, environment)| {
+                environment
+                    .runner
+                    .clone()
+                    .map(|runner| (name.clone(), runner))
+            })
+            .collect();
+        for (name, runner) in idle {
+            core.retire_idle_runner(&name, &runner)
+                .await
+                .map_err(Status::from)?;
         }
         core.retiring = true;
         diagnostic_log::record(core.log.as_ref(), "supervisor_retiring", &[]);
@@ -9535,7 +9561,7 @@ mod tests {
         remove_bound_socket(&socket, &identity).unwrap();
     }
 
-    fn attach_named_test_runner_process(
+    pub(super) fn attach_named_test_runner_process(
         core: &mut SupervisorCore,
         name: &str,
         socket_identity: SocketIdentity,
@@ -16977,7 +17003,10 @@ mod runner_exit_tests {
 
 #[cfg(test)]
 mod retire_tests {
-    use super::tests::{project_environment, test_supervisor_core, test_supervisor_service};
+    use super::tests::{
+        attach_named_test_runner_process, project_environment, test_supervisor_core,
+        test_supervisor_service,
+    };
     use super::*;
 
     fn with_runner(core: &mut SupervisorCore, state: StoredEnvironmentState) {
@@ -17033,6 +17062,37 @@ mod retire_tests {
             environment.state = state;
             assert_eq!(may_run_a_vm(&environment), may_run, "{state:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_retiring_supervisor_ends_its_idle_runners_first() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let socket = SocketIdentity {
+            device: 1,
+            inode: 2,
+            uid: 4,
+            mode: 0o140600,
+        };
+        let (environment_id, process) = attach_named_test_runner_process(&mut core, "dev", socket);
+        core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
+        core.save().unwrap();
+        let service = test_supervisor_service(core);
+        retire(&service, NATIVE_SUPERVISOR_PROTOCOL_VERSION)
+            .await
+            .unwrap();
+        let core = service.core.lock().await;
+        let environment = core.environment("dev").unwrap();
+        assert!(environment.runner.is_none());
+        assert_eq!(environment.state, StoredEnvironmentState::Stopped);
+        assert!(!core.live_runners.contains_key(&environment_id));
+        assert!(
+            rustix::process::test_kill_process(
+                rustix::process::Pid::from_raw(process.pid as i32).unwrap()
+            )
+            .is_err(),
+            "the idle runner {} still runs",
+            process.pid
+        );
     }
 
     #[tokio::test]
