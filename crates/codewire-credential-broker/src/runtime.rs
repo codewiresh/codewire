@@ -911,10 +911,12 @@ impl SyntheticOpenAiSmokeTransport {
         }
     }
 
-    /// Distinguish only the three fixed, public Kind Claude canaries from
-    /// the CW API fixture. This is classification, not admission: the original
-    /// owned request must still pass the Kind provider's complete validator.
-    /// No protected value or request field leaves this borrowed predicate.
+    /// Distinguish only the three fixed, public Kind Claude canaries and the
+    /// Kind sign-in's own synthetic access tokens from the CW API fixture.
+    /// This is classification, not admission: the original owned request must
+    /// still pass the Kind provider's complete validator, which admits only
+    /// the latest sign-in generation. No protected value or request field
+    /// leaves this borrowed predicate.
     pub fn is_kind_anthropic_fixture(request: &BrokerUpstreamRequest) -> bool {
         if request.method != Method::POST
             || !matches!(
@@ -938,11 +940,18 @@ impl SyntheticOpenAiSmokeTransport {
             (None, Some(key)) => {
                 key.as_bytes() == b"sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123456789abcdef"
             }
-            (Some(bearer), None) => matches!(
-                bearer.as_bytes(),
-                b"Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123456789abcdef"
-                    | b"Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef"
-            ),
+            (Some(bearer), None) => {
+                matches!(
+                    bearer.as_bytes(),
+                    b"Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123456789abcdef"
+                        | b"Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef"
+                ) || bearer
+                    .as_bytes()
+                    .strip_prefix(b"Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_SIGN_IN_ACCESS-")
+                    .is_some_and(|generation| {
+                        generation.len() == 6 && generation.iter().all(u8::is_ascii_digit)
+                    })
+            }
             _ => false,
         }
     }
@@ -3105,6 +3114,7 @@ mod tests {
         let api_key = "sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123456789abcdef";
         let token = "Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123456789abcdef";
         let refused = "Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef";
+        let sign_in = "Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_SIGN_IN_ACCESS-000002";
         let request = |url: &str, name: &str, value: &str| {
             BrokerUpstreamRequest::new(
                 Method::POST,
@@ -3121,6 +3131,7 @@ mod tests {
             ("x-api-key", api_key),
             ("authorization", token),
             ("authorization", refused),
+            ("authorization", sign_in),
         ] {
             for url in [
                 url,
@@ -3169,6 +3180,19 @@ mod tests {
             ),
             ("x-api-key", "cwlocalopenai0123456789abcdef0123456789abcdef"),
             ("authorization", "Bearer sk-ant-oat01-unknown"),
+            ("x-api-key", sign_in),
+            (
+                "authorization",
+                "Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_SIGN_IN_ACCESS-00002",
+            ),
+            (
+                "authorization",
+                "Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_SIGN_IN_ACCESS-0000020",
+            ),
+            (
+                "authorization",
+                "Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_SIGN_IN_ACCESS-00000x",
+            ),
         ] {
             assert!(!SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
                 &request(url, name, value)
