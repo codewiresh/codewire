@@ -124,7 +124,10 @@ impl SystemDnsResolver {
         options.try_tcp_on_error = true;
         options.recursion_desired = true;
         options.os_port_selection = false;
-        options.case_randomization = true;
+        // The resolver asks only the host's own stub resolver, over loopback,
+        // where randomizing the query name's case adds no spoofing defense
+        // and leaves randomly cased names in the host resolver's cache.
+        options.case_randomization = false;
         options.trust_anchor = None;
         options.allow_answers.clear();
         options.deny_answers.clear();
@@ -599,7 +602,7 @@ mod tests {
         assert_eq!(options.max_active_requests, DNS_MAX_ACTIVE_REQUESTS);
         assert!(options.preserve_intermediates);
         assert!(options.try_tcp_on_error);
-        assert!(options.case_randomization);
+        assert!(!options.case_randomization);
 
         let outcome = resolver
             .resolve(DnsResolverRequest {

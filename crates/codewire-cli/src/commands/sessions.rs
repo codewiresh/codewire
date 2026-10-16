@@ -1374,13 +1374,22 @@ pub(crate) async fn handle_environment_shell_command(
             no_tty: false,
             detach: false,
             output: OutputFormat::Text,
-            // No command: the daemon starts the workspace user's own login
-            // shell (their passwd shell in a local VM, `$SHELL` or bash in a
-            // hosted Sandbox), so line editing and their rc files work.
-            command: Vec::new(),
+            command: login_shell_command(),
         },
     )
     .await
+}
+
+/// The workspace user's own shell as a login shell: `$SHELL` in the
+/// workspace (the user's passwd shell in a local VM), so line editing,
+/// history and the user's rc files work. A bare `/bin/sh` is dash on the
+/// workspace image and has none of them.
+pub(crate) fn login_shell_command() -> Vec<String> {
+    vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "exec \"${SHELL:-/bin/sh}\" -l".to_string(),
+    ]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1752,7 +1761,7 @@ async fn select_or_create_environment_session(
         SessionSelection::Create if should_create_session()? => {
             target
                 .launch(
-                    Vec::new(),
+                    login_shell_command(),
                     target.default_working_dir(),
                     BTreeMap::new(),
                     true,
