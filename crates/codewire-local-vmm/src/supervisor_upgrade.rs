@@ -378,6 +378,53 @@ async fn list(client: &mut NativeSupervisorClient) -> Result<Vec<v1::Environment
         })
 }
 
+/// What handing this root back to an older cw found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OlderCwRelease {
+    /// No supervisor of this cw's protocol serves the root.
+    Nothing,
+    /// Its supervisor ran no VM and retired; the older cw starts its own.
+    Released,
+    /// These VMs may run on it, so it keeps serving them.
+    Busy(Vec<String>),
+}
+
+/// Before a cw older than this one takes over the root (`cw update rollback`
+/// to a release before #2870), retire this protocol's supervisor while it
+/// runs no VM. An older cw refuses a newer supervisor and has no way to
+/// retire it. Under the takeover lock; starts nothing.
+pub async fn release_for_older_cw(
+    config: &NativeRuntimeConfig,
+) -> Result<OlderCwRelease, TakeoverError> {
+    for socket in [
+        config.supervisor_socket(),
+        config.legacy_supervisor_socket(),
+    ] {
+        if std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            continue;
+        }
+        let root = PrivateRoot::open(&config.root)?;
+        let _lock = TakeoverLock::acquire(&root, LOCK_WAIT).await?;
+        let mut client = NativeSupervisorClient::connect_configured_at(&socket, config)
+            .await
+            .map_err(SupervisorError::from)?;
+        if client.protocol() < NATIVE_SUPERVISOR_PROTOCOL_VERSION {
+            // Already an older cw's: nothing of this cw holds the root.
+            return Ok(OlderCwRelease::Nothing);
+        }
+        let running = running_vms(&mut client)
+            .await
+            .map_err(|reason| failed(&client, reason))?;
+        if !running.is_empty() {
+            return Ok(OlderCwRelease::Busy(running));
+        }
+        let legacy = socket == config.legacy_supervisor_socket();
+        retire_idle(&mut client, legacy).await?;
+        return Ok(OlderCwRelease::Released);
+    }
+    Ok(OlderCwRelease::Nothing)
+}
+
 async fn running_vms(client: &mut NativeSupervisorClient) -> Result<Vec<String>, String> {
     let environments = tokio::time::timeout(LIST_DEADLINE, client.list())
         .await

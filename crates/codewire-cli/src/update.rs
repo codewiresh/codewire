@@ -153,7 +153,7 @@ pub(crate) async fn run(args: UpdateArgs) -> anyhow::Result<()> {
                 },
                 rollback.selection.store.json,
             )?;
-            hand_off_local_vms(&store, &selected.current, &rollback.selection);
+            hand_off_local_vms(&store, &selected.current, &rollback.selection).await;
             Ok(())
         }
         (None, Some(directory), Some(sha256), None, None) => {
@@ -177,7 +177,7 @@ pub(crate) async fn run(args: UpdateArgs) -> anyhow::Result<()> {
                 },
                 args.selection.store.json,
             )?;
-            hand_off_local_vms(&store, &published.sha256, &args.selection);
+            hand_off_local_vms(&store, &published.sha256, &args.selection).await;
             Ok(())
         }
         (None, None, None, Some(version), None) => {
@@ -243,7 +243,7 @@ async fn public_release(
         },
         options.store.json,
     )?;
-    hand_off_local_vms(&store, &published.sha256, &options);
+    hand_off_local_vms(&store, &published.sha256, &options).await;
     Ok(())
 }
 
@@ -253,14 +253,14 @@ async fn public_release(
 /// without that command is asked silently first and skipped. Never for an
 /// explicit --store, which the user's `cw` may not resolve to. It never fails
 /// the update, which has already succeeded.
-fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs) {
+async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs) {
     use std::process::{Command, Stdio};
-    if !cfg!(any(target_os = "linux", target_os = "macos"))
-        || options.store.store.is_some()
-        || store.verify(sha256).is_err()
-    {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) || options.store.store.is_some() {
         return;
     }
+    let Ok(record) = store.verify(sha256) else {
+        return;
+    };
     let executable = store.version_executable(sha256);
     let supported = Command::new(&executable)
         .args(["env", "--local", "upgrade", "--help"])
@@ -270,6 +270,12 @@ fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs) {
         .status()
         .is_ok_and(|status| status.success());
     if !supported {
+        // An older cw, from before #2870: it refuses this cw's local VM
+        // supervisor and cannot retire it, so hand the root back now.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        crate::commands::release_local_vms_for_older_cw(&record.package_version).await;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let _ = record;
         return;
     }
     let mut command = Command::new(&executable);

@@ -1805,6 +1805,30 @@ async fn native_boot_client_here() -> anyhow::Result<NativeSupervisorClient> {
     Ok(client)
 }
 
+/// `cw update` selected an older cw, one without `cw env --local upgrade`. It
+/// refuses this cw's local VM supervisor ("a newer cw runs your local VMs")
+/// and cannot retire it, so hand the state root back while no VM runs on it.
+/// Anything but a confirmed idle supervisor changes nothing, and says how to
+/// hand the VMs over: this cw stops them, and a rollback while none runs
+/// hands the root over. Never fails the update.
+pub(crate) async fn release_local_vms_for_older_cw(version: &str) {
+    use codewire_local_vmm::supervisor_upgrade::{OlderCwRelease, release_for_older_cw};
+    let Ok(config) = native_runtime_config() else {
+        return;
+    };
+    let hand_over = "to hand them over, select this cw again (`cw update rollback`), stop them (`cw env --local stop NAME`), then roll back";
+    match release_for_older_cw(&config).await {
+        Ok(OlderCwRelease::Nothing | OlderCwRelease::Released) => {}
+        Ok(OlderCwRelease::Busy(names)) => eprintln!(
+            "cw: local VMs {} run on the local VM supervisor of the cw you rolled back from, which cw {version} cannot use; {hand_over}",
+            names.join(", ")
+        ),
+        Err(error) => eprintln!(
+            "cw: the local VM supervisor of the cw you rolled back from keeps running ({error}); cw {version} cannot use it; {hand_over}"
+        ),
+    }
+}
+
 /// `cw env --local upgrade`: move the local VMs a previous cw's supervisor
 /// still runs to this cw. Each stops through that supervisor, the ordinary
 /// stop; the supervisor then hands the state root over, and each starts again
