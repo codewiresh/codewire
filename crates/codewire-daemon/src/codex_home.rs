@@ -125,6 +125,7 @@ impl CodexHome {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn owner(&self) -> Option<FileOwner> {
         self.owner
     }
