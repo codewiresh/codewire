@@ -369,12 +369,17 @@ where
     let (app_ports, pod_uid) = bound.unzip();
     #[cfg(target_os = "linux")]
     let (codex_login, claude_login) = match logins {
-        Some(logins) => (
-            crate::codex_home::login::login_writer(&config, logins.codex_home)
-                .map(|writer| (writer, logins.check_period)),
-            crate::claude_home::login::hosted_writer(&config)
-                .map(|writer| (writer, logins.check_period)),
-        ),
+        Some(logins) => {
+            // A local VM keeps Claude Code's login for the same workload user
+            // as Codex's native home; a hosted daemon keeps its own.
+            let owner = logins.codex_home.owner();
+            (
+                crate::codex_home::login::login_writer(&config, logins.codex_home)
+                    .map(|writer| (writer, logins.check_period)),
+                crate::claude_home::login::login_writer(&config, owner)
+                    .map(|writer| (writer, logins.check_period)),
+            )
+        }
         None => (None, None),
     };
     #[cfg(not(target_os = "linux"))]

@@ -756,7 +756,7 @@ fn an_already_expired_delivery_is_never_written() {
 fn a_store_changed_or_created_after_inspection_is_never_replaced() {
     let fixture = Fixture::new();
     fixture.writer().apply(first(), T0).unwrap();
-    let config = open_config(&fixture.home(), false).unwrap().unwrap();
+    let config = open_config(&fixture.home(), false, None).unwrap().unwrap();
     let Credentials::Owned { entry, .. } = classify(&config, CLAUDE_CREDENTIALS_FILE_NAME).unwrap()
     else {
         panic!("Codewire's store expected");
@@ -776,7 +776,7 @@ fn a_store_changed_or_created_after_inspection_is_never_replaced() {
 fn rename_aside_restores_a_concurrent_login_and_never_deletes_one() {
     let fixture = Fixture::new();
     fixture.writer().apply(first(), T0).unwrap();
-    let config = open_config(&fixture.home(), false).unwrap().unwrap();
+    let config = open_config(&fixture.home(), false, None).unwrap().unwrap();
     let aside = ".credentials.json.codewire.synthetic.aside";
     let users = serde_json::to_vec(&json!({ "claudeAiOauth": users_login() })).unwrap();
 
@@ -867,18 +867,37 @@ fn only_a_hosted_daemon_with_the_sign_in_form_runs_the_writer() {
     };
     let anthropic = ManagedCredentialClients::from_profile_slots(["anthropic"]).unwrap();
     let sign_in = anthropic.with_anthropic_sign_in().unwrap();
-    let writer = hosted_writer(&config(Some(CredentialBridgeTransport::Hosted), sign_in)).unwrap();
+    let owner = crate::private_files::FileOwner {
+        uid: 1000,
+        gid: 1000,
+    };
+    let writer =
+        login_writer(&config(Some(CredentialBridgeTransport::Hosted), sign_in), None).unwrap();
     assert_eq!(writer.home, Path::new("/home/codewire"));
-    for (transport, clients) in [
-        (Some(CredentialBridgeTransport::Hosted), anthropic),
+    assert_eq!(writer.owner, None);
+    // A local VM's guest keeps the workload user's home on that user's behalf.
+    let writer = login_writer(
+        &config(Some(CredentialBridgeTransport::Local), sign_in),
+        Some(owner),
+    )
+    .unwrap();
+    assert_eq!(writer.home, Path::new("/home/codewire"));
+    assert_eq!(writer.owner, Some(owner));
+    for (transport, clients, owner) in [
+        (Some(CredentialBridgeTransport::Hosted), anthropic, None),
         (
             Some(CredentialBridgeTransport::Hosted),
             anthropic.with_anthropic_subscription_token().unwrap(),
+            None,
         ),
-        (Some(CredentialBridgeTransport::Local), sign_in),
-        (None, sign_in),
+        (Some(CredentialBridgeTransport::Local), anthropic, Some(owner)),
+        // A local guest without its workload user, or a hosted daemon with one.
+        (Some(CredentialBridgeTransport::Local), sign_in, None),
+        (Some(CredentialBridgeTransport::Hosted), sign_in, Some(owner)),
+        (None, sign_in, None),
+        (None, sign_in, Some(owner)),
     ] {
-        assert!(hosted_writer(&config(transport, clients)).is_none());
+        assert!(login_writer(&config(transport, clients), owner).is_none());
     }
 }
 

@@ -487,3 +487,49 @@ async fn a_codex_login_passes_the_composer_unchanged_both_ways() {
     assert!(f.composer.pending.lock().await.is_empty());
     assert_eq!(f.store.reads.load(Ordering::Relaxed), 0);
 }
+
+/// The Claude login carries no projection either: it passes the composer unchanged on
+/// its way to the platform broker, and its answer passes back unchanged, with
+/// no projection state recorded and no local secret read.
+#[tokio::test]
+async fn a_claude_login_passes_the_composer_unchanged_both_ways() {
+    let f = fixture(true);
+    let request_id = Uuid::new_v4().to_string();
+    let login = bridge::CredentialBridgeGuestMessage {
+        payload: Some(
+            bridge::credential_bridge_guest_message::Payload::ClaudeLogin(
+                bridge::ClaudeLoginRequest {
+                    request_id: request_id.clone(),
+                    recipient_public_key: vec![3; 32],
+                    deadline_unix_ms: now().unwrap() + 30_000,
+                },
+            ),
+        ),
+    };
+    assert_eq!(
+        Arc::clone(&f.composer)
+            .prepare(login.clone())
+            .await
+            .unwrap(),
+        login
+    );
+    let answer = bridge::CredentialBridgeHostMessage {
+        payload: Some(bridge::credential_bridge_host_message::Payload::ClaudeLogin(
+            bridge::ClaudeLoginResponse {
+                request_id,
+                result: Some(bridge::claude_login_response::Result::Failure(
+                    bridge::CredentialBridgeFailureReason::Denied as i32,
+                )),
+            },
+        )),
+    };
+    assert_eq!(
+        Arc::clone(&f.composer)
+            .complete(answer.clone())
+            .await
+            .unwrap(),
+        answer
+    );
+    assert!(f.composer.pending.lock().await.is_empty());
+    assert_eq!(f.store.reads.load(Ordering::Relaxed), 0);
+}

@@ -184,3 +184,58 @@ async fn relay_carries_the_codex_login_request_and_its_answer() {
     assert_eq!(result, Err(BrokerBridgeError::Unavailable));
     assert_eq!(host_rx.recv().await, Some(expected));
 }
+
+/// A local VM's broker lists the Claude login on its epoch too, so the relay
+/// carries the request to the platform and its answer back, instead of ending
+/// the epoch on it.
+#[tokio::test]
+async fn relay_carries_the_claude_login_request_and_its_answer() {
+    let environment_id = Uuid::new_v4();
+    let (guest_tx, guest_rx) = mpsc::channel(2);
+    let (host_tx, mut host_rx) = mpsc::channel(1);
+    guest_tx.send(ready(environment_id, 4)).await.unwrap();
+    let request_id = Uuid::new_v4().to_string();
+    let login = v1::CredentialBridgeGuestMessage {
+        payload: Some(v1::credential_bridge_guest_message::Payload::ClaudeLogin(
+            v1::ClaudeLoginRequest {
+                request_id: request_id.clone(),
+                recipient_public_key: vec![7; 32],
+                deadline_unix_ms: 1,
+            },
+        )),
+    };
+    guest_tx.send(login.clone()).await.unwrap();
+    drop(guest_tx);
+    let admitted = super::super::admit_credential_bridge(
+        FakeBridge {
+            input: guest_rx,
+            output: FakeResponseSink(host_tx),
+        },
+        environment_id,
+        4,
+    )
+    .await
+    .unwrap();
+    let answer = v1::CredentialBridgeHostMessage {
+        payload: Some(v1::credential_bridge_host_message::Payload::ClaudeLogin(
+            v1::ClaudeLoginResponse {
+                request_id,
+                result: Some(v1::claude_login_response::Result::Failure(
+                    v1::CredentialBridgeFailureReason::Denied as i32,
+                )),
+            },
+        )),
+    };
+    let expected = answer.payload.clone().unwrap();
+
+    let result =
+        run_admitted_credential_bridge_relay(admitted, move |_actual, mut input| async move {
+            assert_eq!(input.next().await, Some(login));
+            assert!(input.next().await.is_none());
+            Ok(Box::pin(stream::iter([Ok(answer)])) as CredentialBridgeRelayOutput)
+        })
+        .await;
+
+    assert_eq!(result, Err(BrokerBridgeError::Unavailable));
+    assert_eq!(host_rx.recv().await, Some(expected));
+}

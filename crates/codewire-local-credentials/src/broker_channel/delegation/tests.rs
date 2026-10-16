@@ -133,6 +133,12 @@ impl PlatformCredentialConnector for SyntheticConnector {
                                     request,
                                 )),
                         }) => Some(Ok(login_denied(request.request_id))),
+                        Ok(bridge::CredentialBridgeGuestMessage {
+                            payload:
+                                Some(bridge::credential_bridge_guest_message::Payload::ClaudeLogin(
+                                    request,
+                                )),
+                        }) => Some(Ok(claude_login_denied(request.request_id))),
                         Ok(_) => None,
                         Err(status) => Some(Err(status)),
                     }
@@ -287,10 +293,37 @@ fn login_denied(request_id: String) -> bridge::CredentialBridgeHostMessage {
     }
 }
 
+fn claude_login_request(request_id: &str) -> bridge::CredentialBridgeGuestMessage {
+    bridge::CredentialBridgeGuestMessage {
+        payload: Some(
+            bridge::credential_bridge_guest_message::Payload::ClaudeLogin(
+                bridge::ClaudeLoginRequest {
+                    request_id: request_id.to_owned(),
+                    recipient_public_key: vec![4; 32],
+                    deadline_unix_ms: 42,
+                },
+            ),
+        ),
+    }
+}
+
+fn claude_login_denied(request_id: String) -> bridge::CredentialBridgeHostMessage {
+    bridge::CredentialBridgeHostMessage {
+        payload: Some(bridge::credential_bridge_host_message::Payload::ClaudeLogin(
+            bridge::ClaudeLoginResponse {
+                request_id,
+                result: Some(bridge::claude_login_response::Result::Failure(
+                    bridge::CredentialBridgeFailureReason::Denied as i32,
+                )),
+            },
+        )),
+    }
+}
+
 /// A platform-profile VM's Codex login reaches the platform broker through
 /// the host authority's delegation, and its answer comes back the same way.
 /// A refusal ends neither the delegation nor its epoch: a second login, and
-/// any other request, still cross it.
+/// any other request, still cross it. The Claude login crosses the same way.
 #[tokio::test]
 async fn a_codex_login_crosses_the_delegation_both_ways_and_keeps_it_open() {
     for local_projection in [false, true] {
@@ -328,11 +361,27 @@ async fn codex_login_crosses_the_delegation(local_projection: bool) {
                 .unwrap(),
             login_denied(request_id)
         );
+        let request_id = Uuid::new_v4().to_string();
+        input.send(claude_login_request(&request_id)).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), output.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            claude_login_denied(request_id)
+        );
     }
     assert!(valid_remaining_frame(&login_request(
         &Uuid::new_v4().to_string()
     )));
     assert!(valid_host_frame(&login_denied(Uuid::new_v4().to_string())));
+    assert!(valid_remaining_frame(&claude_login_request(
+        &Uuid::new_v4().to_string()
+    )));
+    assert!(valid_host_frame(&claude_login_denied(
+        Uuid::new_v4().to_string()
+    )));
     fixture.shutdown.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(2), fixture.server)
         .await

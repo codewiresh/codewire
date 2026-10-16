@@ -54,7 +54,7 @@ use crate::agent_login::{
     Document, LoginOutcome, LoginState, LoginWriter, PRIVATE_FILE_MODE, Removal, run_login_writer,
     scrub, unix_now,
 };
-use crate::private_files::{Entry, OwnedEntry, PrivateDirectory};
+use crate::private_files::{Entry, FileOwner, OwnedEntry, PrivateDirectory};
 
 /// Claude Code's configuration directory in the user's home; managed launches
 /// set neither `CLAUDE_CONFIG_DIR` nor `CLAUDE_SECURESTORAGE_CONFIG_DIR`.
@@ -144,6 +144,9 @@ impl From<Result<OpenedClaudeLogin, LoginFailure>> for ClaudeLoginDelivery {
 pub struct ClaudeLoginWriter {
     /// The workspace user's home, which holds `~/.claude`.
     home: PathBuf,
+    /// The workload user a local VM's guest daemon (root) keeps `~/.claude`
+    /// for; `None` on a hosted daemon, whose home is its own.
+    owner: Option<FileOwner>,
     state: LoginState,
     /// Unix seconds since when no login has been delivered; `None` right
     /// after a delivery or a denial.
@@ -162,9 +165,18 @@ impl ClaudeLoginWriter {
     ) -> Self {
         Self {
             home: home.into(),
+            owner: None,
             state: LoginState::load(state_directory.into(), generation, "claude"),
             failing_since: Some(now_unix),
         }
+    }
+
+    /// This writer, keeping `~/.claude` on `owner`'s behalf: a local VM's
+    /// guest daemon runs as root, and every file it creates there is given to
+    /// the workload user before anything is written.
+    pub fn for_owner(mut self, owner: FileOwner) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     /// Remove what an interrupted write or removal left beside the store, so
@@ -173,7 +185,7 @@ impl ClaudeLoginWriter {
     /// (`.new`) or holds Codewire's login. A store set aside because it was
     /// the user's stays. Returns how many were removed.
     pub fn remove_leftovers(&self) -> io::Result<usize> {
-        let Some(config) = open_config(&self.home, false)? else {
+        let Some(config) = open_config(&self.home, false, self.owner)? else {
             return Ok(0);
         };
         let prefix = format!("{CLAUDE_CREDENTIALS_FILE_NAME}.codewire.");
@@ -208,7 +220,7 @@ impl ClaudeLoginWriter {
             ClaudeLoginDelivery::Delivered(opened) => self.deliver(opened, now_unix),
             ClaudeLoginDelivery::Denied => {
                 self.failing_since = None;
-                if let Some(config) = open_config(&self.home, false)?
+                if let Some(config) = open_config(&self.home, false, self.owner)?
                     && remove(&config, |_| true)? == Removal::Removed
                 {
                     self.state.forget_written();
@@ -233,7 +245,7 @@ impl ClaudeLoginWriter {
         if self.state.is_logged_out(&binding.credential_id) {
             return Ok(ClaudeLoginSync::LoggedOut);
         }
-        let Some(config) = open_config(&self.home, true)? else {
+        let Some(config) = open_config(&self.home, true, self.owner)? else {
             return Ok(ClaudeLoginSync::UserOwned);
         };
         self.install(&config, binding, &login)
@@ -304,7 +316,7 @@ impl ClaudeLoginWriter {
     fn failing(&mut self, now_unix: u64, outcome: ClaudeLoginSync) -> io::Result<ClaudeLoginSync> {
         let since = *self.failing_since.get_or_insert(now_unix);
         let lapsed = now_unix.saturating_sub(since) >= CLAUDE_LOGIN_LAPSE.as_secs();
-        let Some(config) = open_config(&self.home, false)? else {
+        let Some(config) = open_config(&self.home, false, self.owner)? else {
             return Ok(outcome);
         };
         let removal = remove(&config, |oauth| lapsed || expired(oauth, now_unix))?;
@@ -324,7 +336,7 @@ impl ClaudeHome {
     /// Remove Codewire's `claudeAiOauth` when the sign-in form is not
     /// selected. The user's own login and every other member are kept.
     pub(crate) fn remove_codewire_login(&self) -> io::Result<Removal> {
-        match open_config(self.root(), false)? {
+        match open_config(self.root(), false, None)? {
             Some(config) => remove(&config, |_| true),
             None => Ok(Removal::Absent),
         }
@@ -338,10 +350,19 @@ impl ClaudeHome {
 }
 
 /// `~/.claude` in `home`, never through a symlink. `None` when the home or
-/// `~/.claude` is a symlink, not a directory or another unprivileged uid's,
-/// or, unless `create`, absent.
-fn open_config(home: &Path, create: bool) -> io::Result<Option<PrivateDirectory>> {
-    let home = match PrivateDirectory::open_home(home) {
+/// `~/.claude` is a symlink, not a directory or another unprivileged uid's
+/// (`owner`'s, when the daemon keeps it for that user), or, unless `create`,
+/// absent.
+fn open_config(
+    home: &Path,
+    create: bool,
+    owner: Option<FileOwner>,
+) -> io::Result<Option<PrivateDirectory>> {
+    let opened = match owner {
+        Some(owner) => PrivateDirectory::open_for(home, owner),
+        None => PrivateDirectory::open_home(home),
+    };
+    let home = match opened {
         Ok(Some(home)) => home,
         Ok(None) => return Ok(None),
         Err(error) if error.kind() == io::ErrorKind::NotFound && !create => return Ok(None),
@@ -655,22 +676,31 @@ fn temporary_name(purpose: &str) -> String {
 /// The login writer of a hosted daemon serving `config`, or `None`: only on a
 /// hosted bridge, and only while the Anthropic client is selected in its
 /// sign-in form.
-pub(crate) fn hosted_writer(config: &crate::Config) -> Option<ClaudeLoginWriter> {
-    let bridge = config
-        .credential_bridge
-        .as_ref()
-        .filter(|bridge| bridge.transport == crate::CredentialBridgeTransport::Hosted)?;
+pub(crate) fn login_writer(
+    config: &crate::Config,
+    owner: Option<FileOwner>,
+) -> Option<ClaudeLoginWriter> {
+    let bridge = config.credential_bridge.as_ref()?;
+    // A hosted daemon keeps its own home; a local VM's guest keeps the
+    // workload user's, on that user's behalf.
+    let local = bridge.transport == crate::CredentialBridgeTransport::Local;
+    if local != owner.is_some() {
+        return None;
+    }
     if !config.managed_credential_clients.anthropic_sign_in() {
         return None;
     }
-    let writer = ClaudeLoginWriter::new(
+    let mut writer = ClaudeLoginWriter::new(
         &config.home_root,
         CLAUDE_LOGIN_STATE_DIRECTORY,
         bridge.environment_generation,
         unix_now(),
     );
+    if let Some(owner) = owner {
+        writer = writer.for_owner(owner);
+    }
     if let Err(error) = writer.remove_leftovers() {
-        tracing::warn!(error_kind = ?error.kind(), "hosted Claude login leftovers could not be removed");
+        tracing::warn!(error_kind = ?error.kind(), "Claude login leftovers could not be removed");
     }
     Some(writer)
 }

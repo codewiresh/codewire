@@ -74,9 +74,11 @@ fn valid_guest_frame(frame: &v1::CredentialBridgeGuestMessage) -> bool {
                 | Some(v1::credential_bridge_guest_message::Payload::Cancel(_))
                 | Some(v1::credential_bridge_guest_message::Payload::EnvironmentProjection(_))
                 | Some(v1::credential_bridge_guest_message::Payload::Ssh(_))
-                // The local broker lists the Codex login on the epoch; the
-                // platform broker decides it for the delegation's creator.
+                // The local broker lists the Codex and Claude logins on the
+                // epoch; the platform broker decides each for the
+                // delegation's creator.
                 | Some(v1::credential_bridge_guest_message::Payload::CodexLogin(_))
+                | Some(v1::credential_bridge_guest_message::Payload::ClaudeLogin(_))
         )
 }
 

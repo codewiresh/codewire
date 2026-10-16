@@ -262,13 +262,13 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     .context("broker daemon transport readiness timed out")?
     .context("connect broker to guest daemon")?;
     stage.set("bridge.open");
-    // Both brokers serve the Codex login, the one listed direct delivery
-    // exception (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
-    // exceptions"). The local broker serves the owner's own Codex sign-in.
-    // For a platform profile the relay passes the request through the host
-    // authority's delegation, which admits the login and its answer both
-    // ways, to the platform broker, which decides it for the delegation's
-    // creator. A refusal answers DENIED or UNAVAILABLE without ending the
+    // Both brokers serve the Codex and Claude logins, the listed direct
+    // delivery exceptions (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct
+    // delivery exceptions"). The local broker serves the owner's own Codex
+    // sign-in; a local profile has no Claude sign-in. For a platform profile
+    // the relay passes each request through the host authority's delegation,
+    // which admits the login and its answer both ways, to the platform broker,
+    // which decides it for the delegation's creator. A refusal answers DENIED or UNAVAILABLE without ending the
     // epoch; only the local broker's authority fault ends its epoch, because
     // a refresh owner it holds is released only when its lease channel
     // closes.
@@ -276,7 +276,10 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         .open_credential_bridge_with_capabilities(
             environment_uuid,
             args.environment_generation,
-            &[codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN],
+            &[
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+            ],
         )
         .await
         .context("open guest credential bridge")?;
