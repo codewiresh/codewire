@@ -429,9 +429,7 @@ fn valid_host_frame(frame: &bridge::CredentialBridgeHostMessage) -> bool {
                 | Some(bridge::credential_bridge_host_message::Payload::CodexLogin(
                     _
                 ))
-                | Some(bridge::credential_bridge_host_message::Payload::ClaudeLogin(
-                    _
-                ))
+                | Some(bridge::credential_bridge_host_message::Payload::ClaudeLogin(_))
         )
 }
 

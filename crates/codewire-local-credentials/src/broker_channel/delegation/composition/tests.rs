@@ -514,14 +514,16 @@ async fn a_claude_login_passes_the_composer_unchanged_both_ways() {
         login
     );
     let answer = bridge::CredentialBridgeHostMessage {
-        payload: Some(bridge::credential_bridge_host_message::Payload::ClaudeLogin(
-            bridge::ClaudeLoginResponse {
-                request_id,
-                result: Some(bridge::claude_login_response::Result::Failure(
-                    bridge::CredentialBridgeFailureReason::Denied as i32,
-                )),
-            },
-        )),
+        payload: Some(
+            bridge::credential_bridge_host_message::Payload::ClaudeLogin(
+                bridge::ClaudeLoginResponse {
+                    request_id,
+                    result: Some(bridge::claude_login_response::Result::Failure(
+                        bridge::CredentialBridgeFailureReason::Denied as i32,
+                    )),
+                },
+            ),
+        ),
     };
     assert_eq!(
         Arc::clone(&f.composer)

@@ -871,8 +871,11 @@ fn only_a_hosted_daemon_with_the_sign_in_form_runs_the_writer() {
         uid: 1000,
         gid: 1000,
     };
-    let writer =
-        login_writer(&config(Some(CredentialBridgeTransport::Hosted), sign_in), None).unwrap();
+    let writer = login_writer(
+        &config(Some(CredentialBridgeTransport::Hosted), sign_in),
+        None,
+    )
+    .unwrap();
     assert_eq!(writer.home, Path::new("/home/codewire"));
     assert_eq!(writer.owner, None);
     // A local VM's guest keeps the workload user's home on that user's behalf.
@@ -890,10 +893,18 @@ fn only_a_hosted_daemon_with_the_sign_in_form_runs_the_writer() {
             anthropic.with_anthropic_subscription_token().unwrap(),
             None,
         ),
-        (Some(CredentialBridgeTransport::Local), anthropic, Some(owner)),
+        (
+            Some(CredentialBridgeTransport::Local),
+            anthropic,
+            Some(owner),
+        ),
         // A local guest without its workload user, or a hosted daemon with one.
         (Some(CredentialBridgeTransport::Local), sign_in, None),
-        (Some(CredentialBridgeTransport::Hosted), sign_in, Some(owner)),
+        (
+            Some(CredentialBridgeTransport::Hosted),
+            sign_in,
+            Some(owner),
+        ),
         (None, sign_in, None),
         (None, sign_in, Some(owner)),
     ] {

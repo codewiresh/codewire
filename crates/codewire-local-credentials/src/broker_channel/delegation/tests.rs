@@ -309,14 +309,16 @@ fn claude_login_request(request_id: &str) -> bridge::CredentialBridgeGuestMessag
 
 fn claude_login_denied(request_id: String) -> bridge::CredentialBridgeHostMessage {
     bridge::CredentialBridgeHostMessage {
-        payload: Some(bridge::credential_bridge_host_message::Payload::ClaudeLogin(
-            bridge::ClaudeLoginResponse {
-                request_id,
-                result: Some(bridge::claude_login_response::Result::Failure(
-                    bridge::CredentialBridgeFailureReason::Denied as i32,
-                )),
-            },
-        )),
+        payload: Some(
+            bridge::credential_bridge_host_message::Payload::ClaudeLogin(
+                bridge::ClaudeLoginResponse {
+                    request_id,
+                    result: Some(bridge::claude_login_response::Result::Failure(
+                        bridge::CredentialBridgeFailureReason::Denied as i32,
+                    )),
+                },
+            ),
+        ),
     }
 }
 
