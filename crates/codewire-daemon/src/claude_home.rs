@@ -30,9 +30,10 @@
 //!
 //! The keys only skip onboarding, so they are never removed, also when the
 //! Anthropic client is later deselected. A selection change restarts the
-//! Sandbox, so one pass at daemon start covers it. Hosted Sandboxes only: a
-//! local VM's guest daemon runs as root and keeps the user's home in an
-//! overlay, and does not write it.
+//! Sandbox, so one pass at daemon start covers it. A local VM's guest daemon,
+//! which runs as root, does the same for the workload user
+//! ([`ClaudeHome::for_owner`]): it reads and replaces only that user's files
+//! and gives every file it creates to that user.
 //!
 //! Before it listens, the daemon also removes Codewire's `claudeAiOauth` from
 //! `~/.claude/.credentials.json` unless the sign-in form is selected; the
@@ -46,7 +47,7 @@ use std::path::{Path, PathBuf};
 use codewire_access::{ManagedCredentialClient, ManagedCredentialClients};
 use serde_json::{Map, Value};
 
-use crate::private_files::{Entry, PrivateDirectory};
+use crate::private_files::{Entry, FileOwner, PrivateDirectory};
 
 pub mod login;
 pub use login::{
@@ -89,6 +90,9 @@ pub enum ClaudeOnboardingSync {
 pub struct ClaudeHome {
     root: PathBuf,
     workspace: String,
+    /// The workload user a local VM's guest daemon (root) keeps the home for;
+    /// `None` on a hosted daemon, whose home is its own.
+    owner: Option<FileOwner>,
 }
 
 impl ClaudeHome {
@@ -96,7 +100,20 @@ impl ClaudeHome {
         Self {
             root: root.into(),
             workspace: workspace.to_string_lossy().into_owned(),
+            owner: None,
         }
+    }
+
+    /// This home, kept on `owner`'s behalf: a local VM's guest daemon runs as
+    /// root and prepares Claude Code for the workload user as a hosted
+    /// daemon does for itself.
+    pub fn for_owner(mut self, owner: FileOwner) -> Self {
+        self.owner = Some(owner);
+        self
+    }
+
+    pub(crate) fn owner(&self) -> Option<FileOwner> {
+        self.owner
     }
 
     pub fn root(&self) -> &Path {
@@ -113,7 +130,11 @@ impl ClaudeHome {
         if !clients.contains(ManagedCredentialClient::Anthropic) {
             return Ok(ClaudeOnboardingSync::NotSelected);
         }
-        let Some(home) = PrivateDirectory::open_home(&self.root)? else {
+        let home = match self.owner {
+            Some(owner) => PrivateDirectory::open_for(&self.root, owner)?,
+            None => PrivateDirectory::open_home(&self.root)?,
+        };
+        let Some(home) = home else {
             return Ok(ClaudeOnboardingSync::UserOwned);
         };
         let temporary = format!(
@@ -164,21 +185,21 @@ impl ClaudeHome {
     pub fn prepare(&self, clients: ManagedCredentialClients) {
         match self.sync(clients) {
             Ok(outcome) => {
-                tracing::info!(claude_onboarding = ?outcome, "hosted Claude Code onboarding prepared");
+                tracing::info!(claude_onboarding = ?outcome, "Claude Code onboarding prepared");
             }
             Err(error) => tracing::warn!(
                 error_kind = ?error.kind(),
-                "hosted Claude Code home unavailable; onboarding was not marked"
+                "Claude Code home unavailable; onboarding was not marked"
             ),
         }
         if !clients.anthropic_sign_in() {
             match self.remove_codewire_login() {
                 Ok(removal) => {
-                    tracing::info!(claude_login = ?removal, "hosted Claude login cleared");
+                    tracing::info!(claude_login = ?removal, "Claude login cleared");
                 }
                 Err(error) => tracing::warn!(
                     error_kind = ?error.kind(),
-                    "hosted Claude login could not be cleared"
+                    "Claude login could not be cleared"
                 ),
             }
         }
@@ -344,6 +365,35 @@ mod tests {
                 other_entries(&home)
             );
         }
+    }
+
+    #[test]
+    fn a_local_vm_daemon_prepares_the_workload_users_home_the_same_way() {
+        // SAFETY: geteuid and getegid have no preconditions and cannot fail.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let owner = FileOwner { uid, gid };
+        for clients in anthropic_forms() {
+            let (_root, hosted) = home();
+            let home = ClaudeHome::new(hosted.root(), Path::new(WORKSPACE)).for_owner(owner);
+            assert_eq!(home.sync(clients).unwrap(), ClaudeOnboardingSync::Created);
+            let written = fs::read(home.config_path()).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&written).unwrap(), fresh());
+            assert_eq!(mode(&home.config_path()), 0o600);
+            assert_eq!(fs::symlink_metadata(home.config_path()).unwrap().uid(), uid);
+            assert_eq!(home.sync(clients).unwrap(), ClaudeOnboardingSync::Current);
+        }
+        // Another user's home is never touched on the workload user's behalf.
+        let (_root, hosted) = home();
+        let other = FileOwner {
+            uid: uid.wrapping_add(1),
+            gid,
+        };
+        let home = ClaudeHome::new(hosted.root(), Path::new(WORKSPACE)).for_owner(other);
+        assert_eq!(
+            home.sync(anthropic_forms()[0]).unwrap(),
+            ClaudeOnboardingSync::UserOwned
+        );
+        assert!(!home.config_path().exists());
     }
 
     /// `contents` with both onboarding keys `true` and the workspace trusted,

@@ -336,7 +336,7 @@ impl ClaudeHome {
     /// Remove Codewire's `claudeAiOauth` when the sign-in form is not
     /// selected. The user's own login and every other member are kept.
     pub(crate) fn remove_codewire_login(&self) -> io::Result<Removal> {
-        match open_config(self.root(), false, None)? {
+        match open_config(self.root(), false, self.owner())? {
             Some(config) => remove(&config, |_| true),
             None => Ok(Removal::Absent),
         }

@@ -754,13 +754,20 @@ pub async fn run_daemon() -> Result<()> {
     // login in the native Codex home, on the workload user's behalf: the one
     // listed direct delivery exception (docs/dev/SECRETS-AND-CREDENTIALS.md,
     // "Direct delivery exceptions").
-    let codex_home = codewire_daemon::codex_home::CodexHome::native(
-        PERSISTENT_CODEX_HOME_PATH,
-        codewire_daemon::codex_home::FileOwner {
-            uid: plan.identity.uid,
-            gid: plan.identity.gid,
-        },
-    );
+    let workload = codewire_daemon::codex_home::FileOwner {
+        uid: plan.identity.uid,
+        gid: plan.identity.gid,
+    };
+    let codex_home =
+        codewire_daemon::codex_home::CodexHome::native(PERSISTENT_CODEX_HOME_PATH, workload);
+    // As a hosted daemon does before it listens: while the Anthropic client is
+    // selected, Claude Code's onboarding is marked complete and the workspace
+    // trusted, so it starts on the managed credential without its login
+    // picker; unless the sign-in form is selected, Codewire's Claude login is
+    // removed. Here for the workload user.
+    codewire_daemon::claude_home::ClaudeHome::new(&plan.identity.home, Path::new(WORKSPACE_PATH))
+        .for_owner(workload)
+        .prepare(config.managed_credential_clients);
     let daemon = codewire_daemon::serve_native_grpc_with_incoming(
         config,
         codex_home,
@@ -4216,7 +4223,7 @@ fn prepare_container_control(
     publish_container_hosts(Path::new(CONTAINER_HOSTS_PATH))?;
     write_durable(
         Path::new(CONTAINER_RESOLV_CONF_PATH),
-        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions attempts:1 timeout:1\n").as_bytes(),
+        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions timeout:2 attempts:3\n").as_bytes(),
         0o444,
     )
     .context("publish isolated workspace resolver configuration")?;
@@ -4277,7 +4284,7 @@ fn prepare_docker_runtime(seed: &Seed, workspace_identity: &WorkspaceIdentity) -
     create_dir(Path::new("/etc"), 0o755)?;
     write_durable(
         Path::new("/etc/resolv.conf"),
-        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions attempts:1 timeout:1\n").as_bytes(),
+        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions timeout:2 attempts:3\n").as_bytes(),
         0o444,
     )
     .context("publish isolated Docker resolver configuration")
@@ -4435,7 +4442,7 @@ fn prepare_docker_root(plan: &WorkspacePlan) -> Result<()> {
 
     write_durable(
         &Path::new(DOCKER_ROOT_PATH).join("etc/resolv.conf"),
-        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions attempts:1 timeout:1\n").as_bytes(),
+        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions timeout:2 attempts:3\n").as_bytes(),
         0o444,
     )?;
     mount_fs(

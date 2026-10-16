@@ -1374,7 +1374,10 @@ pub(crate) async fn handle_environment_shell_command(
             no_tty: false,
             detach: false,
             output: OutputFormat::Text,
-            command: vec!["/bin/sh".to_string()],
+            // No command: the daemon starts the workspace user's own login
+            // shell (their passwd shell in a local VM, `$SHELL` or bash in a
+            // hosted Sandbox), so line editing and their rc files work.
+            command: Vec::new(),
         },
     )
     .await
@@ -1749,7 +1752,7 @@ async fn select_or_create_environment_session(
         SessionSelection::Create if should_create_session()? => {
             target
                 .launch(
-                    vec!["/bin/sh".to_string()],
+                    Vec::new(),
                     target.default_working_dir(),
                     BTreeMap::new(),
                     true,
