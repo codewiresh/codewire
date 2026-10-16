@@ -168,7 +168,10 @@ Or stop them when it suits you and run the command again. `cw setup --local`
 waits the same way, because the previous supervisor would start its next VM
 from the new runtime's files. This cw works with supervisors back to
 v0.3.388's; an older one, or a newer one after `cw update rollback`, is
-refused with a message that names it.
+refused with a message that names it. A rollback to a cw without
+`cw env --local upgrade` (v0.3.389 and earlier) hands the state root to it
+while no local VM runs. While one does, it names them: select the newer cw
+again (`cw update rollback`), stop them, then roll back.
 
 ## Troubleshooting
 
