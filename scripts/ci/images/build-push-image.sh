@@ -38,6 +38,11 @@ readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5
 # multi-platform index (docker/buildkit-syft-scanner 1.12.0, promoted by
 # infra#1383): the native arm64 support build runs its arm64 variant.
 readonly SBOM_GENERATOR_IMAGE='registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9'
+# The workspace image carries the same static cw as the runtime images, built
+# with the runtime profile (thin LTO, parallel codegen): the single-codegen-unit
+# fat-LTO release profile spent about 25 minutes per architecture in one serial
+# link. One profile everywhere is also what lets one cw build be shared.
+readonly SUPPORT_CW_PROFILE=runtime
 readonly PROVENANCE_SOURCE_URL="$PIPELINE_SOURCE_URL"
 readonly EXPECTED_PROVENANCE_BUILDER_ID="$PIPELINE_BUILDER_ID"
 
@@ -722,7 +727,7 @@ label_args=(
   "--label" "org.opencontainers.image.source=$public_source_url"
   "--label" "org.opencontainers.image.revision=$source_sha"
   "--label" "org.opencontainers.image.title=codewire-$image_name"
-  "--label" "dev.codewire.build.profile=release"
+  "--label" "dev.codewire.build.profile=$SUPPORT_CW_PROFILE"
   "--label" "dev.codewire.promotable=true"
 )
 build_args=()
@@ -975,7 +980,7 @@ else
         # A retry reuses an admitted CW producer result and gets a fresh
         # consumer task (cw-image-consumer.sh).
         run_logged_build env DOCKER_CONFIG="$docker_config" \
-          bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
+          bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" "$SUPPORT_CW_PROFILE" "$cw_selected_source_dir" "$cw_image_work" -- \
           "${image_command[@]}" || build_status=$?
       else
         run_logged_build env DOCKER_CONFIG="$docker_config" "${image_command[@]}" || build_status=$?

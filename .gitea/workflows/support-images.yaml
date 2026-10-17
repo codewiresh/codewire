@@ -176,11 +176,32 @@ jobs:
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
+      # The same protected-workspace R2 compiler cache as the amd64 leg. The
+      # credential reaches the remote arm64 BuildKit node only as a BuildKit
+      # secret over the mutual-TLS session; that node already receives the
+      # registry publish credentials for this job.
+      - name: Select the protected-workspace R2 compiler cache
+        id: compiler-cache
+        run: |
+          scripts/ci/setup/select-protected-workspace-rust-cache.sh \
+            "$RUNNER_TEMP/codewire-sccache-r2-protected-workspace.aws"
+
       - name: Build the linux/arm64 base and workspace by digest
         id: build
         env:
           SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
+          CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
+          SCCACHE_BUCKET: example-ci-cache-protected-workspace
+          SCCACHE_ENDPOINT: https://00000000000000000000000000000000.r2.cloudflarestorage.com
+          CODEWIRE_SCCACHE_PREFIX: protected/codewire/workspace/v1
+          CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected-workspace.aws
         run: scripts/ci/images/build-support-platform.sh linux/arm64
+
+      - name: Remove the protected-workspace R2 compiler-cache credential
+        if: ${{ always() }}
+        run: |
+          shred -u -- "$RUNNER_TEMP/codewire-sccache-r2-protected-workspace.aws" 2>/dev/null ||
+            rm -f -- "$RUNNER_TEMP/codewire-sccache-r2-protected-workspace.aws"
 
   publish-support-images:
     # zizmor: ignore[excessive-permissions] This exact protected job receives the scoped publisher identity for the atomic pair.

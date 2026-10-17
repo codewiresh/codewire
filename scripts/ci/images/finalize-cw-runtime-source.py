@@ -15,6 +15,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import resource
 import signal
 import stat
@@ -49,7 +50,40 @@ PROFILES = {"ci": ("--profile", "ci"), "release": ("--release",), "runtime": ("-
 # Fixed per profile so the recorded command stays exact. The ci profile is the
 # Kind daemon producer and runtime the Dev daemon producer; each owns its whole
 # worker. The release (workspace support image) producer keeps its bound.
-JOBS = {"ci": "8", "release": "2", "runtime": "8"}
+MAX_JOBS = 16
+GIB_PER_JOB = 3
+
+
+def cargo_jobs():
+    """Parallel rustc jobs sized to what this build can use.
+
+    The protected runners range from an 8 vCPU / 15 GiB cloud slot to a bare-metal
+    slot with 32 CPUs / 47 GiB, so a fixed count either idles the metal slot or
+    risks running the cloud slot out of memory. Jobs are bounded by visible CPUs
+    and by one job per GIB_PER_JOB of memory (the smaller of the host total and a
+    cgroup limit), and never exceed MAX_JOBS. The count does not change the output.
+    CODEWIRE_CARGO_JOBS (1-32) overrides it for tests and diagnosis.
+    """
+    override = os.environ.get("CODEWIRE_CARGO_JOBS")
+    if override is not None:
+        source.require(re.fullmatch(r"[1-9][0-9]?", override) is not None and int(override) <= 32,
+                       "CODEWIRE_CARGO_JOBS must be 1 to 32")
+        return override
+    cpus = len(os.sched_getaffinity(0))
+    limits = []
+    try:
+        with open("/proc/meminfo", encoding="ascii") as meminfo:
+            for line in meminfo:
+                if line.startswith("MemTotal:"):
+                    limits.append(int(line.split()[1]) * 1024)
+        with open("/sys/fs/cgroup/memory.max", encoding="ascii") as cgroup:
+            value = cgroup.read().strip()
+            if value.isdigit():
+                limits.append(int(value))
+    except (OSError, ValueError):
+        pass
+    gib = min(limits) // (1 << 30) if limits else 0
+    return str(max(2, min(MAX_JOBS, cpus, gib // GIB_PER_JOB)))
 FILES = {"cw", "cw.d", "compile.log", "cw.oci.tar", "image.json", "runtime.pack", "cw-runtime.lock.json", "producer.json"}
 COMPILER_DEADLINE = 7200
 COMPLETION_FIELDS = {"command", "exit", "elapsed_seconds", "log", "log_sha256", "timed_out", "interrupted",
@@ -183,7 +217,7 @@ def command(profile):
     source.require(profile in PROFILES, "producer profile refused")
     return ["/usr/local/cargo/bin/cargo", "zigbuild", "--locked", *PROFILES[profile],
             "-p", "codewire-cli-bin", "--bin", "cw", "--target", source.TARGET,
-            "--manifest-path", "/src/Cargo.toml", "--target-dir", str(TARGET_ROOT), "--jobs", JOBS[profile]]
+            "--manifest-path", "/src/Cargo.toml", "--target-dir", str(TARGET_ROOT), "--jobs", cargo_jobs()]
 
 
 def cargo_environment(model, directory):
@@ -199,7 +233,7 @@ def cargo_environment(model, directory):
     environment = {"PATH": "/usr/local/cargo/bin:/opt/zig:/opt/protoc/bin:/usr/bin:/bin",
                    "HOME": str(directory), "TMPDIR": str(directory), "CARGO_HOME": str(CARGO_HOME),
                    "RUSTUP_HOME": "/usr/local/rustup", "RUSTC": "/usr/local/cargo/bin/rustc",
-                   "PROTOC": "/opt/protoc/bin/protoc", "CARGO_INCREMENTAL": "0", "CARGO_BUILD_JOBS": JOBS[model["profile"]],
+                   "PROTOC": "/opt/protoc/bin/protoc", "CARGO_INCREMENTAL": "0", "CARGO_BUILD_JOBS": cargo_jobs(),
                    "PYTHONDONTWRITEBYTECODE": "1",
                    "LC_ALL": "C", "TZ": "UTC", **cache,
                    **release.build_environment(model["version"], model["source"]["revision"],

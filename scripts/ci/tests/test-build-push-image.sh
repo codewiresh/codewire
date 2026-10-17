@@ -1047,7 +1047,7 @@ grep -qF -- "--build-arg BASE_IMAGE_REF=$base_ref" "$FAKE_DOCKER_CALLS" ||
   fail 'workspace image was not built exactly once'
 [[ "$(cw_producer_invocation_count)" -eq 2 ]] ||
   fail 'workspace did not use exactly one additional original CW producer'
-assert_cw_context release
+assert_cw_context runtime
 grep -qF -- '--no-cache-filter workspace-floating-tools' "$FAKE_DOCKER_CALLS" ||
   fail 'published workspace could reuse floating developer tools'
 
@@ -1626,7 +1626,7 @@ for variant in legacy disabled protected; do
     [[ "$(cw_producer_invocation_count)" -eq 0 ]] || fail 'legacy noncanonical recipe claimed verified CW'
   else
     [[ "$(cw_producer_invocation_count)" -eq 1 ]] || fail "$variant workspace did not use one original CW producer"
-    assert_cw_context release
+    assert_cw_context runtime
   fi
   if [[ "$variant" == protected ]]; then
     grep -qF -- '--no-cache-filter workspace-floating-tools' "$FAKE_DOCKER_CALLS" || fail 'protected compiler cache omitted freshness'
@@ -1722,7 +1722,7 @@ done
 # The amd64 leg still consumes the verified static CW; arm64 compiles natively.
 [[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
   fail 'multi-platform workspace did not bind the one original amd64 CW producer'
-assert_cw_context release
+assert_cw_context runtime
 
 base_source_tag="registry.example.invalid/codewire/base:$source_sha"
 for attestation_case in missing-arm64 extra-platform invalid-arm64-sbom; do
@@ -1813,9 +1813,10 @@ from pathlib import Path
 import sys
 records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
 # The service runtime set binds no CW: the daemon builds alone on its own
-# protected worker, with the thin-LTO runtime profile; the workspace keeps the
-# release profile. The apt snapshot cache case adds one release workspace build.
-assert len(records) == 10 and Counter(record['profile'] for record in records) == {'release': 6, 'runtime': 2, 'ci': 2}
+# protected worker, with the thin-LTO runtime profile; the workspace builds its
+# cw with the same runtime profile. The apt snapshot cache case adds one
+# workspace build.
+assert len(records) == 10 and Counter(record['profile'] for record in records) == {'runtime': 8, 'ci': 2}
 assert Counter(record['source_revision'] for record in records) == {sys.argv[2]: 9, sys.argv[3]: 1}
 assert len({record['producer_receipt_sha256'] for record in records}) == 10
 print('protected/runtime/Kind CW original-producer contexts: 10 verified')

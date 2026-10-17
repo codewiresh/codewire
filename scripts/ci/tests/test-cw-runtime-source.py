@@ -299,9 +299,18 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
             runtime_command = finalizer.command("runtime")
             self.assertEqual(runtime_command[runtime_command.index("--profile") + 1], "runtime")
             self.assertNotIn("--release", runtime_command)
-            self.assertEqual(runtime_command[runtime_command.index("--jobs") + 1], "8")
+            jobs = finalizer.cargo_jobs()
+            self.assertTrue(2 <= int(jobs) <= finalizer.MAX_JOBS, jobs)
+            self.assertEqual(runtime_command[runtime_command.index("--jobs") + 1], jobs)
             release_command = finalizer.command("release")
-            self.assertEqual(release_command[release_command.index("--jobs") + 1], "2")
+            self.assertEqual(release_command[release_command.index("--jobs") + 1], jobs)
+            # The job count follows the machine and can be pinned, within bounds.
+            with mock.patch.dict(os.environ, {"CODEWIRE_CARGO_JOBS": "24"}):
+                self.assertEqual(finalizer.cargo_jobs(), "24")
+            for refused in ("0", "33", "08", "x", ""):
+                with mock.patch.dict(os.environ, {"CODEWIRE_CARGO_JOBS": refused}):
+                    with self.assertRaises(Exception):
+                        finalizer.cargo_jobs()
 
     def build_bytes(self, capsule, record_changes=None):
         model = capsule.model

@@ -786,13 +786,14 @@ class VerificationProfileTests(unittest.TestCase):
         self.assertEqual(shell.count('cw-image-consumer.sh" "$WORKSPACE_CW_PROFILE" '), 2)
         self.assertNotIn('cw-image-consumer.sh" release', shell)
         # Only verification changes. Publication builds the workspace image's
-        # cw with the release profile, and the runtime images' cw with the
-        # runtime profile (thin LTO, #2855).
+        # cw with the same thin-LTO runtime profile as the runtime images
+        # (#2855): the fat-LTO release profile was a 25 minute serial link.
         publish = (root / "scripts/ci/images/build-push-image.sh").read_text()
         self.assertEqual(publish.count('cw-image-consumer.sh" '), 3)
         self.assertEqual(publish.count('cw-image-consumer.sh" runtime '), 2)
-        self.assertEqual(publish.count('cw-image-consumer.sh" release '), 1)
-        release = publish.index('cw-image-consumer.sh" release ')
+        self.assertEqual(publish.count('cw-image-consumer.sh" "$SUPPORT_CW_PROFILE" '), 1)
+        self.assertIn("readonly SUPPORT_CW_PROFILE=runtime\n", publish)
+        release = publish.index('cw-image-consumer.sh" "$SUPPORT_CW_PROFILE" ')
         guard = publish[publish.rindex("  if [ ", 0, release):release]
         self.assertIn('= workspace:images/workspace/Dockerfile ]; then', guard)
         self.assertNotIn("WORKSPACE_CW_PROFILE", publish)

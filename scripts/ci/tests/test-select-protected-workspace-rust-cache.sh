@@ -172,12 +172,12 @@ done < <(find "$ROOT/.gitea/workflows" "$ROOT/.forgejo/workflows" "$ROOT/.github
   -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null)
 
 outside_build_job="$(awk '
-  /^  [A-Za-z0-9_-]+:$/ { capture = ($0 != "  build-support-amd64:") }
+  /^  [A-Za-z0-9_-]+:$/ { capture = ($0 != "  build-support-amd64:" && $0 != "  build-support-arm64:") }
   capture { print }
 ' "$SUPPORT_WORKFLOW")"
 for marker in "${workspace_markers[@]}"; do
   if grep -Pq -- "$marker" <<<"$outside_build_job"; then
-    fail "Support images references the protected-workspace compiler cache outside its amd64 build job ($marker)"
+    fail "Support images references the protected-workspace compiler cache outside its amd64 and arm64 build jobs ($marker)"
   fi
 done
 build_job="$(awk '
@@ -196,15 +196,21 @@ grep -Fxq '          SCCACHE_BUCKET: example-ci-cache-protected-workspace' <<<"$
 grep -Fxq '          CODEWIRE_SCCACHE_PREFIX: protected/codewire/workspace/v1' <<<"$build_job" ||
   fail 'the amd64 build job does not name the protected-workspace prefix'
 grep -Fq 'shred -u' <<<"$build_job" || fail 'the amd64 build job does not remove the credential'
-# The arm64 leg builds on a remote node outside the cluster and is not enabled.
+# The arm64 leg uses the same protected-workspace cache. Its credential reaches
+# the remote BuildKit node only as a BuildKit secret; the leg selects the cache
+# the same way and removes the credential afterwards.
 arm64_job="$(awk '
   /^  [A-Za-z0-9_-]+:$/ { capture = ($0 == "  build-support-arm64:") }
   capture { print }
 ' "$SUPPORT_WORKFLOW")"
 [[ -n "$arm64_job" ]] || fail 'Support images lacks its arm64 build job'
-if grep -Fq 'sccache' <<<"$arm64_job"; then
-  fail 'the arm64 build leg must not use a compiler cache credential'
-fi
+grep -Fq 'select-protected-workspace-rust-cache.sh' <<<"$arm64_job" ||
+  fail 'the arm64 build job does not select the protected-workspace compiler cache'
+grep -Fxq '      OPENBAO_ROLE: codewire-source-support-publisher' <<<"$arm64_job" ||
+  fail 'the arm64 cache job is not the support publisher identity'
+grep -Fxq '          SCCACHE_BUCKET: example-ci-cache-protected-workspace' <<<"$arm64_job" ||
+  fail 'the arm64 build job does not name the protected-workspace bucket'
+grep -Fq 'shred -u' <<<"$arm64_job" || fail 'the arm64 build job does not remove the credential'
 # The workflow's only trigger is a canonical-main push.
 [[ "$(sed -n '/^on:$/,/^$/p' "$SUPPORT_WORKFLOW")" == "$(printf '%s\n' \
     'on:' '  push:' '    branches: [main]' '')" ]] ||
