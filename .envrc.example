@@ -24,3 +24,7 @@
 
 # Per-worktree overrides stay out of the shared file.
 [ -f "$(dirname "${BASH_SOURCE[0]:-$0}")/.envrc.local" ] && . "$(dirname "${BASH_SOURCE[0]:-$0}")/.envrc.local"
+
+# Workstation-wide values live in ~/.config/codewire/env, sourced from the
+# shell profile, so every worktree shares them. Copy this file's settings there.
+# In CI the same names come from repository Actions variables.

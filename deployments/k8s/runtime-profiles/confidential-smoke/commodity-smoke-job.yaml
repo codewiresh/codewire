@@ -22,7 +22,7 @@ spec:
       automountServiceAccountToken: false
       runtimeClassName: commodity
       nodeSelector:
-        kubernetes.io/hostname: cw-dev-prod-node-1
+        kubernetes.io/hostname: dev-node-1
       restartPolicy: Never
       volumes:
         - name: workspace

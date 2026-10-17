@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export CONFIDENTIAL_SNP_NODE=dev-node-1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SMOKE="$ROOT/scripts/runtime/confidential/smoke-dev-confidential-snp.sh"
@@ -75,7 +76,7 @@ rg -F 'CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"' "$
 rg -F 'EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-https://codewire-dev.sh}"' "$SMOKE" >/dev/null
 rg -F 'KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"' "$SMOKE" >/dev/null
 rg -F 'SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"' "$SMOKE" >/dev/null
-rg -F 'NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"' "$SMOKE" >/dev/null
+rg -F 'NODE="${CONFIDENTIAL_SNP_NODE:?set CONFIDENTIAL_SNP_NODE to the Dev confidential node}"' "$SMOKE" >/dev/null
 rg -F './scripts/talos-external-worker verify' "$SMOKE" >/dev/null
 rg -F './scripts/check-talos-runtime-artifacts --stack "$HOST_GATE_STACK"' "$SMOKE" >/dev/null
 rg -F 'confidential profile isolation passed: shared_fs=none host-share-overrides=denied' \
@@ -302,7 +303,7 @@ done
 
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
-rg -F 'kubernetes.io/hostname: cw-dev-prod-node-1' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'kubernetes.io/hostname: dev-node-1' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'storageClassName: longhorn' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'longhorn-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
@@ -646,7 +647,7 @@ case "$*" in
   'get runtimeclass commodity confidential -o yaml')
     printf '%s\n' 'items: []'
     ;;
-  'get node cw-dev-prod-node-1 -o json')
+  'get node dev-node-1 -o json')
     jq -n '{metadata: {labels: {
       "katacontainers.io/kata-runtime": "true",
       "node.codewire.sh/runtime-candidate": "true",
@@ -701,7 +702,7 @@ EOF
 cat >"$bootstrap_dir/infra/scripts/talos-external-worker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == 'verify dev-cluster cw-dev-prod-node-1 1500' ]]
+[[ "$*" == 'verify dev-cluster dev-node-1 1500' ]]
 if [[ -n "${HOST_WORKER_CALLS:-}" ]]; then
   printf '%s\n' "$*" >>"$HOST_WORKER_CALLS"
 fi
@@ -746,7 +747,7 @@ rg -Fx \
   'check-talos-runtime-artifacts: confidential profile isolation passed: shared_fs=none host-share-overrides=denied' \
   "$bootstrap_dir/host-gate-evidence/host-runtime-gate.log" >/dev/null
 rg -Fx -- '--stack dev-cluster' "$bootstrap_dir/host-artifacts.calls" >/dev/null
-rg -Fx -- 'verify dev-cluster cw-dev-prod-node-1 1500' \
+rg -Fx -- 'verify dev-cluster dev-node-1 1500' \
   "$bootstrap_dir/host-worker.calls" >/dev/null
 
 for unsafe_shared_fs in \

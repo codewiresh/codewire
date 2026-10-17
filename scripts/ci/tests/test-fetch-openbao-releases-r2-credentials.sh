@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Synthetic proof for the release publisher's exact-path R2 credential reader.
 set -euo pipefail
+unset CODEWIRE_OPENBAO_ADDR  # the tests exercise the script default
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT

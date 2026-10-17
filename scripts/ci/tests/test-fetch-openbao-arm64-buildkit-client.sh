@@ -4,6 +4,7 @@
 # an empty private directory as three mode-0600 PEM files, nothing secret is
 # printed or passed as an argument, and every failure says what failed.
 set -euo pipefail
+unset CODEWIRE_OPENBAO_ADDR  # the tests exercise the script default
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT

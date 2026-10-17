@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Synthetic proof for the pin proposal's exact-path workspace-pin bot token reader.
 set -euo pipefail
+unset CODEWIRE_OPENBAO_ADDR  # the tests exercise the script default
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT

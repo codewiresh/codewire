@@ -7,7 +7,7 @@ KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"
 SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-dev}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
-NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"
+NODE="${CONFIDENTIAL_SNP_NODE:?set CONFIDENTIAL_SNP_NODE to the Dev confidential node}"
 WAIT_SECONDS="${PRIVATE_PULL_WAIT_SECONDS:-360}"
 KEEP_PROBE="${PRIVATE_PULL_KEEP_PROBE:-0}"
 ENCRYPTED_EMPTYDIR="${PRIVATE_PULL_ENCRYPTED_EMPTYDIR:-0}"
@@ -27,7 +27,7 @@ Dev release. The probe exercises Kata guest CDH, Trustee attestation, and KBS
 registry authorization without creating a Codewire environment or PVC.
 
 Options:
-  --node NAME          Confidential SNP node (default: cw-dev-prod-node-1)
+  --node NAME          Confidential SNP node (default: $CONFIDENTIAL_SNP_NODE)
   --image-role ROLE    Exact active image: daemon, workspace, dind, or the
                        combined product image/cache shape
                        (default: daemon)

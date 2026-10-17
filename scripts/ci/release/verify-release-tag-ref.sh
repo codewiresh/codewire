@@ -66,12 +66,15 @@ case "$event" in
     ;;
 esac
 
-# The canonical Forgejo instance has one public and one internal Tailnet
-# name; runners register against the internal one. Nothing else is trusted.
-case "$server_url" in
-  https://git.example.invalid|https://forgejo.example.invalid) ;;
-  *) fail "server must be canonical Forgejo, got '$server_url'" ;;
-esac
+# The canonical Forgejo instance has one public name and may have an internal
+# one (CODEWIRE_FORGEJO_INTERNAL_URL) that runners register against. Nothing else is
+# trusted.
+internal_url="${CODEWIRE_FORGEJO_INTERNAL_URL:-}"
+internal_url="${internal_url%/}"
+if [[ "$server_url" != https://git.example.invalid &&
+      ( -z "$internal_url" || "$server_url" != "$internal_url" ) ]]; then
+  fail "server must be canonical Forgejo, got '$server_url'"
+fi
 [[ "$repository" == "codewire/codewire" ]] ||
   fail "repository must be codewire/codewire, got '$repository'"
 valid_object_id "$source_sha" || fail "release source is not a Git object ID"

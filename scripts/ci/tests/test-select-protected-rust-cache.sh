@@ -3,6 +3,7 @@
 # cache, and that only the canonical-main Dev publisher job can reach the
 # protected bucket, prefix, or credential while untrusted lanes cannot.
 set -euo pipefail
+unset CODEWIRE_OPENBAO_ADDR ARM64_BUILDKIT_HOST  # the tests exercise the script defaults
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
