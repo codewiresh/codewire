@@ -5,8 +5,6 @@ use crate::worker::workspace_binding::live_cw_runtime_binding;
 use anyhow::{Result, ensure};
 use codewire_daemon_proto::daemon::v1 as private;
 use codewire_server_core::AppError;
-use codewire_server_core::migrate::application_migrator;
-use sha2::{Digest, Sha384};
 const ORG: &str = "runtime-journal-org";
 const ACTOR: &str = "runtime-journal-operator";
 const ENV: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -14,11 +12,6 @@ const POD: &str = "7e7b20f6-0bd2-4f11-8b16-9c239851eb52";
 const CLAIM: &str = "c0ffee00-e29b-41d4-a716-446655440000";
 const SANDBOX: &str = "5a4db0c5-e29b-41d4-a716-446655440000";
 const PVC: &str = "9d8c7b6a-2222-4f5e-8d4c-3b2a1f0e9d8c";
-// Canonical1..37 plus byte-identical CW38; the schema pin is measured
-// independently before qualifying the additive managed39 upgrade/rollback.
-const SCHEMA38: &str = "8ba1bff35a4a9ba8d1ad41aebab3c2bbbecea13a7efed58b3b3e220e9a950252";
-const SCHEMA39: &str = "9c5febb69fa7d930c3b4528cda06cf84521162cc51ed7c912959159a28be78fc";
-const HISTORY38: &str = "68604f8738c2fdf1058494e572f7fb16b690847b820cb19afd2227e1583013ce9c8f6d5bc38f9fda9539131cf0e8a9a2";
 struct Fixture {
     pool: PgPool,
     journal: ManagedJournal,
@@ -331,13 +324,6 @@ fn receipt(m: &ManagedMutation, b: &CapturedBindingFacts, l: ManagedLifecycle) -
             && matches!(l, ManagedLifecycle::Stopped | ManagedLifecycle::Exited),
         reason_code: "settled".into(),
     }
-}
-async fn schema(pool: &PgPool) -> Result<String> {
-    Ok(sqlx::query_scalar(include_str!(
-        "../../../../codewire-server-core/tests/data/application_schema_fingerprint.sql"
-    ))
-    .fetch_one(pool)
-    .await?)
 }
 macro_rules! database_case {($name:ident,$f:ident,$body:block)=>{
     #[tokio::test]
@@ -1269,76 +1255,6 @@ database_case!(
         ensure!(f.observe(m.request_id).await? == old);
     }
 );
-
-#[tokio::test]
-#[ignore = "requires checked-in disposable TEST_DATABASE_URL"]
-async fn db_migration39_fresh_upgrade_rollback_and_retained_evidence_refusal() -> Result<()> {
-    let db = TestDatabase::create().await?;
-    let result = async {
-        // The fixture database carries every embedded migration. Return it to
-        // version 39 and prove only this boundary, so a later migration can
-        // neither enter this proof nor be undone by it.
-        application_migrator().undo(&db.pool, 39).await?;
-        let migrator = boundary39_migrator();
-        let fresh = schema(&db.pool).await?;
-        ensure!(fresh == SCHEMA39);
-        println!("MEASURED_PLATFORM_MANAGED_SCHEMA39={fresh}");
-        migrator.undo(&db.pool, 38).await?;
-        ensure!(schema(&db.pool).await? == SCHEMA38);
-        let mut h = Sha384::new();
-        for m in migrator
-            .iter()
-            .filter(|m| m.version <= 38 && m.migration_type.is_up_migration())
-        {
-            h.update(Sha384::digest(m.sql.as_bytes()));
-        }
-        ensure!(format!("{:x}", h.finalize()) == HISTORY38);
-        let f = Fixture::seed(&db.pool).await?;
-        let before: Vec<String> =
-            sqlx::query_scalar("SELECT row_to_json(e)::text FROM environments e ORDER BY id")
-                .fetch_all(&db.pool)
-                .await?;
-        migrator.run(&db.pool).await?;
-        ensure!(schema(&db.pool).await? == fresh);
-        let after: Vec<String> =
-            sqlx::query_scalar("SELECT row_to_json(e)::text FROM environments e ORDER BY id")
-                .fetch_all(&db.pool)
-                .await?;
-        ensure!(after == before);
-        let m = launch(Uuid::new_v4());
-        let i = f.issue(m.clone()).await?;
-        f.journal
-            .mark_unknown(i, "platform-agent-dispatch-unknown")
-            .await?;
-        ensure!(migrator.undo(&db.pool, 38).await.is_err());
-        ensure!(
-            f.observe(m.request_id).await?.phase == ManagedPhase::Unknown
-                && schema(&db.pool).await? == fresh
-        );
-        let latest: i64 =
-            sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
-                .fetch_one(&db.pool)
-                .await?;
-        ensure!(latest == 39);
-        Ok(())
-    }
-    .await;
-    db.finish(result).await
-}
-
-/// Embedded migrations 1..=39, up and down: the managed-agent boundary.
-fn boundary39_migrator() -> sqlx::migrate::Migrator {
-    sqlx::migrate::Migrator {
-        migrations: std::borrow::Cow::Owned(
-            application_migrator()
-                .iter()
-                .filter(|m| m.version <= 39)
-                .cloned()
-                .collect(),
-        ),
-        ..sqlx::migrate::Migrator::DEFAULT
-    }
-}
 
 async fn wait_blocker(pool: &PgPool, pid: i32) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(4), async {

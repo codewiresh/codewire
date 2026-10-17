@@ -506,7 +506,7 @@ macro_rules! scope_query {
 pub(crate) const SCOPE_QUERY: &str = scope_query!();
 
 /// The environment the reviewed workspace Pod is bound to: its live claim-time
-/// binding, keyed by the Pod UID (migration 0034's primary key, which never
+/// binding, keyed by the Pod UID (the baseline schema's primary key, which never
 /// moves to another environment). The scope query then also requires the
 /// backend pointer to name this Pod. Every column read here is already granted
 /// to the restricted role for the scope query's join.

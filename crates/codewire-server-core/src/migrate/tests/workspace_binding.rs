@@ -1,41 +1,7 @@
-//! Claim-time workspace binding: accepted prior history and disposable
-//! database proof for the binding table, the backend pointer and the
-//! insert-only, cascade-only triggers.
+//! Claim-time workspace binding: disposable database proof for the binding
+//! table, the backend pointer and the insert-only, cascade-only triggers.
 
 use super::*;
-
-const VERSION: i64 = 34;
-// Measured from accepted canonical main 761f9e9bdbdc35bb2210c514fa923ad9d432aefc,
-// not the edited branch: SHA384(concatenated binary SHA384(SQL1)..SHA384(SQL33))
-// and SHA384(SQL33).
-const PRIOR_HISTORY33: &str = "7273dd060d05ff29df4faee58eca624c6618ed9ce5a870b2a65db0058c943dba3f9037d958d5b39515840e8d96e8a89c";
-const PRIOR33: &str = "8fb41c85cc991ac4eba5ab4f256cb428dd05d5429721e5d47d7cc5ab1aea8b4b30478f874a8061b5a9b14643dd7448f5";
-const TRIGGER_FUNCTION: &str = "codewire_workspace_binding_immutable";
-
-pub(super) fn assert_accepted_prior33() -> anyhow::Result<()> {
-    runtime_dispatch_scope::assert_accepted_prior32()?;
-    let mut digest = Sha384::new();
-    let prior: Vec<_> = MIGRATOR.iter().filter(|m| m.version < VERSION).collect();
-    anyhow::ensure!(prior.len() == 33);
-    for (index, migration) in prior.iter().enumerate() {
-        anyhow::ensure!(migration.version == index as i64 + 1);
-        digest.update(Sha384::digest(migration.sql.as_bytes()));
-    }
-    anyhow::ensure!(
-        format!("{:x}", digest.finalize()) == PRIOR_HISTORY33,
-        "migration1..33 differs from accepted canonical 761f9e9bd"
-    );
-    anyhow::ensure!(
-        format!("{:x}", Sha384::digest(prior[32].sql.as_bytes())) == PRIOR33,
-        "migration33 differs from accepted canonical 761f9e9bd"
-    );
-    Ok(())
-}
-
-#[test]
-fn workspace_binding_upgrade_pins_the_accepted33_history() -> anyhow::Result<()> {
-    assert_accepted_prior33()
-}
 
 async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
     Ok(sqlx::query_scalar(include_str!(
@@ -43,58 +9,6 @@ async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
     ))
     .fetch_one(pool)
     .await?)
-}
-
-/// Every helper except migration38's cw-runtime trigger function, which has
-/// its own proof and replaces no prior helper.
-async fn helpers(pool: &PgPool) -> anyhow::Result<Vec<String>> {
-    Ok(sqlx::query_scalar(
-        "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n \
-        ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
-        AND p.proname <> 'codewire_cw_runtime_request_immutable' \
-        ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
-    )
-    .fetch_all(pool)
-    .await?)
-}
-
-/// Helpers other than the one this migration adds.
-async fn prior_helpers(pool: &PgPool) -> anyhow::Result<Vec<String>> {
-    Ok(helpers(pool)
-        .await?
-        .into_iter()
-        .filter(|definition| !definition.contains(&format!("public.{TRIGGER_FUNCTION}()")))
-        .collect())
-}
-
-/// Every pre-existing row this migration could touch. Backend rows are
-/// compared without the new pointer columns, which upgrade leaves NULL.
-async fn rows(pool: &PgPool) -> anyhow::Result<Vec<String>> {
-    let mut result = Vec::new();
-    for (table, projection) in [
-        ("users", "to_jsonb(t)"),
-        ("organizations", "to_jsonb(t)"),
-        ("environment_presets", "to_jsonb(t)"),
-        ("environments", "to_jsonb(t)"),
-        (
-            "sandbox_environment_backend",
-            "to_jsonb(t) - 'pod_uid' - 'bound_at' - 'workspace_pvc_uid'",
-        ),
-        ("tenant_secret_deks", "to_jsonb(t)"),
-        ("tenant_secrets", "to_jsonb(t)"),
-        ("platform_credentials", "to_jsonb(t)"),
-        ("platform_credential_material", "to_jsonb(t)"),
-    ] {
-        result.push(
-            sqlx::query_scalar(&format!(
-                "SELECT COALESCE(jsonb_agg({projection} ORDER BY ({projection})::text),'[]'::jsonb)::text \
-                 FROM public.{table} t"
-            ))
-            .fetch_one(pool)
-            .await?,
-        );
-    }
-    Ok(result)
 }
 
 const ENV_A: &str = "binding-env-a";
@@ -196,30 +110,10 @@ async fn seed_binding(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn binding_count(pool: &PgPool) -> anyhow::Result<i64> {
-    Ok(
-        sqlx::query_scalar("SELECT count(*) FROM public.sandbox_workspace_bindings")
-            .fetch_one(pool)
-            .await?,
-    )
-}
-
 async fn pointers_absent(pool: &PgPool) -> anyhow::Result<bool> {
     Ok(sqlx::query_scalar(
         "SELECT bool_and(pod_uid IS NULL AND bound_at IS NULL AND workspace_pvc_uid IS NULL) \
          FROM public.sandbox_environment_backend",
-    )
-    .fetch_one(pool)
-    .await?)
-}
-
-async fn absent(pool: &PgPool) -> anyhow::Result<bool> {
-    Ok(sqlx::query_scalar(
-        "SELECT to_regclass('public.sandbox_workspace_bindings') IS NULL \
-         AND to_regproc('public.codewire_workspace_binding_immutable') IS NULL \
-         AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' \
-         AND table_name='sandbox_environment_backend' \
-         AND column_name IN ('pod_uid','bound_at','workspace_pvc_uid'))",
     )
     .fetch_one(pool)
     .await?)
@@ -240,7 +134,6 @@ async fn workspace_binding_fresh_schema_constrains_rows_pointer_trigger_and_inde
     let result = async {
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(embedded_max_version()? >= VERSION);
         seed(&pool).await?;
         // Existing backend rows stay valid with NULL pointers, and ordinary
         // writers that never name the new columns keep working.
@@ -581,249 +474,6 @@ async fn workspace_binding_pointer_moves_within_one_environment_and_cascades_wit
             .await?
             .as_deref()
                 == Some(POD_B)
-        );
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-    result.and(db.drop().await)
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL"]
-async fn workspace_binding_upgrade_preserves33_rows_helpers_and_second_startup()
--> anyhow::Result<()> {
-    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
-    let result = async {
-        apply_migrations_before(&db.url, VERSION).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db.url)
-            .await?;
-        let before = applied_migrations(&pool).await?;
-        anyhow::ensure!(before.len() == 33 && before[32].0 == 33);
-        anyhow::ensure!(
-            fingerprint(&pool).await? == ACCEPTED_PRE_WORKSPACE_BINDING_SCHEMA_FINGERPRINT
-        );
-        seed(&pool).await?;
-        let original = rows(&pool).await?;
-        let old_helpers = helpers(&pool).await?;
-        pool.close().await;
-
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db.url)
-            .await?;
-        let after = applied_migrations(&pool).await?;
-        anyhow::ensure!(
-            after.len()
-                == MIGRATOR
-                    .iter()
-                    .filter(|m| m.migration_type.is_up_migration())
-                    .count()
-                && after[..33] == before
-                && after[33].0 == VERSION
-        );
-        // No backfill: existing environments stay unbound until orchestration
-        // records them, and no earlier helper changed.
-        anyhow::ensure!(rows(&pool).await? == original);
-        anyhow::ensure!(pointers_absent(&pool).await? && binding_count(&pool).await? == 0);
-        anyhow::ensure!(prior_helpers(&pool).await? == old_helpers);
-        anyhow::ensure!(helpers(&pool).await?.len() == old_helpers.len() + 1);
-        let measured = fingerprint(&pool).await?;
-        anyhow::ensure!(
-            measured == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT,
-            "workspace binding measured fingerprint: {measured}"
-        );
-        seed_binding(&pool).await?;
-        let with_binding = rows(&pool).await?;
-        let new_helpers = helpers(&pool).await?;
-        pool.close().await;
-
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db.url)
-            .await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == after);
-        anyhow::ensure!(rows(&pool).await? == with_binding && helpers(&pool).await? == new_helpers);
-        anyhow::ensure!(binding_count(&pool).await? == 1 && !pointers_absent(&pool).await?);
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-    result.and(db.drop().await)
-}
-
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL with event-trigger creation"]
-async fn workspace_binding_failed_forward_rolls_back_table_columns_and_ledger_then_retries()
--> anyhow::Result<()> {
-    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
-    let result = async {
-        apply_migrations_before(&db.url, VERSION).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        let before = applied_migrations(&pool).await?;
-        seed(&pool).await?;
-        let original = rows(&pool).await?;
-        let old_helpers = helpers(&pool).await?;
-        // Fail on the last statement, after the table, index, function and
-        // trigger exist.
-        sqlx::raw_sql(
-            "CREATE SCHEMA migration_failure; CREATE FUNCTION migration_failure.reject_pointer() RETURNS event_trigger LANGUAGE plpgsql AS $$ \
-             BEGIN IF to_regclass('public.sandbox_workspace_bindings') IS NOT NULL THEN RAISE EXCEPTION 'synthetic failure after binding table'; END IF; END; $$; \
-             CREATE EVENT TRIGGER binding_failure ON ddl_command_end WHEN TAG IN ('ALTER TABLE') EXECUTE FUNCTION migration_failure.reject_pointer();",
-        )
-        .execute(&pool)
-        .await?;
-        pool.close().await;
-        let error = ensure_schema(&db.url)
-            .await
-            .err()
-            .context("forced migration34 failure accepted")?;
-        anyhow::ensure!(format!("{error:#}").contains("synthetic failure after binding table"));
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(
-            absent(&pool).await?
-                && applied_migrations(&pool).await? == before
-                && rows(&pool).await? == original
-                && helpers(&pool).await? == old_helpers
-        );
-        anyhow::ensure!(
-            fingerprint(&pool).await? == ACCEPTED_PRE_WORKSPACE_BINDING_SCHEMA_FINGERPRINT
-        );
-        sqlx::raw_sql("DROP EVENT TRIGGER binding_failure; DROP SCHEMA migration_failure CASCADE;")
-            .execute(&pool)
-            .await?;
-        pool.close().await;
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(
-            !absent(&pool).await?
-                && applied_migrations(&pool).await?.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count()
-                && rows(&pool).await? == original
-                && pointers_absent(&pool).await?
-        );
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-    result.and(db.drop().await)
-}
-
-/// The documented in-place rollback: the migration only adds a table, its
-/// trigger and function, and three nullable backend columns with their
-/// constraints, so removing them and the ledger row restores version 33
-/// without touching any other row. Recorded bindings are lost; orchestration
-/// records them again after a later roll-forward.
-const WORKSPACE_BINDING_DOWN: &str = "BEGIN; \
-    ALTER TABLE public.sandbox_environment_backend \
-        DROP CONSTRAINT chk_sandbox_backend_workspace_pvc_uid, \
-        DROP CONSTRAINT chk_sandbox_backend_binding_coherent, \
-        DROP CONSTRAINT sandbox_environment_backend_binding_fkey, \
-        DROP COLUMN workspace_pvc_uid, \
-        DROP COLUMN bound_at, \
-        DROP COLUMN pod_uid; \
-    DROP TABLE public.sandbox_workspace_bindings; \
-    DROP FUNCTION public.codewire_workspace_binding_immutable(); \
-    DELETE FROM public._sqlx_migrations WHERE version = 34; \
-    COMMIT;";
-
-#[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL"]
-async fn workspace_binding_down_restores33_in_place_and_keeps_every_other_row() -> anyhow::Result<()>
-{
-    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
-    let result = async {
-        apply_migrations_before(&db.url, VERSION + 1).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db.url)
-            .await?;
-        seed(&pool).await?;
-        seed_binding(&pool).await?;
-        let original = rows(&pool).await?;
-        let old_helpers = prior_helpers(&pool).await?;
-        let ledger = applied_migrations(&pool).await?;
-        anyhow::ensure!(ledger.len() == 34 && ledger[33].0 == VERSION);
-        sqlx::raw_sql(WORKSPACE_BINDING_DOWN).execute(&pool).await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == ledger[..33]);
-        anyhow::ensure!(absent(&pool).await? && helpers(&pool).await? == old_helpers);
-        anyhow::ensure!(
-            fingerprint(&pool).await? == ACCEPTED_PRE_WORKSPACE_BINDING_SCHEMA_FINGERPRINT
-        );
-        anyhow::ensure!(rows(&pool).await? == original);
-        pool.close().await;
-        // Rolling forward again applies 34 cleanly with no bindings.
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db.url)
-            .await?;
-        anyhow::ensure!(
-            applied_migrations(&pool).await?.len()
-                == MIGRATOR
-                    .iter()
-                    .filter(|m| m.migration_type.is_up_migration())
-                    .count()
-        );
-        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
-        anyhow::ensure!(rows(&pool).await? == original);
-        anyhow::ensure!(binding_count(&pool).await? == 0 && pointers_absent(&pool).await?);
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-    result.and(db.drop().await)
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL"]
-async fn workspace_binding_rollback_replays33_only_in_disposable_application_schema()
--> anyhow::Result<()> {
-    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
-    let result = async {
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        seed(&pool).await?;
-        seed_binding(&pool).await?;
-        let old_helpers = prior_helpers(&pool).await?;
-        let ledger = applied_migrations(&pool).await?;
-        sqlx::raw_sql(
-            "CREATE SCHEMA rollback_boundary; CREATE TABLE rollback_boundary.keep(id integer); \
-             INSERT INTO rollback_boundary.keep VALUES(1); DROP SCHEMA public CASCADE; CREATE SCHEMA public;",
-        )
-        .execute(&pool)
-        .await?;
-        pool.close().await;
-        apply_migrations_before(&db.url, VERSION).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == ledger[..33]);
-        let prior_checksum: String = sqlx::query_scalar(
-            "SELECT encode(checksum,'hex') FROM public._sqlx_migrations WHERE version=33 AND success",
-        )
-        .fetch_one(&pool)
-        .await?;
-        anyhow::ensure!(prior_checksum == PRIOR33);
-        anyhow::ensure!(absent(&pool).await? && helpers(&pool).await? == old_helpers);
-        anyhow::ensure!(
-            fingerprint(&pool).await? == ACCEPTED_PRE_WORKSPACE_BINDING_SCHEMA_FINGERPRINT
-        );
-        anyhow::ensure!(
-            sqlx::query_scalar::<_, bool>(
-                "SELECT NOT EXISTS(SELECT 1 FROM environments) \
-                 AND NOT EXISTS(SELECT 1 FROM sandbox_environment_backend) \
-                 AND NOT EXISTS(SELECT 1 FROM platform_credentials)"
-            )
-            .fetch_one(&pool)
-            .await?
-        );
-        anyhow::ensure!(
-            sqlx::query_scalar::<_, i32>("SELECT id FROM rollback_boundary.keep")
-                .fetch_one(&pool)
-                .await?
-                == 1
         );
         pool.close().await;
         Ok(())

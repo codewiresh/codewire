@@ -1,41 +1,6 @@
-//! Pending authenticator replacement and TOTP replay step: staged prior history
-//! and disposable database proof.
+//! Pending authenticator replacement and TOTP replay step: disposable database proof.
 
 use super::*;
-
-const VERSION: i64 = 32;
-// Measured at preview-login branch head
-// da7bf6a031e98ffdf1df62bb8299d4947a13cdce, whose migration31 this work is
-// stacked on: SHA384(concatenated binary SHA384(SQL1)..SHA384(SQL31)) and
-// SHA384(SQL31). This pins staged predecessor bytes; it does not claim that
-// version31 alone was deployed.
-const STAGED_HISTORY31: &str = "df03ad590a6e2c74235c2284c969a5dce75279a78f6c1716074147b9e745672f504cdceec77c54a1d0df0d405a1bb489";
-const STAGED31: &str = "d39f675b139aaf21c91ae2cd0d550d13ee2bad9d5fb6bda9214b9b93b4e2b525f92fcc817f25f5b3d5cebbbe0df3a274";
-
-pub(super) fn assert_accepted_staged31() -> anyhow::Result<()> {
-    preview_browser::assert_accepted_prior30()?;
-    let mut digest = Sha384::new();
-    let prior: Vec<_> = MIGRATOR.iter().filter(|m| m.version < VERSION).collect();
-    anyhow::ensure!(prior.len() == 31);
-    for (index, migration) in prior.iter().enumerate() {
-        anyhow::ensure!(migration.version == index as i64 + 1);
-        digest.update(Sha384::digest(migration.sql.as_bytes()));
-    }
-    anyhow::ensure!(
-        format!("{:x}", digest.finalize()) == STAGED_HISTORY31,
-        "migration1..31 differs from the staged preview browser authorization history"
-    );
-    anyhow::ensure!(
-        format!("{:x}", Sha384::digest(prior[30].sql.as_bytes())) == STAGED31,
-        "migration31 differs from the staged preview browser authorization"
-    );
-    Ok(())
-}
-
-#[test]
-fn two_factor_replacement_upgrade_pins_the_staged31_history() -> anyhow::Result<()> {
-    assert_accepted_staged31()
-}
 
 async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
     Ok(sqlx::query_scalar(include_str!(
@@ -43,48 +8,6 @@ async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
     ))
     .fetch_one(pool)
     .await?)
-}
-
-/// Every helper except migration34's workspace-binding trigger function and
-/// migration38's cw-runtime trigger function, which have their own proof and
-/// replace no prior helper.
-async fn helpers(pool: &PgPool) -> anyhow::Result<Vec<String>> {
-    Ok(sqlx::query_scalar(
-        "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n \
-        ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
-        AND p.proname <> 'codewire_workspace_binding_immutable' \
-        AND p.proname <> 'codewire_cw_runtime_request_immutable' \
-        ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
-    )
-    .fetch_all(pool)
-    .await?)
-}
-
-/// Every pre-existing row this migration could touch. `two_factor` is compared
-/// without the new step column, which upgrade leaves NULL.
-async fn rows(pool: &PgPool) -> anyhow::Result<Vec<String>> {
-    let mut result = Vec::new();
-    for (table, projection) in [
-        ("users", "to_jsonb(t)"),
-        ("sessions", "to_jsonb(t)"),
-        ("two_factor", "to_jsonb(t) - 'last_totp_step'"),
-        ("two_factor_tokens", "to_jsonb(t)"),
-        ("organizations", "to_jsonb(t)"),
-        ("tenant_secret_deks", "to_jsonb(t)"),
-        ("tenant_secrets", "to_jsonb(t)"),
-        ("platform_credentials", "to_jsonb(t)"),
-        ("platform_credential_material", "to_jsonb(t)"),
-    ] {
-        result.push(
-            sqlx::query_scalar(&format!(
-                "SELECT COALESCE(jsonb_agg({projection} ORDER BY ({projection})::text),'[]'::jsonb)::text \
-                 FROM public.{table} t"
-            ))
-            .fetch_one(pool)
-            .await?,
-        );
-    }
-    Ok(result)
 }
 
 // Ciphertext fixtures use the stored layout: base64(nonce || ciphertext || tag).
@@ -158,16 +81,6 @@ async fn pending_count(pool: &PgPool) -> anyhow::Result<i64> {
     )
 }
 
-async fn absent(pool: &PgPool) -> anyhow::Result<bool> {
-    Ok(sqlx::query_scalar(
-        "SELECT to_regclass('public.two_factor_replacements') IS NULL AND NOT EXISTS (\
-         SELECT 1 FROM information_schema.columns WHERE table_schema='public' \
-         AND table_name='two_factor' AND column_name='last_totp_step')",
-    )
-    .fetch_one(pool)
-    .await?)
-}
-
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL"]
 async fn two_factor_replacement_fresh_schema_constrains_rows_trigger_and_indexes()
@@ -176,7 +89,6 @@ async fn two_factor_replacement_fresh_schema_constrains_rows_trigger_and_indexes
     let result = async {
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(embedded_max_version()? >= VERSION);
         seed(&pool).await?;
         seed_pending(&pool).await?;
         let measured = fingerprint(&pool).await?;
@@ -279,76 +191,6 @@ async fn two_factor_replacement_fresh_schema_constrains_rows_trigger_and_indexes
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL"]
-async fn two_factor_replacement_upgrade_preserves31_rows_helpers_and_second_startup()
--> anyhow::Result<()> {
-    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
-    let result = async {
-        apply_migrations_before(&db.url, VERSION).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db.url)
-            .await?;
-        let before = applied_migrations(&pool).await?;
-        anyhow::ensure!(before.len() == 31 && before[30].0 == 31);
-        anyhow::ensure!(
-            fingerprint(&pool).await? == ACCEPTED_PRE_TWO_FACTOR_REPLACEMENT_SCHEMA_FINGERPRINT
-        );
-        seed(&pool).await?;
-        let original = rows(&pool).await?;
-        let old_helpers = helpers(&pool).await?;
-        pool.close().await;
-
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db.url)
-            .await?;
-        let after = applied_migrations(&pool).await?;
-        anyhow::ensure!(
-            after.len()
-                == MIGRATOR
-                    .iter()
-                    .filter(|m| m.migration_type.is_up_migration())
-                    .count()
-                && after[..31] == before
-                && after[31].0 == VERSION
-        );
-        // The existing factor, its sessions and challenge are untouched, and no
-        // step is invented for it: the first later proof may use any step.
-        anyhow::ensure!(rows(&pool).await? == original && helpers(&pool).await? == old_helpers);
-        anyhow::ensure!(
-            sqlx::query_scalar::<_, Option<i64>>("SELECT last_totp_step FROM two_factor")
-                .fetch_one(&pool)
-                .await?
-                .is_none()
-        );
-        anyhow::ensure!(pending_count(&pool).await? == 0);
-        let measured = fingerprint(&pool).await?;
-        anyhow::ensure!(
-            measured == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT,
-            "two-factor replacement measured fingerprint: {measured}"
-        );
-        seed_pending(&pool).await?;
-        let with_pending = rows(&pool).await?;
-        pool.close().await;
-
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db.url)
-            .await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == after);
-        anyhow::ensure!(rows(&pool).await? == with_pending && helpers(&pool).await? == old_helpers);
-        anyhow::ensure!(pending_count(&pool).await? == 1);
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-    result.and(db.drop().await)
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL"]
 async fn two_factor_replacement_cascades_with_session_account_and_disablement() -> anyhow::Result<()>
 {
     for removal in [
@@ -397,168 +239,4 @@ async fn two_factor_replacement_cascades_with_session_account_and_disablement() 
         result.and(db.drop().await)?;
     }
     Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL with event-trigger creation"]
-async fn two_factor_replacement_failed_forward_rolls_back_table_column_and_ledger_then_retries()
--> anyhow::Result<()> {
-    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
-    let result = async {
-        apply_migrations_before(&db.url, VERSION).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        let before = applied_migrations(&pool).await?;
-        seed(&pool).await?;
-        let original = rows(&pool).await?;
-        // Fail on the last statement, after the table, indexes and trigger exist.
-        sqlx::raw_sql(
-            "CREATE SCHEMA migration_failure; CREATE FUNCTION migration_failure.reject_step() RETURNS event_trigger LANGUAGE plpgsql AS $$ \
-             BEGIN IF to_regclass('public.two_factor_replacements') IS NOT NULL THEN RAISE EXCEPTION 'synthetic failure after replacement table'; END IF; END; $$; \
-             CREATE EVENT TRIGGER replacement_failure ON ddl_command_end WHEN TAG IN ('ALTER TABLE') EXECUTE FUNCTION migration_failure.reject_step();",
-        )
-        .execute(&pool)
-        .await?;
-        pool.close().await;
-        let error = ensure_schema(&db.url)
-            .await
-            .err()
-            .context("forced migration32 failure accepted")?;
-        anyhow::ensure!(format!("{error:#}").contains("synthetic failure after replacement table"));
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(
-            absent(&pool).await?
-                && applied_migrations(&pool).await? == before
-                && rows(&pool).await? == original
-        );
-        anyhow::ensure!(
-            fingerprint(&pool).await? == ACCEPTED_PRE_TWO_FACTOR_REPLACEMENT_SCHEMA_FINGERPRINT
-        );
-        sqlx::raw_sql("DROP EVENT TRIGGER replacement_failure; DROP SCHEMA migration_failure CASCADE;")
-            .execute(&pool)
-            .await?;
-        pool.close().await;
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(
-            !absent(&pool).await?
-                && applied_migrations(&pool).await?.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count()
-                && rows(&pool).await? == original
-        );
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-    result.and(db.drop().await)
-}
-
-/// The documented in-place rollback: the migration only adds a table, its
-/// trigger and one nullable column, so removing them and the ledger row restores
-/// version 31 without touching factors, sessions or other rows. Pending
-/// replacements are lost; their accounts keep the authenticator they had.
-const TWO_FACTOR_REPLACEMENT_DOWN: &str = "BEGIN; \
-    DROP TABLE public.two_factor_replacements; \
-    ALTER TABLE public.two_factor DROP COLUMN last_totp_step; \
-    DELETE FROM public._sqlx_migrations WHERE version = 32; \
-    COMMIT;";
-
-#[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL"]
-async fn two_factor_replacement_down_restores31_in_place_and_keeps_every_other_row()
--> anyhow::Result<()> {
-    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
-    let result = async {
-        apply_migrations_before(&db.url, VERSION + 1).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db.url)
-            .await?;
-        seed(&pool).await?;
-        seed_pending(&pool).await?;
-        let original = rows(&pool).await?;
-        let old_helpers = helpers(&pool).await?;
-        let ledger = applied_migrations(&pool).await?;
-        anyhow::ensure!(ledger.len() == 32 && ledger[31].0 == VERSION);
-        sqlx::raw_sql(TWO_FACTOR_REPLACEMENT_DOWN)
-            .execute(&pool)
-            .await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == ledger[..31]);
-        anyhow::ensure!(absent(&pool).await? && helpers(&pool).await? == old_helpers);
-        anyhow::ensure!(
-            fingerprint(&pool).await? == ACCEPTED_PRE_TWO_FACTOR_REPLACEMENT_SCHEMA_FINGERPRINT
-        );
-        anyhow::ensure!(rows(&pool).await? == original);
-        pool.close().await;
-        // Rolling forward again applies 32 cleanly with no pending rows.
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db.url)
-            .await?;
-        anyhow::ensure!(
-            applied_migrations(&pool).await?.len()
-                == MIGRATOR
-                    .iter()
-                    .filter(|m| m.migration_type.is_up_migration())
-                    .count()
-        );
-        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
-        anyhow::ensure!(rows(&pool).await? == original && pending_count(&pool).await? == 0);
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-    result.and(db.drop().await)
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL"]
-async fn two_factor_replacement_rollback_replays31_only_in_disposable_application_schema()
--> anyhow::Result<()> {
-    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
-    let result = async {
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        seed(&pool).await?;
-        seed_pending(&pool).await?;
-        let old_helpers = helpers(&pool).await?;
-        let ledger = applied_migrations(&pool).await?;
-        sqlx::raw_sql(
-            "CREATE SCHEMA rollback_boundary; CREATE TABLE rollback_boundary.keep(id integer); \
-             INSERT INTO rollback_boundary.keep VALUES(1); DROP SCHEMA public CASCADE; CREATE SCHEMA public;",
-        )
-        .execute(&pool)
-        .await?;
-        pool.close().await;
-        apply_migrations_before(&db.url, VERSION).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == ledger[..31]);
-        let prior_checksum: String = sqlx::query_scalar(
-            "SELECT encode(checksum,'hex') FROM public._sqlx_migrations WHERE version=31 AND success",
-        )
-        .fetch_one(&pool)
-        .await?;
-        anyhow::ensure!(prior_checksum == STAGED31);
-        anyhow::ensure!(absent(&pool).await? && helpers(&pool).await? == old_helpers);
-        anyhow::ensure!(
-            fingerprint(&pool).await? == ACCEPTED_PRE_TWO_FACTOR_REPLACEMENT_SCHEMA_FINGERPRINT
-        );
-        anyhow::ensure!(
-            sqlx::query_scalar::<_, bool>(
-                "SELECT NOT EXISTS(SELECT 1 FROM two_factor) AND NOT EXISTS(SELECT 1 FROM sessions) \
-                 AND NOT EXISTS(SELECT 1 FROM platform_credentials)"
-            )
-            .fetch_one(&pool)
-            .await?
-        );
-        anyhow::ensure!(
-            sqlx::query_scalar::<_, i32>("SELECT id FROM rollback_boundary.keep")
-                .fetch_one(&pool)
-                .await?
-                == 1
-        );
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-    result.and(db.drop().await)
 }

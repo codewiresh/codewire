@@ -1,17 +1,7 @@
-//! SSH host keys (migration 37): accepted prior history and disposable
-//! database proof for the host-key table, write-once per bound Pod, its
-//! constraints and its cascade, an upgrade that changes no existing row or
-//! helper, the in-place down and the replay of version 36 into a disposable
-//! application schema.
+//! SSH host keys: disposable database proof for the host-key table, write-once
+//! per bound Pod, its constraints and its cascade.
 
 use super::*;
-
-const VERSION: i64 = 37;
-// Measured from accepted canonical main 6f2693256155b615af44f10ba47c9e53a9419b1b,
-// not the edited branch: SHA384(concatenated binary SHA384(SQL1)..SHA384(SQL36))
-// and SHA384(SQL36).
-const PRIOR_HISTORY36: &str = "d93e9473a13019377f7cc71ae0327aa1bb0e7d1951d57dc45deeab0746e5a1d51e859523d963a0dde16059dbd8ce0383";
-const PRIOR36: &str = "32b0848765fb6892efe547f652316061c530b60e68607d20bce9dbd23f4ab37cb0008095a5fe3a86f9cfcdd5ecebbb8d";
 
 const ENV: &str = "host-key-env";
 const OTHER_ENV: &str = "host-key-env-other";
@@ -26,31 +16,6 @@ const KEY: &str =
 const OTHER_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHoVDsBGpvXjHq1Mc3BJ6ANWjUtpnGxFp1yfCaeHRu3T";
 
-pub(super) fn assert_accepted_prior36() -> anyhow::Result<()> {
-    authority_stamp_removal::assert_accepted_prior35()?;
-    let mut digest = Sha384::new();
-    let prior: Vec<_> = MIGRATOR.iter().filter(|m| m.version < VERSION).collect();
-    anyhow::ensure!(prior.len() == 36);
-    for (index, migration) in prior.iter().enumerate() {
-        anyhow::ensure!(migration.version == index as i64 + 1);
-        digest.update(Sha384::digest(migration.sql.as_bytes()));
-    }
-    anyhow::ensure!(
-        format!("{:x}", digest.finalize()) == PRIOR_HISTORY36,
-        "migration1..36 differs from accepted canonical 6f2693256"
-    );
-    anyhow::ensure!(
-        format!("{:x}", Sha384::digest(prior[35].sql.as_bytes())) == PRIOR36,
-        "migration36 differs from accepted canonical 6f2693256"
-    );
-    Ok(())
-}
-
-#[test]
-fn ssh_host_keys_pins_the_accepted36_history() -> anyhow::Result<()> {
-    assert_accepted_prior36()
-}
-
 async fn connect(url: &str) -> anyhow::Result<PgPool> {
     Ok(PgPoolOptions::new().max_connections(1).connect(url).await?)
 }
@@ -61,39 +26,6 @@ async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
     ))
     .fetch_one(pool)
     .await?)
-}
-
-/// Every `codewire_` helper with its definition. Migration 37 adds none.
-async fn helpers(pool: &PgPool) -> anyhow::Result<Vec<String>> {
-    Ok(sqlx::query_scalar(
-        "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n \
-         ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
-         ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
-    )
-    .fetch_all(pool)
-    .await?)
-}
-
-/// Every pre-existing row this migration could touch.
-async fn rows(pool: &PgPool) -> anyhow::Result<Vec<String>> {
-    let mut result = Vec::new();
-    for table in [
-        "users",
-        "organizations",
-        "environments",
-        "sandbox_environment_backend",
-        "sandbox_workspace_bindings",
-    ] {
-        result.push(
-            sqlx::query_scalar(&format!(
-                "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)::text \
-                 FROM public.{table} t"
-            ))
-            .fetch_one(pool)
-            .await?,
-        );
-    }
-    Ok(result)
 }
 
 /// Two running sandboxes written by version-36 code.
@@ -149,14 +81,6 @@ async fn keys(pool: &PgPool) -> anyhow::Result<Vec<(String, String, i64, String)
     .await?)
 }
 
-async fn absent(pool: &PgPool) -> anyhow::Result<bool> {
-    Ok(
-        sqlx::query_scalar("SELECT to_regclass('public.sandbox_ssh_host_keys') IS NULL")
-            .fetch_one(pool)
-            .await?,
-    )
-}
-
 fn sqlstate(error: &sqlx::Error) -> Option<String> {
     error
         .as_database_error()
@@ -172,7 +96,6 @@ async fn ssh_host_keys_fresh_schema_is_write_once_per_pod_constrained_and_cascad
     let result = async {
         ensure_schema(&db.url).await?;
         let pool = connect(&db.url).await?;
-        anyhow::ensure!(embedded_max_version()? >= VERSION);
         seed(&pool).await?;
         let measured = fingerprint(&pool).await?;
         anyhow::ensure!(
@@ -269,171 +192,6 @@ async fn ssh_host_keys_fresh_schema_is_write_once_per_pod_constrained_and_cascad
                     1,
                     KEY.to_owned()
                 )]
-        );
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-    result.and(db.drop().await)
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL"]
-async fn ssh_host_keys_upgrade_preserves36_rows_helpers_and_second_startup() -> anyhow::Result<()> {
-    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
-    let result = async {
-        apply_migrations_before(&db.url, VERSION).await?;
-        let pool = connect(&db.url).await?;
-        let before = applied_migrations(&pool).await?;
-        anyhow::ensure!(before.len() == 36 && before[35].0 == 36);
-        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_PRE_SSH_HOST_KEY_SCHEMA_FINGERPRINT);
-        seed(&pool).await?;
-        let original = rows(&pool).await?;
-        let old_helpers = helpers(&pool).await?;
-        pool.close().await;
-
-        // Prove SSH37 itself before the later CW journal adds its helper.
-        apply_migrations_before(&db.url, VERSION + 1).await?;
-        let pool = connect(&db.url).await?;
-        let after = applied_migrations(&pool).await?;
-        anyhow::ensure!(after.len() == 37 && after[..36] == before && after[36].0 == VERSION);
-        // No backfill and no other change: no key exists until a daemon
-        // records one.
-        anyhow::ensure!(rows(&pool).await? == original);
-        anyhow::ensure!(helpers(&pool).await? == old_helpers);
-        anyhow::ensure!(keys(&pool).await?.is_empty());
-        let measured = fingerprint(&pool).await?;
-        anyhow::ensure!(
-            measured == ACCEPTED_SSH_HOST_KEY_SCHEMA_FINGERPRINT,
-            "ssh host keys measured fingerprint: {measured}"
-        );
-        record(&pool, ENV, 3, POD, KEY).await?;
-        let recorded = keys(&pool).await?;
-        pool.close().await;
-
-        // A second version-37 startup changes nothing.
-        apply_migrations_before(&db.url, VERSION + 1).await?;
-        let pool = connect(&db.url).await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == after);
-        anyhow::ensure!(rows(&pool).await? == original && keys(&pool).await? == recorded);
-        pool.close().await;
-
-        // Ordinary current startup adds the later journals without changing
-        // the accepted SSH ledger, rows or keys, and then is a no-op too.
-        ensure_schema(&db.url).await?;
-        let pool = connect(&db.url).await?;
-        let current = applied_migrations(&pool).await?;
-        anyhow::ensure!(
-            current.len()
-                == MIGRATOR
-                    .iter()
-                    .filter(|m| m.migration_type.is_up_migration())
-                    .count()
-                && current[..37] == after
-        );
-        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
-        anyhow::ensure!(rows(&pool).await? == original && keys(&pool).await? == recorded);
-        pool.close().await;
-        ensure_schema(&db.url).await?;
-        let pool = connect(&db.url).await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == current);
-        anyhow::ensure!(rows(&pool).await? == original && keys(&pool).await? == recorded);
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-    result.and(db.drop().await)
-}
-
-/// The documented in-place rollback: the migration only adds one table, so
-/// dropping it and the ledger row restores version 36 without touching any
-/// other row. Recorded keys are lost; daemons record them again after a
-/// later roll-forward, at their next bind.
-const SSH_HOST_KEYS_DOWN: &str = "BEGIN; \
-    DROP TABLE public.sandbox_ssh_host_keys; \
-    DELETE FROM public._sqlx_migrations WHERE version = 37; \
-    COMMIT;";
-
-#[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL"]
-async fn ssh_host_keys_down_restores36_in_place_and_keeps_every_other_row() -> anyhow::Result<()> {
-    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
-    let result = async {
-        apply_migrations_before(&db.url, VERSION + 1).await?;
-        let pool = connect(&db.url).await?;
-        seed(&pool).await?;
-        record(&pool, ENV, 3, POD, KEY).await?;
-        let original = rows(&pool).await?;
-        let old_helpers = helpers(&pool).await?;
-        let ledger = applied_migrations(&pool).await?;
-        anyhow::ensure!(ledger.len() == 37 && ledger[36].0 == VERSION);
-        sqlx::raw_sql(SSH_HOST_KEYS_DOWN).execute(&pool).await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == ledger[..36]);
-        anyhow::ensure!(absent(&pool).await? && helpers(&pool).await? == old_helpers);
-        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_PRE_SSH_HOST_KEY_SCHEMA_FINGERPRINT);
-        anyhow::ensure!(rows(&pool).await? == original);
-        pool.close().await;
-
-        // Rolling forward again applies 37 cleanly with no keys.
-        ensure_schema(&db.url).await?;
-        let pool = connect(&db.url).await?;
-        anyhow::ensure!(
-            applied_migrations(&pool).await?.len()
-                == MIGRATOR
-                    .iter()
-                    .filter(|m| m.migration_type.is_up_migration())
-                    .count()
-        );
-        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
-        anyhow::ensure!(rows(&pool).await? == original && keys(&pool).await?.is_empty());
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-    result.and(db.drop().await)
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL"]
-async fn ssh_host_keys_rollback_replays36_only_in_disposable_application_schema()
--> anyhow::Result<()> {
-    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
-    let result = async {
-        ensure_schema(&db.url).await?;
-        let pool = connect(&db.url).await?;
-        seed(&pool).await?;
-        record(&pool, ENV, 3, POD, KEY).await?;
-        let ledger = applied_migrations(&pool).await?;
-        sqlx::raw_sql(
-            "CREATE SCHEMA rollback_boundary; CREATE TABLE rollback_boundary.keep(id integer); \
-             INSERT INTO rollback_boundary.keep VALUES(1); DROP SCHEMA public CASCADE; CREATE SCHEMA public;",
-        )
-        .execute(&pool)
-        .await?;
-        pool.close().await;
-        apply_migrations_before(&db.url, VERSION).await?;
-        let pool = connect(&db.url).await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == ledger[..36]);
-        let prior_checksum: String = sqlx::query_scalar(
-            "SELECT encode(checksum,'hex') FROM public._sqlx_migrations WHERE version=36 AND success",
-        )
-        .fetch_one(&pool)
-        .await?;
-        anyhow::ensure!(prior_checksum == PRIOR36);
-        anyhow::ensure!(absent(&pool).await?);
-        anyhow::ensure!(
-            fingerprint(&pool).await? == ACCEPTED_PRE_SSH_HOST_KEY_SCHEMA_FINGERPRINT
-        );
-        anyhow::ensure!(
-            sqlx::query_scalar::<_, bool>("SELECT NOT EXISTS(SELECT 1 FROM environments)")
-                .fetch_one(&pool)
-                .await?
-        );
-        anyhow::ensure!(
-            sqlx::query_scalar::<_, i32>("SELECT id FROM rollback_boundary.keep")
-                .fetch_one(&pool)
-                .await?
-                == 1
         );
         pool.close().await;
         Ok(())

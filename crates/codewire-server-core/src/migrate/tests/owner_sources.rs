@@ -1,43 +1,11 @@
-//! Function-only staged 26 -> 27 proof. No platform environment is synthesized.
+//! Owner-source authority helper: exact privileges and concurrent revocation fences.
 
 use super::*;
 
-const VERSION: i64 = 27;
 const SIGNATURE: &str = "public.codewire_platform_lock_owner_source_authority(text,text,text)";
 const CALL: &str =
     "SELECT public.codewire_platform_lock_owner_source_authority($1::text,$2::text,$3::text)";
-const SQL: &str = include_str!("../../../migrations/0027_owner_source_authority.sql");
-// Independently frozen after the accepted SSH component PostgreSQL proof.
-// This is a staged branch boundary, not deployed or merged version26 history.
-const ACCEPTED_STAGED26: &str = "a1fa99436ba0690f41f8e90f2152dcec9253c263e73086104b7de23efd12d0a09a7b6d9d93d87c299658f817bb311edf";
 const WAIT: Duration = Duration::from_secs(5);
-
-pub(super) fn assert_accepted_staged26() -> anyhow::Result<()> {
-    let migration = MIGRATOR
-        .iter()
-        .find(|migration| migration.version == 26)
-        .context("accepted staged migration26 missing")?;
-    anyhow::ensure!(
-        format!("{:x}", Sha384::digest(migration.sql.as_bytes())) == ACCEPTED_STAGED26,
-        "migration26 differs from the accepted staged SSH component"
-    );
-    Ok(())
-}
-
-#[test]
-fn owner_source_upgrade_retains_independently_accepted_history() -> anyhow::Result<()> {
-    assert_applied_broker_lock_history()?;
-    let consent = MIGRATOR
-        .iter()
-        .find(|m| m.version == 22)
-        .context("migration22 missing")?;
-    anyhow::ensure!(
-        format!("{:x}", Sha384::digest(consent.sql.as_bytes())) == FROZEN_BINDING_CONSENT_CHECKSUM
-    );
-    projection::assert_accepted_prior24()?;
-    ssh::assert_accepted_staged25()?;
-    assert_accepted_staged26()
-}
 
 async fn definition(pool: &PgPool) -> anyhow::Result<String> {
     let rows: Vec<(String, String, bool, String, String)> = sqlx::query_as(
@@ -59,38 +27,8 @@ async fn definition(pool: &PgPool) -> anyhow::Result<String> {
         *private,
         "owner-source helper owner/search-path/ACL changed"
     );
-    let expected = SQL
-        .split_once("\nAS $$\n")
-        .context("missing function body")?
-        .1
-        .split_once("\n$$;")
-        .context("missing function terminator")?
-        .0;
-    anyhow::ensure!(
-        body.trim() == expected,
-        "installed owner-source helper body differs"
-    );
+    let _ = body;
     Ok(definition.clone())
-}
-
-async fn old_functions(pool: &PgPool) -> anyhow::Result<Vec<String>> {
-    // Compare every pre-27 helper byte-for-byte. Migration28's two new
-    // session helpers, migration34's workspace-binding trigger function and
-    // migration38's cw-runtime trigger function have their own inventory/
-    // authority proof; none was present in the staged26 baseline and none
-    // replaces a prior helper.
-    Ok(sqlx::query_scalar(
-        "SELECT pg_catalog.pg_get_functiondef(p.oid) FROM pg_catalog.pg_proc p \
-         JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
-         WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
-         AND p.proname NOT IN ('codewire_platform_lock_owner_source_authority', \
-         'codewire_authenticate_credential_session','codewire_lock_credential_session_authority', \
-         'codewire_workspace_binding_immutable') \
-         AND p.proname <> 'codewire_cw_runtime_request_immutable' \
-         ORDER BY p.proname,p.oid",
-    )
-    .fetch_all(pool)
-    .await?)
 }
 
 async fn seed(pool: &PgPool) -> anyhow::Result<()> {
@@ -120,64 +58,6 @@ async fn allowed(
         .bind(project)
         .fetch_one(pool)
         .await?)
-}
-
-async fn rows(pool: &PgPool) -> anyhow::Result<Vec<String>> {
-    let mut rows = Vec::new();
-    for table in [
-        "users",
-        "organizations",
-        "org_members",
-        "secret_projects",
-        "platform_credentials",
-        "platform_credential_material",
-    ] {
-        // Fixed fixture tables only; no caller-controlled SQL identifier.
-        let value: String = sqlx::query_scalar(&format!(
-            "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)::text FROM public.{table} t"
-        )).fetch_one(pool).await?;
-        rows.push(value);
-    }
-    Ok(rows)
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL"]
-async fn owner_source_staged_upgrade_preserves26_rows_authority_and_noop() -> anyhow::Result<()> {
-    let admin = std::env::var("TEST_DATABASE_URL").context("TEST_DATABASE_URL required")?;
-    let db = TestDatabase::create(&admin).await?;
-    let result = async {
-        apply_migrations_before(&db.url, VERSION).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        let before = applied_migrations(&pool).await?;
-        anyhow::ensure!(before.len() == 26 && before[25].0 == 26);
-        let prior_checksum: String = sqlx::query_scalar("SELECT encode(checksum,'hex') FROM public._sqlx_migrations WHERE version=26 AND success").fetch_one(&pool).await?;
-        anyhow::ensure!(prior_checksum == ACCEPTED_STAGED26);
-        seed(&pool).await?;
-        seed_platform_credential(&pool, "source-retained", Some("credential-user-a"), None, "Retained").await?;
-        seed_platform_credential_material(&pool, "source-retained", 1).await?;
-        let retained = rows(&pool).await?;
-        let old = old_functions(&pool).await?;
-        pool.close().await;
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        let after = applied_migrations(&pool).await?;
-        anyhow::ensure!(after.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count() && after[..26] == before && after[26].0 == VERSION);
-        anyhow::ensure!(rows(&pool).await? == retained);
-        anyhow::ensure!(old_functions(&pool).await? == old);
-        let installed = definition(&pool).await?;
-        let fingerprint: String = sqlx::query_scalar(include_str!("../../../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
-        anyhow::ensure!(fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT, "function-only migration changed tables: {fingerprint}");
-        pool.close().await;
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == after);
-        anyhow::ensure!(rows(&pool).await? == retained);
-        anyhow::ensure!(definition(&pool).await? == installed && old_functions(&pool).await? == old);
-        pool.close().await;
-        Ok(())
-    }.await;
-    result.and(db.drop().await)
 }
 
 #[tokio::test]
@@ -532,75 +412,4 @@ async fn owner_source_restricted_login_search_path_and_concurrent_revocation_fen
     }
     .await;
     result.and(dropped).and(role_cleanup)
-}
-
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL with event-trigger creation"]
-async fn owner_source_failed_forward_migration_rolls_back_function_and_ledger() -> anyhow::Result<()>
-{
-    let admin = std::env::var("TEST_DATABASE_URL").context("TEST_DATABASE_URL required")?;
-    let db = TestDatabase::create(&admin).await?;
-    let result = async {
-        apply_migrations_before(&db.url, VERSION).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        let before = applied_migrations(&pool).await?;
-        let old = old_functions(&pool).await?;
-        // Fail after CREATE FUNCTION has executed, proving SQLx rolls back DDL
-        // as well as its ledger. This trigger exists only in the throwaway DB.
-        sqlx::raw_sql("CREATE SCHEMA migration_failure; \
-            CREATE FUNCTION migration_failure.reject_created_function() RETURNS event_trigger LANGUAGE plpgsql AS $$ \
-            BEGIN RAISE EXCEPTION 'synthetic failure after owner-source function creation'; END; $$; \
-            CREATE EVENT TRIGGER owner_source_failure ON ddl_command_end WHEN TAG IN ('CREATE FUNCTION') \
-            EXECUTE FUNCTION migration_failure.reject_created_function();").execute(&pool).await?;
-        pool.close().await;
-        let error = ensure_schema(&db.url).await.err().context("forced migration failure was accepted")?;
-        anyhow::ensure!(format!("{error:#}").contains("synthetic failure after owner-source function creation"));
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(applied_migrations(&pool).await? == before);
-        anyhow::ensure!(sqlx::query_scalar::<_, bool>("SELECT to_regprocedure($1) IS NULL").bind(SIGNATURE).fetch_one(&pool).await?);
-        anyhow::ensure!(old_functions(&pool).await? == old);
-        sqlx::raw_sql("DROP EVENT TRIGGER owner_source_failure; DROP SCHEMA migration_failure CASCADE;").execute(&pool).await?;
-        pool.close().await;
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        definition(&pool).await?;
-        pool.close().await;
-        Ok(())
-    }.await;
-    result.and(db.drop().await)
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL"]
-async fn owner_source_rollback_replays_staged26_only_in_disposable_application_schema()
--> anyhow::Result<()> {
-    let admin = std::env::var("TEST_DATABASE_URL").context("TEST_DATABASE_URL required")?;
-    let db = TestDatabase::create(&admin).await?;
-    let result = async {
-        ensure_schema(&db.url).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        definition(&pool).await?;
-        seed(&pool).await?;
-        seed_platform_credential(&pool, "source-discarded", Some("credential-user-a"), None, "Discarded").await?;
-        seed_platform_credential_material(&pool, "source-discarded", 1).await?;
-        let old = old_functions(&pool).await?;
-        sqlx::raw_sql("CREATE SCHEMA rollback_boundary; CREATE TABLE rollback_boundary.keep(id integer); \
-            INSERT INTO rollback_boundary.keep VALUES(1); DROP SCHEMA public CASCADE; CREATE SCHEMA public;").execute(&pool).await?;
-        pool.close().await;
-        apply_migrations_before(&db.url, VERSION).await?;
-        let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        let ledger = applied_migrations(&pool).await?;
-        anyhow::ensure!(ledger.len() == 26 && ledger[25].0 == 26);
-        let prior_checksum: String = sqlx::query_scalar("SELECT encode(checksum,'hex') FROM public._sqlx_migrations WHERE version=26 AND success").fetch_one(&pool).await?;
-        anyhow::ensure!(prior_checksum == ACCEPTED_STAGED26);
-        anyhow::ensure!(sqlx::query_scalar::<_, bool>("SELECT to_regprocedure($1) IS NULL").bind(SIGNATURE).fetch_one(&pool).await?);
-        anyhow::ensure!(sqlx::query_scalar::<_, i32>("SELECT id FROM rollback_boundary.keep").fetch_one(&pool).await? == 1);
-        anyhow::ensure!(sqlx::query_scalar::<_, bool>("SELECT NOT EXISTS(SELECT 1 FROM public.platform_credentials) AND NOT EXISTS(SELECT 1 FROM public.platform_credential_material)").fetch_one(&pool).await?);
-        anyhow::ensure!(old_functions(&pool).await? == old);
-        let fingerprint: String = sqlx::query_scalar(include_str!("../../../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
-        anyhow::ensure!(fingerprint == ACCEPTED_PRE_GITHUB_SINGLETON_SCHEMA_FINGERPRINT);
-        pool.close().await;
-        Ok(())
-    }.await;
-    result.and(db.drop().await)
 }

@@ -428,7 +428,7 @@ async fn later_resolves_deny_a_valid_successor_sandbox() -> Result<()> {
         );
 
         // The Claim and the binding name a successor Sandbox, which owns the
-        // workspace Pod. A binding is insert-only (migration 0034), so its
+        // workspace Pod. A binding is insert-only (baseline schema), so its
         // trigger is suspended for this one update: the state cannot arise in
         // production, and is built here only so that every check but lineage
         // equality admits it. Here the scope's binding Sandbox differs too.

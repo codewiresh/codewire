@@ -9,12 +9,7 @@ cd "$ROOT"
 
 readonly SELF="scripts/ci/tests/test-openbao-only-secret-authority.sh"
 readonly PATTERN='infisical'
-readonly -a ALLOWED=(
-  crates/codewire-server-core/migrations/0009_confidential_storage_keys.sql
-  crates/codewire-server-core/migrations/0010_tenant_secret_envelopes.sql
-  crates/codewire-server-core/migrations/0012_expand_openbao_secret_authority.sql
-  crates/codewire-server-core/migrations/0013_finalize_openbao_native_secrets.sql
-)
+readonly -a ALLOWED=()
 
 check_production_primitive_features() {
   local production_tree primitive_features
@@ -95,35 +90,16 @@ done < <(git ls-files -co --exclude-standard -z)
   exit 1
 }
 
-# Bound the exceptions so an allowlisted file cannot become a new dependency.
-[[ "$(LC_ALL=C rg -i -c -- "$PATTERN" \
-  crates/codewire-server-core/migrations/0009_confidential_storage_keys.sql)" == 2 ]]
-[[ "$(LC_ALL=C rg -i -c -- "$PATTERN" \
-  crates/codewire-server-core/migrations/0010_tenant_secret_envelopes.sql)" == 5 ]]
-[[ "$(LC_ALL=C rg -i -c -- "$PATTERN" \
-  crates/codewire-server-core/migrations/0012_expand_openbao_secret_authority.sql)" == 2 ]]
-[[ "$(LC_ALL=C rg -i -c -- "$PATTERN" \
-  crates/codewire-server-core/migrations/0013_finalize_openbao_native_secrets.sql)" == 1 ]]
-
-# Migration 12 is already applied in Dev. Bind its exact SQLx checksum so a
-# compatibility edit cannot silently rewrite the immutable ledger contract.
-readonly MIGRATION_12=crates/codewire-server-core/migrations/0012_expand_openbao_secret_authority.sql
-readonly MIGRATION_12_SHA384=cbd3494fde9235aaf507236bd18440f2d0c87fe6c42f9b1ce3af78f327b044aa968149229acd1bf064b6d4e67c54ed40
-[[ "$(sha384sum "$MIGRATION_12" | awk '{print $1}')" == "$MIGRATION_12_SHA384" ]]
-
-# The final pre-GA migration removes every runtime fallback only after a
-# zero-row preflight. Historical applied migrations remain immutable.
-readonly FINALIZATION=crates/codewire-server-core/migrations/0013_finalize_openbao_native_secrets.sql
+# The baseline migration is the whole schema and must not carry the retired
+# provider's column, state value or path either (covered by the scan above).
+readonly BASELINE=crates/codewire-server-core/migrations/0001_baseline.sql
 for required in \
-  'requires local_secrets=0' \
-  'requires tenant_secrets=0' \
-  'requires tenant_secret_deks=0' \
-  'DROP TABLE public.local_secrets' \
-  'DROP TABLE public.tenant_secret_control' \
-  'DROP COLUMN infisical_path' \
+  'tenant_secret_deks' \
   "provider = 'openbao-transit'"; do
-  grep -Fq "$required" "$FINALIZATION"
+  grep -Fq "$required" "$BASELINE"
 done
+! grep -Fq 'local_secrets' "$BASELINE"
+! grep -Fq 'tenant_secret_control' "$BASELINE"
 
 if rg -n \
   'TENANT_SECRET_(STORE|KEK_PROVIDER|KEYRING)|LocalSecretStore|tenant-secret-operator|tenant_secret_control|local_secrets|KekProviderKind::Keyring' \
