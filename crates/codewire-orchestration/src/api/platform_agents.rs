@@ -56,8 +56,8 @@ async fn target_info(
         .platform_managed_info(request)
         .await
         .map_err(|error| {
-            // The caller's own Sandbox image lacks the pinned clients: a
-            // normal state for an older Sandbox, which its owner is told.
+            // A daemon of an earlier release found its Sandbox's image
+            // without the clients it pinned, which its owner is told.
             if let Some(stale) = stale_image_clients(&error) {
                 return AppError::Precondition(wire::stale_image_text(&stale).into());
             }
@@ -185,8 +185,9 @@ fn require_support(
 }
 
 /// Fill a Resume from the control plane's own journal and Kubernetes: the
-/// predecessor Pod, proven absent; its agent; and this image's pinned
-/// provider for that agent. Nothing here comes from the client (#2705).
+/// predecessor Pod, proven absent; its agent; and the agent program this
+/// Sandbox runs, as its daemon reports it. Nothing here comes from the
+/// client (#2705).
 async fn prepare_resume(
     state: &ApiState,
     captured: &CapturedPlatformCwRuntime,
@@ -243,8 +244,8 @@ async fn require_predecessor_absent(
     }
 }
 
-/// The control-plane fields of a Resume: its predecessor, its agent, and this
-/// image's pinned provider for that agent.
+/// The control-plane fields of a Resume: its predecessor, its agent, and the
+/// agent program this Sandbox runs, as its daemon reports it.
 fn fill_resume(
     info: &private::PlatformManagedInfoResponse,
     request: &mut private::PlatformManagedMutationRequest,

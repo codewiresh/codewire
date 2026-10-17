@@ -182,7 +182,7 @@ permission mode:
 | Trusted host | None passed: the user's own default mode decides | The user's rules on their own machine |
 | Local VM, platform sandbox | `--permission-mode auto` | A headless turn can use tools such as Bash with no person to answer a prompt |
 
-Verified against the pinned Claude Code 2.1.288: `auto` is one of
+Verified against Claude Code 2.1.288: `auto` is one of
 `--permission-mode`'s choices and needs no separate opt-in. The argument
 outranks `permissions.defaultMode` in the user's settings. A
 `permissions.disableAutoMode` setting (the user's or an administrator's) still
@@ -718,20 +718,30 @@ again by its driver.
 None replaces the matching native Linux hardware or retained Kind sandbox
 journey. Program #2255 holds current commands, outcomes and landing evidence.
 
-A managed agent in a local VM runs the image's pinned client, admitted by the
-same `ProviderPin` code as a hosted Sandbox: the fixed layout under
-`/opt/codewire/agents` for the guest's architecture (x86_64 or aarch64),
-root-owned and read-only files and parents, and the pinned package version
-(Codex 0.160.0, Claude Code 2.1.288). A newer client the user installs into
-`~/.npm-global`, which comes first on PATH, never replaces it. When the image
-has no admitted pinned client, the guest helper runs the client on PATH
-instead, records the reason (missing, another version, ownership or mode,
-not a complete executable) as `program_fallback` in the conversation's
-`config.json`, and `cw run --agent` prints one line naming the program and
-the reason. A trusted host always runs the user's installed client.
+A managed agent runs the client the workspace user's shell runs, in a local
+VM and in a hosted Sandbox alike (owner decision 2026-10-16): the first
+`codex` or `claude` on PATH, followed through symbolic links to the file it
+runs, found by the same code in both placements. No version is pinned, and the
+file needs no particular owner, layout or architecture; Claude Code may still
+be the image's wrapper that installs its native build on first use. A
+client the user updates, or one that updates itself, such as Claude Code's
+native build in `~/.local/bin`, is the one the next conversation runs. Any
+process running as the workspace user can therefore replace the client a
+managed conversation runs.
 
-The managed VM journey runs the actual pinned guest agents through the
-synthetic protected broker. Supply the image-derived initramfs described above,
+A hosted Sandbox reports each client's SHA-256, size and the version its own
+`--version` names, and a launch or Resume runs only while the client is still
+the one it was offered; one that changed in between is refused. A
+conversation keeps the client it was launched with: its driver opens that same
+file again at every start and requires the same bytes, so after the client
+updates, a Restart that finds the file changed or gone fails when its driver
+starts, and a new conversation runs the new client. A Resume in a new Pod
+moves the conversation to the client the shell runs there. Managed Claude runs
+with Claude Code's own updater on, as the shell's does. A trusted host always
+runs the user's installed client.
+
+The managed VM journey runs the guest's own agents through the synthetic
+protected broker. Supply the image-derived initramfs described above,
 then add `--managed-agent-sessions --managed-agent-cw-image-receipt
 /absolute/cw-image/image.json` to the existing
 `smoke-native-local-environment.sh --managed-credential-broker` command. Its
@@ -740,14 +750,14 @@ Before the first conversation, the journey observes root ownership, read-only
 mount flags, image identity and payload digest. It then checks native
 acknowledgement, two turns, resume, guest tool execution, held-turn controls,
 parent continuation, history and cleanup. Before the first conversation it
-stages decoy `codex` and `claude` in `~/.npm-global/bin`, shows they come first
-on PATH, and proves both managed agents run the pinned clients at their pinned
-versions while no decoy ever runs. `--synthetic-peers` needs an image without
-admitted pinned clients, since only then do the staged peers on PATH run; each
-launch must report that fallback. Custody cases exercise detached and
-TERM-resistant tools, a cancelled stop caller, driver death, safe generation
-admission, missing/stale receipt refusal and an unrelated sentinel. Provider
-responses are synthetic; live provider enrollment remains under #1902.
+stages a user's update of `codex` and `claude` in `~/.npm-global/bin`, each of
+which records that it ran and then runs the client the shell found before it,
+shows they come first on PATH, and proves both managed agents ran them.
+`--synthetic-peers` runs the peers staged on PATH the same way. Custody cases
+exercise detached and TERM-resistant tools, a cancelled stop caller, driver
+death, safe generation admission, missing/stale receipt refusal and an
+unrelated sentinel. Provider responses are synthetic; live provider enrollment
+remains under #1902.
 
 Stalled provider initialization has a separate bounded isolated check:
 

@@ -107,10 +107,10 @@ cw wait --message MESSAGE_ID --timeout 10m
 Before `connect codex`, turn on "Enable device code authorization for Codex" in
 ChatGPT's Security settings.
 
-The agent runs the client pinned in the Codewire workspace image (Codex and
-Claude Code at the image's versions), not one found on `PATH`. With an image
-that has no pinned client, `cw run --agent` runs the client from `PATH` and
-says so in one line on stderr. The Codewire `cw` that drives the agent inside
+The agent runs the client the VM user's shell runs: the first `codex` or
+`claude` on `PATH`, with no pinned version. That is the Codewire workspace
+image's Codex and Claude Code until the user, or the client itself, updates
+them in the home. The Codewire `cw` that drives the agent inside
 the VM comes from the runtime that `cw setup --local` installed.
 [CLI-ORCHESTRATION.md](CLI-ORCHESTRATION.md) covers messaging, waiting and
 parent and child agents, and [SECRETS.md](../SECRETS.md) covers credentials

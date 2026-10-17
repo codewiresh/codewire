@@ -840,17 +840,18 @@ async fn platform_managed_a_resume_denied_before_run_is_reverted_and_can_resume_
 }
 
 #[tokio::test]
-async fn platform_managed_records_an_earlier_provider_wrote_load_list_and_refuse_only_restart() {
+async fn platform_managed_records_of_any_client_version_load_list_and_stay_launchable() {
     use crate::platform_managed::Agent;
     use v1::SessionLifecycleState as S;
     let temp = tempfile::tempdir().unwrap();
     let config = retained_config(temp.path());
     let writer = SessionEngine::new(&config, CredentialBridge::new(None));
     // Claude Code 2.1.238 left live by a daemon that stopped; Codex 0.157.0
-    // finished; one record of this release's provider beside them.
+    // finished; a record of a newer Claude Code beside them. No version is
+    // pinned, so each record keeps the client it was launched with.
     let claude = retain(&writer, Agent::Claude, "2.1.238", S::Running).await;
     let codex = retain(&writer, Agent::Codex, "0.157.0", S::Exited).await;
-    let current = retain(&writer, Agent::Claude, "2.1.288", S::Exited).await;
+    let current = retain(&writer, Agent::Claude, "2.1.292", S::Exited).await;
     writer.shutdown().await.unwrap();
 
     let engine = SessionEngine::new(&config, CredentialBridge::new(None));
@@ -868,27 +869,24 @@ async fn platform_managed_records_an_earlier_provider_wrote_load_list_and_refuse
             .unwrap();
         assert_eq!(page.sessions.len(), 1);
         assert_eq!(&page.sessions[0].session_id, session);
-        // Stop's incarnation fence checks shape, not the provider pin.
+        // The incarnation fence checks shape, never a client version.
         engine
             .with_platform_incarnation(origin, session, 1, |_| async { Ok(()) })
             .await
             .unwrap();
+        // Launch admission and the driver spawn check the same shape; the
+        // driver then opens the client the record names.
+        origin.validate(session).unwrap();
     }
-    for ((session, _), product) in [(&claude, "Claude Code"), (&codex, "Codex")] {
-        let refused = engine.platform_restartable(session).await.unwrap_err();
-        assert!(matches!(refused, Error::EarlierProvider(_)));
-        assert_eq!(
-            refused.to_string(),
-            format!(
-                "this managed agent was started with an earlier {product}; start a new conversation"
-            )
+    // A version is still only a version.
+    for version in ["", "latest", "2.1.292 (Claude Code)"] {
+        let mut named = current.1.clone();
+        named.provider.version = version.into();
+        assert!(
+            matches!(named.validate(&current.0), Err(Error::Refused)),
+            "{version}"
         );
     }
-    engine.platform_restartable(&current.0).await.unwrap();
-    // Launch admission and the driver spawn still require this release's pin.
-    assert!(matches!(claude.1.validate(&claude.0), Err(Error::Refused)));
-    assert!(matches!(codex.1.validate(&codex.0), Err(Error::Refused)));
-    current.1.validate(&current.0).unwrap();
     // Ordinary control of a platform record refuses, as before.
     assert!(matches!(
         engine.restart(&claude.0).await,

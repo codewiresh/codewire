@@ -118,16 +118,18 @@ impl Journey {
                 .iter()
                 .find(|s| s.agent.as_known() == Some(kind))
                 .context("original image omitted the required stock agent")?;
+            // The Sandbox's own client, at whatever version it names.
+            let version = &support.provider_version;
             ensure!(
                 support.proxy_only_qualified
                     && support.provider_sha256.len() == 32
                     && support.provider_size > 0
-                    && support.provider_version
-                        == match kind {
-                            rpc::EnvironmentAgentKind::Codex => "0.160.0",
-                            _ => "2.1.288",
-                        },
-                "stock provider identity is not the selected pinned version"
+                    && version.len() <= 32
+                    && version.starts_with(|c: char| c.is_ascii_digit())
+                    && version
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b)),
+                "stock provider identity names no client version"
             );
             let parent = journey.sessions.first();
             let operation = journey
@@ -837,7 +839,7 @@ impl Journey {
         println!(
             "{}",
             json!({"event":"managed-complete", "original_requests":self.requests,
-            "claims":["pinned_stock_API_proxy_turns", "parent_notifications_once", "original_peers_CW_A_B_A",
+            "claims":["stock_API_proxy_turns", "parent_notifications_once", "original_peers_CW_A_B_A",
                 "native_message_steer_interrupt", "revoked_provider_denial", "known_clean_Stop"]})
         );
         Ok(())

@@ -59,7 +59,8 @@ impl DaemonClient {
         for a in &r.agents {
             let kind = v1::PlatformManagedAgent::try_from(a.agent).map_err(|_| refused())?;
             if !agents.insert(a.agent)
-                || wire::provider_version(kind) != Some(a.provider_version.as_str())
+                || kind == v1::PlatformManagedAgent::Unspecified
+                || !wire::valid_provider_version(&a.provider_version)
                 || !a.proxy_only_qualified
                 || a.provider_sha256.len() != 32
                 || !a.provider_sha256.iter().any(|b| *b != 0)

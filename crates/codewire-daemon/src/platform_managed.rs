@@ -25,8 +25,7 @@ const MAX_REQUEST: usize = 512 * 1024;
 mod files;
 pub(crate) use files::{Tree, leaf_refusal, publish_session, tree_refusal};
 mod payload;
-pub use payload::{PinRefusal, ProviderIdentity, ProviderPin};
-pub(crate) use payload::{image_client_version, pinned_version};
+pub use payload::{PinRefusal, ProviderIdentity, ProviderPin, shell_client, shell_client_on};
 mod service;
 pub(crate) use service::{CleanupLink, Owner, RestartAdvance, Service};
 
@@ -54,11 +53,11 @@ impl Agent {
         }
     }
 
-    /// The provider's product name, for user-facing messages.
-    pub(crate) fn product(self) -> &'static str {
+    /// The command the workspace user's shell runs for this agent.
+    pub fn command(self) -> &'static str {
         match self {
-            Self::Codex => "Codex",
-            Self::Claude => "Claude Code",
+            Self::Codex => "codex",
+            Self::Claude => "claude",
         }
     }
 
@@ -127,20 +126,11 @@ pub(crate) struct Origin {
 }
 
 impl Origin {
-    /// The shape plus this release's provider pin. Launch and Restart run the
-    /// record's provider, so they require both; nothing else may.
+    /// What a record must satisfy to launch, load, list, be read, stopped or
+    /// restarted. It names no value that changes between releases, so a
+    /// record an earlier daemon wrote keeps loading after an upgrade, and any
+    /// version its client named is admitted.
     pub(crate) fn validate(&self, session: &str) -> Result<(), Error> {
-        self.validate_shape(session)?;
-        if !self.current_provider() {
-            return Err(Error::Refused);
-        }
-        Ok(())
-    }
-
-    /// What a retained record must satisfy to load, list, be read or be
-    /// stopped. It names no value that changes between releases, so a record
-    /// an earlier daemon wrote keeps loading after an upgrade.
-    pub(crate) fn validate_shape(&self, session: &str) -> Result<(), Error> {
         match self.shape_fault(session) {
             Some(_) => Err(Error::Refused),
             None => Ok(()),
@@ -206,11 +196,6 @@ impl Origin {
         .find_map(|(failed, check)| failed.then_some(check))
     }
 
-    /// Whether this record's provider is the one this release runs.
-    pub(crate) fn current_provider(&self) -> bool {
-        self.provider.version == payload::pinned_version(self.agent)
-    }
-
     pub(crate) fn command(&self) -> Vec<String> {
         vec![
             IMAGE.into(),
@@ -229,10 +214,6 @@ pub enum Error {
     Refused,
     #[error("platform managed outcome is unknown; observe the original request")]
     Unknown,
-    /// Restart of a record an earlier release's provider wrote, refused before
-    /// any effect. It names only the product.
-    #[error("this managed agent was started with an earlier {}; start a new conversation", .0.product())]
-    EarlierProvider(Agent),
     /// An issued launch whose environment projection was refused before the
     /// agent's program ran, with the launcher's cleanup confirmed: nothing
     /// started and nothing remains, so the request is refused, not unknown.

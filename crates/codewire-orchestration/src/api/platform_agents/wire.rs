@@ -12,8 +12,9 @@ pub(super) const FRAME_BYTES: usize = 256 * 1024;
 pub(super) fn invalid() -> AppError {
     AppError::BadRequest("platform agent request metadata is invalid".into())
 }
-/// What the caller is told when its own Sandbox's image carries other agent
-/// clients than its daemon pins. The versions are its own image's.
+/// What the caller is told when a daemon of an earlier release found its
+/// Sandbox's image without the agent clients it pinned. The versions are the
+/// image's own.
 pub(super) fn stale_image_text(stale: &[native::StaleImageClient]) -> String {
     fn product(agent: private::PlatformManagedAgent) -> &'static str {
         match agent {
@@ -365,17 +366,9 @@ mod tests {
                     .to_owned(),
             binding_bound_at: chrono::DateTime::from_timestamp(1_760_000_000, 0).unwrap(),
         };
-        // Codex and Claude launches carry their pinned provider, so the same
-        // request is valid for them and only the kind decides the outcome.
-        let pinned = match agent.as_known() {
-            Some(proto::EnvironmentAgentKind::Codex) => {
-                native::provider_version(private::PlatformManagedAgent::Codex)
-            }
-            Some(proto::EnvironmentAgentKind::Claude) => {
-                native::provider_version(private::PlatformManagedAgent::Claude)
-            }
-            _ => None,
-        };
+        // A launch names whatever version its Sandbox's client reports, so
+        // the same request is valid for Codex and Claude and only the kind
+        // decides the outcome.
         let request = proto::MutateEnvironmentAgentRequest {
             org_id: incarnation.organization_id.clone(),
             environment_id: incarnation.environment_id.clone(),
@@ -392,7 +385,7 @@ mod tests {
                     prompt: Some("hello".into()),
                     expected_provider_sha256: vec![9; 32],
                     expected_provider_size: 4096,
-                    expected_provider_version: pinned.unwrap_or("0.0.0").into(),
+                    expected_provider_version: "2.1.292".into(),
                     ..Default::default()
                 }),
             )),

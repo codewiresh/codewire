@@ -143,8 +143,8 @@ const CODEX_SANDBOX_POLICY: &str = "Sandbox execution: Codex app-server danger-f
 const CLAUDE_SANDBOX_POLICY: &str = "Sandbox execution: installed Claude CLI in auto mode (--permission-mode auto), as `claude` runs for the user in this Sandbox, with the user's and the repository's Claude settings, MCP configuration and permission rules; by default it uses the selected credential through the broker, and those settings or the declared environment can choose another provider or credential; no Codewire-held credential material enters the Sandbox either way";
 /// Managed Claude's permission mode on a Sandbox placement, a local VM or a
 /// hosted Sandbox: auto mode, so that a headless turn can use tools with no
-/// person to answer a prompt. The pinned Claude Code 2.1.288 lists `auto`
-/// among `--permission-mode`'s choices and needs no separate opt-in. The
+/// person to answer a prompt. Claude Code 2.1.288 lists `auto` among
+/// `--permission-mode`'s choices and needs no separate opt-in. The
 /// argument outranks the user's own `permissions.defaultMode`; a
 /// `permissions.disableAutoMode` setting still turns auto mode off, and the
 /// provider can refuse it for an account or a model. A trusted host passes no
@@ -225,9 +225,9 @@ struct AgentConfig {
     environment_id: String,
     agent: AgentKind,
     program: PathBuf,
-    /// Why a local VM conversation runs `program` from PATH instead of the
-    /// image's pinned client. Absent when the pin was used, and on every
-    /// other placement.
+    /// Why an earlier release's local VM conversation ran `program` from PATH
+    /// instead of the image's pinned client. Nothing sets it now; a record
+    /// that names it still loads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     program_fallback: Option<String>,
     model: String,

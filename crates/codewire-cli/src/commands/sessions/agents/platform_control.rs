@@ -69,6 +69,9 @@ enum Request {
         parent_session_id: String,
         initial_message_id: Option<String>,
         route: Route,
+        /// The client the daemon admitted for this launch, which the driver
+        /// runs and opens again at every start.
+        program: PathBuf,
     },
     Queue {
         driver_id: String,
@@ -123,6 +126,8 @@ enum Request {
     Adopt {
         origin: Origin,
         route: Route,
+        /// The client the daemon admitted for `origin`.
+        program: PathBuf,
         commit: bool,
     },
     /// Undo an adoption whose agent never started in this Pod (#2769): the
@@ -143,31 +148,15 @@ fn validate_envelope(environment: &str, request: &Envelope) -> anyhow::Result<()
         request.version == 1 && request.launch_generation > 0,
         "platform incarnation differs"
     );
-    // Adopt names a predecessor that may have run an earlier pinned provider;
-    // its origin must still equal the saved marker, and the new origin it
-    // carries is checked against the current pin.
-    let current_pin = !matches!(request.request, Request::Adopt { .. });
-    validate_origin(
-        environment,
-        &request.session_id,
-        &request.origin,
-        current_pin,
-    )
+    validate_origin(environment, &request.session_id, &request.origin)
 }
-fn validate_origin(
-    environment: &str,
-    session_id: &str,
-    origin: &Origin,
-    current_pin: bool,
-) -> anyhow::Result<()> {
+fn validate_origin(environment: &str, session_id: &str, origin: &Origin) -> anyhow::Result<()> {
     for value in [&origin.environment_id, &origin.driver_id, &origin.pod_uid] {
         id(value)?;
     }
-    let pinned = match origin.agent {
-        AgentKind::Codex => "0.160.0",
-        AgentKind::Claude => "2.1.288",
-        AgentKind::Noel => anyhow::bail!("{NOEL_HOST_ONLY}"),
-    };
+    if origin.agent == AgentKind::Noel {
+        anyhow::bail!("{NOEL_HOST_ONLY}");
+    }
     ensure!(
         origin.version == 1
             && origin.environment_id == environment
@@ -182,7 +171,10 @@ fn validate_origin(
             && (4..=256 * 1024 * 1024).contains(&origin.support_image_size)
             && origin.provider.sha256 != [0; 32]
             && (4..=512 * 1024 * 1024).contains(&origin.provider.size)
-            && (!current_pin || origin.provider.version == pinned)
+            // Any version the client named: none is pinned.
+            && codewire_daemon_proto::platform_managed::valid_provider_version(
+                &origin.provider.version
+            )
             && origin.parent_generation.is_none_or(|g| g > 0),
         "platform incarnation differs"
     );
@@ -399,6 +391,7 @@ fn prepare(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result
         parent_session_id,
         initial_message_id,
         route,
+        program,
     } = request.request
     else {
         unreachable!()
@@ -411,10 +404,8 @@ fn prepare(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result
         route.agent() == agent(request.origin.agent),
         "platform route serves another agent"
     );
-    let provider = codewire_daemon::platform_managed::ProviderPin::admit(
-        agent(request.origin.agent),
-        &request.origin.provider,
-    )?;
+    let provider =
+        codewire_daemon::platform_managed::ProviderPin::reopen(&program, &request.origin.provider)?;
     let parent = if parent_session_id.is_empty() {
         ensure!(
             request.origin.parent_generation.is_none(),
@@ -540,8 +531,10 @@ impl DriverContext {
         let pin = DirectoryPin::open(&dir)?;
         let config: AgentConfig = private_record(&dir.join("config.json"))?;
         config.validate(environment.id(), driver)?;
-        let provider = codewire_daemon::platform_managed::ProviderPin::admit(
-            agent(origin.agent),
+        // The client this conversation was launched or resumed with, still
+        // the same bytes; a newer client on PATH serves the next launch.
+        let provider = codewire_daemon::platform_managed::ProviderPin::reopen(
+            &config.program,
             &origin.provider,
         )?;
         let route = lockdown::check(&dir, &config)?;
@@ -721,10 +714,19 @@ fn handle_fixed(environment: &DriverEnvironment, request: Envelope) -> anyhow::R
     if let Request::Adopt {
         origin,
         route,
+        program,
         commit,
     } = &request.request
     {
-        let value = adopt(environment, &dir, &request, origin, *route, *commit)?;
+        let value = adopt(
+            environment,
+            &dir,
+            &request,
+            origin,
+            *route,
+            program,
+            *commit,
+        )?;
         pin.check()?;
         return Ok(value);
     }
@@ -980,10 +982,11 @@ fn adopt(
     request: &Envelope,
     origin: &Origin,
     route: Route,
+    program: &Path,
     commit: bool,
 ) -> anyhow::Result<Value> {
     let previous = &request.origin;
-    validate_origin(environment.id(), &request.session_id, origin, true)?;
+    validate_origin(environment.id(), &request.session_id, origin)?;
     ensure!(
         origin.environment_id == previous.environment_id
             && origin.org_id == previous.org_id
@@ -1033,10 +1036,9 @@ fn adopt(
             "the agent's credential changed; start a new conversation",
         );
     }
-    let Ok(provider) = codewire_daemon::platform_managed::ProviderPin::admit(
-        agent(origin.agent),
-        &origin.provider,
-    ) else {
+    let Ok(provider) =
+        codewire_daemon::platform_managed::ProviderPin::reopen(program, &origin.provider)
+    else {
         return refuse(
             "resume-provider-not-admitted",
             "this agent's provider is not admitted here",
@@ -1099,7 +1101,7 @@ fn revert_adoption(
     previous: &Origin,
 ) -> anyhow::Result<Value> {
     let current = &request.origin;
-    validate_origin(environment.id(), &request.session_id, previous, false)?;
+    validate_origin(environment.id(), &request.session_id, previous)?;
     ensure!(
         previous.environment_id == current.environment_id
             && previous.org_id == current.org_id

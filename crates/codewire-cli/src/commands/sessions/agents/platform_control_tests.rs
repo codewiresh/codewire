@@ -1081,7 +1081,7 @@ fn platform_control_prepare_requires_a_route_of_the_origin_agent() {
         json!({"version":1,"origin":fixture.origin,"session_id":fixture.session,
             "launch_generation":1,"request":{"op":"prepare","model":"synthetic","effort":null,
             "working_dir":"/","name":"","prompt":null,"parent_session_id":"",
-            "initial_message_id":null,"route":route}})
+            "initial_message_id":null,"route":route,"program":"/usr/bin/false"}})
     };
     let mut missing = prepare(json!("codex"));
     missing["request"].as_object_mut().unwrap().remove("route");
@@ -1357,10 +1357,21 @@ fn successor(f: &Fixture) -> Origin {
 }
 
 fn adopt_request(f: &Fixture, origin: Origin, route: Route, commit: bool) -> Envelope {
+    adopt_program(f, origin, route, Path::new("/usr/bin/true"), commit)
+}
+
+fn adopt_program(
+    f: &Fixture,
+    origin: Origin,
+    route: Route,
+    program: &Path,
+    commit: bool,
+) -> Envelope {
     Envelope {
         request: Request::Adopt {
             origin,
             route,
+            program: program.to_owned(),
             commit,
         },
         ..f.request()
@@ -1416,13 +1427,13 @@ fn platform_adopt_refuses_another_scope_a_live_driver_and_a_changed_route() {
             "platform resume differs",
         );
     }
-    // The new origin must carry the current pin.
+    // The new origin names a version, though none is pinned.
     refused(
         adopt_request(
             &f,
             Origin {
                 provider: codewire_daemon::platform_managed::ProviderIdentity {
-                    version: "0.159.0".into(),
+                    version: "latest".into(),
                     ..f.origin.provider.clone()
                 },
                 ..successor(&f)
@@ -1479,15 +1490,46 @@ fn platform_adopt_refuses_another_scope_a_live_driver_and_a_changed_route() {
         "resume-credential-changed",
         "the agent's credential changed",
     );
-    // The fixture's synthetic provider identity is never the image's, so a
-    // fully valid request reaches provider admission and is refused there.
+    // The fixture's synthetic provider identity is never the bytes of the
+    // program the daemon names, so a fully valid request reaches provider
+    // admission and is refused there.
     plain(
         &|commit| adopt_request(&f, successor(&f), Route::Codex, commit),
         "resume-provider-not-admitted",
         "this agent's provider is not admitted here",
     );
-    // The predecessor's origin may carry an earlier provider pin; it is the
-    // new origin's pin that is admitted.
+    // The program the daemon admitted, with exactly the new origin's bytes,
+    // is admitted: any version, the predecessor's client notwithstanding.
+    let program = f._temp.path().join("codex");
+    fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
+    let current = Origin {
+        provider: codewire_daemon::platform_managed::ProviderIdentity {
+            sha256: <sha2::Sha256 as sha2::Digest>::digest(fs::read(&program).unwrap()).into(),
+            size: fs::metadata(&program).unwrap().len(),
+            version: "0.161.0".into(),
+        },
+        ..successor(&f)
+    };
+    assert_eq!(
+        handle_fixed(
+            &f.environment,
+            adopt_program(&f, current.clone(), Route::Codex, &program, false)
+        )
+        .unwrap(),
+        json!({ "launch_generation": 1 })
+    );
+    fs::write(&program, b"#!/bin/sh\nexit 1\n").unwrap();
+    assert_eq!(
+        handle_fixed(
+            &f.environment,
+            adopt_program(&f, current, Route::Codex, &program, false)
+        )
+        .unwrap(),
+        json!({ "refused": "resume-provider-not-admitted" })
+    );
+    assert_eq!(markers(), before);
+    // The predecessor's origin may name another client; it is the new
+    // origin's that is admitted.
     let mut earlier = f.origin.clone();
     earlier.provider.version = "0.159.0".into();
     write_private_json(&f.dir.join(ORIGIN), &earlier).unwrap();
@@ -1569,6 +1611,7 @@ fn platform_adopt_commit_crash_points_never_open_either_pod() {
         request: Request::Adopt {
             origin: next.clone(),
             route: Route::Codex,
+            program: PathBuf::from("/usr/bin/true"),
             commit: false,
         },
         ..f.request()
@@ -1756,6 +1799,7 @@ fn platform_revert_crash_point_never_opens_either_pod() {
         request: Request::Adopt {
             origin: next.clone(),
             route: Route::Codex,
+            program: PathBuf::from("/usr/bin/true"),
             commit: false,
         },
         ..f.request()

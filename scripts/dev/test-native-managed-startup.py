@@ -411,7 +411,9 @@ class Proof:
                   "working_dir": self.workspace, "name": "", "parent": None,
                   "initial_message_id": message_id, "created_at": rfc3339_now()}
         prepared = self.ok({"op": "prepare", "config": config})["config"]
-        require(prepared["program"] == os.path.join(self.bin, agent) and prepared["driver_id"] == driver_id,
+        # The guest records the file its shell runs, links followed.
+        require(prepared["program"] == os.path.realpath(os.path.join(self.bin, agent)) and
+                prepared["driver_id"] == driver_id,
                 f"prepare did not resolve the synthetic {agent} on the private PATH")
         launched_at = time.monotonic()
         driver = self.launch_driver(label, driver_id)

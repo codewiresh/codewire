@@ -17,7 +17,7 @@ and --sha256-b. Only this mode may omit --sha256-a, deriving it from the bounded
 A receipt before complete byte admission. It accepts no runtime or model flags
 and reports asset admission, never a completed VM journey.
 
-Use the checked-in synthetic protected brokers and actual pinned guest agents.
+Use the checked-in synthetic protected brokers and the guest's actual agents.
 --synthetic-peers is component evidence only and retains that inherited limit.
 All inherited checks and cleanup remain mandatory. Source-only --self-test
 launches no CW, process, provider, VM or socket.
@@ -1848,7 +1848,7 @@ def main():
         "cross-environment parents are not claimed",
         "message records are observed only through cw inbox and wait; result-outbox cut-point recovery "
         "remains covered by the trusted-host journey",
-        ("deterministic peers replace the pinned guest agents; this mode does not prove protected provider delivery"
+        ("deterministic peers replace the guest agents; this mode does not prove protected provider delivery"
          if args.synthetic_peers else
          "the guest tool marker is required from the Codex lead only; Claude tool use is not exercised"),
         "No direct daemon birth observation or remote-member execution.",

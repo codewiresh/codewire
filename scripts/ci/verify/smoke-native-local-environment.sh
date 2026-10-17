@@ -206,7 +206,7 @@ skill preservation.
 Application values are intentionally child-visible, unlike provider credentials.
 
 With --managed-agent-sessions and a source-bound readonly cw runtime image receipt,
-the same protected-broker environment additionally runs actual pinned guest
+the same protected-broker environment additionally runs the guest's actual
 Codex and Claude managed conversations before the existing revocation proof.
 It requires native acknowledgement, follow-up/resume, held-turn controls,
 guest tool execution, same-VM parent continuation, history/wait and cleanup.
@@ -3334,7 +3334,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   else
     run_application_secret_smoke
     if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
-      log 'checking actual pinned guest managed sessions and parent continuation'
+      log 'checking actual guest managed sessions and parent continuation'
       run_native_managed_agent_smoke
     fi
     # The credential-broker proof ends by revoking the selected credentials

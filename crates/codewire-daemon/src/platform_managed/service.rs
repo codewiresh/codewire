@@ -40,7 +40,7 @@ pub(crate) struct Owner {
 fn status(error: Error) -> Status {
     match error {
         // Material-free and refused before any effect, so it says why.
-        Error::EarlierProvider(_) | Error::DeniedBeforeRun | Error::ResumeRefused(_) => {
+        Error::DeniedBeforeRun | Error::ResumeRefused(_) => {
             Status::failed_precondition(error.to_string())
         }
         _ => Status::failed_precondition("platform managed incarnation or outcome refused"),
@@ -300,7 +300,7 @@ impl Service {
             wire::platform_managed_request_fingerprint(&request).map_err(|_| Error::Refused)?;
         let scope = request.scope.as_ref().ok_or(Error::Refused)?;
         self.check_scope(scope)?;
-        // Proxy selection and fixed original native bytes precede reservation.
+        // Proxy selection and the client the shell runs precede reservation.
         match request.operation.as_ref().ok_or(Error::Refused)? {
             v1::platform_managed_mutation_request::Operation::Launch(l) => {
                 let agent = Agent::try_from(l.agent)?;
@@ -341,12 +341,6 @@ impl Service {
                 self.inner.engine.platform_resumable(scope, c).await?;
             }
             v1::platform_managed_mutation_request::Operation::Control(c) => {
-                if c.action == v1::PlatformManagedAction::Restart as i32 {
-                    self.inner
-                        .engine
-                        .platform_restartable(&c.session_id)
-                        .await?;
-                }
                 let origin = self
                     .inner
                     .engine
@@ -494,7 +488,7 @@ impl Owner {
         )
     }
     /// A Resume's origin in this Pod: this scope, the same driver, the
-    /// agent and the image's pinned provider. No parent: a child is never
+    /// agent and the client the shell runs now. No parent: a child is never
     /// resumed.
     pub(crate) fn resume_origin(&self) -> Result<Origin, Error> {
         let Some(v1::platform_managed_mutation_request::Operation::Control(c)) =
@@ -816,25 +810,18 @@ impl PlatformManagedService for Service {
         self.check_info(&r).map_err(status)?;
         let (hash, size) = ImagePin::identity().map_err(status)?;
         let mut agents = Vec::new();
-        let mut stale = Vec::new();
         for agent in [Agent::Codex, Agent::Claude] {
             if agent
                 .route(self.inner.config.managed_credential_clients)
                 .is_some()
             {
-                let pin = match ProviderPin::admit_image_client(agent) {
+                // The client the workspace user's shell runs. With none on
+                // PATH, or one that does not name its version, this agent is
+                // not offered; a client that changed while it was read leaves
+                // the answer unknown, so the caller asks again.
+                let pin = match ProviderPin::admit_shell_client(agent) {
                     Ok(pin) => pin,
-                    // An older Sandbox keeps its image while this daemon follows
-                    // the current release: say which clients it lacks.
-                    Err(PinRefusal::Missing | PinRefusal::Version) => {
-                        stale.push(wire::StaleImageClient {
-                            agent: v1::PlatformManagedAgent::try_from(agent.wire())
-                                .map_err(|_| status(Error::Refused))?,
-                            installed: image_client_version(agent),
-                            pinned: pinned_version(agent).to_owned(),
-                        });
-                        continue;
-                    }
+                    Err(PinRefusal::Missing | PinRefusal::Invalid) => continue,
                     Err(refusal) => return Err(status(refusal.hosted())),
                 };
                 agents.push(v1::PlatformManagedAgentSupport {
@@ -847,11 +834,6 @@ impl PlatformManagedService for Service {
                     interrupt: true,
                 });
             }
-        }
-        if !stale.is_empty() {
-            let message =
-                wire::stale_image_message(&stale).ok_or_else(|| status(Error::Refused))?;
-            return Err(Status::failed_precondition(message));
         }
         Ok(Response::new(v1::PlatformManagedInfoResponse {
             protocol_version: wire::PROTOCOL,
@@ -878,7 +860,7 @@ impl PlatformManagedService for Service {
             // that leaves orchestration an unknown outcome and its deletion
             // lease unresolved (#2705). Other controls keep the error: a
             // cleanup Stop's receipt must carry generations only its book has.
-            Err(error @ (Error::Refused | Error::EarlierProvider(_) | Error::ResumeRefused(_))) => {
+            Err(error @ (Error::Refused | Error::ResumeRefused(_))) => {
                 let reason = match &error {
                     Error::ResumeRefused(reason) => reason,
                     _ => "refused-before-issue",
@@ -1143,21 +1125,7 @@ mod tests {
     }
 
     #[test]
-    fn platform_service_names_only_an_earlier_provider_and_keeps_other_refusals_opaque() {
-        for (agent, message) in [
-            (
-                Agent::Claude,
-                "this managed agent was started with an earlier Claude Code; start a new conversation",
-            ),
-            (
-                Agent::Codex,
-                "this managed agent was started with an earlier Codex; start a new conversation",
-            ),
-        ] {
-            let refused = status(Error::EarlierProvider(agent));
-            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
-            assert_eq!(refused.message(), message);
-        }
+    fn platform_service_keeps_refusals_without_a_plain_reason_opaque() {
         for error in [Error::Refused, Error::Unknown] {
             let refused = status(error);
             assert_eq!(refused.code(), tonic::Code::FailedPrecondition);

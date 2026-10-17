@@ -542,8 +542,7 @@ fn handle(
     request: Request,
     resolve: &dyn Fn(AgentKind) -> anyhow::Result<PathBuf>,
 ) -> anyhow::Result<Value> {
-    // A trusted host runs the user's own installed client; there is no image pin.
-    let resolve = &|agent| resolve(agent).map(native::ResolvedProgram::from);
+    // A trusted host runs the user's own installed client.
     match request {
         Request::Prepare {
             origin,

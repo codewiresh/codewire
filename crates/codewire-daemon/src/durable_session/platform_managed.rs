@@ -63,25 +63,6 @@ impl SessionEngine {
         let metadata = handle.metadata.lock().await;
         checked_origin(&metadata, scope, generation, historical)
     }
-    /// Restart runs the record's provider again, so it needs the provider this
-    /// release runs. A record an earlier provider wrote refuses with that
-    /// reason before any scope check or effect; launch admits its own origin.
-    pub(crate) async fn platform_restartable(&self, session: &str) -> Result<(), Error> {
-        if !self.ensure_platform_records(false).await? {
-            return Err(Error::Refused);
-        }
-        let handle = self.handle(session).map_err(|_| Error::Refused)?;
-        let metadata = handle.metadata.lock().await;
-        let origin = metadata
-            .platform_managed_origin
-            .as_ref()
-            .ok_or(Error::Refused)?;
-        origin.validate_shape(&metadata.session_id)?;
-        if !origin.current_provider() {
-            return Err(Error::EarlierProvider(origin.agent));
-        }
-        Ok(())
-    }
     pub(crate) async fn platform_list(
         &self,
         scope: &v1::PlatformManagedScope,
@@ -313,8 +294,11 @@ impl SessionEngine {
             .map(|_| wire::platform_managed_initial_prompt_id(&owner.request().request_id))
             .transpose()
             .map_err(|_| Error::Refused)?;
+        // The helper records exactly the client admitted here, which its
+        // driver opens again at every start.
         let value=image.helper(&origin,&session,1,json!({"op":"prepare","model":launch.model,"effort":launch.effort,"working_dir":launch.working_dir,
-            "name":launch.name,"prompt":launch.prompt,"parent_session_id":launch.parent_session_id,"initial_message_id":message,"route":route})).await?;
+            "name":launch.name,"prompt":launch.prompt,"parent_session_id":launch.parent_session_id,"initial_message_id":message,"route":route,
+            "program":provider.path()})).await?;
         if value["driver_id"].as_str() != Some(origin.driver_id.as_str())
             || value["message_id"].as_str() != Some(message.as_deref().unwrap_or_default())
         {
@@ -394,7 +378,7 @@ impl SessionEngine {
                 &previous,
                 &c.session_id,
                 c.expected_launch_generation,
-                json!({"op":"adopt","origin":origin,"route":route,"commit":false}),
+                json!({"op":"adopt","origin":origin,"route":route,"program":provider.path(),"commit":false}),
             )
             .await?;
         if let Some(reason) = crate::platform_managed::adopt_refusal(&checked)? {
@@ -432,7 +416,7 @@ impl SessionEngine {
                 &previous,
                 &c.session_id,
                 c.expected_launch_generation,
-                json!({"op":"adopt","origin":origin,"route":route,"commit":true}),
+                json!({"op":"adopt","origin":origin,"route":route,"program":provider.path(),"commit":true}),
             )
             .await
             .map_err(|_| Error::Unknown)?;
@@ -570,8 +554,9 @@ impl SessionEngine {
                 false,
             )
             .await?;
+        // A running conversation keeps the client it was launched with, which
+        // its driver holds; a control does not look on PATH again.
         let image = ImagePin::admit(&self.inner.config, &origin)?;
-        ProviderPin::admit(origin.agent, &origin.provider)?;
         let cleanup = owner.cleanup_link().await?;
         let allow_missing = cleanup.as_ref().is_some_and(|l| l.advance.is_some());
         let engine = self.clone();
@@ -664,7 +649,7 @@ impl SessionEngine {
         F: FnOnce(Captured) -> Fut,
         Fut: Future<Output = Result<T, Error>>,
     {
-        origin.validate_shape(session_id)?;
+        origin.validate(session_id)?;
         if generation == 0 {
             return Err(Error::Refused);
         }
@@ -911,7 +896,7 @@ fn resumable_origin(
         .platform_managed_origin
         .as_ref()
         .ok_or(Error::Refused)?;
-    origin.validate_shape(&metadata.session_id)?;
+    origin.validate(&metadata.session_id)?;
     if c.action != v1::PlatformManagedAction::Resume as i32
         || origin.pod_uid != c.predecessor_pod_uid
         || origin.pod_uid == scope.pod_uid
@@ -943,7 +928,7 @@ fn checked_origin(
         .platform_managed_origin
         .as_ref()
         .ok_or(Error::Refused)?;
-    origin.validate_shape(&metadata.session_id)?;
+    origin.validate(&metadata.session_id)?;
     if !origin.same_scope(scope)
         || metadata.control_origin.is_some()
         || generation == 0
@@ -960,7 +945,7 @@ fn checked_origin(
 }
 /// The first check a retained platform record fails on load, named without
 /// its environment, command arguments or other values. Load checks shape only:
-/// the provider pin of the release that wrote it is not this release's to judge.
+/// the client a record names is its driver's to open again.
 pub(super) fn retained_record_fault(
     metadata: &PersistedSession,
     host_store: bool,

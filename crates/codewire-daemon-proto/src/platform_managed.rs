@@ -66,21 +66,14 @@ pub fn validate_info(r: &v1::PlatformManagedInfoRequest) -> Result<(), &'static 
         Err("invalid platform info")
     }
 }
-pub fn provider_version(a: v1::PlatformManagedAgent) -> Option<&'static str> {
-    match a {
-        v1::PlatformManagedAgent::Codex => Some("0.160.0"),
-        v1::PlatformManagedAgent::Claude => Some("2.1.288"),
-        _ => None,
-    }
-}
-/// The marker on a daemon's refusal of platform managed info when the
-/// Sandbox's image carries other agent clients than the daemon pins. An older
-/// Sandbox keeps its image while its daemon follows the current release, so
-/// this is a normal state its owner must be told about.
+/// The marker on an earlier daemon's refusal of platform managed info when the
+/// Sandbox's image carried other agent clients than that daemon pinned. A
+/// daemon now runs the client the workspace's shell runs and never sends it;
+/// callers still decode it from a daemon of an earlier release.
 pub const STALE_IMAGE_MARKER: &str = "platform managed image clients: ";
 
-/// One agent whose image client differs from the daemon's pin: the version the
-/// image carries (`None` when it has none) and the version the daemon pins.
+/// One agent whose image client differed from an earlier daemon's pin: the
+/// version the image carried (`None` when it had none) and the pinned version.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaleImageClient {
     pub agent: v1::PlatformManagedAgent,
@@ -102,6 +95,13 @@ pub fn valid_client_version(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
+}
+
+/// A managed client's version as the client itself names it, such as
+/// `2.1.292` or `0.160.0`: it starts with a digit. No version is pinned; the
+/// daemon reports the version of the client the workspace's shell runs.
+pub fn valid_provider_version(value: &str) -> bool {
+    value.starts_with(|c: char| c.is_ascii_digit()) && valid_client_version(value)
 }
 
 /// The refusal message: the marker, then `agent=installed/pinned` per agent,
@@ -163,7 +163,8 @@ pub fn validate_mutation(r: &v1::PlatformManagedMutationRequest) -> Result<(), &
             } else {
                 valid_session(&l.parent_session_id) && l.expected_parent_launch_generation > 0
             };
-            if provider_version(a) != Some(l.expected_provider_version.as_str())
+            if agent_name(a).is_none()
+                || !valid_provider_version(&l.expected_provider_version)
                 || !hash(&l.expected_provider_sha256)
                 || !(4..=PROVIDER_BYTES).contains(&l.expected_provider_size)
                 || !token(&l.model, 128)
@@ -189,7 +190,8 @@ pub fn validate_mutation(r: &v1::PlatformManagedMutationRequest) -> Result<(), &
                     .map_err(|_| "invalid platform agent")?;
                 valid_uuid(&c.predecessor_pod_uid)
                     && c.predecessor_pod_uid != scope.pod_uid
-                    && provider_version(agent) == Some(c.expected_provider_version.as_str())
+                    && agent_name(agent).is_some()
+                    && valid_provider_version(&c.expected_provider_version)
                     && hash(&c.expected_provider_sha256)
                     && (4..=PROVIDER_BYTES).contains(&c.expected_provider_size)
             } else {
@@ -463,6 +465,43 @@ mod tests {
         };
         c.text.push('x');
         assert!(platform_managed_request_fingerprint(&r).is_err());
+    }
+    #[test]
+    fn platform_wire_launch_names_any_version_its_client_names_but_only_a_version() {
+        let launch = |agent: v1::PlatformManagedAgent, version: &str| {
+            let mut r = request();
+            r.operation = Some(v1::platform_managed_mutation_request::Operation::Launch(
+                v1::PlatformManagedLaunch {
+                    agent: agent as i32,
+                    model: "fixture-model".into(),
+                    expected_provider_sha256: vec![3; 32],
+                    expected_provider_size: 1024,
+                    expected_provider_version: version.into(),
+                    ..Default::default()
+                },
+            ));
+            validate_mutation(&r)
+        };
+        use v1::PlatformManagedAgent as A;
+        for (agent, version) in [
+            (A::Codex, "0.160.0"),
+            (A::Codex, "0.161.0"),
+            (A::Claude, "2.1.288"),
+            (A::Claude, "2.1.292"),
+            (A::Claude, "2.2.0-beta.1"),
+        ] {
+            assert!(launch(agent, version).is_ok(), "{agent:?} {version}");
+        }
+        for (agent, version) in [
+            (A::Unspecified, "0.160.0"),
+            (A::Codex, ""),
+            (A::Codex, "codex-cli"),
+            (A::Codex, "v0.160.0"),
+            (A::Claude, "2.1.292 (Claude Code)"),
+            (A::Claude, "2.1.292;"),
+        ] {
+            assert!(launch(agent, version).is_err(), "{agent:?} {version}");
+        }
     }
     #[test]
     fn platform_wire_rejects_invalid_actions_parent_and_foreign_identity() {
