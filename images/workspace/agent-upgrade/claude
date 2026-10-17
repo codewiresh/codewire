@@ -1,0 +1,22 @@
+#!/bin/sh
+# The image's Claude Code is an npm install outside the persistent home. Its
+# own updater uses npm, whose default install-script policy skips the step
+# that places Claude Code's native binary, so it cannot update itself there.
+# On first use, Claude Code's own installer puts its native build in the home
+# (~/.local/bin, which PATH prefers from then on), and that build keeps itself
+# up to date. The shell and managed conversations both run it. If the install
+# cannot run, the image's Claude Code runs without its updater, so a failed
+# update never leaves a broken copy ahead of it on PATH.
+set -eu
+shipped=/opt/codewire/agents/npm/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+native="$HOME/.local/bin/claude"
+case "${1:-}" in
+  --version | -v | --help | -h) exec "$shipped" "$@" ;;
+esac
+if [ ! -x "$native" ]; then
+  "$shipped" install >&2 || true
+fi
+if [ -x "$native" ]; then
+  exec "$native" "$@"
+fi
+DISABLE_AUTOUPDATER=1 exec "$shipped" "$@"

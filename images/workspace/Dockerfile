@@ -289,8 +289,9 @@ RUN printf '\n%s\nset +h\n' \
       >>/etc/bash.bashrc
 # The shipped agents are image content outside the persistent home. Keep them
 # read-only, so no self-updater writes a copy that the next restart discards.
-# Codex, Claude and Gemini update into the home's npm prefix themselves; pi,
-# Kimi Code and aider reach the home through their upgrade wrappers.
+# Codex and Gemini update into the home's npm prefix themselves; pi, Kimi Code
+# and aider reach the home through their upgrade wrappers, and Claude Code's
+# wrapper installs its native, self-updating build in the home on first use.
 COPY --chmod=0755 images/workspace/agent-upgrade/ /opt/codewire/agents/upgrade/
 RUN chown -R -h root:root /opt/codewire/agents && chmod -R go-w /opt/codewire/agents
 

@@ -99,7 +99,7 @@ for agent in codex claude gemini kimi pi aider; do
     case "$agent:$executable:$resolved" in
       aider:/opt/codewire/agents/upgrade/aider:/opt/codewire/agents/upgrade/aider) ;;
       codex:/opt/codewire/agents/npm/bin/codex:/opt/codewire/agents/npm/lib/node_modules/*) ;;
-      claude:/opt/codewire/agents/npm/bin/claude:/opt/codewire/agents/npm/lib/node_modules/*) ;;
+      claude:/opt/codewire/agents/upgrade/claude:/opt/codewire/agents/upgrade/claude) ;;
       gemini:/opt/codewire/agents/npm/bin/gemini:/opt/codewire/agents/npm/lib/node_modules/*) ;;
       kimi:/opt/codewire/agents/upgrade/kimi:/opt/codewire/agents/upgrade/kimi) ;;
       pi:/opt/codewire/agents/upgrade/pi:/opt/codewire/agents/upgrade/pi) ;;
