@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
   RUSTUP_VERSION: 1.29.0
   RUSTUP_INIT_SHA256: 4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
 

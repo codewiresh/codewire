@@ -18,6 +18,8 @@ permissions:
 enable-openid-connect: true
 
 env:
+  CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+  ARM64_BUILDKIT_HOST: ${{ vars.ARM64_BUILDKIT_HOST }}
   OPENBAO_ROLE: codewire-source-prod-publisher
   OPENBAO_AUDIENCE: openbao-codewire-source-prod-publisher
   OPENBAO_GHCR_ROLE: codewire-source-prod-publisher

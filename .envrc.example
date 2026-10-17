@@ -14,8 +14,8 @@
 # export REGISTRY_HOST=registry.example.invalid
 
 # Origins `make kind-watch` and the Kind e2e profile use for the dashboard and API.
-# export KIND_PUBLIC_ORIGIN=http://nj.example.invalid:4174
-# export KIND_BROWSER_API_ORIGIN=http://nj.example.invalid:8090
+# export KIND_PUBLIC_ORIGIN=http://localhost:4174
+# export KIND_BROWSER_API_ORIGIN=http://localhost:8090
 
 # Image build caches and profile.
 # export CODEWIRE_SCCACHE_MODE=local

@@ -16,6 +16,10 @@ concurrency:
   group: support-images-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+  ARM64_BUILDKIT_HOST: ${{ vars.ARM64_BUILDKIT_HOST }}
+
 jobs:
   support-selection:
     # zizmor: ignore[excessive-permissions] This credential-free selection uses protected Docker only for the preloaded, pinned Skopeo runtime.

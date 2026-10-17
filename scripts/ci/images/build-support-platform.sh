@@ -28,7 +28,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly BUILDER="$ROOT/scripts/ci/images/build-push-image.sh"
 readonly ARM64_CLIENT_FETCHER="$ROOT/scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh"
-readonly ARM64_BUILDKIT_HOST='arm64-builder.example.invalid'
+readonly ARM64_BUILDKIT_HOST="${ARM64_BUILDKIT_HOST:-arm64-builder.example.invalid}"
 readonly ARM64_BUILDKIT_ENDPOINT="tcp://$ARM64_BUILDKIT_HOST:1234"
 
 fail() {

@@ -661,7 +661,7 @@ validate_retained_cluster
         result = subprocess.run(["make", "-n", "kind-watch", "CLUSTER=synthetic-profile"],
                                 cwd=ROOT, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("nj.example.invalid", result.stdout)
+        self.assertNotIn("localhost:4174", result.stdout)
 
     def test_legacy_make_target_rejects_named_selection_before_effects(self):
         result = subprocess.run(["make", "-n", "up", "CLUSTER=synthetic-profile"],

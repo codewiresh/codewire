@@ -24,6 +24,9 @@ on:
           - success
           - failure
 
+env:
+  CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+
 jobs:
   receipt:
     # zizmor: ignore[excessive-permissions] This validation job has no OIDC, checkout, network access, or write-capable integration.

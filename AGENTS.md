@@ -89,7 +89,7 @@ CI are necessary evidence; they are never proof of behavior.
 
 - Start every product session on the retained local Kind cluster
   (`make kind-status`, then `make kind-watch`; see `docs/dev/AGENT-WORKFLOW.md`)
-  and confirm http://nj.example.invalid:4174/ loads before editing. A broken local
+  and confirm http://localhost:4174/ loads before editing. A broken local
   cluster is the first blocker, not a later gate.
 - Before pushing a user-visible change, walk its acceptance journey where it
   runs: dashboard and platform changes on the retained local Kind cluster through

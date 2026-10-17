@@ -116,7 +116,7 @@ See `docs/ARCHITECTURE.md` for the full phase plan.
 
 ## Plans And Docs
 
-Design plans, execution reports, and restructuring notes live in ``. Start with the newest dated document that matches the area you are changing.
+Design plans, execution reports, and restructuring notes live in the maintainers' private design repository. Start with the newest dated document that matches the area you are changing.
 
 Deeper engineering documentation lives in `docs/dev/`.
 

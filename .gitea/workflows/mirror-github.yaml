@@ -10,6 +10,7 @@ permissions:
 enable-openid-connect: true
 
 env:
+  CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
   OPENBAO_GITHUB_ROLE: codewire-source-github-mirror
   OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-github-mirror
 

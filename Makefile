@@ -207,9 +207,9 @@ dashboard-watch-kind:
 # as the GitHub App callback origin; the default is the owner workstation's
 # Tailnet URL, served by `tailscale serve` from the watcher on 127.0.0.1:5182.
 ifeq ($(strip $(CLUSTER)),)
-KIND_PUBLIC_ORIGIN ?= http://nj.example.invalid:4174
+KIND_PUBLIC_ORIGIN ?= http://localhost:4174
 # The cluster ingress on the same host, for browser terminals and streams.
-KIND_BROWSER_API_ORIGIN ?= http://nj.example.invalid:8090
+KIND_BROWSER_API_ORIGIN ?= http://localhost:8090
 KIND_ORIGIN_ENV = KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" KIND_BROWSER_API_ORIGIN="$(KIND_BROWSER_API_ORIGIN)"
 else
 export CLUSTER

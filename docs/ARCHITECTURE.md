@@ -6,7 +6,7 @@ This document is the canonical architecture reference for the Codewire platform,
 the full stack from control plane through Kubernetes abstraction to hypervisor runtime.
 
 For implementation details, use the dev docs in `docs/dev/`. For future roadmap work, use
-the design plans in ``.
+the maintainers' private design repository.
 
 If a plan doc and this document disagree, treat the plan as **proposed work** and this file
 as the **current stable summary**.

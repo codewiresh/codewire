@@ -155,7 +155,7 @@ Follow `AGENTS.md`. In short:
    and mobile 390, and fails on any skip.
 3. Pin markup the scripts depend on with `cargo test -p codewire-dashboard-web`.
 4. Review in the product on the retained Kind cluster: `make kind-status`, then
-   `make kind-watch` (http://nj.example.invalid:4174/, or
+   `make kind-watch` (http://localhost:4174/, or
    `KIND_WATCH_SOURCE_ROOT=<worktree>`). Walk the empty, loading, failure and
    recovery states. Never recreate the cluster.
 5. When visible text, control names or counts change, update

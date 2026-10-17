@@ -27,6 +27,9 @@ concurrency:
   group: connect-apikey-production-fixtures
   cancel-in-progress: false
 
+env:
+  CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+
 jobs:
   smoke:
     name: Connect ApiKey lifecycle (${{ inputs.target }})

@@ -13,6 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
   CARGO_INCREMENTAL: '0'
 
 jobs:

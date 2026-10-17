@@ -144,6 +144,7 @@ jobs:
       stopped: ${{ steps.start-check.outputs.stop == 'true' || steps.build.outputs.stop == 'true' }}
     env:
       OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
       OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -212,6 +213,7 @@ jobs:
       stopped: ${{ steps.start-check.outputs.stop == 'true' || steps.build.outputs.stop == 'true' }}
     env:
       OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
       OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -269,6 +271,7 @@ jobs:
     if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' && needs.build-service-images.outputs.stopped != 'true' && needs.build-daemon-image.outputs.stopped != 'true' }}
     env:
       OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
       OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
       OPENBAO_GHCR_ROLE: codewire-source-dev-publisher
       OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher
