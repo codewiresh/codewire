@@ -1678,8 +1678,12 @@ if [ "$event_selected" = false ]; then
         ;;
       scripts/ci/setup/fetch-openbao-sccache-r2-protected-credentials.sh|\
       scripts/ci/setup/select-protected-rust-cache.sh|\
+      scripts/ci/setup/fetch-openbao-sccache-r2-protected-workspace-credentials.sh|\
+      scripts/ci/setup/select-protected-workspace-rust-cache.sh|\
       scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-credentials.sh|\
-      scripts/ci/tests/test-select-protected-rust-cache.sh)
+      scripts/ci/tests/test-select-protected-rust-cache.sh|\
+      scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-workspace-credentials.sh|\
+      scripts/ci/tests/test-select-protected-workspace-rust-cache.sh)
         select_token deploy
         select_token policy
         select_token release

@@ -1580,6 +1580,26 @@ if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_f
     "$BUILDER" workspace images/workspace/Dockerfile . >"$work/compiler-rejection.out" 2>&1; then
   fail 'published workspace accepted an untrusted compiler prefix'
 fi
+# The support lane and the Dev delivery lane each name only their own bucket
+# and prefix.
+if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
+    SCCACHE_BUCKET=example-ci-cache-protected SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+    CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
+    "$BUILDER" workspace images/workspace/Dockerfile . >"$work/lane-rejection.out" 2>&1; then
+  fail 'published workspace accepted the Dev delivery compiler cache'
+fi
+if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
+    SCCACHE_BUCKET=example-ci-cache-protected-workspace SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+    CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
+    "$BUILDER" workspace images/workspace/Dockerfile . >"$work/lane-rejection.out" 2>&1; then
+  fail 'published workspace accepted the Dev delivery prefix in its own bucket'
+fi
+if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
+    SCCACHE_BUCKET=example-ci-cache-protected-workspace SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+    CODEWIRE_SCCACHE_PREFIX=protected/codewire/workspace/v1 \
+    "$BUILDER" services deployments/docker/services.Dockerfile . >"$work/lane-rejection.out" 2>&1; then
+  fail 'a non-support image accepted the protected-workspace compiler cache'
+fi
 
 # Exercise old release sources and explicit cold mode through the real argument
 # construction. Only the synthetic registry manifests are removed between runs.
@@ -1597,8 +1617,8 @@ for variant in legacy disabled protected; do
         "$BUILDER" workspace images/workspace/Dockerfile . ;;
     protected)
       CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
-        SCCACHE_BUCKET=codewire-ci SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
-        CODEWIRE_SCCACHE_PREFIX=protected/codewire/test CODEWIRE_BASE_IMAGE_REF="$base_ref" \
+        SCCACHE_BUCKET=example-ci-cache-protected-workspace SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+        CODEWIRE_SCCACHE_PREFIX=protected/codewire/workspace/v1 CODEWIRE_BASE_IMAGE_REF="$base_ref" \
         "$BUILDER" workspace images/workspace/Dockerfile . ;;
   esac
   [[ "$(build_invocation_count)" == 1 ]] || fail "$variant workspace was not built exactly once"
@@ -1611,7 +1631,7 @@ for variant in legacy disabled protected; do
   if [[ "$variant" == protected ]]; then
     grep -qF -- '--no-cache-filter workspace-floating-tools' "$FAKE_DOCKER_CALLS" || fail 'protected compiler cache omitted freshness'
     grep -qF -- '--build-arg CODEWIRE_SCCACHE_MODE=r2' "$FAKE_DOCKER_CALLS" || fail 'protected workspace compiler API was lost'
-    grep -qF -- 'CODEWIRE_SCCACHE_PREFIX=protected/codewire/test' "$FAKE_DOCKER_CALLS" || fail 'protected compiler prefix was lost'
+    grep -qF -- 'CODEWIRE_SCCACHE_PREFIX=protected/codewire/workspace/v1' "$FAKE_DOCKER_CALLS" || fail 'protected compiler prefix was lost'
   else
     grep -qF -- '--no-cache ' "$FAKE_DOCKER_CALLS" || fail "$variant workspace lacks cold-layer bypass"
     if grep -qF -- '--no-cache-filter' "$FAKE_DOCKER_CALLS"; then fail 'publisher combined exclusive no-cache flags'; fi

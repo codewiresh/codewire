@@ -263,6 +263,8 @@ run_policy_core_one() {
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
   scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-credentials.sh
   scripts/ci/tests/test-select-protected-rust-cache.sh
+  scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-workspace-credentials.sh
+  scripts/ci/tests/test-select-protected-workspace-rust-cache.sh
   scripts/ci/tests/test-run-host-rust-build.sh
   scripts/ci/tests/test-local-rust-cache.sh
   scripts/ci/tests/test-check-workspace-hack.sh

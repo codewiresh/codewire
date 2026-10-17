@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset CODEWIRE_OPENBAO_ADDR  # the tests exercise the script default
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 WRAPPER="$ROOT/scripts/runtime/dev/with-dev-smoke-auth.sh"

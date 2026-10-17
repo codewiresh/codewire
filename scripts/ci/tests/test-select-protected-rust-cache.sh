@@ -152,17 +152,20 @@ fi
 rm -f -- "$work/runner/existing.aws"
 
 # Only the canonical-main Dev publisher job references the protected cache.
+# PCRE patterns: the protected-workspace cache is a different boundary with its
+# own selector (test-select-protected-workspace-rust-cache.sh) and must not
+# match these.
 readonly -a protected_markers=(
-  'select-protected-rust-cache.sh'
-  "$FETCHER_NAME"
-  'example-ci-cache-protected'
-  'protected/codewire/'
-  'sccache-r2/protected'
+  'select-protected-rust-cache\.sh'
+  "${FETCHER_NAME//./\\.}"
+  'example-ci-cache-protected(?!-workspace)'
+  'protected/codewire/(?!workspace/)'
+  'sccache-r2/protected(?!-workspace)'
 )
 while IFS= read -r -d '' workflow; do
   [[ "$workflow" == "$DEPLOY_WORKFLOW" ]] && continue
   for marker in "${protected_markers[@]}"; do
-    if grep -Fq -- "$marker" "$workflow"; then
+    if grep -Pq -- "$marker" "$workflow"; then
       fail "${workflow#"$ROOT/"} references the protected compiler cache ($marker)"
     fi
   done
@@ -177,7 +180,7 @@ outside_build_jobs="$(awk '
   capture { print }
 ' "$DEPLOY_WORKFLOW")"
 for marker in "${protected_markers[@]}"; do
-  if grep -Fq -- "$marker" <<<"$outside_build_jobs"; then
+  if grep -Pq -- "$marker" <<<"$outside_build_jobs"; then
     fail "Deploy Dev references the protected compiler cache outside its build jobs ($marker)"
   fi
 done
@@ -212,7 +215,7 @@ for untrusted in \
     scripts/ci/setup/finish-untrusted-rust-cache.sh \
     scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh; do
   for marker in "${protected_markers[@]}"; do
-    if grep -Fq -- "$marker" "$ROOT/$untrusted"; then
+    if grep -Pq -- "$marker" "$ROOT/$untrusted"; then
       fail "$untrusted references the protected compiler cache ($marker)"
     fi
   done
