@@ -125,7 +125,9 @@ cw() {
           jq -Rsc 'split("\n")[:-1] | map({key:.,created_at:"now",updated_at:"now"})'
       else printf '[{"key":"DATABASE_URL"},{"key":"CW_DEV_PRECEDENCE"}]\n'; fi ;;
     'env --cloud list --output json') jq 'map(select(.state != "destroying" and .state != "destroyed"))' "$TMPDIR_SMOKE/environments.db" ;;
-    'env --cloud list --all --output json') cat "$TMPDIR_SMOKE/environments.db" ;;
+    'env report '*' --output json')
+      jq -e --arg id "$3" 'any(.[]; .id == $id)' "$TMPDIR_SMOKE/environments.db" >/dev/null || return 1
+      jq --arg id "$3" '{environment: (.[] | select(.id == $id))}' "$TMPDIR_SMOKE/environments.db" ;;
     'env create --cloud --file '*)
       local project
       project="$(jq -r .secrets.project "$APP_SECRET_DOCUMENT")"
@@ -672,7 +674,8 @@ cleanup_application_secrets
 pass
 expect_failure terminal-info-hidden cw env --cloud info "$ENV_ID" --output json
 application_environment_destroyed
-grep -Fq 'env --cloud list --all --output json' "$TMPDIR_SMOKE/calls"
+grep -Fq "env report $ENV_ID --output json" "$TMPDIR_SMOKE/calls"
+if grep -Fq -- '--all' "$TMPDIR_SMOKE/calls"; then fail 'smoke listed deleted environments'; fi
 pass
 
 

@@ -87,7 +87,7 @@ cw_with_timeout() { shift; cw "$@"; }
 cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
-    'env --cloud list --all --output json'|'credentials --cloud list --output json'|\
+    'env --cloud list --output json'|'credentials --cloud list --output json'|\
     'credentials --cloud profiles list --output json') printf '[]\n' ;;
     'credentials --cloud generate ssh --name '*) [[ "$6" == "$PROVIDER_SSH_CREDENTIAL_NAME" ]] ;;
     'credentials --cloud get '*" --output json")

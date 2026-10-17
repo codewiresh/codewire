@@ -1952,16 +1952,16 @@ run_application_secrets_smoke() {
 
 application_environment_destroyed() {
   local state
-  cw_with_timeout 30 env --cloud list --all --output json \
-    >"$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null || return 1
-  # info deliberately resolves only live environments. Retained terminal rows
-  # are visible through list --all; absence is not terminal cleanup proof.
+  # info deliberately resolves only live environments, and absence is not
+  # terminal cleanup proof. report reads this exact ID, deleted or not, so the
+  # check never depends on the size of the organization's deleted history.
+  cw_with_timeout 30 env report "$ENV_ID" --output json \
+    >"$TMPDIR_SMOKE/app-cleanup-environment.json" 2>/dev/null || return 1
   state="$(jq -ers --arg id "$ENV_ID" '
-    if length != 1 or (.[0] | type) != "array" then error("expected environment array") else .[0] end |
-    [.[] | select(.id == $id)] |
-    if length == 1 and (.[0].state | type) == "string" then .[0].state
-    else error("expected exact unique owned environment") end
-  ' "$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null)" || return 2
+    if length != 1 or (.[0].environment | type) != "object" then error("expected one environment report") else .[0].environment end |
+    if .id == $id and (.state | type) == "string" then .state
+    else error("expected the exact owned environment") end
+  ' "$TMPDIR_SMOKE/app-cleanup-environment.json" 2>/dev/null)" || return 2
   [[ "$state" == destroyed ]]
 }
 
@@ -2015,7 +2015,7 @@ cleanup_application_shared_scope() {
 cleanup_application_secrets() {
   local project project_id selector index status rc=0 deadline
   if [[ -z "$ENV_ID" && "$APP_SECRET_CREATE_ATTEMPTED" == 1 ]]; then
-    if cw_with_timeout 30 env --cloud list --all --output json >"$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null; then
+    if cw_with_timeout 30 env --cloud list --output json >"$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null; then
       ENV_ID="$(jq -ers --arg name "$SMOKE_NAME" '
         if length != 1 or (.[0] | type) != "array" then error("expected environment array") else .[0] end |
         [.[] | select(.name == $name)] |

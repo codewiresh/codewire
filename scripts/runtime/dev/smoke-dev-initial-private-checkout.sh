@@ -145,7 +145,7 @@ checkout_validate_inputs() {
 }
 
 checkout_inventory() {
-  cw_with_timeout 30 env --cloud list --all --output json \
+  cw_with_timeout 30 env --cloud list --output json \
     >"$TMPDIR_SMOKE/checkout-inventory.json" 2>"$TMPDIR_SMOKE/checkout-inventory.err" || return 1
   jq -e 'type == "array"' "$TMPDIR_SMOKE/checkout-inventory.json" >/dev/null 2>&1
 }

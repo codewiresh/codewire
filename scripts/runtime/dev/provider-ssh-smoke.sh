@@ -53,7 +53,7 @@ prepare_provider_ssh_identity() {
   local nonce credential_name profile_name public_key
   nonce="$(tr -d '-' </proc/sys/kernel/random/uuid)"
   [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 'cannot generate disposable SSH fixture names'
-  cw_with_timeout 30 env --cloud list --all --output json >"$TMPDIR_SMOKE/provider-ssh-environments-before.json" ||
+  cw_with_timeout 30 env --cloud list --output json >"$TMPDIR_SMOKE/provider-ssh-environments-before.json" ||
     die 'cannot inspect Dev environment ownership before SSH smoke'
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/provider-ssh-environments-before.json" >/dev/null ||
@@ -200,7 +200,7 @@ provider_ssh_waiter_complete() {
 cleanup_provider_ssh() {
   local rc=0 deadline status
   if [[ -z "$ENV_ID" && "$PROVIDER_SSH_CREATE_ATTEMPTED" == 1 ]]; then
-    cw_with_timeout 30 env --cloud list --all --output json >"$TMPDIR_SMOKE/provider-ssh-cleanup-environments.json" 2>/dev/null &&
+    cw_with_timeout 30 env --cloud list --output json >"$TMPDIR_SMOKE/provider-ssh-cleanup-environments.json" 2>/dev/null &&
       ENV_ID="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/provider-ssh-cleanup-environments.json" "$SMOKE_NAME")" || rc=1
   fi
   if [[ -n "$ENV_ID" ]]; then
