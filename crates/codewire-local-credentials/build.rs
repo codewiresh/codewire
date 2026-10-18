@@ -11,7 +11,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", authority_proto.display());
     println!("cargo:rerun-if-changed={}", bridge_proto.display());
 
-    tonic_prost_build::configure()
+    let compiled = tonic_prost_build::configure()
         .extern_path(
             ".codewire.bridge.v1",
             "::codewire_daemon_proto::codewire::bridge::v1",
@@ -26,6 +26,21 @@ fn main() {
         .compile_protos(
             &[authority_proto],
             &[proto_root, daemon_proto_root, shared_proto_root],
-        )
-        .expect("compile private local credential-authority protobuf types");
+        );
+    require_compiled(
+        compiled,
+        "compile private local credential-authority protobuf types",
+    );
+}
+
+/// Reports a missing `protoc` in one line; any other failure keeps its detail.
+fn require_compiled(result: std::io::Result<()>, what: &str) {
+    let Err(error) = result else { return };
+    if error.kind() == std::io::ErrorKind::NotFound {
+        eprintln!(
+            "error: protoc (the Protocol Buffers compiler) was not found: install it, or set PROTOC to its path"
+        );
+        std::process::exit(1);
+    }
+    panic!("{what}: {error}");
 }

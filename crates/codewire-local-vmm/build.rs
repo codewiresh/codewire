@@ -7,7 +7,20 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", control_proto.display());
 
-    tonic_prost_build::configure()
-        .compile_protos(&[control_proto], &[proto_root])
-        .expect("compile private local runtime protobuf types");
+    require_compiled(
+        tonic_prost_build::configure().compile_protos(&[control_proto], &[proto_root]),
+        "compile private local runtime protobuf types",
+    );
+}
+
+/// Reports a missing `protoc` in one line; any other failure keeps its detail.
+fn require_compiled(result: std::io::Result<()>, what: &str) {
+    let Err(error) = result else { return };
+    if error.kind() == std::io::ErrorKind::NotFound {
+        eprintln!(
+            "error: protoc (the Protocol Buffers compiler) was not found: install it, or set PROTOC to its path"
+        );
+        std::process::exit(1);
+    }
+    panic!("{what}: {error}");
 }

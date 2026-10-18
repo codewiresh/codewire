@@ -42,6 +42,15 @@ pub const SECRET_ACCESS_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
 /// through a separately qualified environment transaction.
 pub const RESEND_API_KEY_ENV: &str = "RESEND_API_KEY";
 
+/// Environment variable holding the From header for the legacy Resend sender:
+/// one mailbox, optionally with a display name (`Codewire <hello@example.com>`).
+/// Its domain must be verified in the Resend account. Unset or empty selects
+/// [`DEFAULT_RESEND_FROM`].
+pub const RESEND_FROM_ENV: &str = "CODEWIRE_RESEND_FROM";
+
+/// The legacy Resend sender used when [`RESEND_FROM_ENV`] is unset.
+pub const DEFAULT_RESEND_FROM: &str = "Codewire <ops@example.invalid>";
+
 const SESSION_TOKEN_ENV: &str = "AWS_SESSION_TOKEN";
 const DISABLE_IMDS_ENV: &str = "AWS_EC2_METADATA_DISABLED";
 const IGNORE_ENDPOINTS_ENV: &str = "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS";
@@ -60,7 +69,6 @@ const ECS_CREDENTIALS_FULL_URI_ENV: &str = "AWS_CONTAINER_CREDENTIALS_FULL_URI";
 const ECS_AUTHORIZATION_TOKEN_ENV: &str = "AWS_CONTAINER_AUTHORIZATION_TOKEN";
 const ECS_AUTHORIZATION_TOKEN_FILE_ENV: &str = "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE";
 const RESEND_EMAIL_ENDPOINT: &str = "https://api.resend.com/emails";
-const RESEND_FROM: &str = "Codewire <ops@example.invalid>";
 
 // SendEmail has no client idempotency key. One bounded HTTP attempt avoids
 // turning an uncertain transport outcome into an automatic duplicate.
@@ -93,6 +101,7 @@ pub enum EmailProvider {
 /// deliberately neither `Clone` nor `Debug`.
 struct ResendDelivery {
     api_key: String,
+    from: String,
     client: reqwest::Client,
 }
 
@@ -147,9 +156,11 @@ impl EmailClient {
         let Some(credentials) = ResendCredentials::from_env()? else {
             return Ok(Self::disabled());
         };
+        let from = read_optional_env(RESEND_FROM_ENV)?;
         Ok(Self {
             delivery: Arc::new(Delivery::Resend(ResendDelivery {
                 api_key: credentials.api_key,
+                from: resend_sender(from.as_deref())?,
                 client: resend_http_client()?,
             })),
         })
@@ -185,8 +196,14 @@ impl EmailClient {
             Delivery::Resend(delivery) => {
                 validate_mailbox(to, "recipient")?;
                 validate_subject(subject)?;
-                let request =
-                    resend_email_request(&delivery.client, &delivery.api_key, to, subject, html)?;
+                let request = resend_email_request(
+                    &delivery.client,
+                    &delivery.api_key,
+                    &delivery.from,
+                    to,
+                    subject,
+                    html,
+                )?;
                 let response = delivery
                     .client
                     .execute(request)
@@ -485,9 +502,9 @@ fn ses_email_payload(from: &str, to: &str, subject: &str, html: &str) -> Result<
     .context("serialize SES email")
 }
 
-fn resend_email_payload(to: &str, subject: &str, html: &str) -> Result<Vec<u8>> {
+fn resend_email_payload(from: &str, to: &str, subject: &str, html: &str) -> Result<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({
-        "from": RESEND_FROM,
+        "from": from,
         "to": [to],
         "subject": subject,
         "html": html,
@@ -498,6 +515,7 @@ fn resend_email_payload(to: &str, subject: &str, html: &str) -> Result<Vec<u8>> 
 fn resend_email_request(
     client: &reqwest::Client,
     api_key: &str,
+    from: &str,
     to: &str,
     subject: &str,
     html: &str,
@@ -509,7 +527,7 @@ fn resend_email_request(
         .post(RESEND_EMAIL_ENDPOINT)
         .header(CONTENT_TYPE, "application/json")
         .header(AUTHORIZATION, authorization)
-        .body(resend_email_payload(to, subject, html)?)
+        .body(resend_email_payload(from, to, subject, html)?)
         .build()
         .context("build Resend email request")
 }
@@ -657,6 +675,37 @@ fn ensure_resend_success(status: reqwest::StatusCode) -> Result<()> {
     } else {
         bail!("Resend email request failed with HTTP {}", status.as_u16())
     }
+}
+
+/// Returns the Resend From header: the configured value, or the default when
+/// unset or empty. It is one plain mailbox, or a display name followed by one
+/// mailbox in angle brackets.
+fn resend_sender(value: Option<&str>) -> Result<String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(DEFAULT_RESEND_FROM.to_owned());
+    };
+    let invalid = || {
+        anyhow::anyhow!(
+            "{RESEND_FROM_ENV} must be one email address, optionally as `Name <address>`"
+        )
+    };
+    if value.len() > 320 || value.chars().any(char::is_control) {
+        return Err(invalid());
+    }
+    match value
+        .strip_suffix('>')
+        .and_then(|rest| rest.rsplit_once('<'))
+    {
+        Some((name, address)) => {
+            let name = name.trim();
+            if name.is_empty() || name.contains(['<', '>', '"', ',', ';', '@']) {
+                return Err(invalid());
+            }
+            validate_mailbox(address, "sender").map_err(|_| invalid())?;
+        }
+        None => validate_mailbox(value, "sender").map_err(|_| invalid())?,
+    }
+    Ok(value.to_owned())
 }
 
 fn validate_mailbox(value: &str, label: &str) -> Result<()> {
@@ -841,6 +890,7 @@ mod tests {
         let request = resend_email_request(
             &client,
             "re_test_credential",
+            DEFAULT_RESEND_FROM,
             "owner@example.com",
             "Review your Codewire request",
             "<p>review</p>",
@@ -854,10 +904,51 @@ mod tests {
         assert_eq!(authorization, "Bearer re_test_credential");
         let body = request.body().unwrap().as_bytes().unwrap();
         let value: serde_json::Value = serde_json::from_slice(body).unwrap();
-        assert_eq!(value["from"], RESEND_FROM);
+        assert_eq!(value["from"], DEFAULT_RESEND_FROM);
         assert_eq!(value["to"], serde_json::json!(["owner@example.com"]));
         assert_eq!(value["subject"], "Review your Codewire request");
         assert_eq!(value["html"], "<p>review</p>");
+    }
+
+    #[test]
+    fn legacy_resend_sender_defaults_and_accepts_one_configured_mailbox() {
+        assert_eq!(resend_sender(None).unwrap(), DEFAULT_RESEND_FROM);
+        assert_eq!(resend_sender(Some(" ")).unwrap(), DEFAULT_RESEND_FROM);
+        assert_eq!(
+            resend_sender(Some("Example <mail@example.com>")).unwrap(),
+            "Example <mail@example.com>"
+        );
+        assert_eq!(
+            resend_sender(Some("mail@example.com")).unwrap(),
+            "mail@example.com"
+        );
+        for invalid in [
+            "Example",
+            "<mail@example.com>",
+            "Example <mail@example.com",
+            "Example <mail@example.com>, Other <other@example.com>",
+            "Example <mail@example.com>\r\nBcc: other@example.com",
+            "Example <two words@example.com>",
+            "Exa\"mple <mail@example.com>",
+            "mail@localhost",
+        ] {
+            let error = resend_sender(Some(invalid)).unwrap_err().to_string();
+            assert!(error.contains(RESEND_FROM_ENV), "{invalid}: {error}");
+        }
+
+        let client = resend_http_client().unwrap();
+        let request = resend_email_request(
+            &client,
+            "re_test_credential",
+            "Example <mail@example.com>",
+            "owner@example.com",
+            "Review your Codewire request",
+            "<p>review</p>",
+        )
+        .unwrap();
+        let body = request.body().unwrap().as_bytes().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(value["from"], "Example <mail@example.com>");
     }
 
     #[test]
