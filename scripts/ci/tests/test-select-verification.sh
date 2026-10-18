@@ -1104,7 +1104,8 @@ run_paths_case retired_packaging_removal pull_request refs/pull/1514/head false 
   aur/TODO.md \
   apps/cli/aur/PKGBUILD \
   apps/cli/scripts/update-homebrew-formula.sh \
-  .schema-reset-write-test
+  .schema-reset-write-test \
+  deploy/cwpreview-ingress.yaml
 retired_root="$TMP/retired-packaging.repo"
 for retired in aur/PKGBUILD apps/cli/aur/PKGBUILD .schema-reset-write-test; do
   [ ! -e "$ROOT/$retired" ] || {

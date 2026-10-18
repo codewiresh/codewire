@@ -437,8 +437,9 @@ if [ "$event_selected" = false ]; then
           recognized=true
           ;;
         aur/*|apps/cli/aur/*|apps/cli/scripts/update-homebrew-formula.sh|\
-        .schema-reset-write-test)
-          # Retired manual AUR/Homebrew packaging and a stray root file feed no
+        .schema-reset-write-test|deploy/cwpreview-ingress.yaml)
+          # Retired manual AUR/Homebrew packaging, a stray root file and a
+          # hand-applied preview Ingress (deployments/k8s owns it) feed no
           # build, test or package. Their removal needs only Policy; a path
           # that reappears is unclassified again.
           select_token policy
