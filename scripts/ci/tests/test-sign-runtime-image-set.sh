@@ -57,8 +57,8 @@ chmod 0755 "$work/bin/curl"
 cat >"$work/fake-cosign" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%q ' "$@" >>"${COSIGN_LOG:?}"
-printf '\n' >>"$COSIGN_LOG"
+# One append per line: the signer runs the five families concurrently.
+printf '%s\n' "$(printf '%q ' "$@")" >>"${COSIGN_LOG:?}"
 command="${1:-}"
 reference="${!#:-}"
 case "$command" in
@@ -121,8 +121,8 @@ chmod 0755 "$work/fake-cosign"
 cat >"$work/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%q ' "$@" >>"${DOCKER_LOG:?}"
-printf '\n' >>"$DOCKER_LOG"
+# One append per line: the signer runs the five families concurrently.
+printf '%s\n' "$(printf '%q ' "$@")" >>"${DOCKER_LOG:?}"
 
 case "${1:-} ${2:-} ${3:-}" in
   login\ *)
