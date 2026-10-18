@@ -1,0 +1,11 @@
+# Text that must not reach the public mirror: matched against added diff lines
+# and commit messages of every commit about to be pushed. One extended regular
+# expression per line. A bracket keeps a pattern from matching its own line.
+private\.invalid
+/home/[u]ser
+mac-runner
+private-site
+Reviewed-o[n]:
+private-repository
+private-notes
+INFISICA[L]_[A-Z0-9_]*IDENTITY_ID[=:] ?"?[0-9a-fA-F-]{36}

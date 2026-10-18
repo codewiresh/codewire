@@ -43,6 +43,11 @@ git -C "$root" remote add github 'https://github.com/codewiresh/codewire.git'
 
 GIT_CONFIG_GLOBAL="$work/gitconfig" GIT_CONFIG_NOSYSTEM=1 \
   git -C "$root" ls-remote --exit-code github >/dev/null
+# Nothing reaches the public mirror unscanned: a finding fails only this job,
+# and the next clean push catches the mirror up.
+remote_head="$(GIT_CONFIG_GLOBAL="$work/gitconfig" GIT_CONFIG_NOSYSTEM=1 \
+  git -C "$root" ls-remote github refs/heads/main | cut -f1)"
+"$root/scripts/ci/release/check-mirror-content.sh" "$remote_head"
 GIT_CONFIG_GLOBAL="$work/gitconfig" GIT_CONFIG_NOSYSTEM=1 \
   git -C "$root" push github HEAD:refs/heads/main
 GIT_CONFIG_GLOBAL="$work/gitconfig" GIT_CONFIG_NOSYSTEM=1 \

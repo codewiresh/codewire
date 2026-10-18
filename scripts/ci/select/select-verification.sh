@@ -1804,6 +1804,9 @@ if [ "$event_selected" = false ]; then
       scripts/ci/verify/check-darwin-cross.sh|\
       scripts/ci/release/mint-github-app-token.sh|\
       scripts/ci/release/mirror-github.sh|\
+      scripts/ci/release/check-mirror-content.sh|\
+      scripts/ci/release/public-content-patterns.txt|\
+      scripts/ci/tests/test-check-mirror-content.sh|\
       scripts/ci/release/package-cw-release.sh|scripts/ci/release/publish-cw-release.sh|\
       scripts/ci/release/cw_release.py|scripts/ci/release/cw_release_r2.py|\
       scripts/ci/release/sign-cw-release.sh|scripts/ci/release/sign-macos-cw.sh|\
@@ -1881,6 +1884,9 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/release/mint-github-app-token.sh|\
       scripts/ci/release/mirror-github.sh|\
+      scripts/ci/release/check-mirror-content.sh|\
+      scripts/ci/release/public-content-patterns.txt|\
+      scripts/ci/tests/test-check-mirror-content.sh|\
       scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/tests/test-mint-github-app-token.sh)
         select_token deploy
