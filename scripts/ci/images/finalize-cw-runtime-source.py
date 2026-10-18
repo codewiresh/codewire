@@ -47,28 +47,15 @@ TARGET_ROOT = Path("/tmp/cargo-target")
 CARGO_HOME = Path("/usr/local/cargo")
 WORK = Path("/out")
 PROFILES = {"ci": ("--profile", "ci"), "release": ("--release",), "runtime": ("--profile", "runtime")}
-# Fixed per profile so the recorded command stays exact. The ci profile is the
-# Kind daemon producer and runtime the Dev daemon producer; each owns its whole
-# worker. The release (workspace support image) producer keeps its bound.
+# The ci profile is the Kind daemon producer; runtime is the Dev daemon and
+# workspace support image producer. Every producer owns its worker and sizes its
+# jobs to it; the chosen count is part of the recorded command.
 MAX_JOBS = 16
-GIB_PER_JOB = 3
+GIB_PER_JOB = 2
 
 
-def cargo_jobs():
-    """Parallel rustc jobs sized to what this build can use.
-
-    The protected runners range from an 8 vCPU / 15 GiB cloud slot to a bare-metal
-    slot with 32 CPUs / 47 GiB, so a fixed count either idles the metal slot or
-    risks running the cloud slot out of memory. Jobs are bounded by visible CPUs
-    and by one job per GIB_PER_JOB of memory (the smaller of the host total and a
-    cgroup limit), and never exceed MAX_JOBS. The count does not change the output.
-    CODEWIRE_CARGO_JOBS (1-32) overrides it for tests and diagnosis.
-    """
-    override = os.environ.get("CODEWIRE_CARGO_JOBS")
-    if override is not None:
-        source.require(re.fullmatch(r"[1-9][0-9]?", override) is not None and int(override) <= 32,
-                       "CODEWIRE_CARGO_JOBS must be 1 to 32")
-        return override
+def machine():
+    """Visible CPUs and whole GiB of memory (the smaller of the host total and a cgroup limit)."""
     cpus = len(os.sched_getaffinity(0))
     limits = []
     try:
@@ -82,7 +69,25 @@ def cargo_jobs():
                 limits.append(int(value))
     except (OSError, ValueError):
         pass
-    gib = min(limits) // (1 << 30) if limits else 0
+    return cpus, min(limits) // (1 << 30) if limits else 0
+
+
+def cargo_jobs():
+    """Parallel rustc jobs sized to what this build can use.
+
+    The protected runners range from an 8 vCPU / 15 GiB cloud slot (7 jobs) to a
+    bare-metal slot with 32 CPUs / 47 GiB (16 jobs), so a fixed count either idles
+    the metal slot or risks running the cloud slot out of memory. Jobs are bounded
+    by visible CPUs and by one job per GIB_PER_JOB of memory, and never exceed
+    MAX_JOBS. The count does not change the output.
+    CODEWIRE_CARGO_JOBS (1-32) overrides it for tests and diagnosis.
+    """
+    override = os.environ.get("CODEWIRE_CARGO_JOBS")
+    if override is not None:
+        source.require(re.fullmatch(r"[1-9][0-9]?", override) is not None and int(override) <= 32,
+                       "CODEWIRE_CARGO_JOBS must be 1 to 32")
+        return override
+    cpus, gib = machine()
     return str(max(2, min(MAX_JOBS, cpus, gib // GIB_PER_JOB)))
 FILES = {"cw", "cw.d", "compile.log", "cw.oci.tar", "image.json", "runtime.pack", "cw-runtime.lock.json", "producer.json"}
 COMPILER_DEADLINE = 7200
@@ -498,6 +503,9 @@ def main(argv=None):
                                        env=environment, text=True, timeout=15).strip()
         admitted.selected.toolchain_rustc(SOURCE_ROOT, rustc)
         _DIAGNOSTIC["phase"] = "compile"
+        cpus, gib = machine()
+        print(f"finalize-cw-runtime-source: cargo --jobs {cargo_jobs()} (cpus={cpus} memory_gib={gib})",
+              file=sys.stderr)
         result = owner.run_owned(command(admitted.model["profile"]), SOURCE_ROOT, environment,
                                  home / "compile.log", time.monotonic() + COMPILER_DEADLINE)
         profile = admitted.model["profile"]
