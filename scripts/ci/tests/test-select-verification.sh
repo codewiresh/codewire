@@ -146,6 +146,8 @@ run_paths_case local_broker_adapter pull_request refs/pull/1/head false \
   crates/codewire-credential-broker/src/local.rs
 run_paths_case docs pull_request refs/pull/1/head false "$policy" \
   docs/guide.md README.md AGENTS.md crates/README.md
+run_paths_case merge_message_template pull_request refs/pull/1/head false "$policy security security_js" \
+  .gitea/default_merge_message/SQUASH_TEMPLATE.md
 run_paths_case ios pull_request refs/pull/1/head false 'ios policy' \
   apps/ios/Sources/CodewireKit/Networking/CodewireClient.swift \
   apps/ios/Resources/Info.plist

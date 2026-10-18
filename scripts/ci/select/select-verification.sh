@@ -422,7 +422,7 @@ if [ "$event_selected" = false ]; then
     fi
     case "$path" in
       docs/*|AGENTS.md|CLAUDE.md|crates/README.md|scripts/README.md|\
-      .agents/*|.claude/*|.github/*)
+      .agents/*|.claude/*|.github/*|.gitea/default_merge_message/*)
         recognized=true
         ;;
     esac

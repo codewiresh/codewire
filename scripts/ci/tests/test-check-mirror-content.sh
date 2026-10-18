@@ -82,13 +82,19 @@ git -C "$repo" commit -q -m 'drop it'
 run_check "$old" >/dev/null || fail 'removing forbidden text was refused'
 git -C "$repo" checkout -q -B main "$base"
 
-# A commit message with a forbidden trailer is refused.
+# A Reviewed-on trailer that links to the forge is refused; one that names
+# only the pull request number is the public form and passes.
 trailer='Reviewed-on'
 commit_file msg.txt 'x' "feat: change
 
 ${trailer}: https://example.invalid/pulls/1"
-if run_check "$base" >"$work/out" 2>&1; then fail 'a Reviewed-on trailer was accepted'; fi
+if run_check "$base" >"$work/out" 2>&1; then fail 'a Reviewed-on link was accepted'; fi
 grep -Fq 'found in the messages of' "$work/out" || fail 'a message refusal does not name the commit'
+reset_to_base
+commit_file msg.txt 'x' "feat: change (#12)
+
+${trailer}: #12"
+run_check "$base" >/dev/null || fail 'a Reviewed-on pull request number was refused'
 reset_to_base
 
 # gitleaks over the range refuses a secret.
