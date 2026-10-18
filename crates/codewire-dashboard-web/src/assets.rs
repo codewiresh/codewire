@@ -372,16 +372,10 @@ mod tests {
         use askama::Template;
 
         let html = crate::templates::HomeTemplate.render().unwrap();
-        for (fixture, prefix) in [
-            (
-                include_str!("../../../packages/codewire-design/reference/fixtures/home.html"),
-                "../../",
-            ),
-            (
-                include_str!("../../../docs/design/story.html"),
-                "../../packages/codewire-design/",
-            ),
-        ] {
+        for (fixture, prefix) in [(
+            include_str!("../../../packages/codewire-design/reference/fixtures/home.html"),
+            "../../",
+        )] {
             let mut normalized = fixture.to_owned();
             for (local, public) in [
                 ("cosmos.css", COSMOS_STYLE_PATH),

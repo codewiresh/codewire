@@ -54,7 +54,6 @@ legacy_sdk_hits="$(
     "$ROOT/libs/sdk-ts" \
     "$ROOT/apps/docs/zola/content" \
     "$ROOT/docs/dev" \
-    "$ROOT/docs/design/story.html" \
     --glob '!**/__pycache__/**' \
     --glob '!**/.venv/**' || true
 )"

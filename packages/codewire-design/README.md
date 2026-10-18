@@ -64,7 +64,7 @@ JavaScript and CSS must be registered as immutable same-origin assets by the
 Rust adapter. Do not add inline scripts, eval-dependent HTMX features, dynamic
 package runners, package-CDN references, or install-time generation.
 
-The homepage template, `reference/fixtures/home.html`, and `docs/design/story.html`
+The homepage template and `reference/fixtures/home.html`
 share `routes/public.css`, `public.js`, and the white Codewire artwork. The Rust
 asset tests verify homepage parity after resolving fixture asset paths.
 The homepage, sign-in, and sign-up share the decorative background in `cosmos.css`
