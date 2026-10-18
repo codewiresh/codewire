@@ -51,7 +51,7 @@ PROFILES = {"ci": ("--profile", "ci"), "release": ("--release",), "runtime": ("-
 # workspace support image producer. Every producer owns its worker and sizes its
 # jobs to it; the chosen count is part of the recorded command.
 MAX_JOBS = 16
-GIB_PER_JOB = 2
+GIB_PER_JOB = 3
 
 
 def machine():
@@ -75,11 +75,15 @@ def machine():
 def cargo_jobs():
     """Parallel rustc jobs sized to what this build can use.
 
-    The protected runners range from an 8 vCPU / 15 GiB cloud slot (7 jobs) to a
-    bare-metal slot with 32 CPUs / 47 GiB (16 jobs), so a fixed count either idles
-    the metal slot or risks running the cloud slot out of memory. Jobs are bounded
-    by visible CPUs and by one job per GIB_PER_JOB of memory, and never exceed
-    MAX_JOBS. The count does not change the output.
+    The protected runners range from a cloud slot to a bare-metal slot, so a fixed
+    count either idles the metal slot or risks running the cloud slot out of
+    memory. Jobs are bounded by visible CPUs and by one job per GIB_PER_JOB of
+    memory, and never exceed MAX_JOBS. The count does not change the output.
+
+    A metal slot is a Kata VM, so this sees the VM's own CPUs and memory (16 jobs).
+    A cloud slot is not: this sees the 8 vCPU / 15 GiB host, while the DinD
+    container around the build is held to 13 GiB in a cgroup it cannot see. Three
+    GiB per job (5 jobs) keeps a cold build inside that limit.
     CODEWIRE_CARGO_JOBS (1-32) overrides it for tests and diagnosis.
     """
     override = os.environ.get("CODEWIRE_CARGO_JOBS")

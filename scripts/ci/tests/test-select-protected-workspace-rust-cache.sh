@@ -187,7 +187,8 @@ build_job="$(awk '
 [[ -n "$build_job" ]] || fail 'Support images lacks its amd64 build job'
 grep -Fq 'select-protected-workspace-rust-cache.sh' <<<"$build_job" ||
   fail 'the amd64 build job does not select the protected-workspace compiler cache'
-grep -Fxq '    runs-on: ci-protected' <<<"$build_job" ||
+# ci-protected-metal is the protected tier's metal capability.
+grep -Exq '    runs-on: ci-protected(-metal)?' <<<"$build_job" ||
   fail 'protected-workspace compiler cache is reachable outside the protected runner tier'
 grep -Fxq '      OPENBAO_ROLE: codewire-source-support-publisher' <<<"$build_job" ||
   fail 'protected-workspace compiler cache job is not the support publisher identity'

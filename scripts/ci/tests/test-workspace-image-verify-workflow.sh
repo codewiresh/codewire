@@ -81,7 +81,8 @@ for path in sorted(pathlib.Path(sys.argv[1]).glob("*.y*ml")):
         if NAME in (job.get("env") or {}):
             if job["env"][NAME] != MIRROR:
                 raise SystemExit(f"{key}: unexpected apt snapshot cache value")
-            if job.get("runs-on") not in ("ci-heavy", "ci-protected", HEAVY):
+            # ci-protected-metal slots are ci-protected pool pods (same cache policy).
+            if job.get("runs-on") not in ("ci-heavy", "ci-protected", "ci-protected-metal", HEAVY):
                 raise SystemExit(f"{key}: apt snapshot cache set outside ci-heavy/ci-protected")
             configured.add(key)
             file_jobs += 1

@@ -113,7 +113,7 @@ jobs:
   build-support-amd64:
     # zizmor: ignore[excessive-permissions] This exact protected job receives the scoped publisher identity for its platform of the pair.
     name: Build exact support pair (linux/amd64)
-    runs-on: ci-protected
+    runs-on: ci-protected-metal
     enable-openid-connect: true
     timeout-minutes: 120
     needs: [support-selection]

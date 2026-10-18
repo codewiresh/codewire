@@ -192,7 +192,8 @@ for job_header in "${protected_cache_jobs[@]}"; do
   [[ -n "$build_job" ]] || fail "Deploy Dev lacks the protected build job${job_header%:}"
   grep -Fq 'select-protected-rust-cache.sh' <<<"$build_job" ||
     fail "Deploy Dev build job${job_header%:} does not select the protected compiler cache"
-  grep -Fxq '    runs-on: ci-protected' <<<"$build_job" ||
+  # ci-protected-metal is the protected tier's metal capability.
+  grep -Exq '    runs-on: ci-protected(-metal)?' <<<"$build_job" ||
     fail 'protected compiler cache is reachable outside the protected runner tier'
   grep -Fxq '      OPENBAO_ROLE: codewire-source-dev-publisher' <<<"$build_job" ||
     fail 'protected compiler cache job is not the Dev publisher identity'

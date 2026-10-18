@@ -599,11 +599,12 @@ superseded_case() {
 # nothing; the join is the only publisher.
 for platform in amd64 arm64; do
   case "$platform" in
-    amd64) timeout_minutes=120 budget=110 next_job=build-support-arm64 ;;
-    arm64) timeout_minutes=120 budget=110 next_job=publish-support-images ;;
+    # amd64 compiles cw on a 32-CPU metal slot; arm64 drives the remote builder.
+    amd64) timeout_minutes=120 budget=110 next_job=build-support-arm64 runs_on=ci-protected-metal ;;
+    arm64) timeout_minutes=120 budget=110 next_job=publish-support-images runs_on=ci-protected ;;
   esac
   platform_job="$(sed -n "/^  build-support-$platform:/,/^  $next_job:/p" "$WORKFLOW")"
-  for expected in '    runs-on: ci-protected' '    enable-openid-connect: true' \
+  for expected in "    runs-on: $runs_on" '    enable-openid-connect: true' \
       "    timeout-minutes: $timeout_minutes" '    needs: [support-selection]' \
       "          SUPPORT_PLATFORM_BUDGET_MINUTES: '$budget'" \
       "        run: scripts/ci/images/build-support-platform.sh linux/$platform" \

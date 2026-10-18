@@ -173,6 +173,11 @@ superseded_case() {
   fail "Dev delivery is not exactly selection, two build halves and one publisher"
 service_job="$(sed -n '/^  build-service-images:/,/^  build-daemon-image:/p' "$WORKFLOW")"
 daemon_job="$(sed -n '/^  build-daemon-image:/,/^  publish-runtime-images:/p' "$WORKFLOW")"
+# The daemon's cw producer is the longest compile; it runs on a 32-CPU metal slot.
+grep -Fxq '    runs-on: ci-protected-metal' <<<"$daemon_job" ||
+  fail "the daemon image build does not select a metal protected slot"
+grep -Fxq '    runs-on: ci-protected' <<<"$service_job" ||
+  fail "the service image build left the ordinary protected pool"
 publish_job="$(sed -n '/^  publish-runtime-images:/,$p' "$WORKFLOW")"
 [[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 4 ]] ||
   fail "Dev workflow does not confine OIDC to selection, the protected builds and publication"

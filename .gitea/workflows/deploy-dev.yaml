@@ -202,7 +202,7 @@ jobs:
   build-daemon-image:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
     name: Build and push the daemon runtime image
-    runs-on: ci-protected
+    runs-on: ci-protected-metal
     enable-openid-connect: true
     timeout-minutes: 110
     needs: [deploy-selection]

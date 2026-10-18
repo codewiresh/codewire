@@ -305,7 +305,7 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
             release_command = finalizer.command("release")
             self.assertEqual(release_command[release_command.index("--jobs") + 1], jobs)
             # The job count follows the machine and can be pinned, within bounds.
-            for size, expected in (((8, 15), "7"), ((32, 47), "16"), ((2, 3), "2"), ((64, 0), "2")):
+            for size, expected in (((8, 15), "5"), ((33, 56), "16"), ((2, 3), "2"), ((64, 0), "2")):
                 with mock.patch.object(finalizer, "machine", return_value=size):
                     self.assertEqual(finalizer.cargo_jobs(), expected, size)
             with mock.patch.dict(os.environ, {"CODEWIRE_CARGO_JOBS": "24"}):
