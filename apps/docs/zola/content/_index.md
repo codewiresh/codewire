@@ -1,62 +1,61 @@
 ---
 title: What is Codewire?
-description: Cloud machines for AI coding agents
+description: Isolated development environments for developers and AI coding agents.
 template: section.html
-sort_by: none
+sort_by: weight
 in_search_index: true
 ---
 
+Codewire gives a developer or an AI coding agent its own development machine:
+a Linux environment with persistent storage, durable terminal and agent
+sessions, Docker, and access over SSH, a browser terminal, file transfer and
+preview URLs.
 
-Codewire gives every AI coding agent its own dedicated cloud environment. Launch Claude Code, Codex, or any tool on isolated machines — and run them in parallel.
+Each environment runs in its own hardware-virtualized VM with its own kernel.
+Agents run untrusted code, whatever they generate and whatever dependency they
+pull, so the hypervisor boundary is the security boundary.
 
-No shared kernels. No noisy neighbors. Each environment gets an isolated VM with dedicated runtime resources.
+## One CLI, three placements
 
-## Key concepts
+The same `cw` command drives every environment, wherever it runs.
 
-### Organizations
+| Placement | Where it runs | Isolation |
+| --- | --- | --- |
+| Hosted sandbox | the Codewire platform | one VM per environment |
+| Local VM | your Linux or Apple Silicon machine | Cloud Hypervisor on KVM; Virtualization.framework on macOS |
+| Trusted host session | your machine, as your own user | process ownership only, no containment |
 
-Group your team, environments, secrets, and billing together. Each organization has its own members, roles, and sandbox environment inventory.
+A local VM needs no account. A hosted sandbox adds organizations, members,
+billing, preview URLs and remote access.
 
-### Environments
+## Try it
 
-Isolated development machines where agents run. Each environment has its own runtime, tools, repository checkout, ports, files, terminal access, SSH access, previews, and persistent sessions.
-
-## How it works
-
-### From the web
-
-1. **Sign up** with an invite code and set up 2FA
-2. **Create an organization**
-3. **Create an environment** from a public repository URL
-4. **Connect** — open a terminal, preview, files, SSH, or an agent session
-
-### From the CLI
-
-During the private preview, run this from an authorized source checkout:
-
-```bash
-make cli-install
-cw setup
-cw env create https://github.com/owner/public-repo
-cw run -- claude "fix the tests"
+```sh
+curl -fsSL https://get.codewire.sh | sh    # install cw
+cw setup --local                           # install the local VM runtime
+cw env create --local --name my-app --path .
+cw shell my-app                            # a shell in the VM
+cw run my-app -- cargo test                # a durable session; cw list, cw attach
 ```
 
-## Codewire vs alternatives
-
-| | Codewire | Self-managed Kubernetes | GitHub Codespaces |
-|---|---|---|---|
-| **Setup** | Create an environment from a repo | Configure clusters, storage, ingress, auth, and billing | Instant but limited config |
-| **Isolation** | VM-backed sandbox environments | Depends on your infrastructure | Shared kernel containers |
-| **AI agents** | First-class support: launch, orchestrate, monitor | Build your own orchestration | Not designed for parallel agents |
-| **Maintenance** | Automatic upgrades, monitoring, backups | You manage everything | Managed by GitHub |
-| **Team management** | Built-in orgs, invitations, roles, and access grants | Bring your own auth and policy | GitHub org/team permissions |
-| **Infrastructure** | Runtime, ingress, secrets, previews, and sessions managed together | You provision and operate it | Shared hosted infrastructure |
-| **Billing** | Organization plans and usage tracking | Your infrastructure cost model | Per-minute compute pricing |
-
-## Next steps
-
 {{ card_grid(
-  titles=["Quickstart", "CLI quickstart", "Create an account"],
-  hrefs=["/docs/quickstart", "/docs/cli/overview", "/docs/getting-started/create-account"],
-  descriptions=["Get your first environment running in 5 minutes.", "Install the CLI and launch agents from your terminal.", "Sign up and verify your email."]
+  titles=["Install the CLI", "Your first local VM", "Your first hosted sandbox", "CLI reference"],
+  hrefs=["/docs/getting-started/install", "/docs/getting-started/local-vm", "/docs/getting-started/hosted-sandbox", "/docs/cli"],
+  descriptions=["One command installs a managed cw that updates itself.", "Run an environment on your own machine, no account needed.", "Sign in, create a sandbox on the platform and run an agent in it.", "Every command, grouped the way cw --help groups them."]
 ) }}
+
+## How the documentation is organized
+
+- [Get started](@/getting-started/_index.md): install, then the first local VM
+  and the first hosted sandbox.
+- [Concepts](@/concepts/_index.md): environments, placements, sessions and
+  agents, secrets and credentials, networking, organizations.
+- [How-to guides](@/guides/_index.md): one task per page.
+- [CLI reference](@/cli/_index.md): every command and flag.
+- [Security model](@/security.md): what isolates what, and what does not.
+- [Reference](@/reference/_index.md): environment statuses, plans, FAQ.
+
+## Status
+
+Codewire is pre-1.0. Breaking changes can land between releases. The source
+is open under AGPL-3.0-only.

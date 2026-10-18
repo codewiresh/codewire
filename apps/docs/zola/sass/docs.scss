@@ -250,6 +250,28 @@ html {
   text-transform: uppercase;
 }
 
+.docs-nav h2.docs-nav-heading {
+  padding: 0;
+}
+
+.docs-nav h2.docs-nav-heading .docs-nav-link {
+  margin: 0;
+  padding: 0.25rem 0.625rem;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.docs-nav h2.docs-nav-heading .docs-nav-link:hover,
+.docs-nav h2.docs-nav-heading .docs-nav-link:focus-visible {
+  color: var(--fg-primary);
+}
+
+.docs-nav h2.docs-nav-heading .docs-nav-link[aria-current="page"] {
+  color: var(--accent-text);
+}
+
 .docs-nav-link {
   display: block;
   margin: 0.125rem 0;

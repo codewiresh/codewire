@@ -22,7 +22,14 @@ ZOLA_BIN=/path/to/zola apps/docs/zola/tests/verify.sh
 
 The wrapper normalizes Zola's nondeterministic Fuse index ordering and emits
 the no-trailing-slash link contract consumed by the Rust server. `routes.toml`
-is the exact 30-route mount and redirect manifest.
+is the exact route mount and redirect manifest: one entry per page and per
+section landing page, and `tests/verify_site.py` pins the count.
+
+Pages use YAML front matter (`title`, `description`, `weight`); section
+landing pages (`_index.md`) use TOML front matter and render with
+`section.html`. The sidebar in `templates/base.html` lists every route by
+hand, so adding a page means adding its route, its sidebar entry and the
+count in `tests/verify_site.py` and `tests/browser.mjs`.
 
 ## Production-equivalent container
 

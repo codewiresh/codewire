@@ -1,62 +1,51 @@
 ---
 title: Configuration
-description: CLI configuration, local environment state, and environment variables.
+description: Where cw keeps its files and which environment variables it reads.
+weight: 8
 ---
 
-Platform identity and organization selection are stored in
-`~/.config/cw/config.json` by default. Set `CW_CONFIG_DIR` to use another
-platform configuration directory.
+## Files
 
-Local environment and Mesh client state live under `~/.codewire/`:
+| Path | Contents |
+| --- | --- |
+| `~/.config/cw/config.json` | Platform server URL and default organization (`CW_CONFIG_DIR` changes the directory) |
+| `~/.config/cw/credentials.json` | Your platform sign-in |
+| `~/.codewire/config.toml` | Mesh URL and selected network, the current `cw use` target, the local credential store kind |
+| `~/.codewire/native-v1/` | Local VM state, disks and logs |
+| `~/.codewire/credentials-v1/` | Local credential records (material is in the Secret Service or Keychain) |
+| `~/.cache/codewire/local-vmm-v1/` | The pinned local VM runtime |
+| `~/.local/share/codewire/cli/` | The managed `cw` version store; `~/.local/bin/cw` links into it |
+| `~/.ssh/config` | The managed `# ---- START CODEWIRE ----` block written by `cw config-ssh` |
 
-```text
-~/.codewire/
-├── config.toml
-├── native-v1/
-├── mesh_runtime.json
-└── codewire-mesh.log
+Session records and output live inside each environment; there is no
+host-side session database.
+
+```sh
+cw config inspect --output json
 ```
-
-`native-v1/` contains the native supervisor's owner-only lifecycle database and
-runtime state. Managed daemon and credential-broker capabilities are not stored
-in that database or printed by normal CLI output.
-
-`native-v1/logs/` holds owner-only diagnostic logs: `supervisor.log` and one
-`runner-<environment id>.log` per environment. Each stops growing at 1 MiB, and
-the previous run's log is kept as `<name>.1`. A line names the operation, the
-lifecycle step and the cause of a failure as fixed codes, identifiers and
-numbers. It never contains secret values, launch values or guest output. The
-files also keep a process's exit error or crash message.
-
-When a local lifecycle command such as `cw env update` fails, its error code
-names the cause, for example `environment_sources_guest_start_failed`.
-`cw env info` shows the same code as the environment's error.
-
-Session records and output live inside the selected environment. There is no
-host-owned session database.
 
 ## Environment variables
 
-| Variable | Purpose |
+| Variable | Effect |
 | --- | --- |
-| `CODEWIRE_SERVER_URL` | Platform server override |
-| `CODEWIRE_API_KEY` | Machine authentication for the platform |
-| `CW_CONFIG_DIR` | Platform configuration directory |
-| `CODEWIRE_MESH_URL` | Mesh base URL override |
-| `CODEWIRE_MESH_AUTH_TOKEN` | Organization-scoped `cw_` API key for a standalone Mesh client |
-| `CODEWIRE_MESH_NETWORK` | Selected Mesh network |
+| `CODEWIRE_SERVER_URL` | Platform server; `--server` overrides it. It must match the saved server unless an API key is used |
+| `CODEWIRE_API_KEY` | A `cw_` API key instead of the saved sign-in; it acts in its organization |
+| `CW_CONFIG_DIR` | Platform configuration directory (default `~/.config/cw`) |
+| `CW_MESH_DATA_DIR` | Local state directory (default `~/.codewire`); must be an absolute path |
+| `CODEWIRE_MESH_URL` | Mesh base URL; otherwise `--mesh-url`, the saved `mesh_url`, or the hosted Mesh derived from the server |
+| `CODEWIRE_MESH_AUTH_TOKEN` | Bearer token for a standalone Mesh service |
+| `CODEWIRE_MESH_NETWORK` | The selected Mesh network, over the saved selection |
+| `XDG_DATA_HOME`, `XDG_BIN_HOME` | Managed install store and entry directories |
+| `SHELL` | Used by `cw completion --install` and `cw doctor` |
 
-Browser users authenticate with `cw login` through the system browser. Local
-daemon credentials are managed internally and are not supplied through these
-variables.
+Diagnostics for the hosted transport (`cw shell`, `ssh`):
 
-## Inspect
+| Variable | Effect |
+| --- | --- |
+| `CW_DEBUG_TAILNET` | Print a transport timeline on stderr |
+| `CW_SSH_TRANSPORT` | `auto` (default), `tailnet` or `websocket` |
+| `CW_DERP_ONLY` | Force the DERP relay |
+| `CW_TAILNET_DIRECT_WAIT`, `CW_TAILNET_PEER_TIMEOUT`, `CW_TAILNET_DIAL_TIMEOUT` | Timing overrides (defaults 2 s, 10 s, 20 s) |
 
-```bash
-cw config inspect
-cw config inspect --output json
-cw current
-cw current --verbose
-```
-
-The global `--server` flag overrides the platform server for one invocation.
+Inside an environment, a managed conversation launched on a trusted host sees
+`CW_ENVIRONMENT` and `CW_SESSION_ID`.

@@ -1,54 +1,34 @@
 ---
-title: Subscription plans
-description: Plans, pricing, and environment allocations
+title: Plans and billing
+description: Organization plans, per-second metering of hosted sandboxes, and the billing page.
+weight: 2
 ---
 
-
-Codewire bills at the organization level for seats, environment capacity, and usage.
+Hosted sandboxes are billed to the organization that owns them. Local VMs and
+trusted host sessions cost nothing.
 
 ## Plans
 
-| Feature | Starter | Pro | Team | Enterprise |
-|---------|:-------:|:---:|:----:|:----------:|
-| **Price** | $49/mo | $199/mo | $499/mo | Custom |
-| Sandbox environments | Yes | Yes | Yes | Yes |
-| Persistent storage | Yes | Yes | Yes | Yes |
-| Preview routing | Yes | Yes | Yes | Yes |
-| Automatic platform updates | Yes | Yes | Yes | Yes |
-| **Free trial** | 14 days | 14 days | 14 days | Contact us |
+| Plan | Price |
+| --- | --- |
+| Starter | $49 per month |
+| Pro | $199 per month |
+| Team | $499 per month |
+| Enterprise | contact us |
 
-## Seat Pricing
+Each plan includes a monthly allowance of CPU, memory and disk hours for
+running sandboxes and a number of concurrent sandboxes; the current allowances
+and overage rates are shown on your organization's **Billing** page. Human
+developer seats are $18 per developer per month; agents are not seats.
 
-All plans include seat-based pricing at **$18 per developer per month**. AI agents don't count as seats — only human developers.
+## Metering
 
-## Usage Overages
+Compute is metered per second while a sandbox is running, from its resources
+(vCPU, memory, disk), and added up for the month. A stopped sandbox keeps its
+storage and uses no compute. `cw cost` shows the organization's usage.
 
-If your organization exceeds plan allocations, overage charges apply:
+## The Billing page
 
-| Usage | Rate |
-|----------|------|
-| **CPU** | $0.03 per core-hour |
-| **Memory** | $0.01 per GB-hour |
-| **Disk** | $0.05 per GB-hour |
-
-Overages are calculated based on actual usage, tracked in 5-minute intervals and aggregated monthly.
-
-## Free Trial
-
-Your first organization plan includes a **14-day free trial** with full access to all features. No credit card required to start.
-
-{% aside(kind="caution") %}
-  When the trial expires, environment access may be suspended. Add a payment method to resume.
-{% end %}
-
-## Changing Plans
-
-You can upgrade or downgrade your plan at any time from organization billing. Changes take effect immediately, with prorated charges for the billing period.
-
-## Related
-
-{{ card_grid(
-  titles=["Billing"],
-  hrefs=["/docs/organizations/billing"],
-  descriptions=["Manage organization billing and payments."]
-) }}
+Owners and admins open the organization's **Billing** page to add a payment
+method or manage the subscription and invoices in the payment portal.
+`hello@codewire.sh` answers questions about plans and invoices.

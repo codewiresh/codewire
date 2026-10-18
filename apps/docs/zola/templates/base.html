@@ -51,53 +51,53 @@
             <section>
               <h2>Overview</h2>
               {{ nav::item(path="/docs", label="What is Codewire?", current=current_path) }}
-              {{ nav::item(path="/docs/quickstart", label="Quickstart", current=current_path) }}
+              {{ nav::item(path="/docs/security", label="Security model", current=current_path) }}
             </section>
             <section>
-              <h2>Getting Started</h2>
-              {{ nav::item(path="/docs/getting-started/create-account", label="Create Account", current=current_path) }}
-              {{ nav::item(path="/docs/getting-started/sign-in", label="Sign In", current=current_path) }}
-              {{ nav::item(path="/docs/getting-started/create-organization", label="Create Organization", current=current_path) }}
-              {{ nav::item(path="/docs/getting-started/create-your-first-environment", label="Create Your First Environment", current=current_path) }}
-              {{ nav::item(path="/docs/getting-started/navigate-the-dashboard", label="Navigate the Dashboard", current=current_path) }}
-              {{ nav::item(path="/docs/getting-started/connect-to-an-environment", label="Connect to an Environment", current=current_path) }}
+              {{ nav::heading(path="/docs/getting-started", label="Get started", current=current_path) }}
+              {{ nav::item(path="/docs/getting-started/install", label="Install the CLI", current=current_path) }}
+              {{ nav::item(path="/docs/getting-started/local-vm", label="Your first local VM", current=current_path) }}
+              {{ nav::item(path="/docs/getting-started/hosted-sandbox", label="Your first hosted sandbox", current=current_path) }}
+              {{ nav::item(path="/docs/getting-started/account", label="Account and organization", current=current_path) }}
             </section>
             <section>
-              <h2>Organizations</h2>
-              {{ nav::item(path="/docs/organizations/overview", label="Overview", current=current_path) }}
-              {{ nav::item(path="/docs/organizations/manage-members", label="Manage Members", current=current_path) }}
-              {{ nav::item(path="/docs/organizations/invite-members", label="Invite Members", current=current_path) }}
-              {{ nav::item(path="/docs/organizations/accept-invitation", label="Accept Invitation", current=current_path) }}
-              {{ nav::item(path="/docs/organizations/billing", label="Billing", current=current_path) }}
-              {{ nav::item(path="/docs/organizations/secrets", label="Secrets", current=current_path) }}
+              {{ nav::heading(path="/docs/concepts", label="Concepts", current=current_path) }}
+              {{ nav::item(path="/docs/concepts/environments", label="Environments", current=current_path) }}
+              {{ nav::item(path="/docs/concepts/placements", label="Placements", current=current_path) }}
+              {{ nav::item(path="/docs/concepts/sessions-and-agents", label="Sessions and agents", current=current_path) }}
+              {{ nav::item(path="/docs/concepts/secrets-and-credentials", label="Secrets and credentials", current=current_path) }}
+              {{ nav::item(path="/docs/concepts/networking", label="Networking and previews", current=current_path) }}
+              {{ nav::item(path="/docs/concepts/organizations", label="Organizations", current=current_path) }}
             </section>
             <section>
-              <h2>Environments</h2>
-              {{ nav::item(path="/docs/environments/overview", label="Overview", current=current_path) }}
-              {{ nav::item(path="/docs/environments/create-environment", label="Create Environment", current=current_path) }}
-              {{ nav::item(path="/docs/environments/manage-environments", label="Manage Environments", current=current_path) }}
-              {{ nav::item(path="/docs/environments/connect", label="Connect", current=current_path) }}
-              {{ nav::item(path="/docs/settings/github-integration", label="Repository access", current=current_path) }}
+              {{ nav::heading(path="/docs/guides", label="How-to guides", current=current_path) }}
+              {{ nav::item(path="/docs/guides/run-agents", label="Orchestrate agents", current=current_path) }}
+              {{ nav::item(path="/docs/guides/ssh-and-vscode", label="SSH, VS Code and files", current=current_path) }}
+              {{ nav::item(path="/docs/guides/credentials", label="Provider credentials", current=current_path) }}
+              {{ nav::item(path="/docs/guides/private-repositories", label="Private repositories", current=current_path) }}
+              {{ nav::item(path="/docs/guides/application-secrets", label="Application secrets", current=current_path) }}
+              {{ nav::item(path="/docs/guides/previews", label="Ports and previews", current=current_path) }}
+              {{ nav::item(path="/docs/guides/project-file", label="The project file", current=current_path) }}
+              {{ nav::item(path="/docs/guides/members", label="Members and sharing", current=current_path) }}
+              {{ nav::item(path="/docs/guides/update", label="Update cw", current=current_path) }}
+              {{ nav::item(path="/docs/guides/troubleshoot-local-vms", label="Troubleshoot local VMs", current=current_path) }}
             </section>
             <section>
-              <h2>Settings</h2>
-              {{ nav::item(path="/docs/settings/security", label="Security", current=current_path) }}
-            </section>
-            <section>
-              <h2>Reference</h2>
-              {{ nav::item(path="/docs/reference/environment-statuses", label="Environment Statuses", current=current_path) }}
-              {{ nav::item(path="/docs/reference/provisioning-events", label="Provisioning Events", current=current_path) }}
-              {{ nav::item(path="/docs/reference/subscription-plans", label="Subscription Plans", current=current_path) }}
-              {{ nav::item(path="/docs/reference/faq", label="FAQ", current=current_path) }}
-            </section>
-            <section>
-              <h2>CLI</h2>
-              {{ nav::item(path="/docs/cli/overview", label="Overview", current=current_path) }}
-              {{ nav::item(path="/docs/cli/orchestration", label="Agent Orchestration", current=current_path) }}
-              {{ nav::item(path="/docs/cli/platform", label="Platform", current=current_path) }}
+              {{ nav::heading(path="/docs/cli", label="CLI reference", current=current_path) }}
+              {{ nav::item(path="/docs/cli/environments", label="Environments", current=current_path) }}
               {{ nav::item(path="/docs/cli/sessions", label="Sessions", current=current_path) }}
-              {{ nav::item(path="/docs/cli/mesh", label="Mesh", current=current_path) }}
+              {{ nav::item(path="/docs/cli/agents", label="Agents", current=current_path) }}
+              {{ nav::item(path="/docs/cli/secrets-and-credentials", label="Secrets and credentials", current=current_path) }}
+              {{ nav::item(path="/docs/cli/networking", label="Networking", current=current_path) }}
+              {{ nav::item(path="/docs/cli/account", label="Account and organizations", current=current_path) }}
+              {{ nav::item(path="/docs/cli/cw", label="cw itself", current=current_path) }}
               {{ nav::item(path="/docs/cli/configuration", label="Configuration", current=current_path) }}
+            </section>
+            <section>
+              {{ nav::heading(path="/docs/reference", label="Reference", current=current_path) }}
+              {{ nav::item(path="/docs/reference/environment-statuses", label="Environment statuses", current=current_path) }}
+              {{ nav::item(path="/docs/reference/subscription-plans", label="Plans and billing", current=current_path) }}
+              {{ nav::item(path="/docs/reference/faq", label="FAQ", current=current_path) }}
             </section>
           </nav>
         </aside>

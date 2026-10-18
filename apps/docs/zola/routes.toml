@@ -8,160 +8,52 @@ source = "content/_index.md"
 output = "index.html"
 
 [[routes]]
-canonical = "/docs/quickstart"
-redirect_from = "/docs/quickstart/"
-source = "content/quickstart.md"
-output = "quickstart/index.html"
+canonical = "/docs/cli"
+redirect_from = "/docs/cli/"
+source = "content/cli/_index.md"
+output = "cli/index.html"
 
 [[routes]]
-canonical = "/docs/getting-started/create-account"
-redirect_from = "/docs/getting-started/create-account/"
-source = "content/getting-started/create-account.md"
-output = "getting-started/create-account/index.html"
+canonical = "/docs/cli/account"
+redirect_from = "/docs/cli/account/"
+source = "content/cli/account.md"
+output = "cli/account/index.html"
 
 [[routes]]
-canonical = "/docs/getting-started/sign-in"
-redirect_from = "/docs/getting-started/sign-in/"
-source = "content/getting-started/sign-in.md"
-output = "getting-started/sign-in/index.html"
+canonical = "/docs/cli/agents"
+redirect_from = "/docs/cli/agents/"
+source = "content/cli/agents.md"
+output = "cli/agents/index.html"
 
 [[routes]]
-canonical = "/docs/getting-started/create-organization"
-redirect_from = "/docs/getting-started/create-organization/"
-source = "content/getting-started/create-organization.md"
-output = "getting-started/create-organization/index.html"
+canonical = "/docs/cli/configuration"
+redirect_from = "/docs/cli/configuration/"
+source = "content/cli/configuration.md"
+output = "cli/configuration/index.html"
 
 [[routes]]
-canonical = "/docs/getting-started/create-your-first-environment"
-redirect_from = "/docs/getting-started/create-your-first-environment/"
-source = "content/getting-started/create-your-first-environment.md"
-output = "getting-started/create-your-first-environment/index.html"
+canonical = "/docs/cli/cw"
+redirect_from = "/docs/cli/cw/"
+source = "content/cli/cw.md"
+output = "cli/cw/index.html"
 
 [[routes]]
-canonical = "/docs/getting-started/navigate-the-dashboard"
-redirect_from = "/docs/getting-started/navigate-the-dashboard/"
-source = "content/getting-started/navigate-the-dashboard.md"
-output = "getting-started/navigate-the-dashboard/index.html"
+canonical = "/docs/cli/environments"
+redirect_from = "/docs/cli/environments/"
+source = "content/cli/environments.md"
+output = "cli/environments/index.html"
 
 [[routes]]
-canonical = "/docs/getting-started/connect-to-an-environment"
-redirect_from = "/docs/getting-started/connect-to-an-environment/"
-source = "content/getting-started/connect-to-an-environment.md"
-output = "getting-started/connect-to-an-environment/index.html"
+canonical = "/docs/cli/networking"
+redirect_from = "/docs/cli/networking/"
+source = "content/cli/networking.md"
+output = "cli/networking/index.html"
 
 [[routes]]
-canonical = "/docs/organizations/overview"
-redirect_from = "/docs/organizations/overview/"
-source = "content/organizations/overview.md"
-output = "organizations/overview/index.html"
-
-[[routes]]
-canonical = "/docs/organizations/manage-members"
-redirect_from = "/docs/organizations/manage-members/"
-source = "content/organizations/manage-members.md"
-output = "organizations/manage-members/index.html"
-
-[[routes]]
-canonical = "/docs/organizations/invite-members"
-redirect_from = "/docs/organizations/invite-members/"
-source = "content/organizations/invite-members.md"
-output = "organizations/invite-members/index.html"
-
-[[routes]]
-canonical = "/docs/organizations/accept-invitation"
-redirect_from = "/docs/organizations/accept-invitation/"
-source = "content/organizations/accept-invitation.md"
-output = "organizations/accept-invitation/index.html"
-
-[[routes]]
-canonical = "/docs/organizations/billing"
-redirect_from = "/docs/organizations/billing/"
-source = "content/organizations/billing.md"
-output = "organizations/billing/index.html"
-
-[[routes]]
-canonical = "/docs/organizations/secrets"
-redirect_from = "/docs/organizations/secrets/"
-source = "content/organizations/secrets.md"
-output = "organizations/secrets/index.html"
-
-[[routes]]
-canonical = "/docs/environments/overview"
-redirect_from = "/docs/environments/overview/"
-source = "content/environments/overview.md"
-output = "environments/overview/index.html"
-
-[[routes]]
-canonical = "/docs/environments/create-environment"
-redirect_from = "/docs/environments/create-environment/"
-source = "content/environments/create-environment.md"
-output = "environments/create-environment/index.html"
-
-[[routes]]
-canonical = "/docs/environments/manage-environments"
-redirect_from = "/docs/environments/manage-environments/"
-source = "content/environments/manage-environments.md"
-output = "environments/manage-environments/index.html"
-
-[[routes]]
-canonical = "/docs/environments/connect"
-redirect_from = "/docs/environments/connect/"
-source = "content/environments/connect.md"
-output = "environments/connect/index.html"
-
-[[routes]]
-canonical = "/docs/settings/github-integration"
-redirect_from = "/docs/settings/github-integration/"
-source = "content/settings/github-integration.md"
-output = "settings/github-integration/index.html"
-
-[[routes]]
-canonical = "/docs/settings/security"
-redirect_from = "/docs/settings/security/"
-source = "content/settings/security.md"
-output = "settings/security/index.html"
-
-[[routes]]
-canonical = "/docs/reference/environment-statuses"
-redirect_from = "/docs/reference/environment-statuses/"
-source = "content/reference/environment-statuses.md"
-output = "reference/environment-statuses/index.html"
-
-[[routes]]
-canonical = "/docs/reference/provisioning-events"
-redirect_from = "/docs/reference/provisioning-events/"
-source = "content/reference/provisioning-events.md"
-output = "reference/provisioning-events/index.html"
-
-[[routes]]
-canonical = "/docs/reference/subscription-plans"
-redirect_from = "/docs/reference/subscription-plans/"
-source = "content/reference/subscription-plans.md"
-output = "reference/subscription-plans/index.html"
-
-[[routes]]
-canonical = "/docs/reference/faq"
-redirect_from = "/docs/reference/faq/"
-source = "content/reference/faq.md"
-output = "reference/faq/index.html"
-
-[[routes]]
-canonical = "/docs/cli/overview"
-redirect_from = "/docs/cli/overview/"
-source = "content/cli/overview.md"
-output = "cli/overview/index.html"
-
-[[routes]]
-canonical = "/docs/cli/orchestration"
-redirect_from = "/docs/cli/orchestration/"
-source = "content/cli/orchestration.md"
-output = "cli/orchestration/index.html"
-
-[[routes]]
-canonical = "/docs/cli/platform"
-redirect_from = "/docs/cli/platform/"
-source = "content/cli/platform.md"
-output = "cli/platform/index.html"
+canonical = "/docs/cli/secrets-and-credentials"
+redirect_from = "/docs/cli/secrets-and-credentials/"
+source = "content/cli/secrets-and-credentials.md"
+output = "cli/secrets-and-credentials/index.html"
 
 [[routes]]
 canonical = "/docs/cli/sessions"
@@ -170,13 +62,169 @@ source = "content/cli/sessions.md"
 output = "cli/sessions/index.html"
 
 [[routes]]
-canonical = "/docs/cli/mesh"
-redirect_from = "/docs/cli/mesh/"
-source = "content/cli/mesh.md"
-output = "cli/mesh/index.html"
+canonical = "/docs/concepts"
+redirect_from = "/docs/concepts/"
+source = "content/concepts/_index.md"
+output = "concepts/index.html"
 
 [[routes]]
-canonical = "/docs/cli/configuration"
-redirect_from = "/docs/cli/configuration/"
-source = "content/cli/configuration.md"
-output = "cli/configuration/index.html"
+canonical = "/docs/concepts/environments"
+redirect_from = "/docs/concepts/environments/"
+source = "content/concepts/environments.md"
+output = "concepts/environments/index.html"
+
+[[routes]]
+canonical = "/docs/concepts/networking"
+redirect_from = "/docs/concepts/networking/"
+source = "content/concepts/networking.md"
+output = "concepts/networking/index.html"
+
+[[routes]]
+canonical = "/docs/concepts/organizations"
+redirect_from = "/docs/concepts/organizations/"
+source = "content/concepts/organizations.md"
+output = "concepts/organizations/index.html"
+
+[[routes]]
+canonical = "/docs/concepts/placements"
+redirect_from = "/docs/concepts/placements/"
+source = "content/concepts/placements.md"
+output = "concepts/placements/index.html"
+
+[[routes]]
+canonical = "/docs/concepts/secrets-and-credentials"
+redirect_from = "/docs/concepts/secrets-and-credentials/"
+source = "content/concepts/secrets-and-credentials.md"
+output = "concepts/secrets-and-credentials/index.html"
+
+[[routes]]
+canonical = "/docs/concepts/sessions-and-agents"
+redirect_from = "/docs/concepts/sessions-and-agents/"
+source = "content/concepts/sessions-and-agents.md"
+output = "concepts/sessions-and-agents/index.html"
+
+[[routes]]
+canonical = "/docs/getting-started"
+redirect_from = "/docs/getting-started/"
+source = "content/getting-started/_index.md"
+output = "getting-started/index.html"
+
+[[routes]]
+canonical = "/docs/getting-started/account"
+redirect_from = "/docs/getting-started/account/"
+source = "content/getting-started/account.md"
+output = "getting-started/account/index.html"
+
+[[routes]]
+canonical = "/docs/getting-started/hosted-sandbox"
+redirect_from = "/docs/getting-started/hosted-sandbox/"
+source = "content/getting-started/hosted-sandbox.md"
+output = "getting-started/hosted-sandbox/index.html"
+
+[[routes]]
+canonical = "/docs/getting-started/install"
+redirect_from = "/docs/getting-started/install/"
+source = "content/getting-started/install.md"
+output = "getting-started/install/index.html"
+
+[[routes]]
+canonical = "/docs/getting-started/local-vm"
+redirect_from = "/docs/getting-started/local-vm/"
+source = "content/getting-started/local-vm.md"
+output = "getting-started/local-vm/index.html"
+
+[[routes]]
+canonical = "/docs/guides"
+redirect_from = "/docs/guides/"
+source = "content/guides/_index.md"
+output = "guides/index.html"
+
+[[routes]]
+canonical = "/docs/guides/application-secrets"
+redirect_from = "/docs/guides/application-secrets/"
+source = "content/guides/application-secrets.md"
+output = "guides/application-secrets/index.html"
+
+[[routes]]
+canonical = "/docs/guides/credentials"
+redirect_from = "/docs/guides/credentials/"
+source = "content/guides/credentials.md"
+output = "guides/credentials/index.html"
+
+[[routes]]
+canonical = "/docs/guides/members"
+redirect_from = "/docs/guides/members/"
+source = "content/guides/members.md"
+output = "guides/members/index.html"
+
+[[routes]]
+canonical = "/docs/guides/previews"
+redirect_from = "/docs/guides/previews/"
+source = "content/guides/previews.md"
+output = "guides/previews/index.html"
+
+[[routes]]
+canonical = "/docs/guides/private-repositories"
+redirect_from = "/docs/guides/private-repositories/"
+source = "content/guides/private-repositories.md"
+output = "guides/private-repositories/index.html"
+
+[[routes]]
+canonical = "/docs/guides/project-file"
+redirect_from = "/docs/guides/project-file/"
+source = "content/guides/project-file.md"
+output = "guides/project-file/index.html"
+
+[[routes]]
+canonical = "/docs/guides/run-agents"
+redirect_from = "/docs/guides/run-agents/"
+source = "content/guides/run-agents.md"
+output = "guides/run-agents/index.html"
+
+[[routes]]
+canonical = "/docs/guides/ssh-and-vscode"
+redirect_from = "/docs/guides/ssh-and-vscode/"
+source = "content/guides/ssh-and-vscode.md"
+output = "guides/ssh-and-vscode/index.html"
+
+[[routes]]
+canonical = "/docs/guides/troubleshoot-local-vms"
+redirect_from = "/docs/guides/troubleshoot-local-vms/"
+source = "content/guides/troubleshoot-local-vms.md"
+output = "guides/troubleshoot-local-vms/index.html"
+
+[[routes]]
+canonical = "/docs/guides/update"
+redirect_from = "/docs/guides/update/"
+source = "content/guides/update.md"
+output = "guides/update/index.html"
+
+[[routes]]
+canonical = "/docs/reference"
+redirect_from = "/docs/reference/"
+source = "content/reference/_index.md"
+output = "reference/index.html"
+
+[[routes]]
+canonical = "/docs/reference/environment-statuses"
+redirect_from = "/docs/reference/environment-statuses/"
+source = "content/reference/environment-statuses.md"
+output = "reference/environment-statuses/index.html"
+
+[[routes]]
+canonical = "/docs/reference/faq"
+redirect_from = "/docs/reference/faq/"
+source = "content/reference/faq.md"
+output = "reference/faq/index.html"
+
+[[routes]]
+canonical = "/docs/reference/subscription-plans"
+redirect_from = "/docs/reference/subscription-plans/"
+source = "content/reference/subscription-plans.md"
+output = "reference/subscription-plans/index.html"
+
+[[routes]]
+canonical = "/docs/security"
+redirect_from = "/docs/security/"
+source = "content/security.md"
+output = "security/index.html"

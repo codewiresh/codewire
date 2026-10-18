@@ -14,7 +14,7 @@ from xml.etree import ElementTree
 
 
 CANONICAL_ORIGIN = "https://codewire.sh"
-EXPECTED_ROUTE_COUNT = 30
+EXPECTED_ROUTE_COUNT = 38
 
 
 def fail(message: str) -> None:
@@ -72,12 +72,11 @@ def parse_document(path: Path) -> tuple[DocumentParser, str]:
 
 
 def source_documents(content_root: Path) -> set[str]:
-    documents: set[str] = set()
-    for path in content_root.rglob("*.md"):
-        relative = path.relative_to(content_root)
-        if relative == Path("_index.md") or relative.name != "_index.md":
-            documents.add(f"content/{relative.as_posix()}")
-    return documents
+    # Every page and every section landing page (`_index.md`) is a route.
+    return {
+        f"content/{path.relative_to(content_root).as_posix()}"
+        for path in content_root.rglob("*.md")
+    }
 
 
 def frontmatter_value(path: Path, key: str) -> str | None:
