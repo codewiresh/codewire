@@ -844,16 +844,58 @@ print("cooperative cancellation: no adopted children")
     def test_swift_components_reject_cargo_only_options_before_ssh(self):
         for component in ("vz-runner", "sandbox-canary"):
             for option in (["--intel"], ["--seed-cargo"], ["--action", "clippy"]):
+                stderr = io.StringIO()
                 with self.subTest(component=component, option=option), \
-                     mock.patch.object(sys, "argv", ["macos-cli.py", "--component", component, *option]), \
+                     mock.patch.object(sys, "argv", ["macos-cli.py", "--host", "user@mac.example.invalid",
+                                                     "--component", component, *option]), \
                      mock.patch.object(helper, "ssh") as ssh, \
                      mock.patch.object(helper, "output") as output, \
-                     contextlib.redirect_stderr(io.StringIO()):
+                     contextlib.redirect_stderr(stderr):
                     with self.assertRaises(SystemExit) as failure:
                         helper.main()
                     self.assertEqual(failure.exception.code, 2)
+                    self.assertIn("Swift components accept", stderr.getvalue())
                     ssh.assert_not_called()
                     output.assert_not_called()
+
+    def test_mac_destination_is_required_and_read_from_the_environment(self):
+        environment = {key: value for key, value in os.environ.items() if key != "CODEWIRE_MAC_HOST"}
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, environment, clear=True), \
+             mock.patch.object(sys, "argv", ["macos-cli.py"]), \
+             mock.patch.object(helper, "ssh") as ssh, \
+             mock.patch.object(helper, "output") as output, \
+             contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as failure:
+                helper.main()
+        self.assertEqual(failure.exception.code, 2)
+        self.assertIn("--host or CODEWIRE_MAC_HOST", stderr.getvalue())
+        ssh.assert_not_called()
+        output.assert_not_called()
+
+        # The environment supplies the destination; validation still applies to it.
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"CODEWIRE_MAC_HOST": "-oProxyCommand=x"}), \
+             mock.patch.object(sys, "argv", ["macos-cli.py"]), \
+             mock.patch.object(helper, "ssh") as ssh, \
+             mock.patch.object(helper, "output") as output, \
+             contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as failure:
+                helper.main()
+        self.assertEqual(failure.exception.code, 2)
+        self.assertIn("invalid SSH destination", stderr.getvalue())
+        ssh.assert_not_called()
+
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"CODEWIRE_MAC_HOST": "user@mac.example.invalid"}), \
+             mock.patch.object(sys, "argv", ["macos-cli.py", "--component", "vz-runner", "--intel"]), \
+             mock.patch.object(helper, "ssh") as ssh, \
+             mock.patch.object(helper, "output") as output, \
+             contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                helper.main()
+        self.assertIn("Swift components accept", stderr.getvalue())
+        ssh.assert_not_called()
 
     def test_worker_stdin_eof_cancels_owned_command(self):
         run = self.worker_fixture()

@@ -32,7 +32,15 @@ releases from `releases.codewire.sh`. See
 
 From a checkout, `make cli-install` builds and installs the same way.
 `cargo build -p codewire-cli-bin --bin cw` gives an unmanaged development
-binary at `target/debug/cw`.
+binary at `target/debug/cw`. Building from source needs a Rust toolchain
+(`rustup`) and `protoc`, the Protocol Buffers compiler, on `PATH` (or `PROTOC`
+set to its path):
+
+```sh
+sudo apt-get install protobuf-compiler   # Debian/Ubuntu
+sudo pacman -S protobuf                  # Arch
+brew install protobuf                    # macOS
+```
 
 ## Quick start
 

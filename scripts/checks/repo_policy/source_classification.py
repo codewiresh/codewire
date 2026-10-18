@@ -60,20 +60,7 @@ def check_rust_validation_source(_args: argparse.Namespace) -> int:
 
 def check_retired_reference_source(_args: argparse.Namespace) -> int:
     retired_coder_pattern = re.compile(r"(?<![A-Za-z])coder(?![A-Za-z])", re.IGNORECASE)
-    allowed: list[dict[str, Any]] = [
-        {
-            "path": "docs/dev/GO-RUST-RETIREMENT-LEDGER.md",
-            "line": re.compile(
-                r"(?:legacy|retired) Coder-reference classification|"
-                r"(?:Legacy|Retired) Coder/product-integration references|"
-                r"remaining `coder` strings|github\.com/coder/websocket|"
-                r"unclassified Coder(?:/resource)? references|"
-                r"`coder` strings outside immutable migration history",
-                re.IGNORECASE,
-            ),
-            "reason": "canonical #48 classification for remaining retired references",
-        },
-    ]
+    allowed: list[dict[str, Any]] = []
     for path in [
         "libs/tailnet/go.mod",
         "libs/tailnet/go.sum",
@@ -194,8 +181,8 @@ def check_go_source_classification(_args: argparse.Namespace) -> int:
         for finding in findings:
             print(f"  {finding}", file=sys.stderr)
         print(
-            "Remaining Go must be accepted support/test/generated/oracle/SDK surface in "
-            "docs/dev/GO-RUST-RETIREMENT-LEDGER.md.",
+            "Remaining Go must be accepted support/test/generated/oracle/SDK surface "
+            "in this guard's categories.",
             file=sys.stderr,
         )
         return 1

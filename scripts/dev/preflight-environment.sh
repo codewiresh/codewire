@@ -44,7 +44,7 @@ problem() {
 }
 
 # shellcheck disable=SC2016 # Printed literally as the fix to run.
-per_task_tmpdir_fix='export TMPDIR="$HOME/.cache/cwt-<short task>" (mkdir -p it): executable, at most 34 characters, outside /tmp, /run and ~/.claude'
+per_task_tmpdir_fix='export TMPDIR="$HOME/.cache/cwt-<short task>" (mkdir -p it): executable, at most 34 characters, outside /run and ~/.claude'
 
 # Unix-socket tests bind below TMPDIR, and sun_path holds fewer than 104
 # bytes on every supported host. The longest known binding, the codewire-cli
@@ -58,12 +58,9 @@ check_tmpdir() {
     return
   fi
   resolved="$(cd "$configured" && pwd -P)"
+  # /tmp is accepted wherever it allows executing files; where it is mounted
+  # noexec, the probe below refuses it.
   case "$resolved" in
-    /tmp|/tmp/*)
-      problem "TMPDIR resolves to ${resolved}; /tmp is noexec on the workstation and shared by every task" \
-        "$per_task_tmpdir_fix"
-      return
-      ;;
     /run|/run/*)
       problem "TMPDIR resolves to ${resolved}; native mount tests refuse projects inside /run" \
         "$per_task_tmpdir_fix"
@@ -96,7 +93,7 @@ check_tmpdir() {
     problem "TMPDIR=${resolved} does not allow executing files (noexec mount)" "$per_task_tmpdir_fix"
     return
   fi
-  ok "TMPDIR=${configured} is short, executable and outside /tmp, /run and .claude"
+  ok "TMPDIR=${configured} is short, executable and outside /run and .claude"
 }
 
 pinned_rust_channel() {

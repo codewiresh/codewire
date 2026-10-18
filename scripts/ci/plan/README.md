@@ -56,7 +56,7 @@ the pin, Container contract verification keeps any selected exact-source
 workspace verification. The receipt retains its contract, architecture and
 immutable image bindings. A local receipt also covers a later tree when this
 planner shows `workspace_image_verification` unchanged from the receipt's
-commit (see `docs/dev/WORKSPACE-CACHE.md`). Only standalone workspace
+commit. Only standalone workspace
 verification can be omitted by the narrower artifact fact. An unaffected fact
 means the checked-in build and contract inputs are unchanged; floating tool
 channels can still resolve differently on the next actual image build.

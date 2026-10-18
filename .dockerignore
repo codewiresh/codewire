@@ -23,8 +23,6 @@ apps/web/dist
 apps/web/e2e
 apps/mobile/node_modules
 packages/*/node_modules
-go-server/tmp
-go-server/.tmp
 **/.tmp
 **/__pycache__
 **/*.pyc

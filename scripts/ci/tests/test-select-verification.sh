@@ -1095,9 +1095,32 @@ run_paths_case retired_cli_assets pull_request refs/pull/1513/head false \
   apps/cli/docs/quickstart.md
 run_paths_case cli_packaging pull_request refs/pull/1514/head false \
   'go_consumer_interop go_support policy release runtime_confidential' \
+  apps/cli/nfpm.yaml
+# Removing the retired manual AUR/Homebrew packaging and the stray root file
+# needs only Policy; the same paths reappearing are unclassified again.
+run_paths_case retired_packaging_removal pull_request refs/pull/1514/head false \
+  'policy' \
+  aur/PKGBUILD \
+  aur/TODO.md \
   apps/cli/aur/PKGBUILD \
-  apps/cli/nfpm.yaml \
-  apps/cli/scripts/update-homebrew-formula.sh
+  apps/cli/scripts/update-homebrew-formula.sh \
+  .schema-reset-write-test
+retired_root="$TMP/retired-packaging.repo"
+for retired in aur/PKGBUILD apps/cli/aur/PKGBUILD .schema-reset-write-test; do
+  [ ! -e "$ROOT/$retired" ] || {
+    echo "retired path exists in the checkout: $retired" >&2; exit 1
+  }
+  mkdir -p "$retired_root/$(dirname "$retired")"
+  : > "$retired_root/$retired"
+  printf '%s\n' "$retired" > "$TMP/retired-packaging.paths"
+  retired_output="$(cd "$retired_root" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+    GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1514/head \
+    KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/retired-packaging.paths" 2>/dev/null)"
+  [[ "$retired_output" == *'classification=unclassified'* \
+      && "$retired_output" == *'required_local_mode=full'* ]] || {
+    echo "a reappearing retired path was classified: $retired" >&2; exit 1
+  }
+done
 run_paths_case cli_deploy_assets pull_request refs/pull/1515/head false \
   'deploy policy' \
   apps/cli/charts/codewire-mesh/values.yaml \

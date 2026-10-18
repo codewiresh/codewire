@@ -95,8 +95,7 @@ routed workflow document. Re-read only instruction files that changed, then
 bind the new revision. Do not keep acting from stale loaded instructions or
 re-read unchanged files every iteration.
 
-For bounded Rust CLI-only slices that qualify for the fast lane in
-`docs/dev/RUST-PORT-PLAYBOOK.md`, treat local CLI gates as the primary loop and
+For bounded Rust CLI-only slices, treat local CLI gates as the primary loop and
 Forgejo CI as the merge gate. Capture the PR run once, poll sparsely, inspect logs
 only on failure/cancel/timeout/stall or run/job disagreement, and keep working
 on the next independent CLI branch while healthy CI is in progress. If the

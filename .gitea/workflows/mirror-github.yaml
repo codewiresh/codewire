@@ -32,4 +32,7 @@ jobs:
           fetch-depth: 0
 
       - name: Mirror with an OpenBao-backed GitHub App token
+        env:
+          # Private names the content gate refuses; the gate fails closed when empty.
+          MIRROR_PRIVATE_CONTENT_PATTERNS: ${{ vars.MIRROR_PRIVATE_CONTENT_PATTERNS }}
         run: scripts/ci/release/mirror-github.sh "${GITHUB_REF:?}"

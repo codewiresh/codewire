@@ -583,7 +583,9 @@ def main():
     if len(sys.argv) == 4 and sys.argv[1] == "--worker":
         return worker(Path(sys.argv[2]), Path(sys.argv[3]))
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="user@mac.example.invalid")
+    parser.add_argument("--host", default=os.environ.get("CODEWIRE_MAC_HOST"),
+                        help="SSH destination of the Mac, such as user@mac.example.invalid "
+                             "(default: $CODEWIRE_MAC_HOST)")
     parser.add_argument("--component", choices=["cli", *VZ_FIXTURES, *SWIFT_COMPONENTS], default="cli")
     parser.add_argument("--action", choices=["build", "test", "clippy", "verify"], default="build")
     parser.add_argument("--intel", action="store_true", help="also compile/link x86_64; never execute it")
@@ -594,6 +596,8 @@ def main():
                              "and git under their installed names, for tests")
     parser.add_argument("--recover", metavar="RUN_ID", help="recover an earlier interrupted run")
     args = parser.parse_args()
+    if not args.host:
+        parser.error("name the Mac with --host or CODEWIRE_MAC_HOST")
     if not re.fullmatch(r"[A-Za-z0-9_.@:-]+", args.host) or args.host.startswith("-"):
         parser.error("invalid SSH destination")
     if not 1 <= args.timeout <= 14400:

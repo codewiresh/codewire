@@ -1,7 +1,6 @@
 # Non-secret local settings for the CI, Kind and smoke scripts. Copy to .envrc
 # (untracked) and uncomment only what differs from the defaults; every value
-# below is the default the scripts already use. Reference and the full table:
-# docs/dev/ENVIRONMENT.md
+# below is the default the scripts already use.
 #
 # Never put a secret here. Secrets and provider credentials come from OpenBao
 # through the repository wrappers (scripts/runtime/dev/with-dev-smoke-auth.sh,

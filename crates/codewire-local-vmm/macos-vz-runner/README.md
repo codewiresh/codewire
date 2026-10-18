@@ -147,10 +147,8 @@ virtio-vsock.
 
 ## Production-init developer fixture (schema 2)
 
-See [preparation and execution](../../../docs/dev/MACOS-VZ-PRODUCTION-FIXTURE.md)
-for the Rust verifier, private synthetic inputs and parent harness. The standalone
-`developer-entitlements.plist` is the sole-entitlement ad-hoc signing input;
-building the package does not sign it or start a VM.
+The standalone `developer-entitlements.plist` is the sole-entitlement ad-hoc
+signing input; building the package does not sign it or start a VM.
 
 `production-init-fixture --control-fd FD` is a separate, unreachable developer
 entrypoint. The existing four-descriptor schema-1 inode probes are unchanged.
@@ -233,7 +231,8 @@ python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
 ```
 
 After the Mac Command Line Tools match the installed SDK, run the source-only
-developer build loop with:
+developer build loop against your Mac's SSH destination (`--host`, or
+`CODEWIRE_MAC_HOST`) with:
 
 ```sh
 python3 scripts/dev/macos-cli.py --host user@mac.example.invalid \

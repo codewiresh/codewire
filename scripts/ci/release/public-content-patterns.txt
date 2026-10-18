@@ -1,11 +1,8 @@
-# Text that must not reach the public mirror: matched against added diff lines
-# and commit messages of every commit about to be pushed. One extended regular
-# expression per line. A bracket keeps a pattern from matching its own line.
-private\.invalid
-/home/[u]ser
-mac-runner
-private-site
+# Generic text that must not reach the public mirror: matched against added
+# diff lines and commit messages of every commit about to be pushed. One
+# extended regular expression per line. A bracket keeps a pattern from matching
+# its own line. Patterns that name private hosts, machines or repositories are
+# not tracked: check-mirror-content.sh reads them from the
+# MIRROR_PRIVATE_CONTENT_PATTERNS environment variable.
 Reviewed-o[n]: *[a-z]+://
-private-repository
-private-notes
 INFISICA[L]_[A-Z0-9_]*IDENTITY_ID[=:] ?"?[0-9a-fA-F-]{36}

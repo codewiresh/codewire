@@ -236,8 +236,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
             "AGPL-3.0-only obligations for the combined work.",
         ],
         "apps/cli/nfpm.yaml": ["license: AGPL-3.0-only"],
-        "apps/cli/aur/PKGBUILD": ["license=('AGPL-3.0-only')"],
-        "aur/PKGBUILD": ["license=('MIT')"],
     }
     for rel, expected_fragments in claims.items():
         text = read_text(rel)

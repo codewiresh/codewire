@@ -5,12 +5,20 @@
 #
 # REMOTE_HEAD is the commit the mirror's main points at. Everything after it up
 # to HEAD (default: HEAD) is scanned: gitleaks over the range with the
-# repository policy, and public-content-patterns.txt over added diff lines and
-# commit messages. A finding names the commit and the pattern number, never the
-# matched text. The owner clears a finding by fixing it, or through a reviewed
-# change to .gitleaks.toml or .gitleaks-baseline.json. An unknown or
-# non-ancestor REMOTE_HEAD fails closed: the first push to an empty mirror is
-# made by hand after the history filter's own verification.
+# repository policy, and two pattern lists over added diff lines and commit
+# messages: the generic, tracked public-content-patterns.txt, and the private
+# names that must stay out of the tracked tree, which arrive as newline-separated
+# extended regular expressions in MIRROR_PRIVATE_CONTENT_PATTERNS (the mirror
+# workflow passes the Forgejo Actions variable of the same name). A finding
+# names the commit and the pattern number, never the matched text or the
+# pattern. The owner clears a finding by fixing it, or through a reviewed change
+# to .gitleaks.toml or .gitleaks-baseline.json. An unknown or non-ancestor
+# REMOTE_HEAD fails closed: the first push to an empty mirror is made by hand
+# after the history filter's own verification.
+#
+# Without private patterns the gate fails closed. Only a local test run outside
+# CI may scan with the tracked patterns alone, by setting
+# MIRROR_CONTENT_LOCAL_TEST=1; CI refuses that flag.
 set -euo pipefail
 
 fail() {
@@ -30,6 +38,21 @@ readonly root
 readonly patterns="$root/scripts/ci/release/public-content-patterns.txt"
 [[ -f "$patterns" ]] || fail 'the public-content pattern file is missing'
 
+# Keep only pattern lines: blank lines and comments carry no pattern, and a
+# carriage return from a web form would silently stop a pattern matching.
+pattern_lines() { tr -d '\r' | grep -Ev '^[[:space:]]*(#|$)' || true; }
+
+private_patterns="$(printf '%s\n' "${MIRROR_PRIVATE_CONTENT_PATTERNS:-}" | pattern_lines)"
+readonly private_patterns
+if [[ -z "$private_patterns" ]]; then
+  if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then
+    fail 'MIRROR_PRIVATE_CONTENT_PATTERNS is empty; set the Forgejo Actions variable before mirroring'
+  fi
+  [[ "${MIRROR_CONTENT_LOCAL_TEST:-}" == 1 ]] ||
+    fail 'MIRROR_PRIVATE_CONTENT_PATTERNS is empty; set it, or MIRROR_CONTENT_LOCAL_TEST=1 for a local test run'
+  printf '[check-mirror-content] local test run: scanning with the tracked patterns only\n' >&2
+fi
+
 [[ "$base" =~ ^[0-9a-f]{40}$ ]] ||
   fail 'the mirror head is unknown; make the first push by hand after the history filter verification'
 git -C "$root" cat-file -e "${base}^{commit}" 2>/dev/null ||
@@ -44,26 +67,42 @@ if [[ -z "$(git -C "$root" rev-list -n 1 "$range")" ]]; then
 fi
 
 status=0
-number=0
-while IFS= read -r pattern; do
-  [[ -n "$pattern" && "$pattern" != '#'* ]] || continue
-  number=$((number + 1))
+
+# scan_pattern LABEL PATTERN: report the commits whose added lines or messages
+# match PATTERN. awk's diagnostics are discarded because they would quote the
+# pattern; an invalid pattern fails by its label.
+scan_pattern() {
+  local label="$1" pattern="$2" added messages
   # The pattern travels in the environment: awk -v would process its escapes.
+  PATTERN="$pattern" awk 'BEGIN{ if ("" ~ ENVIRON["PATTERN"]) {} }' 2>/dev/null </dev/null ||
+    fail "$label is not a valid extended regular expression"
   added="$(git -C "$root" log --no-color -p -U0 --format='@@commit %h' "$range" |
-    PATTERN="$pattern" awk 'BEGIN{p=ENVIRON["PATTERN"]} /^@@commit /{c=$2; next} /^\+\+\+ /{next} /^\+/{ if (substr($0, 2) ~ p) print c }' |
+    PATTERN="$pattern" awk 'BEGIN{p=ENVIRON["PATTERN"]} /^@@commit /{c=$2; next} /^\+\+\+ /{next} /^\+/{ if (substr($0, 2) ~ p) print c }' 2>/dev/null |
     sort -u | tr '\n' ' ')"
   messages="$(git -C "$root" log --no-color --format='@@commit %h%n%B' "$range" |
-    PATTERN="$pattern" awk 'BEGIN{p=ENVIRON["PATTERN"]} /^@@commit /{c=$2; next} { if ($0 ~ p) print c }' |
+    PATTERN="$pattern" awk 'BEGIN{p=ENVIRON["PATTERN"]} /^@@commit /{c=$2; next} { if ($0 ~ p) print c }' 2>/dev/null |
     sort -u | tr '\n' ' ')"
   if [[ -n "$added" ]]; then
-    printf '[check-mirror-content] pattern %s found in added lines of: %s\n' "$number" "$added" >&2
+    printf '[check-mirror-content] %s found in added lines of: %s\n' "$label" "$added" >&2
     status=1
   fi
   if [[ -n "$messages" ]]; then
-    printf '[check-mirror-content] pattern %s found in the messages of: %s\n' "$number" "$messages" >&2
+    printf '[check-mirror-content] %s found in the messages of: %s\n' "$label" "$messages" >&2
     status=1
   fi
-done <"$patterns"
+}
+
+number=0
+while IFS= read -r pattern; do
+  number=$((number + 1))
+  scan_pattern "pattern $number" "$pattern"
+done < <(pattern_lines <"$patterns")
+number=0
+while IFS= read -r pattern; do
+  [[ -n "$pattern" ]] || continue
+  number=$((number + 1))
+  scan_pattern "private pattern $number" "$pattern"
+done <<<"$private_patterns"
 
 command -v gitleaks >/dev/null || fail 'gitleaks is required to mirror'
 gitleaks_args=(git --no-banner --redact --exit-code 23

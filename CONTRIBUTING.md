@@ -1,12 +1,22 @@
 # Contributing
 
-## DCO
-
-This repository uses the Developer Certificate of Origin instead of a CLA. Sign off every commit with `git commit -s` so each commit includes a `Signed-off-by:` line.
-
-By contributing, you certify the DCO and agree that your contribution is licensed under the repository's AGPL-3.0 license.
+Codewire is not accepting issues or pull requests yet. This guide describes
+how the project is built and tested, and the terms that will apply once
+contributions open (see [License](#license)).
 
 ## Build, test, run
+
+The Rust build needs a Rust toolchain (`rustup`) and `protoc`, the Protocol
+Buffers compiler, on `PATH`; set `PROTOC` to its path otherwise:
+
+```bash
+sudo apt-get install protobuf-compiler   # Debian/Ubuntu
+sudo pacman -S protobuf                  # Arch
+brew install protobuf                    # macOS
+```
+
+`docs/dev/LOCAL-DEV.md` lists the rest of the tooling for the control plane and
+dashboard.
 
 Build and install the CLI from your checkout:
 
@@ -119,16 +129,16 @@ changes behaviour updates the public docs for the surface it changes.
 
 ## Pull requests
 
-Open pull requests against `main`. The canonical repository is the
+The project does not take pull requests yet. The canonical repository is the
 maintainers' Forgejo instance, which mirrors to GitHub; a maintainer reviews
-and lands each pull request, and `main` accepts no direct pushes.
+and lands each change against `main`, and `main` accepts no direct pushes.
 
-Expectations:
+Expectations for a change:
 
 - the selected verification families pass
 - relevant builds still pass for the changed area
 - commits use conventional commit style such as `feat:`, `fix:`, or `chore:`
-- no attribution trailers beyond your own `Signed-off-by`
+- no attribution or co-author trailers
 
 Maintainer-only workflow (Forgejo tooling, the retained Kind cluster,
 delivery and release steps) is described in `AGENTS.md` and
@@ -136,4 +146,8 @@ delivery and release steps) is described in `AGENTS.md` and
 
 ## License
 
-All contributions to this repository are accepted under AGPL-3.0.
+Once the project accepts contributions, each contribution is licensed under the
+license of the part it changes: AGPL-3.0-only for the application, and MIT for
+the SDK packages. A few packages carry another license: `crates/README.md`
+lists each crate's license, and every package directory carries its license
+text.

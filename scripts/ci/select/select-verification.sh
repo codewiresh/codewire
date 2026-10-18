@@ -436,6 +436,15 @@ if [ "$event_selected" = false ]; then
           select_token policy
           recognized=true
           ;;
+        aur/*|apps/cli/aur/*|apps/cli/scripts/update-homebrew-formula.sh|\
+        .schema-reset-write-test)
+          # Retired manual AUR/Homebrew packaging and a stray root file feed no
+          # build, test or package. Their removal needs only Policy; a path
+          # that reappears is unclassified again.
+          select_token policy
+          recognized=true
+          continue
+          ;;
       esac
     fi
 
@@ -1870,8 +1879,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/verify-release-support-pair.sh|scripts/ci/tests/test-verify-release-support-pair.sh|\
       apps/cli/GPG_PUBLIC_KEY.asc|\
       apps/cli/README.md|apps/cli/install.sh|scripts/dev/test-cw-release-update.py|\
-      apps/cli/aur/PKGBUILD|apps/cli/nfpm.yaml|\
-      apps/cli/scripts/update-homebrew-formula.sh|install.sh)
+      apps/cli/nfpm.yaml|install.sh)
         select_token release
         recognized=true
         ;;

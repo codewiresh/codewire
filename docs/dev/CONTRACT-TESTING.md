@@ -96,7 +96,6 @@ backed Rust matrix and directly probes each enabled service binary; it fails on
 a skip or an empty test count.
 
 While an area dual-serves REST and Connect, both answer from the same service
-layer and the area's Rust-owned suites must be green on both before clients flip
-(`connect-rpc/00-MASTER.md`, gate G4/G5). Per-service Connect
-suites (api-keys first, `connect-rpc/05`) build on
+layer and the area's Rust-owned suites must be green on both before clients flip.
+Per-service Connect suites (api-keys first) build on
 the Rust shared harness rather than re-proving the serving stack.

@@ -1505,14 +1505,14 @@ cat > "$environment_tree/bin/chromium-fixture" <<'EOF'
 printf 'Chromium %s\n' "${FIXTURE_CHROMIUM_VERSION:?}"
 EOF
 chmod +x "$environment_tree"/bin/*
-# A passing environment needs a short executable TMPDIR outside /tmp and
-# /run; this fixture's own directory is usually too long.
+# A passing environment needs a short executable TMPDIR outside /run and
+# .claude; this fixture's own directory is usually too long.
 environment_ok_tmp=""
 for short_root in /var/tmp "${HOME:-}/.cache" "$ORIGINAL_TMPDIR"; do
   [ -n "$short_root" ] && [ -d "$short_root" ] && [ -w "$short_root" ] || continue
   candidate="$(mktemp -d "$short_root/pe.XXXXXX" 2>/dev/null)" || continue
   case "$(cd "$candidate" && pwd -P)/" in
-    /tmp/*|/run/*|*/.claude/*) rm -rf -- "$candidate"; continue ;;
+    /run/*|*/.claude/*) rm -rf -- "$candidate"; continue ;;
   esac
   if [ "${#candidate}" -le 34 ] && printf '#!/bin/sh\nexit 0\n' >"$candidate/x" \
       && chmod 0700 "$candidate/x" && "$candidate/x"; then
@@ -1562,7 +1562,24 @@ mkdir -p "$long_tmp"
 assert_environment_fails tmp-length 'Unix-socket tests below it need 34 or fewer' \
   env TMPDIR="$long_tmp" "$precheck"
 
-assert_environment_fails tmp-root 'TMPDIR resolves to /tmp' env TMPDIR=/tmp "$precheck"
+# /tmp is judged by the execution probe, not by its path: accepted where it
+# allows executing files, refused as noexec where it does not.
+tmp_probe="$(mktemp /tmp/preflight-tmp-probe.XXXXXX)"
+printf '#!/bin/sh\nexit 0\n' >"$tmp_probe"
+chmod 0700 "$tmp_probe"
+tmp_executable=false
+if "$tmp_probe" 2>/dev/null; then
+  tmp_executable=true
+fi
+rm -f -- "$tmp_probe"
+if [ "$tmp_executable" = true ]; then
+  tmp_output="$(run_environment env TMPDIR=/tmp "$precheck" 2>&1)" ||
+    { printf '%s\n' "$tmp_output" >&2; fail 'environment precheck refused an executable /tmp'; }
+  assert_contains environment_tmp_executable "$tmp_output" '[preflight-environment] OK'
+else
+  assert_environment_fails tmp-noexec 'TMPDIR=/tmp does not allow executing files (noexec mount)' \
+    env TMPDIR=/tmp "$precheck"
+fi
 mkdir -p "$TMP/home/.claude/jobs"
 assert_environment_fails claude-component 'the image-source policy test rejects every path with a .claude component' \
   env TMPDIR="$TMP/home/.claude/jobs" "$precheck"
