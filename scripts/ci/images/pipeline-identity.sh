@@ -11,7 +11,7 @@
 # build and required before signing. It is an identifier, not a URL anything
 # fetches. Changing it invalidates verification of every image built under the
 # old value, so change it only in a release that rebuilds the whole set.
-readonly PIPELINE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+readonly PIPELINE_BUILDER_ID='https://codewire.sh/ci/builders/protected-delivery/v1'
 # The repository URL provenance must name as its source.
 readonly PIPELINE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
 # OpenBao serving the Transit signing key and publisher credentials. Every

@@ -853,7 +853,7 @@ export FAKE_DOCKER_CALLS="$work/docker-calls"
 export FAKE_SCCACHE_CALLS="$work/sccache-calls"
 export FAKE_MANIFESTS="$work/manifests"
 export FAKE_DIGEST="$digest"
-export FAKE_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+export FAKE_PROVENANCE_BUILDER_ID='https://codewire.sh/ci/builders/protected-delivery/v1'
 export FAKE_CW_FIXTURE="$CW_FIXTURE"
 export FAKE_CW_CONTEXTS="$work/cw-contexts.jsonl"
 export FAKE_SOURCE_SHA="$source_sha"
@@ -898,7 +898,7 @@ grep -qF -- "CODEWIRE_IMAGE_SOURCE_SHA=$source_sha" "$FAKE_DOCKER_CALLS" ||
   fail 'exact source revision did not reach canonical Bake'
 grep -qF -- 'CODEWIRE_RUST_PROFILE=runtime' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not force the thin-LTO runtime profile'
-grep -qF -- 'builder-id=https://git.example.invalid/infra/ci/builders/protected-delivery/v1' "$FAKE_DOCKER_CALLS" ||
+grep -qF -- 'builder-id=https://codewire.sh/ci/builders/protected-delivery/v1' "$FAKE_DOCKER_CALLS" ||
   fail 'protected product build omitted its explicit minimal BuildKit SLSA provenance identity'
 grep -qF -- 'version=v1' "$FAKE_DOCKER_CALLS" ||
   fail 'protected product build did not request the verified SLSA v1 predicate'

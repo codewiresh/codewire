@@ -163,7 +163,7 @@ case "${1:-} ${2:-} ${3:-}" in
     done
     [[ -n "$format" && -n "$reference" ]]
     if [[ "$format" == '{{json .Provenance.SLSA}}' ]]; then
-      builder='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+      builder='https://codewire.sh/ci/builders/protected-delivery/v1'
       [[ "$reference" != "${FAKE_BAD_PROVENANCE_REF:-}" ]] || builder='https://attacker.invalid/builder'
       revision="${GITHUB_SHA:?}"
       if [[ -n "${FAKE_CARRIED_REF:-}" && "$reference" == "$FAKE_CARRIED_REF" ]]; then

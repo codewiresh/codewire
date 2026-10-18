@@ -207,7 +207,7 @@ builder="$(cut -d'|' -f2 "$build_log" | sort -u)"
 [[ "$(cut -d'|' -f4 "$build_log" | sort -u)" = local ]] ||
   fail "protected wrapper did not keep sccache job-local"
 [[ "$(cut -d'|' -f5 "$build_log" "$daemon_build_log" | sort -u)" = \
-  'https://git.example.invalid/infra/ci/builders/protected-delivery/v1' ]] ||
+  'https://codewire.sh/ci/builders/protected-delivery/v1' ]] ||
   fail "protected wrapper did not bind the stable protected builder identity"
 [[ "$(awk -F'|' '$1 == "services" { print $6 }' "$build_log")" = 1 ]] ||
   fail "services did not anchor the service runtime-set Bake transaction"
