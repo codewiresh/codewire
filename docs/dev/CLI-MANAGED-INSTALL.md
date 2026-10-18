@@ -29,7 +29,8 @@ version can still be selected or reused, but a new version is refused.
 ## Commands
 
 ```sh
-curl -fsSL https://codewire.sh/install.sh | sh   # stock tools; installs a managed cw
+curl -fsSL https://get.codewire.sh | sh          # stock tools; installs a managed cw
+curl -fsSL https://codewire.sh/install.sh | sh   # the same installer by its direct address
 make cli-install                      # build, then `cw install --managed`
 cw update                             # same as --channel stable
 cw update status [--json]
@@ -44,8 +45,7 @@ still `N`. Public fetching is implemented with the compiled release primary key;
 `--version` or `--channel stable` selects signed assets at the fixed public origin.
 Unavailable assets or origin refuse before selection; `cw update` alone follows
 the stable channel. Local `--from`/`--sha256` updates and retained rollback remain
-available. A synthetic test key is never production trust. See
-cw release delivery (runbooks/cw-release-delivery.md).
+available. A synthetic test key is never production trust.
 
 `cw-runtime.json` is the schema-2 cw identity (`schema_version`,
 `protocol_version`, `record_version`, `package_version`, `target`,
@@ -68,8 +68,7 @@ any store or entry change:
 
 `make cli-install` builds through `scripts/dev/build-cw.py`, which passes the
 checkout's revision and source digest explicitly. It admits the result only
-when the record, the unchanged source and every compiled input agree (see
-cw release delivery (runbooks/cw-release-delivery.md)). Set
+when the record, the unchanged source and every compiled input agree. Set
 `CODEWIRE_VERSION` to override the effective version.
 
 Self-install refuses, before any store or entry change:

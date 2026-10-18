@@ -7,12 +7,7 @@ Temporal, Kubernetes resources, and the same service boundaries used by the
 shipped application.
 
 Local verification is the development loop. Reproduce and fix product and
-integration failures locally; use the exact-head Forgejo run as merge
-attestation after the local gate is green.
-
-The hosted verification flow, runner isolation model, cache boundaries, and
-decision-plan transition are documented in
-[docs/dev/CI-ARCHITECTURE.md](dev/CI-ARCHITECTURE.md).
+integration failures locally; hosted CI confirms the merged tree afterwards.
 
 ## Canonical commands
 

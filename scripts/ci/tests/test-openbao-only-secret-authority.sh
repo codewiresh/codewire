@@ -104,7 +104,7 @@ done
 if rg -n \
   'TENANT_SECRET_(STORE|KEK_PROVIDER|KEYRING)|LocalSecretStore|tenant-secret-operator|tenant_secret_control|local_secrets|KekProviderKind::Keyring' \
   crates/codewire-orchestration/src crates/codewire-protected-store/src \
-  deployments docs/SECRETS.md; then
+  deployments; then
   printf 'retired tenant-secret runtime choice remains active\n' >&2
   exit 1
 fi
@@ -115,7 +115,7 @@ if rg -n --glob '!migrate.rs' \
 fi
 if rg -n \
   'TENANT_SECRET_BAO_SA_TOKEN_PATH|CONFIDENTIAL_STORAGE_BAO_SA_TOKEN_PATH|/var/run/secrets/codewire-(tenant-bao|confidential-openbao)' \
-  crates deployments docs/SECRETS.md; then
+  crates deployments; then
   printf 'obsolete file-backed OpenBao workload identity remains active\n' >&2
   exit 1
 fi

@@ -155,7 +155,7 @@ while IFS=$'\t' read -r path expected_sha384; do
       ;;
   esac
   reference="/assets/codewire/${path##*/}"
-  sources=("crates/codewire-dashboard-web/templates" "docs/homepage/demo.html")
+  sources=("crates/codewire-dashboard-web/templates")
   matches="$(rg --no-heading -n -F "$reference" "${sources[@]}" || true)"
   if [[ -z "$matches" ]]; then
     echo "supply-chain audit: vendored browser asset is not referenced: $path" >&2

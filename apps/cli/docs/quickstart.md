@@ -6,7 +6,7 @@ session grammar works for local hosts, local sandboxes and platform sandboxes.
 ## Install
 
 ```bash
-brew install codewiresh/tap/codewire
+curl -fsSL https://get.codewire.sh | sh
 ```
 
 Or build the Rust CLI from this repository:

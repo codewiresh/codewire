@@ -1,10 +1,8 @@
 # Proto Style Guide
 
-Canonical authoring rules for every proto under `proto/`. Promoted from
-`connect-rpc/02-proto-authoring-guide.md` (WI-3); amendments
-land here, not in the plan doc. Program context:
-`connect-rpc/00-MASTER.md` and the ADR
-(`2026-07-10-connect-rpc-api-contract-design.md`).
+Canonical authoring rules for every proto under `proto/`. Amendments land
+here. The control-plane contract is authored in `proto/` and generated with
+Buf; there is no separate OpenAPI contract.
 
 ## Layout
 
@@ -29,8 +27,8 @@ proto/
   google/rpc/             # vendored error-detail types (01 WI-1)
 ```
 
-(`daemon.v1` is the Rust-consumed private gateway-to-daemon protocol under
-`libs/daemon-proto/proto/`; see `proto/README.md`.)
+(`daemon.v1` is the private gRPC protocol between orchestration and the
+workspace daemon under `libs/daemon-proto/proto/`; see `proto/README.md`.)
 
 `codewire.testing.v1` (an 03-D8 amendment to this layout) is the
 Connect serving infrastructure's conformance fixture (`PingService`):

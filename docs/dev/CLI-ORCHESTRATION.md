@@ -716,7 +716,7 @@ line). The synthetic journey also proves a killed Codex or Claude driver or
 process still ends the message unknown, and that neither agent is started
 again by its driver.
 None replaces the matching native Linux hardware or retained Kind sandbox
-journey. Program #2255 holds current commands, outcomes and landing evidence.
+journey.
 
 A managed agent runs the client the workspace user's shell runs, in a local
 VM and in a hosted Sandbox alike (owner decision 2026-10-16): the first
@@ -757,7 +757,8 @@ shows they come first on PATH, and proves both managed agents ran them.
 exercise detached and TERM-resistant tools, a cancelled stop caller, driver
 death, safe generation admission, missing/stale receipt refusal and an
 unrelated sentinel. Provider responses are synthetic; live provider enrollment
-remains under #1902.
+is covered by the credentials journeys in
+[SECRETS-AND-CREDENTIALS.md](SECRETS-AND-CREDENTIALS.md).
 
 Stalled provider initialization has a separate bounded isolated check:
 

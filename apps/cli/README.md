@@ -231,7 +231,7 @@ cw network nodes
 `cw mesh up`, `cw mesh status`, and `cw mesh down` manage an optional local
 Mesh service installation.
 
-Remote member execution is planned in [#2269](https://git.example.invalid/codewire/codewire/issues/2269).
+Remote member execution is planned.
 Its execution grants and `--member` routing remain unimplemented.
 
 ## Clean cutover

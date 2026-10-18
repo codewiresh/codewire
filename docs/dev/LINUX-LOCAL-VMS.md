@@ -11,7 +11,7 @@ agents in a local VM, and what to do when something fails. For the Mac, see
 Install `cw`, then its local VM runtime:
 
 ```sh
-curl -fsSL https://codewire.sh/install.sh | sh
+curl -fsSL https://get.codewire.sh | sh
 cw setup --local
 ```
 
@@ -113,7 +113,8 @@ image's Codex and Claude Code until the user, or the client itself, updates
 them in the home. The Codewire `cw` that drives the agent inside
 the VM comes from the runtime that `cw setup --local` installed.
 [CLI-ORCHESTRATION.md](CLI-ORCHESTRATION.md) covers messaging, waiting and
-parent and child agents, and [SECRETS.md](../SECRETS.md) covers credentials
+parent and child agents, and
+[SECRETS-AND-CREDENTIALS.md](SECRETS-AND-CREDENTIALS.md) covers credentials
 and profiles.
 
 ## SSH keys in a local VM

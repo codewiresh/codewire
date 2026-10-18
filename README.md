@@ -1,351 +1,130 @@
 # Codewire
 
-Agent-ready sandbox environments. Open source under AGPL-3.0-only.
+Isolated development environments for developers and AI coding agents.
+Open source under AGPL-3.0-only.
 
-## What it is
+Codewire runs each environment in its own hardware-virtualized VM with its own
+kernel, keeps durable terminal and agent sessions inside it, and lets you reach
+it by shell, SSH, file transfer, browser terminal and preview URLs. The same
+`cw` CLI drives three placements: a hosted sandbox on the Codewire platform, a
+local VM on your own Linux or Apple Silicon machine, and a trusted session on
+your host. This repository holds the platform services, the dashboard, the
+CLI, the local VM runtime and the SDKs.
 
-Codewire orchestrates sandbox environments on Kubernetes via the `agent-sandbox` CRD operator. Each environment is a long-lived development environment that users or AI agents can SSH into, exec inside, transfer files into, and tunnel ports through.
+## Install
 
-This repository contains the control plane, dashboard, CLI, SDKs, and generated API types for that stack.
-
-## Repo layout
-
+```sh
+curl -fsSL https://get.codewire.sh | sh
 ```
-apps/
-  cli/         cw packaging, installers, charts, and release metadata
-  dashboard/   Playwright contract and Rust/Zola production image
-  docs/        Zola documentation source
-  ios/         native iOS client
 
-libs/
-  daemon-proto/       internal daemon and broker protobuf contract
-  gen-go/, gen-python/  generated public Connect clients
-  sdk-go/, sdk-ts/, sdk-python/  public language SDKs
-  tailnet/            bounded Tailscale interoperability support
+It redirects to the installer, which you can also fetch directly:
 
-crates/        Rust workspace for services, web UI, CLI, desktop, and shared clients
-packages/      shared design assets and generated TypeScript Connect schemas
-deployments/   k8s manifests + kustomize overlays
-docs/          stable docs + planning notes
+```sh
+curl -fsSL https://codewire.sh/install.sh | sh
 ```
+
+The installer needs only a POSIX shell, `curl` and a SHA-256 tool. It
+downloads the stable release for your platform (Linux x86_64/arm64, macOS
+Apple Silicon/Intel), checks it against the release's `SHA256SUMS`, and
+installs it as a managed `cw` that `cw update` keeps current with signed
+releases from `releases.codewire.sh`. See
+[docs/dev/CLI-MANAGED-INSTALL.md](docs/dev/CLI-MANAGED-INSTALL.md).
+
+From a checkout, `make cli-install` builds and installs the same way.
+`cargo build -p codewire-cli-bin --bin cw` gives an unmanaged development
+binary at `target/debug/cw`.
 
 ## Quick start
 
-### Install this checkout's CLI
+A local VM needs no account. On Linux it runs Cloud Hypervisor on KVM; on an
+Apple Silicon Mac it uses Virtualization.framework.
 
-```bash
-make dogfood
+```sh
+cw setup --local                       # install the pinned VM runtime
+cw env create --local --name my-app --path .
+cw shell                               # creation selected my-app
+cw run -- cargo test                   # a durable session; cw list, cw attach
+cw env stop --local my-app
 ```
 
-This aliases `make cli-install-user`: it builds the normal locked release CLI,
-runs the existing help smoke checks, and replaces `cw` in `XDG_BIN_HOME` or
-`~/.local/bin`. Ensure that directory is on `PATH`. It does not boot a VM,
-enable synthetic features, or import credentials; local environment creation
-is a separate step below.
+`--path .` mounts the folder live in the VM; dependency and build folders
+(`node_modules`, `target`, `.venv` by default) stay on the VM disk.
 
-### Local kind control plane
+A hosted sandbox:
 
-```bash
-# Interactive development cluster
-make up
-
-# Separate isolated Rust-owned product gate
-make e2e-kind
+```sh
+cw setup                               # sign in, pick an organization
+cw env create --name my-app --image workspace
+cw shell my-app
+cw run my-app --name lead --agent codex --detach --prompt 'Review this repo'
+cw inbox my-app lead
 ```
 
-The interactive local kind ingress listens on `http://127.0.0.1:8080`; the e2e
-gate creates and deletes its own cluster. Use `docs/dev/KIND-E2E.md` for the
-full local cluster workflow.
+`cw --help` groups every command; `cw init` writes a `codewire.yaml` that
+either placement can use.
 
-### Local sandbox environment (CLI)
+## How it works
 
-On Linux/x86_64, local VMs run Cloud Hypervisor directly through KVM. A
-release's `cw` installs its pinned runtime (Cloud Hypervisor v53, the Linux
-6.18.48 guest kernel, the Codewire guest root and the in-VM `cw`) with
-`cw setup --local`, checking every file against the digests it carries. The
-host needs usable `/dev/kvm` and `/dev/vhost-vsock`, Linux 6.2 or later with
-Landlock, and e2fsprogs. See [Local VMs on Linux](docs/dev/LINUX-LOCAL-VMS.md)
-for the requirements, managed agents and troubleshooting.
+- **Control plane.** Rust services behind one shared chassis
+  (`crates/codewire-server-core`): identity and OIDC (`codewire-idp`),
+  environment lifecycle (`codewire-orchestration`, a Temporal worker and the
+  Kubernetes sandbox client), billing (`codewire-billing`), the credential
+  broker (`codewire-credential-service`), the tailnet coordinator, DERP and
+  UDP relays, and Codewire Mesh. PostgreSQL holds product state; Temporal runs
+  lifecycle workflows. The dashboard (`crates/codewire-dashboard-web`) is
+  server-rendered HTML with HTMX.
+- **Hosted environment.** One Pod per environment, created through the
+  kubernetes-sigs `agent-sandbox` CRDs and scheduled with a RuntimeClass:
+  `commodity` is Kata Containers with Cloud Hypervisor; `confidential` is Kata
+  with QEMU-SNP on eligible hosts. The Pod holds a `workspace` container and a
+  guest-local `dind` container. The workspace runs `cw __hosted-daemon`.
+- **Daemon.** The daemon is the in-environment control plane: exec, PTY and
+  file RPCs for sessions, an SSH server (with SFTP and SCP) on port 2222, and
+  the environment's tailnet peer. Orchestration binds it, records its host
+  key, and relays its credential bridge to the broker so provider secrets stay
+  outside the sandbox. There is no sidecar or gateway.
+- **Access.** `cw` reaches a hosted environment over WireGuard: direct UDP
+  first, then the UDP relay, then DERP, and finally a WebSocket SSH proxy
+  through orchestration. `cw config-ssh` lets OpenSSH, VS Code and `rsync`
+  use the same path.
+- **Local VM.** `cw` supervises the VM on your machine with the same guest
+  daemon and workspace image; secrets and provider credentials stay in a host
+  broker and reach the VM only as bounded capabilities.
 
-On an Apple Silicon Mac, local VMs run under Virtualization.framework through
-the signed `codewire-vz-runner` helper instead of Cloud Hypervisor, with the
-same artifact paths. Build the arm64 kernel Image and guest root on an x86_64
-Linux host and copy them to the Mac. On the Mac, build the pinned e2fsprogs
-and git the runtime ships (a stock Mac has neither; nothing comes from Homebrew
-or the Xcode Command Line Tools), then build, sign and install the helper with
-all four:
+## Repository layout
 
-```bash
-python3 scripts/dev/macos-ext4-tool.py --source-archive /abs/e2fsprogs-1.47.4.tar.gz \
-  --output /abs/private/e2fsprogs
-python3 scripts/dev/macos-git-tool.py --source-archive /abs/git-2.56.0.tar.xz \
-  --output /abs/private/git
-make macos-local-runtime KERNEL=/abs/Image INITRAMFS=/abs/initramfs.cpio \
-  E2FSPROGS=/abs/private/e2fsprogs/bundle GIT_BUNDLE=/abs/private/git/bundle
+```text
+apps/cli/        cw installer, packaging and release metadata
+apps/dashboard/  dashboard image and browser tests
+apps/docs/       documentation site (codewire.sh/docs)
+crates/          Rust workspace: services, daemon, CLI, local VM runtime, dashboard
+deployments/     Kubernetes manifests, kustomize overlays, Docker images
+images/          workspace and runtime OCI images
+libs/            SDKs (TypeScript, Go, Python) and generated clients
+packages/        design system and generated TypeScript schemas
+proto/           Connect-RPC contract source
+docs/            architecture, glossary and developer docs
 ```
-
-Until the arm64 default workspace image is published, pass `--image` with a
-multi-architecture image, for example
-`--image docker.io/library/alpine:3.22 --no-docker`. See
-[macOS CLI](docs/dev/MACOS-CLI.md) for the full flow and what macOS local
-environments cannot do yet.
-
-```bash
-# Build the CLI
-cargo build -p codewire-cli-bin --bin cw
-
-# Auto-clone a clean Git root, or copy an ordinary directory once.
-./target/debug/cw env create --local \
-  --name codewire-dev \
-  --cpu 2 \
-  --memory 8GB \
-  --path .
-
-# Creation selects it, so enter it without a platform login or target argument.
-./target/debug/cw shell
-
-# Run a durable non-interactive session and manage the same VM.
-./target/debug/cw run -- uname -a
-./target/debug/cw env info --local codewire-dev
-./target/debug/cw env stop --local codewire-dev
-./target/debug/cw env start --local codewire-dev
-./target/debug/cw env restart --local codewire-dev
-
-# CPU and memory apply on restart; the persistent ext4 disk grows offline.
-./target/debug/cw env resize --local codewire-dev \
-  --cpu 4 --memory 16GB --disk 40GB --yes
-
-# Read-only inventory: this never adopts, repairs, or deletes an orphan.
-./target/debug/cw doctor local
-./target/debug/cw env rm --local codewire-dev --yes
-```
-
-Familiar resource inputs are binary quantities: `8GB` of memory allocates 8192
-MiB, and `2048MB` of disk resolves to 2 GiB. `GiB`/`MiB` and their shorter
-`Gi`/`Mi` spellings also work, and suffixes are case-insensitive.
-
-An exact clean Git root becomes an independent clone of its checked-out commit;
-host hooks, credential helpers, embedded remote credentials, unrelated refs,
-and later host changes do not enter the VM. An ordinary directory becomes an
-environment-owned point-in-time copy. Use `--path-mode clone` or
-`--path-mode copy` to override automatic classification; direct host access is
-never inferred from `--path`. The primary workspace runs directly in the
-canonical Codewire OCI workspace image beneath trusted guest init and runc;
-Docker does not own it. A `codewire.yaml` may combine portable `repositories`
-with local `mounts` using `mode: copy`; relative mount sources resolve from the
-configuration file, and each becomes an environment-owned point-in-time copy.
-Multi-repository entries use the same normalized project model as the platform.
-`image` in `codewire.yaml` and `--image` select any valid OCI workspace image. A
-`ports` entry with `port` declares a guest application port. A `host_port` and
-`guest_port` pair also publishes it on the host loopback address only:
-
-```yaml
-ports:
-  - host_port: 18080
-    guest_port: 8080
-```
-
-A running local environment can publish or withdraw ports without a restart,
-including guest ports `codewire.yaml` does not declare. A stopped one records
-the change and binds it at its next start; changes persist across restarts.
-
-Small files on the live project mount are 10–140× slower to create than on
-the VM's own disk, so dependency and build folders stay in the VM.
-`workspace.vm_only` lists them as `.dockerignore`-style patterns, relative to
-the project folder:
-
-```yaml
-workspace:
-  vm_only:          # stored on the VM's own disk, never shared with the host
-    - node_modules
-    - target
-    - .venv
-    - "**/node_modules"   # every node_modules in a monorepo
-```
-
-Without the key the list is `node_modules`, `target` and `.venv`, top level
-only, less any that Git tracks in the project; `vm_only: []` turns it off.
-
-- **Patterns** are anchored at the project folder, as in `.dockerignore`:
-  `node_modules` is the top-level folder only. A `**` segment matches any
-  number of folders, none included (`build/**` also names `build`), `*` any
-  run of characters within a name, `?` one character, `[abc]`, `[a-z]` or
-  `[!a-z]` one character of a class, and `\` escapes the next character.
-  Matching is case-sensitive. Patterns match folders only, never a `.git`
-  folder or anything in one, and a match that holds its own `.git` stays
-  shared. A trailing `/` is ignored. Refused: absolute paths, `..`, `.git`,
-  `!` exceptions, a pattern that is only `**`, duplicates (letter case
-  aside), more than 32 patterns, 256 bytes in one or 2 KiB in all, more than
-  16 segments, or more than 4 `*` in one segment. Patterns may overlap: a
-  matching folder is kept whole, so the outermost match wins.
-- **Review:** `cw env create --local` shows the patterns ("Kept in the VM:
-  node_modules, target, .venv"), the folders each one matches, those that
-  stay shared and why, and any matching folder that holds files Git tracks
-  (in the VM they look deleted, so do not commit there). A change to
-  `vm_only` applies to VMs created after it.
-- **Live mount (the default):** at every start the guest finds the folders
-  that match and binds a folder on the VM's disk over each one, so installs
-  and builds there run at VM-disk speed. The VM never sees the host's copy
-  and the host never sees the VM's; the VM's copy survives stop and start.
-  A folder created after the VM starts that matches is kept from the next
-  start: until then it is shared, and what is written into it before then
-  stays on the host, hidden from the VM, so install again. The search keeps
-  at most 256 folders per VM (plain names first, then the shallowest) and
-  stops after 20,000 folders, 100,000 names, 64 levels or 10 seconds; when a
-  limit stops it, the review and the guest console say so. A plain-names
-  list, such as the default, needs no search. A VM-disk folder that no start
-  has used for 7 days is removed.
-- **Folders the host lacks:** a pattern without wildcards whose folder is
-  missing gets it created on the host, empty, as the mount point (its parent
-  must exist). A symlink or a file at the path, or a missing parent, stays
-  shared, and create says so. A pattern with wildcards keeps only folders
-  that exist.
-- **Inside the VM** a kept folder is a mount point: its contents can be
-  deleted, but the folder itself cannot be removed or renamed.
-  `rm -rf node_modules` and `cargo clean` empty it, then report that it is
-  busy, as does removing a folder that holds one (`rm -rf packages/web`).
-- **Host changes while the VM runs:** if the host deletes or replaces a kept
-  folder, for example with `cargo clean` or `rm -rf node_modules` on the
-  host, the guest binds it again within about a second (and recreates the
-  empty host folder). Files the VM writes there in that second land on the
-  host.
-- **Copy:** a copy (`--path-mode copy`, a snapshot of a folder that is not a
-  Git root, or a `mode: copy` mount of the project folder) leaves every
-  matching folder out, like `.dockerignore`; a clone already takes only
-  committed files.
-- **Not applied:** read-only mounts and mounts of other folders keep nothing
-  in the VM.
-- **Image user changes:** if the workspace image's user changes, the kept
-  folders start empty.
-
-Only declared ports are reachable over Mesh.
-
-```bash
-cw env port add --local 47321 --env NAME                    # 127.0.0.1:47321 -> 47321
-cw env port add --local 8080 --host-port 18081 --env NAME   # 127.0.0.1:18081 -> 8080
-cw env port ls --local --env NAME
-cw env port rm --local 18081 --env NAME                     # by host port
-```
-
-Native local environments join Mesh only when `--network NAME` is explicit or
-a selected network is confirmed; `--no-network` always disables attachment.
-Use `cw network use NAME --auto-connect` to make the selected network the
-durable no-prompt default for new local and platform environments at the
-matching Mesh origin and organization; running `cw network use NAME` without
-that flag restores confirmation. Native local creation with no selected network
-starts neither Mesh transport nor platform access. Once attachment is selected,
-native local and platform creation fail instead of silently creating a
-disconnected environment when enrollment cannot be completed.
-`cw mesh up` provides the standalone offline/self-hosted coordinator used by
-the product smoke. The host owns Mesh identity and transport, and the VM sees
-only admitted TCP streams for its declared application ports. Access profiles
-select material-free credential grants whose protected values remain in the
-isolated host broker. Credential and access-profile commands treat a bare
-selector as a name. Use `name:<name>` for a name that resembles selector syntax,
-`id:<canonical-uuid>` for a record ID, and `user/<name>` for an exact
-scope-qualified access-profile reference. Malformed prefixes are rejected.
-Selected application secrets reach install/startup and managed launches under
-their original names; provider profiles keep private credentials outside the
-VM. See [Secrets and credentials](docs/dev/SECRETS-AND-CREDENTIALS.md) for
-selection, update and clear commands. Presets and automatic agent installation
-remain explicitly unsupported in the native preview. Repository, copy-mount,
-and direct-mount skills are
-captured into immutable environment-owned generations at create time and on
-explicit skill refresh. An owner-only SQLite WAL is the authoritative
-supervisor state. Preview JSON is not imported, and older SQLite schemas are
-unsupported. Lifecycle effects are journaled, disk shrink is rejected, and
-delete moves the environment tree to an operation-specific trash generation
-before removing only known runtime files.
-
-Developers with artifacts staged outside the default cache can point the CLI
-at them and run the complete product smoke:
-
-```bash
-export CODEWIRE_NATIVE_ARTIFACT_ROOT=/absolute/path/to/artifacts
-export CODEWIRE_NATIVE_ARTIFACT_LOCK=/absolute/path/to/artifacts.lock.json
-cargo build -p codewire-cli-bin --bin cw \
-  -p codewire-mesh --bin codewire-mesh \
-  -p codewire-derp --bin codewire-derp
-cargo build -p codewire-local-vmm \
-  --bin codewire-local-codex-bridge-smoke \
-  --bin codewire-local-public-data-smoke \
-  --bin codewire-local-state-probe
-mkdir -p .tmp
-chmod 0700 .tmp
-
-scripts/ci/verify/smoke-native-local-environment.sh \
-  --cw-bin "$PWD/target/debug/cw" \
-  --mesh-bin "$PWD/target/debug/codewire-mesh" \
-  --derp-bin "$PWD/target/debug/codewire-derp" \
-  --data-plane-smoke-bin "$PWD/target/debug/codewire-local-public-data-smoke" \
-  --credential-bridge-smoke-bin "$PWD/target/debug/codewire-local-codex-bridge-smoke" \
-  --state-probe-bin "$PWD/target/debug/codewire-local-state-probe" \
-  --artifact-root "$CODEWIRE_NATIVE_ARTIFACT_ROOT" \
-  --artifact-lock "$CODEWIRE_NATIVE_ARTIFACT_LOCK" \
-  --scratch-parent "$PWD/.tmp"
-```
-
-The native smoke verifies that repository, copy-mount, and direct-mount skill
-inputs remain immutable until an explicit refresh, are projected read-only in
-the guest, and preserve executable helper modes.
-
-The native local supervisor is the only supported local environment owner:
-
-```bash
-./target/debug/cw env create --local \
-  --name native-local \
-  --image workspace \
-  --path .
-
-# Resize a native environment. A terminal shows the current-to-desired plan,
-# active-session warning, and a default-no confirmation before the restart.
-./target/debug/cw env resize --local native-local --cpu 6 --memory 12Gi --disk 120Gi
-
-# Automation must provide explicit resources and --yes.
-./target/debug/cw env resize --local native-local --cpu 6 --yes --output json
-```
-
-`cw env resize ENV` resolves the placement when it is unambiguous. Native and
-platform resize both restore a running VM after applying changes without
-recreating the environment, and disk growth cannot be reversed. Native VMs use
-whole CPU cores and perform ext4 growth while stopped.
-
-### Local database and dashboard loop
-
-```bash
-make dev           # Start local Postgres
-make db-init       # Apply the baseline schema
-make web           # Run the dashboard dev server
-```
-
-### SDK tests
-
-```bash
-make test-sdk      # Typecheck + unit tests across Go, Python, TypeScript SDKs
-```
-
-## Architecture (one-paragraph)
-
-The **control plane** (`codewire`) accepts API requests, manages environment lifecycle, integrates with Kubernetes via the `agent-sandbox` CRD, handles billing, and exposes OIDC. Each running environment is a pod containing a workspace container + a **gateway** sidecar; the gateway routes SSH/SCP/SFTP from outside the cluster to a **daemon** running alongside user code. Gateway↔daemon talks over Connect-RPC. The web dashboard and the `cw` CLI are first-class clients of the control plane.
-
-## Status
-
-Codewire is pre-1.0. The OSS surface is stable enough to run and contribute against but breaking changes can land between releases. Architectural direction and current work are tracked on the issue tracker.
 
 ## Documentation
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — stable architecture summary
-- [docs/GLOSSARY.md](docs/GLOSSARY.md) — canonical terms
-- [docs/dev/CODEWIRE-APP-GUIDE.md](docs/dev/CODEWIRE-APP-GUIDE.md) — internal engineering guide
+- [User guide](https://codewire.sh/docs)
+- [Architecture](docs/ARCHITECTURE.md) and [glossary](docs/GLOSSARY.md)
+- [Local VMs on Linux](docs/dev/LINUX-LOCAL-VMS.md) and [on macOS](docs/dev/MACOS-CLI.md)
+- [Sessions and agent orchestration](docs/dev/CLI-ORCHESTRATION.md)
+- [Sandbox daemon](docs/dev/SANDBOX-DAEMON.md), [networking](docs/dev/DERP-STUN.md),
+  [secrets and credentials](docs/dev/SECRETS-AND-CREDENTIALS.md)
+- [Local development](docs/dev/LOCAL-DEV.md), [contributing](CONTRIBUTING.md)
+  and the [docs index](docs/README.md)
+
+## Status
+
+Codewire is pre-1.0. Breaking changes can land between releases.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for the vulnerability disclosure policy.
+See [SECURITY.md](SECURITY.md) for the disclosure policy.
 
 ## License
 
 Codewire is licensed under AGPL-3.0-only. See [LICENSE](LICENSE).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

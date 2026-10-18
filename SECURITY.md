@@ -21,7 +21,7 @@ Email: **n@noeljackson.com**
 Include:
 
 - A description of the issue and which component it affects (control plane API,
-  gateway, daemon, dashboard, CLI, etc.).
+  workspace daemon, dashboard, CLI, local VM runtime, etc.).
 - Steps to reproduce, or a proof-of-concept if you have one.
 - The version or commit SHA you tested against.
 - Any suggested remediation, if you have a recommendation.
@@ -35,8 +35,8 @@ on a per-issue basis.
 In scope:
 
 - The Rust control-plane services in `crates/`, including billing,
-  orchestration, IdP/auth, coordinator, Mesh, gateway, daemon, DERP, and the
-  `cw` CLI.
+  orchestration, IdP/auth, credential service, coordinator, Mesh, the
+  workspace daemon, DERP, the local VM runtime, and the `cw` CLI.
 - The retained Go SDK/generated-client modules, Tailscale-client
   interoperability suite, and bounded Tailnet diagnostic.
 - The dashboard (`apps/dashboard`) and other client apps in this repository.

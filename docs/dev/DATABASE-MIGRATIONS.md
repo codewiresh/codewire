@@ -113,7 +113,7 @@ next to the migration, from the shape before it.
 
 ## Mesh Database
 
-Issue #823 was implemented by PR #835. Mesh uses:
+Mesh uses:
 
 - `sqlx::migrate!` over `crates/codewire-mesh/migrations`;
 - the Mesh database's own standard `_sqlx_migrations` table;

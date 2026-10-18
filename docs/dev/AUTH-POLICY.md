@@ -1,9 +1,7 @@
 # Authentication policy
 
-This is Codewire's canonical authentication policy. The architectural decision
-and migration evidence live in
-`connect-rpc/15-auth-policy.md`; product and client code should link
-here instead of restating or extending the credential model.
+This is Codewire's canonical authentication policy. Product and client code
+should link here instead of restating or extending the credential model.
 
 Codewire issues four authentication credential flavors: three user-facing and
 one platform-internal. Kubernetes supplies the separate Pod-bound identity a
@@ -172,7 +170,7 @@ the same OAuth-only mount. Both share the existing broker capacity and drain.
 An admitted stream that carries no operation for 25 seconds sends one empty
 keepalive, which the server answers on the same stream, so the edge's idle
 limits never end it: ingress-nginx ends a request body silent for 60 seconds,
-and Cloudflare a response silent for 125 (#2702). A keepalive grants nothing,
+and Cloudflare a response silent for 125. A keepalive grants nothing,
 never reaches the broker and is accepted only after admission, with at most one
 awaiting its answer. The server offers keepalives in its admission response
 (`accepts_keepalive`), and a client sends none to a server that did not, since

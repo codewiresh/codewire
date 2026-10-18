@@ -12,46 +12,57 @@ The main account boundary for billing, membership, secrets, and environment owne
 
 The canonical product object. An environment is an isolated development machine for agents and developers.
 
-Environments have a lifecycle: pending, creating, starting, running, stopping, stopped, deleting, deleted, failed, suspended, and related operational states.
+Environment states are `pending`, `pending_build`, `building`,
+`build_failed`, `pulling_snapshot`, `creating`, `starting`, `running`,
+`stopping`, `stopped`, `archiving`, `archived`, `restoring`, `resizing`,
+`destroying`, `destroyed`, `error` and `unknown`. See
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Placement
+
+Where an environment runs: a hosted sandbox on the platform, a local VM on
+the user's machine, or a trusted host session as the user's own account.
+
+## Application secret
+
+A named application value, such as `DATABASE_URL`, stored in a user,
+organization or project secret source. Selecting a source for an environment
+injects its values into managed processes under their original names; those
+processes and the environment's root can read them.
+
+## Provider credential
+
+A named identity for an external provider (Codex/OpenAI, Anthropic, GitHub,
+an SSH key). Its private material stays outside the sandbox behind a typed
+proxy, signer or repository executor, except for the listed direct delivery
+exceptions in `dev/SECRETS-AND-CREDENTIALS.md`.
+
+## Credential profile
+
+A named selection of provider identities. A profile contains no
+application-secret mappings or exposure rules. Storing a credential does not
+attach it to an environment; selecting a profile does.
 
 ## Stored material
 
 A protected value at rest. Storing material does not expose it to an
 environment and does not select how it will be used.
 
-## Secret-blind execution
-
-The target default for new secret delivery. A process receives only the
-non-secret configuration needed to exercise explicitly bound capabilities. AV
-adds protected material at the allowed operation boundary; the process cannot
-read or export it. A placement must not claim this property until its runtime
-boundary enforces it.
-
 ## Environment projection
 
-The child-visible values assembled for one process launch after an explicit raw
-binding. A projection is ephemeral, is not a workload-readable shared file,
-and cannot restore a workspace or VM. It reuses the owning runtime operation's
-identity; there is no separate secret-generation history. This capability is
-not implemented yet.
+The child-visible values assembled for one process launch from the selected
+application-secret sources. A projection is ephemeral, is not a
+workload-readable shared file, and cannot restore a workspace or VM. It reuses
+the owning runtime operation's identity; there is no separate
+secret-generation history.
 
 ## Credential integration
 
-A typed AV adapter that uses protected material without giving that material to
+A typed adapter that uses protected material without giving that material to
 the workload. Examples include an HTTP credential proxy, request signer, or
 repository executor. The credential provider is the service being accessed,
 such as OpenAI or GitHub; the protected store is its material source, not its
 provider.
-
-## AV proxy helper
-
-Reusable edge code, not a secrets database or a separately named control
-plane. It gives a child a credential-free local endpoint and manages bounded
-relay/session lifecycle. The trusted broker outside the sandbox remains the
-only process that may resolve material, inject authorization, own a private CA
-key, or open the credential-bearing provider connection. Extraction of this
-library is planned; the existing local Codex bridge is its first Codewire
-building block.
 
 ## Workspace storage
 
@@ -74,6 +85,7 @@ does not implement VM checkpoints yet.
 ## Session
 
 A running process inside an environment, often an AI agent or shell command.
+Sessions are durable: they outlive the client that launched them.
 
 ## Preset
 
@@ -85,8 +97,14 @@ A `cw_` prefixed key for programmatic access. SHA-256 hashed, prefix-based looku
 
 ## Sandbox
 
-The native runtime backing Codewire environments. Sandboxes are backed by
-Agent Sandbox CRDs, a Codewire runtime profile, and Guard controls.
+The native runtime backing hosted Codewire environments. Sandboxes are backed
+by Agent Sandbox CRDs, a Codewire runtime profile, and Guard controls.
+
+## Daemon
+
+The in-environment control plane, `cw __hosted-daemon` in a hosted sandbox
+and the guest daemon in a local VM. It serves sessions, files, SSH and the
+environment's tailnet peer. See `dev/SANDBOX-DAEMON.md`.
 
 ## Codewire Guard
 
@@ -100,7 +118,7 @@ The hosted or self-hosted node network control plane used by the CLI and
 environment runtime for remote access, node discovery, membership, access
 grants, and task/reporting coordination.
 
-Mesh does not use the AV credential proxy. Hosted Mesh sends the one Codewire
+Mesh does not use the credential proxy. Hosted Mesh sends the one Codewire
 user credential already presented to it over a private, method-scoped Connect
 RPC and receives only typed identity, organization, role, and credential-kind
 metadata. It does not store that credential. For a native VM, a confined
@@ -127,28 +145,16 @@ available. DERP relay and UDP peer relay are data-plane relay terms.
 
 Do not use bare `relay` as the user-facing name for the hosted control service.
 
-## isol8
-
-A separate Xen runtime project. It is useful for cloud-VM experiments and
-historical reference, but it is not an approved managed Codewire runtime
-profile.
-
 ## Tenant
 
-Legacy or internal implementation term.
-
-Use `tenant` only when referring to:
-
-- existing database/table names
-- current provisioning internals
-- older implementation details that still use that name in code
-
-Do not use `tenant` as the preferred product term in new top-level docs.
+Legacy or internal implementation term that survives in some database and
+table names. Do not use `tenant` as the product term in new docs.
 
 ## SDK
 
-Official client libraries for the Codewire API. Shipped in a separate repo: [`codewiresh/sdk`](https://github.com/codewiresh/sdk).
+Official client libraries for the Codewire API, in this repository under
+`libs/`:
 
-- TypeScript: `@codewire/sdk`
-- Go: `codewire.sh/sdk-go`
-- Python: `codewire`
+- TypeScript: `@codewire/sdk` (`libs/sdk-ts`)
+- Go: `codewire.sh/sdk-go` (`libs/sdk-go`)
+- Python: `codewire` (`libs/sdk-python`)

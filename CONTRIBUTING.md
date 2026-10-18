@@ -6,23 +6,28 @@ This repository uses the Developer Certificate of Origin instead of a CLA. Sign 
 
 By contributing, you certify the DCO and agree that your contribution is licensed under the repository's AGPL-3.0 license.
 
-## Build, Test, Run
+## Build, test, run
 
-Apply pending application migrations through SQLx:
-
-```bash
-make db-init
-```
-
-Run the local Rust control plane in KIND:
+Build and install the CLI from your checkout:
 
 ```bash
-make up
-make e2e-kind
+make cli-install                              # managed install behind ~/.local/bin/cw
+cargo build -p codewire-cli-bin --bin cw      # unmanaged development binary
 ```
 
-For focused Rust service work, run the service binary directly; examples live
-in `docs/dev/LOCAL-DEV.md`.
+Run the Rust checks for the crates you touch:
+
+```bash
+cargo fmt --all
+cargo clippy -p <crate> --all-targets
+cargo test -p <crate>
+```
+
+For the control plane and dashboard, `docs/dev/LOCAL-DEV.md` describes the
+local loop: Postgres from Docker Compose (`make dev`, `make db-init`), the
+dashboard dev server (`make web`), focused Rust service binaries, and the
+local Kind cluster (`make kind-up`, then `make kind-deploy SERVICE=...` and
+`make kind-test`). `docs/TESTING.md` covers the dashboard browser suite.
 
 Run the bounded Go/Tailscale support tests when changing those surfaces:
 
@@ -38,7 +43,7 @@ bun run build
 bun run typecheck
 bun run rust:check
 make proto-drift-check
-cw env create --local --name codewire-dev
+make test-sdk
 ```
 
 ## Pre-push gate
@@ -93,47 +98,41 @@ comparisons continue to select the full preflight.
 
 ## Backend runtime work is Rust
 
-The backend service policy is:
+The product runtime is Rust: the services in `crates/`, the daemon, the
+`cw` CLI and the local VM runtime. A new backend service is a new binary
+owning a new bounded context, written on top of `codewire-server-core`, which
+provides the HTTP scaffold, error envelope, auth middleware, tracing, and
+DB/NATS helpers every service shares. Start with `crates/README.md`.
 
-> **A new backend service is a new binary owning a new bounded context (a new
-> deployment unit, e.g. `codewire-billing`). New services are written in Rust on
-> top of `codewire-server-core`.**
+Go is limited to the SDK and generated-client modules under `libs/`, the
+Tailscale-client interoperability suite and the contract tests under
+`tests/contract`. Do not add a Go product runtime path.
 
-That policy is now broader for product/runtime work:
+`docs/ARCHITECTURE.md` describes the current system; `docs/README.md` indexes
+the rest of the documentation.
 
-- New product services, runtime binaries, API ownership, CLI runtime behavior,
-  gateway, daemon, mesh, and orchestration work belongs in Rust.
-- Remaining Go is limited to SDK/client surfaces, generated clients, real
-  Tailscale-client interoperability, and the bounded Tailnet oracle.
-- Do not add a new Go product runtime path without first updating the Gitea
-  migration issues and `docs/dev/GO-RUST-RETIREMENT-LEDGER.md`.
+## Docs and plans
 
-For *new* services start by reading `crates/README.md`; the
-`codewire-server-core` crate provides the HTTP scaffold, error envelope, auth
-middleware, tracing, and DB/NATS helpers every service shares.
+Shipped behaviour is documented under `docs/`. Design plans and proposals
+live in the maintainers' private design repository; a pull request that
+changes behaviour updates the public docs for the surface it changes.
 
-See `docs/ARCHITECTURE.md` for the full phase plan.
+## Pull requests
 
-## Plans And Docs
-
-Design plans, execution reports, and restructuring notes live in the maintainers' private design repository. Start with the newest dated document that matches the area you are changing.
-
-Deeper engineering documentation lives in `docs/dev/`.
-
-## Pull Requests
-
-`main` is protected: direct pushes are blocked, so all changes land via pull
-request. Gitea (`git.example.invalid/codewire/codewire`) is the source of truth for
-issues, pull requests, merges, CI, images, and deploys. GitHub is the public
-mirror.
-
-PRs should keep the build green and include any needed doc or generated-type updates for the surface they change.
+Open pull requests against `main`. The canonical repository is the
+maintainers' Forgejo instance, which mirrors to GitHub; a maintainer reviews
+and lands each pull request, and `main` accepts no direct pushes.
 
 Expectations:
 
 - the selected verification families pass
 - relevant builds still pass for the changed area
 - commits use conventional commit style such as `feat:`, `fix:`, or `chore:`
+- no attribution trailers beyond your own `Signed-off-by`
+
+Maintainer-only workflow (Forgejo tooling, the retained Kind cluster,
+delivery and release steps) is described in `AGENTS.md` and
+`docs/dev/AGENT-WORKFLOW.md`.
 
 ## License
 
