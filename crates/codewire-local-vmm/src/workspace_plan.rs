@@ -14,13 +14,14 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use codewire_access::AccessProfileId;
+use codewire_access::{AccessProfileId, GITHUB_HTTPS_URL};
 use codewire_local_credentials::{
     AuthorityRuntimeConfig, LocalCredentialControlClient, LocalRepositoryGit,
     validate_github_https_source,
 };
 use codewire_project::{
-    RepositorySpec, canonical_repository_known_hosts, parse_repository_ssh_host,
+    GitHubSourceForm, RepositorySpec, canonical_repository_known_hosts, github_repository_path,
+    parse_repository_ssh_host,
 };
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -191,6 +192,26 @@ pub(crate) struct RepositoryCredentialAccess {
     pub(crate) profile_id: AccessProfileId,
     pub(crate) profile_revision: u64,
     pub(crate) platform: Option<codewire_local_credentials::RepositoryPlatformAccess>,
+    /// Whether the selected profile has an SSH key. It is read only for a
+    /// github.com source in SSH form, the one source it changes.
+    pub(crate) ssh_key: bool,
+}
+
+/// The source and host trust the authority fetches a repository with. SSH
+/// first: only without an SSH key does a github.com source in SSH form go
+/// through the GitHub connection, as its canonical HTTPS path (#2723). The
+/// prepared input keeps the user's source, so the stored source and origin
+/// stay in SSH form.
+fn repository_fetch(
+    repository: &RepositorySpec,
+    access: &RepositoryCredentialAccess,
+) -> (String, Vec<String>) {
+    match github_repository_path(&repository.source) {
+        Some((path, GitHubSourceForm::Ssh)) if !access.ssh_key => {
+            (format!("{GITHUB_HTTPS_URL}{path}"), Vec::new())
+        }
+        _ => (repository.source.clone(), repository.known_hosts.clone()),
+    }
 }
 
 async fn prepare_repository(
@@ -339,12 +360,9 @@ async fn prepare_authenticated_repository(
     credential_authority: &AuthorityRuntimeConfig,
 ) -> Result<WorkspaceInput, WorkspacePlanError> {
     validate_repository_trust(repository)?;
-    if parse_repository_ssh_host(&repository.source)
-        .ok()
-        .flatten()
-        .is_none()
-    {
-        validate_github_https_source(&repository.source)
+    let (source, known_hosts) = repository_fetch(repository, access);
+    if parse_repository_ssh_host(&source).ok().flatten().is_none() {
+        validate_github_https_source(&source)
             .map_err(|_| WorkspacePlanError::UnsupportedRepositorySource)?;
     }
     let staging_name = format!("repository-prepare-{}", Uuid::new_v4());
@@ -378,10 +396,10 @@ async fn prepare_authenticated_repository(
             access.request_id,
             &access.profile_id,
             access.profile_revision,
-            repository.source.clone(),
+            source,
             repository.branch.clone(),
             repository.revision.clone(),
-            repository.known_hosts.clone(),
+            known_hosts,
             access.platform.clone(),
             git,
         )
@@ -872,6 +890,63 @@ mod tests {
             .map(str::to_owned)
             .to_vec();
         assert!(validate_repository_trust(&repository).is_ok());
+    }
+
+    #[test]
+    fn a_github_ssh_source_uses_the_key_first_then_the_github_connection() {
+        let github_keys = codewire_project::GITHUB_SSH_KNOWN_HOSTS
+            .map(str::to_owned)
+            .to_vec();
+        let other_keys = vec!["[example.test]:2222 ssh-ed25519 AAAA".to_owned()];
+        let fetch = |source: &str, known_hosts: &[String], ssh_key: bool| {
+            let repository = RepositorySpec {
+                source: source.to_owned(),
+                destination: "/workspace".to_owned(),
+                branch: String::new(),
+                revision: String::new(),
+                known_hosts: known_hosts.to_vec(),
+            };
+            let access = RepositoryCredentialAccess {
+                request_id: Uuid::new_v4(),
+                profile_id: AccessProfileId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+                profile_revision: 1,
+                platform: None,
+                ssh_key,
+            };
+            repository_fetch(&repository, &access)
+        };
+        let same = |source: &str, known_hosts: &[String]| (source.to_owned(), known_hosts.to_vec());
+
+        for source in ["git@github.com:org/app.git", "ssh://git@github.com/org/app"] {
+            // A key, alone or with the GitHub connection: SSH, no fallback.
+            assert_eq!(
+                fetch(source, &github_keys, true),
+                same(source, &github_keys)
+            );
+            // No key (the GitHub connection only, or neither): the canonical
+            // HTTPS path, which the authority admits only for the GitHub
+            // connection and refuses without one.
+            let (https, known_hosts) = fetch(source, &github_keys, false);
+            assert!(known_hosts.is_empty());
+            assert!(validate_github_https_source(&https).is_ok(), "{https}");
+            assert_eq!(
+                https,
+                source
+                    .replace("git@github.com:", "https://github.com/")
+                    .replace("ssh://git@github.com/", "https://github.com/")
+            );
+        }
+        // Other SSH hosts still need the key.
+        for ssh_key in [false, true] {
+            let source = "ssh://git@example.test:2222/repo.git";
+            assert_eq!(
+                fetch(source, &other_keys, ssh_key),
+                same(source, &other_keys)
+            );
+        }
+        // An HTTPS source is fetched as written.
+        let source = "https://github.com/org/app.git";
+        assert_eq!(fetch(source, &[], false), same(source, &[]));
     }
 
     #[test]

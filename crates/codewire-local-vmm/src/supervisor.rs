@@ -116,6 +116,8 @@ const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// An environment's runner is gone while the environment should be running;
 /// `cw env --local daemon repair` or a restart recovers it.
 const RUNNER_EXIT_ERROR_CODE: &str = "runner_exit";
+/// The profile slot that holds an SSH key, on both placements.
+const SSH_PROFILE_SLOT: &str = "ssh";
 /// How long a client keeps connecting after its replacement supervisor exited
 /// without taking the lock, in case a concurrently started one is binding.
 const STALE_ENDPOINT_GRACE: Duration = Duration::from_secs(2);
@@ -831,6 +833,50 @@ impl SupervisorCore {
             .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)
     }
 
+    /// Whether a create's selected profile has an SSH key, asked only when a
+    /// github.com repository in SSH form would otherwise use the GitHub
+    /// connection (#2723): a platform profile's slots say so; a local
+    /// profile's exact revision is read from the authority, material-free.
+    async fn profile_has_ssh_key(
+        &mut self,
+        request: &v1::CreateEnvironmentRequest,
+        project: &codewire_project::ProjectSpec,
+        platform: bool,
+        profile_id: &AccessProfileId,
+        profile_revision: u64,
+    ) -> Result<bool, SupervisorError> {
+        if !project.repositories.iter().any(|repository| {
+            matches!(
+                codewire_project::github_repository_path(&repository.source),
+                Some((_, codewire_project::GitHubSourceForm::Ssh))
+            )
+        }) {
+            return Ok(false);
+        }
+        if platform {
+            return Ok(request
+                .platform_source_authority
+                .as_ref()
+                .is_some_and(|authority| {
+                    authority
+                        .profile_slots
+                        .iter()
+                        .any(|slot| slot == SSH_PROFILE_SLOT)
+                }));
+        }
+        let revision = self
+            .access_control_client()
+            .await?
+            .get_profile_revision(profile_id, profile_revision)
+            .await
+            .map_err(credential_control_error)?;
+        Ok(revision
+            .profile
+            .entries
+            .keys()
+            .any(|slot| slot.as_str() == SSH_PROFILE_SLOT))
+    }
+
     async fn bind_environment_access(
         &mut self,
         request: &v1::CreateEnvironmentRequest,
@@ -1201,15 +1247,28 @@ impl SupervisorCore {
                 environment_id,
                 &self.config.platform_config_dir,
             )?;
-            let credential_access = create_request_access_selection(request, &project)?.map(
-                |(profile_id, profile_revision, _)| RepositoryCredentialAccess {
-                    request_id: Uuid::parse_str(&request.request_id)
-                        .expect("validated create request ID"),
-                    profile_id,
-                    profile_revision,
-                    platform,
-                },
-            );
+            let credential_access = match create_request_access_selection(request, &project)? {
+                Some((profile_id, profile_revision, _)) => {
+                    let ssh_key = self
+                        .profile_has_ssh_key(
+                            request,
+                            &project,
+                            platform.is_some(),
+                            &profile_id,
+                            profile_revision,
+                        )
+                        .await?;
+                    Some(RepositoryCredentialAccess {
+                        request_id: Uuid::parse_str(&request.request_id)
+                            .expect("validated create request ID"),
+                        profile_id,
+                        profile_revision,
+                        platform,
+                        ssh_key,
+                    })
+                }
+                None => None,
+            };
             prepare_repository_plan(
                 &self.config.engine_root(),
                 &project.repositories,

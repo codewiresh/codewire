@@ -679,3 +679,47 @@ fn the_pinned_anthropic_form_chooses_claude_codes_form() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_platform_profile_has_an_ssh_key_only_with_its_ssh_slot() {
+    async fn has_key(
+        core: &mut SupervisorCore,
+        project: &ProjectSpec,
+        profile_id: &AccessProfileId,
+        slots: &[&str],
+    ) -> bool {
+        let request = v1::CreateEnvironmentRequest {
+            platform_source_authority: Some(v1::PlatformSourceAuthority {
+                profile_slots: slots.iter().map(|slot| (*slot).to_owned()).collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        core.profile_has_ssh_key(&request, project, true, profile_id, 7)
+            .await
+            .unwrap()
+    }
+    let environment = environment(true);
+    let (_temporary, mut core) =
+        crate::supervisor::tests::test_supervisor_core(environment.clone());
+    let profile_id = environment
+        .access_binding
+        .as_ref()
+        .unwrap()
+        .profile_id
+        .clone();
+    let mut project: ProjectSpec =
+        serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+    project.repositories.push(codewire_project::RepositorySpec {
+        source: "https://github.com/synthetic/repository".into(),
+        destination: "/workspace/repository".into(),
+        ..Default::default()
+    });
+    // Without a github.com source in SSH form nothing asks, so the authority
+    // is never started.
+    assert!(!has_key(&mut core, &project, &profile_id, &["github", "ssh"]).await);
+    project.repositories[0].source = "git@github.com:synthetic/repository.git".into();
+    assert!(has_key(&mut core, &project, &profile_id, &["github", "ssh"]).await);
+    assert!(!has_key(&mut core, &project, &profile_id, &["codex", "github"]).await);
+    assert!(!core.config.credential_authority_root.exists());
+}

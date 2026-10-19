@@ -69,7 +69,8 @@ repositories:
 ```
 
 An HTTPS GitHub source that needs authentication uses the profile's GitHub
-connection (`cw credentials --local connect github`, or a platform profile);
-an SSH source uses the profile's SSH key. Other SSH hosts also need their
-`known_hosts` lines in the project file. See
-[The project file](@/guides/project-file.md).
+connection (`cw credentials --local connect github`, or a platform profile).
+An SSH source uses the profile's SSH key; without a key, a `github.com`
+source in SSH form goes through the GitHub connection, and its origin stays
+as written. Other SSH hosts need the key and their `known_hosts` lines in the
+project file. See [The project file](@/guides/project-file.md).
