@@ -2569,6 +2569,17 @@ grep -qF "trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification
   "$selection_block"
 grep -qF 'python3 "$trusted_adapter" --plan "$plan_output"' \
   "$selection_block"
+# A main push plans its artifact facts with the previous main's trusted
+# policy (#2897); a dispatch, an older policy or a planner failure keeps every
+# artifact selected, and only a push receives the job token for that.
+grep -qF "main_push_planner='.trusted-ci-policy/scripts/ci/plan/plan-main-push.py'" \
+  "$selection_block"
+grep -qF 'if [ "$GITHUB_EVENT_NAME" = push ] && [ -f "$main_push_planner" ]' "$selection_block"
+grep -qF -- '--before "$PUSH_BEFORE_SHA"' "$selection_block"
+grep -A4 -F 'python3 scripts/ci/plan/apply-verification-plan.py' "$selection_block" \
+  | grep -qF -- '--unclassified'
+grep -qF "GITEA_TOKEN: \${{ github.event_name == 'push' && github.token || '' }}" "$selection_block"
+python3 "$ROOT/scripts/ci/plan/tests/test_plan_main_push.py"
 grep -qF "grep -Fxq 'selector_version=v3'" "$selection_block"
 if grep -qF 'selector_version=v2' "$selection_block" \
     || grep -qF 'One-time contract bridge' "$selection_block"; then

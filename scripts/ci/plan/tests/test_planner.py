@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import fnmatch
 import importlib.util
 import io
 import json
 import os
+import posixpath
+import re
 import shutil
 import subprocess
 import sys
@@ -28,6 +31,16 @@ PRODUCTION_GRAPH = json.loads(
 WORKSPACE_VERIFICATION_SPEC = PRODUCTION_GRAPH["artifacts"]["workspace_image_verification"]
 CW_RUNTIME_ASSET_SPEC = PRODUCTION_GRAPH["artifacts"]["cw_runtime_image_asset"]
 DEV_ACCEPTANCE_HARNESS_SPEC = PRODUCTION_GRAPH["artifacts"]["dev_acceptance_harness"]
+DAEMON_IMAGE_SPEC = PRODUCTION_GRAPH["artifacts"]["daemon_image"]
+WORKSPACE_IMAGE_SPEC = PRODUCTION_GRAPH["artifacts"]["workspace_image"]
+# The only file the workspace pin bot changes.
+WORKSPACE_PIN = "crates/codewire-workspace-image/src/pin.rs"
+# The image build drivers and the planned images each one builds.
+IMAGE_BUILD_DRIVERS = {
+    "scripts/ci/images/build-push-image.sh": ("daemon_image", "workspace_image"),
+    "scripts/ci/images/build-push-runtime-images.sh": ("daemon_image", "workspace_image"),
+    "scripts/ci/images/build-support-platform.sh": ("workspace_image",),
+}
 CREDENTIAL_ACCEPTANCE_PATHS = (
     "scripts/runtime/dev/provider-anthropic-output.py",
     "scripts/runtime/dev/provider-anthropic-smoke.sh",
@@ -287,19 +300,7 @@ class FixtureRepository:
                         "proto/**",
                     ],
                 },
-                "daemon_image": {
-                    "kind": "composite",
-                    "dependencies": ["cw_runtime_image_asset"],
-                    "inputs": [
-                        "Cargo.toml",
-                        "Cargo.lock",
-                        "crates/**",
-                        "deployments/docker/daemon.Dockerfile",
-                        "deployments/docker/daemon.Dockerfile.dockerignore",
-                        "libs/daemon-proto/**",
-                        "proto/**",
-                    ],
-                },
+                "daemon_image": DAEMON_IMAGE_SPEC,
                 "derp_image": {
                     "kind": "file-set",
                     "inputs": [
@@ -358,22 +359,7 @@ class FixtureRepository:
                     ],
                 },
                 "workspace_image_verification": WORKSPACE_VERIFICATION_SPEC,
-                "workspace_image": {
-                    "kind": "composite",
-                    "dependencies": [
-                        "base_image",
-                        "cw_runtime_image_asset",
-                        "confidential_workspace_acceptance_contract",
-                        "dev_release_tree",
-                        "dev_acceptance_harness",
-                        "dashboard_image",
-                        "daemon_image",
-                        "derp_image",
-                        "services_image",
-                        "mesh_image",
-                    ],
-                    "inputs": ["images/workspace/**"],
-                },
+                "workspace_image": WORKSPACE_IMAGE_SPEC,
             },
         }
         self.write("scripts/ci/plan/artifact-graph.json", json.dumps(graph, sort_keys=True, indent=2) + "\n")
@@ -639,11 +625,55 @@ dependencies = ["core"]
         for path in DEV_ACCEPTANCE_HARNESS_SPEC["inputs"]:
             if "*" not in path and not (self.root / path).exists():
                 self.write(path, "# Synthetic Dev acceptance harness input\n")
+        for path in DAEMON_IMAGE_SPEC["inputs"] + WORKSPACE_IMAGE_SPEC["inputs"]:
+            if "*" not in path and not (self.root / path).exists():
+                self.write(path, "# Synthetic image build input\n")
+        # Ordinary repository scripts no artifact lists: a developer tool, a
+        # CI self-test and the shared pre-push hook.
+        self.write("scripts/dev/fixture-tool.py", "print('fixture')\n", 0o755)
+        self.write("scripts/ci/tests/test-fixture-tool.sh", "#!/bin/sh\nexit 0\n", 0o755)
+        self.write(".githooks/pre-push", "#!/bin/sh\nexit 0\n", 0o755)
 
     def commit(self, message: str) -> str:
         run(["git", "add", "-A"], self.root)
         run(["git", "commit", "-q", "-m", message], self.root)
         return run(["git", "rev-parse", "HEAD"], self.root)
+
+    def add_workspace_pin_crate(self) -> str:
+        """Model the workspace image pin crate, which cw compiles, as the new base."""
+        self.write(
+            "crates/codewire-workspace-image/Cargo.toml",
+            '[package]\nname = "codewire-workspace-image"\nversion = "0.1.0"\n'
+            'edition = "2021"\n',
+        )
+        self.write("crates/codewire-workspace-image/src/lib.rs", "pub mod pin;\n")
+        self.write(WORKSPACE_PIN, 'pub const WORKSPACE_IMAGE: &str = "workspace@sha256:one";\n')
+        workspace = (self.root / "Cargo.toml").read_text()
+        self.write(
+            "Cargo.toml",
+            workspace.replace('"unrelated"]', '"unrelated", "crates/codewire-workspace-image"]'),
+        )
+        cli = (self.root / "cli/Cargo.toml").read_text()
+        self.write(
+            "cli/Cargo.toml",
+            cli.replace(
+                "[features]",
+                'codewire-workspace-image = { path = "../crates/codewire-workspace-image" }\n\n'
+                "[features]",
+            ),
+        )
+        lockfile = (self.root / "Cargo.lock").read_text()
+        self.write(
+            "Cargo.lock",
+            lockfile.replace(' "build-helper",\n', ' "build-helper",\n "codewire-workspace-image",\n')
+            .replace(
+                '[[package]]\nname = "core"',
+                '[[package]]\nname = "codewire-workspace-image"\nversion = "0.1.0"\n\n'
+                '[[package]]\nname = "core"',
+            ),
+        )
+        self.base = self.commit("cw compiles the workspace pin")
+        return self.base
 
     def change(self, relative: str, content: str, message: str = "fixture change") -> str:
         self.write(relative, content)
@@ -1067,6 +1097,14 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
 
     def deploy_outputs(self, repository: FixtureRepository, document: dict, head: str) -> dict[str, str]:
+        return self.adapter_outputs("apply-deploy-plan.py", repository, document, head)
+
+    def support_outputs(self, repository: FixtureRepository, document: dict, head: str) -> dict[str, str]:
+        return self.adapter_outputs("apply-support-plan.py", repository, document, head)
+
+    def adapter_outputs(
+        self, adapter: str, repository: FixtureRepository, document: dict, head: str
+    ) -> dict[str, str]:
         tree = run(["git", "rev-parse", f"{head}^{{tree}}"], repository.root)
         with tempfile.TemporaryDirectory(prefix="codewire-deploy-adapter-") as temporary:
             plan_path = Path(temporary) / "plan.json"
@@ -1074,7 +1112,7 @@ class PlannerFixtureTests(unittest.TestCase):
             completed = subprocess.run(
                 [
                     sys.executable,
-                    str(PLANNER_PATH.parent / "apply-deploy-plan.py"),
+                    str(PLANNER_PATH.parent / adapter),
                     "--plan",
                     str(plan_path),
                     "--head",
@@ -1633,16 +1671,34 @@ class PlannerFixtureTests(unittest.TestCase):
         capabilities = select_capabilities([path])
         self.assertIn("|policy|", capabilities["selection"])
 
-    def test_unknown_kind_suite_fixture_neighbor_remains_unclassified(self) -> None:
-        # The exact fixture exemption must not cover its unreviewed neighbors.
+    def test_unlisted_ci_test_script_is_no_rust_input(self) -> None:
+        # Before #2897 any unlisted script made the cw, desktop and workspace
+        # binaries unclassified. No crate compiles from scripts/, so a script
+        # is an input only of the artifacts that list it.
         self.repo.write(
             "scripts/ci/tests/test-kind-e2e-suites.sh",
             "#!/usr/bin/env bash\nset -euo pipefail\n",
             0o755,
         )
-        self.repo.change("scripts/ci/tests/test-kind-e2e-unreviewed.sh", "# Unknown input\n")
+        self.repo.change("scripts/ci/tests/test-kind-e2e-unreviewed.sh", "# Unlisted test\n")
         document = self.repo.plan()
-        self.assertEqual(self.states(document), ("unclassified",) * 2)
+        self.assertFalse(document["degraded_reasons"])
+        self.assertTrue(all(
+            artifact["state"] == "unaffected"
+            for artifact in document["artifacts"].values()
+        ))
+
+    def test_unknown_input_inside_a_rust_closure_still_fails_closed(self) -> None:
+        # The scripts root is unrelated to Rust; a file a crate could embed is
+        # not, wherever its name or neighbors suggest otherwise.
+        self.repo.write("scripts/dev/fixture-tool.py", "print('changed')\n", 0o755)
+        self.repo.change("core/assets/embedded.dat", "unknown reachable input\n")
+        document = self.repo.plan()
+        self.assertEqual(self.states(document), ("unclassified", "unclassified"))
+        self.assertIn(
+            "core/assets/embedded.dat",
+            document["artifacts"]["cw_cli_release_assets"]["explanations"][0],
+        )
 
     def test_credential_acceptance_paths_keep_capability_checks_without_artifact_changes(self) -> None:
         for path in CREDENTIAL_ACCEPTANCE_PATHS:
@@ -1686,20 +1742,33 @@ class PlannerFixtureTests(unittest.TestCase):
                 for artifact in document["artifacts"].values()
             ))
 
-    def test_unknown_credential_acceptance_neighbor_remains_unclassified(self) -> None:
-        # An unknown neighbor must not join the canonical policy-only exemption.
+    def test_exact_main_policy_edit_does_not_hide_an_unknown_rust_input(self) -> None:
+        # Exact-head planning ignores the policy edit, never a file a crate
+        # could embed. The unlisted runtime script beside it is no Rust input.
         self.repo.write("scripts/ci/select/credential-fixture.sh", "# Policy edit\n")
-        head = self.repo.change(
-            "scripts/runtime/dev/provider-openai-unreviewed.sh", "# Unknown input\n"
+        self.repo.write(
+            "scripts/runtime/dev/provider-openai-unreviewed.sh", "# Unlisted script\n"
         )
+        head = self.repo.change("core/assets/embedded.dat", "unknown reachable input\n")
         candidate = self.repo.deployed_source_candidate(self.repo.base, head)
         support = self.repo.support_candidate(self.repo.base)
         for document in (
             self.repo.deployed_source_plan(candidate, head),
             self.repo.support_plan(support, head),
         ):
-            self.assertEqual(self.runtime_states(document), ("unclassified",) * 5)
+            self.assertTrue(document["baseline"]["validation"]["valid"])
             self.assertEqual(self.states(document), ("unclassified",) * 2)
+            self.assertEqual(
+                self.workspace_states(document),
+                ("unclassified", "unaffected", "unclassified"),
+            )
+            self.assertIn(
+                "core/assets/embedded.dat",
+                document["artifacts"]["workspace_cw_binary"]["explanations"][0],
+            )
+            self.assertEqual(
+                document["artifacts"]["daemon_image"]["state"], "unclassified"
+            )
 
     def test_credential_acceptance_does_not_hide_real_runtime_image_changes(self) -> None:
         self.repo.write(CREDENTIAL_ACCEPTANCE_PATHS[0], "# Acceptance-only edit\n")
@@ -1720,6 +1789,121 @@ class PlannerFixtureTests(unittest.TestCase):
             self.workspace_states(document),
             ("unclassified", "unaffected", "unclassified"),
         )
+
+    def changed_artifacts(self, document: dict) -> dict[str, str]:
+        return {
+            name: artifact["state"]
+            for name, artifact in document["artifacts"].items()
+            if artifact["state"] != "unaffected"
+        }
+
+    def every_plan(self, repository: FixtureRepository, head: str) -> dict[str, dict]:
+        """The previous-policy plan (pull request or main push) and both exact-head plans."""
+        return {
+            "previous-policy": repository.plan(head),
+            "support": repository.support_plan(
+                repository.support_candidate(repository.base), head
+            ),
+            "deploy": repository.deployed_source_plan(
+                repository.deployed_source_candidate(repository.base, head), head
+            ),
+        }
+
+    def test_developer_script_hook_and_ci_test_select_no_build(self) -> None:
+        # Before #2897 each of these made cw_cli_release_assets,
+        # desktop_package and workspace_cw_binary unclassified and, through
+        # the cw runtime asset, the daemon, workspace and workspace
+        # verification images too (Deploy Dev 15027 and 15320).
+        for path, content in (
+            ("scripts/dev/fixture-tool.py", "print('changed')\n"),
+            (".githooks/pre-push", "#!/bin/sh\necho changed\n"),
+            ("scripts/ci/tests/test-fixture-tool.sh", "#!/bin/sh\necho changed\n"),
+        ):
+            with self.subTest(path=path), tempfile.TemporaryDirectory(
+                prefix="codewire-script-only-"
+            ) as temporary:
+                repository = FixtureRepository(Path(temporary))
+                head = repository.change(path, content)
+                plans = self.every_plan(repository, head)
+                for mode, document in plans.items():
+                    self.assertFalse(document["degraded_reasons"], mode)
+                    self.assertEqual(self.changed_artifacts(document), {}, mode)
+                support = self.support_outputs(repository, plans["support"], head)
+                self.assertEqual(support["build_support_images"], "false")
+                self.assertEqual(support["reason"], "artifacts_unaffected")
+                deploy = self.deploy_outputs(repository, plans["deploy"], head)
+                self.assertEqual(deploy["deploy_dev"], "false")
+
+    def test_image_build_scripts_still_select_their_images(self) -> None:
+        # A script an artifact lists stays that artifact's input; the scripts
+        # root only stopped unlisted scripts from looking like Rust inputs.
+        runtime_cw = {
+            "cw_runtime_image_asset",
+            "daemon_image",
+            "workspace_image",
+            "workspace_image_verification",
+        }
+        cases = {
+            "scripts/ci/images/build-push-image.sh": {"daemon_image", "workspace_image"},
+            "scripts/ci/images/compute-image-tags.sh": {"daemon_image", "workspace_image"},
+            "scripts/ci/images/image-bundle.py": {"daemon_image", "workspace_image"},
+            "scripts/ci/setup/fetch-openbao-harbor-credentials.sh": {
+                "daemon_image",
+                "workspace_image",
+            },
+            "scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh": {"workspace_image"},
+            "scripts/ci/images/build-support-platform.sh": {"workspace_image"},
+            "scripts/ci/images/run-rust-build.sh": runtime_cw,
+            "scripts/dev/build-cw.py": runtime_cw,
+            "scripts/ci/verify/verify-workspace-image.sh": {"workspace_image_verification"},
+            "scripts/runtime/dev/smoke-dev-commodity.sh": {
+                "dev_acceptance_harness",
+                "workspace_image",
+            },
+            "scripts/ci/release/package-cli.sh": {"cw_cli_release_assets"},
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path), tempfile.TemporaryDirectory(
+                prefix="codewire-image-script-"
+            ) as temporary:
+                repository = FixtureRepository(Path(temporary))
+                head = repository.change(path, "# Synthetic build input edit\n")
+                for mode, document in self.every_plan(repository, head).items():
+                    changed = self.changed_artifacts(document)
+                    self.assertEqual(set(changed), expected, mode)
+                    self.assertEqual(set(changed.values()), {"affected"}, mode)
+
+    def test_workspace_pin_change_selects_what_compiles_the_pin(self) -> None:
+        # The pin bot's only change is crates/codewire-workspace-image/src/pin.rs,
+        # which cw compiles. The packaged and workspace cw and every image that
+        # carries cw or builds crates/** are affected, never unclassified; the
+        # desktop, base and DERP images are not.
+        repository = self.repo
+        repository.add_workspace_pin_crate()
+        head = repository.change(
+            WORKSPACE_PIN, 'pub const WORKSPACE_IMAGE: &str = "workspace@sha256:two";\n'
+        )
+        plans = self.every_plan(repository, head)
+        for document in plans.values():
+            self.assertFalse(document["degraded_reasons"])
+            self.assertNotIn("unclassified", self.changed_artifacts(document).values())
+            self.assertEqual(self.states(document), ("affected", "unaffected"))
+            self.assertEqual(
+                self.workspace_states(document), ("affected", "unaffected", "affected")
+            )
+            self.assertEqual(
+                self.runtime_states(document),
+                ("affected", "affected", "unaffected", "affected", "affected"),
+            )
+            self.assertEqual(
+                document["artifacts"]["workspace_image_verification"]["state"], "affected"
+            )
+        support = self.support_outputs(repository, plans["support"], head)
+        self.assertEqual(support["build_support_images"], "true")
+        self.assertEqual(support["reason"], "artifact_affected")
+        deploy = self.deploy_outputs(repository, plans["deploy"], head)
+        self.assertEqual(deploy["deploy_dev"], "true")
+        self.assertEqual(deploy["reason"], "artifact_affected")
 
     def test_base_change_affects_the_atomic_workspace_pair(self) -> None:
         self.repo.write("images/base/entrypoint.sh", "#!/bin/sh\nset -eu\nexec \"$@\"\n", 0o755)
@@ -1805,24 +1989,66 @@ class PlannerFixtureTests(unittest.TestCase):
             )
         )
 
+        # A policy edit beside a real change: before #2897 every artifact was
+        # unclassified, so a published or deployed range that crossed any
+        # policy commit rebuilt everything. The head policy is authoritative
+        # here; only the dashboard and the workspace release it feeds change.
+        # (The candidates above are untracked files an unknown root path
+        # would otherwise commit.)
+        deployed_candidate.unlink()
+        support_candidate.unlink()
         mixed_head = self.repo.change(
             "apps/dashboard/runtime-inventory.json",
             '{"changed": true}\n',
         )
-        mixed_candidate = self.repo.deployed_source_candidate(
-            self.repo.base,
-            mixed_head,
-        )
-        mixed_document = self.repo.deployed_source_plan(
-            mixed_candidate,
-            mixed_head,
-        )
-        self.assertTrue(
-            all(
-                artifact["state"] == "unclassified"
-                for artifact in mixed_document["artifacts"].values()
+        for document in (
+            self.repo.deployed_source_plan(
+                self.repo.deployed_source_candidate(self.repo.base, mixed_head),
+                mixed_head,
+            ),
+            self.repo.support_plan(self.repo.support_candidate(self.repo.base), mixed_head),
+        ):
+            self.assertTrue(document["baseline"]["validation"]["valid"])
+            self.assertFalse(document["degraded_reasons"])
+            changed = {
+                name
+                for name, artifact in document["artifacts"].items()
+                if artifact["state"] != "unaffected"
+            }
+            self.assertEqual(changed, {"dashboard_image", "workspace_image"})
+            self.assertEqual(
+                document["artifacts"]["dashboard_image"]["state"], "affected"
             )
+            self.assertEqual(
+                document["artifacts"]["workspace_image"]["state"], "affected"
+            )
+
+        # The same range planned with the previous policy (a pull request or
+        # a main push) still fails every artifact closed.
+        self.assertTrue(all(
+            artifact["state"] == "unclassified"
+            for artifact in self.repo.plan(mixed_head)["artifacts"].values()
+        ))
+
+    def test_exact_main_policy_only_range_publishes_nothing_and_adapters_skip(self) -> None:
+        head = self.repo.change(
+            "scripts/ci/plan/artifact-graph-notes.txt",
+            "a reviewed policy edit\n",
         )
+        support = self.support_outputs(
+            self.repo,
+            self.repo.support_plan(self.repo.support_candidate(self.repo.base), head),
+            head,
+        )
+        self.assertEqual(support["build_support_images"], "false")
+        self.assertEqual(support["build_confidential_probe_image"], "false")
+        self.assertEqual(support["reason"], "artifacts_unaffected")
+        deployed = self.repo.deployed_source_plan(
+            self.repo.deployed_source_candidate(self.repo.base, head), head
+        )
+        outputs = self.deploy_outputs(self.repo, deployed, head)
+        self.assertEqual(outputs["deploy_dev"], "false")
+        self.assertEqual(outputs["reason"], "artifacts_unaffected")
 
     def test_non_artifact_workflow_change_does_not_select_builds(self) -> None:
         self.repo.change(
@@ -2184,6 +2410,78 @@ class HostileArchiveTests(unittest.TestCase):
             self.assertEqual((destination / "target").read_text(), "x")
 
         self.assertTrue(process.stdout.drained_before_close)
+
+
+REPOSITORY_ROOT = PLANNER_PATH.parents[3]
+INCLUDE_RE = re.compile(r'\binclude(?:_str|_bytes)?!\(\s*"([^"]+)"\s*,?\s*\)')
+SCRIPT_REFERENCE_RE = re.compile(r"scripts/[A-Za-z0-9_./-]+\.(?:sh|py)")
+
+
+def tracked_files(*patterns: str) -> list[str]:
+    return run(["git", "ls-files", "--", *patterns], REPOSITORY_ROOT).splitlines()
+
+
+class RepositoryEmbedTests(unittest.TestCase):
+    """The planner treats scripts/ and .githooks/ as no crate's source.
+
+    A file there is a Rust input only when the graph lists it. These checks
+    fail when a crate starts compiling one in, so the author lists it instead
+    of the planner silently missing it.
+    """
+
+    # Script embeds no shipped binary carries: an example, and a test-only
+    # proof inside a #[cfg(test)] module.
+    KNOWN_SCRIPT_EMBEDS = {
+        (
+            "crates/codewire-client/examples/environment-cw-runtime-smoke.rs",
+            "scripts/ci/verify/kind/cw_runtime_probe.py",
+        ),
+        (
+            "crates/codewire-local-vmm/src/bin/codewire-local-codex-bridge-smoke.rs",
+            "scripts/ci/verify/stock-ssh-workload.sh",
+        ),
+    }
+
+    def test_no_crate_embeds_a_script_or_hook(self) -> None:
+        embedded = set()
+        for relative in tracked_files("*.rs"):
+            text = (REPOSITORY_ROOT / relative).read_text(errors="replace")
+            for target in INCLUDE_RE.findall(text):
+                resolved = posixpath.normpath(
+                    posixpath.join(posixpath.dirname(relative), target)
+                )
+                if resolved.split("/", 1)[0] in {"scripts", ".githooks"}:
+                    embedded.add((relative, resolved))
+        self.assertEqual(embedded, self.KNOWN_SCRIPT_EMBEDS)
+
+    def test_no_build_script_reads_a_script_or_hook(self) -> None:
+        build_scripts = tracked_files("build.rs", "*/build.rs")
+        self.assertTrue(build_scripts)
+        for relative in build_scripts:
+            with self.subTest(build_script=relative):
+                text = (REPOSITORY_ROOT / relative).read_text(errors="replace")
+                self.assertNotRegex(text, r"scripts/|\.githooks")
+
+
+class ImageDriverInputTests(unittest.TestCase):
+    def test_every_script_an_image_build_driver_runs_is_an_input_of_its_images(self) -> None:
+        # The drivers' helpers decide how the image is built and named, so a
+        # change to one rebuilds the images that driver builds.
+        for driver, artifacts in IMAGE_BUILD_DRIVERS.items():
+            code = "\n".join(
+                line
+                for line in (REPOSITORY_ROOT / driver).read_text().splitlines()
+                if not line.lstrip().startswith("#")
+            )
+            scripts = {driver, *SCRIPT_REFERENCE_RE.findall(code)}
+            for artifact in artifacts:
+                patterns = PRODUCTION_GRAPH["artifacts"][artifact]["inputs"]
+                for script in sorted(scripts):
+                    with self.subTest(driver=driver, artifact=artifact, script=script):
+                        self.assertTrue(
+                            any(fnmatch.fnmatchcase(script, pattern) for pattern in patterns),
+                            f"{driver} runs {script}, which {artifact} does not list",
+                        )
 
 
 if __name__ == "__main__":

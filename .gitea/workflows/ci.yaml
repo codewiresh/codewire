@@ -148,6 +148,9 @@ jobs:
           # merge qualification leaves it unset.
           VERIFICATION_PR_SCOPE: quick
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # A push to main reads whether its previous main run verified that
+          # commit (plan-main-push.py); no other event receives the token here.
+          GITEA_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
         run: |
           set -euo pipefail
           case "${VERIFICATION_REQUEST:-}" in
@@ -186,14 +189,25 @@ jobs:
             trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'
             python3 "$trusted_adapter" --plan "$plan_output"
           else
-            baseline="$GITHUB_SHA"
-            if git rev-parse --verify "$GITHUB_SHA^" >/dev/null 2>&1; then
-              baseline="$(git rev-parse "$GITHUB_SHA^")"
+            # A push to main plans its artifact facts with the previous main's
+            # trusted policy, against that commit when its own run verified
+            # it (plan-main-push.py). A dispatch, a policy that predates the
+            # planner, or any planner failure keeps every artifact selected.
+            main_push_planner='.trusted-ci-policy/scripts/ci/plan/plan-main-push.py'
+            if [ "$GITHUB_EVENT_NAME" = push ] && [ -f "$main_push_planner" ] \
+                && python3 -I -B "$main_push_planner" \
+                  --repository . \
+                  --head "$GITHUB_SHA" \
+                  --before "$PUSH_BEFORE_SHA" \
+                  --output "$plan_output"; then
+              cat "$plan_output" >> "$GITHUB_OUTPUT"
+            else
+              echo 'main artifact facts: no trusted main-push plan; every artifact stays selected'
+              python3 scripts/ci/plan/apply-verification-plan.py \
+                --unclassified \
+                --head "$GITHUB_SHA" \
+                --head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
             fi
-            python3 scripts/ci/plan/apply-verification-plan.py \
-              --unclassified \
-              --head "$GITHUB_SHA" \
-              --head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
           fi
 
       - name: Verify exact tested-tree receipt

@@ -1070,6 +1070,13 @@ def has_unknown_reachable_path(
     }
     analyzed |= before.closure_manifests | after.closure_manifests
     known_root_inputs = {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml"}
+    # Roots no Rust package compiles from. A file under one is a Rust input
+    # only when the graph lists it (package_inputs, explicit_inputs or a
+    # composite's inputs), and every listed file is classified above or by its
+    # own artifact. No crate embeds or builds from a script or Git hook
+    # (test_planner.py RepositoryEmbedTests keeps it that way), so an
+    # unlisted script stays an input of whatever artifact lists it, never an
+    # unknown input of the cw, desktop or workspace binary.
     unrelated_roots = {
         "apps",
         "deployments",
@@ -1078,6 +1085,8 @@ def has_unknown_reachable_path(
         "packages",
         "proto",
         "libs",
+        "scripts",
+        ".githooks",
         ".github",
     }
     for path in paths:
@@ -1114,8 +1123,6 @@ def has_unknown_reachable_path(
             continue
         first = path.split("/", 1)[0]
         if first in unrelated_roots:
-            continue
-        if path.startswith("scripts/ci/release/"):
             continue
         return path
     return None
@@ -1496,12 +1503,15 @@ def plan(
         else:
             paths = changed_paths(repository, baseline["baseline_commit"], head)
             observed_policy_change = policy_changed(paths, non_artifact_inputs)
-            # A PR candidate must never use its proposed policy to reduce its
-            # own checks, so policy changes remain fail-closed there. Protected
+            # A PR candidate, or a main push planned with the previous main's
+            # policy, must never use its proposed policy to reduce its own
+            # checks, so policy changes remain fail-closed there. Protected
             # support and Dev planning execute the exact canonical head policy
             # against a validated ancestor baseline; in that mode the reviewed
             # head policy is authoritative and artifact fingerprints determine
-            # whether publication is actually required.
+            # whether publication is actually required, whatever else the
+            # range changed. A policy path is never a Rust input; one that an
+            # artifact lists still changes that artifact's fingerprint.
             exact_head_policy = (
                 baseline.get("mode")
                 in {"published_support_pair", "deployed_source"}
@@ -1517,19 +1527,9 @@ def plan(
                 if exact_head_policy
                 else set()
             )
-            exact_head_policy_only = exact_head_policy and all(
-                path in exact_head_policy_paths
-                or any(
-                    fnmatch.fnmatchcase(path, pattern)
-                    for pattern in non_artifact_inputs
-                )
-                for path in paths
-            )
             changed_policy_path = (
-                None if exact_head_policy_only else observed_policy_change
+                None if exact_head_policy else observed_policy_change
             )
-            if not exact_head_policy_only:
-                exact_head_policy_paths = set()
             try:
                 export_git_tree(repository, baseline["baseline_commit"], baseline_tree)
                 export_git_tree(repository, head, head_tree)

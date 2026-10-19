@@ -15,6 +15,21 @@ policy-path change makes every artifact `unclassified` under the trusted
 policy. Artifact state is `affected`, `unaffected`, or `unclassified`, and
 consumers schedule both `affected` and `unclassified`.
 
+A push to `main` runs `plan-main-push.py` from the previous main commit's
+checkout, so it plans with that commit's policy exactly as a pull request
+plans with its base's. It plans against the previous main commit only when
+that commit's own CI push run verified it: the run succeeded and its Policy
+verification job ran. A superseded run dispatches nothing and a failed run
+proved nothing, so after either, and for a dispatch, a force push, an
+unavailable Forgejo API or any planner failure, every artifact stays selected
+(`apply-verification-plan.py --unclassified`), as it did for every push before.
+
+A Rust package compiles only from its crates and the files the graph lists.
+`scripts/`, `.githooks/` and the other unrelated roots are never its unknown
+inputs: a script is an input only of the artifacts that list it, and the
+tests fail when a crate embeds a script or an image build driver runs a helper
+its images do not list.
+
 ```sh
 python3 scripts/ci/plan/planner.py \
   --repository . \
@@ -27,7 +42,10 @@ published base/workspace pair, removes registry credentials, and supplies the
 untrusted metadata as `--baseline-candidate`. The planner accepts only a
 matching immutable pair whose revision is an ancestor of the exact head.
 `apply-support-plan.py` preserves pair atomicity: if either artifact is not
-proven unaffected, both are selected.
+proven unaffected, both are selected. Support and Dev planning execute the
+exact canonical head's reviewed policy, so a policy path in the range never
+makes an artifact unclassified there, alone or beside other changes; the
+artifact fingerprints decide.
 
 The workspace image also depends on the complete Dev release selection: the
 release tree, the Dev acceptance harness, all five runtime images, and the
