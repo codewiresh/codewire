@@ -78,6 +78,13 @@ if [[ "$(pin show --commit "$main_sha" digest)" == "$digest" ]]; then
   echo "workspace image pin: main already pins $digest"
   exit 0
 fi
+# The pin follows the image definition. An image rebuilt from the definition
+# main already pins (only the cw it carries changed, or the pin itself) needs
+# no new pin: that cw is refreshed through its own runtime asset.
+if [[ "$(pin show --commit "$main_sha" inputs-sha256)" == "$(pin inputs-sha256 --commit "$GITHUB_SHA")" ]]; then
+  echo 'workspace image pin: main already pins an image of this definition'
+  exit 0
+fi
 
 # The published image must be one index serving linux/amd64 (Dev and Production
 # Sandboxes) and linux/arm64 (local VMs on Apple silicon). This job runs only

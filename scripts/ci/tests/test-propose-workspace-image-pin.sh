@@ -187,6 +187,24 @@ grep -Fq "main already pins $NEW" "$work/same.out" || fail 'a pinned digest was 
   fail 'a pinned digest rewrote the automation branch'
 pass
 
+# An image rebuilt from the definition main already pins proposes nothing,
+# even with a new digest: only the cw it carries, or the pin, changed.
+mkdir -p "$repo/crates/codewire-cli/src"
+printf 'fn main() {}\n' >"$repo/crates/codewire-cli/src/main.rs"
+git -C "$repo" add -A
+git -C "$repo" commit -qm 'change cw only'
+git -C "$repo" push -q origin main
+calls_before="$(wc -l <"$work/curl-calls")"
+propose "registry.example.invalid/codewire/workspace@sha256:$(printf '5%.0s' {1..64})" \
+  GITHUB_SHA="$(git -C "$repo" rev-parse HEAD)" >"$work/definition.out" 2>&1 ||
+  fail "a rebuilt definition failed: $(cat "$work/definition.out")"
+grep -Fq 'main already pins an image of this definition' "$work/definition.out" ||
+  fail 'an image of the pinned definition was proposed'
+[[ "$(wc -l <"$work/curl-calls")" -eq "$calls_before" ]] || fail 'a rebuilt definition reached the API'
+[[ "$(git -C "$origin" rev-parse automation/workspace-image-pin)" == "$before" ]] ||
+  fail 'a rebuilt definition rewrote the automation branch'
+pass
+
 # A main that moved to another definition leaves the proposal to its own publication.
 git -C "$repo" switch -q main
 write_definition 3.0.0
