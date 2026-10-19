@@ -94,9 +94,6 @@ concurrency:
   group: cw-release-dry-run-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: read
-
 env:
   CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
   EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE: ${{ vars.EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE }}
@@ -119,6 +116,7 @@ env:
 
 jobs:
   protected-main:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # Both builders are protected. Refuse any ref but main on a lite runner,
     # before any job reaches mac-runner or ci-protected; a dispatch from a
     # feature branch must not run its code there.
@@ -132,6 +130,7 @@ jobs:
           [ "$GITHUB_REF_NAME" = 'main' ]
 
   superseded:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # Only the newest queued commit needs the protected builders and the
     # single Mac runner: scripts/ci/release/dry-run-superseded.sh says when an
     # older one may skip without losing a check. Each builder job decides
@@ -154,6 +153,7 @@ jobs:
         run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
 
   build-runtime-linux:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Build or check the local runtime's Linux side
     needs: [protected-main, superseded]
     if: needs.superseded.outputs.superseded == 'false'
@@ -261,6 +261,7 @@ jobs:
           retention-days: 1
 
   build-helper-darwin:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # The release's helper build (cli-release.yaml): the VZ helper's recipe
     # and, when no release has signed it yet, the helper built unsigned for
     # the stand-in signer.
@@ -311,6 +312,7 @@ jobs:
           retention-days: 1
 
   sign-helper:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # The release's helper signing job with the recording rcodesign stand-in
     # and synthetic keys. It signs nothing, holds no credential and reaches no
     # Apple service, and nothing packs what it hands back: the macOS build
@@ -365,6 +367,7 @@ jobs:
             'sign verify print-signature-info encode-app-store-connect-api-key notary-submit ' ]
 
   pack-runtime:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # The release's runtime pack (cli-release.yaml) from cached slow parts:
     # the one document the macOS pair and both Linux cws then build from.
     name: Pack the local runtime from cached parts
@@ -446,6 +449,7 @@ jobs:
           retention-days: 1
 
   build-darwin:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Build the macOS cw natively
     needs: [protected-main, pack-runtime]
     if: needs.pack-runtime.outputs.superseded == 'false'
@@ -517,6 +521,7 @@ jobs:
           retention-days: 1
 
   sign-darwin:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # The release's macOS signing job with the recording rcodesign stand-in
     # and synthetic keys (scripts/ci/tests/fixtures/rcodesign-stand-in.sh).
     # It signs nothing, holds no credential and reaches no Apple service, but
@@ -582,6 +587,7 @@ jobs:
           retention-days: 1
 
   build-linux-musl:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # One Linux cw from the packed runtime, beside the macOS pair and the
     # other Linux cw, as a release builds it.
     name: Build the Linux x86_64 cw
@@ -672,6 +678,7 @@ jobs:
           retention-days: 1
 
   build-linux-gnu:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # One Linux cw from the packed runtime, beside the macOS pair and the
     # other Linux cw, as a release builds it.
     name: Build the Linux arm64 cw
@@ -762,6 +769,7 @@ jobs:
           retention-days: 1
 
   assemble:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # The release's packaging: the four cws each built in its own job,
     # imported and prepared, and the unsigned delivery verified.
     name: Assemble and verify the unsigned four-target delivery

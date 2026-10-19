@@ -20,9 +20,6 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: read
-
 concurrency:
   group: connect-apikey-production-fixtures
   cancel-in-progress: false
@@ -35,6 +32,7 @@ env:
 
 jobs:
   smoke:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Connect ApiKey lifecycle (${{ inputs.target }})
     runs-on: ci-protected
     env:

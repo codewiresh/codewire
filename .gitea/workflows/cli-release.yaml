@@ -20,9 +20,6 @@ on:
         default: none
         options: [none, stable]
 
-permissions:
-  contents: read
-
 env:
   CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
   EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE: ${{ vars.EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE }}
@@ -49,6 +46,7 @@ env:
 
 jobs:
   release-selection:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Verify canonical CLI release tag
     runs-on: ci-lite
     outputs:
@@ -117,6 +115,7 @@ jobs:
           printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"
 
   build-runtime-linux:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # The Linux side of the local VM runtime every release cw embeds (#2539,
     # #2733): the arm64 guest root, the arm64 kernel (from the release parts
     # cache, or built in its pinned container), the aarch64 cw runtime and
@@ -199,6 +198,7 @@ jobs:
           retention-days: 1
 
   build-helper-darwin:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # The local runtime's Virtualization.framework helper (#1905). Every
     # release cw's runtime document pins its digest, so sign-helper signs it
     # with the Developer ID before build-darwin packs the runtime, and only
@@ -263,6 +263,7 @@ jobs:
           retention-days: 1
 
   sign-helper:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # Developer ID signing and Apple notarization of the VZ helper (#1905),
     # only when build-helper-darwin built one; otherwise build-darwin takes
     # the helper signed for the same recipe from the parts cache. Only this
@@ -358,6 +359,7 @@ jobs:
           retention-days: 1
 
   pack-runtime:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # The one local runtime document every release cw embeds, and the only
     # output the four cw builds wait for: the macOS target packed on the Mac
     # from the Linux side and the signed helper, merged with the Linux job's
@@ -476,6 +478,7 @@ jobs:
           retention-days: 1
 
   build-darwin:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # The macOS cw links Apple frameworks (Security, SystemConfiguration), so
     # it is built natively on the protected mac-runner runner: one ephemeral
     # registration per job, as the unprivileged ci account (infra
@@ -557,6 +560,7 @@ jobs:
           retention-days: 1
 
   sign-darwin:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # Developer ID signing and Apple notarization of the macOS pair (#2064).
     # Each target's identity binds its final bytes, so the pair is signed
     # before the delivery is prepared. Only this job reads the Apple keys; it
@@ -629,6 +633,7 @@ jobs:
           retention-days: 1
 
   build-linux-musl:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # One Linux cw, built from the runtime document beside the macOS pair
     # and the other Linux cw. Compilation only: no OIDC, signing, mirror or
     # R2 capability exists in this job.
@@ -723,6 +728,7 @@ jobs:
           retention-days: 1
 
   build-linux-gnu:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # One Linux cw, built from the runtime document beside the macOS pair
     # and the other Linux cw. Compilation only: no OIDC, signing, mirror or
     # R2 capability exists in this job.
@@ -817,6 +823,7 @@ jobs:
           retention-days: 1
 
   build-release:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # Packaging once all four cws exist: the signed macOS pair and the two
     # Linux cws, each bound to the bytes its job built; it compiles only cw's
     # signature verifier. No OIDC, signing, mirror or R2 capability exists in
@@ -971,13 +978,12 @@ jobs:
           retention-days: 1
 
   package-release:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # Signing, mirror and R2 capabilities exist only after a successful build.
     name: Sign and publish cw release
     needs: [release-selection, pack-runtime, build-release]
     runs-on: ci-protected
     enable-openid-connect: true
-    permissions:
-      contents: write
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 

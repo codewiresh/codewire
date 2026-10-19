@@ -12,9 +12,6 @@ concurrency:
   group: deploy-prod-release
   cancel-in-progress: false
 
-permissions:
-  contents: read
-
 enable-openid-connect: true
 
 env:
@@ -30,6 +27,7 @@ env:
 
 jobs:
   release-selection:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Verify canonical release tag
     runs-on: ci-lite
     outputs:
@@ -98,6 +96,7 @@ jobs:
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
 
   build-daemon-image:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Alias Existing Daemon Image
     runs-on: ci-protected
     needs: [release-selection]
@@ -122,6 +121,7 @@ jobs:
         run: scripts/ci/images/build-push-image.sh daemon .release-source/deployments/docker/daemon.Dockerfile .release-source
 
   build-derp:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Alias Existing DERP Relay Image
     runs-on: ci-protected
     needs: [release-selection]
@@ -146,6 +146,7 @@ jobs:
         run: scripts/ci/images/build-push-image.sh derp .release-source/deployments/docker/derp.Dockerfile .release-source
 
   build-services-image:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Alias Existing Rust Services Image
     runs-on: ci-protected
     needs: [release-selection]
@@ -170,6 +171,7 @@ jobs:
         run: scripts/ci/images/build-push-image.sh services .release-source/deployments/docker/services.Dockerfile .release-source
 
   build-mesh-image:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Alias Existing Hosted Mesh Image
     runs-on: ci-protected
     needs: [release-selection]
@@ -194,6 +196,7 @@ jobs:
         run: scripts/ci/images/build-push-image.sh mesh .release-source/deployments/docker/mesh.Dockerfile .release-source
 
   build-dashboard-image:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Alias Existing Dashboard Image
     runs-on: ci-protected
     needs: [release-selection]
@@ -223,6 +226,7 @@ jobs:
   # mutual TLS, never under emulation, then one join that verifies the whole
   # index before it is tagged and published.
   support-pair-selection:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Select the release support pair
     runs-on: ci-protected
     timeout-minutes: 15
@@ -241,6 +245,7 @@ jobs:
         run: scripts/ci/images/release-support-pair-state.sh "$SOURCE_SHA"
 
   build-support-amd64:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Build the release support pair (linux/amd64)
     runs-on: ci-protected
     timeout-minutes: 120
@@ -274,6 +279,7 @@ jobs:
         run: scripts/ci/images/build-support-platform.sh linux/amd64
 
   build-support-arm64:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Build the release support pair (linux/arm64)
     runs-on: ci-protected
     timeout-minutes: 120
@@ -303,6 +309,7 @@ jobs:
         run: scripts/ci/images/build-support-platform.sh linux/arm64
 
   publish-support-release-images:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # The platform digests are only pointers: each join verifies the whole
     # index (both platforms, and only those, with the release source's
     # protected provenance and an SBOM each) before it tags or reports a
@@ -377,6 +384,7 @@ jobs:
             "$SOURCE_SHA" "$RELEASE_TAG"
 
   publish-runtime-images:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Validate and Publish Exact Runtime Bundle
     runs-on: ci-protected
     needs:
@@ -468,6 +476,7 @@ jobs:
             "$SOURCE_SHA" "$RELEASE_TAG"
 
   dispatch-deploy-prod:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Dispatch Signed Tag to Deploy
     runs-on: ci-protected
     timeout-minutes: 15

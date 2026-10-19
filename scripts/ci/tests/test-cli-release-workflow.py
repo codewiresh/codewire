@@ -535,8 +535,7 @@ MUTATIONS = {
         "          curl -fsSL -o /tmp/protoc.zip \"https://github.com/protocolbuffers", 1),
     "unbounded zig download": lambda t: t.replace(
         'scripts/ci/release/fetch-pinned.sh "$zig_url"', 'curl -fsSLo zig.tar.xz "$zig_url" #', 1),
-    "global OIDC": lambda t: t.replace("permissions:\n  contents: read\n",
-                                       "permissions:\n  contents: read\n\nenable-openid-connect: true\n", 1),
+    "global OIDC": lambda t: t.replace("\n\nenv:\n", "\n\nenable-openid-connect: true\n\nenv:\n", 1),
     "OIDC in build": lambda t: t.replace("    runs-on: ci-protected\n    timeout-minutes: 30\n",
                                          "    runs-on: ci-protected\n    enable-openid-connect: true\n"
                                          "    timeout-minutes: 30\n", 1),

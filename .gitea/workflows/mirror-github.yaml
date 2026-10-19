@@ -4,9 +4,6 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
-
 enable-openid-connect: true
 
 env:
@@ -23,6 +20,7 @@ concurrency:
 
 jobs:
   mirror:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Mirror main and signed tags to GitHub
     runs-on: ci-protected
     timeout-minutes: 15
