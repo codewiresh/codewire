@@ -2629,11 +2629,25 @@ if sys.argv[1:] == ["--version"]:
     sys.exit(0)
 record = os.environ.get("FAKE_CLAUDE_RECORD")
 if record:
+    import socket, urllib.parse
     names = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
              "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+    proxies = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY",
+               "all_proxy", "NO_PROXY", "no_proxy")
+    # Whether the proxy Claude Code would use refuses a connection now.
+    proxy = urllib.parse.urlsplit(os.environ.get("HTTPS_PROXY", "http://127.0.0.1:0"))
+    try:
+        socket.create_connection((proxy.hostname, proxy.port), timeout=2).close()
+        refused = False
+    except ConnectionRefusedError:
+        refused = True
+    except OSError:
+        refused = None
     with open(record, "a") as output:
         output.write(json.dumps({"argv": sys.argv[1:],
                                  "env": {name: os.environ.get(name) for name in names},
+                                 "proxies": {name: os.environ.get(name) for name in proxies},
+                                 "proxy_refused": refused,
                                  "home": os.environ["HOME"], "cwd": os.getcwd(),
                                  "stdin": sys.stdin.read()}) + "\n")
 if mode == "ok":
@@ -2774,6 +2788,30 @@ class ClaudeSessionDriver(unittest.TestCase):
                 self.assertEqual(call["cwd"], call["home"])
                 self.assertTrue(Path(call["home"]).name.startswith("kind-claude-"))
                 self.assertFalse(Path(call["home"]).exists())
+
+    def test_claude_has_no_route_but_loopback_in_every_form(self):
+        # #2891: a Kind Sandbox has open egress; Claude Code's own account
+        # calls must never carry a fixture credential or a placeholder to a
+        # real provider. Every proxy names one refusing loopback port, and
+        # loopback, where the managed route listens, is the only exemption.
+        for form, projected in (("subscription_token", self.SUBSCRIPTION),
+                                ("api_key", self.API_KEY), ("sign_in", self.SIGN_IN)):
+            with self.subTest(form=form):
+                self.record.unlink(missing_ok=True)
+                if form == "sign_in":
+                    self.write_login()
+                status, events, output = self.main(
+                    [form, "success"],
+                    self.environ(projected=projected, NO_PROXY="corp.example", HTTPS_PROXY="http://corp:3128"))
+                self.assertEqual(status, 0, output)
+                [call] = self.calls()
+                proxies = call["proxies"]
+                url = proxies["HTTPS_PROXY"]
+                self.assertRegex(url, r"^http://127\.0\.0\.1:[1-9][0-9]*$")
+                self.assertEqual(proxies, {**dict.fromkeys(CLAUDE.PROXIES, url),
+                                           "NO_PROXY": "127.0.0.1,localhost",
+                                           "no_proxy": "127.0.0.1,localhost"})
+                self.assertIs(call["proxy_refused"], True)
 
     def test_the_driver_never_supplies_a_missing_or_wrong_projection(self):
         for name, value in (
@@ -3356,8 +3394,8 @@ kind_credential_codex_request_count
         self.assertIn('assert_kind_credential_claude_token "$token_name" 2',
                       flow[refusal:flow.index('"$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |', refusal)])
         suite = (ROOT / "scripts/ci/verify/kind/suites/credential-journey.sh").read_text()
-        self.assertLess(suite.index("\n  kind_credential_native_smoke\n"),
-                        suite.index("\n  kind_credential_claude_session\n"))
+        self.assertLess(suite.index("\n    kind_credential_native_smoke\n"),
+                        suite.index("\n    kind_credential_claude_session\n"))
         gate = (ROOT / "scripts/ci/verify/kind/common.sh").read_text().split(
             "deploy_agent_sandbox_and_smoke() {", 1)[1].split("\n}", 1)[0]
         self.assertLess(gate.index("kind_credential_native_smoke"),
@@ -3523,8 +3561,8 @@ kind_credential_claude_rotation env-1 kind-claude 3
         self.assertNotIn("claude_session.py", flow)
         self.assertIn("prebuilt-release", flow.split("log ", 1)[0])
         suite = (ROOT / "scripts/ci/verify/kind/suites/credential-journey.sh").read_text()
-        self.assertLess(suite.index("\n  kind_credential_claude_session\n"),
-                        suite.index("\n  kind_credential_claude_sign_in\n"))
+        self.assertLess(suite.index("\n    kind_credential_claude_session\n"),
+                        suite.index("\n    kind_credential_claude_sign_in\n"))
         gate = (ROOT / "scripts/ci/verify/kind/common.sh").read_text().split(
             "deploy_agent_sandbox_and_smoke() {", 1)[1].split("\n}", 1)[0]
         self.assertLess(gate.index("kind_credential_claude_session"),

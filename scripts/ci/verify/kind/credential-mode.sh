@@ -31,7 +31,7 @@ load_kind_github_app() {
   local field
   require_tool bao
   BAO_ADDR="$KIND_GITHUB_APP_OPENBAO_ADDR" bao kv metadata get "$KIND_GITHUB_APP_OPENBAO_PATH" >/dev/null 2>&1 || {
-    echo "::error::OpenBao ${KIND_GITHUB_APP_OPENBAO_PATH} is not readable; refresh the owner's OpenBao login (dev/INFRA-REFERENCE.md), then rerun" >&2
+    echo "::error::OpenBao ${KIND_GITHUB_APP_OPENBAO_PATH} is not readable; refresh the owner's OpenBao login, then rerun" >&2
     return 1
   }
   openbao_app_field() {

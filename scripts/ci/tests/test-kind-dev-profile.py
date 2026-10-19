@@ -186,6 +186,7 @@ with (pathlib.Path(os.environ["FAKE_STATE"]) / "calls").open("a") as log:
         "kube_context":os.environ.get("KUBE_CONTEXT"),
         "kubeconfig":os.environ.get("KUBECONFIG"), "smokes":os.environ.get("CARGO_CI_DIR"),
         "lock_fd":os.environ.get("KIND_PROFILE_LOCK_FD"),
+        "credential_stages":os.environ.get("KIND_CREDENTIAL_STAGES"),
         "postgres_port":os.environ.get("KIND_POSTGRES_HOST_PORT")}) + "\n")
 sys.exit(int(os.environ.get("FAKE_SUITE_STATUS", "0")))
 '''
@@ -1104,6 +1105,15 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertIn("deploying credential-service failed", result.stderr)
         self.assertFalse(self.calls("suite"))
 
+    def test_credential_stages_are_the_suites(self) -> None:
+        selected = (CONSUMERS / "scripts/dev/kind/test-selected.sh").read_text()
+        journey = (ROOT / "scripts/ci/verify/kind/suites/credential-journey.sh").read_text()
+        stages = re.search(r"^CREDENTIAL_STAGES=\(([^)]*)\)", selected, re.M)
+        order = re.search(r"^KIND_CREDENTIAL_STAGE_ORDER=\(([^)]*)\)", journey, re.M)
+        self.assertIsNotNone(stages)
+        self.assertIsNotNone(order)
+        self.assertEqual(stages.group(1).split(), order.group(1).split())
+
     def test_service_sources_names_the_crate_each_deploy_builds(self) -> None:
         sources = load_service_sources()
         selected = (CONSUMERS / "scripts/dev/kind/test-selected.sh").read_text()
@@ -1155,6 +1165,69 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
                                  FAKE_FRONTEND_URL="http://127.0.0.1:31100")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([call["args"] for call in self.calls("suite")], [["suite", "dashboard-browser"]])
+
+    def test_credential_stages_reach_only_the_credentials_suite(self) -> None:
+        # #2890: rerun one credentials stage; it never reads as a green suite.
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="workspace-services credentials",
+                                 KIND_CREDENTIAL_STAGES="claude-sign-in")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([(call["args"], call["credential_stages"]) for call in self.calls("suite")],
+                         [(["suite", "credentials"], "claude-sign-in"), (["suite", "workspace-services"], "")])
+        self.assertIn("credentials stages claude-sign-in only: not a green credentials suite", result.stderr)
+        self.assertIn("credentials ran only stages claude-sign-in, which is not a green credentials suite",
+                      result.stderr)
+        self.assertNotIn("all selected suites green", result.stderr)
+        self.assertNotIn("suite credentials green", result.stderr)
+        # Named out of order, the stages run in suite order.
+        self.calls_path.write_text("")
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="credentials",
+                                 KIND_CREDENTIAL_STAGES="claude-sign-in native")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([call["credential_stages"] for call in self.calls("suite")], ["native claude-sign-in"])
+
+    def test_credentials_suite_is_whole_by_default(self) -> None:
+        # Unset, empty, or every stage named: the whole suite, reported as such.
+        for stages in (None, "", "claude-sign-in claude-session native"):
+            with self.subTest(stages=stages):
+                self.calls_path.write_text("")
+                environment = {"KIND_TEST_SUITES": "credentials"}
+                if stages is not None:
+                    environment["KIND_CREDENTIAL_STAGES"] = stages
+                result = self.run_script("test-selected.sh", **environment)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([call["credential_stages"] for call in self.calls("suite")], [""])
+                self.assertIn("suite credentials green", result.stderr)
+                self.assertIn("all selected suites green", result.stderr)
+                self.assertNotIn("not a green credentials suite", result.stderr)
+
+    def test_credential_stages_are_refused_before_any_effect(self) -> None:
+        for environment, message in (
+                ({"KIND_TEST_SUITES": "credentials", "KIND_CREDENTIAL_STAGES": "claude"},
+                 "unknown credentials stage: claude"),
+                ({"KIND_TEST_SUITES": "workspace-services", "KIND_CREDENTIAL_STAGES": "claude-sign-in"},
+                 "which this run does not select")):
+            with self.subTest(**environment):
+                self.calls_path.write_text("")
+                result = self.run_script("test-selected.sh", FAKE_CHANGES="service idp",
+                                         FAKE_RECORDS=current_records("idp"), **environment)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertFalse([call for call in self.calls() if call["tool"] in ("docker", "kind", "suite")])
+
+    def test_make_kind_test_passes_credential_stages(self) -> None:
+        (self.tree / "Makefile").write_text(MAKEFILE_SOURCE)
+        (self.tree / ".env").write_text("AGENT_SANDBOX_SHA=synthetic\nBUF=synthetic-buf\nGO_BIN=/synthetic/bin\n")
+        for arguments, stages in ((("SUITES=credentials", "CREDENTIAL_STAGES=claude-sign-in"), "claude-sign-in"),
+                                  (("SUITES=credentials",), "")):
+            with self.subTest(arguments=arguments):
+                self.calls_path.write_text("")
+                # A stage list exported in the shell does not leak into a run
+                # that names none.
+                result = subprocess.run(["make", "--no-print-directory", "kind-test", *arguments],
+                                        cwd=self.tree, env=self.env | {"KIND_CREDENTIAL_STAGES": "native"},
+                                        text=True, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([call["credential_stages"] for call in self.calls("suite")], [stages])
 
     def test_selected_stops_when_changes_are_unknown(self) -> None:
         result = self.run_script("test-selected.sh", KIND_TEST_SUITES="credentials", FAKE_CHANGES_FAIL="1")

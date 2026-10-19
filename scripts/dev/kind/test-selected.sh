@@ -4,6 +4,7 @@
 #
 #   KIND_CLUSTER_NAME=<cluster> scripts/dev/kind/test-selected.sh
 #   KIND_TEST_SUITES="credentials dashboard-browser" ...   # explicit suites
+#   KIND_CREDENTIAL_STAGES=claude-sign-in ...              # only these credentials stages
 #   PREFLIGHT_BASE_SHA=<parent> ...                        # stacked branches
 #
 # The repository's one path classifier (scripts/dev/preflight.sh --explain)
@@ -35,6 +36,10 @@ KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 ORDER=(edge-contract credentials workspace-services dashboard-browser final-fencing runtime-acceptance integrated cw-runtime cw-managed-agents warm-pools)
 # deploy-service.sh services, in deploy order.
 SERVICES=(idp orchestration credential-service billing coordinator mesh dashboard daemon)
+# The credentials suite's stages, as credential-journey.sh orders them. Naming
+# some (KIND_CREDENTIAL_STAGES) reruns only those after the suite's setup:
+# an iteration aid that never makes a green credentials suite (#2890).
+CREDENTIAL_STAGES=(native claude-session claude-sign-in)
 
 log() { printf '[kind-test] %s\n' "$*" >&2; }
 die() { printf '[kind-test] error: %s\n' "$*" >&2; exit 1; }
@@ -201,6 +206,23 @@ selected=()
 for suite in "${ORDER[@]}"; do
   [ -n "${wanted[$suite]:-}" ] && selected+=("$suite")
 done
+# Credentials stages, in suite order; empty means the whole suite.
+credential_stages=""
+read -r -a requested_stages <<<"${KIND_CREDENTIAL_STAGES:-}"
+if [ "${#requested_stages[@]}" -gt 0 ]; then
+  for stage in "${requested_stages[@]}"; do
+    [[ " ${CREDENTIAL_STAGES[*]} " == *" ${stage} "* ]] \
+      || die "unknown credentials stage: ${stage} (the stages are: ${CREDENTIAL_STAGES[*]})"
+  done
+  [[ " ${selected[*]} " == *' credentials '* ]] \
+    || die 'CREDENTIAL_STAGES names stages of the credentials suite, which this run does not select (SUITES=credentials)'
+  stages=()
+  for stage in "${CREDENTIAL_STAGES[@]}"; do
+    [[ " ${requested_stages[*]} " != *" ${stage} "* ]] || stages+=("$stage")
+  done
+  # Every stage is the whole suite.
+  [ "${stages[*]}" = "${CREDENTIAL_STAGES[*]}" ] || credential_stages="${stages[*]}"
+fi
 log "change since ${base}"
 for item in "${unobserved[@]}"; do
   log "  not observable in Kind: ${item}"
@@ -220,6 +242,9 @@ fi
 for suite in "${selected[@]}"; do
   log "  suite ${suite}: ${why[$suite]}"
 done
+if [ -n "$credential_stages" ]; then
+  log "  credentials stages ${credential_stages} only: not a green credentials suite"
+fi
 log "  services this change feeds: ${changed_services[*]:-none}"
 
 if [ "$KIND_PROFILE" = 1 ]; then
@@ -307,11 +332,23 @@ done
 timings=("deploy $((SECONDS - started))s")
 for suite in "${selected[@]}"; do
   started=$SECONDS
+  suite_stages=""
+  [ "$suite" != credentials ] || suite_stages="$credential_stages"
   # Test the current source against the cluster as deployed, not only an
   # unchanged tree that matches the image receipt.
   KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" KIND_RETAINED_USE_CLUSTER_WORKSPACE=1 \
+    KIND_CREDENTIAL_STAGES="$suite_stages" \
     "$ROOT/scripts/ci/verify/kind-e2e.sh" suite "$suite" || die "suite ${suite} failed after $((SECONDS - started))s"
-  timings+=("${suite} $((SECONDS - started))s")
-  log "suite ${suite} green in $((SECONDS - started))s"
+  if [ -n "$suite_stages" ]; then
+    timings+=("${suite} (stages ${suite_stages}) $((SECONDS - started))s")
+    log "credentials stages ${suite_stages} green in $((SECONDS - started))s; the other stages did not run"
+  else
+    timings+=("${suite} $((SECONDS - started))s")
+    log "suite ${suite} green in $((SECONDS - started))s"
+  fi
 done
-log "all selected suites green: ${timings[*]}"
+if [ -n "$credential_stages" ]; then
+  log "selected suites green; credentials ran only stages ${credential_stages}, which is not a green credentials suite: ${timings[*]}"
+else
+  log "all selected suites green: ${timings[*]}"
+fi

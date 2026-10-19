@@ -44,12 +44,24 @@ variable; the other Anthropic names are absent, never empty. The fresh HOME and
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC are harness-local: no saved login,
 telemetry or update call. Neither changes authentication. The `sign_in` form
 keeps the session's HOME, because its authentication is the saved login.
+
+Claude Code has no route but loopback, also harness-local: every proxy
+variable names a loopback port that refuses connections, and only loopback,
+where the managed route listens, is exempt. A Kind Sandbox has open egress,
+and stock Claude Code sends its own account calls straight to
+api.anthropic.com whatever ANTHROPIC_BASE_URL says. With a fixture credential
+or a placeholder the real provider answers 401; for the sign-in form Claude
+Code then refreshes with Codewire's placeholder at the real token endpoint
+and clears the delivered login when that is refused (#2891). A real Sandbox
+login is accepted there, and no synthetic credential or placeholder may reach
+a provider.
 """
 
 import json
 import os
 import re
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -118,6 +130,9 @@ CREDENTIAL_MARKERS = (
     "CW_KIND_SYNTHETIC_REFUSED_TOKEN",
     "CW_KIND_SYNTHETIC_SIGN_IN",
 )
+# Claude Code's proxy variables; each names a loopback port that refuses.
+PROXIES = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
+LOOPBACK = "127.0.0.1,localhost"
 REFUSAL = b"401"
 WITHHELD = b"403"
 SESSION_TIMEOUT = 120.0
@@ -246,10 +261,13 @@ def delivered_login(environ):
     return True
 
 
-def child_environment(environ, home):
+def child_environment(environ, home, no_route):
     """The session's own environment with a fresh harness-local home only, or,
-    when home is None, with the session's own home."""
+    when home is None, with the session's own home, and no route but loopback:
+    every proxy variable names `no_route`, a refusing loopback URL."""
     child = dict(environ)
+    child.update({name: no_route for name in PROXIES})
+    child.update({"NO_PROXY": LOOPBACK, "no_proxy": LOOPBACK})
     if home is not None:
         child.update({
             "HOME": home,
@@ -319,10 +337,14 @@ def session(form, outcome, environ):
         if outcome != "logged_out" and not delivered:
             raise Failure("login_missing")
     emit("claude_projection", form=form, source="daemon_session")
-    with tempfile.TemporaryDirectory(prefix="kind-claude-") as scratch:
+    # Bound and never listening: a connection to it is refused at once.
+    with tempfile.TemporaryDirectory(prefix="kind-claude-") as scratch, \
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM) as no_route:
+        no_route.bind(("127.0.0.1", 0))
         # The sign-in form authenticates with the session user's own saved
         # login; every other form gets a fresh home without one.
-        env = child_environment(environ, None if form == "sign_in" else scratch)
+        env = child_environment(environ, None if form == "sign_in" else scratch,
+                                f"http://127.0.0.1:{no_route.getsockname()[1]}")
         version = client_version(env, scratch)
         status, stdout, stderr = run([*CLAUDE_ARGV, "-p", PROMPT], env, scratch,
                                      SESSION_TIMEOUT, "claude")

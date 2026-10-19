@@ -98,8 +98,35 @@ apply_kind_codex_login_check_period() {
   log "set the overlay's Codex login check period in codewire-config (${have:-unset} -> ${want}s) and restarted orchestration, which reads it"
 }
 
+# The suite's stages, in the order it runs them (#2890). On a retained
+# cluster, KIND_CREDENTIAL_STAGES names a subset to rerun one stage in minutes
+# (`make kind-test SUITES=credentials CREDENTIAL_STAGES=claude-sign-in`); the
+# suite's setup still runs first. A subset is never the credentials suite: it
+# does not report the suite green, and the gate and its shards refuse it.
+KIND_CREDENTIAL_STAGE_ORDER=(native claude-session claude-sign-in)
+
+# The stages KIND_CREDENTIAL_STAGES selects, space-separated in suite order;
+# every stage when it is unset or empty. Fails on a name that is not a stage.
+kind_credential_stages() {
+  local stage selected=()
+  local -a requested=()
+  read -r -a requested <<<"${KIND_CREDENTIAL_STAGES:-}"
+  for stage in "${requested[@]}"; do
+    if [[ " ${KIND_CREDENTIAL_STAGE_ORDER[*]} " != *" ${stage} "* ]]; then
+      echo "::error::unknown credentials stage ${stage}; the stages are: ${KIND_CREDENTIAL_STAGE_ORDER[*]}" >&2
+      return 2
+    fi
+  done
+  for stage in "${KIND_CREDENTIAL_STAGE_ORDER[@]}"; do
+    if [ "${#requested[@]}" -eq 0 ] || [[ " ${requested[*]} " == *" ${stage} "* ]]; then
+      selected+=("$stage")
+    fi
+  done
+  printf '%s\n' "${selected[*]}"
+}
+
 run_retained_credentials_suite() {
-  local command
+  local command stages
   require_kind_errexit
   require_tool jq
   require_tool kind
@@ -107,6 +134,10 @@ run_retained_credentials_suite() {
   require_tool openssl
   require_tool python3
 
+  stages="$(kind_credential_stages)"
+  if [ "$stages" != "${KIND_CREDENTIAL_STAGE_ORDER[*]}" ]; then
+    log "running only the credentials stages ${stages} after the suite's setup; this is not the credentials suite"
+  fi
   trap retained_suite_cleanup EXIT
   validate_retained_cluster
   command="$(kubectl -n "$NS" get deployment codewire-credential-service \
@@ -119,8 +150,18 @@ run_retained_credentials_suite() {
   apply_kind_codex_login_check_period
   log "restarting the synthetic credential-service for a fresh provider event log"
   restart_credential_service
-  kind_credential_native_smoke
-  kind_credential_claude_session
-  kind_credential_claude_sign_in
-  log "retained credentials suite green"
+  if [[ " $stages " == *' native '* ]]; then
+    kind_credential_native_smoke
+  fi
+  if [[ " $stages " == *' claude-session '* ]]; then
+    kind_credential_claude_session
+  fi
+  if [[ " $stages " == *' claude-sign-in '* ]]; then
+    kind_credential_claude_sign_in
+  fi
+  if [ "$stages" = "${KIND_CREDENTIAL_STAGE_ORDER[*]}" ]; then
+    log "retained credentials suite green"
+  else
+    log "credentials stages ${stages} green; not a green credentials suite, the other stages did not run"
+  fi
 }

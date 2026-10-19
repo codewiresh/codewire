@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -229,11 +231,12 @@ class LoginFile(unittest.TestCase):
         self.assertIsNone(driver.delivered())
         self.workspace.deliver(login()[:30])
         self.assertIsNone(driver.delivered())
-        # Claude Code cleared the refresh token after a refused refresh: still
-        # Codewire's, waiting for the daemon's next write. Without the marker
-        # it is not Codewire's.
-        self.workspace.deliver(login(refresh=""))
-        self.assertIsNone(driver.delivered())
+        # Claude Code cleared Codewire's login after its own refresh was
+        # refused: it reached a token endpoint, which the probe forbids
+        # (#2891). Without the marker it is not Codewire's.
+        self.workspace.deliver(login(refresh="", accessToken="", expiresAt=0))
+        with self.assertRaisesRegex(driver.Failure, "^login_cleared_by_claude$"):
+            driver.delivered()
         self.workspace.deliver(login(refresh="", marker=False))
         with self.assertRaisesRegex(driver.Failure, "^login_not_codewires$"):
             driver.delivered()
@@ -319,6 +322,82 @@ class SyntheticBackend(unittest.TestCase):
         self.assertEqual(self.call("/v1/models", self.oauth(), method="GET")[0], 404)
         self.assertEqual(self.backend.take(), ([3, 4, 4], 4, 1))
         self.assertEqual(self.backend.take()[0], [])
+        # Each refusal keeps only its closed form, never a value.
+        # A fixture bearer without the OAuth beta is the #2891 refusal: it
+        # names its public generation.
+        self.assertEqual(self.backend.rejections, [
+            {"route": "messages", "credential": "fixture_bearer", "oauth_beta": False,
+             "generation": 3},
+            {"route": "messages", "credential": "api_key", "oauth_beta": True},
+            {"route": "messages", "credential": "other_bearer", "oauth_beta": True},
+            {"route": "messages", "credential": "none", "oauth_beta": False},
+        ])
+
+    def test_a_refusal_names_the_credential_form_only(self):
+        beta = {"anthropic-beta": "oauth-2025-04-20"}
+        cases = (
+            ({"Authorization": "Basic x", **beta}, "malformed_bearer"),
+            ({"Authorization": f"Bearer {token(3)}", "x-api-key": "k", **beta}, "several"),
+            ({"Authorization": "Bearer sk-ant-oat01-somebody-else", **beta}, "other_bearer"),
+        )
+        for headers, form in cases:
+            with self.subTest(form=form):
+                self.assertEqual(self.call("/v1/messages/count_tokens", headers=headers)[0], 403)
+                self.assertEqual(self.backend.rejections[-1],
+                                 {"route": "count_tokens", "credential": form, "oauth_beta": True})
+        self.assertNotIn("somebody", json.dumps(self.backend.rejections))
+        for index in range(driver.MAX_REJECTIONS + 2):
+            self.call(headers={})
+        self.assertEqual(len(self.backend.rejections), driver.MAX_REJECTIONS)
+
+
+class NoRouteButLoopback(unittest.TestCase):
+    """#2891: the probe's Claude Code reaches its loopback backend and
+    nothing else, so a synthetic login never meets a real provider."""
+
+    def setUp(self):
+        self.workspace = Workspace(self)
+        self.backend = driver.Backend()
+        self.addCleanup(self.backend.close)
+
+    def test_every_proxy_names_a_refusing_loopback_port_and_only_loopback_is_exempt(self):
+        environment = driver.claude_environment(self.backend)
+        url = self.backend.no_route_url
+        self.assertRegex(url, r"^http://127\.0\.0\.1:[1-9][0-9]*$")
+        self.assertEqual({name: environment[name] for name in driver.PROXIES},
+                         dict.fromkeys(("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                                        "ALL_PROXY", "all_proxy"), url))
+        self.assertEqual((environment["NO_PROXY"], environment["no_proxy"]),
+                         ("127.0.0.1,localhost", "127.0.0.1,localhost"))
+        port = int(url.rsplit(":", 1)[1])
+        with self.assertRaises(ConnectionRefusedError):
+            socket.create_connection(("127.0.0.1", port), timeout=2).close()
+
+    def test_a_client_that_honours_the_proxy_reaches_only_the_backend(self):
+        # A stock HTTP client in Claude Code's environment: the backend
+        # answers; any other host is refused at the proxy, never resolved.
+        probe = (
+            "import sys, urllib.request, urllib.error\n"
+            "def get(url):\n"
+            "    try:\n"
+            "        urllib.request.urlopen(url, timeout=5)\n"
+            "    except urllib.error.HTTPError as error:\n"
+            "        return f'http {error.code}'\n"
+            "    except urllib.error.URLError as error:\n"
+            "        return type(error.reason).__name__\n"
+            "print(get(sys.argv[1] + '/v1/models'))\n"
+            "print(get('http://api.anthropic.invalid/api/oauth/profile'))\n"
+            "print(get('https://platform.claude.invalid/v1/oauth/token'))\n")
+        environment = driver.claude_environment(self.backend)
+        result = subprocess.run([sys.executable, "-I", "-c", probe, self.backend.base_url],
+                                env=environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.stdout.split(), ["http", "404", "ConnectionRefusedError",
+                                                 "ConnectionRefusedError"], result.stderr)
+
+    def test_the_refusing_port_is_released_with_the_backend(self):
+        backend = driver.Backend()
+        backend.close()
+        self.assertEqual(backend.no_route.fileno(), -1)
 
 
 class Modes(unittest.TestCase):
@@ -361,8 +440,11 @@ class Modes(unittest.TestCase):
                 self.workspace.deliver(login(3))
                 status, events = self.run_mode("deliver", "1", synthetic=synthetic)
                 self.assertEqual(status, 1)
-                self.assertEqual(events, [{"event": "failed", "mode": "deliver",
-                                           "reason": reason}])
+                # A refused turn names the closed form it presented (#2891).
+                named = [{"event": "backend_rejected", "rejections": [
+                    {"route": "messages", "credential": "api_key", "oauth_beta": True}]}]
+                self.assertEqual(events, (named if reason == "backend_rejected" else [])
+                                 + [{"event": "failed", "mode": "deliver", "reason": reason}])
 
     def rotate_when_ready(self, ready, generation, nonce="c" * 32, keep=True):
         def run():

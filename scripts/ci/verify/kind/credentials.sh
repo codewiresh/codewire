@@ -1832,6 +1832,20 @@ kind_credential_claude_latest_token() {
 # Bound on the rotation probe reporting its first turn.
 KIND_CLAUDE_ROTATION_READY_SECONDS=180
 
+# Why a Claude login step failed, from closed records only: the workspace
+# daemon's login checks (outcomes, never a token) and the fixture's sign-in
+# events (grant and generation). Best-effort.
+kind_credential_claude_login_diagnostics() {
+  local pod="$1"
+  echo "::group::Claude login checks of ${pod} and the fixture's sign-in events"
+  kubectl -n "$SANDBOX_NS" logs "$pod" -c workspace --since=30m 2>&1 \
+    | grep -F 'hosted Claude login' | tail -n 20 || true
+  kind_credential_fixture_events 2>/dev/null | jq -c '.[]
+    | select(.event | test("^(claude_sign_in_token|claude_sign_in_refused|claude_profile|provider_unserved|anthropic_rejected)$"))' \
+    2>/dev/null | tail -n 20 || true
+  echo '::endgroup::'
+}
+
 # claude_login.py `rotation` in the background of the calling shell: once its
 # long-lived Claude Code answered a turn with the delivered token, it creates
 # READY in the Pod, and the sign-in is reconnected in place, so the daemon
@@ -1864,6 +1878,7 @@ kind_credential_claude_rotation() {
   output="$(cat -- "$RUN_DIR/credential-claude-rotation.jsonl")"
   [ "$status" -eq 0 ] || {
     printf '%s\n' "$output" >&2
+    kind_credential_claude_login_diagnostics "$pod" >&2
     return "$status"
   }
   generation="$(jq -er 'select(.event == "rotation_adopted")

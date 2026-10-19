@@ -68,6 +68,7 @@ usage:
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite edge-contract
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite integrated
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite credentials
+  KIND_CLUSTER_NAME=<retained-cluster> KIND_CREDENTIAL_STAGES="<stage>..." scripts/ci/verify/kind-e2e.sh suite credentials
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite workspace-services
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite dashboard-browser
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite final-fencing
@@ -83,6 +84,14 @@ EOF
 }
 
 dispatch_kind_e2e() {
+  # A credentials stage subset reruns one stage on a retained cluster. The
+  # gate, its shards and every other command run whole suites, so they refuse
+  # it rather than ignore it.
+  if [ -n "${KIND_CREDENTIAL_STAGES:-}" ] && { [ "$#" -ne 2 ] || [ "$1" != suite ] \
+      || [ "$2" != credentials ] || [ "${KIND_SHARD_TRANSACTION:-0}" = 1 ]; }; then
+    echo "::error::KIND_CREDENTIAL_STAGES selects stages of the retained credentials suite only (suite credentials); unset it for this command"
+    return 2
+  fi
   if [ "$#" -eq 0 ]; then
     run_integrated_kind_suite
     return

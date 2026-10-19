@@ -1279,6 +1279,91 @@ for wrapped_entry in former-shard:run_kind_up wrapped-suite:run_retained_credent
   fi
 done
 
+# #2890: KIND_CREDENTIAL_STAGES reruns some credentials stages on a retained
+# cluster after the suite's whole setup, and never reports the suite green.
+# Unset, the suite runs every stage as before. The gate, its shards and other
+# commands refuse a stage list before any effect rather than ignore it.
+stage_driver="$FIXTURE/stage-driver.sh"
+cat >"$stage_driver" <<'EOF'
+set -euo pipefail
+# shellcheck source=scripts/ci/verify/kind-e2e.sh
+source "$1"
+shift
+record() { printf '%s\n' "$1" >>"$CALLS"; }
+log() { record "log:$*"; }
+require_tool() { :; }
+kubectl() {
+  case "$*" in
+    *'get deployment codewire-credential-service'*)
+      printf '%s' /codewire-kind-fixtures/credential-service ;;
+    *) record "kubectl:$*" ;;
+  esac
+}
+validate_retained_cluster() { record validate; }
+build_retained_kind_smokes() { record smokes; }
+apply_kind_codex_login_check_period() { record period; }
+restart_credential_service() { record restart; }
+kind_credential_native_smoke() { record native; }
+kind_credential_claude_session() { record claude-session; }
+kind_credential_claude_sign_in() { record claude-sign-in; }
+run_kind_up() { record up; }
+run_integrated_kind_suite() { record full-gate; }
+run_retained_workspace_services_suite() { record workspace-services; }
+dump_cluster_state() { record dump; }
+dispatch_kind_e2e "$@"
+EOF
+run_stage_driver() {
+  local label="$1" stages="$2"
+  shift 2
+  : >"$CALLS"
+  driver_status=0
+  KIND_CREDENTIAL_STAGES="$stages" CALLS="$CALLS" RUN_DIR="$FIXTURE/stage-run" \
+    bash "$stage_driver" "$SCRIPT" "$@" >"$FIXTURE/${label}.out" 2>&1 || driver_status=$?
+}
+for stage_case in ':native claude-session claude-sign-in' 'claude-sign-in native claude-session:native claude-session claude-sign-in'; do
+  run_stage_driver whole-suite "${stage_case%%:*}" suite credentials
+  [ "$driver_status" -eq 0 ] || fail "the whole credentials suite failed with ${driver_status}"
+  [ "$(grep -Fx -e validate -e smokes -e period -e restart -e native -e claude-session -e claude-sign-in "$CALLS" | tr '\n' ' ')" \
+    = "validate smokes period restart ${stage_case#*:} " ] ||
+    fail "stages '${stage_case%%:*}' did not run the whole suite in order: $(tr '\n' ' ' <"$CALLS")"
+  grep -Fxq 'log:retained credentials suite green' "$CALLS" ||
+    fail "stages '${stage_case%%:*}' did not report the whole suite green"
+  if grep -Fq 'not a green credentials suite' "$CALLS"; then
+    fail "the whole suite with stages '${stage_case%%:*}' reported itself partial"
+  fi
+done
+run_stage_driver one-stage claude-sign-in suite credentials
+[ "$driver_status" -eq 0 ] || fail "a single credentials stage failed with ${driver_status}"
+# The whole setup still runs; only the named stage follows it.
+[ "$(grep -Fx -e validate -e smokes -e period -e restart -e native -e claude-session -e claude-sign-in "$CALLS" | tr '\n' ' ')" \
+  = 'validate smokes period restart claude-sign-in ' ] ||
+  fail "a single stage did not run the suite's setup and then only that stage: $(tr '\n' ' ' <"$CALLS")"
+if grep -Fxq 'log:retained credentials suite green' "$CALLS"; then
+  fail 'a single credentials stage reported the credentials suite green'
+fi
+grep -Fxq 'log:credentials stages claude-sign-in green; not a green credentials suite, the other stages did not run' "$CALLS" ||
+  fail 'a single credentials stage did not say it is not the credentials suite'
+run_stage_driver unknown-stage 'claude-sign-in claude' suite credentials
+[ "$driver_status" -eq 2 ] || fail "an unknown credentials stage was not refused: ${driver_status}"
+grep -Fq 'unknown credentials stage claude' "$FIXTURE/unknown-stage.out" ||
+  fail 'an unknown credentials stage was not named'
+[ ! -s "$CALLS" ] || fail "an unknown credentials stage ran something: $(tr '\n' ' ' <"$CALLS")"
+for refused in 'full-gate' 'up:up' 'shard:shard credentials' 'other-suite:suite workspace-services' \
+    'credential-mode:credentials fake'; do
+  read -r -a refused_command <<<"${refused#*:}"
+  [ "${refused%%:*}" != full-gate ] || refused_command=()
+  run_stage_driver "stages-${refused%%:*}" claude-sign-in "${refused_command[@]}"
+  [ "$driver_status" -eq 2 ] || fail "${refused%%:*} accepted a credentials stage list: ${driver_status}"
+  grep -Fq 'KIND_CREDENTIAL_STAGES selects stages of the retained credentials suite only' \
+    "$FIXTURE/stages-${refused%%:*}.out" || fail "${refused%%:*} did not explain its refusal"
+  [ ! -s "$CALLS" ] || fail "${refused%%:*} ran something with a stage list: $(tr '\n' ' ' <"$CALLS")"
+done
+# Without a stage list the same commands run as before.
+run_stage_driver gate-unchanged '' shard credentials
+[ "$driver_status" -eq 0 ] || fail "a shard without a stage list failed: ${driver_status}"
+[ "$(grep -Fx -e up -e native -e claude-session -e claude-sign-in "$CALLS" | tr '\n' ' ')" \
+  = 'up native claude-session claude-sign-in ' ] || fail "a shard did not run every credentials stage"
+
 # Restore the production suite functions replaced by the dispatcher spies.
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$INTEGRATED"

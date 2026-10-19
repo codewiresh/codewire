@@ -250,9 +250,11 @@ kind-db-restore:
 
 # Deploy the services the current change feeds, then run only the retained
 # Kind suites that cover it (SUITES=... to choose explicitly). Exit 3: only the
-# full CI Kind gate covers this change.
+# full CI Kind gate covers this change. CREDENTIAL_STAGES=claude-sign-in reruns
+# only that credentials stage (native, claude-session, claude-sign-in); it is
+# never a green credentials suite.
 kind-test:
-	KIND_TEST_SUITES="$(SUITES)" ./scripts/dev/kind/test-selected.sh
+	KIND_TEST_SUITES="$(SUITES)" KIND_CREDENTIAL_STAGES="$(CREDENTIAL_STAGES)" ./scripts/dev/kind/test-selected.sh
 
 kind-credentials-real:
 	$(KIND_ORIGIN_ENV) ./scripts/ci/verify/kind-e2e.sh credentials real

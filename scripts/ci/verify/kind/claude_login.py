@@ -49,10 +49,23 @@ bearer Claude Code itself sends: the delivered login's access token, in
 Claude Code's OAuth form. The managed route itself is proven by
 claude_session.py's `sign_in` form in a daemon-launched session.
 
+Why the probe's Claude Code has no route but loopback: a Kind Sandbox has
+open egress, and stock Claude Code sends its own account calls (the OAuth
+profile, claude.ai MCP servers, org settings) straight to api.anthropic.com
+whatever `ANTHROPIC_BASE_URL` says. With the fixture's synthetic login the
+real provider answers 401, Claude Code then refreshes with Codewire's
+placeholder at the real token endpoint, and that `invalid_grant` makes it
+clear the login on disk and drop its claude.ai headers until it re-reads the
+file (#2891). A real Sandbox login is accepted there, so none of that happens
+outside Kind. Every proxy variable of the probe's Claude Code therefore names
+a loopback port that refuses connections, with only loopback exempt: no
+synthetic credential or placeholder ever reaches a provider, and a login
+Claude Code cleared itself fails the probe.
+
 Why `logout` edits the file instead of running `claude auth logout`: stock
-logout also asks platform.claude.com to revoke the placeholder, which a Kind
-Sandbox without egress cannot reach; the daemon's rule depends only on the file
-it leaves, which is what this mode writes.
+logout also asks platform.claude.com to revoke the placeholder, which must not
+reach a provider; the daemon's rule depends only on the file it leaves, which
+is what this mode writes.
 """
 
 import json
@@ -61,6 +74,7 @@ from pathlib import Path
 import re
 import selectors
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -199,10 +213,10 @@ def delivered(now_ms=None):
         return None
     refresh = login.get("refreshToken") if isinstance(login, dict) else None
     if refresh == "" and document.get(MARKER_KEY) == 1:
-        # Claude Code cleared the refresh token after its own refresh was
-        # refused; the login is still Codewire's and the daemon's next check
-        # rewrites it (claude_home/login.rs).
-        return None
+        # Claude Code cleared Codewire's login after its own refresh with the
+        # placeholder was refused. The daemon would rewrite it, but nothing
+        # here may make Claude Code refresh: it reached a token endpoint.
+        raise Failure("login_cleared_by_claude")
     if not isinstance(refresh, str) or not refresh.startswith(PLACEHOLDER_PREFIX):
         raise Failure("login_not_codewires")
     if not NONCE.fullmatch(refresh[len(PLACEHOLDER_PREFIX):]):
@@ -294,17 +308,54 @@ SSE = "".join(
 ).encode()
 
 
+# The most refused requests whose credential form a failure reports.
+MAX_REJECTIONS = 8
+
+
+def credential_form(headers):
+    """The closed form of the credential one request presented, and whether it
+    carried the OAuth beta: never a value."""
+    authorization = headers.get_all("Authorization") or []
+    keys = headers.get_all("x-api-key") or []
+    betas = headers.get_all("anthropic-beta") or []
+    oauth_beta = any(OAUTH_BETA in [part.strip() for part in beta.split(",")] for beta in betas)
+    bearer = authorization[0][len("Bearer "):] if authorization and \
+        authorization[0].startswith("Bearer ") else ""
+    if len(authorization) + len(keys) > 1:
+        form = "several"
+    elif keys:
+        form = "api_key"
+    elif not authorization:
+        form = "none"
+    elif not bearer.strip():
+        form = "malformed_bearer"
+    elif ACCESS.fullmatch(bearer):
+        form = "fixture_bearer"
+    else:
+        form = "other_bearer"
+    return form, oauth_beta, int(ACCESS.fullmatch(bearer).group(1)) if form == "fixture_bearer" else None
+
+
 class Backend:
     """A synthetic Anthropic Messages API on loopback. It records the fixture
     generation of every bearer Claude Code presents (never the bearer), and
     answers any other credential 403, never 401: Claude Code would then try to
-    refresh with the placeholder."""
+    refresh with the placeholder. A refused request keeps only its closed
+    credential form, whether it carried the OAuth beta and, for a fixture
+    bearer, its public generation.
+
+    It also holds a loopback port bound but never listening: Claude Code's
+    proxy for every host but loopback, so its own account calls are refused
+    at once instead of reaching a provider."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.generations = []
         self.rejected = 0
+        self.rejections = []
         self.unknown = 0
+        self.no_route = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.no_route.bind(("127.0.0.1", 0))
         backend = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -369,8 +420,15 @@ class Backend:
             return self.respond(request, 404)
         generation = self.generation(request)
         if generation is None:
+            form, oauth_beta, presented = credential_form(request.headers)
+            rejection = {"route": "count_tokens" if path.endswith("/count_tokens") else "messages",
+                         "credential": form, "oauth_beta": oauth_beta}
+            if presented is not None:
+                rejection["generation"] = presented
             with self.lock:
                 self.rejected += 1
+                if len(self.rejections) < MAX_REJECTIONS:
+                    self.rejections.append(rejection)
             return self.respond(request, 403, json.dumps({
                 "type": "error", "error": {"type": "permission_error",
                                            "message": "synthetic Kind refusal"}}).encode())
@@ -403,25 +461,41 @@ class Backend:
             seen, self.generations = self.generations, []
             return seen, self.rejected, self.unknown
 
+    def refused(self):
+        """Fail the turn for its refused credential, naming the forms seen."""
+        with self.lock:
+            rejections = list(self.rejections)
+        emit("backend_rejected", rejections=rejections)
+        raise Failure("backend_rejected")
+
+    @property
+    def no_route_url(self):
+        return f"http://127.0.0.1:{self.no_route.getsockname()[1]}"
+
     def close(self):
         self.server.shutdown()
         self.server.server_close()
+        self.no_route.close()
+
+
+# Claude Code's proxy variables; each names the backend's refusing port.
+PROXIES = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
 
 
 def claude_environment(backend):
     """The exec environment for stock Claude Code: the session user's own
     HOME, where the delivered login lives, and this probe's loopback backend
-    as its only API base. Nothing that would outrank the login."""
+    as its only API base. Nothing that would outrank the login, and no route
+    to any host but loopback (see the module documentation)."""
     environment = {name: value for name, value in os.environ.items()
                    if name not in OUTRANKING}
-    no_proxy = ",".join(part for part in (environment.get("NO_PROXY"), "127.0.0.1,localhost")
-                        if part)
     environment.update({
         "HOME": str(HOME),
         "ANTHROPIC_BASE_URL": backend.base_url,
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        "NO_PROXY": no_proxy,
-        "no_proxy": no_proxy,
+        "NO_PROXY": "127.0.0.1,localhost",
+        "no_proxy": "127.0.0.1,localhost",
+        **{name: backend.no_route_url for name in PROXIES},
     })
     return environment
 
@@ -525,11 +599,11 @@ def turn_generations(backend, claude):
         claude.turn()
     except Failure:
         if backend.take()[1]:
-            raise Failure("backend_rejected") from None
+            backend.refused()
         raise
     seen, rejected, _unknown = backend.take()
     if rejected:
-        raise Failure("backend_rejected")
+        backend.refused()
     if not seen:
         raise Failure("turn_never_reached_backend")
     if len(set(seen)) != 1:
