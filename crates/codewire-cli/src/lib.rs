@@ -10,6 +10,7 @@ mod hosted_exec;
 mod local_runtime_pin;
 mod mesh;
 mod organization_client;
+mod output;
 #[cfg(target_os = "linux")]
 mod platform_cw_runtime;
 mod presentation;

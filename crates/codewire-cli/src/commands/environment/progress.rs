@@ -940,7 +940,7 @@ fn humanize_phase(phase: &str) -> String {
 
 /// Server-provided text with control characters (including escape sequences
 /// and newlines) replaced, so a row cannot drive the terminal.
-fn terminal_text(text: &str) -> String {
+pub(crate) fn terminal_text(text: &str) -> String {
     let replaced: String = text
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use super::*;
 
-pub(super) mod progress;
+pub(crate) mod progress;
 mod runtime;
 mod sources;
 
