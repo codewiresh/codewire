@@ -436,7 +436,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -575,7 +575,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -634,7 +634,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -758,7 +758,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -859,7 +859,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -943,7 +943,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -1030,7 +1030,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -1117,7 +1117,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -1246,7 +1246,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -1372,7 +1372,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -1520,7 +1520,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -1671,7 +1671,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
   kind-workspace:
@@ -1776,7 +1776,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -1851,7 +1851,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -1928,7 +1928,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -2018,7 +2018,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
@@ -2234,7 +2234,7 @@ jobs:
           unset GITEA_TOKEN
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:-https://git.example.invalid}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
           rm -f "$auth"
           echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 

@@ -24,12 +24,6 @@ on:
           - success
           - failure
 
-env:
-  CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
-  EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE: ${{ vars.EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE }}
-  CODEWIRE_FORGEJO_INTERNAL_URL: ${{ vars.CODEWIRE_FORGEJO_INTERNAL_URL }}
-  CONFIDENTIAL_SNP_NODE: ${{ vars.CONFIDENTIAL_SNP_NODE }}
-
 jobs:
   receipt:
     # zizmor: ignore[excessive-permissions] This validation job has no OIDC, checkout, network access, or write-capable integration.
