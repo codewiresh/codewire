@@ -1,11 +1,12 @@
 //! The client a managed agent runs: the one the workspace user's shell runs.
-//! `codex` or `claude` is found on PATH as the shell finds it and followed
-//! through symbolic links to the file that runs. No version is pinned and no
-//! layout, owner or mode is required of the file (owner decision 2026-10-16);
-//! a process running as the workspace user can replace the client. A launch
-//! names the client's identity, its bytes and the version it reports, and
-//! runs only while the client is still that file.
+//! `codex` or `claude` is found on the PATH a session gets, as the shell
+//! finds it, and followed through symbolic links to the file that runs. No
+//! version is pinned and no layout, owner or mode is required of the file
+//! (owner decision 2026-10-16); a process running as the workspace user can
+//! replace the client. A launch names the client's identity, its bytes and
+//! the version it reports, and runs only while the client is still that file.
 use super::{Agent, Error, Stamp, stamp};
+use crate::config::Config;
 use codewire_daemon_proto::platform_managed::{PROVIDER_BYTES, valid_provider_version};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -59,10 +60,23 @@ impl PinRefusal {
     }
 }
 /// The file the workspace user's shell runs for `agent`: the first
-/// executable `codex` or `claude` in a PATH directory, followed through every
-/// symbolic link. `None` when PATH has none.
-pub fn shell_client(agent: Agent) -> Option<PathBuf> {
-    shell_client_on(agent, &std::env::var_os("PATH")?)
+/// executable `codex` or `claude` in a directory of the PATH this daemon's
+/// sessions get, followed through every symbolic link. That PATH, not the
+/// daemon's own, is the one the user's shell and the managed driver run
+/// with. `None` when it has none.
+pub fn shell_client(agent: Agent, config: &Config) -> Option<PathBuf> {
+    shell_client_in(agent, config, std::env::vars())
+}
+/// [`shell_client`] over an explicit daemon environment, for tests.
+fn shell_client_in(
+    agent: Agent,
+    config: &Config,
+    daemon_environment: impl IntoIterator<Item = (String, String)>,
+) -> Option<PathBuf> {
+    shell_client_on(
+        agent,
+        &crate::env::session_path_in(config, daemon_environment)?,
+    )
 }
 /// [`shell_client`] for an explicit PATH value. A relative PATH entry is
 /// skipped, so the working directory never names a client.
@@ -218,13 +232,13 @@ fn leader_exited(pid: libc::id_t) -> Option<bool> {
     Some(unsafe { info.si_pid() } != 0)
 }
 impl ProviderPin {
-    pub fn discover(agent: Agent) -> Result<Self, Error> {
-        Self::admit_shell_client(agent).map_err(PinRefusal::hosted)
+    pub fn discover(config: &Config, agent: Agent) -> Result<Self, Error> {
+        Self::admit_shell_client(config, agent).map_err(PinRefusal::hosted)
     }
     /// The client the workspace user's shell runs for `agent` now, or why it
     /// is not admitted.
-    pub fn admit_shell_client(agent: Agent) -> Result<Self, PinRefusal> {
-        let path = shell_client(agent).ok_or(PinRefusal::Missing)?;
+    pub fn admit_shell_client(config: &Config, agent: Agent) -> Result<Self, PinRefusal> {
+        let path = shell_client(agent, config).ok_or(PinRefusal::Missing)?;
         Self::admit_client(&path, VERSION_TIMEOUT)
     }
     fn admit_client(path: &Path, timeout: Duration) -> Result<Self, PinRefusal> {
@@ -246,8 +260,12 @@ impl ProviderPin {
     }
     /// The client the shell runs now, which must still be the one `expected`
     /// names: a launch runs only the client it was offered.
-    pub fn admit(agent: Agent, expected: &ProviderIdentity) -> Result<Self, Error> {
-        let pin = Self::discover(agent)?;
+    pub fn admit(
+        config: &Config,
+        agent: Agent,
+        expected: &ProviderIdentity,
+    ) -> Result<Self, Error> {
+        let pin = Self::discover(config, agent)?;
         if pin.identity != *expected {
             return Err(Error::Refused);
         }
@@ -328,6 +346,91 @@ mod tests {
             Some(real.join("2.1.292"))
         );
         assert_eq!(shell_client_on(Agent::Codex, &path), None);
+    }
+
+    fn config(home_root: PathBuf) -> Config {
+        Config {
+            listen_addr: "127.0.0.1:0".into(),
+            workspace_root: PathBuf::from("/workspace"),
+            home_root,
+            auth_token: crate::DaemonAuthToken::new("provider-pin-test-token").unwrap(),
+            process_execution: crate::execution::ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            host: None,
+            launch_projection: None,
+            session_working_dir: None,
+        }
+    }
+
+    /// The image's layout, in its PATH order: the user's npm prefix, the
+    /// native installer's `~/.local/bin`, the first-use wrapper, then the
+    /// image's npm client. The client is found on the PATH a session gets:
+    /// the wrapper while Claude Code's native build is not installed, that
+    /// build once it is, and a directory the workspace environment puts first
+    /// on PATH over both, which the daemon's own PATH would never name.
+    #[test]
+    fn the_shell_client_is_found_on_the_path_a_session_gets() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let home = root.join("home/codewire");
+        let (npm_global, local, upgrade, image, user) = (
+            home.join(".npm-global/bin"),
+            home.join(".local/bin"),
+            root.join("opt/codewire/agents/upgrade"),
+            root.join("opt/codewire/agents/npm/bin"),
+            home.join("bin"),
+        );
+        let shipped = root.join("opt/codewire/agents/npm/lib/claude-code/bin/claude.exe");
+        for dir in [&npm_global, &local, &upgrade, &image, &user] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::create_dir_all(shipped.parent().unwrap()).unwrap();
+        write(&shipped, "#!/bin/sh\n", 0o755);
+        std::os::unix::fs::symlink(&shipped, image.join("claude")).unwrap();
+        write(&upgrade.join("claude"), "#!/bin/sh\n", 0o755);
+        let daemon_path = std::env::join_paths([&npm_global, &local, &upgrade, &image]).unwrap();
+        let daemon = || {
+            [
+                ("HOME".to_owned(), home.display().to_string()),
+                ("PATH".to_owned(), daemon_path.to_str().unwrap().to_owned()),
+            ]
+        };
+        let config = config(home.clone());
+
+        // Before the first use, the wrapper that installs the native build.
+        assert_eq!(
+            shell_client_in(Agent::Claude, &config, daemon()),
+            Some(upgrade.join("claude"))
+        );
+        // Once installed, `~/.local/bin` comes first: the native build runs.
+        let native = home.join(".local/share/claude/versions/2.1.303");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        write(&native, "#!/bin/sh\n", 0o755);
+        std::os::unix::fs::symlink(&native, local.join("claude")).unwrap();
+        assert_eq!(
+            shell_client_in(Agent::Claude, &config, daemon()),
+            Some(native.clone())
+        );
+
+        // The workspace environment puts the user's own directory first; the
+        // session's PATH, and so the managed agent's, is that one.
+        write(&user.join("claude"), "#!/bin/sh\n", 0o755);
+        let session_path = std::env::join_paths([&user, &local, &upgrade, &image]).unwrap();
+        std::fs::create_dir_all(home.join(".codewire")).unwrap();
+        std::fs::write(
+            home.join(".codewire/environment.json"),
+            serde_json::to_vec(&serde_json::json!({"PATH": session_path.to_str().unwrap()}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            shell_client_in(Agent::Claude, &config, daemon()),
+            Some(user.join("claude"))
+        );
+        // The daemon's own PATH, which resolution used before, names another.
+        assert_eq!(shell_client_on(Agent::Claude, &daemon_path), Some(native));
+        assert_eq!(shell_client_in(Agent::Codex, &config, daemon()), None);
     }
 
     #[test]

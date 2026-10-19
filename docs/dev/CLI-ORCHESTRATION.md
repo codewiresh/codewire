@@ -720,10 +720,12 @@ journey.
 
 A managed agent runs the client the workspace user's shell runs, in a local
 VM and in a hosted Sandbox alike (owner decision 2026-10-16): the first
-`codex` or `claude` on PATH, followed through symbolic links to the file it
-runs, found by the same code in both placements. No version is pinned, and the
-file needs no particular owner, layout or architecture; Claude Code may still
-be the image's wrapper that installs its native build on first use. A
+`codex` or `claude` on the PATH a session gets, followed through symbolic links
+to the file it runs, found by the same code in both placements. That PATH
+includes a workspace environment that sets PATH; the daemon's own is never
+used. No version is pinned, and the file needs no particular owner, layout or
+architecture; Claude Code may still be the image's wrapper that installs its
+native build on first use. A
 client the user updates, or one that updates itself, such as Claude Code's
 native build in `~/.local/bin`, is the one the next conversation runs. Any
 process running as the workspace user can therefore replace the client a

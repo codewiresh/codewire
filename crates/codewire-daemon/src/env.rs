@@ -52,6 +52,24 @@ pub fn build_process_env_in(
     build_managed_process_env_from(config, persisted, extra, term, inherited, &fallback_shell)
 }
 
+/// The PATH a session of this daemon gets when it names no environment of
+/// its own, as a managed agent's driver does: the shared builder's, over
+/// `daemon_environment`. A workspace environment that sets PATH therefore
+/// wins over the daemon's own, and a daemon started without one gets the
+/// default. `None` when no session environment can be built.
+pub fn session_path_in(
+    config: &Config,
+    daemon_environment: impl IntoIterator<Item = (String, String)>,
+) -> Option<std::ffi::OsString> {
+    build_process_env_in(config, &[], "", daemon_environment)
+        .ok()?
+        .entries
+        .iter()
+        .rev()
+        .find_map(|entry| entry.strip_prefix("PATH="))
+        .map(Into::into)
+}
+
 fn build_managed_process_env_from(
     config: &Config,
     persisted: Vec<String>,
@@ -1342,6 +1360,35 @@ mod tests {
         assert_eq!(
             guest.get("CW_SESSION_ID").map(String::as_str),
             Some("session-stale")
+        );
+    }
+
+    /// The PATH a managed agent's client is resolved on is the one its
+    /// session gets: the daemon's, a workspace environment's over it, or the
+    /// default for a daemon started without one.
+    #[test]
+    fn the_session_path_is_the_one_a_session_gets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().to_path_buf();
+        let config = test_config(home.clone());
+        let daemon = |path: &str| [("PATH".to_owned(), path.to_owned())];
+        assert_eq!(
+            session_path_in(&config, daemon("/daemon/bin:/usr/bin")),
+            Some("/daemon/bin:/usr/bin".into())
+        );
+        assert_eq!(
+            session_path_in(&config, daemon("")),
+            Some(DEFAULT_PATH.into())
+        );
+        fs::create_dir_all(home.join(".codewire")).expect("env dir");
+        fs::write(
+            home.join(".codewire/environment.json"),
+            br#"{"PATH":"/workspace/bin:/usr/bin"}"#,
+        )
+        .expect("environment file");
+        assert_eq!(
+            session_path_in(&config, daemon("/daemon/bin:/usr/bin")),
+            Some("/workspace/bin:/usr/bin".into())
         );
     }
 

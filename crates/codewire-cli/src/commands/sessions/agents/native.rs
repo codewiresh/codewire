@@ -195,7 +195,10 @@ type ResolveProgram<'a> = &'a dyn Fn(AgentKind) -> anyhow::Result<PathBuf>;
 /// A local VM runs the client the guest user's shell runs, resolved by the
 /// same code as a hosted Sandbox: the first `codex` or `claude` on PATH,
 /// followed through symbolic links to its file. A client the user updated
-/// first on PATH is the one that runs; no image version is pinned.
+/// first on PATH is the one that runs; no image version is pinned. This
+/// helper runs as an ordinary command of the guest daemon, which builds its
+/// environment as it does every session's, so its own PATH is the session
+/// PATH a hosted daemon resolves on too.
 fn resolve_guest_program(agent: AgentKind) -> anyhow::Result<PathBuf> {
     program_on_path(agent, &env::var_os("PATH").unwrap_or_default())
 }

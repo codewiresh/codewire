@@ -322,7 +322,7 @@ impl Service {
                         .then_some(l.expected_parent_launch_generation),
                 )?;
                 ImagePin::admit(&self.inner.config, &origin)?;
-                ProviderPin::admit(agent, &provider)?;
+                ProviderPin::admit(&self.inner.config, agent, &provider)?;
             }
             v1::platform_managed_mutation_request::Operation::Control(c)
                 if c.action == v1::PlatformManagedAction::Resume as i32 =>
@@ -332,7 +332,7 @@ impl Service {
                 // a launch's is (#2705).
                 let origin = resume_origin(scope, c)?;
                 ImagePin::admit(&self.inner.config, &origin)?;
-                ProviderPin::admit(origin.agent, &origin.provider)
+                ProviderPin::admit(&self.inner.config, origin.agent, &origin.provider)
                     .map_err(|_| Error::ResumeRefused(super::PROVIDER_NOT_ADMITTED))?;
                 origin
                     .agent
@@ -819,7 +819,7 @@ impl PlatformManagedService for Service {
                 // PATH, or one that does not name its version, this agent is
                 // not offered; a client that changed while it was read leaves
                 // the answer unknown, so the caller asks again.
-                let pin = match ProviderPin::admit_shell_client(agent) {
+                let pin = match ProviderPin::admit_shell_client(&self.inner.config, agent) {
                     Ok(pin) => pin,
                     Err(PinRefusal::Missing | PinRefusal::Invalid) => continue,
                     Err(refusal) => return Err(status(refusal.hosted())),

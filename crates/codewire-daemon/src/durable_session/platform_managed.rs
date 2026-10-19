@@ -188,7 +188,7 @@ impl SessionEngine {
     ) -> Result<(v1::SessionRecord, bool, bool), Error> {
         let origin = owner.launch_origin()?;
         let image = ImagePin::admit(&self.inner.config, &origin)?;
-        let provider = ProviderPin::admit(origin.agent, &origin.provider)?;
+        let provider = ProviderPin::admit(&self.inner.config, origin.agent, &origin.provider)?;
         // The binding's selection is fixed for its generation, so the route
         // the private home records now stays the selected one.
         let route = origin
@@ -363,7 +363,7 @@ impl SessionEngine {
         let previous = resumable_origin(&*handle.metadata.lock().await, &scope, &c)?;
         let origin = owner.resume_origin()?;
         let image = ImagePin::admit(&self.inner.config, &origin)?;
-        let provider = ProviderPin::admit(origin.agent, &origin.provider)
+        let provider = ProviderPin::admit(&self.inner.config, origin.agent, &origin.provider)
             .map_err(|_| Error::ResumeRefused(PROVIDER_NOT_ADMITTED))?;
         let route = origin
             .agent
