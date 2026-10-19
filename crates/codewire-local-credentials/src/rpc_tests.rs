@@ -2104,6 +2104,189 @@ async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
     }
 }
 
+/// The first child serves; every later one closes its lease channel before
+/// it is ready, as a broker does once its environment's runner is gone.
+#[derive(Clone)]
+struct RunnerGoneBrokerSpawner {
+    store: TestProtectedStore,
+    child_pids: Arc<Mutex<Vec<u32>>>,
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl LocalBrokerProcessSpawner for RunnerGoneBrokerSpawner {
+    fn spawn(
+        &self,
+        config: &LocalBrokerProcessConfig,
+        authority_peer: std::os::unix::net::UnixStream,
+    ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| LocalBrokerSpawnError::Spawn)?;
+        let first = {
+            let mut pids = self
+                .child_pids
+                .lock()
+                .map_err(|_| LocalBrokerSpawnError::Spawn)?;
+            pids.push(child.id().ok_or(LocalBrokerSpawnError::Spawn)?);
+            pids.len() == 1
+        };
+        if !first {
+            drop(authority_peer);
+            return Ok(child);
+        }
+        authority_peer
+            .set_nonblocking(true)
+            .map_err(|_| LocalBrokerSpawnError::Spawn)?;
+        let stream =
+            UnixStream::from_std(authority_peer).map_err(|_| LocalBrokerSpawnError::Spawn)?;
+        let store = self.store.clone();
+        let environment_id = config.environment_id.clone();
+        let environment_generation = config.environment_generation;
+        let task = tokio::spawn(async move {
+            let ready = codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeReady {
+                protocol_version: codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                environment_id: environment_id.to_string(),
+                environment_generation,
+            };
+            let Ok(mut client) = LocalCredentialBrokerLeaseClient::connect(
+                stream,
+                store,
+                environment_id,
+                environment_generation,
+            )
+            .await
+            else {
+                return;
+            };
+            if client.report_ready(ready).await.is_err() {
+                return;
+            }
+            std::future::pending::<()>().await;
+            drop(client);
+        });
+        self.tasks
+            .lock()
+            .map_err(|_| LocalBrokerSpawnError::Spawn)?
+            .push(task);
+        Ok(child)
+    }
+}
+
+/// #2924: a broker that keeps failing is restarted while its environment
+/// still selects it, and the stop its environment's removal sends ends that:
+/// no child is spawned and nothing is logged for it afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_broker_restarts_until_its_environment_stops_it_and_never_after() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let child_pids = Arc::new(Mutex::new(Vec::new()));
+    let tasks = Arc::new(Mutex::new(Vec::new()));
+    let spawner = Arc::new(RunnerGoneBrokerSpawner {
+        store: store.clone(),
+        child_pids: Arc::clone(&child_pids),
+        tasks: Arc::clone(&tasks),
+    });
+    let (shutdown, server) = start_server_with_spawner(
+        config.clone(),
+        store,
+        spawner as Arc<dyn LocalBrokerProcessSpawner>,
+    )
+    .await;
+    let mut owner = connect_when_ready(&config).await;
+    let credential = owner
+        .add_credential(
+            NewCredential {
+                provider: provider("openai"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name: "synthetic-broker".into(),
+                account_hint: None,
+                expires_at_unix: None,
+            },
+            ProtectedValue::from_slice(FIRST_MATERIAL).unwrap(),
+        )
+        .await
+        .unwrap();
+    let profile = owner
+        .create_profile(
+            &AccessProfileName::parse("broker").unwrap(),
+            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+        )
+        .await
+        .unwrap();
+    let environment_id = EnvironmentId::parse(uuid::Uuid::new_v4().to_string()).unwrap();
+    let selected_binding = EnvironmentAccessBinding {
+        environment_id: environment_id.clone(),
+        profile_id: profile.profile.id,
+        profile_revision: profile.profile.revision,
+    };
+    owner
+        .create_environment_access_binding(&selected_binding)
+        .await
+        .unwrap();
+    let mut control = LocalCredentialControlClient::connect(&config)
+        .await
+        .unwrap();
+    let runtime = control
+        .ensure_environment_broker(
+            &environment_id,
+            31,
+            "dev",
+            &temp.path().join(format!("runtime/{environment_id}.sock")),
+            EnvironmentBrokerSelection {
+                local_profile: Some(selected_binding),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(runtime.running);
+
+    // The serving child ends; each replacement fails before it is ready.
+    let first_pid = child_pids.lock().unwrap()[0];
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(first_pid as i32).unwrap(),
+        rustix::process::Signal::KILL,
+    )
+    .unwrap();
+    // A failure of a still-selected broker is transient: it restarts.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while child_pids.lock().unwrap().len() < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    control
+        .stop_environment_broker(&environment_id, Some(31))
+        .await
+        .unwrap();
+    let log_path = config.root.join("logs").join("brokers.log");
+    let spawned = child_pids.lock().unwrap().clone();
+    let logged = fs::read_to_string(&log_path).unwrap();
+    assert!(logged.contains("reason=lease_closed_before_ready"));
+    assert!(logged.contains("event=broker_restart_scheduled"));
+    // Well past the next restart delay (at most 1.6 s after three children).
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(*child_pids.lock().unwrap(), spawned);
+    assert_eq!(fs::read_to_string(&log_path).unwrap(), logged);
+    for pid in spawned {
+        assert!(matches!(
+            rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid as i32).unwrap()),
+            Err(rustix::io::Errno::SRCH)
+        ));
+    }
+
+    shutdown.send(()).unwrap();
+    server.await.unwrap().unwrap();
+    for task in tasks.lock().unwrap().drain(..) {
+        task.abort();
+    }
+}
+
 #[tokio::test]
 async fn owner_filter_rejects_a_peer_before_rpc_dispatch() {
     let temp = tempfile::tempdir().unwrap();

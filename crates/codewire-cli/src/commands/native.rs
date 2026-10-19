@@ -1273,9 +1273,9 @@ pub(crate) async fn delete_native_environment(
 ) -> anyhow::Result<v1::DeleteEnvironmentResponse> {
     let mut client = native_client().await?;
     let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
-    if !environment.access_profile.is_empty() {
-        connect_native_credential_authority().await?;
-    }
+    // Delete stops the environment's credential broker through the authority
+    // whenever it selected a profile or secrets.
+    ensure_native_credential_authority(&environment).await?;
     client
         .delete(&environment.name)
         .await

@@ -3929,6 +3929,14 @@ impl SupervisorCore {
             cleanup_interrupted_workspace_provisioning(&self.config.engine_root(), environment_id)?;
         }
         self.reconcile(name).await?;
+        // Removal ends the broker's supervision, as a stop does: the authority
+        // drains the exact generation before its runner goes. Access
+        // revocation cannot do it for a platform profile or a projection,
+        // which hold no local binding, and the authority would otherwise keep
+        // restarting a broker whose runner is gone (#2924).
+        let environment = self.environment(name)?.clone();
+        self.stop_environment_broker_if_present(&environment)
+            .await?;
         if self.environment(name)?.runner.is_none() {
             // Create durably reserves generation 1 before EnsureRunner. A
             // generation-zero failure with no recorded runner cannot require
@@ -8860,6 +8868,35 @@ mod tests {
         environment
     }
 
+    /// A platform profile pins its selection as a local one does, but the
+    /// authority holds no local binding for it.
+    fn project_environment_with_platform_profile() -> EnvironmentRecord {
+        let mut environment = project_environment_with_access();
+        let mut project: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        project.credentials = Some(codewire_project::CredentialBinding {
+            profile: "platform:id:11111111-1111-4111-8111-111111111111".into(),
+        });
+        let project_spec_json = project.canonical_json().unwrap();
+        environment.project_spec_sha256 = Some(format!(
+            "{:x}",
+            Sha256::digest(project_spec_json.as_slice())
+        ));
+        environment.project_spec_json = Some(project_spec_json);
+        environment.platform_source_authority = Some(
+            sources::PlatformSourceAuthority::from_proto(&v1::PlatformSourceAuthority {
+                anthropic_form: String::new(),
+                server_url: "https://codewire.example".into(),
+                organization_id: "synthetic-org".into(),
+                user_id: "synthetic-user".into(),
+                profile_slots: Vec::new(),
+            })
+            .unwrap(),
+        );
+        environment.validate("dev").unwrap();
+        environment
+    }
+
     fn workspace_update_payload(
         environment: &EnvironmentRecord,
         project_spec_json: &[u8],
@@ -13432,6 +13469,48 @@ mod tests {
         drop(authority);
         server.abort();
         let _ = server.await;
+    }
+
+    /// #2924: removing an environment ends its broker's supervision. Access
+    /// revocation finds no local binding for a platform profile or a
+    /// projection, so delete itself stops the exact generation's broker,
+    /// before its runner goes, and cannot proceed without that drain.
+    #[tokio::test]
+    async fn delete_stops_the_environment_broker_before_retiring_its_runner() {
+        for environment in [
+            project_environment_with_platform_profile(),
+            project_environment_with_secret_selection(
+                codewire_project::SecretBindings {
+                    user: Some(codewire_project::StoragePlacement::Local),
+                    ..Default::default()
+                },
+                BTreeMap::new(),
+            ),
+            project_environment_with_access(),
+        ] {
+            assert!(environment.generation > 0);
+            let environment_id = environment.id;
+            let (_parent, mut core) = test_supervisor_core(environment);
+            let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+            let paths = VmPaths::create(&engine, environment_id).unwrap();
+            assert!(matches!(
+                core.prepare_environment_for_delete("dev").await,
+                Err(SupervisorError::CredentialAuthorityUnavailable)
+            ));
+            assert_eq!(core.environment("dev").unwrap().id, environment_id);
+            assert!(paths.vm_dir.exists());
+
+            // With the authority present, its acknowledgement lets the delete
+            // go on to the runner, which this fixture cannot boot.
+            let (authority, server) = start_test_credential_authority(&core).await;
+            assert!(!matches!(
+                core.prepare_environment_for_delete("dev").await,
+                Err(SupervisorError::CredentialAuthorityUnavailable)
+            ));
+            drop(authority);
+            server.abort();
+            let _ = server.await;
+        }
     }
 
     #[tokio::test]
