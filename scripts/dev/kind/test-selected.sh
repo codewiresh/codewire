@@ -104,6 +104,8 @@ map_token() {
     rust_pkg_codewire_proto | rust_pkg_codewire_daemon_proto | rust_pkg_codewire_workload_secrets)
       full "$token" 'every service compiles it; only the full gate rebuilds them all' ;;
     rust_workspace) full "$token" 'the workspace manifest or lockfile rebuilds every service' ;;
+    rust_pkg_codewire_workspace_hack)
+      full "$token" 'hakari feature unification rebuilds every service' ;;
     contracts_proto) full "$token" 'protobuf contracts change every service and client' ;;
     rust_pkg_codewire_local_vmm | transport_pkg_codewire_local_vmm | \
       transport_pkg_codewire_vmm_guest_probe | rust_pkg_codewire_egress_broker | \
