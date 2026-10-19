@@ -1,0 +1,63 @@
+# A Codewire environment for developing Codewire itself.
+#
+# Local VM: create it from a checkout of this repository. The checkout is
+# mounted live and read-write at /workspace/<folder name>, and sessions start
+# there. The folders under workspace.vm_only stay on the VM's own disk:
+# Cargo and Bun output is many small files, and the host share is much slower
+# than the VM disk for those. The host keeps its own target/ and node_modules,
+# and the VM never sees them.
+#
+# Cloud: this file declares no repositories, so a cloud environment created
+# from it starts with an empty /workspace. Clone the repository there, or add
+# a repositories entry in a copy of this file. Cloud does not use
+# workspace.vm_only.
+#
+# Resources suit a full workspace build. On a smaller machine, pass lower
+# values to the create command (--cpu, --memory, --disk).
+version: 1
+image: workspace
+cpu: "8"
+memory: "16Gi"
+disk: "100Gi"
+agents:
+  tools:
+    - claude-code
+    - codex
+# The workspace image's protoc (3.21) is too old for this repository's
+# protos, which use the debug_redact option. The install command fetches the
+# protoc 35.1 that CI pins (same checksums as the Makefile and the workspace
+# image build) into the persistent home, once, and PROTOC points the Rust
+# build scripts at it.
+install_command: |
+  set -eu
+  version=35.1
+  case "$(uname -m)" in
+    x86_64) asset=linux-x86_64 sha=6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 ;;
+    aarch64) asset=linux-aarch_64 sha=01bf9d08808c7f96678b63f4bd8efa559bb4f83d5a7a270d5edaf507f9d5d9cf ;;
+    *) echo "no pinned protoc for $(uname -m)" >&2; exit 1 ;;
+  esac
+  dir="$HOME/.local/share/protoc-$version"
+  if [ ! -x "$dir/bin/protoc" ]; then
+    tmp="$(mktemp -d)"
+    curl --proto '=https' --tlsv1.2 -fsSL -o "$tmp/protoc.zip" \
+      "https://github.com/protocolbuffers/protobuf/releases/download/v$version/protoc-$version-$asset.zip"
+    echo "$sha  $tmp/protoc.zip" | sha256sum -c --quiet -
+    python3 -m zipfile -e "$tmp/protoc.zip" "$tmp/protoc"
+    chmod 0755 "$tmp/protoc/bin/protoc"
+    mkdir -p "$(dirname "$dir")"
+    rm -rf "$dir"
+    mv "$tmp/protoc" "$dir"
+    rm -rf "$tmp"
+  fi
+  "$dir/bin/protoc" --version
+environment:
+  PROTOC: /home/codewire/.local/share/protoc-35.1/bin/protoc
+workspace:
+  vm_only:
+    - target
+    - .tmp
+    - .venv-proto
+    - node_modules
+    - apps/dashboard/node_modules
+    - packages/codewire-proto-ts/node_modules
+    - libs/sdk-ts/node_modules

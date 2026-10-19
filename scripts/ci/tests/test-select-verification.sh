@@ -535,6 +535,9 @@ run_paths_case leaf_rust pull_request refs/pull/4/head false \
 run_paths_case cli_bin_rust pull_request refs/pull/400/head false \
   'policy rust rust_pkg_codewire_cli_bin' \
   crates/codewire-cli-bin/Cargo.toml
+run_paths_case repository_codewire_yaml pull_request refs/pull/404/head false \
+  'policy rust rust_pkg_codewire_project' \
+  codewire.yaml
 run_paths_case detached_desktop pull_request refs/pull/401/head false \
   'policy rust rust_pkg_codewire_desktop' \
   crates/codewire-desktop/src/main.rs

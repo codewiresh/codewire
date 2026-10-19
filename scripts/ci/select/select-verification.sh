@@ -595,6 +595,17 @@ if [ "$event_selected" = false ]; then
     fi
 
     case "$path" in
+      codewire.yaml)
+        # The repository's own environment file. codewire-project's tests
+        # parse it, so a schema change cannot leave it invalid.
+        select_token policy
+        select_token rust
+        select_token rust_pkg_codewire_project
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
       .gitattributes|.gitignore|.dockerignore|.env.example|.envrc.example|turbo.json)
         select_token policy
         recognized=true

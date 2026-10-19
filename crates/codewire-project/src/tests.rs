@@ -1,6 +1,13 @@
 use super::*;
 
 #[test]
+fn repository_codewire_yaml_parses() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../codewire.yaml");
+    let content = std::fs::read_to_string(&path).expect("read the repository codewire.yaml");
+    parse_project_yaml(&content).expect("the repository codewire.yaml parses");
+}
+
+#[test]
 fn canonical_mapping_grammar_normalizes_to_one_spec() {
     let canonical = parse_project_yaml(
         r#"
