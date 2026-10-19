@@ -8,8 +8,8 @@ ARG BASE_IMAGE_REF
 FROM rust:1.99.0-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a16627bc841228151faa2d4de2644ac9987e4a2f1f2fa AS cw-toolchain
 RUN rustup component add --toolchain 1.99.0 rustfmt clippy
 
-# Checksum-pinned compiler tools, selected for the build platform. None of
-# these archives enters the runtime.
+# Checksum-pinned compiler tools, selected for the build platform. Only protoc
+# also enters the workspace, unpacked for the image's own platform.
 FROM scratch AS sccache-amd64
 ADD --checksum=sha256:67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006 \
   https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz /sccache.tar.gz
@@ -210,8 +210,17 @@ ENV GOPATH="/home/codewire/go"
 RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     apt-get-with-retry update && apt-get-with-retry install -y --no-install-recommends \
       bubblewrap=0.9.0-1ubuntu0.1 \
-      file gdb pipx pkg-config protobuf-compiler python3-full python3-venv strace && \
+      file gdb pipx pkg-config python3-full python3-venv strace && \
     rm -rf /var/lib/apt/lists/*
+
+# The protoc CI pins, for the image's own platform. Ubuntu's protobuf-compiler
+# (3.21) cannot compile this repository's protos, which use debug_redact.
+RUN --mount=type=bind,from=protoc-amd64,source=/protoc.zip,target=/tmp/protoc-amd64.zip \
+    --mount=type=bind,from=protoc-arm64,source=/protoc.zip,target=/tmp/protoc-arm64.zip \
+    unzip -q "/tmp/protoc-${TARGETARCH}.zip" -d /opt/protoc && \
+    chmod -R a+rX /opt/protoc && \
+    test "$(/opt/protoc/bin/protoc --version)" = 'libprotoc 35.1'
+ENV PATH="/opt/protoc/bin:${PATH}" PROTOC=/opt/protoc/bin/protoc
 
 RUN mkdir -p /home/codewire/go /home/codewire/.npm-global \
       /opt/codewire/agents/npm /opt/codewire/agents/pipx /opt/codewire/agents/bin && \
