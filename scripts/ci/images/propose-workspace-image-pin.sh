@@ -17,8 +17,8 @@ readonly BRANCH='automation/workspace-image-pin'
 readonly PIN='crates/codewire-workspace-image/src/pin.rs'
 readonly TOOL="$ROOT/scripts/ci/images/workspace-image-pin.py"
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
-readonly BOT_NAME='Codewire workspace pin bot'
-readonly BOT_EMAIL='codewire-workspace-pin-bot@noreply.example.invalid'
+readonly BOT_NAME='Codewire'
+readonly BOT_EMAIL='hello@codewire.sh'
 
 die() {
   printf '[propose-workspace-image-pin] ERROR: %s\n' "$*" >&2

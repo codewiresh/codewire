@@ -160,7 +160,7 @@ jq -e '(.body | contains("workspace-pin bot opened this pull request")) and
   (.body | test("reopen"; "i") | not)' "$work/created-body.json" >/dev/null ||
   fail 'the pull request body does not say the bot opened it, or still asks for a reopen'
 [[ "$(git -C "$origin" log -1 --format='%an <%ae>' automation/workspace-image-pin)" == \
-  'Codewire workspace pin bot <codewire-workspace-pin-bot@noreply.example.invalid>' ]] ||
+  'Codewire <hello@codewire.sh>' ]] ||
   fail 'the proposal commit is not authored by the workspace-pin bot'
 if grep -rqF "$TOKEN" "$work/curl-calls" "$work/propose.out" "$work/created-body.json"; then
   fail 'the token reached curl arguments, output or the request body'
