@@ -2,16 +2,16 @@
 // the post-publish proposal rewrites this file and policy refuses other edits.
 
 /// Content digest of the published workspace image.
-pub const DIGEST: &str = "sha256:e89ce9e72bbeb7fb24761c1befa102bdfdc153562c176b13b00f40d292106456";
+pub const DIGEST: &str = "sha256:fd97e6b84c1a523802a7de6e1be94affa5ffc1e62cdfb52a3e4c2a012f6f28f3";
 /// The image at the Harbor repository every deployment pulls.
-pub const HARBOR_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:e89ce9e72bbeb7fb24761c1befa102bdfdc153562c176b13b00f40d292106456";
+pub const HARBOR_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:fd97e6b84c1a523802a7de6e1be94affa5ffc1e62cdfb52a3e4c2a012f6f28f3";
 /// The same digest at the public GHCR mirror, pulled anonymously by local
 /// environments.
-pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:e89ce9e72bbeb7fb24761c1befa102bdfdc153562c176b13b00f40d292106456";
+pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:fd97e6b84c1a523802a7de6e1be94affa5ffc1e62cdfb52a3e4c2a012f6f28f3";
 /// Platforms the published image index serves.
 pub const PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];
 /// Commit the image was built from.
-pub const SOURCE_SHA: &str = "20dd951dc079da9e2734cd5e73d08d84df8c95f4";
+pub const SOURCE_SHA: &str = "6e08a975cf9ca4cf3e2efc9550fd2e2195bdf7fb";
 /// Identity of the image definition at `SOURCE_SHA`; see the generator.
 pub const INPUTS_SHA256: &str = "fd495bfeb9f9552c43187a1ed3d8e62fdaab3165b91817697bdfb32d758c8339";
 /// Agent CLI versions the image definition at `SOURCE_SHA` installs.
@@ -24,6 +24,7 @@ pub const AGENT_VERSIONS: &[(&str, &str)] = &[
 ];
 /// Earlier published digests, newest first, that older clients may send.
 pub const PREVIOUS_DIGESTS: &[&str] = &[
+    "sha256:e89ce9e72bbeb7fb24761c1befa102bdfdc153562c176b13b00f40d292106456",
     "sha256:8e2285651bc4b45f0f6df4bbab437b73965d9ecef3b8af008a19fabde10886cc",
     "sha256:d8043d615c6b4adeb771f191f4cc57cee5ae4dfa5651b56b9cd09c69594e6641",
     "sha256:56b19805ceec01b33f21fe7bc9251944359c47f8df374d3c891ba8de0650cfa1",
