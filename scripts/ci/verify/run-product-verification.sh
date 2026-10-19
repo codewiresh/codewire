@@ -12,6 +12,8 @@ export CARGO_TARGET_DIR
 CARGO_DEBUG_DIR="$CARGO_TARGET_DIR/debug"
 # shellcheck source=scripts/ci/verify/local-rust-cache.sh
 source "$ROOT/scripts/ci/verify/local-rust-cache.sh"
+# shellcheck source=scripts/ci/verify/side-by-side.sh
+source "$ROOT/scripts/ci/verify/side-by-side.sh"
 # Composition state is never accepted from a caller's environment.
 RUST_COMPOSE_FORMAT=false
 RUST_COMPOSE_FORMAT_DONE=false
@@ -226,8 +228,11 @@ run_policy_core() {
 run_policy_core_one() {
   (
   isolate_kind_fixture_environment
+  # Every step is independent; run_side_by_side runs them side by side.
+  run_side_by_side <<'STEPS'
   run_verification_shell_syntax
   scripts/ci/tests/test-resolve-deployed-source.sh
+  scripts/ci/tests/test-run-side-by-side.sh
   scripts/ci/tests/test-select-verification.sh
   scripts/ci/tests/test-service-ssh-image-verifier.sh
   scripts/ci/tests/test-shellcheck-policy-domain.sh
@@ -296,6 +301,7 @@ run_policy_core_one() {
   python3 scripts/checks/repo_checks.py retired-reference-source
   python3 scripts/checks/source/check-native-desktop-ui.py
   python3 scripts/checks/repo_checks.py go-source-classification
+STEPS
   )
 }
 
@@ -303,8 +309,10 @@ run_policy_core_one() {
 run_policy_core_two() {
   (
   isolate_kind_fixture_environment
+  run_side_by_side <<'STEPS'
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
   python3 scripts/ci/tests/test-repo-checks-modules.py
+STEPS
   )
 }
 
@@ -880,6 +888,8 @@ run_edge() {
 }
 
 run_release() {
+  # Every step is independent; run_side_by_side runs them side by side.
+  run_side_by_side <<'STEPS'
   scripts/ci/tests/test-base-image-source.sh
   scripts/ci/tests/test-apt-get-with-retry.sh
   scripts/ci/tests/test-build-push-image.sh
@@ -912,6 +922,7 @@ run_release() {
   python3 scripts/ci/tests/test-image-bundle.py
   scripts/ci/tests/test-deploy-prod-workflow.sh
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test
+STEPS
 }
 
 download_ci_tool() {

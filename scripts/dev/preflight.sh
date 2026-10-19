@@ -569,6 +569,10 @@ if [ "${BASH_VERSINFO[0]}" -lt 5 ] \
     || { [ "${BASH_VERSINFO[0]}" -eq 5 ] && [ "${BASH_VERSINFO[1]}" -lt 1 ]; }; then
   fail "merge qualification needs Bash 5.1 or newer for lane supervision"
 fi
+# The lanes already run families side by side and share one CPU budget, so
+# each family runs its own tests one at a time here (run_side_by_side); CI
+# gives every family its own runner.
+export VERIFICATION_TEST_JOBS="${VERIFICATION_TEST_JOBS:-1}"
 PREFLIGHT_STATE_DIR="$REPO_ROOT/.tmp/preflight"
 if ! git check-ignore -q "$PREFLIGHT_STATE_DIR/passed/probe"; then
   fail "merge state directory .tmp/ is not ignored by Git"

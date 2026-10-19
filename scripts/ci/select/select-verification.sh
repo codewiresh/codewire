@@ -516,6 +516,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
       scripts/ci/tests/test-local-rust-cache.sh|\
+      scripts/ci/tests/test-run-side-by-side.sh|\
       scripts/ci/tests/test-darwin-cross-check.sh|\
       scripts/ci/tests/test-ci-runner-image-contract.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
@@ -574,6 +575,15 @@ if [ "$event_selected" = false ]; then
         # Changes to the capability's routing must execute the capability on
         # the candidate tree, not merely assert that its token is present.
         select_token runtime_dev_smoke
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
+      scripts/ci/verify/side-by-side.sh)
+        # The release family runs its steps through it; policy core does too,
+        # and every scripts/ci/verify helper already selects policy.
+        select_token release
         recognized=true
         ;;
     esac

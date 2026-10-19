@@ -114,6 +114,8 @@ runner.write_text(production)
 runner.chmod(0o755)
 shutil.copy(source_root / 'scripts/ci/verify/local-rust-cache.sh',
             runner.parent / 'local-rust-cache.sh')
+shutil.copy(source_root / 'scripts/ci/verify/side-by-side.sh',
+            runner.parent / 'side-by-side.sh')
 binary = fixture / 'bin'
 binary.mkdir()
 trace = temporary / 'rust-composition-trace.jsonl'
