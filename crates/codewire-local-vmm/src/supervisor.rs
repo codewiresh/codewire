@@ -710,8 +710,11 @@ impl SupervisorCore {
         let mut projected = environment.proto(self.selected(name));
         if self.incompatible_runners.contains(&environment.id) {
             projected.error_code = "runner_protocol_unsupported".to_owned();
-        } else if environment.state == StoredEnvironmentState::Error
-            && environment.runner.is_none()
+        } else if projected.error_code.is_empty()
+            && matches!(
+                environment.state,
+                StoredEnvironmentState::Error | StoredEnvironmentState::Stopped
+            )
             && let Some(error_code) = self.error_transition_code(environment.id)?
         {
             projected.error_code = error_code;
@@ -719,27 +722,40 @@ impl SupervisorCore {
         Ok(projected)
     }
 
-    /// Why an environment without a runner is in Error: the error code of the
-    /// reconcile that moved it there (#2568). Operations recorded since, while
-    /// it stayed in Error, do not replace that code; a completed operation that
-    /// left it in another state means the code no longer applies.
+    /// Why an environment without a runner's own code is in Error, or stopped
+    /// after a failure: the error code of the reconcile that moved it into
+    /// Error (#2568). Operations recorded since, while it stayed in Error, do
+    /// not replace that code, nor does a runner reporting the VM stopped after
+    /// the failure (#2626). A runner that reported its start failure first
+    /// moved it into Error unrecorded, so the failed operation's own record is
+    /// then the oldest code. A completed operation that left it in another
+    /// state, or an observation that it runs again, means no code applies.
     fn error_transition_code(
         &self,
         environment_id: Uuid,
     ) -> Result<Option<String>, SupervisorError> {
         let operations = self.store.recent_environment_operations(environment_id)?;
+        let mut recorded = None;
         for operation in operations.into_iter().rev() {
             if operation.phase != OperationPhase::Completed {
                 continue;
             }
             if operation.kind == OperationKind::Reconcile
                 && let Ok(parameters) = reconcile_operation_parameters(&operation)
-                && parameters.state == StoredEnvironmentState::Error
             {
-                if parameters.precondition.state == StoredEnvironmentState::Error {
-                    continue;
+                match parameters.state {
+                    StoredEnvironmentState::Error => {
+                        if parameters.runner_error_code.is_some() {
+                            recorded = parameters.runner_error_code;
+                        }
+                        if parameters.precondition.state != StoredEnvironmentState::Error {
+                            return Ok(recorded);
+                        }
+                        continue;
+                    }
+                    StoredEnvironmentState::Stopped => continue,
+                    _ => return Ok(recorded),
                 }
-                return Ok(parameters.runner_error_code);
             }
             let state = operation
                 .result
@@ -747,10 +763,10 @@ impl SupervisorCore {
                 .and_then(|result: &serde_json::Value| result.get("state"))
                 .and_then(serde_json::Value::as_str);
             if state.is_some_and(|state| state != StoredEnvironmentState::Error.as_str()) {
-                return Ok(None);
+                return Ok(recorded);
             }
         }
-        Ok(None)
+        Ok(recorded)
     }
 
     fn save(&self) -> Result<(), SupervisorError> {
@@ -17032,6 +17048,71 @@ mod runner_exit_tests {
             Some("restart_interrupted")
         );
         assert_eq!(shown_error_code(&core), "restart_interrupted");
+    }
+
+    #[test]
+    fn a_failed_operation_shows_its_code_until_one_succeeds() {
+        // Either the operation records the move into Error, or the runner
+        // reported its start failure first and moved it there unrecorded.
+        for runner_reported_first in [false, true] {
+            let (_parent, mut core) = test_supervisor_core(project_environment());
+            let id = running_with_a_runner(&mut core);
+            if runner_reported_first {
+                core.record_runner_start_failure("dev", "network_worker_start_timeout")
+                    .unwrap();
+            }
+            let update = operation(&core, id, OperationKind::UpdateEnvironmentSources);
+            core.fail_operation_with_environment_error(
+                &update,
+                "dev",
+                "environment_sources_network_worker_start_timeout",
+            )
+            .unwrap();
+
+            // The runner then reports the VM stopped with no code of its own,
+            // and later goes away: the environment is stopped and retryable,
+            // and still says why the update failed (#2626).
+            let generation = core.environment("dev").unwrap().generation;
+            core.record_reconcile_observation(
+                "dev",
+                StoredEnvironmentState::Stopped,
+                generation,
+                false,
+                None,
+            )
+            .unwrap();
+            core.record_reconcile_observation(
+                "dev",
+                StoredEnvironmentState::Stopped,
+                generation,
+                true,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                core.environment("dev").unwrap().state,
+                StoredEnvironmentState::Stopped
+            );
+            assert_eq!(
+                shown_error_code(&core),
+                "environment_sources_network_worker_start_timeout",
+                "runner reported first: {runner_reported_first}"
+            );
+
+            // A retry that succeeds clears it.
+            let retry = operation(&core, id, OperationKind::UpdateEnvironmentSources);
+            let result = environment_operation_result(core.environment("dev").unwrap());
+            core.store
+                .advance_operation(
+                    retry.operation_id,
+                    retry.checkpoint,
+                    OperationPhase::Completed,
+                    Some(&result),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(shown_error_code(&core), "");
+        }
     }
 
     #[test]
