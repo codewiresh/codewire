@@ -54,6 +54,11 @@ pub(crate) enum Command {
         endpoint: IpListenEndpoint,
         reply: tokio::sync::oneshot::Sender<std::io::Result<TcpListener>>,
     },
+    /// Bind the one catch-all listener: it accepts every TCP connection whose
+    /// destination no explicit listener holds.
+    BindCatchAll {
+        reply: tokio::sync::oneshot::Sender<std::io::Result<TcpListener>>,
+    },
     /// Dial `remote`; reply with the connecting stream (resolves before the
     /// handshake completes — reads/writes drive it, mirroring tokio's
     /// `TcpStream::connect` returning a connected-enough socket).
@@ -108,6 +113,9 @@ struct Driver {
     sockets: SocketSet<'static>,
     conns: HashMap<SocketHandle, Conn>,
     listeners: HashMap<IpListenEndpoint, ListenSlot>,
+    /// The catch-all listener, if bound. Its unaccepted sockets each listen on
+    /// the exact destination of the SYN they were opened for.
+    catch_all: Option<ListenSlot>,
     /// Clone handed to every stream so its writes/closes reach us.
     cmd_tx: mpsc::Sender<Command>,
     stream_notify: Arc<Notify>,
@@ -154,6 +162,26 @@ impl Driver {
                         listening: vec![handle],
                     },
                 );
+                // A catch-all socket still waiting in LISTEN on an endpoint this
+                // listener covers would take its SYNs first, in slot order.
+                let covered: Vec<SocketHandle> = self
+                    .catch_all
+                    .iter()
+                    .flat_map(|slot| slot.listening.iter().copied())
+                    .filter(|&h| {
+                        let socket = self.sockets.get::<tcp::Socket>(h);
+                        let waiting = socket.listen_endpoint();
+                        socket.state() == tcp::State::Listen
+                            && waiting.port == endpoint.port
+                            && (endpoint.addr.is_none() || waiting.addr == endpoint.addr)
+                    })
+                    .collect();
+                if let Some(slot) = self.catch_all.as_mut() {
+                    slot.listening.retain(|h| !covered.contains(h));
+                }
+                for h in covered {
+                    self.sockets.remove(h);
+                }
                 tracing::debug!(
                     listen_addr = ?endpoint.addr,
                     listen_port = endpoint.port,
@@ -162,6 +190,33 @@ impl Driver {
                 );
                 let listener = TcpListener {
                     endpoint,
+                    incoming,
+                    _tx: self.cmd_tx.clone(),
+                    notify: self.stream_notify.clone(),
+                };
+                let _ = reply.send(Ok(listener));
+            }
+            Command::BindCatchAll { reply } => {
+                if self.catch_all.is_some() {
+                    let _ = reply.send(Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        "netstack catch-all TCP listener is already bound",
+                    )));
+                    return;
+                }
+                // Every connection the catch-all accepts can wait here at
+                // once; the connection limit bounds them, not a backlog.
+                let (to_listener, incoming) = mpsc::channel(self.limits.max_connections);
+                self.catch_all = Some(ListenSlot {
+                    to_listener,
+                    listening: Vec::new(),
+                });
+                tracing::debug!("rust userspace netstack catch-all listener bound");
+                let listener = TcpListener {
+                    endpoint: IpListenEndpoint {
+                        addr: None,
+                        port: 0,
+                    },
                     incoming,
                     _tx: self.cmd_tx.clone(),
                     notify: self.stream_notify.clone(),
@@ -246,6 +301,20 @@ impl Driver {
                 }
             }
         }
+        if self
+            .catch_all
+            .as_ref()
+            .is_some_and(|slot| slot.to_listener.is_closed())
+        {
+            for handle in self
+                .catch_all
+                .take()
+                .into_iter()
+                .flat_map(|slot| slot.listening)
+            {
+                self.schedule_abort(handle);
+            }
+        }
 
         let handles: Vec<_> = self
             .conns
@@ -288,7 +357,7 @@ impl Driver {
     ///   its own SYN-ACK, and a spare LISTEN socket cannot take the SYN and
     ///   open a second connection for the same 4-tuple.
     fn admit_syns(&mut self) {
-        if self.listeners.is_empty()
+        if (self.listeners.is_empty() && self.catch_all.is_none())
             || !self
                 .device
                 .inbound
@@ -315,6 +384,7 @@ impl Driver {
         let mut unaccepted: usize = self
             .listeners
             .values()
+            .chain(self.catch_all.as_ref())
             .map(|slot| slot.listening.len())
             .sum();
         let mut free: HashMap<IpListenEndpoint, usize> = self
@@ -329,6 +399,15 @@ impl Driver {
                 (*endpoint, listening)
             })
             .collect();
+        // The catch-all's spare LISTEN sockets, by the exact endpoint each
+        // waits on.
+        let mut catch_all_free: HashMap<IpListenEndpoint, usize> = HashMap::new();
+        for &handle in self.catch_all.iter().flat_map(|slot| slot.listening.iter()) {
+            let socket = self.sockets.get::<tcp::Socket>(handle);
+            if socket.state() == tcp::State::Listen {
+                *catch_all_free.entry(socket.listen_endpoint()).or_default() += 1;
+            }
+        }
         for packet in std::mem::take(&mut self.device.inbound) {
             let Some((local, remote)) = initial_syn(&packet) else {
                 self.device.inbound.push_back(packet);
@@ -342,18 +421,49 @@ impl Driver {
                 );
                 continue;
             }
-            let Some(endpoint) = self.listen_endpoint_for(local) else {
+            // An explicit listener always takes its SYNs before the catch-all.
+            if let Some(endpoint) = self.listen_endpoint_for(local) {
+                let available = free.entry(endpoint).or_default();
+                if *available == 0
+                    && self.listeners[&endpoint].listening.len() < self.limits.accept_queue
+                    && self.conns.len() + unaccepted < self.limits.max_connections
+                {
+                    if let Some(handle) = self.spawn_listen_socket(endpoint) {
+                        if let Some(slot) = self.listeners.get_mut(&endpoint) {
+                            slot.listening.push(handle);
+                        }
+                        unaccepted += 1;
+                        *available += 1;
+                    }
+                }
+                if *available == 0 {
+                    tracing::debug!(
+                        listen_port = endpoint.port,
+                        backlog = self.limits.accept_queue,
+                        "rust userspace netstack dropped a TCP SYN at the accept queue limit"
+                    );
+                    continue;
+                }
+                *available -= 1;
+                self.device.inbound.push_back(packet);
+                continue;
+            }
+            if self.catch_all.is_none() {
                 // Not listening: smoltcp answers with RST.
                 self.device.inbound.push_back(packet);
                 continue;
+            }
+            // The catch-all opens a socket for exactly this destination. Only
+            // the connection limit bounds them; a SYN beyond it is dropped, so
+            // the client retries once a connection closes (#2993).
+            let endpoint = IpListenEndpoint {
+                addr: Some(local.addr),
+                port: local.port,
             };
-            let available = free.entry(endpoint).or_default();
-            if *available == 0
-                && self.listeners[&endpoint].listening.len() < self.limits.accept_queue
-                && self.conns.len() + unaccepted < self.limits.max_connections
-            {
+            let available = catch_all_free.entry(endpoint).or_default();
+            if *available == 0 && self.conns.len() + unaccepted < self.limits.max_connections {
                 if let Some(handle) = self.spawn_listen_socket(endpoint) {
-                    if let Some(slot) = self.listeners.get_mut(&endpoint) {
+                    if let Some(slot) = self.catch_all.as_mut() {
                         slot.listening.push(handle);
                     }
                     unaccepted += 1;
@@ -362,14 +472,42 @@ impl Driver {
             }
             if *available == 0 {
                 tracing::debug!(
-                    listen_port = endpoint.port,
-                    backlog = self.limits.accept_queue,
-                    "rust userspace netstack dropped a TCP SYN at the accept queue limit"
+                    local_port = local.port,
+                    connection_limit = self.limits.max_connections,
+                    "rust userspace netstack dropped a TCP SYN at the connection limit"
                 );
                 continue;
             }
             *available -= 1;
             self.device.inbound.push_back(packet);
+        }
+        // A catch-all socket back in LISTEN with no queued SYN for its endpoint
+        // (its handshake was reset or timed out) serves no one: each listens on
+        // one past destination, so unlike an explicit listener's spare it
+        // would only hold a connection slot.
+        let spare: Vec<SocketHandle> = self
+            .catch_all
+            .iter()
+            .flat_map(|slot| slot.listening.iter().copied())
+            .filter(|&h| {
+                let socket = self.sockets.get::<tcp::Socket>(h);
+                socket.state() == tcp::State::Listen
+                    && catch_all_free
+                        .get_mut(&socket.listen_endpoint())
+                        .is_some_and(|count| {
+                            let unused = *count > 0;
+                            if unused {
+                                *count -= 1;
+                            }
+                            unused
+                        })
+            })
+            .collect();
+        if let Some(slot) = self.catch_all.as_mut() {
+            slot.listening.retain(|h| !spare.contains(h));
+        }
+        for handle in spare {
+            self.sockets.remove(handle);
         }
     }
 
@@ -378,7 +516,7 @@ impl Driver {
     /// queue, or a few lost handshakes would wedge the listener.
     fn prune_closed_listening(&mut self) {
         let mut closed = Vec::new();
-        for slot in self.listeners.values_mut() {
+        for slot in self.listeners.values_mut().chain(self.catch_all.as_mut()) {
             slot.listening.retain(|&handle| {
                 let done = self.sockets.get::<tcp::Socket>(handle).state() == tcp::State::Closed;
                 if done {
@@ -500,26 +638,40 @@ impl Driver {
 
         // 1) Promote any listening socket that became connected into an
         //    accepted stream. New SYNs get sockets in `admit_syns`.
-        let mut promotions: Vec<(IpListenEndpoint, SocketHandle)> = Vec::new();
-        for (endpoint, slot) in self.listeners.iter() {
+        // `None` names the catch-all, whose sockets each listen on their own
+        // exact endpoint.
+        let mut promotions: Vec<(Option<IpListenEndpoint>, SocketHandle)> = Vec::new();
+        let slots = self
+            .listeners
+            .iter()
+            .map(|(endpoint, slot)| (Some(*endpoint), slot))
+            .chain(self.catch_all.iter().map(|slot| (None, slot)));
+        for (owner, slot) in slots {
             for &h in slot.listening.iter() {
                 let socket = self.sockets.get::<tcp::Socket>(h);
                 let state = socket.state();
                 if matches!(state, tcp::State::Established | tcp::State::CloseWait) {
+                    let endpoint = socket.listen_endpoint();
                     tracing::debug!(
                         listen_addr = ?endpoint.addr,
                         listen_port = endpoint.port,
+                        catch_all = owner.is_none(),
                         ?state,
                         "rust userspace netstack TCP listener socket established"
                     );
-                    promotions.push((*endpoint, h));
+                    promotions.push((owner, h));
                 }
             }
         }
-        for (endpoint, h) in promotions {
-            if let Some(slot) = self.listeners.get_mut(&endpoint) {
+        for (owner, h) in promotions {
+            let slot = match owner {
+                Some(endpoint) => self.listeners.get_mut(&endpoint),
+                None => self.catch_all.as_mut(),
+            };
+            if let Some(slot) = slot {
                 slot.listening.retain(|&x| x != h);
             }
+            let endpoint = self.sockets.get::<tcp::Socket>(h).listen_endpoint();
 
             let accepted = if self.conns.len() >= self.limits.max_connections {
                 tracing::debug!(
@@ -530,10 +682,11 @@ impl Driver {
                 );
                 false
             } else if let Some((stream, conn)) = self.stream_for_socket(h) {
-                let delivered = self
-                    .listeners
-                    .get(&endpoint)
-                    .is_some_and(|slot| slot.to_listener.try_send(stream).is_ok());
+                let slot = match owner {
+                    Some(endpoint) => self.listeners.get(&endpoint),
+                    None => self.catch_all.as_ref(),
+                };
+                let delivered = slot.is_some_and(|slot| slot.to_listener.try_send(stream).is_ok());
                 if delivered {
                     tracing::debug!(
                         listen_addr = ?endpoint.addr,
@@ -740,6 +893,7 @@ pub(crate) fn spawn(
         sockets: SocketSet::new(Vec::new()),
         conns: HashMap::new(),
         listeners: HashMap::new(),
+        catch_all: None,
         cmd_tx,
         stream_notify: stream_notify.clone(),
         limits,

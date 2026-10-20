@@ -1165,3 +1165,154 @@ async fn handshakes_that_never_complete_do_not_wedge_the_listener() {
     assert_eq!(&request, b"fresh");
     drop(lost);
 }
+
+/// A client stack that routes every destination through a worker stack that
+/// accepts any IP, with the SYN-ACKs to `lost` client ports dropped on the
+/// way back.
+fn any_ip_pair(worker_limits: NetstackLimits, lost: &'static [u16]) -> (Netstack, Netstack) {
+    let config = |local_ip, accept_any_ip, default_gateway| NetstackConfig {
+        local_ip,
+        prefix_len: PREFIX,
+        mtu: 1_500,
+        verify_rx_checksums: true,
+        accept_any_ip,
+        default_gateway,
+    };
+    let (a_out_tx, b_in_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (b_out_tx, b_out_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (a_in_tx, a_in_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    syn_ack_dropping_link(b_out_rx, a_in_tx, lost);
+    let client = Netstack::with_config_and_limits(
+        config(IpAddr::V6(A_IP), false, Some(IpAddr::V6(B_IP))),
+        NetstackLimits::default(),
+        a_in_rx,
+        a_out_tx,
+    )
+    .expect("client netstack");
+    let worker = Netstack::with_config_and_limits(
+        config(IpAddr::V6(B_IP), true, None),
+        worker_limits,
+        b_in_rx,
+        b_out_tx,
+    )
+    .expect("worker netstack");
+    (client, worker)
+}
+
+/// A destination outside both stacks' prefix, reached through the worker.
+fn remote(index: u16) -> SocketAddr {
+    SocketAddr::new(
+        IpAddr::V6(Ipv6Addr::new(0xfd00, 0xdead, 0, 0, 0, 0, 0, 1 + index)),
+        443,
+    )
+}
+
+/// #2993: the catch-all listener accepts more live destinations than the
+/// stack has listeners, each stream naming its own destination.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_catch_all_accepts_more_live_destinations_than_listeners() {
+    let limits = NetstackLimits {
+        max_listeners: 2,
+        max_connections: 8,
+        ..NetstackLimits::default()
+    };
+    let (client, worker) = any_ip_pair(limits, &[]);
+    let mut listener = worker.bind_catch_all().await.expect("catch-all");
+    assert_eq!(listener.local_port(), 0);
+    assert!(
+        worker.bind_catch_all().await.is_err(),
+        "one catch-all listener at a time"
+    );
+    let mut live = Vec::new();
+    for index in 0..6_u16 {
+        let mut stream = client.connect(remote(index)).await.expect("dial");
+        stream.write_all(&[index as u8]).await.expect("write");
+        let mut accepted = accept_one(&mut listener).await;
+        assert_eq!(accepted.local_addr(), remote(index));
+        let mut byte = [0_u8; 1];
+        accepted.read_exact(&mut byte).await.expect("read");
+        assert_eq!(byte[0], index as u8);
+        live.push((stream, accepted));
+    }
+}
+
+/// #2993: an explicit listener takes connections to its endpoint before the
+/// catch-all does; every other destination reaches the catch-all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_listener_takes_its_endpoint_before_the_catch_all() {
+    let (client, worker) = any_ip_pair(NetstackLimits::default(), &[]);
+    let mut catch_all = worker.bind_catch_all().await.expect("catch-all");
+    let mut explicit = worker.bind_endpoint(remote(1)).await.expect("explicit");
+    let _first = client.connect(remote(1)).await.expect("dial explicit");
+    assert_eq!(accept_one(&mut explicit).await.local_addr(), remote(1));
+    let _second = client.connect(remote(2)).await.expect("dial other");
+    assert_eq!(accept_one(&mut catch_all).await.local_addr(), remote(2));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), catch_all.accept())
+            .await
+            .is_err(),
+        "the explicit listener's connection never reached the catch-all"
+    );
+}
+
+/// #2993: more destinations than the stack has connections, one after
+/// another, all connect: a closed connection frees its slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sequential_destinations_beyond_the_connection_limit_all_connect() {
+    let limits = NetstackLimits {
+        max_connections: 4,
+        ..NetstackLimits::default()
+    };
+    let (client, worker) = any_ip_pair(limits, &[]);
+    let mut listener = worker.bind_catch_all().await.expect("catch-all");
+    for index in 0..12_u16 {
+        let mut stream = client.connect(remote(index)).await.expect("dial");
+        stream.write_all(b"x").await.expect("write");
+        let mut accepted = accept_one(&mut listener).await;
+        assert_eq!(accepted.local_addr(), remote(index));
+        let mut byte = [0_u8; 1];
+        accepted.read_exact(&mut byte).await.expect("read");
+        drop(accepted);
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// #2993: half-open handshakes hold connection slots, so the catch-all drops a
+/// SYN beyond the limit; once those handshakes time out, the client's SYN
+/// retry connects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_catch_all_drops_syns_beyond_the_connection_limit_until_a_slot_frees() {
+    // The client numbers its ports from 49152: the first two dials lose every
+    // SYN-ACK and stay half-open on the worker.
+    const LOST: &[u16] = &[49152, 49153];
+    let limits = NetstackLimits {
+        max_connections: 2,
+        tcp_idle_timeout: Duration::from_secs(1),
+        ..NetstackLimits::default()
+    };
+    let (client, worker) = any_ip_pair(limits, LOST);
+    let mut listener = worker.bind_catch_all().await.expect("catch-all");
+    let mut half_open = Vec::new();
+    for index in 0..2_u16 {
+        let stream = client.connect(remote(index)).await.expect("dial");
+        assert!(LOST.contains(&stream.local_addr().port()));
+        half_open.push(stream);
+    }
+    let _third = client
+        .connect(remote(2))
+        .await
+        .expect("dial beyond the limit");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.accept())
+            .await
+            .is_err(),
+        "no connection beyond the limit while the slots are held"
+    );
+    let accepted = tokio::time::timeout(Duration::from_secs(15), listener.accept())
+        .await
+        .expect("the retried SYN connected once the half-open slots freed")
+        .expect("accepted stream");
+    assert_eq!(accepted.local_addr(), remote(2));
+    drop(half_open);
+}

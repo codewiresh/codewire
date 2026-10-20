@@ -219,6 +219,23 @@ impl Netstack {
         rx.await.map_err(driver_gone)?
     }
 
+    /// Bind the one catch-all listener. It accepts every TCP connection whose
+    /// destination no explicit listener holds, so a consumer that terminates
+    /// arbitrary destinations (with [`NetstackConfig::accept_any_ip`]) needs no
+    /// listener per destination. Each SYN gets a socket for exactly its
+    /// destination, and only [`NetstackLimits::max_connections`] bounds them;
+    /// a SYN beyond it is dropped so the client retries. Explicit listeners
+    /// keep precedence. Its [`TcpListener::local_port`] is 0.
+    pub async fn bind_catch_all(&self) -> std::io::Result<TcpListener> {
+        let (reply, rx) = oneshot::channel();
+        self.handle
+            .cmd_tx
+            .send(Command::BindCatchAll { reply })
+            .await
+            .map_err(driver_gone)?;
+        rx.await.map_err(driver_gone)?
+    }
+
     /// Dial a TCP connection to `addr` over the packet transport.
     /// Resolves to a [`TcpStream`] once the connect is initiated; reads/writes
     /// drive the handshake to completion (like tokio's `TcpStream::connect`).
