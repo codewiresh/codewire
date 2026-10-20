@@ -7,6 +7,7 @@
 //! stderr, and machine (JSON) output gets none of it. References only: no
 //! credential material or secret value passes through here.
 
+use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
@@ -233,6 +234,97 @@ impl ResultBlock {
     }
 }
 
+/// A lifecycle wait that Ctrl-C ended. Its text is the one line that says
+/// what continues; `cw` exits 130, as a shell reports an interrupted process.
+#[derive(Debug)]
+pub(crate) struct Interrupted(String);
+
+impl fmt::Display for Interrupted {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
+/// The exit status of an interrupted lifecycle wait.
+pub(crate) const INTERRUPTED_EXIT_CODE: i32 = 130;
+
+/// What an interrupted lifecycle wait reports: which operation of which
+/// environment, and where to check on it. Stopping the wait never cancels
+/// the operation; the local runtime or the platform carries it on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InterruptNotice {
+    operation: &'static str,
+    name: String,
+    check: String,
+}
+
+impl InterruptNotice {
+    /// `operation` names it as a noun: `creation`, `start`, `restart`,
+    /// `stop` or `removal`.
+    pub(crate) fn new(location: VmLocation, operation: &'static str, name: &str) -> Self {
+        let name = terminal_text(name);
+        let check = if operation == "removal" {
+            format!("cw {} ls", placement_flag(location))
+        } else {
+            environment_command(location, "info", &name)
+        };
+        Self {
+            operation,
+            name,
+            check,
+        }
+    }
+
+    /// The error for an interrupt. `confirmed` says the local runtime or
+    /// the platform reported the operation running before the interrupt.
+    pub(crate) fn error(&self, confirmed: bool) -> anyhow::Error {
+        let Self {
+            operation,
+            name,
+            check,
+        } = self;
+        anyhow::Error::new(Interrupted(if confirmed {
+            format!(
+                "Interrupted. The {operation} of {name} continues in the background; check it with `{check}`."
+            )
+        } else {
+            format!(
+                "Interrupted. The {operation} of {name} was requested but not confirmed; check it with `{check}`."
+            )
+        }))
+    }
+}
+
+/// The exit status for `error` when it is an interrupted lifecycle wait.
+pub(crate) fn interrupted_exit_code(error: &anyhow::Error) -> Option<i32> {
+    error
+        .chain()
+        .any(|cause| cause.is::<Interrupted>())
+        .then_some(INTERRUPTED_EXIT_CODE)
+}
+
+/// Awaits `work`, or, when `interruptible`, ends the wait at the first
+/// Ctrl-C and returns `None`. Without a usable signal handler Ctrl-C keeps
+/// its default behaviour. Dropping `work` stops only the waiting.
+pub(crate) async fn unless_interrupted<T>(
+    interruptible: bool,
+    work: impl Future<Output = T>,
+) -> Option<T> {
+    if !interruptible {
+        return Some(work.await);
+    }
+    tokio::pin!(work);
+    tokio::select! {
+        result = &mut work => Some(result),
+        signal = tokio::signal::ctrl_c() => match signal {
+            Ok(()) => None,
+            Err(_) => Some(work.await),
+        },
+    }
+}
+
 /// The location word a result's detail line starts with.
 pub(crate) fn location_label(location: VmLocation) -> &'static str {
     match location {
@@ -283,6 +375,65 @@ mod tests {
             );
             assert_eq!(args.environment.as_deref(), Some("app"), "{next}");
         }
+    }
+
+    #[test]
+    fn interrupts_name_what_continues_and_where_to_check() {
+        let start = InterruptNotice::new(VmLocation::Local, "start", "app");
+        let error = start.error(true);
+        assert_eq!(
+            error.to_string(),
+            "Interrupted. The start of app continues in the background; check it with `cw --local info app`."
+        );
+        assert_eq!(interrupted_exit_code(&error), Some(130));
+        assert_eq!(
+            InterruptNotice::new(VmLocation::Cloud, "stop", "review")
+                .error(false)
+                .to_string(),
+            "Interrupted. The stop of review was requested but not confirmed; check it with `cw --cloud info review`."
+        );
+        assert_eq!(
+            InterruptNotice::new(VmLocation::Local, "removal", "app")
+                .error(false)
+                .to_string(),
+            "Interrupted. The removal of app was requested but not confirmed; check it with `cw --local ls`."
+        );
+        let wrapped = InterruptNotice::new(VmLocation::Cloud, "creation", "app")
+            .error(true)
+            .context("create environment");
+        assert_eq!(interrupted_exit_code(&wrapped), Some(130));
+        assert_eq!(interrupted_exit_code(&anyhow::anyhow!("other")), None);
+        let hostile = InterruptNotice::new(VmLocation::Local, "start", "app\x1b[2J").error(true);
+        assert!(!hostile.to_string().contains('\x1b'));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_first_ctrl_c_ends_an_interruptible_wait() {
+        // A listener of our own keeps every SIGINT below from reaching the
+        // default handler, whatever the order of registration.
+        let _listener =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+        let wait = tokio::spawn(unless_interrupted(true, std::future::pending::<()>()));
+        let pid = std::process::id().to_string();
+        let interrupted = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                std::process::Command::new("kill")
+                    .args(["-INT", &pid])
+                    .status()
+                    .unwrap();
+                if wait.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            wait.await.unwrap()
+        })
+        .await
+        .expect("Ctrl-C ended the wait");
+        assert_eq!(interrupted, None);
+        assert_eq!(unless_interrupted(false, async { 7 }).await, Some(7));
+        assert_eq!(unless_interrupted(true, async { 8 }).await, Some(8));
     }
 
     #[test]

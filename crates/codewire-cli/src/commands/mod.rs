@@ -2513,7 +2513,7 @@ mod collaboration;
 mod core;
 mod environment;
 pub(crate) mod flat;
-mod lifecycle_output;
+pub(crate) mod lifecycle_output;
 mod mesh_commands;
 mod platform_commands;
 mod secrets;

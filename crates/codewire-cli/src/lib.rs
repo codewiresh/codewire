@@ -704,6 +704,12 @@ pub fn native_network_worker_exit_code(error: &anyhow::Error) -> Option<i32> {
         .map(codewire_local_vmm::network_worker::NetworkWorkerError::exit_code)
 }
 
+/// 130 when Ctrl-C ended a lifecycle wait (`cw start`, `cw create` and the
+/// like): the error's text already says what continues in the background.
+pub fn interrupted_exit_code(error: &anyhow::Error) -> Option<i32> {
+    commands::lifecycle_output::interrupted_exit_code(error)
+}
+
 /// Preserve the fixed private broker failure taxonomy across the thin binary
 /// wrapper without printing process-internal detail to ambient stderr.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -20,7 +20,8 @@ const PLATFORM_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(180);
 const STOPPING_LABEL: &str = "Stopping the environment";
 const REMOVING_LABEL: &str = "Removing the environment";
 
-use crate::output::{Outcome, StatusLine};
+use super::lifecycle_output::InterruptNotice;
+use crate::output::{Outcome, StatusLine, VmLocation};
 
 /// The environment's name for a text result, read once; scripts (machine
 /// output) and a failed read keep the reference they gave.
@@ -557,14 +558,25 @@ pub(crate) async fn handle_platform_env_command(
                     let caps = super::lifecycle_output::capabilities(args.output);
                     let summary = lifecycle::cloud_summary(&environment, Outcome::Created, &names);
                     super::lifecycle_output::print_context(&summary, &caps);
-                    wait_for_platform_environment_setup(
-                        &environment_client,
-                        &org_id,
-                        &environment,
-                        began,
-                        &caps,
-                    )
-                    .await?;
+                    // The platform holds the environment from here on: an
+                    // interrupt ends only the wait for its setup.
+                    // Boxed: this command's future stays small enough for a
+                    // thread's default stack.
+                    Box::pin(super::lifecycle_output::unless_interrupted(
+                        true,
+                        wait_for_platform_environment_setup(
+                            &environment_client,
+                            &org_id,
+                            &environment,
+                            began,
+                            &caps,
+                        ),
+                    ))
+                    .await
+                    .ok_or_else(|| {
+                        InterruptNotice::new(VmLocation::Cloud, "creation", &summary.name)
+                            .error(true)
+                    })??;
                     super::lifecycle_output::print_summary(&summary, &caps);
                 }
                 OutputFormat::Text => {
@@ -612,11 +624,16 @@ pub(crate) async fn handle_platform_env_command(
             .await;
             let mut line = StatusLine::new(std::io::stderr(), &caps);
             line.begin(STOPPING_LABEL)?;
-            let response = lifecycle::tick_while(
+            let Some(response) = Box::pin(lifecycle::tick_while(
                 &mut line,
+                !caps.is_machine(),
                 environment_client.stop_environment(&org_id, &environment_id),
-            )
-            .await;
+            ))
+            .await
+            else {
+                line.clear()?;
+                return Err(InterruptNotice::new(VmLocation::Cloud, "stop", &name).error(false));
+            };
             let response = match response {
                 Ok(response) => {
                     line.clear()?;
@@ -651,13 +668,14 @@ pub(crate) async fn handle_platform_env_command(
                 .await;
                 let summary = lifecycle::cloud_summary(&environment, Outcome::Started, &names);
                 super::lifecycle_output::print_context(&summary, &caps);
-                start_platform_environment_with_progress(
+                Box::pin(start_platform_environment_with_progress(
                     &environment_client,
                     &org_id,
                     &environment_id,
                     began,
                     &caps,
-                )
+                    &InterruptNotice::new(VmLocation::Cloud, "start", &summary.name),
+                ))
                 .await?;
                 super::lifecycle_output::print_summary(&summary, &caps);
                 return Ok(());
@@ -696,16 +714,21 @@ pub(crate) async fn handle_platform_env_command(
             .await;
             let mut line = StatusLine::new(std::io::stderr(), &caps);
             line.begin(REMOVING_LABEL)?;
-            let removal = lifecycle::tick_while(
+            let Some(removal) = Box::pin(lifecycle::tick_while(
                 &mut line,
+                !caps.is_machine(),
                 lifecycle::remove_cloud_environment(
                     &environment_client,
                     &org_id,
                     &environment_id,
                     &name,
                 ),
-            )
-            .await;
+            ))
+            .await
+            else {
+                line.clear()?;
+                return Err(InterruptNotice::new(VmLocation::Cloud, "removal", &name).error(false));
+            };
             let removal = match removal {
                 Ok(removal) => {
                     line.clear()?;
@@ -1347,7 +1370,9 @@ async fn handle_unified_environment_create(
             {
                 native_create_selected(&args)?;
                 let caps = super::lifecycle_output::capabilities(output);
-                let Some(created) = create_native_environment(globals, *args, &caps).await? else {
+                let Some(created) =
+                    Box::pin(create_native_environment(globals, *args, &caps)).await?
+                else {
                     return Ok(());
                 };
                 print_native_created(&created, output, &caps)
@@ -1936,22 +1961,22 @@ async fn handle_unified_environment_lifecycle(
     match (target, command) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (UnifiedEnvironmentTarget::NativeLocal(name), UnifiedEnvironmentLifecycle::Start(args)) => {
-            start_native_environment(globals, &name, args.output).await
+            Box::pin(start_native_environment(globals, &name, args.output)).await
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (UnifiedEnvironmentTarget::NativeLocal(name), UnifiedEnvironmentLifecycle::Stop(args)) => {
-            stop_native_environment(&name, args.output).await
+            Box::pin(stop_native_environment(&name, args.output)).await
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (
             UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Restart(args),
-        ) => restart_native_environment(globals, &name, args.output).await,
+        ) => Box::pin(restart_native_environment(globals, &name, args.output)).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (
             UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Remove(args),
-        ) => remove_native_environment(&name, args.output).await,
+        ) => Box::pin(remove_native_environment(&name, args.output)).await,
         (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Start(args)) => {
             handle_platform_env_command(
                 globals,
@@ -3233,6 +3258,7 @@ async fn start_platform_environment_with_progress(
     environment_id: &str,
     began: Instant,
     caps: &crate::output::Capabilities,
+    interrupt: &InterruptNotice,
 ) -> anyhow::Result<()> {
     // Rows up to now belong to earlier operations, including the terminal
     // row that would otherwise end the stream at once.
@@ -3250,29 +3276,40 @@ async fn start_platform_environment_with_progress(
             .await
             .context("wait for environment daemon readiness")
     };
-    match cursor {
-        Ok(cursor) => {
-            let feed = progress::PlatformLogFeed {
-                client,
-                org_id,
-                environment_id,
-            };
-            progress::await_environment_start(
-                &feed,
-                &mut view,
-                &FollowPolicy::default(),
-                environment_id,
-                cursor,
-                daemon_ready,
-            )
-            .await?;
+    // The platform accepted the start; an interrupt ends only this wait.
+    let waited = super::lifecycle_output::unless_interrupted(!caps.is_machine(), async {
+        match cursor {
+            Ok(cursor) => {
+                let feed = progress::PlatformLogFeed {
+                    client,
+                    org_id,
+                    environment_id,
+                };
+                progress::await_environment_start(
+                    &feed,
+                    &mut view,
+                    &FollowPolicy::default(),
+                    environment_id,
+                    cursor,
+                    daemon_ready,
+                )
+                .await
+            }
+            Err(error) => {
+                view.note(&format!("Start progress is unavailable: {error:#}"))?;
+                progress::await_daemon_ready(&mut view, &FollowPolicy::default(), daemon_ready)
+                    .await
+            }
         }
-        Err(error) => {
-            view.note(&format!("Start progress is unavailable: {error:#}"))?;
-            progress::await_daemon_ready(&mut view, &FollowPolicy::default(), daemon_ready).await?;
+    })
+    .await;
+    match waited {
+        Some(result) => result,
+        None => {
+            view.finish()?;
+            Err(interrupt.error(true))
         }
     }
-    Ok(())
 }
 
 pub(crate) fn print_environment_logs_historical(logs: &[EnvironmentLog]) {

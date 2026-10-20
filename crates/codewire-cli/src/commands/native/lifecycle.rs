@@ -6,8 +6,8 @@ use codewire_project::{ProjectSpec, StoragePlacement};
 
 use super::*;
 use crate::commands::lifecycle_output::{
-    ResultBlock, bounded, credential_ref, environment_command, exact_reference_id, location_label,
-    next_run_command, print_context, print_summary, secret_refs,
+    InterruptNotice, ResultBlock, bounded, credential_ref, environment_command, exact_reference_id,
+    location_label, next_run_command, print_context, print_summary, secret_refs,
 };
 use crate::output::{
     Allocation, Capabilities, LifecycleSummary, MeshPlacement, NetworkRef, Outcome, SourceRef,
@@ -209,8 +209,11 @@ pub(crate) async fn start_native_environment(
         &local_summary(&environment, Outcome::Started, secrets.clone()),
         &caps,
     );
-    let progress = NativeProgress::new(&caps);
-    let started = run_native_start(client, &environment.name, &progress).await;
+    let progress = NativeProgress::new(&caps).interruptible(
+        &caps,
+        InterruptNotice::new(VmLocation::Local, "start", &environment.name),
+    );
+    let started = run_native_start(client, &environment.name, &progress).await?;
     let started = match started {
         Ok(started) => started,
         Err((stage, error)) => {
@@ -246,11 +249,14 @@ pub(crate) async fn restart_native_environment(
         &local_summary(&environment, Outcome::Restarted, secrets.clone()),
         &caps,
     );
-    let progress = NativeProgress::new(&caps);
+    let progress = NativeProgress::new(&caps).interruptible(
+        &caps,
+        InterruptNotice::new(VmLocation::Local, "restart", &environment.name),
+    );
     progress.begin("restart", "Restarting the VM");
     let restarted = progress
         .tick_while(client.restart(&environment.name, &environment.id))
-        .await;
+        .await?;
     let restarted = match restarted {
         Ok(restarted) => {
             progress.complete();
@@ -288,9 +294,12 @@ pub(crate) async fn stop_native_environment(
     let caps = crate::commands::lifecycle_output::capabilities(output);
     let mut client = native_client().await?;
     let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
-    let progress = NativeProgress::new(&caps);
+    let progress = NativeProgress::new(&caps).interruptible(
+        &caps,
+        InterruptNotice::new(VmLocation::Local, "stop", &environment.name),
+    );
     progress.begin("stop", "Stopping the VM");
-    let stopped = match progress.tick_while(client.stop(&environment.name)).await {
+    let stopped = match progress.tick_while(client.stop(&environment.name)).await? {
         Ok(stopped) => {
             progress.complete();
             stopped
@@ -352,9 +361,15 @@ pub(crate) async fn remove_native_environment(
     // Delete stops the environment's credential broker through the authority
     // whenever it selected a profile or secrets.
     ensure_native_credential_authority(&environment).await?;
-    let progress = NativeProgress::new(&caps);
+    let progress = NativeProgress::new(&caps).interruptible(
+        &caps,
+        InterruptNotice::new(VmLocation::Local, "removal", &environment.name),
+    );
     progress.begin("remove", "Removing the environment");
-    let removed = match progress.tick_while(client.delete(&environment.name)).await {
+    let removed = match progress
+        .tick_while(client.delete(&environment.name))
+        .await?
+    {
         Ok(removed) => {
             progress.complete();
             removed

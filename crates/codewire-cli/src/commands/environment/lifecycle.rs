@@ -5,7 +5,7 @@
 use super::*;
 use crate::commands::lifecycle_output::{
     ResultBlock, bounded, credential_ref, environment_command, exact_reference_id, location_label,
-    next_run_command, secret_refs,
+    next_run_command, secret_refs, unless_interrupted,
 };
 use crate::output::{
     Allocation, LifecycleSummary, MeshPlacement, NetworkRef, Outcome, SourceRef, Status,
@@ -244,23 +244,28 @@ pub(crate) async fn remove_cloud_environment(
     }
 }
 
-/// Runs `work` while the status line animates.
+/// Runs `work` while the status line animates. When `interruptible`, the
+/// first Ctrl-C ends the wait (not the operation) and returns `None`.
 pub(crate) async fn tick_while<W: std::io::Write, T>(
     line: &mut StatusLine<W>,
+    interruptible: bool,
     work: impl std::future::Future<Output = T>,
-) -> T {
-    tokio::pin!(work);
-    loop {
-        let Some(interval) = line.tick_interval() else {
-            return work.await;
-        };
-        tokio::select! {
-            result = &mut work => return result,
-            () = tokio::time::sleep(interval) => {
-                let _ = line.tick();
+) -> Option<T> {
+    unless_interrupted(interruptible, async {
+        tokio::pin!(work);
+        loop {
+            let Some(interval) = line.tick_interval() else {
+                return work.await;
+            };
+            tokio::select! {
+                result = &mut work => return result,
+                () = tokio::time::sleep(interval) => {
+                    let _ = line.tick();
+                }
             }
         }
-    }
+    })
+    .await
 }
 
 #[cfg(test)]

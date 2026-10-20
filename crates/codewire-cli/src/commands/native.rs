@@ -685,12 +685,19 @@ pub(crate) async fn create_native_environment(
         &context.summary(&request.name, vcpus, memory_mib, disk_bytes),
         caps,
     );
-    let progress = NativeProgress::new(caps);
+    let progress = NativeProgress::new(caps).interruptible(
+        caps,
+        crate::commands::lifecycle_output::InterruptNotice::new(
+            crate::output::VmLocation::Local,
+            "creation",
+            &request.name,
+        ),
+    );
     progress.begin_sources();
     let mut observe = |operation: &v1::Operation| progress.observe(operation);
     let created = progress
         .tick_while(client.create_observed(request.clone(), &mut observe))
-        .await;
+        .await?;
     let environment = match created {
         Ok(environment) => {
             progress.complete();
@@ -1221,24 +1228,30 @@ async fn prepare_native_start(
     get_native_environment_with_required_authority(client, name).await
 }
 
-/// Starts `name` with its stages on `progress`. A failure carries the stage
-/// it stopped at.
+/// The start of a local VM: its environment, or the stage it stopped at
+/// and why.
+type NativeStart = Result<v1::Environment, (Option<&'static str>, anyhow::Error)>;
+
+/// Starts `name` with its stages on `progress`. The outer error is an
+/// interrupted wait; the inner one a failed start with its stage.
 async fn run_native_start(
     mut client: NativeSupervisorClient,
     name: &str,
     progress: &NativeProgress,
-) -> Result<v1::Environment, (Option<&'static str>, anyhow::Error)> {
+) -> anyhow::Result<NativeStart> {
     let mut observe = |operation: &v1::Operation| progress.observe(operation);
-    match progress
-        .tick_while(client.start_observed(name, &mut observe))
-        .await
-    {
-        Ok(environment) => {
-            progress.complete();
-            Ok(environment)
-        }
-        Err(status) => Err((progress.fail(), native_status(status))),
-    }
+    Ok(
+        match progress
+            .tick_while(client.start_observed(name, &mut observe))
+            .await?
+        {
+            Ok(environment) => {
+                progress.complete();
+                Ok(environment)
+            }
+            Err(status) => Err((progress.fail(), native_status(status))),
+        },
+    )
 }
 
 /// Starts a local VM again after `cw upgrade` moved it to this cw.
@@ -1249,7 +1262,7 @@ async fn start_native_environment_with(
     prepare_native_start(&mut client, name).await?;
     let progress = NativeProgress::new(&super::environment::progress::text_progress_capabilities());
     run_native_start(client, name, &progress)
-        .await
+        .await?
         .map_err(|(stage, error)| match stage {
             Some(stage) => error.context(format!("start {name} failed at {stage:?}")),
             None => error,

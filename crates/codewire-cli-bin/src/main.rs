@@ -228,6 +228,6 @@ fn main() {
             std::process::exit(exit_code);
         }
         eprintln!("{err:#}");
-        std::process::exit(1);
+        std::process::exit(codewire_cli::interrupted_exit_code(&err).unwrap_or(1));
     }
 }
