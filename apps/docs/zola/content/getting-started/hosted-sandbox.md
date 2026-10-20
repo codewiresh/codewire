@@ -29,7 +29,7 @@ cw org list
 ## 2. Create the sandbox
 
 ```sh
-cw env create --name my-app --image workspace
+cw create --name my-app --image workspace
 ```
 
 `workspace` is shorthand for the Codewire workspace image; any OCI image
@@ -49,9 +49,9 @@ Useful flags:
 The command follows setup until the environment is running. Later:
 
 ```sh
-cw env list
-cw env info my-app
-cw env logs my-app        # setup logs
+cw ls
+cw info my-app
+cw logs my-app --setup    # how it was set up: provisioning, clones, install and startup
 ```
 
 The same form is in the dashboard: open your organization and choose
@@ -63,7 +63,7 @@ The same form is in the dashboard: open your organization and choose
 cw shell my-app
 cw run my-app --name tests --no-tty -- make test
 cw wait my-app tests
-cw logs my-app tests
+cw logs my-app --session tests
 ```
 
 `cw vscode my-app` opens it in VS Code over SSH, and `ssh cw-my-app` works
@@ -72,7 +72,7 @@ after `cw setup`; see [SSH, VS Code and files](@/guides/ssh-and-vscode.md).
 Publish a port as an HTTPS preview URL:
 
 ```sh
-cw env port add 3000 --label web --access org_members -e my-app
+cw ports my-app --publish 3000 --label web --access org_members
 ```
 
 ## 4. Run an agent
@@ -81,7 +81,7 @@ Managed agents need a credential profile with a provider credential for the
 agent: the `codex` slot (or an OpenAI API key) for Codex, the `anthropic` slot
 for Claude Code. Create one once, then create the sandbox with
 `--profile platform:NAME`, or add it later with
-`cw env update my-app --profile platform:NAME`.
+`cw update my-app --profile platform:NAME`.
 
 ```sh
 cw run my-app --name lead --agent codex --detach --prompt 'Review this repository and list the three riskiest files.'
@@ -96,9 +96,9 @@ recovery.
 ## 5. Stop or delete
 
 ```sh
-cw env stop my-app     # releases compute; workspace storage stays
-cw env start my-app
-cw env rm my-app       # deletes it at once, no prompt
+cw stop my-app     # the whole sandbox: releases compute; workspace storage stays
+cw start my-app
+cw rm my-app       # deletes it at once, no prompt
 ```
 
 Billing is per second of running compute; see

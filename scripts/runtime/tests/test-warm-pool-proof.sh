@@ -71,9 +71,9 @@ grep -qF 'check "hit $n: no gateway objects" no_gateway_objects "$id"' "$PROOF" 
   fail 'hits do not check for gateway objects'
 grep -qF 'check "hit $n: SSH presents the host key the platform recorded" ssh_presents_recorded_key "$id"' "$PROOF" ||
   fail 'hits do not prove SSH against the recorded host key'
-# The SSH check runs OpenSSH through the block `cw config-ssh` writes, as a
+# The SSH check runs OpenSSH through the block `cw setup ssh` writes, as a
 # user does, never through hand-built trust options.
-for option in 'config-ssh --ssh-config-file "$config"' 'ssh -F "$config"' \
+for option in 'setup ssh --ssh-config-file "$config"' 'ssh -F "$config"' \
     'env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' 'BatchMode=yes'; do
   grep -qF -- "$option" "$PROOF" || fail "SSH host-key proof is missing $option"
 done

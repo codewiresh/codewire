@@ -129,11 +129,10 @@ fn run_command_parser_rejects_conflicting_tty_overrides() {
 
 #[test]
 fn top_level_help_has_only_environment_session_commands() {
-    let mut command = Cli::command();
-    let help = command.render_long_help().to_string();
+    let help = crate::cli_command_with(true).render_help().to_string();
     for retained in [
         "run ",
-        "list ",
+        "ls, list ",
         "attach ",
         "logs ",
         "send ",
@@ -163,7 +162,6 @@ fn top_level_help_has_only_environment_session_commands() {
         "status ",
         "kill ",
         "watch ",
-        "access ",
         "hook ",
         "gateway ",
         "mcp-server ",

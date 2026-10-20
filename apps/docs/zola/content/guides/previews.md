@@ -14,16 +14,20 @@ https://{label}-{sandbox-id-prefix}-{organization-slug}.{preview domain}
 ```
 
 ```sh
-cw env port add 3000 --label web --access org_members -e my-app
-cw env port list -e my-app
-cw env port rm web -e my-app
+cw ports my-app --publish 3000 --label web --access org_members
+cw ports my-app
+cw ports my-app --unpublish 3000
 ```
 
 | Flag | Meaning |
 | --- | --- |
-| `--label` | 2 to 22 lowercase letters, digits or hyphens; distinct per sandbox; required on the platform |
+| `--label` | 2 to 22 lowercase letters, digits or hyphens; distinct per sandbox; default `port-PORT` |
 | `--access` | `creator` (default), `org_members` or `public` |
-| `-e, --env` | the environment; defaults to the one selected with `cw use` |
+| `ENV` or `--in ENV` | the environment; defaults to the one selected with `cw use` |
+
+Publishing needs a running sandbox; a stopped one is refused with the
+`cw start ENV` repair. `--unpublish` names the guest port, with `--label` to
+choose when one port has several previews.
 
 Port 2222 is reserved for the environment's SSH server. The dashboard's
 **Ports** dialog on the Sandbox page offers the same fields and shows the
@@ -53,15 +57,17 @@ A local VM is reachable only through ports you publish on your machine's
 loopback address:
 
 ```sh
-cw env port add 3000 --host-port 3000 -e my-app    # http://127.0.0.1:3000
-cw env port list -e my-app
-cw env port rm 3000 -e my-app                      # by host port
+cw ports my-app --publish 3000 --host-port 3000     # http://127.0.0.1:3000
+cw ports my-app
+cw ports my-app --unpublish 3000                    # by guest port
 ```
 
 `--host-port` defaults to the guest port; `--label` and `--access` are
-refused here. A stopped VM records the change and publishes the port at its
-next start. In `codewire.yaml`, a `host_port`/`guest_port` pair declares a
-local port:
+refused here. Publishing needs a running VM; a stopped one is refused with
+the `cw start ENV` repair, while listing and unpublishing work either way.
+When a guest port is published on several host ports, `--unpublish` takes
+`--host-port` to choose one. In `codewire.yaml`, a `host_port`/`guest_port`
+pair declares a local port:
 
 ```yaml
 ports:

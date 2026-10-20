@@ -14,7 +14,8 @@ cw setup --local [--from DIR] [--replace]
 The hosted wizard: choose the server (`--server`, `CODEWIRE_SERVER_URL`, the
 saved configuration, or `https://codewire.sh`), sign in through the browser
 (the URL and code are printed), save credentials, choose or create the default
-organization, and run `config-ssh` unless `--skip-ssh`. With one organization
+organization, and write the OpenSSH integration (as `cw setup ssh` does)
+unless `--skip-ssh`. With one organization
 it is picked automatically; with several, `--org` or a picker.
 
 `--local` installs and verifies the local VM runtime this release pins

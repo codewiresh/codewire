@@ -119,19 +119,22 @@ pub(crate) fn env_create_mesh_prompt(mesh_url: &str, network_id: &str) -> String
     )
 }
 
-pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyhow::Result<()> {
-    let placement = args.placement();
+pub(crate) async fn handle_env_command(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    command: EnvCommand,
+) -> anyhow::Result<()> {
     #[cfg(unix)]
     if placement != Some(EnvironmentPlacement::Platform)
-        && handle_host_environment_command(globals, placement, &args.command).await?
+        && handle_host_environment_command(globals, placement, &command).await?
     {
         return Ok(());
     }
-    match args.command {
+    match command {
         EnvCommand::Agent(args) => {
             anyhow::ensure!(
                 placement != Some(EnvironmentPlacement::Local),
-                "cw env agent requires a platform environment"
+                "cw agent requires a cloud environment"
             );
             #[cfg(unix)]
             {
@@ -144,28 +147,12 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
             }
         }
         EnvCommand::Runtime(args) => runtime::handle(globals, placement, args.command).await,
-        EnvCommand::Upgrade(args) => {
-            anyhow::ensure!(
-                placement != Some(EnvironmentPlacement::Platform),
-                "cw env upgrade restarts local VMs; use `cw env --local upgrade`"
-            );
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            {
-                upgrade_native_environments(args.yes, args.after_update).await
-            }
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            {
-                let _ = args;
-                anyhow::bail!("local VMs are not available on this platform")
-            }
-        }
         EnvCommand::Create(create) => {
             handle_unified_environment_create(globals, placement, create).await
         }
         EnvCommand::Update(update) => {
             handle_unified_environment_update(globals, placement, update).await
         }
-        EnvCommand::List(list) => handle_unified_environment_list(globals, placement, list).await,
         EnvCommand::Info(info) => handle_unified_environment_info(globals, placement, info).await,
         EnvCommand::Resize(resize) => {
             handle_unified_environment_resize(globals, placement, resize).await
@@ -217,13 +204,30 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
         EnvCommand::Cp(args) => handle_unified_environment_cp(globals, placement, args).await,
         EnvCommand::Port(args) => handle_unified_environment_port(globals, placement, args).await,
         command => {
-            if placement.is_some() {
+            // Cloud-only operations: an explicit --cloud is their placement;
+            // --local is refused rather than ignored.
+            if placement == Some(EnvironmentPlacement::Local) {
                 anyhow::bail!(
-                    "--local and --cloud currently support only create, update, list, info, start, stop, restart, refresh-skills, rm, cp, port, access, share, and daemon diagnostics"
+                    "`cw {}` is available only for cloud environments",
+                    platform_only_command_name(&command)
                 );
             }
             handle_platform_env_command(globals, command).await
         }
+    }
+}
+
+fn platform_only_command_name(command: &EnvCommand) -> &'static str {
+    match command {
+        EnvCommand::Report(_) => "report",
+        EnvCommand::Prune(_) => "prune",
+        EnvCommand::Nuke(_) => "nuke",
+        EnvCommand::Protect(_) => "protect",
+        EnvCommand::Unprotect(_) => "unprotect",
+        EnvCommand::CancelDelete(_) => "cancel-delete",
+        EnvCommand::Extend(_) => "extend",
+        EnvCommand::Logs(_) => "logs --setup",
+        _ => "this command",
     }
 }
 
@@ -288,29 +292,27 @@ async fn handle_unified_environment_cp(
     }
 }
 
-/// A local environment's ports live on this host's 127.0.0.1; a platform
-/// environment's are preview URLs. `--env`, or the selected environment,
+/// A local environment's ports live on this host's 127.0.0.1; a cloud
+/// environment's are preview URLs. ENV, else the selected environment,
 /// decides which when no placement is given.
 async fn handle_unified_environment_port(
     globals: &Globals,
     placement: Option<EnvironmentPlacement>,
-    args: EnvPortArgs,
+    mut args: EnvPortTarget,
 ) -> anyhow::Result<()> {
-    let target = match &args.command {
-        EnvPortCommand::Add(add) => add.env.clone(),
-        EnvPortCommand::List(list) => list.env.clone(),
-        EnvPortCommand::Rm(rm) => rm.env.clone(),
-    };
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let local = match (placement, target) {
+        let local = match (placement, args.environment.as_deref()) {
             (Some(EnvironmentPlacement::Platform), _) => None,
             (_, Some(target)) => {
-                match resolve_unified_environment_target(globals, placement, &target, "port")
+                match resolve_unified_environment_target(globals, placement, target, "ports")
                     .await?
                 {
                     UnifiedEnvironmentTarget::NativeLocal(name) => Some(name),
-                    UnifiedEnvironmentTarget::Platform(_) => None,
+                    UnifiedEnvironmentTarget::Platform(id) => {
+                        args.environment = Some(id);
+                        None
+                    }
                 }
             }
             (Some(EnvironmentPlacement::Local), None) => Some(
@@ -319,22 +321,36 @@ async fn handle_unified_environment_port(
                     .map(|environment| environment.name)
                     .ok_or_else(|| {
                         anyhow::anyhow!(
-                            "no local environment selected; pass --env NAME or run `cw use NAME`"
+                            "no local environment selected; pass ENV or run `cw use --local ENV`"
                         )
                     })?,
             ),
-            (None, None) => None,
+            (None, None) => selected_local_environment_name().await?,
         };
         if let Some(name) = local {
-            return handle_native_environment_port(&name, args.command).await;
+            return handle_native_environment_port(&name, args.operation, args.output).await;
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     if placement == Some(EnvironmentPlacement::Local) {
-        let _ = target;
         anyhow::bail!("native local environments currently require Linux or macOS");
     }
     handle_platform_env_command(globals, EnvCommand::Port(args)).await
+}
+
+/// The selected environment's name when it is a local VM.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn selected_local_environment_name() -> anyhow::Result<Option<String>> {
+    let paths = ResolvePaths::from_env(&OsEnv)?;
+    match config::current_target(&paths.mesh_data_dir) {
+        Ok(target) if target.kind == "env" || target.kind == "host" => Ok(None),
+        Ok(target) if target.kind == "local" && target.target_ref != "local" => {
+            Ok(Some(target.target_ref))
+        }
+        _ => Ok(native_selected_environment()
+            .await?
+            .map(|environment| environment.name)),
+    }
 }
 
 async fn handle_unified_environment_access(
@@ -421,10 +437,7 @@ pub(crate) async fn handle_platform_env_command(
                 anyhow::bail!("platform managed agent commands require a Unix client")
             }
         }
-        EnvCommand::Runtime(_) => anyhow::bail!("cw env runtime supports only native Linux VMs"),
-        EnvCommand::Upgrade(_) => {
-            anyhow::bail!("cw env upgrade restarts local VMs; use `cw env --local upgrade`")
-        }
+        EnvCommand::Runtime(_) => anyhow::bail!("cw runtime supports only native Linux VMs"),
         EnvCommand::Create(args) => {
             let began = Instant::now();
             let mut request = prepare_platform_env_create_request(&args)?;
@@ -487,20 +500,6 @@ pub(crate) async fn handle_platform_env_command(
         }
         EnvCommand::Update(args) => {
             sources::update_platform_sources(&platform, &environment_client, &org_id, args).await?;
-        }
-        EnvCommand::List(args) => {
-            let environments = environment_client
-                .list_environments(&org_id, args.all)
-                .await
-                .context("list environments")?;
-            let filtered = filter_environments(
-                &environments,
-                args.environment_type.as_deref(),
-                args.state.as_deref(),
-                args.all,
-            );
-            let current = config::current_target(&paths.mesh_data_dir).ok();
-            print_env_list(&filtered, current.as_ref(), args.output)?;
         }
         EnvCommand::Info(args) => {
             let environment_id =
@@ -704,13 +703,8 @@ pub(crate) async fn handle_platform_env_command(
             handle_env_share_command(&environment_client, &org_id, args.command).await?;
         }
         EnvCommand::Port(args) => {
-            handle_env_port_command(
-                &environment_client,
-                &org_id,
-                &paths.mesh_data_dir,
-                args.command,
-            )
-            .await?;
+            handle_env_port_command(&environment_client, &org_id, &paths.mesh_data_dir, args)
+                .await?;
         }
         EnvCommand::Logs(args) => {
             let environment_id =
@@ -1248,13 +1242,56 @@ async fn handle_unified_environment_list(
     placement: Option<EnvironmentPlacement>,
     args: EnvListArgs,
 ) -> anyhow::Result<()> {
+    let inventory = unified_environment_inventory(globals, placement, &args).await?;
+    if let Some(location) = inventory.unavailable.first() {
+        anyhow::bail!(
+            "{} environments could not be listed: {}",
+            location.location,
+            location.error
+        );
+    }
+    print_unified_environment_list(&inventory.entries, args.output)
+}
+
+/// A location whose environments could not be listed: the local runtime or
+/// the cloud. Never shown as an empty list.
+#[derive(Debug)]
+pub(crate) struct UnavailableLocation {
+    pub(crate) location: &'static str,
+    pub(crate) error: String,
+}
+
+/// The environments the placement admits, sorted by name, and the
+/// locations that could not be listed.
+#[derive(Debug)]
+pub(crate) struct EnvironmentInventory {
+    pub(crate) entries: Vec<UnifiedEnvironmentListEntry>,
+    pub(crate) unavailable: Vec<UnavailableLocation>,
+}
+
+/// Every environment the placement admits, local and cloud. An unconfigured
+/// cloud is skipped without a placement; a location that fails to list is
+/// reported as unavailable, never as empty, and the other locations are
+/// still listed.
+pub(crate) async fn unified_environment_inventory(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    args: &EnvListArgs,
+) -> anyhow::Result<EnvironmentInventory> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
+    let mut unavailable = Vec::new();
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let native = if placement != Some(EnvironmentPlacement::Platform)
         && args.environment_type.as_deref() != Some("host")
     {
-        native_environments().await?
+        native_environments().await.unwrap_or_else(|error| {
+            unavailable.push(UnavailableLocation {
+                location: "local",
+                error: format!("{error:#}"),
+            });
+            Vec::new()
+        })
     } else {
         Vec::new()
     };
@@ -1264,22 +1301,34 @@ async fn handle_unified_environment_list(
         && (placement == Some(EnvironmentPlacement::Platform)
             || resolve_platform(globals, &paths, &env).is_ok())
     {
-        let platform = resolve_platform(globals, &paths, &env)?;
-        let environment_client = EnvironmentClient::new(&platform)?;
-        let organization_client = organization_client(&platform)?;
-        let orgs = organization_client.list_orgs().await.context("list orgs")?;
-        let org_id = current_org_id(&platform, &orgs)?;
-        let environments = environment_client
-            .list_environments(&org_id, args.all)
-            .await
-            .context("list environments")?;
-        let filtered = filter_environments(
-            &environments,
-            args.environment_type.as_deref(),
-            args.state.as_deref(),
-            args.all,
-        );
-        platform_environment_daemon_health(&environment_client, &org_id, filtered).await
+        let listed = async {
+            let platform = resolve_platform(globals, &paths, &env)?;
+            let environment_client = EnvironmentClient::new(&platform)?;
+            let organization_client = organization_client(&platform)?;
+            let orgs = organization_client.list_orgs().await.context("list orgs")?;
+            let org_id = current_org_id(&platform, &orgs)?;
+            let environments = environment_client
+                .list_environments(&org_id, args.all)
+                .await
+                .context("list environments")?;
+            let filtered = filter_environments(
+                &environments,
+                args.environment_type.as_deref(),
+                args.state.as_deref(),
+                args.all,
+            );
+            anyhow::Ok(
+                platform_environment_daemon_health(&environment_client, &org_id, filtered).await,
+            )
+        }
+        .await;
+        listed.unwrap_or_else(|error| {
+            unavailable.push(UnavailableLocation {
+                location: "cloud",
+                error: format!("{error:#}"),
+            });
+            Vec::new()
+        })
     } else {
         Vec::new()
     };
@@ -1320,7 +1369,14 @@ async fn handle_unified_environment_list(
     if placement != Some(EnvironmentPlacement::Platform)
         && args.environment_type.as_deref() != Some("sandbox")
     {
-        for environment in host_environments()? {
+        let hosts = host_environments().unwrap_or_else(|error| {
+            unavailable.push(UnavailableLocation {
+                location: "trusted host",
+                error: format!("{error:#}"),
+            });
+            Vec::new()
+        });
+        for environment in hosts {
             let daemon_health = host_daemon_health(&environment).await;
             entries.push(UnifiedEnvironmentListEntry {
                 environment_type: "host".into(),
@@ -1342,7 +1398,10 @@ async fn handle_unified_environment_list(
             .cmp(&right.name)
             .then(left.placement.cmp(&right.placement))
     });
-    print_unified_environment_list(&entries, args.output)
+    Ok(EnvironmentInventory {
+        entries,
+        unavailable,
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1677,7 +1736,7 @@ async fn resolve_unified_environment_daemon_target(
     let paths = ResolvePaths::from_env(&env)?;
     let current = config::current_target(&paths.mesh_data_dir).map_err(|_| {
         anyhow::anyhow!(
-            "no environment selected; use `cw use ENV` or pass ENV to `cw env {}`",
+            "no environment selected; use `cw use ENV` or pass ENV to `cw {}`",
             command.command_name()
         )
     })?;
@@ -1707,7 +1766,7 @@ async fn resolve_unified_environment_daemon_target(
             Ok(UnifiedEnvironmentTarget::Platform(current.target_ref))
         }
         _ => anyhow::bail!(
-            "no environment selected; use `cw use ENV` or pass ENV to `cw env {}`",
+            "no environment selected; use `cw use ENV` or pass ENV to `cw {}`",
             command.command_name()
         ),
     }
@@ -1962,7 +2021,7 @@ async fn resolve_unified_environment_target(
 
 /// The platform answers daemon status only for a running Sandbox; every other
 /// state is refused and shown as unavailable. Asking only running rows keeps
-/// the output and stops `cw env list --all` from slowing down and collecting
+/// the output and stops `cw ls --all` from slowing down and collecting
 /// errors as the history of destroyed environments grows.
 pub(crate) fn environment_has_daemon(environment: &Environment) -> bool {
     environment.state == "running"
@@ -1995,7 +2054,7 @@ pub(crate) fn ambiguous_environment_placement_error(
     target_ref: &str,
 ) -> anyhow::Error {
     anyhow::anyhow!(
-        "environment {target_ref:?} exists in both placements; use `cw env {command} --local {target_ref}` or `cw env {command} --cloud {target_ref}`"
+        "environment {target_ref:?} exists in both placements; use `cw --local {command} {target_ref}` or `cw --cloud {command} {target_ref}`"
     )
 }
 
@@ -2008,7 +2067,7 @@ pub(crate) fn reject_local_create_options(args: &EnvCreateArgs) -> anyhow::Resul
         || args.no_docker
     {
         anyhow::bail!(
-            "--backend, --path, --path-mode, --spec, --docker-disk, and --no-docker require `cw env create --local`"
+            "--backend, --path, --path-mode, --spec, --docker-disk, and --no-docker require `cw create --local`"
         );
     }
     Ok(())
@@ -2143,16 +2202,16 @@ pub(crate) fn environment_daemon_readiness(
         "ready" => Ok(true),
         "starting" | "" => Ok(false),
         "upgrade_required" | "unsupported" => {
-            anyhow::bail!("environment daemon requires an upgrade; run `cw env daemon repair`")
+            anyhow::bail!("environment daemon requires an upgrade; run `cw daemon repair`")
         }
         "unhealthy" => {
             let detail = trimmed_str(&status.message).unwrap_or("no diagnostic message");
             anyhow::bail!(
-                "environment daemon is unhealthy ({detail}); run `cw env daemon status` or `cw env daemon repair`"
+                "environment daemon is unhealthy ({detail}); run `cw daemon status` or `cw daemon repair`"
             );
         }
         state => anyhow::bail!(
-            "environment daemon reported unknown state {state:?}; run `cw env daemon status`"
+            "environment daemon reported unknown state {state:?}; run `cw daemon status`"
         ),
     }
 }
@@ -2870,40 +2929,59 @@ pub(crate) async fn handle_env_port_command(
     environment_client: &EnvironmentClient,
     org_id: &str,
     data_dir: &Path,
-    command: EnvPortCommand,
+    args: EnvPortTarget,
 ) -> anyhow::Result<()> {
-    match command {
-        EnvPortCommand::Add(args) => {
+    let environment_id = resolve_port_environment_id(
+        environment_client,
+        org_id,
+        data_dir,
+        args.environment.as_deref(),
+    )
+    .await?;
+    match args.operation {
+        PortOperation::List => {
+            let ports = environment_client
+                .list_environment_ports(org_id, &environment_id)
+                .await
+                .context("list ports")?;
+            print_env_port_list(&ports, args.output)?;
+        }
+        PortOperation::Publish {
+            port,
+            host_port,
+            label,
+            access,
+        } => {
             anyhow::ensure!(
-                args.host_port.is_none(),
-                "--host-port applies to local environments; a platform port is published as a preview URL"
+                host_port.is_none(),
+                "--host-port applies to local environments; a cloud port is published as a preview URL"
             );
-            let port = parse_env_port_number(&args.port)?;
-            let label = args
-                .label
+            let label = label
                 .as_deref()
                 .and_then(trimmed_str)
-                .ok_or_else(|| anyhow::anyhow!("--label is required"))?
-                .to_string();
-            let access = args
-                .access
+                .map(str::to_owned)
+                .unwrap_or_else(|| default_port_label(port));
+            let access = access
                 .as_deref()
                 .and_then(trimmed_str)
                 .unwrap_or("creator")
                 .to_string();
-            let environment_id = resolve_port_environment_id(
-                environment_client,
-                org_id,
-                data_dir,
-                args.env.as_deref(),
-            )
-            .await?;
+            let environment = environment_client
+                .get_environment(org_id, &environment_id)
+                .await
+                .context("get environment")?;
+            let name = environment_display_name(&environment).to_owned();
+            anyhow::ensure!(
+                environment.state == "running",
+                "{name} is {}; start it with `cw start {name}`, then publish the port",
+                display_str(&environment.state)
+            );
             let result = environment_client
                 .create_environment_port(
                     org_id,
                     &environment_id,
                     &CreateEnvironmentPortRequest {
-                        port,
+                        port: i32::from(port),
                         label,
                         access,
                     },
@@ -2912,33 +2990,20 @@ pub(crate) async fn handle_env_port_command(
                 .context("create port")?;
             print_env_port_add(&result, args.output)?;
         }
-        EnvPortCommand::List(args) => {
-            let environment_id = resolve_port_environment_id(
-                environment_client,
-                org_id,
-                data_dir,
-                args.env.as_deref(),
-            )
-            .await?;
+        PortOperation::Unpublish {
+            port,
+            host_port,
+            label,
+        } => {
+            anyhow::ensure!(
+                host_port.is_none(),
+                "--host-port applies to local environments; a cloud preview is selected by its port and --label"
+            );
             let ports = environment_client
                 .list_environment_ports(org_id, &environment_id)
                 .await
                 .context("list ports")?;
-            print_env_port_list(&ports, args.output)?;
-        }
-        EnvPortCommand::Rm(args) => {
-            let environment_id = resolve_port_environment_id(
-                environment_client,
-                org_id,
-                data_dir,
-                args.env.as_deref(),
-            )
-            .await?;
-            let ports = environment_client
-                .list_environment_ports(org_id, &environment_id)
-                .await
-                .context("list ports")?;
-            let target = resolve_environment_port(&ports, &args.port)?;
+            let target = select_unpublished_preview(&ports, port, label.as_deref())?;
             environment_client
                 .delete_environment_port(org_id, &environment_id, &target.id)
                 .await
@@ -2947,6 +3012,36 @@ pub(crate) async fn handle_env_port_command(
         }
     }
     Ok(())
+}
+
+/// The preview label `cw ports ENV --publish PORT` uses without `--label`.
+pub(crate) fn default_port_label(port: u16) -> String {
+    format!("port-{port}")
+}
+
+/// The one cloud preview of a guest port; `--label` chooses among several.
+pub(crate) fn select_unpublished_preview(
+    ports: &[EnvironmentPort],
+    port: u16,
+    label: Option<&str>,
+) -> anyhow::Result<EnvironmentPort> {
+    let matches: Vec<&EnvironmentPort> = ports
+        .iter()
+        .filter(|candidate| candidate.port == i32::from(port))
+        .filter(|candidate| label.is_none_or(|label| candidate.label == label))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => anyhow::bail!("no preview publishes port {port}"),
+        several => anyhow::bail!(
+            "port {port} is published as {}; choose one with --label",
+            several
+                .iter()
+                .map(|candidate| candidate.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 pub(crate) async fn resolve_port_environment_id(
@@ -2960,40 +3055,15 @@ pub(crate) async fn resolve_port_environment_id(
     }
 
     let current = config::current_target(data_dir).map_err(|_| {
-        anyhow::anyhow!(
-            "no environment specified and no current target set (use --env or `cw use`)"
-        )
+        anyhow::anyhow!("no environment named and none selected; pass ENV or run `cw use ENV`")
     })?;
     if current.kind != "env" || trimmed_str(&current.target_ref).is_none() {
-        anyhow::bail!("no environment specified and no current target set (use --env or `cw use`)");
+        anyhow::bail!("no environment named and none selected; pass ENV or run `cw use ENV`");
     }
     resolve_environment_id(client, org_id, &current.target_ref).await
 }
 
-pub(crate) fn parse_env_port_number(value: &str) -> anyhow::Result<i32> {
-    let Ok(port) = value.parse::<i32>() else {
-        anyhow::bail!("invalid port number: {value}");
-    };
-    if !(1..=65535).contains(&port) {
-        anyhow::bail!("invalid port number: {value}");
-    }
-    Ok(port)
-}
-
-pub(crate) fn resolve_environment_port(
-    ports: &[EnvironmentPort],
-    port_ref: &str,
-) -> anyhow::Result<EnvironmentPort> {
-    let port_ref = trimmed_str(port_ref).unwrap_or(port_ref);
-    for port in ports {
-        if port.label == port_ref || port.id == port_ref || port.port.to_string() == port_ref {
-            return Ok(port.clone());
-        }
-    }
-    anyhow::bail!("port {port_ref:?} not found")
-}
-
-/// `cw env logs --follow`: renders rows until the stream's terminal row,
+/// `cw logs ENV --setup --follow`: renders rows until the stream's terminal row,
 /// resuming after the last rendered row when the connection drops.
 pub(crate) async fn follow_environment_logs(
     client: &EnvironmentClient,
@@ -3020,7 +3090,7 @@ pub(crate) async fn follow_environment_logs(
     result.map(|_| ())
 }
 
-/// `cw env create`: every setup stage through `complete`, then daemon
+/// `cw create`: every setup stage through `complete`, then daemon
 /// readiness. Exits non-zero when a stage fails.
 async fn wait_for_platform_environment_setup(
     client: &EnvironmentClient,
@@ -3061,7 +3131,7 @@ async fn wait_for_platform_environment_setup(
     Ok(())
 }
 
-/// `cw env start` with text output: the start's stages, then daemon
+/// `cw start` with text output: the start's stages, then daemon
 /// readiness. Exits non-zero when a stage fails.
 async fn start_platform_environment_with_progress(
     client: &EnvironmentClient,
@@ -3145,18 +3215,6 @@ pub(crate) fn filter_environments(
         .filter(|environment| all || environment.state != "destroyed")
         .cloned()
         .collect()
-}
-
-pub(crate) fn print_env_list(
-    environments: &[Environment],
-    current: Option<&config::CurrentTargetConfig>,
-    output: OutputFormat,
-) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(environments)?),
-        OutputFormat::Text => print!("{}", format_env_list_text(environments, current)),
-    }
-    Ok(())
 }
 
 pub(crate) fn print_env_info(
@@ -3589,12 +3647,12 @@ pub(crate) fn map_env_delete_error(environment_ref: &str, err: anyhow::Error) ->
     let message = err.to_string();
     if message.contains("deletion_pending") || message.contains("202") {
         return anyhow::anyhow!(
-            "Environment {environment_ref} scheduled for deletion (grace period).\nUse 'cw env cancel-delete {environment_ref}' to cancel."
+            "Environment {environment_ref} scheduled for deletion (grace period).\nUse 'cw cancel-delete {environment_ref}' to cancel."
         );
     }
     if message.contains("environment_protected") {
         return anyhow::anyhow!(
-            "environment is protected. Run 'cw env unprotect {environment_ref}' first"
+            "environment is protected. Run 'cw unprotect {environment_ref}' first"
         );
     }
     if message.contains("access_denied") {
@@ -3732,69 +3790,6 @@ pub(crate) fn env_bulk_label(environment: &Environment) -> String {
     }
 }
 
-pub(crate) fn format_env_list_text(
-    environments: &[Environment],
-    current: Option<&config::CurrentTargetConfig>,
-) -> String {
-    if environments.is_empty() {
-        return "No environments found.\n".to_string();
-    }
-
-    let current_ref = current
-        .filter(|target| target.kind == "env")
-        .and_then(|target| trimmed_str(&target.target_ref));
-    let mut output = String::new();
-    for (index, environment) in environments.iter().enumerate() {
-        if index > 0 {
-            output.push('\n');
-        }
-        output.push_str(&format_env_card_text(environment, current_ref));
-    }
-    output
-}
-
-pub(crate) fn format_env_card_text(environment: &Environment, current_ref: Option<&str>) -> String {
-    let marker = if current_ref.is_some_and(|current| current == environment.id) {
-        " (current)"
-    } else {
-        ""
-    };
-    let protected = if environment.protected {
-        " [protected]"
-    } else {
-        ""
-    };
-
-    let mut output = format!(
-        "{} [{}]  {}  {}{}{}\n",
-        environment_display_name(environment),
-        short_env_id(&environment.id),
-        env_state_label(environment),
-        env_created_label(environment),
-        marker,
-        protected
-    );
-    output.push_str(&format!(
-        "  {}  {}m/{}MB  ttl {}\n",
-        env_type_label(environment),
-        environment.cpu_millicores,
-        environment.memory_mb,
-        env_ttl_label(environment)
-    ));
-    if let Some(network) = environment.network.as_deref().and_then(trimmed_str) {
-        output.push_str(&format!("  network: {network}\n"));
-    }
-    if let Some(deleting_at) = environment
-        .deletion_grace_until
-        .as_deref()
-        .and_then(trimmed_str)
-    {
-        output.push_str(&format!("  deleting at: {deleting_at}\n"));
-    }
-    output.push_str(&format!("  connect: {}\n", env_connect_hint(environment)));
-    output
-}
-
 pub(crate) fn format_env_info_text(environment: &Environment) -> String {
     let mut output = String::new();
     output.push_str(&format!("{:<14} {}\n", "ID:", environment.id));
@@ -3897,26 +3892,4 @@ pub(crate) fn env_state_label(environment: &Environment) -> &str {
 
 pub(crate) fn env_created_label(environment: &Environment) -> &str {
     trimmed_str(&environment.created_at).unwrap_or("--")
-}
-
-pub(crate) fn env_ttl_label(environment: &Environment) -> String {
-    if let Some(ttl_seconds) = environment.ttl_seconds {
-        return format!("{ttl_seconds}s");
-    }
-    if environment
-        .shutdown_at
-        .as_deref()
-        .and_then(trimmed_str)
-        .is_some()
-    {
-        return "set".to_string();
-    }
-    "--".to_string()
-}
-
-pub(crate) fn env_connect_hint(environment: &Environment) -> String {
-    if env_type_label(environment) == "sandbox" && environment.state == "running" {
-        return format!("cw shell {}", short_env_id(&environment.id));
-    }
-    "--".to_string()
 }

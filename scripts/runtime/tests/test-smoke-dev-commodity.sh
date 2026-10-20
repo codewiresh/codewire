@@ -98,12 +98,12 @@ assert_static_contract() {
     rg -F 'codewire.sh/type=gateway' >/dev/null ||
     fail "no-gateway check no longer selects gateway objects by label"
   # The host key is the one the platform recorded for the current
-  # generation: trusted only through the block `cw config-ssh` writes, whose
+  # generation: trusted only through the block `cw setup ssh` writes, whose
   # one trust source is `cw ssh known-hosts`, never first use; a changed key
   # is refused; stop and start rotate it. A user's own command line and an
   # SFTP-mode scp run over that same block.
   host_key_smoke="$(awk '/^user_ssh_config\(\)/,/^run_ssh_smoke\(\)/' "$SMOKE")"
-  for binding in 'config-ssh --ssh-config-file "$config"' 'ssh -F "$config"' \
+  for binding in 'setup ssh --ssh-config-file "$config"' 'ssh -F "$config"' \
       'env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' 'user_ssh "printf' \
       'StrictHostKeyChecking=yes' 'GlobalKnownHostsFile=/dev/null' \
       'UserKnownHostsFile=$pinned' 'run_user_ssh_journey' \
@@ -136,9 +136,9 @@ assert_static_contract() {
   restart_witness="$(awk '/^application_restart_witness_guest\(\)/,/^run_application_secret_pty\(\)/' "$SMOKE")"
   rg -F 'cw_with_timeout 30 run --no-tty --output json "$ENV_ID"' <<<"$restart_witness" >/dev/null ||
     fail "restart witness no longer captures the durable session identity from public JSON launch output"
-  rg -F 'cw_with_timeout 30 logs "$ENV_ID" "$session_id" --raw' <<<"$restart_witness" >/dev/null ||
+  rg -F 'cw_with_timeout 30 logs "$ENV_ID" --session "$session_id" --raw' <<<"$restart_witness" >/dev/null ||
     fail "restart witness no longer binds its ready receipt to exact-session public logs"
-  [[ "$(rg -F -c 'cw_with_timeout 30 list "$ENV_ID" --output json' <<<"$restart_witness")" == 2 ]] ||
+  [[ "$(rg -F -c 'cw_with_timeout 30 ls "$ENV_ID" --output json' <<<"$restart_witness")" == 2 ]] ||
     fail "restart witness no longer checks exact-session readiness and termination through public session lists"
   for terminal_state in Stopped Exited Failed Interrupted; do
     rg -F "\$state == \"$terminal_state\"" <<<"$restart_witness" >/dev/null ||
@@ -567,7 +567,7 @@ run_resize_guest_case() {
       SMOKE_EXISTING_ENV_ID="$existing_env" SMOKE_TIMEOUT_SECONDS=60 \
       SMOKE_RESIZE_GUEST_CPU_DELTA=1000 SMOKE_RESIZE_GUEST_MEMORY_DELTA=2048
     cw() {
-      [[ "$*" == "env info 11111111-1111-4111-8111-111111111111 --output json" ]] || return 97
+      [[ "$*" == "info 11111111-1111-4111-8111-111111111111 --output json" ]] || return 97
       printf '{"cpu_millicores":1000,"memory_mb":2048}\n'
     }
     cw_with_timeout() {
@@ -1126,7 +1126,7 @@ write_admin_oauth_cw_fixture() {
     '*" org current")' \
     '  printf '\''%s\n'\'' '\''ID: admin-org'\''' \
     '  ;;' \
-    '*" env list --output json")' \
+    '*" ls --output json")' \
     '  printf '\''%s\n'\'' '\''[]'\''' \
     '  ;;' \
     '*) exit 97 ;;' \

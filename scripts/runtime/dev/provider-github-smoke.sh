@@ -72,7 +72,7 @@ prepare_provider_github() {
 }
 
 run_provider_github_smoke() {
-  cw_with_timeout 30 env info --local "$ENV_ID" --output json \
+  cw_with_timeout 30 info --local "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/provider-github-environment.json" 2>"$TMPDIR_SMOKE/provider-github-info.err" ||
     die 'cannot inspect the local GitHub environment binding'
   jq -e --arg id "$ENV_ID" --arg profile "platform:id:$PROVIDER_GITHUB_PROFILE_ID" \

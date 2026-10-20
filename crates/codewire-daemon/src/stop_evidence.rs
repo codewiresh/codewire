@@ -6,7 +6,7 @@
 //! for each:
 //!
 //! - **The whole environment is being taken down:** [`SHUTDOWN_MARKER`] in
-//!   the environment's state root. `cw env stop`, `restart` and `rm` write it
+//!   the environment's state root. `cw stop ENV`, `restart` and `rm` write it
 //!   to ask the daemon to stop. The daemon writes it itself before it cancels
 //!   a launch or stops a session for any other shutdown, and removes it when
 //!   it starts.
@@ -140,7 +140,7 @@ mod tests {
         assert!(!takedown_marked(root));
         mark_takedown(root).unwrap();
         assert!(takedown_marked(root));
-        // `cw env stop` wrote its own: it is left as it is.
+        // `cw stop ENV` wrote its own: it is left as it is.
         std::fs::write(root.join(SHUTDOWN_MARKER), b"true\n").unwrap();
         mark_takedown(root).unwrap();
         assert_eq!(

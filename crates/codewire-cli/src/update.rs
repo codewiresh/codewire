@@ -1,4 +1,4 @@
-//! `cw update` and `cw install --managed`.
+//! `cw upgrade` and `cw install --managed`.
 //!
 //! A managed installation keeps every admitted cw at an immutable digest path
 //! in an ordinary-user store and points one entry, normally `~/.local/bin/cw`,
@@ -31,11 +31,16 @@ use crate::public_fetch;
 const LOCAL_RELEASE_IDENTITY: &str = "cw-runtime.json";
 const LOCAL_RELEASE_EXECUTABLE: &str = "cw";
 
+/// `cw upgrade`: with no flags, ask what to upgrade at a terminal; `--cli`
+/// and `--vms` say it for scripts. A source flag implies `--cli`.
 #[derive(Debug, Args)]
 #[command(args_conflicts_with_subcommands = true)]
-pub(crate) struct UpdateArgs {
+pub(crate) struct UpgradeArgs {
     #[command(subcommand)]
-    command: Option<UpdateCommand>,
+    command: Option<UpgradeCommand>,
+    /// Select the newer CLI from the source [default source: the signed stable channel].
+    #[arg(long)]
+    cli: bool,
     /// Pinned local release directory containing `cw` and `cw-runtime.json`.
     #[arg(long, value_name = "DIR", requires = "sha256", conflicts_with_all = ["version", "channel"])]
     from: Option<PathBuf>,
@@ -53,7 +58,7 @@ pub(crate) struct UpdateArgs {
 }
 
 #[derive(Debug, Subcommand)]
-enum UpdateCommand {
+enum UpgradeCommand {
     /// Show the managed installation, its selection and retained versions.
     Status(StoreArgs),
     /// Select the previous, or a named retained, version for new invocations.
@@ -75,10 +80,11 @@ struct SelectionArgs {
     /// Refuse unless the selection generation is still N.
     #[arg(long, value_name = "N")]
     expect_generation: Option<u64>,
-    /// Restart local VMs still running on the previous cw without asking;
-    /// a restart ends the work running in them.
+    /// Restart the local VMs still running on an older cw onto the selected
+    /// cw; the flag is the consent, and a restart ends the work running in
+    /// them. Alone, it restarts them without selecting a CLI version.
     #[arg(long)]
-    restart_vms: bool,
+    vms: bool,
     #[command(flatten)]
     store: StoreArgs,
 }
@@ -91,6 +97,87 @@ struct RollbackArgs {
     to: Option<String>,
     #[command(flatten)]
     selection: SelectionArgs,
+}
+
+/// Where a CLI selection comes from.
+#[derive(Debug, PartialEq, Eq)]
+enum CliSource {
+    Local { directory: PathBuf, sha256: String },
+    Public(PublicSource),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PublicSource {
+    Version(String),
+    Stable,
+}
+
+/// What a bare or flagged `cw upgrade` does.
+#[derive(Debug, PartialEq, Eq)]
+enum UpgradePlan {
+    /// At a terminal with no flags: check, then ask item by item.
+    Ask,
+    /// Select the CLI, then restart stale VMs only with `vms` consent.
+    Cli { source: CliSource, vms: bool },
+    /// `--vms` alone: restart stale local VMs; no CLI is fetched or selected.
+    Vms,
+}
+
+/// Decide from the flags alone, before any effect. `interactive` is a text
+/// run with stdin and stderr on a terminal; `local_vms` says whether this
+/// platform runs local VMs.
+fn upgrade_plan(
+    args: &UpgradeArgs,
+    interactive: bool,
+    local_vms: bool,
+) -> anyhow::Result<UpgradePlan> {
+    let vms = args.selection.vms;
+    anyhow::ensure!(
+        !vms || local_vms,
+        "--vms restarts local VMs, which this platform does not run"
+    );
+    anyhow::ensure!(
+        !vms || args.selection.store.store.is_none(),
+        "--vms restarts the local VMs of your installed cw; it cannot follow an explicit --store"
+    );
+    let source = match (&args.from, &args.sha256, &args.version, &args.channel) {
+        (Some(directory), Some(sha256), None, None) => Some(CliSource::Local {
+            directory: directory.clone(),
+            sha256: sha256.clone(),
+        }),
+        (None, None, Some(version), None) => {
+            Some(CliSource::Public(PublicSource::Version(version.clone())))
+        }
+        (None, None, None, Some(channel)) if channel == "stable" => {
+            Some(CliSource::Public(PublicSource::Stable))
+        }
+        (None, None, None, None) => None,
+        _ => anyhow::bail!(
+            "cw upgrade takes one source: --version vMAJOR.MINOR.PATCH, --channel stable, \
+             or --from DIR --sha256 HEX"
+        ),
+    };
+    Ok(match (source, args.cli, vms) {
+        // A source names the CLI to select: it implies --cli.
+        (Some(source), _, vms) => UpgradePlan::Cli { source, vms },
+        (None, true, vms) => UpgradePlan::Cli {
+            source: CliSource::Public(PublicSource::Stable),
+            vms,
+        },
+        (None, false, true) => {
+            anyhow::ensure!(
+                args.selection.expect_generation.is_none() && !args.selection.store.json,
+                "--expect-generation and --json describe a CLI selection; `cw upgrade --vms` alone selects none"
+            );
+            UpgradePlan::Vms
+        }
+        (None, false, false) if interactive => UpgradePlan::Ask,
+        // Scripts keep the stable CLI upgrade; stale VMs are only listed.
+        (None, false, false) => UpgradePlan::Cli {
+            source: CliSource::Public(PublicSource::Stable),
+            vms: false,
+        },
+    })
 }
 
 #[derive(Debug, Args)]
@@ -123,44 +210,73 @@ struct SelectionReport<'a> {
     identity: Option<&'a CwPayloadIdentity>,
 }
 
-pub(crate) async fn run(args: UpdateArgs) -> anyhow::Result<()> {
-    match (
-        args.command,
-        args.from,
-        args.sha256,
-        args.version,
-        args.channel,
-    ) {
-        (Some(UpdateCommand::Status(store)), _, _, _, _) => status(store),
-        (Some(UpdateCommand::Rollback(rollback)), _, _, _, _) => {
-            let store = open_store(rollback.selection.store.store.as_deref())?;
-            let selected = store
-                .rollback(rollback.to.as_deref(), rollback.selection.expect_generation)
-                .map_err(with_hint)?;
-            let record = store.verify(&selected.current)?;
-            print_selection(
-                &store,
-                &SelectionReport {
-                    entry: store.entry(),
-                    store: store.root(),
-                    sha256: &selected.current,
-                    package_version: &record.package_version,
-                    published: false,
-                    changed: selected.changed,
-                    generation: selected.generation,
-                    previous: selected.previous.as_deref(),
-                    identity: None,
-                },
-                rollback.selection.store.json,
-            )?;
-            hand_off_local_vms(&store, &selected.current, &rollback.selection).await;
-            Ok(())
+pub(crate) async fn run(args: UpgradeArgs) -> anyhow::Result<()> {
+    use std::io::IsTerminal as _;
+    let rollback = match args.command {
+        Some(UpgradeCommand::Status(store)) => return status(store),
+        Some(UpgradeCommand::Rollback(rollback)) => rollback,
+        None => {
+            let interactive = !args.selection.store.json
+                && io::stdin().is_terminal()
+                && io::stderr().is_terminal();
+            let local_vms = cfg!(any(target_os = "linux", target_os = "macos"));
+            return match upgrade_plan(&args, interactive, local_vms)? {
+                UpgradePlan::Vms => restart_local_vms().await,
+                UpgradePlan::Cli { source, vms } => select_cli(source, args.selection, vms).await,
+                UpgradePlan::Ask => ask_and_upgrade(args.selection).await,
+            };
         }
-        (None, Some(directory), Some(sha256), None, None) => {
-            let store = open_store(args.selection.store.store.as_deref())?;
+    };
+    anyhow::ensure!(
+        !rollback.selection.vms || rollback.selection.store.store.is_none(),
+        "--vms restarts the local VMs of your installed cw; it cannot follow an explicit --store"
+    );
+    let store = open_store(rollback.selection.store.store.as_deref())?;
+    let selected = store
+        .rollback(rollback.to.as_deref(), rollback.selection.expect_generation)
+        .map_err(with_hint)?;
+    let record = store.verify(&selected.current)?;
+    print_selection(
+        &store,
+        &SelectionReport {
+            entry: store.entry(),
+            store: store.root(),
+            sha256: &selected.current,
+            package_version: &record.package_version,
+            published: false,
+            changed: selected.changed,
+            generation: selected.generation,
+            previous: selected.previous.as_deref(),
+            identity: None,
+        },
+        rollback.selection.store.json,
+    )?;
+    hand_off_local_vms(
+        &store,
+        &selected.current,
+        &rollback.selection,
+        rollback.selection.vms,
+    )
+    .await;
+    Ok(())
+}
+
+/// Select the CLI from `source`; then the selected cw restarts stale local
+/// VMs with `vms` consent, or only lists them.
+async fn select_cli(source: CliSource, options: SelectionArgs, vms: bool) -> anyhow::Result<()> {
+    match source {
+        CliSource::Public(source) => {
+            let source = match source {
+                PublicSource::Version(version) => public_fetch::Selection::Version(version),
+                PublicSource::Stable => public_fetch::Selection::Stable,
+            };
+            public_release(source, options, vms).await
+        }
+        CliSource::Local { directory, sha256 } => {
+            let store = open_store(options.store.store.as_deref())?;
             let candidate = local_release(&directory, &sha256)?;
             let (published, selected) = store
-                .publish_and_select(&candidate, args.selection.expect_generation)
+                .publish_and_select(&candidate, options.expect_generation)
                 .map_err(with_hint)?;
             print_selection(
                 &store,
@@ -175,22 +291,222 @@ pub(crate) async fn run(args: UpdateArgs) -> anyhow::Result<()> {
                     previous: selected.previous.as_deref(),
                     identity: None,
                 },
-                args.selection.store.json,
+                options.store.json,
             )?;
-            hand_off_local_vms(&store, &published.sha256, &args.selection).await;
+            hand_off_local_vms(&store, &published.sha256, &options, vms).await;
             Ok(())
         }
-        (None, None, None, Some(version), None) => {
-            public_release(public_fetch::Selection::Version(version), args.selection).await
+    }
+}
+
+/// `cw upgrade --vms` alone: move the local VMs a previous cw still runs
+/// onto this cw. The flag is the consent; nothing is fetched or selected.
+async fn restart_local_vms() -> anyhow::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        crate::commands::upgrade_native_environments(true, false).await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        anyhow::bail!("--vms restarts local VMs, which this platform does not run")
+    }
+}
+
+/// Bare `cw upgrade` at a terminal: check the stable channel and the local
+/// VMs, then ask about each applicable item; nothing changes until every
+/// answer is in, and a cancelled question changes nothing.
+async fn ask_and_upgrade(options: SelectionArgs) -> anyhow::Result<()> {
+    let host = Platform::host().ok_or(StoreError::UnsupportedHost)?;
+    let store = open_store(options.store.store.as_deref())?;
+    let (expected, current) = admit_public_selection(&store, options.expect_generation)?;
+    let installed = current
+        .as_ref()
+        .map_or(crate::CLI_VERSION, |record| record.package_version.as_str())
+        .to_owned();
+    eprintln!("Checking the stable channel for a newer cw...");
+    let fetched = public_fetch::fetch(public_fetch::Selection::Stable, host).await?;
+    let newer = current
+        .as_ref()
+        .is_none_or(|record| record.sha256 != fetched.identity.sha256)
+        && codewire_cw_release::release::guard_stable(
+            current
+                .as_ref()
+                .map(|record| (record.package_version.as_str(), record.sha256.as_str())),
+            &fetched.identity,
+        )
+        .is_ok();
+    let offered = fetched.identity.package_version.clone();
+    let decided = ask_upgrade_items(&installed, newer.then_some(offered.as_str()), &options).await;
+    let (select, restart, stale) = match decided {
+        Ok((Items::Decided { select, restart }, stale)) => (select, restart, stale),
+        Ok((Items::Nothing, _)) => {
+            fetched.cleanup()?;
+            eprintln!("The CLI (v{installed}) and local VMs are current.");
+            return Ok(());
         }
-        // Without a source, cw follows the signed stable channel.
-        (None, None, None, None, channel) if channel.as_deref().is_none_or(|c| c == "stable") => {
-            public_release(public_fetch::Selection::Stable, args.selection).await
+        Ok((Items::Canceled, _)) => {
+            fetched.cleanup()?;
+            anyhow::bail!("upgrade canceled; nothing changed")
         }
-        _ => anyhow::bail!(
-            "cw update takes one source: --version vMAJOR.MINOR.PATCH, --channel stable, \
-             or --from DIR --sha256 HEX"
-        ),
+        Err(error) => {
+            let cleanup = fetched.cleanup();
+            return Err(match cleanup {
+                Ok(()) => error,
+                Err(_) => error.context("public release scratch cleanup failed; scratch retained"),
+            });
+        }
+    };
+    if !select {
+        fetched.cleanup()?;
+        if restart {
+            return restart_local_vms().await;
+        }
+        // With the CLI unchanged, only VMs on an older cw than this one are
+        // stale.
+        let stale = if newer && !stale.is_empty() {
+            stale_local_vms(false).await?
+        } else {
+            stale
+        };
+        if !stale.is_empty() {
+            eprintln!(
+                "cw: local VMs {} run on an older cw; restart them with `cw upgrade --vms`",
+                stale.join(", ")
+            );
+        }
+        eprintln!("Nothing changed.");
+        return Ok(());
+    }
+    let operation = commit_public(&store, expected, current.as_ref(), true, &fetched);
+    let identity = fetched.identity.clone();
+    let cleanup = fetched.cleanup();
+    let (published, selected) = match operation {
+        Ok(value) => {
+            cleanup.context("selection committed, but public release scratch cleanup failed")?;
+            value
+        }
+        Err(error) => {
+            if cleanup.is_err() {
+                return Err(
+                    error.context("public release scratch cleanup failed; scratch retained")
+                );
+            }
+            return Err(error);
+        }
+    };
+    print_selection(
+        &store,
+        &SelectionReport {
+            entry: store.entry(),
+            store: store.root(),
+            sha256: &published.sha256,
+            package_version: &published.record.package_version,
+            published: published.created,
+            changed: selected.changed,
+            generation: selected.generation,
+            previous: selected.previous.as_deref(),
+            identity: Some(&identity),
+        },
+        options.store.json,
+    )?;
+    hand_off_local_vms(&store, &published.sha256, &options, restart).await;
+    Ok(())
+}
+
+/// What `cw upgrade`'s question decided.
+#[derive(Debug, PartialEq, Eq)]
+enum Items {
+    /// The CLI and the local VMs are current: nothing to ask.
+    Nothing,
+    Decided {
+        select: bool,
+        restart: bool,
+    },
+    /// Escape, Ctrl-C or closed input: nothing applies.
+    Canceled,
+}
+
+/// Offer the applicable items in one checklist: the newer CLI (checked) and
+/// the local VMs that would run on an older cw (unchecked, since a restart
+/// ends their work). Without a usable terminal it answers as a script would:
+/// the CLI alone, VMs only listed afterwards.
+async fn ask_upgrade_items(
+    installed: &str,
+    offered: Option<&str>,
+    options: &SelectionArgs,
+) -> anyhow::Result<(Items, Vec<String>)> {
+    use crate::output::{Capabilities, Checklist, ChecklistItem, OutputMode, run_checklist};
+    // The hand-off cannot follow an explicit --store, so neither can this.
+    let stale = if options.store.store.is_none() {
+        stale_local_vms(offered.is_some()).await?
+    } else {
+        Vec::new()
+    };
+    let mut items = Vec::new();
+    let cli = offered.map(|offered| {
+        items.push(ChecklistItem::new(
+            format!("Codewire CLI v{installed} → v{offered}"),
+            true,
+        ));
+        items.len() - 1
+    });
+    let vms = (!stale.is_empty()).then(|| {
+        let noun = if stale.len() == 1 { "VM" } else { "VMs" };
+        let target = offered.unwrap_or(installed);
+        items.push(
+            ChecklistItem::new(
+                format!("Restart {} local {noun} onto v{target}", stale.len()),
+                false,
+            )
+            .with_detail(format!(
+                "ends the work running in them: {}",
+                stale.join(", ")
+            )),
+        );
+        items.len() - 1
+    });
+    if items.is_empty() {
+        return Ok((Items::Nothing, stale));
+    }
+    let checklist = Checklist::new("Upgrade Codewire", items);
+    let caps = Capabilities::from_process(OutputMode::Text);
+    let outcome = tokio::task::spawn_blocking(move || run_checklist(checklist, &caps))
+        .await
+        .context("ask what to upgrade")??;
+    Ok((decide_items(outcome, cli, vms), stale))
+}
+
+/// The checklist's answer as the items to apply.
+fn decide_items(
+    outcome: crate::output::ChecklistOutcome,
+    cli: Option<usize>,
+    vms: Option<usize>,
+) -> Items {
+    use crate::output::ChecklistOutcome;
+    match outcome {
+        ChecklistOutcome::Applied(checked) => Items::Decided {
+            select: cli.is_some_and(|index| checked.contains(&index)),
+            restart: vms.is_some_and(|index| checked.contains(&index)),
+        },
+        ChecklistOutcome::Canceled => Items::Canceled,
+        ChecklistOutcome::Unavailable => Items::Decided {
+            select: cli.is_some(),
+            restart: false,
+        },
+    }
+}
+
+/// The local VMs that run on an older cw than the one this upgrade leaves
+/// selected. Starts nothing.
+async fn stale_local_vms(cli_changes: bool) -> anyhow::Result<Vec<String>> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        crate::commands::local_vms_on_an_older_cw(cli_changes).await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = cli_changes;
+        Ok(Vec::new())
     }
 }
 
@@ -205,6 +521,7 @@ fn release_version(value: &str) -> Result<String, String> {
 async fn public_release(
     source: public_fetch::Selection,
     options: SelectionArgs,
+    vms: bool,
 ) -> anyhow::Result<()> {
     let host = Platform::host().ok_or(StoreError::UnsupportedHost)?;
     let stable = matches!(source, public_fetch::Selection::Stable);
@@ -243,17 +560,22 @@ async fn public_release(
         },
         options.store.json,
     )?;
-    hand_off_local_vms(&store, &published.sha256, &options).await;
+    hand_off_local_vms(&store, &published.sha256, &options, vms).await;
     Ok(())
 }
 
-/// After a selection, let the selected cw offer to restart local VMs still
+/// After a selection, let the selected cw restart the local VMs still
 /// running on the previous one: it runs that version's own `env --local
-/// upgrade --after-update`, since this cw's code may be the older. A version
-/// without that command is asked silently first and skipped. Never for an
-/// explicit --store, which the user's `cw` may not resolve to. It never fails
-/// the update, which has already succeeded.
-async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs) {
+/// upgrade --after-update`, since this cw's code may be the older. That argv
+/// is the hand-off protocol every cw since #2870 accepts, including those
+/// without `cw upgrade`, so a rollback to one still restarts its VMs; later
+/// cw keep it as a hidden route (`commands/flat.rs`). With `restart` the
+/// consent passes as `--yes`. Without it the hand-off must not ask again:
+/// its stdin is not a terminal, so every version only lists the VMs and the
+/// repair. A version without the hand-off is asked silently first and
+/// skipped. Never for an explicit --store, which the user's `cw` may not
+/// resolve to. It never fails the update, which has already succeeded.
+async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs, restart: bool) {
     use std::process::{Command, Stdio};
     if !cfg!(any(target_os = "linux", target_os = "macos")) || options.store.store.is_some() {
         return;
@@ -280,8 +602,10 @@ async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs
     }
     let mut command = Command::new(&executable);
     command.args(["env", "--local", "upgrade", "--after-update"]);
-    if options.restart_vms {
+    if restart {
         command.arg("--yes");
+    } else {
+        command.stdin(Stdio::null());
     }
     if options.store.json {
         // stdout carries the JSON report alone.
@@ -293,7 +617,7 @@ async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs
         }
     }
     if !command.status().is_ok_and(|status| status.success()) {
-        eprintln!("cw: restart local VMs still on the previous cw with `cw env --local upgrade`");
+        eprintln!("cw: restart local VMs still on the previous cw with `cw upgrade --vms`");
     }
 }
 
@@ -322,7 +646,7 @@ fn admit_public_selection(
     let status = store.status()?;
     anyhow::ensure!(
         status.consistent && status.pending.is_none(),
-        "public update refuses an uncertain or inconsistent Store selection; observe cw update status and resolve the owning operation first"
+        "public update refuses an uncertain or inconsistent Store selection; observe cw upgrade status and resolve the owning operation first"
     );
     let expected = requested.unwrap_or(status.generation);
     anyhow::ensure!(
@@ -393,7 +717,7 @@ fn install_identified(
     anyhow::ensure!(
         installed.published.sha256 == identity.sha256,
         "the running cw changed while it was installed: stored {} instead of {}; select the \
-         intended version with `cw update rollback`",
+         intended version with `cw upgrade rollback`",
         installed.published.sha256,
         identity.sha256
     );
@@ -486,7 +810,7 @@ fn render_status(status: &Status) -> String {
     if let Some(pending) = &status.pending {
         let _ = writeln!(
             text,
-            "  pending:    interrupted selection of {}; the next update or rollback resolves it from the entry",
+            "  pending:    interrupted selection of {}; the next upgrade or rollback resolves it from the entry",
             pending.to
         );
     } else if !status.consistent {
@@ -551,7 +875,7 @@ fn print_selection(store: &Store, report: &SelectionReport<'_>, json: bool) -> a
         println!("Running cw processes keep their current version.");
     }
     if let Some(previous) = report.previous {
-        println!("Previous version {previous} is retained; `cw update rollback` selects it.");
+        println!("Previous version {previous} is retained; `cw upgrade rollback` selects it.");
     }
     Ok(())
 }
@@ -666,7 +990,7 @@ fn with_hint(error: StoreError) -> anyhow::Error {
              --bin-dir instead.",
         ),
         StoreError::ExternallyChanged { .. } => Some(
-            "Restore the entry to the selected version shown by `cw update status`, or remove \
+            "Restore the entry to the selected version shown by `cw upgrade status`, or remove \
              it if nothing uses it, before updating.",
         ),
         _ => None,
@@ -770,29 +1094,29 @@ mod tests {
     }
 
     #[test]
-    fn update_and_install_grammar() {
+    fn upgrade_and_install_grammar() {
         let sha256 = "a".repeat(64);
         assert!(matches!(
-            parse(&["cw", "update"]),
-            Ok(Command::Update(UpdateArgs {
+            parse(&["cw", "upgrade"]),
+            Ok(Command::Upgrade(UpgradeArgs {
                 command: None,
                 from: None,
                 ..
             }))
         ));
         assert!(matches!(
-            parse(&["cw", "update", "status", "--json"]),
-            Ok(Command::Update(UpdateArgs {
-                command: Some(UpdateCommand::Status(StoreArgs { json: true, .. })),
+            parse(&["cw", "upgrade", "status", "--json"]),
+            Ok(Command::Upgrade(UpgradeArgs {
+                command: Some(UpgradeCommand::Status(StoreArgs { json: true, .. })),
                 ..
             }))
         ));
-        let Ok(Command::Update(UpdateArgs {
-            command: Some(UpdateCommand::Rollback(rollback)),
+        let Ok(Command::Upgrade(UpgradeArgs {
+            command: Some(UpgradeCommand::Rollback(rollback)),
             ..
         })) = parse(&[
             "cw",
-            "update",
+            "upgrade",
             "rollback",
             "--to",
             "1.2.3",
@@ -804,9 +1128,9 @@ mod tests {
         };
         assert_eq!(rollback.to.as_deref(), Some("1.2.3"));
         assert_eq!(rollback.selection.expect_generation, Some(4));
-        let Ok(Command::Update(update)) = parse(&[
+        let Ok(Command::Upgrade(update)) = parse(&[
             "cw",
-            "update",
+            "upgrade",
             "--from",
             "/releases/1.2.3",
             "--sha256",
@@ -815,14 +1139,23 @@ mod tests {
             panic!("update --from");
         };
         assert_eq!(update.from.as_deref(), Some(Path::new("/releases/1.2.3")));
-        assert!(parse(&["cw", "update", "--from", "/releases/1.2.3"]).is_err());
-        assert!(parse(&["cw", "update", "--sha256", &sha256]).is_err());
+        assert!(parse(&["cw", "upgrade", "--from", "/releases/1.2.3"]).is_err());
+        assert!(parse(&["cw", "upgrade", "--sha256", &sha256]).is_err());
         assert!(
             parse(&[
-                "cw", "update", "--from", "/r", "--sha256", &sha256, "status"
+                "cw", "upgrade", "--from", "/r", "--sha256", &sha256, "status"
             ])
             .is_err()
         );
+        // No subcommand or flag restarts VMs except --vms.
+        assert!(parse(&["cw", "upgrade", "restart-vms"]).is_err());
+        assert!(parse(&["cw", "upgrade", "--restart-vms"]).is_err());
+        assert!(parse(&["cw", "upgrade", "--vms", "status"]).is_err());
+        // `cw update` now changes an environment; it is no updater route.
+        assert!(matches!(
+            parse(&["cw", "update", "status"]),
+            Ok(Command::Update(_))
+        ));
         let Ok(Command::Install(install)) =
             parse(&["cw", "install", "--managed", "--bin-dir", "/opt/bin"])
         else {
@@ -835,14 +1168,14 @@ mod tests {
 
     #[test]
     fn public_update_sources_are_explicit_exclusive_bounded_and_closed() {
-        let Ok(Command::Update(version)) = parse(&["cw", "update", "--version", "v1.2.3"]) else {
+        let Ok(Command::Upgrade(version)) = parse(&["cw", "upgrade", "--version", "v1.2.3"]) else {
             panic!("version");
         };
         assert_eq!(version.version.as_deref(), Some("v1.2.3"));
         assert!(version.channel.is_none() && version.from.is_none());
-        let Ok(Command::Update(channel)) = parse(&[
+        let Ok(Command::Upgrade(channel)) = parse(&[
             "cw",
-            "update",
+            "upgrade",
             "--channel",
             "stable",
             "--expect-generation",
@@ -854,16 +1187,37 @@ mod tests {
         assert_eq!(channel.selection.expect_generation, Some(7));
         let sha = "a".repeat(64);
         for args in [
-            vec!["cw", "update", "--version", ""],
-            vec!["cw", "update", "--version", "1.2.3"],
-            vec!["cw", "update", "--version", "v1.2.3/../../x"],
-            vec!["cw", "update", "--version", "v1.2.3", "--version", "v1.2.4"],
-            vec!["cw", "update", "--channel", "stable", "--channel", "stable"],
-            vec!["cw", "update", "--channel", "dev"],
-            vec!["cw", "update", "--version", "v1.2.3", "--channel", "stable"],
+            vec!["cw", "upgrade", "--version", ""],
+            vec!["cw", "upgrade", "--version", "1.2.3"],
+            vec!["cw", "upgrade", "--version", "v1.2.3/../../x"],
             vec![
                 "cw",
-                "update",
+                "upgrade",
+                "--version",
+                "v1.2.3",
+                "--version",
+                "v1.2.4",
+            ],
+            vec![
+                "cw",
+                "upgrade",
+                "--channel",
+                "stable",
+                "--channel",
+                "stable",
+            ],
+            vec!["cw", "upgrade", "--channel", "dev"],
+            vec![
+                "cw",
+                "upgrade",
+                "--version",
+                "v1.2.3",
+                "--channel",
+                "stable",
+            ],
+            vec![
+                "cw",
+                "upgrade",
                 "--from",
                 "/r",
                 "--sha256",
@@ -873,7 +1227,7 @@ mod tests {
             ],
             vec![
                 "cw",
-                "update",
+                "upgrade",
                 "--from",
                 "/r",
                 "--sha256",
@@ -881,20 +1235,20 @@ mod tests {
                 "--channel",
                 "stable",
             ],
-            vec!["cw", "update", "--channel", "stable", "status"],
-            vec!["cw", "update", "--version", "v1.2.3", "rollback"],
+            vec!["cw", "upgrade", "--channel", "stable", "status"],
+            vec!["cw", "upgrade", "--version", "v1.2.3", "rollback"],
             vec![
                 "cw",
-                "update",
+                "upgrade",
                 "--channel",
                 "stable",
                 "--url",
                 "https://example.invalid",
             ],
-            vec!["cw", "update", "--channel", "stable", "--key", "/tmp/key"],
+            vec!["cw", "upgrade", "--channel", "stable", "--key", "/tmp/key"],
             vec![
                 "cw",
-                "update",
+                "upgrade",
                 "--channel",
                 "stable",
                 "--proxy",
@@ -905,21 +1259,203 @@ mod tests {
         }
     }
 
+    fn plan(arguments: &[&str], interactive: bool, local_vms: bool) -> anyhow::Result<UpgradePlan> {
+        let Ok(Command::Upgrade(args)) = parse(arguments) else {
+            panic!("upgrade {arguments:?}");
+        };
+        upgrade_plan(&args, interactive, local_vms)
+    }
+
+    #[test]
+    fn upgrade_flags_choose_what_to_upgrade_before_any_effect() {
+        let stable = || CliSource::Public(PublicSource::Stable);
+        // Bare: a question at a terminal, the stable CLI alone for scripts.
+        assert_eq!(
+            plan(&["cw", "upgrade"], true, true).unwrap(),
+            UpgradePlan::Ask
+        );
+        // --json is never a terminal conversation (`run` passes false).
+        assert_eq!(
+            plan(&["cw", "upgrade", "--json"], false, true).unwrap(),
+            UpgradePlan::Cli {
+                source: stable(),
+                vms: false
+            }
+        );
+        assert_eq!(
+            plan(&["cw", "upgrade"], false, true).unwrap(),
+            UpgradePlan::Cli {
+                source: stable(),
+                vms: false
+            }
+        );
+        // Explicit flags never ask.
+        for (arguments, expected) in [
+            (
+                vec!["cw", "upgrade", "--cli"],
+                UpgradePlan::Cli {
+                    source: stable(),
+                    vms: false,
+                },
+            ),
+            (vec!["cw", "upgrade", "--vms"], UpgradePlan::Vms),
+            (
+                vec!["cw", "upgrade", "--cli", "--vms"],
+                UpgradePlan::Cli {
+                    source: stable(),
+                    vms: true,
+                },
+            ),
+            (
+                vec!["cw", "upgrade", "--version", "v1.2.3"],
+                UpgradePlan::Cli {
+                    source: CliSource::Public(PublicSource::Version("v1.2.3".into())),
+                    vms: false,
+                },
+            ),
+            (
+                vec!["cw", "upgrade", "--channel", "stable", "--vms"],
+                UpgradePlan::Cli {
+                    source: stable(),
+                    vms: true,
+                },
+            ),
+        ] {
+            assert_eq!(
+                plan(&arguments, true, true).unwrap(),
+                expected,
+                "{arguments:?}"
+            );
+            assert_eq!(
+                plan(&arguments, false, true).unwrap(),
+                expected,
+                "{arguments:?}"
+            );
+        }
+        let sha256 = "a".repeat(64);
+        assert_eq!(
+            plan(
+                &["cw", "upgrade", "--from", "/r", "--sha256", &sha256],
+                true,
+                true
+            )
+            .unwrap(),
+            UpgradePlan::Cli {
+                source: CliSource::Local {
+                    directory: PathBuf::from("/r"),
+                    sha256: sha256.clone(),
+                },
+                vms: false,
+            }
+        );
+        // --vms is refused where no local VM runtime exists, or for a store
+        // the installed cw may not follow, before anything is fetched.
+        for arguments in [
+            vec!["cw", "upgrade", "--vms"],
+            vec!["cw", "upgrade", "--cli", "--vms"],
+            vec!["cw", "upgrade", "rollback", "--vms"],
+        ] {
+            let Ok(Command::Upgrade(args)) = parse(&arguments) else {
+                panic!("upgrade {arguments:?}");
+            };
+            if args.command.is_none() {
+                assert_eq!(
+                    upgrade_plan(&args, true, false).unwrap_err().to_string(),
+                    "--vms restarts local VMs, which this platform does not run",
+                    "{arguments:?}"
+                );
+            }
+        }
+        assert!(plan(&["cw", "upgrade", "--vms", "--store", "/s"], false, true).is_err());
+        assert!(plan(&["cw", "upgrade", "--vms", "--json"], false, true).is_err());
+        assert!(
+            plan(
+                &["cw", "upgrade", "--vms", "--expect-generation", "3"],
+                false,
+                true
+            )
+            .is_err()
+        );
+        assert!(parse(&["cw", "upgrade", "rollback", "--to", "v1.2.3", "--vms"]).is_ok());
+    }
+
+    #[test]
+    fn the_upgrade_checklist_applies_only_checked_items_and_falls_back_to_scripts() {
+        use crate::output::ChecklistOutcome;
+        let both = (Some(0), Some(1));
+        assert_eq!(
+            decide_items(ChecklistOutcome::Applied(vec![0]), both.0, both.1),
+            Items::Decided {
+                select: true,
+                restart: false
+            }
+        );
+        assert_eq!(
+            decide_items(ChecklistOutcome::Applied(vec![0, 1]), both.0, both.1),
+            Items::Decided {
+                select: true,
+                restart: true
+            }
+        );
+        assert_eq!(
+            decide_items(ChecklistOutcome::Applied(vec![1]), both.0, both.1),
+            Items::Decided {
+                select: false,
+                restart: true
+            }
+        );
+        assert_eq!(
+            decide_items(ChecklistOutcome::Applied(vec![]), both.0, both.1),
+            Items::Decided {
+                select: false,
+                restart: false
+            }
+        );
+        // Only the VM item applies: index 0 is the restart.
+        assert_eq!(
+            decide_items(ChecklistOutcome::Applied(vec![0]), None, Some(0)),
+            Items::Decided {
+                select: false,
+                restart: true
+            }
+        );
+        assert_eq!(
+            decide_items(ChecklistOutcome::Canceled, both.0, both.1),
+            Items::Canceled
+        );
+        // No usable terminal: what a script gets, the CLI alone.
+        assert_eq!(
+            decide_items(ChecklistOutcome::Unavailable, both.0, both.1),
+            Items::Decided {
+                select: true,
+                restart: false
+            }
+        );
+        assert_eq!(
+            decide_items(ChecklistOutcome::Unavailable, None, Some(0)),
+            Items::Decided {
+                select: false,
+                restart: false
+            }
+        );
+    }
+
     #[tokio::test]
-    async fn update_without_a_source_follows_the_stable_channel() {
+    async fn upgrade_without_a_source_follows_the_stable_channel() {
         // The stable channel opens the managed store before any fetch, so a
         // missing store proves the selection without touching the network.
         let directory = tempdir();
         let store = directory.path().join("missing-store");
-        let error = run(UpdateArgs {
+        let error = run(UpgradeArgs {
             command: None,
             from: None,
             sha256: None,
             version: None,
             channel: None,
+            cli: false,
             selection: SelectionArgs {
                 expect_generation: None,
-                restart_vms: false,
+                vms: false,
                 store: StoreArgs {
                     store: Some(store.clone()),
                     json: false,

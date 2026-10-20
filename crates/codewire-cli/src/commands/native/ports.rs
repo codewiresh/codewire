@@ -1,22 +1,36 @@
-//! `cw env port` for local environments: publish or withdraw a guest port on
-//! the host's 127.0.0.1 while the VM runs. A stopped environment records the
-//! change and publishes it at its next start.
+//! `cw ports` for local environments: list, publish or withdraw a guest port
+//! on the host's 127.0.0.1. Listing never starts the VM; publishing needs it
+//! running; withdrawing works either way.
 
 use super::*;
 
 pub(crate) async fn handle_native_environment_port(
     name: &str,
-    command: EnvPortCommand,
+    operation: PortOperation,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let mut client = native_client().await?;
-    match command {
-        EnvPortCommand::Add(args) => {
+    match operation {
+        PortOperation::List => {
+            let environment = client.get(name).await.map_err(native_status)?;
+            print_native_ports(&environment, output, None)
+        }
+        PortOperation::Publish {
+            port: guest_port,
+            host_port,
+            label,
+            access,
+        } => {
             anyhow::ensure!(
-                args.label.is_none() && args.access.is_none(),
-                "--label and --access apply to platform preview ports; a local port is published on 127.0.0.1 only"
+                label.is_none() && access.is_none(),
+                "--label and --access apply to cloud preview ports; a local port is published on 127.0.0.1 only"
             );
-            let guest_port = parse_local_port(&args.port)?;
-            let host_port = args.host_port.unwrap_or(guest_port);
+            let environment = client.get(name).await.map_err(native_status)?;
+            anyhow::ensure!(
+                environment.state == v1::EnvironmentState::Running as i32,
+                "{name} is not running; start it with `cw start {name}`, then publish the port"
+            );
+            let host_port = host_port.unwrap_or(guest_port);
             let environment = client
                 .update_host_ports(
                     name,
@@ -28,38 +42,60 @@ pub(crate) async fn handle_native_environment_port(
                 )
                 .await
                 .map_err(native_status)?;
-            let summary = if environment.state == v1::EnvironmentState::Running as i32 {
-                format!("Published http://127.0.0.1:{host_port} -> {name}:{guest_port}")
-            } else {
-                format!(
-                    "Recorded 127.0.0.1:{host_port} -> {name}:{guest_port}; it is published when {name} starts"
-                )
-            };
-            print_native_ports(&environment, args.output, Some(&summary))
+            let summary = format!("Published http://127.0.0.1:{host_port} -> {name}:{guest_port}");
+            print_native_ports(&environment, output, Some(&summary))
         }
-        EnvPortCommand::List(args) => {
+        PortOperation::Unpublish {
+            port: guest_port,
+            host_port,
+            label,
+        } => {
+            anyhow::ensure!(
+                label.is_none(),
+                "--label applies to cloud preview ports; choose a local binding with --host-port"
+            );
             let environment = client.get(name).await.map_err(native_status)?;
-            print_native_ports(&environment, args.output, None)
-        }
-        EnvPortCommand::Rm(args) => {
-            let host_port = parse_local_port(&args.port)?;
+            let host_port = unpublished_host_port(&environment, guest_port, host_port)?;
             let environment = client
                 .update_host_ports(name, Vec::new(), vec![u32::from(host_port)])
                 .await
                 .map_err(native_status)?;
-            let summary = format!("Withdrew 127.0.0.1:{host_port} from {name}");
-            print_native_ports(&environment, args.output, Some(&summary))
+            let summary = format!("Withdrew 127.0.0.1:{host_port} -> {name}:{guest_port}");
+            print_native_ports(&environment, output, Some(&summary))
         }
     }
 }
 
-fn parse_local_port(value: &str) -> anyhow::Result<u16> {
-    value
-        .trim()
-        .parse::<u16>()
-        .ok()
-        .filter(|port| *port != 0)
-        .ok_or_else(|| anyhow::anyhow!("a port is a number from 1 to 65535"))
+/// The host port of the one binding of `guest_port`; `--host-port` chooses
+/// among several and must name one of them.
+fn unpublished_host_port(
+    environment: &v1::Environment,
+    guest_port: u16,
+    host_port: Option<u16>,
+) -> anyhow::Result<u16> {
+    let name = &environment.name;
+    let bindings: Vec<u16> = environment
+        .host_ports
+        .iter()
+        .filter(|binding| binding.guest_port == u32::from(guest_port))
+        .filter_map(|binding| u16::try_from(binding.host_port).ok())
+        .filter(|bound| host_port.is_none_or(|host_port| *bound == host_port))
+        .collect();
+    match (bindings.as_slice(), host_port) {
+        ([one], _) => Ok(*one),
+        ([], Some(host_port)) => anyhow::bail!(
+            "{name} does not publish guest port {guest_port} on 127.0.0.1:{host_port}"
+        ),
+        ([], None) => anyhow::bail!("{name} does not publish guest port {guest_port}"),
+        (several, _) => anyhow::bail!(
+            "{name} publishes guest port {guest_port} on several host ports ({}); choose one with --host-port",
+            several
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 fn native_port_views(environment: &v1::Environment) -> Vec<NativeHostPortView> {
@@ -116,11 +152,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_ports_parse_and_render_without_preview_urls() {
-        assert_eq!(parse_local_port(" 47321 ").unwrap(), 47_321);
-        for invalid in ["0", "65536", "web", ""] {
-            assert!(parse_local_port(invalid).is_err(), "{invalid}");
-        }
+    fn unpublish_selects_one_binding_by_guest_port() {
+        let binding = |host_port, guest_port| v1::HostPortBinding {
+            host_port,
+            guest_port,
+        };
+        let environment = v1::Environment {
+            name: "web".into(),
+            host_ports: vec![binding(3000, 3000), binding(8080, 80), binding(8081, 80)],
+            ..Default::default()
+        };
+        assert_eq!(
+            unpublished_host_port(&environment, 3000, None).unwrap(),
+            3000
+        );
+        assert_eq!(
+            unpublished_host_port(&environment, 80, Some(8081)).unwrap(),
+            8081
+        );
+        let ambiguous = unpublished_host_port(&environment, 80, None).unwrap_err();
+        assert_eq!(
+            ambiguous.to_string(),
+            "web publishes guest port 80 on several host ports (8080, 8081); choose one with --host-port"
+        );
+        assert_eq!(
+            unpublished_host_port(&environment, 80, Some(9000))
+                .unwrap_err()
+                .to_string(),
+            "web does not publish guest port 80 on 127.0.0.1:9000"
+        );
+        assert_eq!(
+            unpublished_host_port(&environment, 22, None)
+                .unwrap_err()
+                .to_string(),
+            "web does not publish guest port 22"
+        );
+    }
+
+    #[test]
+    fn local_ports_render_without_preview_urls() {
         let ports = [NativeHostPortView {
             listen: "127.0.0.1:18080".to_owned(),
             guest_port: 3_000,

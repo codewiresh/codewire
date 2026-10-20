@@ -28,7 +28,7 @@ own `git` and `e2fsprogs`; nothing else is installed.
 
 {% aside(kind="tip") %}
   You do not have to check these yourself. `cw setup --local`,
-  `cw env create --local` and `cw env start --local` check them first and
+  `cw create --local` and `cw start --local` check them first and
   name every unmet requirement with its fix.
 {% end %}
 
@@ -49,7 +49,7 @@ downloads nothing.
 From your project directory:
 
 ```sh
-cw env create --local --name my-app --path .
+cw create --local --name my-app --path .
 ```
 
 At a terminal, `cw` shows the name, workspace, image, resources, Docker,
@@ -78,8 +78,8 @@ boot). A failed create leaves nothing behind.
 cw shell my-app                       # an interactive shell in the VM
 cw run my-app -- cargo test           # a durable session that streams output
 cw run my-app --name dev --detach -- npm run dev
-cw list my-app                        # sessions in this environment
-cw logs my-app dev                    # saved output
+cw ls my-app                        # sessions in this environment
+cw logs my-app --session dev                    # saved output
 cw attach my-app dev                  # reattach; Ctrl+B d detaches
 ```
 
@@ -91,19 +91,19 @@ To reach a server running inside the VM from your browser, publish its port
 on `127.0.0.1`:
 
 ```sh
-cw env port add 3000 -e my-app
+cw ports my-app --publish 3000
 ```
 
 ## 5. Stop, start, remove
 
 ```sh
-cw env stop my-app      # SIGTERM to every process, 5 s, then power off
-cw env start my-app
-cw env rm my-app        # deletes the VM and its disks; your project directory stays
+cw stop my-app      # SIGTERM to every process, 5 s, then power off
+cw start my-app
+cw rm my-app        # deletes the VM and its disks; your project directory stays
 ```
 
-A stopped VM keeps its workspace storage and its disks; `cw env start` brings
-them back. `cw env resize my-app --cpu 4 --memory 8GB` changes resources
+A stopped VM keeps its workspace storage and its disks; `cw start` brings
+them back. `cw resize my-app --cpu 4 --memory 8GB` changes resources
 (disks grow, never shrink).
 
 ## Next

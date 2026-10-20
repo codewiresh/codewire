@@ -320,8 +320,8 @@ class Setup(unittest.TestCase):
                 commands.append(argv)
                 if argv[0] == "install":
                     return {"identity": journey.assets[0]["identity"], "generation": 1}
-                self.assertEqual(argv[0], "env")
-                operation = argv[1]
+                operation = argv[0]
+                self.assertIn(operation, ("create", "stop", "start"))
                 events.append(operation)
                 if operation == "create":
                     inherited.append(dict(journey.env))
@@ -401,8 +401,9 @@ class Setup(unittest.TestCase):
                 else:
                     with self.assertRaises(self.FirstLaunch): journey.run()
                     journey.launch.assert_called_once()
-                    self.assertEqual(sum(v[:2] == ("env", "stop") for v in commands), 1)
-                    self.assertEqual(sum(v[:2] == ("env", "start") for v in commands), 1)
+                    self.assertEqual(sum(v[0] == "stop" for v in commands), 1)
+                    self.assertEqual(sum(v[0] == "start" for v in commands), 1)
+                    self.assertFalse(any("env" in v for v in commands), commands)
                     self.assertTrue(journey.setup_proof["public_stop_confirmed"])
                     self.assertTrue(journey.setup_proof["initial_daemon_death_observed"])
                     self.assertTrue(journey.setup_proof["public_start_confirmed"])

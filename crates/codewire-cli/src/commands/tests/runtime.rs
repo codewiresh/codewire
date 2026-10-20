@@ -5,7 +5,6 @@ fn live_runtime_cli_requires_explicit_environment_pins_revision_and_stable_reque
     let request = uuid::Uuid::new_v4().to_string();
     let args = [
         "cw",
-        "env",
         "--local",
         "runtime",
         "update",
@@ -24,14 +23,13 @@ fn live_runtime_cli_requires_explicit_environment_pins_revision_and_stable_reque
         "json",
     ];
     let parsed = Cli::try_parse_from(args).unwrap();
-    let Command::Env(EnvArgs {
+    let (
         local,
         platform,
-        command:
-            EnvCommand::Runtime(EnvRuntimeArgs {
-                command: EnvRuntimeCommand::Update(update),
-            }),
-    }) = parsed.command
+        EnvCommand::Runtime(EnvRuntimeArgs {
+            command: EnvRuntimeCommand::Update(update),
+        }),
+    ) = env_operation(parsed)
     else {
         panic!("wrong route")
     };
@@ -53,7 +51,7 @@ fn live_runtime_cli_requires_explicit_environment_pins_revision_and_stable_reque
         bad[index] = value;
         assert!(Cli::try_parse_from(bad).is_err());
     }
-    let missing_environment = ["cw", "env", "runtime", "info"];
+    let missing_environment = ["cw", "runtime", "info"];
     assert!(Cli::try_parse_from(missing_environment).is_err());
     for flag in [
         "--source",
@@ -77,7 +75,6 @@ fn live_runtime_cli_observe_cancel_and_rollback_never_accept_a_source_or_lifecyc
     for action in ["observe", "cancel"] {
         let parsed = Cli::try_parse_from([
             "cw",
-            "env",
             "--local",
             "runtime",
             action,
@@ -86,18 +83,11 @@ fn live_runtime_cli_observe_cancel_and_rollback_never_accept_a_source_or_lifecyc
             &request,
         ])
         .unwrap();
-        assert!(matches!(
-            parsed.command,
-            Command::Env(EnvArgs {
-                command: EnvCommand::Runtime(_),
-                ..
-            })
-        ));
-        assert!(Cli::try_parse_from(["cw", "env", "runtime", action, "vm-a"]).is_err());
+        assert!(matches!(parsed.command, Command::Runtime(_)));
+        assert!(Cli::try_parse_from(["cw", "runtime", action, "vm-a"]).is_err());
         assert!(
             Cli::try_parse_from([
                 "cw",
-                "env",
                 "runtime",
                 action,
                 "vm-a",
@@ -112,7 +102,6 @@ fn live_runtime_cli_observe_cancel_and_rollback_never_accept_a_source_or_lifecyc
     assert!(
         Cli::try_parse_from([
             "cw",
-            "env",
             "runtime",
             "rollback",
             "vm-a",
@@ -121,12 +110,11 @@ fn live_runtime_cli_observe_cancel_and_rollback_never_accept_a_source_or_lifecyc
         ])
         .is_ok()
     );
-    assert!(Cli::try_parse_from(["cw", "env", "runtime", "rollback", "vm-a"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "runtime", "rollback", "vm-a"]).is_err());
     for extra in ["--source", "--restart", "--force", "--shell"] {
         assert!(
             Cli::try_parse_from([
                 "cw",
-                "env",
                 "runtime",
                 "rollback",
                 "vm-a",

@@ -118,9 +118,9 @@ cw_runtime_managed_after_restart() {
   local environment="$1" before_pod="$2" before_uid after_uid pod launched session listed
   local state attempt output
   before_uid="$(kubectl -n "$SANDBOX_NS" get pod "$before_pod" -o 'jsonpath={.metadata.uid}')"
-  kind_credential_cli env --cloud stop "$environment" --output json >/dev/null
+  kind_credential_cli --cloud stop "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" stopped
-  kind_credential_cli env --cloud start "$environment" --output json >/dev/null
+  kind_credential_cli --cloud start "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" running
   pod="$(kind_credential_workspace "$environment")"
   after_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
@@ -138,7 +138,7 @@ cw_runtime_managed_after_restart() {
   # next generation, and is delivered to its driver here. Nothing from the
   # first Pod is replayed.
   local earlier generation sent message resumed waited
-  # `cw list` shows a top-level conversation's parent as "".
+  # `cw ls` shows a top-level conversation's parent as "".
   earlier="$(jq -er '[.[] | select(.command[1] == "__platform-agent-driver"
     and (.parent_session_id // "") == "")][0]' <<<"$listed")" || {
     echo '::error::no top-level managed conversation from the first Pod listed after Stop/Start' >&2
@@ -164,7 +164,7 @@ cw_runtime_managed_after_restart() {
     echo "::error::the resumed conversation is at generation ${resumed}, not $((generation + 1))" >&2
     return 1
   }
-  kind_credential_cli stop "$environment" "$(jq -er .session_id <<<"$earlier")" \
+  kind_credential_cli stop "$environment" --session "$(jq -er .session_id <<<"$earlier")" \
     --output json >/dev/null
   launched="$(kind_credential_launch "$environment" --no-tty --detach --output json -- \
     sh -c 'printf cw-runtime-after-restart')"
@@ -180,7 +180,7 @@ cw_runtime_managed_after_restart() {
       *) break ;;
     esac
   done
-  output="$(kind_credential_cli logs "$environment" "$session" --raw)"
+  output="$(kind_credential_cli logs "$environment" --session "$session" --raw)"
   [ "$state" = "Exited 0" ] && [ "$output" = cw-runtime-after-restart ] || {
     echo "::error::an ordinary command after Stop/Start ended ${state:-unknown}" >&2
     return 1
@@ -188,7 +188,7 @@ cw_runtime_managed_after_restart() {
   launched="$(kind_credential_cli run "$environment" --agent codex --output json)"
   session="$(jq -er '(.sessionId // .session_id)
     | select(type == "string" and test("^session-[0-9a-f-]{36}$"))' <<<"$launched")"
-  kind_credential_cli stop "$environment" "$session" --output json >/dev/null
+  kind_credential_cli stop "$environment" --session "$session" --output json >/dev/null
   log "the restarted Pod launched and stopped managed agent ${session}"
 }
 
@@ -300,9 +300,9 @@ SQL
 cw_runtime_managed_resume_denied_before_run() {
   local environment="$1" session="$2" generation="$3" previous pods requests count
   local output sent message attempt resumed refused
-  kind_credential_cli env --cloud stop "$environment" --output json >/dev/null
+  kind_credential_cli --cloud stop "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" stopped
-  kind_credential_cli env --cloud start "$environment" --output json >/dev/null
+  kind_credential_cli --cloud start "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" running
   wait_kind_credential_setup_complete "$environment"
   refused="$(mktemp)"
@@ -408,7 +408,7 @@ cw_runtime_managed_resume_continues() {
   local profile="$1" workspace_image="$2" environment update operation pod
   local launched session first generation before after listed sent message waited resumed
   local back_to_back=20 round
-  environment="$(kind_credential_cli env --cloud create --name "kind-cw-resume-${RANDOM}-${RANDOM}" \
+  environment="$(kind_credential_cli --cloud create --name "kind-cw-resume-${RANDOM}-${RANDOM}" \
     --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -416,7 +416,7 @@ cw_runtime_managed_resume_continues() {
   wait_kind_credential_environment "$environment" running
   # A source change is refused until setup finishes.
   wait_kind_credential_setup_complete "$environment"
-  update="$(kind_credential_cli env --cloud update "$environment" \
+  update="$(kind_credential_cli --cloud update "$environment" \
     --profile "platform:$profile" --yes --output json)"
   operation="$(jq -er '.operation_generation |
     if type == "number" and . > 0 and . == floor then .
@@ -439,9 +439,9 @@ cw_runtime_managed_resume_continues() {
   generation="$(jq -er --arg id "$session" \
     '[.[] | select(.session_id == $id)][0].launch_generation' <<<"$listed")"
   before="$(cw_runtime_openai_attempts)"
-  kind_credential_cli env --cloud stop "$environment" --output json >/dev/null
+  kind_credential_cli --cloud stop "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" stopped
-  kind_credential_cli env --cloud start "$environment" --output json >/dev/null
+  kind_credential_cli --cloud start "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" running
   # Start reads running before its setup finishes, and a message is refused
   # until then ("environment runtime or setup is not ready").
@@ -499,9 +499,9 @@ cw_runtime_managed_resume_continues() {
   }
   log "checking that a Resume denied before its agent runs is refused and can resume again"
   cw_runtime_managed_resume_denied_before_run "$environment" "$session" "$resumed"
-  kind_credential_cli stop "$environment" "$session" --output json >/dev/null
+  kind_credential_cli stop "$environment" --session "$session" --output json >/dev/null
   pod="$(kind_credential_workspace "$environment")"
-  kind_credential_cli env --cloud rm "$environment" --yes --output json >/dev/null
+  kind_credential_cli --cloud rm "$environment" --yes --output json >/dev/null
   wait_kind_credential_environment "$environment" destroyed
   kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s "pod/$pod"
 }
@@ -542,7 +542,7 @@ run_retained_managed_agents_journey() {
   # First, while the synthetic providers the smoke later revokes are valid,
   # a conversation continues across Stop/Start in its own environment (#2705).
   cw_runtime_managed_resume_continues "$profile_name" "$workspace_image"
-  environment="$(kind_credential_cli env --cloud create --name "$profile_name" \
+  environment="$(kind_credential_cli --cloud create --name "$profile_name" \
     --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -551,7 +551,7 @@ run_retained_managed_agents_journey() {
   # bound, and the probe's session waits for environment setup to finish,
   # which a source change requires.
   kind_credential_probe "$environment" unselected
-  update="$(kind_credential_cli env --cloud update "$environment" \
+  update="$(kind_credential_cli --cloud update "$environment" \
     --profile "platform:$profile_name" --yes --output json)"
   generation="$(jq -er '.operation_generation |
     if type == "number" and . > 0 and . == floor then .
@@ -575,7 +575,7 @@ run_retained_managed_agents_journey() {
     and any(.[]; .event == "api_key_attempt" and .family == "anthropic" and .api_attempt > 0)' >/dev/null
   cw_runtime_managed_after_restart "$environment" "$pod"
   pod="$(kind_credential_workspace "$environment")"
-  kind_credential_cli env --cloud rm "$environment" --yes --output json
+  kind_credential_cli --cloud rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s "pod/$pod"
   kind_credential_cli credentials --cloud --profile "$profile_name" delete --yes
@@ -647,7 +647,7 @@ run_admitted_cw_runtime_journey() {
     kind_credential_cli credentials --cloud get "$credential_name" --output json | jq -e \
       'length == 1 and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
   fi
-  environment="$(kind_credential_cli env --cloud create --name "$profile_name" \
+  environment="$(kind_credential_cli --cloud create --name "$profile_name" \
     --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -659,7 +659,7 @@ run_admitted_cw_runtime_journey() {
   # Profile setup may replace the initial sandbox before the baseline exists.
   # It is completed once; the same-Pod CW journey follows on that Pod, and
   # the managed journey then Stops and Starts the environment.
-  update="$(kind_credential_cli env --cloud update "$environment" \
+  update="$(kind_credential_cli --cloud update "$environment" \
     --profile "platform:$profile_name" --yes --output json)"
   generation="$(jq -er '.operation_generation |
     if type == "number" and . > 0 and . == floor then .
@@ -713,7 +713,7 @@ run_admitted_cw_runtime_journey() {
   fi
   # Public cleanup runs only after the complete journey, including Observe,
   # stale-incarnation refusal and permanent Attach closure, has succeeded.
-  kind_credential_cli env --cloud rm "$environment" --yes --output json
+  kind_credential_cli --cloud rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s "pod/$pod"
   kind_credential_cli credentials --cloud --profile "$profile_name" delete --yes

@@ -126,7 +126,7 @@ impl NativeSupervisorClient {
             Ok(response) => response.into_inner(),
             Err(status) if status.code() == tonic::Code::AlreadyExists => {
                 return Err(Status::already_exists(format!(
-                    "{} (remove it with `cw env --local rm {name}` or choose another --name)",
+                    "{} (remove it with `cw --local rm {name}` or choose another --name)",
                     status.message()
                 )));
             }
@@ -152,11 +152,11 @@ impl NativeSupervisorClient {
             Err(status) if status.code() == tonic::Code::NotFound => {
                 " No environment was kept; the image layers it downloaded stay cached, so a retry resumes.".to_owned()
             }
-            Ok(_) => format!(
-                " The failed environment could not be removed; run `cw env --local rm {name}`."
-            ),
+            Ok(_) => {
+                format!(" The failed environment could not be removed; run `cw --local rm {name}`.")
+            }
             Err(_) => format!(
-                " Whether the failed environment was removed is unknown; check `cw env --local list` and remove {name} if it is listed."
+                " Whether the failed environment was removed is unknown; check `cw --local ls` and remove {name} if it is listed."
             ),
         };
         Status::new(failure.code(), format!("{}{outcome}", failure.message()))
@@ -604,7 +604,7 @@ fn operation_error_hint(error_code: &str) -> &'static str {
             " (the image has no Docker tooling; create with --no-docker or choose an image that includes Docker)"
         }
         "delete_failed" | "delete_interrupted" => {
-            " (nothing was removed and the environment was kept; see cw env info, then run cw env rm again)"
+            " (nothing was removed and the environment was kept; see cw info, then run cw rm again)"
         }
         "create_direct_share_changed" | "start_direct_share_changed" => {
             " (a direct-mount source directory was moved, removed or replaced since it was admitted; put the original directory back at its path, or remove and recreate the environment)"
@@ -613,7 +613,7 @@ fn operation_error_hint(error_code: &str) -> &'static str {
             " (a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; stop it, or change host_port in codewire.yaml)"
         }
         "start_host_port_unavailable" => {
-            " (a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; `cw env --local port ls` lists its ports: stop that program, or withdraw the port with `cw env --local port rm` and publish another)"
+            " (a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; `cw --local ports ENV` lists its ports: stop that program, or withdraw the port with `cw --local ports ENV --unpublish PORT` and publish another)"
         }
         "host_port_unavailable" => {
             " (the host port is in use on 127.0.0.1 by another program or local environment; choose another with --host-port)"
@@ -627,7 +627,7 @@ fn operation_error_hint(error_code: &str) -> &'static str {
             " (the image has no variant for this host's architecture; pass --image with one that has)"
         }
         "create_name_taken" => {
-            " (an environment with this name already exists; remove it with cw env --local rm NAME or choose another --name)"
+            " (an environment with this name already exists; remove it with cw --local rm NAME or choose another --name)"
         }
         "create_interrupted" => {
             " (the local supervisor stopped during the create; create it again)"

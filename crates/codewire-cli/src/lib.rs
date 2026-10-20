@@ -103,7 +103,12 @@ const LOCAL_MESH_LOG_FILE: &str = "codewire-mesh.log";
 const LOCAL_DERP_LOG_FILE: &str = "codewire-derp.log";
 
 #[derive(Debug, Parser)]
-#[command(name = "cw", version = CLI_VERSION, about = "Codewire CLI")]
+#[command(
+    name = "cw",
+    version = CLI_VERSION,
+    about = "Codewire CLI",
+    disable_help_subcommand = true
+)]
 struct Cli {
     #[arg(short, long, global = true, help = "Platform server URL override")]
     server: Option<String>,
@@ -114,55 +119,126 @@ struct Cli {
         help = "Pinned trusted host member"
     )]
     member: Option<String>,
+    /// The one placement source every command reads (`Globals::placement`).
+    /// Accepted before or after the command; never declared again by a
+    /// subcommand, so no second `--local` exists to collide with it.
+    #[arg(
+        long,
+        global = true,
+        help = "Target local environments (credentials and secrets: local storage)"
+    )]
+    local: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "Target cloud environments (credentials and secrets: cloud storage)"
+    )]
+    cloud: bool,
     #[command(subcommand)]
     command: Command,
 }
 
-/// Top-level help sections in display order. Each visible command belongs to
-/// exactly one section; a command missing here still appears under "Other".
-const HELP_SECTIONS: &[(&str, &[&str])] = &[
-    ("Get started", &["setup", "login", "logout", "whoami"]),
-    (
+impl Cli {
+    /// The explicit placement. Clap checks conflicts only within one parse
+    /// level, while a global's values reach the root from any level, so
+    /// `cw --local ls --cloud` is refused here.
+    fn placement(&self) -> anyhow::Result<Option<EnvironmentPlacement>> {
+        match (self.local, self.cloud) {
+            (true, true) => {
+                anyhow::bail!("--local and --cloud select different placements; pass only one")
+            }
+            (true, false) => Ok(Some(EnvironmentPlacement::Local)),
+            (false, true) => Ok(Some(EnvironmentPlacement::Platform)),
+            (false, false) => Ok(None),
+        }
+    }
+}
+
+/// Help sections in display order. Each visible command belongs to exactly
+/// one section. `cw --help` shows the everyday sections; `cw help --all`
+/// shows every section. A command missing here still appears under "Other".
+const HELP_SECTIONS: &[HelpSection] = &[
+    HelpSection::everyday("Get started", &["setup", "run", "login"]),
+    HelpSection::everyday(
         "Environments",
         &[
-            "env",
-            "use",
-            "current",
-            "init",
-            "shell",
-            "vscode",
-            "config-ssh",
-            "preset",
+            "ls", "info", "create", "start", "stop", "restart", "rm", "use", "current",
         ],
     ),
-    (
-        "Sessions",
+    HelpSection::everyday(
+        "Work and return",
+        &["attach", "shell", "vscode", "logs", "msg", "inbox", "ports"],
+    ),
+    HelpSection::everyday(
+        "Configuration and transfer",
+        &["init", "update", "cp", "credentials", "secrets"],
+    ),
+    HelpSection::everyday("Codewire", &["upgrade", "doctor", "help"]),
+    HelpSection::full(
+        "Account and organization",
+        &["logout", "whoami", "org", "api-keys", "cost"],
+    ),
+    HelpSection::full("Session controls", &["send", "wait", "interrupt", "steer"]),
+    HelpSection::full(
+        "Environment administration",
         &[
-            "run", "list", "attach", "logs", "send", "wait", "stop", "restart",
+            "resize",
+            "extend",
+            "report",
+            "access",
+            "share",
+            "protect",
+            "unprotect",
+            "cancel-delete",
+            "prune",
+            "nuke",
+            "refresh-skills",
         ],
     ),
-    ("Agents", &["msg", "steer", "interrupt", "inbox"]),
-    ("Secrets and credentials", &["secrets", "credentials"]),
-    ("Networking", &["network", "mesh", "control", "member"]),
-    ("Organizations and billing", &["org", "api-keys", "cost"]),
-    (
-        "cw itself",
-        &[
-            "install",
-            "update",
-            "doctor",
-            "config",
-            "completion",
-            "help",
-        ],
+    HelpSection::full("Reusable setup", &["preset"]),
+    HelpSection::full("Environment runtime", &["runtime", "daemon", "agent"]),
+    HelpSection::full(
+        "Mesh and host delegation",
+        &["network", "mesh", "control", "member"],
     ),
+    HelpSection::full("CLI administration", &["install", "config", "completion"]),
 ];
 
-/// The top-level command with its commands grouped into [`HELP_SECTIONS`].
-/// Descriptions come from the commands themselves, so the help cannot drift.
+struct HelpSection {
+    heading: &'static str,
+    commands: &'static [&'static str],
+    /// Shown by `cw --help`; otherwise only by `cw help --all`.
+    everyday: bool,
+}
+
+impl HelpSection {
+    const fn everyday(heading: &'static str, commands: &'static [&'static str]) -> Self {
+        Self {
+            heading,
+            commands,
+            everyday: true,
+        }
+    }
+
+    const fn full(heading: &'static str, commands: &'static [&'static str]) -> Self {
+        Self {
+            heading,
+            commands,
+            everyday: false,
+        }
+    }
+}
+
+/// The top-level command with its commands grouped into [`HELP_SECTIONS`]:
+/// the everyday sections, or every section for `cw help --all`. Descriptions
+/// come from the commands themselves, so the help cannot drift.
 fn cli_command() -> clap::Command {
+    cli_command_with(false)
+}
+
+fn cli_command_with(all: bool) -> clap::Command {
     let command = Cli::command();
-    let mut visible: Vec<(String, String, String)> = command
+    let visible: Vec<(String, String, String)> = command
         .get_subcommands()
         .filter(|subcommand| !subcommand.is_hide_set())
         .map(|subcommand| {
@@ -178,11 +254,6 @@ fn cli_command() -> clap::Command {
             (name, label, about)
         })
         .collect();
-    visible.push((
-        "help".to_owned(),
-        "help".to_owned(),
-        "Show help for cw or one of its commands".to_owned(),
-    ));
     let width = visible
         .iter()
         .map(|(_, label, _)| label.len())
@@ -200,19 +271,28 @@ fn cli_command() -> clap::Command {
                 sections.push_str(&format!("{heading}:\n{body}\n"));
             }
         };
-    for (heading, names) in HELP_SECTIONS {
-        let mut members = names
+    for help_section in HELP_SECTIONS {
+        listed.extend(help_section.commands.iter().copied());
+        if !all && !help_section.everyday {
+            continue;
+        }
+        let mut members = help_section
+            .commands
             .iter()
             .filter_map(|name| visible.iter().find(|(candidate, _, _)| candidate == name));
-        section(heading, &mut members);
-        listed.extend(names.iter().copied());
+        section(help_section.heading, &mut members);
     }
     let mut other = visible
         .iter()
         .filter(|(name, _, _)| !listed.contains(name.as_str()));
     section("Other", &mut other);
+    let more = if all {
+        ""
+    } else {
+        "`cw help --all` lists every command; `cw help COMMAND` shows one command.\n\n"
+    };
     command.help_template(format!(
-        "{{before-help}}{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{sections}Options:\n{{options}}{{after-help}}"
+        "{{before-help}}{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{sections}{more}Options:\n{{options}}{{after-help}}"
     ))
 }
 
@@ -220,6 +300,8 @@ fn cli_command() -> clap::Command {
 struct Globals {
     server: Option<String>,
     member: Option<String>,
+    /// `--local` or `--cloud`, read by every command that accepts one.
+    placement: Option<EnvironmentPlacement>,
 }
 
 mod commands;
@@ -235,32 +317,26 @@ enum Command {
     },
     #[command(about = "Generate or install shell completion scripts")]
     Completion(CompletionArgs),
-    #[command(
-        name = "config-ssh",
-        about = "Write OpenSSH config for Codewire environments",
-        long_about = "Adds or updates the managed Codewire section in your SSH config so OpenSSH, scp, sftp, rsync, and Remote-SSH can use `cw shell --stdio` as ProxyCommand."
-    )]
-    ConfigSsh(ConfigSshArgs),
-    #[command(about = "Check Codewire CLI and environment setup")]
+    #[command(about = "Diagnose installation and environment problems")]
     Doctor(DoctorArgs),
-    #[command(about = "Update, inspect or roll back the managed cw installation")]
-    Update(update::UpdateArgs),
+    #[command(about = "Upgrade the CLI, inspect versions, or roll back")]
+    Upgrade(update::UpgradeArgs),
     #[command(about = "Install this cw as a managed, versioned installation")]
     Install(update::InstallArgs),
     #[command(about = "Sign in to Codewire")]
     Login(LoginArgs),
     #[command(
-        about = "Run the Codewire first-time setup wizard",
-        long_about = "Connect to a Codewire server, sign in, choose or create a default organization, and optionally configure OpenSSH integration."
+        about = "Set up Codewire, the local runtime, and SSH integration",
+        long_about = "Connect to a Codewire server, sign in, choose or create a default organization, and configure OpenSSH integration.\n\nWith --local, install and verify the local VM runtime instead of signing in. `cw setup ssh` writes only the OpenSSH integration."
     )]
     Setup(SetupArgs),
     #[command(about = "Sign out of Codewire")]
     Logout,
     #[command(about = "Show current user and server")]
     Whoami(WhoamiArgs),
-    #[command(about = "Set the current execution target")]
+    #[command(about = "Select an environment; --local or --cloud limits the lookup")]
     Use(UseTargetArgs),
-    #[command(about = "Show the current execution target")]
+    #[command(about = "Show the current environment")]
     Current(CurrentTargetArgs),
     #[command(
         about = "Write a codewire.yaml project file",
@@ -288,10 +364,16 @@ enum Command {
     Send(SendArgs),
     #[command(about = "Wait for a session or managed message to finish")]
     Wait(WaitArgs),
-    #[command(about = "Stop an owned session; asks before stopping its running children")]
+    #[command(
+        about = "Stop an environment; --session stops one session",
+        long_about = "Stop a whole environment:\n  cw stop ENV\n\nStop one session, asking before stopping its running children:\n  cw stop ENV --session SESSION\n  cw stop --session SESSION        (in the selected environment)\n\n--all, with --session, also stops every running descendant without asking."
+    )]
     Stop(StopArgs),
-    #[command(about = "Restart a retained session with its canonical identity")]
-    Restart(SessionTargetArgs),
+    #[command(
+        about = "Restart a local environment, or one session with --session",
+        long_about = "Restart a whole local environment (cloud environments restart sessions only):\n  cw restart ENV\n\nRestart one retained session with its canonical identity:\n  cw restart ENV --session SESSION\n  cw restart --session SESSION     (in the selected environment)"
+    )]
+    Restart(SessionScopeArgs),
     #[cfg(unix)]
     #[command(about = "Send a task or follow-up to a managed agent conversation")]
     Msg(AgentMessageArgs),
@@ -313,8 +395,10 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "_agent-peer", hide = true)]
     AgentPeer(AgentPeerArgs),
-    #[command(about = "Manage environments")]
-    Env(EnvArgs),
+    /// Retired `env` namespace: only the updater hand-off is accepted;
+    /// anything else is refused with its flat spelling (`commands/flat.rs`).
+    #[command(name = "env", hide = true, disable_help_flag = true)]
+    Env(RetiredEnvArgs),
     #[command(about = "Show usage and billing overview")]
     Cost(CostArgs),
     #[command(alias = "orgs", about = "Manage organizations")]
@@ -350,10 +434,10 @@ enum Command {
         command: MeshCommand,
     },
     #[cfg(target_os = "linux")]
-    #[command(about = "Manage trusted Mesh access to a local host")]
+    #[command(about = "Manage trusted Mesh access to a local host (Linux only)")]
     Control(HostControlArgs),
     #[cfg(target_os = "linux")]
-    #[command(about = "Manage pinned trusted host members")]
+    #[command(about = "Manage pinned trusted host members (Linux only)")]
     Member(MemberArgs),
     #[cfg(not(target_os = "linux"))]
     #[command(about = "Manage trusted Mesh access to a local host (Linux only)")]
@@ -406,17 +490,89 @@ enum Command {
     #[command(name = "__local-credential-broker-synthetic-smoke-check", hide = true)]
     LocalCredentialBrokerSyntheticSmokeCheck,
     #[command(
-        visible_alias = "ls",
-        about = "List sessions in every environment, or only in ENV"
+        name = "ls",
+        visible_alias = "list",
+        about = "List environments, or sessions in one environment"
     )]
-    List(ListArgs),
+    Ls(ListArgs),
     #[command(
         about = "Attach to a session in the selected or explicit environment",
         long_about = "Attach to a durable environment session. A single positional is always an environment. Detach without stopping the session with Ctrl+B d."
     )]
     Attach(AttachArgs),
-    #[command(about = "Show saved output for an environment session")]
+    #[command(
+        about = "Show session output with --session, or setup logs with --setup",
+        long_about = "Show a session's saved output, or how an environment was set up:\n  cw logs ENV --session SESSION [--follow]\n  cw logs --session SESSION        (in the selected environment)\n  cw logs ENV --setup [--follow]   (cloud environments)\n\n--setup shows how the environment was set up: provisioning, repository clones, and the install and startup steps.\n\nWithout --session or --setup, an interactive call selects the environment's only session or offers a choice; scripts must name one."
+    )]
     Logs(LogsArgs),
+    #[command(about = "Show configuration, state, and connection details")]
+    Info(EnvInfoArgs),
+    #[command(
+        about = "Create an environment without launching an agent",
+        long_about = "Create a new environment from direct CLI flags.\n\nMultiple repos can be specified as positional args or with --repo flags.\nUse URL[@branch][::/workspace/path] to set a branch and optional checkout path per repo.\n\nWith --local, create a local VM; with --cloud, a cloud environment."
+    )]
+    Create(Box<EnvCreateArgs>),
+    #[command(about = "Start an environment")]
+    Start(EnvTargetArgs),
+    #[command(about = "Remove an environment")]
+    Rm(EnvDeleteArgs),
+    #[command(
+        about = "Change an environment's application secrets and credential profile",
+        long_about = "Change the application secrets and credential profile selected for an environment:\n  cw update ENV --profile local:work\n  cw update --in ENV --clear-secrets\n\nTo upgrade the CLI itself, use `cw upgrade`."
+    )]
+    Update(UpdateEnvironmentArgs),
+    #[command(
+        about = "Copy a file to or from an environment",
+        long_about = "Copy files between the local filesystem and an environment.\n\nUse ENV:PATH for the environment side:\n  cw cp local.txt ENV:/workspace/local.txt\n  cw cp ENV:/workspace/file.txt ./file.txt"
+    )]
+    Cp(EnvCpArgs),
+    #[command(
+        about = "List ports; --publish or --unpublish changes a mapping",
+        long_about = "List an environment's published ports, or change one mapping:\n  cw ports ENV\n  cw ports ENV --publish 3000 [--host-port 3001]          (local: 127.0.0.1 on this host)\n  cw ports ENV --publish 3000 [--label web] [--access creator]   (cloud: a preview URL)\n  cw ports ENV --unpublish 3000\n\nListing never starts an environment; publishing needs a running one."
+    )]
+    Ports(PortsArgs),
+    #[command(about = "Inspect or change the cw defaults in a running environment")]
+    Runtime(EnvRuntimeArgs),
+    #[command(about = "Inspect cloud managed agent support and saved requests")]
+    Agent(EnvAgentArgs),
+    #[command(about = "Inspect or repair an environment's managed daemon")]
+    Daemon(EnvDaemonArgs),
+    #[command(about = "Resize a local or cloud environment")]
+    Resize(EnvResizeArgs),
+    #[command(about = "Show isolation, runtime, and trust evidence (cloud)")]
+    Report(EnvReportArgs),
+    #[command(about = "Extend a cloud environment's TTL")]
+    Extend(EnvExtendArgs),
+    #[command(about = "Inspect or apply an environment access profile")]
+    Access(EnvAccessArgs),
+    #[command(about = "Manage cloud environment collaborators")]
+    Share(EnvShareArgs),
+    #[command(about = "Protect a cloud environment from deletion")]
+    Protect(EnvTargetArgs),
+    #[command(about = "Remove deletion protection from a cloud environment")]
+    Unprotect(EnvTargetArgs),
+    #[command(
+        name = "cancel-delete",
+        about = "Cancel a pending cloud environment deletion"
+    )]
+    CancelDelete(EnvTargetArgs),
+    #[command(
+        about = "Delete stale cloud environments",
+        long_about = "Delete cloud environments stuck in error, creating, or pending states."
+    )]
+    Prune(EnvPruneArgs),
+    #[command(
+        about = "Delete ALL cloud environments",
+        long_about = "Delete every environment in the current org. Requires typed confirmation unless --yes is passed."
+    )]
+    Nuke(EnvNukeArgs),
+    #[command(
+        name = "refresh-skills",
+        about = "Refresh immutable skills for a local environment"
+    )]
+    RefreshSkills(EnvTargetArgs),
+    #[command(about = "Show help for cw or one of its commands; --all lists every command")]
+    Help(HelpArgs),
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -443,7 +599,7 @@ where
     let Command::EnvironmentLaunch(args) = cli.command else {
         return Err(invalid());
     };
-    if cli.server.is_some() || cli.member.is_some() {
+    if cli.server.is_some() || cli.member.is_some() || cli.local || cli.cloud {
         return Err(invalid());
     }
     codewire_daemon::execution::run_environment_launcher(&args.projection_socket, &args.command)
@@ -571,7 +727,7 @@ fn require_local_broker_smoke_executable() -> anyhow::Result<()> {
 /// record (the original parent's unique ID) survives reparenting to launchd,
 /// and Codewire uses no private API, so a Mac host cannot be a member.
 #[cfg(not(target_os = "linux"))]
-const MEMBER_CONTROL_REQUIRES_LINUX: &str = "delegated member control (cw control, cw member, --member) requires Linux: macOS offers no public way to find a session's processes after their parent exits, which member control needs to stop them all; on a Mac, run sessions in a local VM (cw env create --local) instead";
+const MEMBER_CONTROL_REQUIRES_LINUX: &str = "delegated member control (cw control, cw member, --member) requires Linux: macOS offers no public way to find a session's processes after their parent exits, which member control needs to stop them all; on a Mac, run sessions in a local VM (cw create --local) instead";
 
 /// `cw control` and `cw member` are refused before their arguments are read.
 #[cfg(not(target_os = "linux"))]
@@ -584,10 +740,13 @@ pub(crate) struct UnavailableMemberControlArgs {
 fn validate_member_mutation_flags(cli: &Cli) -> anyhow::Result<()> {
     if cli.member.is_none() {
         match &cli.command {
-            Command::Stop(StopArgs { session: args, .. })
-            | Command::Restart(args)
-            | Command::Interrupt(args)
-            | Command::Inbox(args) => anyhow::ensure!(
+            Command::Stop(StopArgs { scope: args, .. }) | Command::Restart(args) => {
+                anyhow::ensure!(
+                    args.request_id.is_none() && args.expected_launch_generation.is_none(),
+                    "member mutation flags require --member"
+                )
+            }
+            Command::Interrupt(args) | Command::Inbox(args) => anyhow::ensure!(
                 args.request_id.is_none() && args.expected_launch_generation.is_none(),
                 "member mutation flags require --member"
             ),
@@ -606,10 +765,18 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
+    let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
     let mut command = cli_command();
-    let matches = command.clone().get_matches_from(args);
+    let matches = command.clone().get_matches_from(args.iter().cloned());
     let cli =
         Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.format(&mut command).exit());
+    let placement = cli.placement()?;
+    validate_placement_scope(
+        &cli.command,
+        matches.subcommand_name().unwrap_or_default(),
+        placement,
+        cli.member.is_some(),
+    )?;
     validate_member_mutation_flags(&cli)?;
     if cli.member.is_some() {
         #[cfg(target_os = "linux")]
@@ -617,7 +784,7 @@ where
             matches!(
                 &cli.command,
                 Command::Run(_)
-                    | Command::List(_)
+                    | Command::Ls(_)
                     | Command::Send(_)
                     | Command::Logs(_)
                     | Command::Wait(_)
@@ -629,7 +796,7 @@ where
                     | Command::Inbox(_)
                     | Command::Member(_)
             ),
-            "--member supports run, list, send, logs, wait, stop, restart, msg, steer, interrupt, inbox and member commands"
+            "--member supports run, ls, send, logs, wait, stop, restart, msg, steer, interrupt, inbox and member commands"
         );
         #[cfg(not(target_os = "linux"))]
         anyhow::bail!(MEMBER_CONTROL_REQUIRES_LINUX);
@@ -640,15 +807,15 @@ where
     let globals = Globals {
         server: cli.server.clone(),
         member: cli.member.clone(),
+        placement,
     };
     match cli.command {
         Command::Config {
             command: ConfigCommand::Inspect { output },
         } => inspect_config(output),
         Command::Completion(args) => handle_completion_command(args),
-        Command::ConfigSsh(args) => handle_config_ssh_command(args),
         Command::Doctor(args) => handle_doctor_command(&globals, args).await,
-        Command::Update(args) => update::run(args).await,
+        Command::Upgrade(args) => update::run(args).await,
         Command::Install(args) => update::install(args),
         Command::Login(args) => handle_login_command(&globals, args).await,
         Command::Setup(args) => handle_setup_command(&globals, args).await,
@@ -665,8 +832,8 @@ where
         Command::HostDaemon(args) => run_host_daemon(args).await,
         Command::Send(args) => handle_send_command(&globals, args).await,
         Command::Wait(args) => handle_wait_command(&globals, args).await,
-        Command::Stop(args) => handle_stop_command(&globals, args).await,
-        Command::Restart(args) => handle_restart_command(&globals, args).await,
+        Command::Stop(args) => flat::handle_stop(&globals, args).await,
+        Command::Restart(args) => flat::handle_restart(&globals, args).await,
         #[cfg(unix)]
         Command::Msg(args) => handle_agent_message_command(&globals, args, false).await,
         #[cfg(unix)]
@@ -681,7 +848,7 @@ where
         Command::AgentControl(args) => run_agent_control(args).await,
         #[cfg(target_os = "linux")]
         Command::AgentPeer(args) => run_agent_peer(args).await,
-        Command::Env(args) => handle_env_command(&globals, args).await,
+        Command::Env(retired) => flat::handle_retired_env(&args, placement, retired).await,
         Command::Cost(args) => handle_cost_command(&globals, args).await,
         Command::Org { command } => handle_org_command(&globals, command).await,
         Command::ApiKeys { command } => handle_api_keys_command(&globals, command).await,
@@ -736,10 +903,100 @@ where
             println!("codewire-local-credential-broker-synthetic-smoke:v1");
             Ok(())
         }
-        Command::List(args) => handle_list_command(&globals, args).await,
+        Command::Ls(args) => flat::handle_ls(&globals, args).await,
         Command::Attach(args) => handle_attach_command(&globals, args).await,
-        Command::Logs(args) => handle_logs_command(&globals, args).await,
+        Command::Logs(args) => flat::handle_logs(&globals, args).await,
+        Command::Update(args) => flat::handle_update(&globals, args).await,
+        Command::Ports(args) => flat::handle_ports(&globals, args).await,
+        command @ (Command::Info(_)
+        | Command::Create(_)
+        | Command::Start(_)
+        | Command::Rm(_)
+        | Command::Cp(_)
+        | Command::Runtime(_)
+        | Command::Agent(_)
+        | Command::Daemon(_)
+        | Command::Resize(_)
+        | Command::Report(_)
+        | Command::Extend(_)
+        | Command::Access(_)
+        | Command::Share(_)
+        | Command::Protect(_)
+        | Command::Unprotect(_)
+        | Command::CancelDelete(_)
+        | Command::Prune(_)
+        | Command::Nuke(_)
+        | Command::RefreshSkills(_)) => {
+            let operation = flat::direct_environment_command(command)
+                .map_err(|_| anyhow::anyhow!("not an environment operation"))?;
+            flat::operation(&globals, operation).await
+        }
+        Command::Help(args) => flat::handle_help(args),
     }
+}
+
+/// `--local` / `--cloud` reach every command through the one global pair.
+/// A command that does not read a placement refuses it before any effect,
+/// so an explicit placement is never ignored or reinterpreted.
+fn validate_placement_scope(
+    command: &Command,
+    name: &str,
+    placement: Option<EnvironmentPlacement>,
+    member: bool,
+) -> anyhow::Result<()> {
+    let Some(placement) = placement else {
+        return Ok(());
+    };
+    let flag = match placement {
+        EnvironmentPlacement::Local => "--local",
+        EnvironmentPlacement::Platform => "--cloud",
+    };
+    anyhow::ensure!(
+        !member,
+        "{flag} cannot be combined with --member, which names its pinned host target"
+    );
+    if let Command::Setup(SetupArgs {
+        command: Some(SetupCommand::Ssh(_)),
+        ..
+    }) = command
+    {
+        anyhow::bail!("{flag} does not apply to `cw setup ssh`");
+    }
+    let reads = matches!(
+        command,
+        Command::Setup(_)
+            | Command::Use(_)
+            | Command::Credentials(_)
+            | Command::Secrets(_)
+            | Command::Env(_)
+            | Command::Ls(_)
+            | Command::Logs(_)
+            | Command::Stop(_)
+            | Command::Restart(_)
+            | Command::Info(_)
+            | Command::Create(_)
+            | Command::Start(_)
+            | Command::Rm(_)
+            | Command::Update(_)
+            | Command::Cp(_)
+            | Command::Ports(_)
+            | Command::Runtime(_)
+            | Command::Agent(_)
+            | Command::Daemon(_)
+            | Command::Resize(_)
+            | Command::Report(_)
+            | Command::Extend(_)
+            | Command::Access(_)
+            | Command::Share(_)
+            | Command::Protect(_)
+            | Command::Unprotect(_)
+            | Command::CancelDelete(_)
+            | Command::Prune(_)
+            | Command::Nuke(_)
+            | Command::RefreshSkills(_)
+    );
+    anyhow::ensure!(reads, "{flag} does not apply to `cw {name}`");
+    Ok(())
 }
 
 async fn run_hosted_daemon() -> anyhow::Result<()> {

@@ -920,19 +920,19 @@ run_named_reader_smoke() {
     .eof == true and .history_gap == false
   ' "$LAST_STDOUT" >/dev/null || die 'named reader wait did not confirm input, zero exit, output, and EOF'
 
-  run_cw restart "$reader_name" --output json
+  run_cw restart --session "$reader_name" --output json
   jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
     length == 1 and (.[0] |
       .session_id == $id and .name == $name and .parent_session_id == $parent and
       .pty == false and .state == "Running" and .exit_code == null)
   ' "$LAST_STDOUT" >/dev/null || die 'reader restart changed its identity, name, parent, or run state'
-  run_cw stop "$reader_name" --output json
+  run_cw stop --session "$reader_name" --output json
   jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
     length == 1 and (.[0] |
       .session_id == $id and .name == $name and .parent_session_id == $parent and
       .pty == false and .state == "Stopped" and .cleanup_unknown == false)
   ' "$LAST_STDOUT" >/dev/null || die 'reader stop did not return its terminal known-clean record'
-  run_cw list "$NAME" --output json
+  run_cw ls "$NAME" --output json
   jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
     [.[] | select(.name == $name)] |
     length == 1 and (.[0] |
@@ -1597,12 +1597,12 @@ require_guest_egress_restored() {
 
 restart_failed_environment() {
   local label="$1"
-  run_cw env stop --local "$NAME" --output json
+  run_cw stop --local "$NAME" --output json
   jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null ||
     die "environment did not stop after the $label kill"
   wait_for_journal_complete || die "stop after the $label kill left a partial journal"
   assert_direct_share_processes_stopped
-  run_cw env start --local "$NAME" --output json
+  run_cw start --local "$NAME" --output json
   jq -e '.state == "running" and (has("error_code") | not)' "$LAST_STDOUT" >/dev/null ||
     die "environment did not restart cleanly after the $label kill"
   wait_for_journal_complete || die "start after the $label kill left a partial journal"
@@ -2135,12 +2135,12 @@ run_application_secret_smoke() {
       b)
         expected="$APP_SECRET_SHA_B"; project_id="$APP_SECRET_PROJECT_B_ID"
         journal="$(native_database_value journal_summary)"
-        run_cw_expect_failure env update --local "$NAME" --secrets "local:$APP_SECRET_PROJECT_B" \
+        run_cw_expect_failure update --local "$NAME" --secrets "local:$APP_SECRET_PROJECT_B" \
           --user-secrets local --output json
         [[ "$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")" == "$generation" &&
            "$(native_database_value journal_summary)" == "$journal" ]] ||
           die 'unconfirmed source update changed the running generation or admitted an operation'
-        run_cw env update --local "$NAME" --secrets "local:$APP_SECRET_PROJECT_B" \
+        run_cw update --local "$NAME" --secrets "local:$APP_SECRET_PROJECT_B" \
           --user-secrets local --yes --output json
         assert_previous_direct_share_processes_gone
         assert_direct_share_processes
@@ -2148,13 +2148,13 @@ run_application_secret_smoke() {
         ;;
       clear)
         expected=absent; project_id=''
-        run_cw env update --local "$NAME" --clear-secrets --yes --output json
+        run_cw update --local "$NAME" --clear-secrets --yes --output json
         assert_previous_direct_share_processes_gone
         assert_direct_share_processes
         generation=$((generation + 1))
         ;;
     esac
-    run_cw env info --local "$NAME" --output json
+    run_cw info --local "$NAME" --output json
     jq -e --argjson generation "$generation" --arg id "$ENVIRONMENT_ID" --arg project "$project_id" \
       --arg skills "$INITIAL_SKILL_SNAPSHOT" '
       .id == $id and .generation == $generation and .state == "running" and
@@ -2572,7 +2572,7 @@ raise SystemExit(1 if found else 0)
 wait_for_environment_state() {
   local expected="$1"
   for _attempt in {1..100}; do
-    run_cw env info --local "$NAME" --output json
+    run_cw info --local "$NAME" --output json
     if jq -e --arg expected "$expected" '.state == $expected' "$LAST_STDOUT" >/dev/null; then
       return 0
     fi
@@ -2892,7 +2892,7 @@ cleanup() {
   if [[ "$ENV_CREATED" -eq 1 && -f "$STATE_ROOT/supervisor.db" ]]; then
     if [[ "$status" -eq 0 ]]; then
       log 'cleaning native environment after incomplete smoke'
-      if ! cw_isolated env rm --local "$NAME" --yes >/dev/null 2>&1; then
+      if ! cw_isolated rm --local "$NAME" --yes >/dev/null 2>&1; then
         cleanup_status=1
       fi
     else
@@ -3203,7 +3203,7 @@ else
 fi
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
-run_cw env create --local --name "$NAME" --cpu 2 --memory 16GB \
+run_cw create --local --name "$NAME" --cpu 2 --memory 16GB \
   --path "$WORKSPACE" "${CREATE_ACCESS_ARGS[@]}" "${CREATE_DOCKER_ARGS[@]}" --output json
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
@@ -3255,7 +3255,7 @@ printf '%s\n' 'repository skill generation two' >"$REPOSITORY_SKILL_SOURCE/SKILL
 printf '%s\n' 'direct skill generation two' >"$DIRECT_SKILL_SOURCE/SKILL.md"
 printf '%s\n' 'user skill generation two' >"$USER_SKILL_SOURCE/SKILL.md"
 printf 'direct read-only host changed after creation\n' >"$DIRECT_RO_SOURCE/data.txt"
-run_cw env list --local --output json
+run_cw ls --local --output json
 jq -e '
   length == 1 and
   (.[0] |
@@ -3368,7 +3368,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   fi
 
   log 'stopping the VM before scanning all durable test-owned state'
-  run_cw env stop --local "$NAME" --output json
+  run_cw stop --local "$NAME" --output json
   jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null ||
     die 'broker-bound native environment did not stop'
   wait_for_journal_complete ||
@@ -3377,7 +3377,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   # The preceding scenario deliberately revoked the selected credential and
   # killed its authority. Detach that now-unusable profile through the public
   # API before the independent offline/direct-share lifecycle scenario.
-  run_cw env update --local "$NAME" --clear-profile --yes --output json
+  run_cw update --local "$NAME" --clear-profile --yes --output json
   jq -e '
     .state == "stopped" and
     .access_profile == null and
@@ -3389,7 +3389,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   printf 'direct read-only offline host change\n' >"$DIRECT_RO_SOURCE/restart.txt"
   printf 'direct read-write offline host change\n' >"$DIRECT_RW_SOURCE/restart.txt"
   log 'checking offline restart reopens the exact direct-share roots'
-  run_cw env start --local "$NAME" --output json
+  run_cw start --local "$NAME" --output json
   jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null ||
     die 'broker-bound native environment did not restart'
   assert_direct_share_processes
@@ -3402,7 +3402,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   # script remains valid. Retire it only before the final stop and deletion.
   run_cw run --no-tty -- /bin/bash /workspace/fixtures/stock-ssh-workload.sh cleanup
   rg -qxF stock-ssh-workload-cleaned "$LAST_STDOUT" || die 'stock SSH fixture cleanup failed'
-  run_cw env stop --local "$NAME" --output json
+  run_cw stop --local "$NAME" --output json
   jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null ||
     die 'restarted broker-bound native environment did not stop'
   wait_for_journal_complete ||
@@ -3416,7 +3416,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   scan_for_credential_canary before-delete-workload-secret "$WORKLOAD_SECRET_CANARY"
 
   log 'deleting the environment, profile, credentials, and protected-store entries'
-  run_cw env rm --local "$NAME" --yes
+  run_cw rm --local "$NAME" --yes
   ENV_CREATED=0
   assert_current_target_cleared
   [[ -d "$DIRECT_RO_SOURCE" && -d "$DIRECT_RW_SOURCE" ]] ||
@@ -3527,10 +3527,10 @@ import sys
 Path(sys.argv[1]).write_bytes(bytes(range(256)) * 257 + b"\x00codewire-cp\xff")
 PY
 CW_UPLOAD_SHA256="$(sha256sum "$CW_UPLOAD" | cut -d' ' -f1)"
-run_cw env cp --local "$CW_UPLOAD" "$NAME:/workspace/cw-upload.bin"
+run_cw cp --local "$CW_UPLOAD" "$NAME:/workspace/cw-upload.bin"
 run_cw run --no-tty -- /bin/sh -lc \
   "test \"\$(sha256sum /workspace/cw-upload.bin | cut -d' ' -f1)\" = '$CW_UPLOAD_SHA256'"
-run_cw env cp --local "$NAME:/workspace/cw-upload.bin" "$CW_DOWNLOAD"
+run_cw cp --local "$NAME:/workspace/cw-upload.bin" "$CW_DOWNLOAD"
 cmp "$CW_UPLOAD" "$CW_DOWNLOAD" || die 'cw binary file transfer changed content'
 
 log 'checking codewire.yaml loopback host-port publication through the native VM'
@@ -3540,7 +3540,7 @@ HOST_PORT_SESSION_ID="$(jq -er '.session_id | select(type == "string" and length
   die 'host-port guest session did not return an identity'
 HOST_PORT_SESSION_READY=0
 for _attempt in {1..200}; do
-  run_cw logs "$NAME" "$HOST_PORT_SESSION_ID" --raw
+  run_cw logs "$NAME" --session "$HOST_PORT_SESSION_ID" --raw
   if rg -qxF 'codewire-host-port-ready' "$LAST_STDOUT"; then
     HOST_PORT_SESSION_READY=1
     break
@@ -3578,7 +3578,7 @@ cat "$SMOKE_ROOT/host-port.stdout" "$SMOKE_ROOT/host-port.stderr" >>"$TRANSCRIPT
   die 'native host-port receipt drifted'
 HOST_PORT_SESSION_EXITED=0
 for _attempt in {1..100}; do
-  run_cw list "$NAME" --output json
+  run_cw ls "$NAME" --output json
   if jq -e --arg session_id "$HOST_PORT_SESSION_ID" '
     any(.[];
       .session_id == $session_id and
@@ -3600,7 +3600,7 @@ start_guest_port_server() {
   session_id="$(jq -er '.session_id | select(type == "string" and length > 0)' "$LAST_STDOUT")" ||
     die "guest port $port listener did not return an identity"
   for _attempt in {1..200}; do
-    run_cw logs "$NAME" "$session_id" --raw
+    run_cw logs "$NAME" --session "$session_id" --raw
     rg -qxF 'codewire-host-port-ready' "$LAST_STDOUT" && return 0
     sleep 0.05
   done
@@ -3644,8 +3644,8 @@ published_ports_include() {
 }
 
 log 'checking host ports published and withdrawn on the running native VM'
-run_cw env port add --local "$DYNAMIC_GUEST_PORT" --host-port "$DYNAMIC_HOST_PORT" \
-  --env "$NAME" --output json
+run_cw ports --local "$NAME" --publish "$DYNAMIC_GUEST_PORT" --host-port "$DYNAMIC_HOST_PORT" \
+  --output json
 published_ports_include "$DYNAMIC_HOST_PORT" "$DYNAMIC_GUEST_PORT" ||
   die 'dynamic host port was not published'
 published_ports_include "$HOST_PORT" 3000 ||
@@ -3653,13 +3653,14 @@ published_ports_include "$HOST_PORT" 3000 ||
 start_guest_port_server "$DYNAMIC_GUEST_PORT"
 host_port_round_trip "$DYNAMIC_HOST_PORT" ||
   die 'dynamic host-port round trip failed'
-run_cw env port rm --local "$DYNAMIC_HOST_PORT" --env "$NAME" --output json
+run_cw ports --local "$NAME" --unpublish "$DYNAMIC_GUEST_PORT" --host-port "$DYNAMIC_HOST_PORT" \
+  --output json
 ! published_ports_include "$DYNAMIC_HOST_PORT" "$DYNAMIC_GUEST_PORT" ||
   die 'withdrawn host port is still listed'
 host_port_refused "$DYNAMIC_HOST_PORT" ||
   die 'withdrawn host port still accepts connections'
-run_cw env port add --local "$DYNAMIC_GUEST_PORT" --host-port "$DYNAMIC_HOST_PORT" \
-  --env "$NAME" --output json
+run_cw ports --local "$NAME" --publish "$DYNAMIC_GUEST_PORT" --host-port "$DYNAMIC_HOST_PORT" \
+  --output json
 published_ports_include "$DYNAMIC_HOST_PORT" "$DYNAMIC_GUEST_PORT" ||
   die 'a withdrawn host port could not be published again'
 
@@ -3667,7 +3668,7 @@ log 'checking stock Codex 0.160.0 over the synthetic guest credential bridge'
 run_codex_credential_bridge_smoke
 
 log 'checking bounded public daemon status over the owner-only supervisor UDS'
-run_cw env --local daemon status "$NAME" --output json
+run_cw --local daemon status "$NAME" --output json
 jq -e '
   .state == "ready" and
   .protocol_version == 1 and
@@ -3822,7 +3823,7 @@ done
 log 'checking explicit native restart and persistent workspace identity'
 PRE_RESTART_VMM_PID="$(recorded_vmm_pid)"
 PRE_RESTART_GENERATION="$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")"
-run_cw env restart --local "$NAME" --output json
+run_cw restart --local "$NAME" --output json
 jq -e '.name == "native-smoke" and .state == "running"' "$LAST_STDOUT" >/dev/null ||
   die 'explicit native restart did not return the running environment'
 wait_for_journal_complete ||
@@ -3838,7 +3839,7 @@ run_cw run --no-tty -- /bin/sh -lc \
   'printf "sentinel="; cat /workspace/sentinel.txt; printf "\nmachine-id="; cat /etc/machine-id'
 rg -qxF 'sentinel=persistence-ok' "$LAST_STDOUT" ||
   die 'workspace sentinel did not survive explicit native restart'
-run_cw env port ls --local --env "$NAME" --output json
+run_cw ports --local "$NAME" --output json
 published_ports_include "$DYNAMIC_HOST_PORT" "$DYNAMIC_GUEST_PORT" ||
   die 'a host port published while running did not survive restart'
 start_guest_port_server "$DYNAMIC_GUEST_PORT"
@@ -3851,7 +3852,7 @@ run_docker_persistence_smoke docker-explicit-restart-persistence-ok
 log 'checking explicit offline immutable skill refresh and read-only reprojection'
 # Refreshing the snapshot can materialize a new OCI root generation. Retain the
 # same bounded budget as the preceding guest storage workloads for that rebuild.
-run_cw env refresh-skills --local "$NAME" --output json
+run_cw refresh-skills --local "$NAME" --output json
 CW_COMMAND_TIMEOUT_SECONDS=180
 jq -e --arg prior "$INITIAL_SKILL_SNAPSHOT" '
   .name == "native-smoke" and
@@ -3874,7 +3875,7 @@ log 'checking daemon logs contain only trusted lifecycle journal fields'
 DAEMON_GUEST_SENTINEL='guest-output-must-not-enter-daemon-logs-1909'
 run_cw run --no-tty -- /bin/sh -lc "printf '%s\\n' '$DAEMON_GUEST_SENTINEL'"
 rg -qF "$DAEMON_GUEST_SENTINEL" "$LAST_STDOUT" || die 'guest diagnostic sentinel was not emitted'
-run_cw env --local daemon logs "$NAME"
+run_cw --local daemon logs "$NAME"
 rg -q '^time_unix_ms=[0-9]+ operation=[0-9a-f-]{36} kind=create phase=completed checkpoint=9 stage=OPERATION_STAGE_[A-Z_]+ error=-$' "$LAST_STDOUT" ||
   die 'native daemon logs did not expose the trusted create journal record'
 [[ "$(stat -c '%s' "$LAST_STDOUT")" -le 65536 ]] || die 'native daemon logs exceeded their public bound'
@@ -3918,18 +3919,18 @@ log 'checking nonzero status and saved session output'
 run_cw_expect_failure run --no-tty -- /bin/sh -lc 'printf saved-nonzero; exit 42'
 rg -qF 'saved-nonzero' "$LAST_STDOUT" || die 'nonzero session output was not returned'
 rg -qF 'session exited with code 42' "$LAST_STDERR" || die 'guest exit code 42 was not propagated'
-run_cw list "$NAME" --output json
+run_cw ls "$NAME" --output json
 SESSION_ID="$(jq -er '
   .[] |
   select(.command == ["/bin/sh", "-lc", "printf saved-nonzero; exit 42"]) |
   select(.state == "Exited" and .exit_code == 42 and .output_end_offset == 13) |
   .session_id
 ' "$LAST_STDOUT")" || die 'saved nonzero session record drifted'
-run_cw logs "$NAME" "$SESSION_ID" --raw
+run_cw logs "$NAME" --session "$SESSION_ID" --raw
 [[ "$(cat "$LAST_STDOUT")" == 'saved-nonzero' ]] || die 'saved session output was not readable'
 
 log 'checking stopped offline restart remains pinned after the installed artifact lock advances'
-run_cw env stop --local "$NAME" --output json
+run_cw stop --local "$NAME" --output json
 jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null || die 'native environment did not stop'
 wait_for_journal_complete ||
   die 'native stop returned before its lifecycle journal became terminal'
@@ -3951,7 +3952,7 @@ wait_for_journal_complete ||
 prepare_advanced_artifact_source
 ARTIFACT_ROOT="$ADVANCED_ARTIFACT_ROOT"
 ARTIFACT_LOCK="$ADVANCED_ARTIFACT_LOCK"
-run_cw env start --local "$NAME" --output json
+run_cw start --local "$NAME" --output json
 jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null || die 'native environment did not restart'
 REPLACEMENT_RUNNER_PID="$(native_database_value runner_pid)"
 [[ "$REPLACEMENT_RUNNER_PID" != "$STOPPED_RUNNER_PID" && -d "/proc/$REPLACEMENT_RUNNER_PID" ]] ||
@@ -3986,7 +3987,7 @@ SUPERVISOR_PID="$(find_exact_supervisor_pid)" || die 'native supervisor process 
 kill -KILL -- "$SUPERVISOR_PID"
 wait_for_pid_exit "$SUPERVISOR_PID" || die 'killed supervisor process did not exit'
 [[ -d "/proc/$RUNNER_PID" ]] || die 'runner did not survive supervisor crash'
-run_cw env info --local "$NAME" --output json
+run_cw info --local "$NAME" --output json
 jq -e '.state == "running" and .cpu == 2 and .memory == "16Gi" and .disk == "20Gi"' "$LAST_STDOUT" >/dev/null ||
   die 'replacement supervisor did not reconcile the running environment'
 [[ "$(native_database_value runner_pid)" == "$RUNNER_PID" ]] ||
@@ -4002,7 +4003,7 @@ jq -e --arg network "$MESH_NETWORK" '
   .network == $network and
   .error_code == "mesh_transport_exit"
 ' "$LAST_STDOUT" >/dev/null || die 'typed Mesh transport failure did not reach CLI status'
-run_cw env --local daemon status "$NAME" --output json
+run_cw --local daemon status "$NAME" --output json
 jq -e '
   .state == "unhealthy" and
   .message == "local environment runtime requires repair"
@@ -4012,13 +4013,13 @@ jq -e --arg network "$MESH_NETWORK" '
   .selected_network == $network and .auto_connect == true
 ' \
   "$MESH_OWNER_CONTEXT" >/dev/null || die 'Mesh restart lost the selected network projection'
-run_cw env --local daemon repair "$NAME" --output json
+run_cw --local daemon repair "$NAME" --output json
 jq -e '
   .replaced_pod_name == "" and
   .status.state == "ready" and
   .status.message == "local environment daemon is ready"
 ' "$LAST_STDOUT" >/dev/null || die 'native daemon did not repair after Mesh transport loss'
-run_cw env info --local "$NAME" --output json
+run_cw info --local "$NAME" --output json
 jq -e --arg network "$MESH_NETWORK" '
   .state == "running" and
   .network == $network and
@@ -4036,7 +4037,7 @@ wait_for_pid_death "$VMM_PID" || die 'pidfd-signalled VMM process remained live'
 wait_for_environment_state error ||
   die 'VMM death was not classified as an environment error'
 wait_for_pid_exit "$VMM_PID" || die 'reconciled VMM process was not reaped'
-run_cw env --local daemon status "$NAME" --output json
+run_cw --local daemon status "$NAME" --output json
 jq -e '
   .state == "unhealthy" and
   .protocol_version == 1 and
@@ -4050,7 +4051,7 @@ jq -e '
   }] and
   .pod_name == ""
 ' "$LAST_STDOUT" >/dev/null || die 'native daemon error status drifted after exact VMM death'
-run_cw env --local daemon repair "$NAME" --output json
+run_cw --local daemon repair "$NAME" --output json
 jq -e '
   .replaced_pod_name == "" and
   .status.state == "ready" and
@@ -4084,7 +4085,7 @@ wait_for_environment_state error ||
   die 'runner death was not classified as an environment error'
 jq -e '.error_code == "runner_exit"' "$LAST_STDOUT" >/dev/null ||
   die 'runner death did not report error_code runner_exit'
-run_cw env --local daemon repair "$NAME" --output json
+run_cw --local daemon repair "$NAME" --output json
 jq -e '.replaced_pod_name == "" and .status.state == "ready" and .status.pod_name == ""' \
   "$LAST_STDOUT" >/dev/null || die 'environment daemon did not repair after exact runner death'
 RECOVERED_RUNNER_PID="$(wait_for_replaced_runner_pid "$RUNNER_PID")" ||
@@ -4108,10 +4109,10 @@ run_cw_disruptive run --no-tty -- docker run --rm --privileged --pid=host \
 wait_for_environment_state error ||
   die 'guest-local dockerd crash was not classified as an environment error'
 wait_for_pid_death "$VMM_PID" || die 'VMM remained live after guest-local dockerd crashed'
-run_cw env --local daemon status "$NAME" --output json
+run_cw --local daemon status "$NAME" --output json
 jq -e '.state == "unhealthy" and .message == "local environment runtime requires repair"' \
   "$LAST_STDOUT" >/dev/null || die 'daemon remained healthy after guest-local dockerd crashed'
-run_cw env --local daemon repair "$NAME" --output json
+run_cw --local daemon repair "$NAME" --output json
 jq -e '.replaced_pod_name == "" and .status.state == "ready"' "$LAST_STDOUT" >/dev/null ||
   die 'environment daemon did not repair after guest-local dockerd crashed'
 RECOVERED_VMM_PID="$(recorded_vmm_pid)" || die 'repaired Docker VMM identity was not readable'
@@ -4122,7 +4123,7 @@ run_cw run --no-tty -- /bin/sh -lc 'test "$(cat /workspace/sentinel.txt)" = pers
 run_docker_persistence_smoke docker-crash-persistence-ok
 
 log 'checking journaled offline disk growth and restart-applied CPU and memory'
-run_cw env resize --local "$NAME" --cpu 3 --memory 12GB --disk 21GB --yes --force --output json
+run_cw resize --local "$NAME" --cpu 3 --memory 12GB --disk 21GB --yes --force --output json
 jq -e '
   .state == "running" and
   .cpu == 3 and
@@ -4141,7 +4142,7 @@ MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
 [[ "$MEMORY_KIB" =~ ^[0-9]+$ && "$MEMORY_KIB" -ge 11000000 && "$MEMORY_KIB" -le 13000000 ]] ||
   die "guest MemTotal is not consistent with 12 GiB after resize: ${MEMORY_KIB:-missing} KiB"
 run_docker_persistence_smoke docker-resize-persistence-ok
-run_cw_expect_failure env resize --local "$NAME" --disk 20Gi --yes --output json
+run_cw_expect_failure resize --local "$NAME" --disk 20Gi --yes --output json
 rg -qF 'disk shrink is not supported' "$LAST_STDERR" ||
   die 'native disk shrink did not fail with an actionable error'
 
@@ -4150,7 +4151,7 @@ if [[ "$NETWORK_QUALIFICATION" -eq 1 ]]; then
 fi
 
 log 'deleting the environment and proving complete owned-object cleanup'
-run_cw env rm --local "$NAME" --yes
+run_cw rm --local "$NAME" --yes
 ENV_CREATED=0
 assert_current_target_cleared
 DELETED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
@@ -4218,7 +4219,7 @@ ln "$WORKSPACE/data.txt" "$WORKSPACE/hardlink.txt"
 ln -s data.txt "$WORKSPACE/link.txt"
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
-run_cw env create --local --name "$NAME" --cpu 2 --memory 16GB \
+run_cw create --local --name "$NAME" --cpu 2 --memory 16GB \
   --path "$WORKSPACE" --path-mode copy --no-network --no-docker --output json
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
@@ -4247,7 +4248,7 @@ rg -qF 'copy-executable-ok' "$LAST_STDOUT" ||
   die 'copy-mode guest read or write mutated the selected host source'
 [[ ! -e "$WORKSPACE/guest-only.txt" ]] ||
   die 'copy-mode guest write escaped into the selected host source'
-run_cw env rm --local "$NAME" --yes
+run_cw rm --local "$NAME" --yes
 ENV_CREATED=0
 assert_current_target_cleared
 [[ "$(cat "$WORKSPACE/data.txt")" == 'host changed after copy creation' ]] ||

@@ -27,7 +27,7 @@ cw network delete NAME --org ORG_ID [--yes]
 ```
 
 A local VM joins the network given by `--network`, `CODEWIRE_MESH_NETWORK` or
-the selection from `network use`; at a terminal `cw env create --local` asks
+the selection from `network use`; at a terminal `cw create --local` asks
 first unless the selection was made with `--auto-connect`, and `--no-network`
 opts out. Deleting a network retires its name for good (old connections must
 never reach a replacement); stop or detach its environments and revoke its
@@ -47,7 +47,7 @@ unless `--no-derp`, for a setup that does not use the hosted one.
 
 ## Trusted host members (Linux)
 
-A trusted host environment (`cw env create --local --type host`) can be
+A trusted host environment (`cw create --local --type host`) can be
 enrolled in a Mesh network and driven from another Linux machine. This is
 delegated control over your own machines, not sharing with other accounts:
 every grant names the exact caller and target keys.
@@ -80,16 +80,19 @@ Grant verbs: `read`, `launch`, `input`, `stop`, `managed-launch`,
 
 ```sh
 cw --member NAME run --name lead --agent codex --detach --prompt '...'
-cw --member NAME list
+cw --member NAME ls
 cw --member NAME msg session-UUID 'text'
 cw --member NAME wait --message MESSAGE_ID --timeout 10m
-cw --member NAME stop session-UUID --request-id UUID --expected-launch-generation N
+cw --member NAME stop --session session-UUID --request-id UUID --expected-launch-generation N
 cw member observe NAME REQUEST_UUID
 ```
 
-`--member` applies to `run`, `list`, `send`, `logs`, `wait`, `stop`,
+`--member` applies to `run`, `ls`, `send`, `logs`, `wait`, `stop`,
 `restart`, `msg`, `steer`, `interrupt` and `inbox`. Sessions are addressed
-by canonical `session-UUID` IDs; command runs need `--no-tty`; attaching is
+by canonical `session-UUID` IDs, with `--session` for `stop`, `restart` and
+`logs`, which never act on the whole environment under `--member`; an
+environment named alongside must be the pinned one, and `--local` or `--cloud`
+is refused; command runs need `--no-tty`; attaching is
 unsupported; `--request-id` and `--expected-launch-generation` make a control
 operation observable after a lost reply. Member control exists on Linux only:
 macOS offers no public way to find a session's processes after their parent

@@ -32,8 +32,8 @@ select a profile.
 ## Create the environment
 
 ```sh
-cw env create --name app --repo https://github.com/owner/private-repo --profile platform:work
-cw env create --name app --repo git@github.com:owner/private-repo@main --profile platform:work
+cw create --name app --repo https://github.com/owner/private-repo --profile platform:work
+cw create --name app --repo git@github.com:owner/private-repo@main --profile platform:work
 ```
 
 GitHub sources may be written as `https://github.com/owner/repo`,

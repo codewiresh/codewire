@@ -131,7 +131,7 @@ cleanup() {
   local id
   if [[ "$KEEP" == 0 ]]; then
     for id in "${CREATED_ENVS[@]}"; do
-      cw env rm --yes "$id" >/dev/null 2>&1 || log "cleanup: could not remove $id"
+      cw rm --yes "$id" >/dev/null 2>&1 || log "cleanup: could not remove $id"
     done
   fi
   if [[ -n "$TMPDIR_PROOF" && -d "$TMPDIR_PROOF" ]]; then
@@ -201,7 +201,7 @@ now_ms() { date +%s%3N; }
 
 # ------------------------------------------------------------ environment
 
-env_info() { cw env --cloud info "$1" --output json 2>/dev/null; }
+env_info() { cw --cloud info "$1" --output json 2>/dev/null; }
 
 env_state() { env_info "$1" | jq -r '.state // ""'; }
 
@@ -235,7 +235,7 @@ create_env() {
   # The per-user create limit (10 per 60 s) resets only after 60 s without a
   # create, so a long run waits out the window instead of failing a journey.
   for attempt in 1 2 3; do
-    if cw env create --image "$PROOF_IMAGE" --name "$name" --cpu "$PROOF_CPU" \
+    if cw create --image "$PROOF_IMAGE" --name "$name" --cpu "$PROOF_CPU" \
       --memory "$PROOF_MEMORY" --disk "$PROOF_DISK" --isolation standard --ttl "$PROOF_TTL" \
       --no-network --no-wait --yes >"$out" 2>&1; then
       break
@@ -256,7 +256,7 @@ create_env() {
 
 remove_env() {
   local id="$1" kept=()
-  cw env rm --yes "$id" >/dev/null 2>&1 || return 1
+  cw rm --yes "$id" >/dev/null 2>&1 || return 1
   for existing in "${CREATED_ENVS[@]}"; do [[ "$existing" == "$id" ]] || kept+=("$existing"); done
   CREATED_ENVS=("${kept[@]}")
 }
@@ -391,7 +391,7 @@ stage_order_ok() {
   # workspace_bind completes before access_ready completes (design §10).
   local id="$1" logs="$TMPDIR_PROOF/logs-$1.txt"
   # The CLI renders setup progress on stderr.
-  cw env logs --follow false "$id" >"$logs" 2>&1 || return 1
+  cw logs "$id" --setup >"$logs" 2>&1 || return 1
   local bind access
   bind="$(grep -n -i 'Binding workspace\|workspace_bind' "$logs" | head -n1 | cut -d: -f1)"
   access="$(grep -n -i 'SSH access ready\|access_ready' "$logs" | tail -n1 | cut -d: -f1)"
@@ -404,7 +404,7 @@ journey_create() {
   local n id started elapsed times=() binds=() accesses=()
   for ((n = 1; n <= PROOF_CREATES; n++)); do
     started="$(now_ms)"
-    id="$(create_env)" || { fail "create $n: cw env create"; continue; }
+    id="$(create_env)" || { fail "create $n: cw create"; continue; }
     if ! wait_ready "$id"; then fail "create $n: $id did not become ready"; continue; fi
     elapsed=$(( $(now_ms) - started ))
     times+=("$elapsed")
@@ -546,10 +546,10 @@ journey_stop_start() {
   wait_ready "$id" || { fail "stop-start: not ready"; return; }
   uid1="$(pod_uid "$id")"; pvc1="$(workspace_pvc_uid "$id")"
   in_workspace "$id" 'echo binding-proof > /workspace/.binding-proof' >/dev/null 2>&1 || fail "stop-start: write marker"
-  cw env stop "$id" >/dev/null 2>&1 || { fail "stop-start: stop"; return; }
+  cw stop "$id" >/dev/null 2>&1 || { fail "stop-start: stop"; return; }
   check "stop-start: stopped" wait_state "$id" stopped
   [[ -z "$SQL_CMD" ]] || check "stop-start: binding released on stop" sql_binding_released "$id" "$uid1"
-  cw env start "$id" >/dev/null 2>&1 || { fail "stop-start: start"; return; }
+  cw start "$id" >/dev/null 2>&1 || { fail "stop-start: start"; return; }
   check "stop-start: running again" wait_ready "$id"
   uid2="$(pod_uid "$id")"; pvc2="$(workspace_pvc_uid "$id")"
   check "stop-start: new Pod UID" test "$uid1" != "$uid2"
@@ -565,7 +565,7 @@ journey_repair() {
   id="$(create_env)" || { fail "repair: create"; return; }
   wait_ready "$id" || { fail "repair: not ready"; return; }
   uid1="$(pod_uid "$id")"
-  cw env daemon repair "$id" >/dev/null 2>&1 || fail "repair: cw env daemon repair"
+  cw daemon repair "$id" >/dev/null 2>&1 || fail "repair: cw daemon repair"
   uid2="$(pod_uid "$id")"
   check "repair: replacement Pod" test "$uid1" != "$uid2"
   check "repair: replacement daemon reachable" daemon_reachable "$id"
@@ -578,8 +578,8 @@ journey_resize() {
   id="$(create_env)" || { fail "resize: create"; return; }
   wait_ready "$id" || { fail "resize: not ready"; return; }
   pvc1="$(workspace_pvc_uid "$id")"
-  cw env resize "$id" --disk "$((PROOF_DISK + 5))Gi" --allow-restart --force --yes >/dev/null 2>&1 ||
-    fail "resize: cw env resize"
+  cw resize "$id" --disk "$((PROOF_DISK + 5))Gi" --allow-restart --force --yes >/dev/null 2>&1 ||
+    fail "resize: cw resize"
   wait_ready "$id" || fail "resize: running after resize"
   pvc2="$(workspace_pvc_uid "$id")"
   check "resize: same PVC UID" test "$pvc1" = "$pvc2"
@@ -593,7 +593,7 @@ journey_destroy_stopped() {
   id="$(create_env)" || { fail "destroy-stopped: create"; return; }
   wait_ready "$id" || { fail "destroy-stopped: not ready"; return; }
   pvc="$(workspace_pvc_uid "$id")"; sandbox="$(claim_sandbox "$id")"
-  if ! cw env stop "$id" >/dev/null 2>&1 || ! wait_state "$id" stopped; then
+  if ! cw stop "$id" >/dev/null 2>&1 || ! wait_state "$id" stopped; then
     fail "destroy-stopped: stop"
     return
   fi
@@ -636,11 +636,11 @@ journey_replay() {
 journey_legacy_upgrade() {
   local id="$LEGACY_ENV_ID"
   check "legacy-upgrade: precondition, the Pod renders the environment token" pod_is_legacy "$id"
-  if ! cw env stop "$id" >/dev/null 2>&1 || ! wait_state "$id" stopped; then
+  if ! cw stop "$id" >/dev/null 2>&1 || ! wait_state "$id" stopped; then
     fail "legacy-upgrade: stop"
     return
   fi
-  cw env start "$id" >/dev/null 2>&1 || { fail "legacy-upgrade: start"; return; }
+  cw start "$id" >/dev/null 2>&1 || { fail "legacy-upgrade: start"; return; }
   check "legacy-upgrade: running again" wait_ready "$id"
   check "legacy-upgrade: now identity-free" pod_is_identity_free "$id"
   check "legacy-upgrade: daemon reachable" daemon_reachable "$id"

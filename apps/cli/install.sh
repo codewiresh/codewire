@@ -3,7 +3,7 @@
 # a POSIX shell, curl and a SHA-256 tool. This first download trusts HTTPS to
 # releases.codewire.sh: the executable must match the SHA-256 that the
 # release's SHA256SUMS lists for this platform. The verified cw then installs
-# itself as a managed installation, so `cw update` verifies every later release
+# itself as a managed installation, so `cw upgrade` verifies every later release
 # with its compiled release key and needs neither GnuPG nor Python.
 #
 # Usage: curl -fsSL https://codewire.sh/install.sh | sh -s -- [--version vX.Y.Z] [--prefix DIR] [--verbose]

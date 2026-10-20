@@ -71,7 +71,7 @@ fn ssh_test_options(ssh_options: &[&str]) -> SshConfigOptions {
 }
 
 const CURRENT_MANAGED_SSH_BLOCK: &str = "# ---- START CODEWIRE ----
-# This section is managed by Codewire. Re-run `cw config-ssh` to update it.
+# This section is managed by Codewire. Re-run `cw setup ssh` to update it.
 # It stays first in this file: OpenSSH uses the first value it finds for an option.
 Host cw-*
     ProxyCommand /opt/codewire/bin/cw shell --stdio %n
@@ -785,21 +785,59 @@ fn setup_parser_accepts_noninteractive_flags() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn setup_local_installs_the_runtime_without_signing_in() {
-    let cli = Cli::try_parse_from(["cw", "setup", "--local", "--from", "/abs/release", "--replace"])
-        .unwrap();
-    let Command::Setup(args) = cli.command else {
-        panic!("expected setup command");
-    };
-    assert!(args.local && args.replace);
-    assert_eq!(args.from.as_deref(), Some(std::path::Path::new("/abs/release")));
+    // The global flag reaches setup from either side of the command.
+    for argv in [
+        vec!["cw", "setup", "--local", "--from", "/abs/release", "--replace"],
+        vec!["cw", "--local", "setup", "--from", "/abs/release", "--replace"],
+    ] {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        assert_eq!(cli.placement().unwrap(), Some(EnvironmentPlacement::Local));
+        let Command::Setup(args) = cli.command else {
+            panic!("expected setup command");
+        };
+        assert!(args.replace);
+        assert_eq!(args.from.as_deref(), Some(std::path::Path::new("/abs/release")));
+        validate_setup_placement(&args, Some(EnvironmentPlacement::Local)).unwrap();
+    }
     for command in [
         vec!["cw", "setup", "--from", "/abs/release"],
         vec!["cw", "setup", "--replace"],
         vec!["cw", "setup", "--local", "--org", "codewire"],
         vec!["cw", "setup", "--local", "--skip-ssh"],
+        vec!["cw", "--cloud", "setup", "--replace"],
     ] {
-        assert!(Cli::try_parse_from(command.clone()).is_err(), "{command:?}");
+        let cli = Cli::try_parse_from(command.clone()).unwrap();
+        let placement = cli.placement().unwrap();
+        let Command::Setup(args) = cli.command else {
+            panic!("expected setup command");
+        };
+        assert!(validate_setup_placement(&args, placement).is_err(), "{command:?}");
     }
+}
+
+#[test]
+fn setup_ssh_replaces_config_ssh_and_takes_no_placement() {
+    let cli = Cli::try_parse_from(["cw", "setup", "ssh", "-n", "-o", "ForwardX11 no"]).unwrap();
+    let Command::Setup(SetupArgs {
+        command: Some(SetupCommand::Ssh(args)),
+        ..
+    }) = cli.command
+    else {
+        panic!("expected setup ssh");
+    };
+    assert!(args.dry_run);
+    assert_eq!(args.ssh_options, ["ForwardX11 no"]);
+    assert!(Cli::try_parse_from(["cw", "setup", "ssh", "--org", "codewire"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "config-ssh"]).is_err());
+    let cli = Cli::try_parse_from(["cw", "--local", "setup", "ssh"]).unwrap();
+    let error = crate::validate_placement_scope(
+        &cli.command,
+        "setup",
+        cli.placement().unwrap(),
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "--local does not apply to `cw setup ssh`");
 }
 
 #[test]
@@ -867,6 +905,7 @@ fn resolve_setup_server_url_defaults_to_hosted_codewire() {
     let globals = Globals {
         server: None,
         member: None,
+        placement: None,
     };
 
     assert_eq!(
@@ -883,6 +922,7 @@ fn resolve_setup_server_url_prefers_global_server() {
     let globals = Globals {
         server: Some(" https://flag.codewire.sh/ ".to_string()),
         member: None,
+        placement: None,
     };
 
     assert_eq!(
@@ -996,19 +1036,16 @@ fn test_environment(id: &str, name: Option<&str>, state: &str) -> Environment {
 
 #[test]
 fn env_report_command_parser_accepts_json_and_rejects_retired_names() {
-    let cli = Cli::try_parse_from(["cw", "env", "report", "builder", "--output", "json"]).unwrap();
-    let Command::Env(EnvArgs {
-        command: EnvCommand::Report(args),
-        ..
-    }) = cli.command
+    let cli = Cli::try_parse_from(["cw", "report", "builder", "--output", "json"]).unwrap();
+    let (_, _, EnvCommand::Report(args)) = env_operation(cli)
     else {
         panic!("expected env report command");
     };
     assert_eq!(args.environment, "builder");
     assert_eq!(args.output, OutputFormat::Json);
 
-    assert!(Cli::try_parse_from(["cw", "env", "trust-report", "builder"]).is_err());
-    assert!(Cli::try_parse_from(["cw", "env", "attest", "builder"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "trust-report", "builder"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "attest", "builder"]).is_err());
 }
 
 #[test]
@@ -1218,46 +1255,123 @@ fn format_current_target_text_reports_local_and_mesh_network() {
     );
 }
 
+/// Rows of a rendered top-level help, as (section heading, command name).
+fn help_rows(help: &str) -> Vec<(String, String)> {
+    let mut heading = String::new();
+    let mut rows = Vec::new();
+    for line in help.lines() {
+        if line.ends_with(':') && !line.starts_with(' ') {
+            heading = line.trim_end_matches(':').to_owned();
+        } else if let Some(row) = line.strip_prefix("  ")
+            && heading != "Options"
+            && !row.starts_with(' ')
+            && !row.is_empty()
+        {
+            let name = row.split([' ', ',']).next().unwrap_or_default();
+            rows.push((heading.clone(), name.to_owned()));
+        }
+    }
+    rows
+}
+
 #[test]
 fn top_level_help_groups_every_visible_command_once() {
     use clap::CommandFactory as _;
-    let help = crate::cli_command().render_help().to_string();
     let visible: Vec<String> = crate::Cli::command()
         .get_subcommands()
         .filter(|command| !command.is_hide_set())
         .map(|command| command.get_name().to_owned())
         .collect();
-    for name in visible.iter().map(String::as_str).chain(["help"]) {
+    for name in &visible {
         let sections = crate::HELP_SECTIONS
             .iter()
-            .filter(|(_, names)| names.contains(&name))
+            .filter(|section| section.commands.contains(&name.as_str()))
             .count();
         assert_eq!(sections, 1, "{name} belongs to exactly one help section");
-        let rows = help
-            .lines()
-            .filter(|line| {
-                let line = line.trim_start();
-                line.starts_with(&format!("{name} ")) || line.starts_with(&format!("{name}, "))
-            })
-            .count();
-        assert_eq!(rows, 1, "{name} is listed once");
     }
-    assert!(!help.contains("\nOther:\n"));
-    assert!(!help.contains("__"));
-    let headings: Vec<&str> = help
-        .lines()
-        .filter(|line| line.ends_with(':') && !line.starts_with(' '))
-        .collect();
-    let expected: Vec<String> = crate::HELP_SECTIONS
-        .iter()
-        .map(|(heading, _)| format!("{heading}:"))
-        .chain(["Options:".to_owned()])
-        .collect();
-    assert_eq!(headings, expected);
+    // Every listed name is a real visible command: nothing removed lingers.
+    for section in crate::HELP_SECTIONS {
+        for name in section.commands {
+            assert!(
+                visible.iter().any(|candidate| candidate == name),
+                "{name} in {} is a visible command",
+                section.heading
+            );
+        }
+    }
+    for all in [false, true] {
+        let help = crate::cli_command_with(all).render_help().to_string();
+        let rows = help_rows(&help);
+        assert!(!help.contains("\nOther:\n"));
+        assert!(!help.contains("__"));
+        let expected: Vec<&str> = crate::HELP_SECTIONS
+            .iter()
+            .filter(|section| all || section.everyday)
+            .map(|section| section.heading)
+            .collect();
+        let mut headings: Vec<&str> = Vec::new();
+        for (heading, _) in &rows {
+            if headings.last() != Some(&heading.as_str()) {
+                headings.push(heading);
+            }
+        }
+        assert_eq!(headings, expected, "help --all={all}");
+        for section in crate::HELP_SECTIONS {
+            for name in section.commands {
+                let listed = rows
+                    .iter()
+                    .filter(|(heading, row)| heading == section.heading && row == name)
+                    .count();
+                let shown = all || section.everyday;
+                assert_eq!(listed, usize::from(shown), "{name} with --all={all}");
+            }
+        }
+        // Hidden internals and removed routes never appear.
+        for hidden in ["env", "ssh", "config-ssh", "list", "_agent-driver"] {
+            assert!(
+                !rows.iter().any(|(_, name)| name == hidden),
+                "{hidden} is hidden from help --all={all}"
+            );
+        }
+    }
+    // `cw help --all` lists every visible command.
+    let full = help_rows(&crate::cli_command_with(true).render_help().to_string());
+    for name in &visible {
+        assert!(full.iter().any(|(_, row)| row == name), "{name} in help --all");
+    }
+    let everyday = crate::cli_command().render_help().to_string();
+    assert!(everyday.contains("`cw help --all` lists every command"));
 }
 
 #[test]
-fn every_list_command_answers_to_ls() {
+fn help_names_availability_limits_and_the_help_command_renders_from_the_parser() {
+    let full = crate::cli_command_with(true).render_help().to_string();
+    assert!(full.contains("(Linux only)"), "{full}");
+    let restart = full
+        .lines()
+        .find(|line| line.trim_start().starts_with("restart "))
+        .unwrap();
+    assert!(restart.contains("local environment"), "{restart}");
+    let cli = Cli::try_parse_from(["cw", "help", "--all"]).unwrap();
+    let Command::Help(args) = cli.command else {
+        panic!("expected help");
+    };
+    assert!(args.all && args.command.is_empty());
+    let cli = Cli::try_parse_from(["cw", "help", "runtime", "update"]).unwrap();
+    let Command::Help(args) = cli.command else {
+        panic!("expected help");
+    };
+    assert_eq!(args.command, ["runtime", "update"]);
+    assert!(Cli::try_parse_from(["cw", "help", "--all", "stop"]).is_err());
+    assert!(crate::commands::flat::handle_help(crate::commands::HelpArgs {
+        all: false,
+        command: vec!["env".into()],
+    })
+    .is_err());
+}
+
+#[test]
+fn every_list_subcommand_answers_to_ls_and_ls_is_the_one_inventory_route() {
     use clap::CommandFactory as _;
     fn walk(command: &clap::Command, path: &str, lists: &mut Vec<String>) {
         for subcommand in command.get_subcommands() {
@@ -1274,9 +1388,28 @@ fn every_list_command_answers_to_ls() {
     }
     let mut lists = Vec::new();
     walk(&crate::Cli::command(), "cw", &mut lists);
-    for path in ["cw list", "cw env list", "cw credentials list", "cw network list"] {
+    for path in ["cw credentials list", "cw network list"] {
         assert!(lists.iter().any(|list| list == path), "{path} exists");
     }
+    // `cw ls` is the one inventory route; `list` is its visible alias.
+    let ls = crate::Cli::command();
+    let ls = ls.find_subcommand("ls").unwrap();
+    assert!(ls.get_visible_aliases().any(|alias| alias == "list"));
     let help = crate::cli_command().render_help().to_string();
-    assert!(help.lines().any(|line| line.trim_start().starts_with("list, ls ")));
+    assert!(help.lines().any(|line| line.trim_start().starts_with("ls, list ")));
+    for (alias, canonical) in [
+        (vec!["cw", "list"], vec!["cw", "ls"]),
+        (
+            vec!["cw", "list", "--type", "sandbox", "--state", "running", "-a", "--output", "json"],
+            vec!["cw", "ls", "--type", "sandbox", "--state", "running", "-a", "--output", "json"],
+        ),
+        (vec!["cw", "--cloud", "list", "app"], vec!["cw", "--cloud", "ls", "app"]),
+    ] {
+        let alias = Cli::try_parse_from(alias).unwrap();
+        let canonical = Cli::try_parse_from(canonical).unwrap();
+        assert_eq!(
+            (alias.local, alias.cloud, format!("{:?}", alias.command)),
+            (canonical.local, canonical.cloud, format!("{:?}", canonical.command))
+        );
+    }
 }

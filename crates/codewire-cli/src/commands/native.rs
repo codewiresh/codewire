@@ -1805,7 +1805,7 @@ async fn native_boot_client_here() -> anyhow::Result<NativeSupervisorClient> {
     Ok(client)
 }
 
-/// `cw update` selected an older cw, one without `cw env --local upgrade`. It
+/// `cw upgrade` selected an older cw, one without the updater hand-off. It
 /// refuses this cw's local VM supervisor ("a newer cw runs your local VMs")
 /// and cannot retire it, so hand the state root back while no VM runs on it.
 /// Anything but a confirmed idle supervisor changes nothing, and says how to
@@ -1816,7 +1816,7 @@ pub(crate) async fn release_local_vms_for_older_cw(version: &str) {
     let Ok(config) = native_runtime_config() else {
         return;
     };
-    let hand_over = "to hand them over, select this cw again (`cw update rollback`), stop them (`cw env --local stop NAME`), then roll back";
+    let hand_over = "to hand them over, select this cw again (`cw upgrade rollback`), stop them (`cw --local stop NAME`), then roll back";
     match release_for_older_cw(&config).await {
         Ok(OlderCwRelease::Nothing | OlderCwRelease::Released) => {}
         Ok(OlderCwRelease::Busy(names)) => eprintln!(
@@ -1829,10 +1829,10 @@ pub(crate) async fn release_local_vms_for_older_cw(version: &str) {
     }
 }
 
-/// `cw env --local upgrade`: move the local VMs a previous cw's supervisor
+/// `cw upgrade --vms`: move the local VMs a previous cw's supervisor
 /// still runs to this cw. Each stops through that supervisor, the ordinary
 /// stop; the supervisor then hands the state root over, and each starts again
-/// here. With `after_update`, the hand-off `cw update` runs, nothing is
+/// here. With `after_update`, the hand-off `cw upgrade` runs, nothing is
 /// printed when nothing moves, and nothing moves unless this cw is still the
 /// store's selection.
 pub(crate) async fn upgrade_native_environments(
@@ -1858,10 +1858,37 @@ pub(crate) async fn upgrade_native_environments(
             for name in previous.stopping() {
                 eprintln!("cw: local VM {name} still runs on the cw you updated from");
             }
-            eprintln!("cw: restart them with `cw env --local upgrade`");
+            eprintln!("cw: restart them with `cw upgrade --vms`");
             Ok(())
         }
     }
+}
+
+/// The local VMs that would run on an older cw than the one `cw upgrade`
+/// leaves selected: those on a previous cw's supervisor, and, when the CLI
+/// selection changes, those on this cw's own. Starts nothing; a VM no stop
+/// reaches refuses the question as it would the restart.
+pub(crate) async fn local_vms_on_an_older_cw(cli_changes: bool) -> anyhow::Result<Vec<String>> {
+    let config = native_runtime_config()?;
+    if let Some(previous) = codewire_local_vmm::supervisor_upgrade::previous_cw(&config).await? {
+        refuse_orphaned(&previous)?;
+        return Ok(previous.stopping().map(str::to_owned).collect());
+    }
+    if !cli_changes || std::os::unix::net::UnixStream::connect(config.supervisor_socket()).is_err()
+    {
+        return Ok(Vec::new());
+    }
+    Ok(native_environments()
+        .await?
+        .into_iter()
+        .filter(|environment| {
+            matches!(
+                v1::EnvironmentState::try_from(environment.state),
+                Ok(v1::EnvironmentState::Running | v1::EnvironmentState::Starting)
+            )
+        })
+        .map(|environment| environment.name)
+        .collect())
 }
 
 enum Consent {
@@ -1947,12 +1974,12 @@ async fn move_previous_environments(
     }
     for name in &previous.stop_only {
         eprintln!(
-            "cw: local VM {name} was in an error state and stays stopped; start it with `cw env --local start {name}`"
+            "cw: local VM {name} was in an error state and stays stopped; start it with `cw --local start {name}`"
         );
     }
     anyhow::ensure!(
         failed.is_empty(),
-        "local VMs {} stopped but did not start on this cw; start them with `cw env --local start NAME`",
+        "local VMs {} stopped but did not start on this cw; start them with `cw --local start NAME`",
         failed.join(", ")
     );
     Ok(true)
@@ -1982,7 +2009,7 @@ async fn offer_restart_when_refused(error: anyhow::Error) -> anyhow::Error {
     ) {
         return error;
     }
-    let hint = || anyhow::anyhow!("{error}\ncw: restart them with `cw env --local upgrade`");
+    let hint = || anyhow::anyhow!("{error}\ncw: restart them with `cw upgrade --vms`");
     let config = match native_runtime_config() {
         Ok(config) => config,
         Err(_) => return hint(),
@@ -2112,7 +2139,7 @@ pub(crate) async fn setup_local_runtime(
 /// Why `cw setup --local` has nothing to install (#2733). A published release
 /// with no runtime for this host is not a development build, and no release
 /// for this host may exist yet, so it points to hosted Sandboxes rather than
-/// to `cw update` or `--from`.
+/// to `cw upgrade` or `--from`.
 fn no_pinned_runtime(
     record: &codewire_cw_release::build_record::BuildRecord,
     host: &str,
@@ -2121,7 +2148,7 @@ fn no_pinned_runtime(
         && codewire_cw_release::release::valid_release_tag(&record.package_version)
     {
         format!(
-            "Local VMs aren't available on {} yet; hosted Sandboxes work (`cw env create --cloud`).",
+            "Local VMs aren't available on {} yet; hosted Sandboxes work (`cw --cloud create`).",
             host_name(host)
         )
     } else {
@@ -3786,7 +3813,6 @@ mod tests {
         use clap::Parser as _;
         let cli = crate::Cli::try_parse_from([
             "cw",
-            "env",
             "create",
             "--local",
             "--install",
@@ -3795,11 +3821,7 @@ mod tests {
             "printf startup",
         ])
         .unwrap();
-        let crate::Command::Env(EnvArgs {
-            command: EnvCommand::Create(mut args),
-            ..
-        }) = cli.command
-        else {
+        let (_, _, EnvCommand::Create(mut args)) = crate::commands::env_operation(cli) else {
             panic!("expected environment creation");
         };
         reject_unsupported_native_create_options(&args).unwrap();
@@ -4388,14 +4410,14 @@ working_directory: /workspace/github
         let release = no_pinned_runtime(&record("v0.3.389", Some(&revision)), "linux-aarch64");
         assert_eq!(
             release,
-            "Local VMs aren't available on Linux arm64 yet; hosted Sandboxes work (`cw env create --cloud`)."
+            "Local VMs aren't available on Linux arm64 yet; hosted Sandboxes work (`cw --cloud create`)."
         );
         let release = no_pinned_runtime(&record("v0.3.389", Some(&revision)), "linux-x86_64");
         assert!(
             release.starts_with("Local VMs aren't available on Linux x86_64 yet;"),
             "{release}"
         );
-        for misleading in ["development build", "cw update", "--from"] {
+        for misleading in ["development build", "cw upgrade", "--from"] {
             assert!(!release.contains(misleading), "{release}");
         }
         assert_eq!(host_name("macos-aarch64"), "macOS arm64");

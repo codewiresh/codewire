@@ -13,8 +13,8 @@ host. Set `ENV` to your environment's name.
   with a provider for each agent: the `codex` slot (or an OpenAI API key) for
   Codex, the `anthropic` slot for Claude Code. See
   [Provider credentials](@/guides/credentials.md), then
-  `cw env create ... --profile platform:NAME` or
-  `cw env update ENV --profile platform:NAME` (`local:NAME` on a local VM).
+  `cw create ... --profile platform:NAME` or
+  `cw update ENV --profile platform:NAME` (`local:NAME` on a local VM).
 - **Trusted host**: install Codex and Claude Code on your `PATH` and sign in
   to them yourself; the host uses your ordinary `HOME`.
 
@@ -27,7 +27,7 @@ cw run "$ENV" --name implement --parent lead --agent codex --detach --output jso
   --prompt 'Implement the assigned change and report the result.'
 cw run "$ENV" --name review --parent lead --agent claude --detach --output json \
   --prompt 'Review the assigned change without editing files.'
-cw list "$ENV"
+cw ls "$ENV"
 ```
 
 Each launch returns a session ID; a launch with `--prompt` also returns a
@@ -70,7 +70,7 @@ applied.
 ```sh
 cw run "$ENV" --name check --detach --no-tty -- make test
 cw wait "$ENV" check --timeout 10m
-cw logs "$ENV" check
+cw logs "$ENV" --session check
 cw run "$ENV" --name shell --tty --detach -- sh
 cw send "$ENV" shell 'pwd'
 cw attach "$ENV" shell          # Ctrl+B d detaches
@@ -84,20 +84,22 @@ Raw input (`send`, `attach`) is refused for managed conversations.
 Closing your terminal changes nothing in the environment:
 
 ```sh
-cw list "$ENV"
-cw logs "$ENV" implement
+cw ls "$ENV"
+cw logs "$ENV" --session implement
 cw inbox "$ENV" implement
 ```
 
-`cw interrupt` ends an active turn. `cw stop` cancels the whole conversation
-(at a terminal it asks about running children; `--all` stops them too), and
-`cw restart` resumes the retained conversation from its saved session. An
+`cw interrupt` ends an active turn. `cw stop "$ENV" --session NAME` cancels
+the whole conversation (at a terminal it asks about running children; `--all`
+stops them too), and `cw restart "$ENV" --session NAME` resumes the retained
+conversation from its saved session. Without `--session`, `stop` and
+`restart` act on the whole environment. An
 interrupted turn can remain unknown; restarting does not resubmit it.
 
 ### After a hosted sandbox stops and starts
 
-A managed conversation stops with its sandbox. After `cw env start`, it is
-still listed, and `cw msg` or `cw restart` resumes it in the new sandbox with
+A managed conversation stops with its sandbox. After `cw start`, it is
+still listed, and `cw msg` or `cw restart ENV --session NAME` resumes it in the new sandbox with
 its earlier turns; a `cw wait --message` for a message sent before the stop
 completes once the conversation has resumed. What was in flight is not
 replayed. If the environment refuses the resume before anything ran (for
@@ -115,17 +117,17 @@ If a platform control request loses its reply, observe the original request
 instead of resending it:
 
 ```sh
-cw env agent observe "$ENV" --request-id "$ORIGINAL_REQUEST_ID" --output json
-cw stop "$ENV" implement --cleanup-request-id "$ORIGINAL_REQUEST_ID"
+cw agent observe "$ENV" --request-id "$ORIGINAL_REQUEST_ID" --output json
+cw stop "$ENV" --session implement --cleanup-request-id "$ORIGINAL_REQUEST_ID"
 ```
 
 ## Clean up
 
 ```sh
-cw stop "$ENV" review
-cw stop "$ENV" implement
-cw stop "$ENV" lead --all
-cw env stop "$ENV"
+cw stop "$ENV" --session review
+cw stop "$ENV" --session implement
+cw stop "$ENV" --session lead --all
+cw stop "$ENV"
 ```
 
 ## On a trusted Linux host

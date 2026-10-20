@@ -270,51 +270,51 @@ fn session_table_aligns_columns_and_names_the_parent() {
         running_children_hints(&sessions[1..2], &sessions[0], Some("team")),
         [
             "cw: child session session-2 is still running",
-            "cw: stop them with `cw stop --all team lead`",
+            "cw: stop them with `cw stop team --session lead --all`",
         ]
     );
-    let Command::Stop(stop) = Cli::try_parse_from(["cw", "stop", "--all", "team", "lead"])
+    assert_eq!(
+        running_children_hints(&sessions[1..2], &sessions[0], None)[1],
+        "cw: stop them with `cw stop --session lead --all`"
+    );
+    let Command::Stop(stop) = Cli::try_parse_from(["cw", "stop", "--all", "team", "--session", "lead"])
         .unwrap()
         .command
     else {
         panic!("stop expected");
     };
     assert!(stop.all);
-    assert_eq!(stop.session.target, ["team", "lead"]);
-    assert!(Cli::try_parse_from(["cw", "restart", "--all", "lead"]).is_err());
+    assert_eq!(stop.scope.environment.as_deref(), Some("team"));
+    assert_eq!(stop.scope.session.as_deref(), Some("lead"));
+    assert!(Cli::try_parse_from(["cw", "restart", "--all", "--session", "lead"]).is_err());
     let mut stopped = sessions[1].clone();
     stopped.state = "Stopped".to_string();
     assert!(running_children(&[stopped], &std::collections::BTreeSet::from(["session-1".to_string()])).is_empty());
     assert_eq!(
         format_environment_sessions(&sessions, "  "),
         concat!(
-            "  NAME    STATE    PARENT     SESSION    COMMAND\n",
-            "  lead    Running  -          session-1  bash\n",
-            "  -       Running  lead       session-2  cargo test\n",
-            "  orphan  Running  session-9  session-3  sleep 5\n",
+            "  NAME    STATE    MODE    PARENT     SESSION    COMMAND\n",
+            "  lead    Running  normal  -          session-1  bash\n",
+            "  -       Running  normal  lead       session-2  cargo test\n",
+            "  orphan  Running  normal  session-9  session-3  sleep 5\n",
         )
     );
 }
 
 #[test]
 fn session_grammar_uses_environment_as_first_positional() {
-    let list = Cli::try_parse_from(["cw", "list", "builder"]).unwrap();
-    let Command::List(args) = list.command else {
-        panic!("expected list command");
+    let Command::Ls(args) = Cli::try_parse_from(["cw", "ls", "builder"]).unwrap().command else {
+        panic!("expected ls command");
     };
     assert_eq!(args.environment.as_deref(), Some("builder"));
-    for argv in [vec!["cw", "list"], vec!["cw", "ls"], vec!["cw", "ls", "--all"]] {
-        let Command::List(args) = Cli::try_parse_from(argv).unwrap().command else {
-            panic!("expected list command");
+    for argv in [vec!["cw", "ls"], vec!["cw", "ls", "--all"], vec!["cw", "--local", "ls"]] {
+        let Command::Ls(args) = Cli::try_parse_from(argv).unwrap().command else {
+            panic!("expected ls command");
         };
         assert_eq!(args.environment, None, "no ENV lists every environment");
     }
-    let Command::List(args) = Cli::try_parse_from(["cw", "ls", "builder"]).unwrap().command else {
-        panic!("expected list command");
-    };
-    assert_eq!(args.environment.as_deref(), Some("builder"));
 
-    let logs = Cli::try_parse_from(["cw", "logs", "builder", "session-1"]).unwrap();
+    let logs = Cli::try_parse_from(["cw", "logs", "builder", "--session", "session-1"]).unwrap();
     let Command::Logs(args) = logs.command else {
         panic!("expected logs command");
     };
@@ -327,6 +327,231 @@ fn session_grammar_uses_environment_as_first_positional() {
     };
     assert_eq!(args.environment.as_deref(), Some("session-1"));
     assert_eq!(args.session, None);
+}
+
+/// The scope errors `stop`, `restart` and `logs` give before any lookup.
+async fn scope_error(argv: &[&str]) -> String {
+    let cli = Cli::try_parse_from(argv).unwrap();
+    let globals = Globals {
+        server: None,
+        member: cli.member.clone(),
+        placement: cli.placement().unwrap(),
+    };
+    let error = match cli.command {
+        Command::Stop(args) => crate::commands::flat::handle_stop(&globals, args).await,
+        Command::Restart(args) => crate::commands::flat::handle_restart(&globals, args).await,
+        Command::Logs(args) => crate::commands::flat::handle_logs(&globals, args).await,
+        Command::Update(args) => crate::commands::flat::handle_update(&globals, args).await,
+        other => panic!("unexpected {other:?}"),
+    }
+    .unwrap_err();
+    error.to_string()
+}
+
+#[tokio::test]
+async fn stop_restart_and_logs_refuse_unscoped_or_retired_selectors_before_effects() {
+    for (argv, message) in [
+        (
+            vec!["cw", "stop"],
+            "missing environment: `cw stop ENV` acts on a whole environment; `cw stop --session SESSION` acts on one session in the selected environment",
+        ),
+        (
+            vec!["cw", "restart"],
+            "missing environment: `cw restart ENV` acts on a whole environment; `cw restart --session SESSION` acts on one session in the selected environment",
+        ),
+        (
+            vec!["cw", "stop", "app", "coding"],
+            "`cw stop ENV SESSION` no longer selects a session; use `cw stop app --session coding`",
+        ),
+        (
+            vec!["cw", "restart", "app", "coding"],
+            "`cw restart ENV SESSION` no longer selects a session; use `cw restart app --session coding`",
+        ),
+        (
+            vec!["cw", "logs", "app", "coding"],
+            "`cw logs ENV SESSION` no longer selects a session; use `cw logs app --session coding`",
+        ),
+        (
+            vec!["cw", "stop", "--all", "app"],
+            "--all stops a session's running descendants; add --session SESSION",
+        ),
+        (
+            vec!["cw", "stop", "app", "--in", "app", "--session", "coding"],
+            "name the environment once: `cw stop ENV` or `cw stop --in ENV`, not both",
+        ),
+        (
+            vec!["cw", "logs", "app", "--in", "app", "--session", "coding"],
+            "name the environment once: `cw logs ENV` or `cw logs --in ENV`, not both",
+        ),
+        (
+            vec!["cw", "stop", "app", "--cleanup-request-id", "11111111-1111-4111-8111-111111111111"],
+            "--request-id, --expected-launch-generation and --cleanup-request-id apply to one --session",
+        ),
+        (
+            vec!["cw", "logs", "app", "--setup", "--tail", "5"],
+            "--tail and --raw apply to session output, not to --setup logs",
+        ),
+        (
+            vec!["cw", "--local", "logs", "app", "--setup"],
+            "setup logs are kept for cloud environments; a local environment shows its setup as `cw start` or `cw create` runs",
+        ),
+        (
+            vec!["cw", "update"],
+            "missing environment: `cw update ENV` changes an environment's secrets and credential profile; `cw upgrade` upgrades the CLI",
+        ),
+        (
+            vec!["cw", "update", "--restart-vms", "app"],
+            "`cw update ENV` changes an environment and takes no --restart-vms; `cw upgrade` upgrades the CLI and restarts local VMs (see `cw upgrade --help`)",
+        ),
+        (
+            vec!["cw", "update", "rollback", "--to", "v0.3.391"],
+            "`cw update ENV` changes an environment and takes no --to; `cw upgrade` upgrades the CLI and restarts local VMs (see `cw upgrade --help`)",
+        ),
+    ] {
+        assert_eq!(scope_error(&argv).await, message, "{argv:?}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_member_never_controls_a_whole_environment() {
+    for argv in [
+        vec!["cw", "--member", "build", "stop", "app"],
+        vec!["cw", "--member", "build", "restart", "app"],
+    ] {
+        let message = scope_error(&argv).await;
+        assert!(
+            message.contains("a member never controls a whole environment"),
+            "{argv:?}: {message}"
+        );
+    }
+    assert_eq!(
+        scope_error(&["cw", "--member", "build", "logs", "app", "--setup"]).await,
+        "--setup is not available with --member; name the --session"
+    );
+}
+
+#[test]
+fn update_takes_environment_names_that_once_were_updater_subcommands() {
+    for name in ["status", "rollback"] {
+        let cli = Cli::try_parse_from(["cw", "update", name, "--clear-profile"]).unwrap();
+        let (_, _, EnvCommand::Update(args)) = env_operation(cli) else {
+            panic!("expected update");
+        };
+        assert_eq!(args.environment, name);
+        assert!(args.clear_profile);
+    }
+    let cli = Cli::try_parse_from(["cw", "update", "--in", "app", "--profile", "local:work"]).unwrap();
+    let (_, _, EnvCommand::Update(args)) = env_operation(cli) else {
+        panic!("expected update");
+    };
+    assert_eq!(args.environment, "app");
+    assert_eq!(args.profile.as_deref(), Some("local:work"));
+}
+
+#[test]
+fn placement_is_refused_by_commands_that_do_not_read_it() {
+    for (argv, name) in [
+        (vec!["cw", "--local", "login"], "login"),
+        (vec!["cw", "run", "--cloud", "app", "--", "true"], "run"),
+        (vec!["cw", "--local", "attach", "app"], "attach"),
+        (vec!["cw", "--cloud", "shell", "app"], "shell"),
+        (vec!["cw", "--local", "upgrade", "status"], "upgrade"),
+        (vec!["cw", "--cloud", "help"], "help"),
+    ] {
+        let matches = crate::cli_command().try_get_matches_from(argv.clone()).unwrap();
+        let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();
+        let error = crate::validate_placement_scope(
+            &cli.command,
+            matches.subcommand_name().unwrap(),
+            cli.placement().unwrap(),
+            false,
+        )
+        .unwrap_err();
+        let flag = if argv.contains(&"--local") { "--local" } else { "--cloud" };
+        assert_eq!(error.to_string(), format!("{flag} does not apply to `cw {name}`"));
+    }
+    for argv in [
+        vec!["cw", "--local", "stop", "app"],
+        vec!["cw", "stop", "app", "--cloud"],
+        vec!["cw", "--cloud", "credentials", "list"],
+        vec!["cw", "secrets", "--local", "--user", "list"],
+        vec!["cw", "--local", "use", "app"],
+        vec!["cw", "--cloud", "prune"],
+    ] {
+        let matches = crate::cli_command().try_get_matches_from(argv.clone()).unwrap();
+        let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();
+        crate::validate_placement_scope(
+            &cli.command,
+            matches.subcommand_name().unwrap(),
+            cli.placement().unwrap(),
+            false,
+        )
+        .unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+    }
+    let matches = crate::cli_command()
+        .try_get_matches_from(["cw", "--member", "build", "--local", "ls"])
+        .unwrap();
+    let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();
+    assert!(
+        crate::validate_placement_scope(&cli.command, "ls", cli.placement().unwrap(), true)
+            .is_err()
+    );
+}
+
+#[test]
+fn retired_env_routes_keep_only_the_exact_updater_handoff() {
+    use crate::commands::flat::{RetiredEnvRoute, retired_env_route};
+    fn route(argv: &[&str]) -> RetiredEnvRoute {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        let placement = cli.placement().unwrap();
+        let Command::Env(args) = cli.command else {
+            panic!("expected the hidden env route for {argv:?}");
+        };
+        let raw: Vec<std::ffi::OsString> = argv.iter().map(Into::into).collect();
+        retired_env_route(&raw, placement, &args.arguments)
+    }
+    // Exactly the argv every updater since #2870 runs, in both directions.
+    assert_eq!(
+        route(&["cw", "env", "--local", "upgrade", "--help"]),
+        RetiredEnvRoute::HandoffProbe
+    );
+    assert_eq!(
+        route(&["cw", "env", "--local", "upgrade", "--after-update"]),
+        RetiredEnvRoute::Handoff { yes: false }
+    );
+    assert_eq!(
+        route(&["cw", "env", "--local", "upgrade", "--after-update", "--yes"]),
+        RetiredEnvRoute::Handoff { yes: true }
+    );
+    for (argv, replacement) in [
+        (vec!["cw", "env", "stop", "app"], "`cw stop app`"),
+        (vec!["cw", "env", "list"], "`cw ls`"),
+        (vec!["cw", "env", "--cloud", "list", "--output", "json"], "`cw --cloud ls --output json`"),
+        (vec!["cw", "env", "--local", "upgrade"], "`cw upgrade --vms`"),
+        (vec!["cw", "env", "upgrade", "--after-update"], "`cw upgrade --vms`"),
+        (vec!["cw", "env", "--local", "upgrade", "--yes", "--after-update"], "`cw upgrade --vms`"),
+        (vec!["cw", "--local", "env", "upgrade", "--help"], "`cw upgrade --vms`"),
+        (vec!["cw", "env", "logs", "app"], "`cw logs app --setup`"),
+        (vec!["cw", "env", "port", "add", "3000", "--env", "app"], "`cw ports app --publish 3000`"),
+        (vec!["cw", "env", "port", "rm", "3000", "-e", "app"], "`cw ports app --unpublish 3000`"),
+        (vec!["cw", "env", "--local", "port", "ls"], "`cw --local ports ENV`"),
+        (vec!["cw", "env", "create", "--local", "--name", "my app"], "`cw create --local --name \"my app\"`"),
+        (vec!["cw", "env"], "the top-level environment commands (`cw help`)"),
+        (vec!["cw", "env", "--help"], "the top-level environment commands (`cw help --all`)"),
+        (vec!["cw", "env", "bogus"], "the top-level environment commands (`cw help --all`)"),
+    ] {
+        assert_eq!(
+            route(&argv),
+            RetiredEnvRoute::Refused(format!("`cw env` was removed; use {replacement}")),
+            "{argv:?}"
+        );
+    }
+    // The hidden route stays out of every help.
+    for all in [false, true] {
+        let help = crate::cli_command_with(all).render_help().to_string();
+        assert!(!help.lines().any(|line| line.trim_start().starts_with("env ")));
+    }
 }
 
 #[test]
@@ -371,7 +596,8 @@ fn orchestration_arguments_preserve_terminal_and_semantic_boundaries() {
     assert!(
         Cli::try_parse_from(["cw", "send", "shell", "--no-newline", "--key", "ctrl-c"]).is_err()
     );
-    assert!(Cli::try_parse_from(["cw", "list", "--all", "host-team"]).is_err());
+    // The inventory filters parse beside ENV and are refused before any lookup.
+    assert!(Cli::try_parse_from(["cw", "ls", "--all", "host-team"]).is_ok());
 }
 
 #[tokio::test]
@@ -386,6 +612,7 @@ async fn wait_for_a_message_explains_that_its_id_names_the_session() {
     let globals = Globals {
         server: None,
         member: None,
+        placement: None,
     };
     let error = handle_wait_command(&globals, args).await.unwrap_err();
     assert_eq!(
@@ -419,7 +646,7 @@ fn member_control_is_refused_off_linux_with_its_reason() {
                     .to_string();
                 assert!(error.contains("requires Linux"), "{error}");
                 assert!(error.contains("process"), "{error}");
-                assert!(error.contains("cw env create --local"), "{error}");
+                assert!(error.contains("cw create --local"), "{error}");
             }
         })
         .unwrap()
@@ -430,16 +657,12 @@ fn member_control_is_refused_off_linux_with_its_reason() {
 #[cfg(unix)]
 #[test]
 fn host_creation_is_explicit_and_rejects_vm_or_provider_projection_options() {
-    let Command::Env(args) = Cli::try_parse_from([
-        "cw", "env", "create", "--local", "--type", "host", "--name", "team", "--path", ".",
+    let cli = Cli::try_parse_from([
+        "cw", "create", "--local", "--type", "host", "--name", "team", "--path", ".",
     ])
-    .unwrap()
-    .command
-    else {
-        panic!("env expected");
-    };
-    let placement = args.placement();
-    let EnvCommand::Create(create) = args.command else {
+    .unwrap();
+    let placement = cli.placement().unwrap();
+    let (_, _, EnvCommand::Create(create)) = env_operation(cli) else {
         panic!("create expected");
     };
     assert_eq!(create.environment_type, EnvironmentTypeArg::Host);
@@ -455,16 +678,12 @@ fn host_creation_is_explicit_and_rejects_vm_or_provider_projection_options() {
     validate_host_create(&create, placement).unwrap();
     assert!(validate_host_create(&create, Some(EnvironmentPlacement::Platform)).is_err());
     for option in ["--image", "--backend", "--profile", "--secrets"] {
-        let Command::Env(args) = Cli::try_parse_from([
-            "cw", "env", "create", "--local", "--type", "host", "--name", "team", option, "native",
+        let cli = Cli::try_parse_from([
+            "cw", "create", "--local", "--type", "host", "--name", "team", option, "native",
         ])
-        .unwrap()
-        .command
-        else {
-            panic!("env expected");
-        };
-        let placement = args.placement();
-        let EnvCommand::Create(create) = args.command else {
+        .unwrap();
+        let placement = cli.placement().unwrap();
+        let (_, _, EnvCommand::Create(create)) = env_operation(cli) else {
             panic!("create expected");
         };
         assert!(validate_host_create(&create, placement).is_err());

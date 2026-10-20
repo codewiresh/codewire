@@ -504,7 +504,7 @@ fn a_failed_row_names_its_stage_and_becomes_the_command_error() {
     );
     assert_eq!(
         failure.into_error("env-1").to_string(),
-        "environment env-1 failed at stage \"Running install command\": npm ci exploded (see `cw env logs env-1`)"
+        "environment env-1 failed at stage \"Running install command\": npm ci exploded (see `cw logs env-1 --setup`)"
     );
 
     let unlabelled = StageFailure {
@@ -514,7 +514,7 @@ fn a_failed_row_names_its_stage_and_becomes_the_command_error() {
     };
     assert_eq!(
         unlabelled.into_error("env-2").to_string(),
-        "environment env-2 failed at stage \"Gateway ready\" (see `cw env logs env-2`)"
+        "environment env-2 failed at stage \"Gateway ready\" (see `cw logs env-2 --setup`)"
     );
 }
 
@@ -797,7 +797,7 @@ async fn create_exits_non_zero_on_a_failed_stage_without_waiting_for_the_daemon(
     assert!(!daemon_checked.get());
     assert_eq!(
         error.to_string(),
-        "environment env-1 failed at stage \"Cloning repositories\": git clone: repository not found (see `cw env logs env-1`)"
+        "environment env-1 failed at stage \"Cloning repositories\": git clone: repository not found (see `cw logs env-1 --setup`)"
     );
     assert!(
         output(view).ends_with("  ✗ Cloning repositories: git clone: repository not found  2s\n")
@@ -839,7 +839,7 @@ async fn create_fails_when_setup_stops_without_a_failed_row() {
     .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "environment env-1 setup failed: sync workspace env: timed out (see `cw env logs env-1`)"
+        "environment env-1 setup failed: sync workspace env: timed out (see `cw logs env-1 --setup`)"
     );
 }
 
@@ -940,7 +940,7 @@ async fn start_exits_non_zero_on_a_failed_row() {
     .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "environment env-1 failed at stage \"Gateway ready\": sidecar did not become ready (see `cw env logs env-1`)"
+        "environment env-1 failed at stage \"Gateway ready\": sidecar did not become ready (see `cw logs env-1 --setup`)"
     );
 }
 

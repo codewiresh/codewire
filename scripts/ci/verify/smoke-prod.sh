@@ -254,7 +254,7 @@ create_environment() {
   local output
   output="$(mktemp "$ROOT/.tmp/prod-smoke-create.XXXXXX")"
   log "creating production smoke environment $SMOKE_NAME"
-  if ! cw_prod env create \
+  if ! cw_prod create \
       --preset "$SMOKE_PRESET" \
       --repo "$SMOKE_REPO" \
       --name "$SMOKE_NAME" \
@@ -264,14 +264,14 @@ create_environment() {
       --yes >"$output" 2>&1; then
     sed 's/[[:cntrl:]]//g' "$output" >&2 || true
     rm -f "$output"
-    die "cw env create failed"
+    die "cw create failed"
   fi
 
   SMOKE_ENV_ID="$(awk '/^[[:space:]]*ID:/ {print $2; exit}' "$output")"
   if [[ -z "$SMOKE_ENV_ID" ]]; then
     sed 's/[[:cntrl:]]//g' "$output" >&2 || true
     rm -f "$output"
-    die "failed to parse environment ID from cw env create output"
+    die "failed to parse environment ID from cw create output"
   fi
   rm -f "$output"
   log "production smoke environment id $SMOKE_ENV_ID"
@@ -282,7 +282,7 @@ cleanup_environment() {
     return 0
   fi
   log "deleting production smoke environment $SMOKE_CREATED_ENV_ID"
-  cw_prod env rm "$SMOKE_CREATED_ENV_ID" --yes >/dev/null || true
+  cw_prod rm "$SMOKE_CREATED_ENV_ID" --yes >/dev/null || true
 }
 
 environment_state() {
@@ -302,7 +302,7 @@ wait_environment_running() {
 
   log "waiting for environment $SMOKE_ENV_ID to reach running"
   while (( $(date +%s) < deadline )); do
-    if cw_prod env info "$SMOKE_ENV_ID" >"$info" 2>&1; then
+    if cw_prod info "$SMOKE_ENV_ID" >"$info" 2>&1; then
       state="$(environment_state "$info")"
       error_reason="$(environment_error_reason "$info")"
       if [[ -n "$error_reason" ]]; then
@@ -348,7 +348,7 @@ run_authenticated_checks() {
 
   cw_prod run --no-tty "$SMOKE_ENV_ID" -- pwd
   printf 'prod-smoke\n' >"$tmp_local"
-  cw_prod env cp "$tmp_local" "$SMOKE_ENV_ID:$remote_path"
+  cw_prod cp "$tmp_local" "$SMOKE_ENV_ID:$remote_path"
   rm -f "$tmp_local"
   cw_prod run --no-tty "$SMOKE_ENV_ID" -- sh -lc "test \"\$(cat '$remote_path')\" = prod-smoke"
   cw_prod doctor tailnet "$SMOKE_ENV_ID" --output json --expect any

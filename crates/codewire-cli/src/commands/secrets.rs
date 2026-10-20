@@ -51,8 +51,9 @@ pub(crate) async fn handle_secrets_command(
     globals: &Globals,
     args: SecretsArgs,
 ) -> anyhow::Result<()> {
-    let local = args.local;
-    let platform = args.platform;
+    // The global `--local` / `--cloud` is the explicit storage choice here.
+    let local = globals.placement == Some(EnvironmentPlacement::Local);
+    let platform = globals.placement == Some(EnvironmentPlacement::Platform);
     let operation = resolve_secret_operation(args)?;
     let placement = resolve_storage_placement(local, platform, secret_operation_json(&operation))?;
     validate_secret_operation_placement(&operation, placement)?;
@@ -756,8 +757,12 @@ mod tests {
                 "KEY",
             ],
         ] {
+            // A conflicting placement is refused as the parsed flags are read.
             assert!(
-                Cli::try_parse_from(&argv).is_err(),
+                Cli::try_parse_from(&argv)
+                    .map_err(drop)
+                    .and_then(|cli| cli.placement().map_err(drop))
+                    .is_err(),
                 "accepted retired/conflicting grammar: {argv:?}"
             );
         }

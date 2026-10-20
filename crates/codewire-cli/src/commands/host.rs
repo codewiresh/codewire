@@ -563,7 +563,7 @@ async fn connect_or_start_host(
 ) -> anyhow::Result<codewire_daemon::client::SessionClient> {
     if environment.state != "running" {
         anyhow::bail!(
-            "host environment is stopped; use cw env start {}",
+            "host environment is stopped; use cw start {}",
             environment.name
         );
     }
@@ -753,7 +753,7 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
     let shutdown = async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("install host daemon SIGTERM observer");
-        // A signal takes the environment down as `cw env stop` does. The
+        // A signal takes the environment down as `cw stop ENV` does. The
         // daemon marks the takedown itself before it stops anything (see
         // `codewire_daemon::stop_evidence`), so a conversation's driver that
         // a rebooting host signals in the same moment finds the marker.

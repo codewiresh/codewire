@@ -4,11 +4,11 @@ description: What the local VM messages mean, what cw doctor local reports, and 
 weight: 10
 ---
 
-`cw env info ENV` shows an environment's state and, after a failure, the error
+`cw info ENV` shows an environment's state and, after a failure, the error
 code that names the cause (for example
-`environment_sources_guest_start_failed`). `cw env daemon status ENV` and
-`cw env daemon logs ENV` inspect the daemon inside a running VM, and
-`cw env daemon repair ENV` reconciles it without recreating the environment.
+`environment_sources_guest_start_failed`). `cw daemon status ENV` and
+`cw daemon logs ENV` inspect the daemon inside a running VM, and
+`cw daemon repair ENV` reconciles it without recreating the environment.
 
 ## Messages
 
@@ -24,7 +24,7 @@ Reconnect and run `cw setup --local`. With an application firewall, allow
 `pkg-containers.githubusercontent.com` for the workspace image.
 
 **`your local VMs ... still run on the cw you updated from`**. Restart them on
-this version with `cw env --local upgrade`, or stop them and rerun. See
+this version with `cw upgrade --vms`, or stop them and rerun. See
 [Update cw](@/guides/update.md).
 
 **`Local VMs aren't available on Linux arm64 yet`**. Local VMs run on x86_64
@@ -33,10 +33,10 @@ Linux and on Apple Silicon Macs. Elsewhere, use hosted sandboxes.
 **`managed VM agents require a selected credential profile`**. Select a
 profile with a provider for the agent: a `codex` slot (or an `openai` slot)
 for Codex, an `anthropic` slot for Claude Code:
-`cw env update ENV --profile local:NAME` or `--profile platform:NAME`. If the
+`cw update ENV --profile local:NAME` or `--profile platform:NAME`. If the
 message says the profile has no Codex or OpenAI (or Anthropic) provider, add
 that slot with `cw credentials --local --profile NAME set codex CREDENTIAL`,
-then run `cw env update` again, because a VM keeps the profile revision it
+then run `cw update ENV` again, because a VM keeps the profile revision it
 selected.
 
 **A credential command cannot reach the Secret Service**. Start or unlock
@@ -60,7 +60,7 @@ about 5 seconds.
 
 A failed create leaves no environment, VM, disk or record behind. `cw`
 reports the cause and "No environment was kept" once the environment is
-confirmed gone, or names `cw env --local rm NAME` when removal could not
+confirmed gone, or names `cw --local rm NAME` when removal could not
 finish. The image layers it already downloaded and verified stay cached, so
 a retry resumes the download instead of starting over. The cache holds only
 the latest pull's image layers, never a repository, and lasts until you
@@ -69,7 +69,7 @@ those layers as unreferenced content.
 
 ```sh
 cw doctor local                    # VM files and processes no environment owns; changes nothing
-cw env rm --local NAME --yes       # remove a VM you no longer need
+cw rm --local NAME --yes       # remove a VM you no longer need
 ```
 
 ## Where things are

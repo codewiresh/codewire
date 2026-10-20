@@ -45,7 +45,7 @@ fn unknown_environment_without_cloud(target_ref: &str, error: anyhow::Error) -> 
         _ => return error,
     };
     let local = if cfg!(any(target_os = "linux", target_os = "macos")) {
-        "no local VM has that name (`cw env --local list` shows yours)"
+        "no local VM has that name (`cw --local ls` shows yours)"
     } else {
         "local VMs are not available on this platform"
     };
@@ -482,9 +482,15 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
 }
 
 pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> anyhow::Result<()> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if args.local {
+    if let Some(SetupCommand::Ssh(ssh)) = args.command {
+        return handle_config_ssh_command(ssh);
+    }
+    validate_setup_placement(&args, globals.placement)?;
+    if globals.placement == Some(EnvironmentPlacement::Local) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         return super::native::setup_local_runtime(args.from, args.replace).await;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        anyhow::bail!("local VMs are not available on this platform");
     }
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
@@ -533,19 +539,45 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
     }
 
     if !args.skip_ssh {
-        if let Err(err) = handle_config_ssh_command(ConfigSshArgs {
+        if let Err(err) = handle_config_ssh_command(SshSetupArgs {
             ssh_config_file: None,
             ssh_options: Vec::new(),
             dry_run: false,
         }) {
             eprintln!("Warning: SSH config update failed: {err}");
-            eprintln!("You can retry later with: cw config-ssh");
+            eprintln!("You can retry later with: cw setup ssh");
         } else {
             eprintln!("Updated OpenSSH config.");
         }
     }
 
     eprintln!("Setup complete.");
+    Ok(())
+}
+
+/// `cw setup --local` installs the local VM runtime; sign-in flags belong to
+/// the cloud setup and the runtime flags to the local one. Checked before any
+/// effect, since clap cannot relate a subcommand flag to the global
+/// `--local`.
+pub(crate) fn validate_setup_placement(
+    args: &SetupArgs,
+    placement: Option<EnvironmentPlacement>,
+) -> anyhow::Result<()> {
+    if placement == Some(EnvironmentPlacement::Local) {
+        anyhow::ensure!(
+            args.org.is_none()
+                && args.create_org.is_none()
+                && args.org_slug.is_none()
+                && !args.skip_ssh,
+            "--org, --create-org, --org-slug and --skip-ssh apply to sign-in, not to `cw setup --local`"
+        );
+        return Ok(());
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    anyhow::ensure!(
+        args.from.is_none() && !args.replace,
+        "--from and --replace install the local VM runtime; use `cw setup --local`"
+    );
     Ok(())
 }
 
@@ -2001,7 +2033,7 @@ pub(crate) fn doctor_ssh_config_check_at(config_path: &Path, cw_command: &str) -
             "ssh config",
             DoctorStatus::Warn,
             format!(
-                "Codewire section in {} is outdated or not first; run `cw config-ssh`",
+                "Codewire section in {} is outdated or not first; run `cw setup ssh`",
                 config_path.display()
             ),
         );
@@ -2155,7 +2187,7 @@ pub(crate) fn ssh_cw_command(path: &Path) -> anyhow::Result<String> {
     })
 }
 
-pub(crate) fn handle_config_ssh_command(args: ConfigSshArgs) -> anyhow::Result<()> {
+pub(crate) fn handle_config_ssh_command(args: SshSetupArgs) -> anyhow::Result<()> {
     let config_path =
         expand_home_path(args.ssh_config_file.unwrap_or_else(default_ssh_config_path))?;
     let (content, changed) = render_managed_ssh_config(
@@ -2223,8 +2255,7 @@ pub(crate) fn ssh_config_block(options: &SshConfigOptions) -> anyhow::Result<Str
     let mut output = String::new();
     output.push_str(SSH_CONFIG_MARKER_START);
     output.push('\n');
-    output
-        .push_str("# This section is managed by Codewire. Re-run `cw config-ssh` to update it.\n");
+    output.push_str("# This section is managed by Codewire. Re-run `cw setup ssh` to update it.\n");
     output.push_str(
         "# It stays first in this file: OpenSSH uses the first value it finds for an option.\n",
     );
@@ -2547,7 +2578,7 @@ mod tests {
         let message = format!("{:#}", unknown_environment_without_cloud("gh", missing));
         assert_eq!(
             message,
-            "no environment named \"gh\": no local VM has that name (`cw env --local list` shows yours), and no Codewire server is set up for cloud environments (`cw login`)"
+            "no environment named \"gh\": no local VM has that name (`cw --local ls` shows yours), and no Codewire server is set up for cloud environments (`cw login`)"
         );
         let logged_out = anyhow::Error::from(config::ConfigError::NoPlatformToken { cause: None });
         assert!(

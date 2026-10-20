@@ -314,14 +314,10 @@ mod tests {
     use super::*;
 
     fn update_args(flags: &[&str]) -> EnvUpdateArgs {
-        let mut argv = vec!["cw", "env", "update", "exact-environment"];
+        let mut argv = vec!["cw", "update", "exact-environment"];
         argv.extend_from_slice(flags);
         let cli = Cli::try_parse_from(argv).unwrap();
-        let Command::Env(EnvArgs {
-            command: EnvCommand::Update(args),
-            ..
-        }) = cli.command
-        else {
+        let (_, _, EnvCommand::Update(args)) = env_operation(cli) else {
             panic!("update");
         };
         args
@@ -432,18 +428,25 @@ mod tests {
             "--secrets-user=platform",
             "--secrets-organization",
         ] {
-            assert!(Cli::try_parse_from(["cw", "env", "update", "app", retired]).is_err());
+            assert!(Cli::try_parse_from(["cw", "update", "app", retired]).is_err());
         }
     }
 
     #[test]
     fn source_update_requires_target_and_nonempty_unambiguous_change() {
-        assert!(Cli::try_parse_from(["cw", "env", "update", "--clear-secrets"]).is_err());
+        // Without ENV the update is refused before any effect.
+        let crate::Command::Update(args) = Cli::try_parse_from(["cw", "update", "--clear-secrets"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected update");
+        };
+        assert!(crate::commands::flat::update_operation(args).is_err());
         for flags in [
             vec!["--clear-secrets", "--user-secrets=platform"],
             vec!["--clear-profile", "--profile=work"],
         ] {
-            let mut args = vec!["cw", "env", "update", "exact-environment"];
+            let mut args = vec!["cw", "update", "exact-environment"];
             args.extend(flags);
             assert!(Cli::try_parse_from(args).is_err());
         }

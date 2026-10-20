@@ -14,12 +14,12 @@ terminal closes, and you reattach, read its output or stop it from anywhere.
 cw run my-app -- cargo test                      # foreground: streams output, exits with the command's status
 cw run my-app --name dev --detach -- npm run dev # background, named
 cw run my-app --name shell --tty --detach -- sh  # an interactive shell you attach to later
-cw list my-app                                   # cw list alone covers every environment
+cw ls my-app                                   # cw ls alone covers every environment
 cw attach my-app dev                             # Ctrl+B d detaches
-cw logs my-app dev --follow
+cw logs my-app --session dev --follow
 cw wait my-app tests --timeout 10m
-cw stop my-app dev
-cw restart my-app dev
+cw stop my-app --session dev
+cw restart my-app --session dev
 ```
 
 Names are unique within an environment. A foreground `run` fails when the
@@ -29,9 +29,10 @@ unknown, never success. `cw send` writes input to a terminal or command
 session and acknowledges the write; it does not tell you that a command
 finished.
 
-`cw stop` asks at a terminal whether to stop the session's running children;
-`--all` stops every descendant without asking. Output is retained across your
-disconnects and across an environment's stop and start.
+`cw stop ENV --session NAME` stops one session and asks at a terminal whether
+to stop its running children; `--all` stops every descendant without asking.
+`cw stop ENV` without `--session` stops the whole environment. Output is
+retained across your disconnects and across an environment's stop and start.
 
 ## Managed agents
 
@@ -46,7 +47,7 @@ cw inbox my-app lead                             # messages and their results
 cw wait --message MESSAGE_ID --timeout 10m       # the reply to one message
 cw steer my-app lead 'Keep the public API stable.'
 cw interrupt my-app lead
-cw logs my-app lead                              # each turn's prompt, tools and reply
+cw logs my-app --session lead                              # each turn's prompt, tools and reply
 ```
 
 `--model` and `--effort` (`low`, `medium`, `high`, `xhigh`, `max`) are
@@ -105,8 +106,8 @@ host uses the clients' own logins.
 ### Across a stop and start
 
 A managed conversation in a hosted sandbox stops with the sandbox. After
-`cw env start`, `cw list` still shows it, and the next `cw msg` or
-`cw restart` resumes it: the agent starts again from its saved session with
+`cw start`, `cw ls` still shows it, and the next `cw msg` or
+`cw restart ENV --session NAME` resumes it: the agent starts again from its saved session with
 its earlier turns. Whatever was in flight when the sandbox stopped is not
 replayed. A conversation cannot resume when its selected credentials or
 secrets changed, its working directory is gone, or its last outcome is

@@ -645,7 +645,7 @@ class Journey:
 
     def call(self, *args, expect="ok", timeout=30):
         limit = self.budget(timeout)
-        verb = args[0] if args[0] != "env" else "env " + args[1]
+        verb = args[0]
         process = subprocess.Popen([self.cw, *args], env=self.env, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                    start_new_session=True)
@@ -706,8 +706,8 @@ class Journey:
     # -- Sessions --------------------------------------------------------
 
     def sessions(self):
-        _, views = self.data("list", self.environment, "--output", "json")
-        require(isinstance(views, list), "cw list did not return a session array")
+        _, views = self.data("ls", self.environment, "--output", "json")
+        require(isinstance(views, list), "cw ls did not return a session array")
         return {view["session_id"]: view for view in views}
 
     def own(self, view):
@@ -792,8 +792,9 @@ class Journey:
         return proof
 
     def begin_caller(self, verb, sid):
+        """Starts `cw stop` or `cw restart` of session SID in the environment."""
         self.budget(60)
-        process = subprocess.Popen([self.cw, verb, self.environment, sid, "--output", "json"],
+        process = subprocess.Popen([self.cw, verb, self.environment, "--session", sid, "--output", "json"],
                                    env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True, start_new_session=True)
         self.pending_callers.append(process)
@@ -817,7 +818,7 @@ class Journey:
         return views[0]
 
     def stop(self, sid):
-        code, views = self.data("stop", self.environment, sid, "--output", "json", expect="any", timeout=60)
+        code, views = self.data("stop", self.environment, "--session", sid, "--output", "json", expect="any", timeout=60)
         view = views[0] if isinstance(views, list) and views else None
         if code != 0 or not view or view.get("state") not in TERMINAL_SESSION or view.get("cleanup_unknown"):
             self.ambiguous.append({"kind": "session-stop", "session_id": sid,
@@ -827,7 +828,7 @@ class Journey:
         return view
 
     def restart(self, sid):
-        _, views = self.data("restart", self.environment, sid, "--output", "json", timeout=60)
+        _, views = self.data("restart", self.environment, "--session", sid, "--output", "json", timeout=60)
         require(isinstance(views, list) and views and views[0]["session_id"] == sid,
                 f"restart of {sid} returned another session identity")
         return views[0]
@@ -962,7 +963,7 @@ class Journey:
 
     def run(self):
         self.stage = "preflight"
-        _, info = self.data("env", "info", "--local", self.environment, "--output", "json", timeout=60)
+        _, info = self.data("info", "--local", self.environment, "--output", "json", timeout=60)
         require(info.get("id") == self.environment, "environment info reported another immutable ID")
         require(info.get("state") == "running", "the owned environment is not running")
         self.profile_selected = bool(info.get("access_profile"))
@@ -974,7 +975,7 @@ class Journey:
         require(isinstance(self.image_receipt, dict), "VM journey requires the externally pinned cw image receipt")
         pins = [self.image_receipt.get(field) for field in ("index_sha256", "manifest_sha256", "cw_sha256")]
         require(all(isinstance(pin, str) and re.fullmatch("[0-9a-f]{64}", pin) for pin in pins), "invalid cw image receipt")
-        _, runtime = self.data("env", "--local", "runtime", "info", self.environment, "--output", "json", timeout=60)
+        _, runtime = self.data("runtime", "info", "--local", self.environment, "--output", "json", timeout=60)
         require(runtime.get("environment_id") == self.environment, "runtime info reported another environment")
         bootstrap = (runtime.get("selection") or {}).get("bootstrap_catalog_sha256")
         require(isinstance(bootstrap, str) and re.fullmatch("[0-9a-f]{64}", bootstrap), "runtime info omitted its bound bootstrap")
@@ -1195,8 +1196,8 @@ class Journey:
         views = self.sessions()
         require(views[self.worker]["parent_session_id"] == self.lead and
                 all("_agent-driver" in views[sid]["command"] for sid in (self.lead, self.worker)),
-                "cw list does not show the managed parent linkage")
-        self.call("logs", self.environment, self.lead, "--tail", "20", timeout=30)
+                "cw ls does not show the managed parent linkage")
+        self.call("logs", self.environment, "--session", self.lead, "--tail", "20", timeout=30)
         self.check("history/inbox-order/wait-routing-by-message/unknown-message-refused/logs-readable")
 
     def prove_controls(self):
@@ -1455,7 +1456,7 @@ class Journey:
             require(changed.get("receipt_sha256") == digest and changed.get("original_inode") == inode,
                     "receipt fault did not preserve the exact original file")
             before = self.sessions()[case["sid"]]
-            self.call("restart", self.environment, case["sid"], "--output", "json", expect="fail", timeout=15)
+            self.call("restart", self.environment, "--session", case["sid"], "--output", "json", expect="fail", timeout=15)
             refused = self.inbox(case["sid"])
             after = self.sessions()[case["sid"]]
             require(after["state"] == before["state"] and generation(after) == case["generation"] and
@@ -1569,7 +1570,7 @@ class Journey:
     def sentinel_live(self):
         nonce = secrets.token_hex(4)
         self.call("send", self.environment, self.sentinel, f"echo SENTINEL_$((6*7))_{nonce}")
-        self.until(lambda: self.call("logs", self.environment, self.sentinel, "--tail", "50")[1],
+        self.until(lambda: self.call("logs", self.environment, "--session", self.sentinel, "--tail", "50")[1],
                    lambda output: f"SENTINEL_42_{nonce}" in output, 30, "sentinel terminal reply")
         require(self.sessions()[self.sentinel]["state"] == "Running", "unrelated sentinel stopped during custody cleanup")
 
@@ -1610,7 +1611,7 @@ class Journey:
         require(all(views.get(sid, {}).get("state") == "Running"
                     for sid, state in self.preexisting.items() if state == "Running"),
                 "an unrelated pre-existing session stopped")
-        _, info = self.data("env", "info", "--local", self.environment, "--output", "json", timeout=60)
+        _, info = self.data("info", "--local", self.environment, "--output", "json", timeout=60)
         require(info.get("state") == "running", "the environment stopped")
         self.check("own-sessions-stopped-known-clean/sentinel-terminal-live/preexisting-preserved/environment-running")
 
@@ -1783,7 +1784,7 @@ def contract_tests():
                 with self.subTest(stdout=stdout):
                     _, detail = self.failed_call(stdout)
                     self.assertEqual(detail, "cw wait exited 1: session exited with code 1\n")
-            for verb, output in (("wait", "text"), ("env", "json")):
+            for verb, output in (("wait", "text"), ("info", "json")):
                 with self.subTest(verb=verb, output=output):
                     _, detail = self.failed_call('{"output":"unrelated stdout"}', verb=verb, output=output)
                     self.assertNotIn("unrelated stdout", detail)

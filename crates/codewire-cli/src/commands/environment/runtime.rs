@@ -179,7 +179,7 @@ async fn handle_linux(command: EnvRuntimeCommand) -> anyhow::Result<()> {
                     .map_err(|_| anyhow::anyhow!("runtime source path is not UTF8"))?,
             };
             eprintln!(
-                "Runtime request: {request_id}; observe with cw env --local runtime observe {id} --request-id {request_id}"
+                "Runtime request: {request_id}; observe with cw --local runtime observe {id} --request-id {request_id}"
             );
             let status = client
                 .runtime_update(request)
@@ -206,7 +206,7 @@ async fn handle_linux(command: EnvRuntimeCommand) -> anyhow::Result<()> {
                 source_lock: String::new(),
             };
             eprintln!(
-                "Runtime request: {request_id}; observe with cw env --local runtime observe {id} --request-id {request_id}"
+                "Runtime request: {request_id}; observe with cw --local runtime observe {id} --request-id {request_id}"
             );
             let status = client
                 .runtime_rollback(request)

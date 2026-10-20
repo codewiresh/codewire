@@ -127,25 +127,25 @@ READY_STATE=running; READY_SETUP=true; READY_ERROR=null; READY_PROFILE="platform
 cw_with_timeout() {
   shift
   case "$*" in
-    'env --cloud info '*" --output json")
+    '--cloud info '*" --output json")
       jq -n --arg id "$ENVIRONMENT_ID" --arg state "$READY_STATE" --argjson setup "$READY_SETUP" \
         --argjson error "$READY_ERROR" --arg profile "$READY_PROFILE" --argjson revision "$READY_REVISION" \
         '{id:$id,state:$state,setup_complete:$setup,setup_error:$error,
           source_selection:{credentials:{profile:$profile},profile_revision:$revision}}' ;;
-    'env --cloud list --output json')
+    '--cloud ls --output json')
       # As the server lists them: deleted environments are left out.
       if [[ "$INVENTORY_STATE" == absent || "$INVENTORY_STATE" == destroyed ]]; then printf '[]\n'; else
         jq -n --arg id "$ENVIRONMENT_ID" --arg name "$SMOKE_NAME" --arg state "$INVENTORY_STATE" \
           '[{id:$id,name:$name,state:$state}]'; fi ;;
-    'env report '*' --output json')
-      [[ "$3" == "$ENVIRONMENT_ID" && "$INVENTORY_STATE" != absent ]] || return 1
+    'report '*' --output json')
+      [[ "$2" == "$ENVIRONMENT_ID" && "$INVENTORY_STATE" != absent ]] || return 1
       jq -n --arg id "$ENVIRONMENT_ID" --arg state "$INVENTORY_STATE" '{environment:{id:$id,state:$state}}' ;;
-    'env --cloud rm --yes '*)
-      [[ "$5" == "$ENVIRONMENT_ID" ]] || fail 'deleted foreign ID'
+    '--cloud rm --yes '*)
+      [[ "$4" == "$ENVIRONMENT_ID" ]] || fail 'deleted foreign ID'
       printf 'environment\n' >>"$TEST_ROOT/order"; INVENTORY_STATE=destroyed ;;
-    'env create --cloud '*)
+    'create --cloud '*)
       [[ "$CHECKOUT_ATTEMPTED" == 1 && "$PWD" == "$CHECKOUT_WORKSPACE" &&
-         "$*" == "env create --cloud --name $SMOKE_NAME --cpu 2000 --memory 4096 --ttl 30m --no-network --file codewire.yaml --no-wait --yes --output json" ]] ||
+         "$*" == "create --cloud --name $SMOKE_NAME --cpu 2000 --memory 4096 --ttl 30m --no-network --file codewire.yaml --no-wait --yes --output json" ]] ||
         fail 'hosted create scope/resources/document or attempted-state drifted'
       printf '{"id":"%s"}\n' "$ENVIRONMENT_ID" ;;
     *) fail 'unexpected public command' ;;

@@ -356,7 +356,7 @@ cw_with_timeout() {
       [[ $# == 3 && "$3" == "$ORG_ID" ]] || fail 'Mesh owner selection changed the authenticated organization'
       [[ "$FAILURE" != mesh-owner ]] || return 1
       touch "$TMPDIR_SMOKE/mesh-owner-selected" ;;
-    'env info --local '*" --output json")
+    'info --local '*" --output json")
       jq -n --arg id "$ENV_ID" --arg project "platform:id:$PROJECT_ID" --arg profile "platform:id:$PROFILE_ID" \
         --arg server "$CODEWIRE_SERVER_URL" --arg user "$LP_USER_ID" --arg org "$ORG_ID" --arg failure "$FAILURE" \
         --argjson application_only "$LP_APPLICATION_ONLY" --argjson empty_source "$FIXTURE_EMPTY_SOURCE" '
@@ -397,18 +397,18 @@ cw_with_timeout() {
       if [[ "$FAILURE" == bad-revoke ]]; then printf '[]\n'; else
         jq -n --arg id "$KEY_ID" '[{id:$id,status:"CREDENTIAL_STATUS_REVOKED",revocationGeneration:"2"}]'
       fi ;;
-    'env cp --local '*)
-      [[ -e "$TMPDIR_SMOKE/revoked" && "$5" == "$SMOKE_NAME:/workspace/.cw-ssh-smoke/revoked-trigger" ]] || fail 'wrong local trigger'
+    'cp --local '*)
+      [[ -e "$TMPDIR_SMOKE/revoked" && "$4" == "$SMOKE_NAME:/workspace/.cw-ssh-smoke/revoked-trigger" ]] || fail 'wrong local trigger'
       touch "$TMPDIR_SMOKE/triggered" ;;
     'logs '*" --raw")
-      [[ "$2" == "$VM_ID" && "$3" == owned-session ]] || fail 'wrong session logs'
+      [[ "$2" == "$VM_ID" && "$3" == --session && "$4" == owned-session ]] || fail 'wrong session logs'
       if [[ -e "$TMPDIR_SMOKE/triggered" ]]; then
         [[ "$FAILURE" == empty-denial ]] || printf 'stock-ssh-workload-revoked\n'
       else
         [[ -e "$TMPDIR_SMOKE/admitted" ]] || fail 'unadmitted waiter'
         touch "$TMPDIR_SMOKE/ready"; printf 'stock-ssh-workload-awaiting-revocation\n'
       fi ;;
-    'list '*" --output json")
+    'ls '*" --output json")
       [[ "$2" == "$VM_ID" && -e "$TMPDIR_SMOKE/triggered" ]] || fail 'wrong completion'
       [[ "$FAILURE" != denial ]] || return 1
       printf '[{"session_id":"owned-session","state":"Exited","exit_code":0}]\n' ;;
@@ -700,7 +700,7 @@ LP_WORKSPACE="$TMPDIR_SMOKE"
       printf 'application-secret-check-ok\n'
       printf 'Launched session session-%s\n' "$VM_ID" >&2
       [[ "${SESSION_RECEIPT_FAILURE:-}" != duplicate-ack ]] || printf 'Launched session session-%s\n' "$VM_ID" >&2
-    elif [[ "$*" == "list $ENV_ID --output json" ]]; then
+    elif [[ "$*" == "ls $ENV_ID --output json" ]]; then
       jq -n --arg id "session-$VM_ID" --arg guest "$SYNTHETIC_GUEST_CHECK" \
         '[{session_id:$id,command:["/bin/sh","-c",$guest],pty:false,state:"Exited",exit_code:0}]' |
         jq --arg failure "${SESSION_RECEIPT_FAILURE:-}" '
@@ -776,9 +776,9 @@ local_platform_ssh_revoke() {
 cw_with_timeout() {
   shift
   case "$*" in
-    'env list --local --output json') printf '[]\n' ;;
-    'env create --local '*)
-      [[ "$*" == "env create --local --name $SMOKE_NAME --cpu 2 --memory 16GB --no-docker --no-network --path $LP_WORKSPACE --path-mode copy --file codewire.yaml --yes --output json" ]] || fail 'unsupported native create command'
+    'ls --local --output json') printf '[]\n' ;;
+    'create --local '*)
+      [[ "$*" == "create --local --name $SMOKE_NAME --cpu 2 --memory 16GB --no-docker --no-network --path $LP_WORKSPACE --path-mode copy --file codewire.yaml --yes --output json" ]] || fail 'unsupported native create command'
       jq -e --arg profile "platform:id:$PROFILE_ID" --arg project "platform:id:$PROJECT_ID" --arg image "$LOCAL_PLATFORM_IMAGE" \
         --argjson application_only "$LP_APPLICATION_ONLY" '
         .secrets.project == $project and .image == $image and
@@ -790,12 +790,12 @@ cw_with_timeout() {
       [[ "$FAILURE" != create ]] || return 1
       jq -n --arg id "$VM_ID" '{id:$id}'; printf 'a\n' >"$TMPDIR_SMOKE/phase" ;;
     'use --local '*) [[ "$3" == "$VM_ID" ]] || fail 'wrong local target' ;;
-    'env update --local '*" --secrets "*)
-      [[ "$*" == "env update --local $VM_ID --secrets platform:id:$KEY_ID --yes --output json" ]] || fail 'wrong update source'
+    'update --local '*" --secrets "*)
+      [[ "$*" == "update --local $VM_ID --secrets platform:id:$KEY_ID --yes --output json" ]] || fail 'wrong update source'
       [[ "$FAILURE" != update ]] || return 1
       printf 'b\n' >"$TMPDIR_SMOKE/phase" ;;
-    'env update --local '*" --clear-secrets --yes --output json")
-      [[ "$4" == "$VM_ID" ]] || fail 'wrong clear target'
+    'update --local '*" --clear-secrets --yes --output json")
+      [[ "$3" == "$VM_ID" ]] || fail 'wrong clear target'
       [[ "$FAILURE" != clear ]] || return 1
       printf 'clear\n' >"$TMPDIR_SMOKE/phase" ;;
     'run --no-tty -- /bin/bash '* )
@@ -903,10 +903,10 @@ for live_provider in codex anthropic openai github; do
   cw_with_timeout() {
     local duration="$1"; shift
     case "$*" in
-      'env list --local --output json') printf '[]\n' ;;
-      'env create --local '*)
+      'ls --local --output json') printf '[]\n' ;;
+      'create --local '*)
         [[ "$duration" == 1500 && "$LP_CREATE_ATTEMPTED" == 1 &&
-           "$*" == "env create --local --name $SMOKE_NAME --cpu 2 --memory 16GB --no-docker --no-network --path $LP_WORKSPACE --path-mode copy --file codewire.yaml --yes --output json" ]] ||
+           "$*" == "create --local --name $SMOKE_NAME --cpu 2 --memory 16GB --no-docker --no-network --path $LP_WORKSPACE --path-mode copy --file codewire.yaml --yes --output json" ]] ||
           fail 'Codex changed owned create arguments or lost parent ownership'
         jq -e --arg image "$LOCAL_PLATFORM_IMAGE" --arg profile "platform:id:$PROFILE_ID" '
           .image == $image and .credentials.profile == $profile and (has("secrets") | not)
@@ -980,19 +980,19 @@ assert_application_artifacts_redacted() { [[ "$FAILURE" != leakage ]]; }
 cw_with_timeout() {
   shift
   case "$*" in
-    'env list --local --output json')
+    'ls --local --output json')
       if [[ -e "$TMPDIR_SMOKE/deleted" ]]; then printf '[]\n'; else
         jq -n --arg id "$VM_ID" --arg name "$SMOKE_NAME" --arg failure "$FAILURE" '
           [{id:$id,name:$name}] |
           if $failure == "ambiguous" then . + . elif $failure == "rebound" then .[0].id="11111111-1111-4111-8111-111111111111" else . end'
       fi ;;
-    'env rm --local --yes '*)
-      [[ "$5" == "$VM_ID" ]] || fail 'deleted a different VM'
+    'rm --local --yes '*)
+      [[ "$4" == "$VM_ID" ]] || fail 'deleted a different VM'
       printf 'vm\n' >>"$TMPDIR_SMOKE/cleanup-calls"
       [[ "$FAILURE" != rm ]] || return 1
       touch "$TMPDIR_SMOKE/deleted" ;;
-    'env info --local '*" --output json")
-      [[ "$4" == "$VM_ID" && ! -e "$TMPDIR_SMOKE/deleted" ]] || fail 'launch observation changed ownership/order'
+    'info --local '*" --output json")
+      [[ "$3" == "$VM_ID" && ! -e "$TMPDIR_SMOKE/deleted" ]] || fail 'launch observation changed ownership/order'
       [[ "$FAILURE" != info-failure ]] || return 1
       jq -n --arg id "$VM_ID" --arg failure "$FAILURE" '
         {id:$id,state:"error",error_code:"guest_start_failed"} |

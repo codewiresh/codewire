@@ -1155,8 +1155,8 @@ exit "$rc"
                 self.assertEqual(result.returncode, expected, result.stderr)
                 steps = result.stdout.splitlines()
                 self.assertEqual(steps[:4], [
-                    f"env --cloud stop {ENVIRONMENT} --output json", "wait stopped",
-                    f"env --cloud start {ENVIRONMENT} --output json", "wait running"])
+                    f"--cloud stop {ENVIRONMENT} --output json", "wait stopped",
+                    f"--cloud start {ENVIRONMENT} --output json", "wait running"])
                 # The new epoch must deliver the login again before the
                 # journey uses it.
                 self.assertEqual(steps[4:], ["login redelivered"] if expected == 0 else [])
@@ -1233,8 +1233,8 @@ kind_credential_bound_revision '%s'
         source = HELPERS.read_text()
         flow = source.split("kind_credential_native_smoke() (", 1)[1]
         self.assertNotIn("configmap", flow.lower())
-        stop = flow.index('env --cloud stop "$environment"')
-        start = flow.index('env --cloud start "$environment"')
+        stop = flow.index('--cloud stop "$environment"')
+        start = flow.index('--cloud start "$environment"')
         self.assertLess(flow.index("/home/codewire/.codex/kind-persistence"), stop)
         self.assertLess(start, flow.index('cat /home/codewire/.codex/kind-persistence'))
 
@@ -1286,8 +1286,8 @@ kind_credential_codex_login '%s' %s %s
         rotation = index('kind_credential_codex_login "$environment" rotation "$login_generation" || return $?')
         own = index('kind_credential_codex_login "$environment" own-login || return $?')
         logout = index('kind_credential_codex_login "$environment" logout || return $?')
-        stop = index('env --cloud stop "$environment"')
-        start = index('env --cloud start "$environment"')
+        stop = index('--cloud stop "$environment"')
+        start = index('--cloud start "$environment"')
         redelivered = index('kind_credential_codex_login "$environment" redelivered || return $?')
         daemon = 'kind_credential_daemon_probe "$environment" '
         bounded = ' "$KIND_AUTHORITY_CHANGE_WITHIN_MS"'
@@ -1323,7 +1323,7 @@ kind_credential_codex_login '%s' %s %s
         revoked = index('kind_credential_codex_login "$environment" revoked || return $?')
         served = index('served="$(jq -s \'map(.served // 0) | add\' "$KIND_DAEMON_PROBE_LOG")" || return $?')
         final = index('assert_kind_credential_provider_counts "$((5 + served))"')
-        destroy = index('env --cloud rm "$environment"')
+        destroy = index('--cloud rm "$environment"')
         # An unselected projection first; delivery before the proxy session
         # whose refreshes rotate it; the user's own login and logout after
         # rotation; Stop/Start, where a new container forgets the logout; the
@@ -1615,8 +1615,8 @@ kind_credential_cli() {
     'org current') printf 'ID: org_contract_1\\n' ;;
     'credentials --cloud get'*)
       printf '[{"name":"%%s","provider":"openai","status":"CREDENTIAL_STATUS_ACTIVE"}]\\n' "$4" ;;
-    'env --cloud create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
-    'env --cloud update'*) printf '{"operation_generation":1}\\n' ;;
+    '--cloud create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
+    '--cloud update'*) printf '{"operation_generation":1}\\n' ;;
     *) return 0 ;;
   esac
 }
@@ -1652,8 +1652,8 @@ kind_credential_cli() {
     'org current') printf 'ID: org_contract_1\\n' ;;
     'credentials --cloud get'*)
       printf '[{"name":"%%s","provider":"openai","status":"CREDENTIAL_STATUS_ACTIVE"}]\\n' "$4" ;;
-    'env --cloud create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
-    'env --cloud update'*) printf '{"operation_generation":1}\\n' ;;
+    '--cloud create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
+    '--cloud update'*) printf '{"operation_generation":1}\\n' ;;
     *) return 0 ;;
   esac
 }
@@ -1691,7 +1691,7 @@ kind_credential_native_smoke
         flow = HELPERS.read_text().split("kind_credential_native_smoke() (", 1)[1]
         unselected = flow.index('kind_credential_probe "$environment" unselected')
         restart = flow.index("\n  restart_kind_orchestration\n")
-        update = flow.index('kind_credential_cli env --cloud update "$environment"')
+        update = flow.index('kind_credential_cli --cloud update "$environment"')
         relay = flow.index('relay_pod="$(sed -n \'1p\' <<<"$relay")"')
         lead = flow.index('token_lead="$(kind_credential_relay_token_lead "$pod" "$relay_pod")" || return $?')
         deliver = flow.index('kind_credential_codex_login "$environment" deliver')
@@ -1744,7 +1744,7 @@ kind_credential_relay_token_lead sandbox-x codewire-orchestration-a
         flow = source.split("kind_credential_native_smoke() (", 1)[1]
         for retired in ("wait_kind_credential_sandbox_pair", "gateway_uid", "codewire-gateway"):
             self.assertNotIn(retired, flow)
-        update = flow.index('update="$(kind_credential_cli env --cloud update "$environment"')
+        update = flow.index('update="$(kind_credential_cli --cloud update "$environment"')
         generation = flow.index('restart_generation="$(jq -er')
         pod = flow.index('pod="$(wait_kind_credential_restarted_workspace '
                          '"$environment" "$restart_generation")"')
@@ -3097,7 +3097,7 @@ kind_credential_cli() {{
     "run env-1 --no-tty --detach --output json -- python3 -B -u {driver} {form} {outcome}")
       printf '{{"session_id":"session-1","state":"Starting"}}\n' ;;
     "list env-1 --output json") cat "$RUN_DIR/listing.json" ;;
-    "logs env-1 session-1 --raw") cat "$RUN_DIR/output.txt" ;;
+    "logs env-1 --session session-1 --raw") cat "$RUN_DIR/output.txt" ;;
     *) echo "unexpected: $*" >&2; return 99 ;;
   esac
 }}
@@ -3365,7 +3365,7 @@ kind_credential_codex_request_count
         # Claude Code never runs through kubectl exec: only the driver is staged.
         self.assertNotIn("python3 -B -u -", flow)
         ordered = [
-            'update="$(kind_credential_cli env --cloud update "$environment"',
+            'update="$(kind_credential_cli --cloud update "$environment"',
             'pod="$(wait_kind_credential_restarted_workspace "$environment" "$generation")"',
             'clients="$(kind_credential_managed_clients "$environment" "$pod_uid")"',
             'assert_kind_credential_claude_selection "$form" "$clients"',
@@ -3382,7 +3382,7 @@ kind_credential_codex_request_count
             'assert_kind_credential_claude_token "$token_name" 3',
             'kind_credential_claude_run "$environment" "$driver" subscription_token success',
             'assert_kind_credential_anthropic_events "$baseline" subscription_token 200',
-            'kind_credential_cli env --cloud rm "$environment"',
+            'kind_credential_cli --cloud rm "$environment"',
             'wait_kind_credential_environment "$environment" destroyed',
             'kind_credential_cli credentials --cloud revoke "$credential"',
             'kind_credential_cli credentials --cloud delete "$credential" --yes',
@@ -3538,15 +3538,15 @@ kind_credential_claude_rotation env-1 kind-claude 3
             'rotated="$(kind_credential_claude_rotation "$environment" "$name" "$delivered")"',
             'kind_credential_claude_login "$environment" own-login',
             'kind_credential_claude_login "$environment" logout',
-            'kind_credential_cli env --cloud stop "$environment"',
-            'kind_credential_cli env --cloud start "$environment"',
+            'kind_credential_cli --cloud stop "$environment"',
+            'kind_credential_cli --cloud start "$environment"',
             'kind_credential_claude_login "$environment" redelivered',
             'kind_credential_cli credentials --cloud revoke "$name"',
             'kind_credential_claude_login "$environment" revoked',
             'driver="$(kind_credential_claude_stage "$pod")"',
             'kind_credential_claude_run "$environment" "$driver" sign_in logged_out',
             'length == $baseline',
-            'kind_credential_cli env --cloud rm "$environment"',
+            'kind_credential_cli --cloud rm "$environment"',
             'kind_credential_cli credentials --cloud --profile "$profile" delete --yes',
             'kind_credential_cli credentials --cloud delete "$name" --yes',
         ]

@@ -111,7 +111,7 @@ private_checkout_create() {
   LP_CREATE_ATTEMPTED=1
   (
     cd -- "$LP_WORKSPACE" || exit 1
-    cw_with_timeout "$duration" env create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB \
+    cw_with_timeout "$duration" create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB \
       --no-docker --no-network --file "$filename" --yes --output json
   ) \
     >"$TMPDIR_SMOKE/checkout-$phase.json" 2>"$TMPDIR_SMOKE/checkout-$phase.err"
@@ -125,7 +125,7 @@ private_checkout_reject() {
   grep -Fq -- "$reason" "$TMPDIR_SMOKE/checkout-$phase.err" ||
     die 'initial checkout failed outside the expected validation boundary'
   [[ "$(private_checkout_count)" == 0 ]] || die 'invalid initial checkout authenticated to the fixture'
-  cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/checkout-rejected-inventory.json" ||
+  cw_with_timeout 30 ls --local --output json >"$TMPDIR_SMOKE/checkout-rejected-inventory.json" ||
     die 'cannot inspect the rejected initial checkout'
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name or .state != "running")' \
     "$TMPDIR_SMOKE/checkout-rejected-inventory.json" >/dev/null || die 'rejected checkout started a VM'
@@ -136,7 +136,7 @@ private_checkout_reject() {
 
 private_checkout_journey() {
   SMOKE_NAME="local-checkout-$(tr -d '-' </proc/sys/kernel/random/uuid)"
-  cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/checkout-before.json"
+  cw_with_timeout 30 ls --local --output json >"$TMPDIR_SMOKE/checkout-before.json"
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/checkout-before.json" >/dev/null || die 'initial-checkout environment name collision'
   prepare_provider_ssh_identity

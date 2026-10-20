@@ -62,16 +62,78 @@ legacy_sdk_hits="$(
   fail 'active source or documentation still exposes the retired local SDK contract'
 }
 
-legacy_doc_hits="$(
+# Retired CLI spellings: the local-SDK era commands, the `cw env` namespace,
+# `cw config-ssh`, and the CLI updater's former `cw update` routes (now
+# `cw upgrade`). `cw update ENV` changes an environment and stays valid, as
+# does a placement flag on either side of a command (`cw --local ls`).
+readonly RETIRED_CLI_GRAMMAR='cw local\b|cw exec\b|cw node\b|cw run --node|node:session|cw (--(local|cloud) )?env\b|cw config-ssh\b|cw update( (status|rollback)\b| --(version|channel|from|sha256|restart-vms|to|expect-generation|store)\b|`|$)'
+
+# Print every retired spelling in the given paths.
+retired_grammar_hits() {
   rg -n \
     --glob '!*evidence*' \
     --glob '!archive/**' \
-    'cw local|cw exec|cw node|cw run --local|cw run --node|node:session' \
+    "$RETIRED_CLI_GRAMMAR" \
+    "$@" || true
+}
+
+# The guard itself: retired spellings fail, their replacements pass.
+# shellcheck disable=SC2016 # the fixtures are literal Markdown with backticks
+self_test() {
+  local fixture
+  fixture="$(mktemp -d)"
+  # shellcheck disable=SC2064 # expand the fixture path now
+  trap "rm -rf '$fixture'" RETURN
+  local retired
+  for retired in \
+    'cw env list' \
+    'cw env --local stop app' \
+    'cw --cloud env create' \
+    'run `cw config-ssh` again' \
+    'cw update' \
+    'cw update status' \
+    'cw update rollback --to v0.3.390' \
+    'cw update --version v0.3.391' \
+    'cw update --restart-vms' \
+    'see `cw update`' \
+    'cw exec ls' \
+    'cw run --node build'; do
+    printf '```sh\n%s\n```\n' "$retired" >"$fixture/retired.md"
+    [[ -n "$(retired_grammar_hits "$fixture")" ]] ||
+      fail "self-test: retired spelling passed the guard: $retired"
+  done
+  rm -f "$fixture/retired.md"
+  local current
+  for current in \
+    'cw ls' \
+    'cw --local ls' \
+    'cw stop app --cloud' \
+    'cw stop app --session coding' \
+    'cw setup ssh' \
+    'cw update app --profile local:work' \
+    'cw update --in app --clear-secrets' \
+    'cw upgrade' \
+    'cw upgrade rollback --to v0.3.390' \
+    'cw upgrade --vms' \
+    'cw run app -- cargo test' \
+    'environment variables such as cw environment names'; do
+    printf '```sh\n%s\n```\n' "$current" >"$fixture/current.md"
+    [[ -z "$(retired_grammar_hits "$fixture")" ]] ||
+      fail "self-test: current spelling failed the guard: $current"
+  done
+}
+
+self_test
+
+legacy_doc_hits="$(
+  retired_grammar_hits \
     "$ROOT/README.md" \
     "$ROOT/CONTRIBUTING.md" \
     "$ROOT/crates/codewire-dashboard-web" \
+    "$ROOT/packages/codewire-design/reference" \
+    "$ROOT/apps/cli" \
     "$ROOT/apps/docs/zola/content" \
-    "$ROOT/docs/dev" || true
+    "$ROOT/docs"
 )"
 [[ -z "$legacy_doc_hits" ]] || {
   printf '%s\n' "$legacy_doc_hits" >&2

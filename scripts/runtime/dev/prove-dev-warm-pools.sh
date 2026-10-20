@@ -188,7 +188,7 @@ cleanup() {
   local id
   if [[ "$KEEP" == 0 ]]; then
     for id in "${CREATED_ENVS[@]}"; do
-      cw env rm --yes "$id" >/dev/null 2>&1 || log "cleanup: could not remove $id"
+      cw rm --yes "$id" >/dev/null 2>&1 || log "cleanup: could not remove $id"
     done
   fi
   if [[ -n "$TMPDIR_PROOF" && -d "$TMPDIR_PROOF" ]]; then
@@ -277,7 +277,7 @@ percentile() { # P: sorted numbers on stdin -> nearest-rank percentile
 
 # ------------------------------------------------------------ environment
 
-env_info() { cw env --cloud info "$1" --output json 2>/dev/null; }
+env_info() { cw --cloud info "$1" --output json 2>/dev/null; }
 
 env_state() { env_info "$1" | jq -r '.state // ""'; }
 
@@ -304,7 +304,7 @@ create_env() { # CPU -> environment id
   for attempt in 1 2 3; do
     # Timings start at the accepted request, not before a rate-limit wait.
     now_ms >"$TMPDIR_PROOF/create-started"
-    if cw env create --image "$PROOF_IMAGE" --name "$name" --cpu "$cpu" \
+    if cw create --image "$PROOF_IMAGE" --name "$name" --cpu "$cpu" \
       --memory "$PROOF_MEMORY" --disk "$PROOF_DISK" --isolation standard --ttl "$PROOF_TTL" \
       --no-network --no-wait --yes >"$out" 2>&1; then
       break
@@ -325,7 +325,7 @@ create_env() { # CPU -> environment id
 
 remove_env() {
   local id="$1" kept=() existing
-  cw env rm --yes "$id" >/dev/null 2>&1 || return 1
+  cw rm --yes "$id" >/dev/null 2>&1 || return 1
   for existing in "${CREATED_ENVS[@]}"; do [[ "$existing" == "$id" ]] || kept+=("$existing"); done
   CREATED_ENVS=("${kept[@]}")
 }
@@ -337,7 +337,7 @@ in_workspace() {
 
 daemon_reachable() { in_workspace "$1" 'true' >/dev/null 2>&1; }
 
-# OpenSSH as a user runs it, through the block `cw config-ssh` writes: its
+# OpenSSH as a user runs it, through the block `cw setup ssh` writes: its
 # only trusted host key is the one `cw ssh known-hosts` reads from the
 # platform for the bound Pod, so success proves the bound daemon's SSH
 # server presents exactly the recorded key. The block's commands carry no
@@ -351,12 +351,12 @@ ssh_presents_recorded_key() {
     { log "ssh: cw-$id: $(sed 's/[[:cntrl:]]//g' "$TMPDIR_PROOF/ssh-$id.err" | tail -n 2 | tr '\n' ' ')"; return 1; }
 }
 
-# The block `cw config-ssh` writes, once per run.
+# The block `cw setup ssh` writes, once per run.
 managed_ssh_config() {
   local config="$TMPDIR_PROOF/ssh_config"
   if [[ ! -s "$config" ]]; then
-    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" config-ssh --ssh-config-file "$config" >/dev/null ||
-      { log "cw config-ssh could not write the managed SSH block"; return 1; }
+    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" setup ssh --ssh-config-file "$config" >/dev/null ||
+      { log "cw setup ssh could not write the managed SSH block"; return 1; }
   fi
   printf '%s\n' "$config"
 }
@@ -678,7 +678,7 @@ journey_hits() {
   ensure_pool
   for ((n = 1; n <= PROOF_HITS; n++)); do
     if ! wait_pool_members 1; then fail "hit $n: pool $POOL_NAME has no ready member after ${POOL_WAIT_SECONDS}s"; continue; fi
-    id="$(create_env "$PROOF_CPU")" || { fail "hit $n: cw env create"; continue; }
+    id="$(create_env "$PROOF_CPU")" || { fail "hit $n: cw create"; continue; }
     started="$(<"$TMPDIR_PROOF/create-started")"
     start_first_ssh "$id" "$started" || fail "hit $n: could not start the first-SSH timer"
     if ! wait_ready "$id"; then

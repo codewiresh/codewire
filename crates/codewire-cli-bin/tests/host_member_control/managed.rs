@@ -891,7 +891,6 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
     let created = target
         .json(
             &[
-                "env",
                 "create",
                 "--local",
                 "--type",
@@ -909,7 +908,7 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
     let env = created["id"].as_str().unwrap().to_owned();
     let initial = daemon(&target, &env).await;
     target
-        .json(&["env", "stop", "--local", &env, "--output", "json"], None)
+        .json(&["stop", "--local", &env, "--output", "json"], None)
         .await;
     assert!(
         wait_terminal(&initial.fd, Duration::from_secs(10)).await,
@@ -1021,7 +1020,7 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
         );
     }
     target
-        .json(&["env", "start", "--local", &env, "--output", "json"], None)
+        .json(&["start", "--local", &env, "--output", "json"], None)
         .await;
     let daemon = daemon(&target, &env).await;
     assert_ne!(daemon.birth, initial.birth);
@@ -1233,6 +1232,7 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
                 "--member",
                 "target",
                 "stop",
+                "--session",
                 &worker.session,
                 "--expected-launch-generation",
                 "1",
@@ -1262,6 +1262,7 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
                 "--member",
                 "target",
                 "restart",
+                "--session",
                 &worker.session,
                 "--expected-launch-generation",
                 "1",
@@ -1483,6 +1484,7 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
                     "--member",
                     "target-renewed",
                     "stop",
+                    "--session",
                     &c.session,
                     "--output",
                     "json",
@@ -1501,7 +1503,7 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
     assert!(terminal(&helper.fd));
     assert!(!terminal(&daemon.fd));
     target
-        .json(&["env", "stop", "--local", &env, "--output", "json"], None)
+        .json(&["stop", "--local", &env, "--output", "json"], None)
         .await;
     assert!(terminal(&daemon.fd));
     broker.stdin.take();
@@ -1688,6 +1690,7 @@ async fn caller_loss(
                 "--member",
                 "target",
                 "stop",
+                "--session",
                 &cancelled.session,
                 "--output",
                 "json",

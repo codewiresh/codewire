@@ -309,11 +309,11 @@ class Journey:
         # The host daemon this starts inherits a conversation identity, as
         # one a lead's own cw started would. No session ever sees it.
         stale = dict(self.env, CW_ENVIRONMENT="stale-environment", CW_SESSION_ID="session-stale")
-        created = self.call("env", "create", "--local", "--type", "host", "--name", "proof",
+        created = self.call("create", "--local", "--type", "host", "--name", "proof",
                             "--path", str(self.workspace), "--output", "json", data=True, env=stale)
         self.environment = created["id"]
         assert created["type"] == "host"
-        assert self.call("list", self.environment, "--output", "json", data=True) == []
+        assert self.call("ls", self.environment, "--output", "json", data=True) == []
         self.check("create/empty")
 
         self.launch("identity", ["sh", "-c", 'printf "%s|%s" "${CW_ENVIRONMENT-unset}" "${CW_SESSION_ID-unset}"'])
@@ -326,7 +326,7 @@ class Journey:
         self.call("send", self.environment, "reader", "--", "-rest")
         waited = self.call("wait", self.environment, "reader", "--timeout", "10s", "--output", "json", data=True)
         assert waited["output"] == "RECEIVED:part-rest" and waited["eof"], waited
-        assert self.call("logs", self.environment, "reader").stdout == waited["output"]
+        assert self.call("logs", self.environment, "--session", "reader").stdout == waited["output"]
         self.call("run", self.environment, "--name", "reader", "--detach", "--", "true", ok=False)
         self.check("acknowledged-send/partial/wait/logs/unique-name")
 
@@ -339,11 +339,11 @@ class Journey:
         child_pid = int(child_pid_file.read_text())
         if MACOS:
             assert child_pid in owned_family(self.root), "owned-family scan misses a session descendant"
-        stopped = self.call("stop", self.environment, "tree", "--output", "json", data=True)[0]
+        stopped = self.call("stop", self.environment, "--session", "tree", "--output", "json", data=True)[0]
         assert stopped["state"] == "Stopped" and not stopped["cleanup_unknown"], stopped
         assert not process_alive(child_pid), "ordinary child survived Stop"
         self.launch("child", ["true"], parent=owned["session_id"])
-        views = self.call("list", self.environment, "--output", "json", data=True)
+        views = self.call("ls", self.environment, "--output", "json", data=True)
         assert next(v for v in views if v["name"] == "child")["parent_session_id"] == owned["session_id"]
         self.check("owned-tree-stop/unrelated-process/parent-identity")
 
@@ -375,8 +375,8 @@ class Journey:
 
         if self.native:
             saved_thread = self.inbox("lead")["driver"]["native_thread_id"]
-            self.call("stop", self.environment, "lead")
-            restarted = self.call("restart", self.environment, "lead", "--output", "json", data=True)[0]
+            self.call("stop", self.environment, "--session", "lead")
+            restarted = self.call("restart", self.environment, "--session", "lead", "--output", "json", data=True)[0]
             assert restarted["session_id"] == parent["session_id"], restarted
             command = [self.cw, "run", self.environment, "--name", "lead-command", "--detach", "--no-tty", "--", "printf", "LEAD_COMMAND"]
             text = ("Run this exact command once, using your command tool: " +
@@ -390,8 +390,8 @@ class Journey:
             assert self.inbox("lead")["driver"]["native_thread_id"] == saved_thread
             self.check("codex-resume/lead-initiated-cw-command/actual-host-policy")
             saved_thread = self.inbox("worker")["driver"]["native_thread_id"]
-            self.call("stop", self.environment, "worker")
-            self.call("restart", self.environment, "worker")
+            self.call("stop", self.environment, "--session", "worker")
+            self.call("restart", self.environment, "--session", "worker")
             resumed = self.call("msg", self.environment, "worker",
                                 "Reply with exactly CLAUDE_RESUMED. Do not use tools.",
                                 "--output", "json", data=True)
@@ -433,15 +433,15 @@ class Journey:
             self.idle("paused-lead")
             paused = self.pause(lead="paused-lead")
             waiter = self.waiting(paused["paused-noel"][0]["id"])
-        self.call("env", "stop", "--local", self.environment)
+        self.call("stop", "--local", self.environment)
         if paused:
             self.prove_paused(paused, lead="paused-lead")
             # The synthetic noel holds its restarted conversation's startup,
             # so the paused message can be read before noel resumes its run.
             hold_start = self.workspace / f"noel-hold-start-{paused['paused-noel'][2]}"
             hold_start.write_text("")
-        self.call("env", "start", "--local", self.environment)
-        listed = self.call("list", self.environment, "--output", "json", data=True)
+        self.call("start", "--local", self.environment)
+        listed = self.call("ls", self.environment, "--output", "json", data=True)
         assert any(v["name"] == "reader" and v["state"] == "Exited" for v in listed)
         assert (self.workspace / "child.pid").exists()
         if paused:
@@ -470,9 +470,9 @@ class Journey:
         assert self.call("wait", self.environment, "projection", "--timeout", "10s").stdout == "synthetic-only"
         metadata = self.root / "hosts" / self.environment / "sessions" / projected["session_id"] / "session.json"
         assert "synthetic-only" not in metadata.read_text() and '"env"' not in metadata.read_text()
-        self.call("env", "stop", "--local", self.environment)
-        self.call("env", "start", "--local", self.environment)
-        refused = self.call("restart", self.environment, "projection", ok=False)
+        self.call("stop", "--local", self.environment)
+        self.call("start", "--local", self.environment)
+        refused = self.call("restart", self.environment, "--session", "projection", ok=False)
         assert "launch a new session" in refused.stderr, refused.stderr
         self.check("launch-projection/not-persisted/reload-refuses-stale-replay")
 
@@ -654,21 +654,21 @@ class Journey:
         inbox = self.call("inbox", env, "paused-noel").stdout
         line = next(line for line in inbox.splitlines() if line.startswith(message["id"]))
         assert line.endswith("(resumed after its environment stopped)"), inbox
-        logs = self.call("logs", env, "paused-noel").stdout
+        logs = self.call("logs", env, "--session", "paused-noel").stdout
         assert f"message {message['id']} resumed by noel after its environment stopped: run {run}" in logs, logs
         print(f"cli-host: noel inbox after its environment restarted: {line}", flush=True)
-        views = {v["name"]: v for v in self.call("list", env, "--output", "json", data=True)}
+        views = {v["name"]: v for v in self.call("ls", env, "--output", "json", data=True)}
         for name in [n for n in paused if n != "paused-noel"] + [lead]:
             assert views[name]["state"] == "Stopped", views[name]
             assert self.daemon_logged(name, RESUME_LOGGED) == 0, name
         for name, (other, _, _) in paused.items():
             if name == "paused-noel":
                 continue
-            self.call("restart", env, name)
+            self.call("restart", env, "--session", name)
             self.idle(name)
             record = self.wait_message(other["id"], ok=False)
             assert record["state"] == "unknown" and "pause" not in record, (name, record)
-        self.call("restart", env, lead)
+        self.call("restart", env, "--session", lead)
         self.told_pause_then_final(lead, message)
         reply = self.call("msg", env, "paused-noel", "AFTER", "--output", "json", data=True)
         assert self.wait_message(reply["id"])["result"] == "[faux/echo] AFTER"
@@ -682,19 +682,19 @@ class Journey:
         message, run = self.hold("paused-noel")
         waiter = self.waiting(message["id"])
         os.kill(self.driver_pid("paused-noel"), signal.SIGSTOP)
-        self.call("env", "stop", "--local", env)
+        self.call("stop", "--local", env)
         record = self.record_file("paused-noel", message["id"])
         assert record["state"] == "paused" and record["pause"]["reason"] == "environment_stopped", record
         assert self.daemon_logged("paused-noel", PAUSE_LOGGED) == 2
         notes = self.notices(lead, message["id"])
         assert len(notes) == 1 and "paused message" in notes[0]["text"], notes
-        self.call("env", "start", "--local", env)
+        self.call("start", "--local", env)
         done = self.wait_message(message["id"])
         assert done["state"] == "completed" and done["result"] == "[faux/echo] HOLD", done
         assert done["turn_id"] == run and "native_resumed" not in done, done
         self.waited(waiter, message, "[faux/echo] HOLD")
         assert self.daemon_logged("paused-noel", RESUME_LOGGED) == 2
-        self.call("restart", env, lead)
+        self.call("restart", env, "--session", lead)
         self.told_pause_then_final(lead, message)
 
     def daemon_pid(self):
@@ -728,7 +728,7 @@ class Journey:
         # Any command in a running environment starts its daemon: this wait
         # may, and so does the listing after it.
         waiter = self.waiting(message["id"])
-        views = {v["name"]: v for v in self.call("list", env, "--output", "json", data=True)}
+        views = {v["name"]: v for v in self.call("ls", env, "--output", "json", data=True)}
         assert views[lead]["state"] != "Running", views[lead]
         assert not marker.exists()
         done = self.wait_message(message["id"])
@@ -736,7 +736,7 @@ class Journey:
         assert done["turn_id"] == run and "native_resumed" not in done, done
         self.waited(waiter, message, "[faux/echo] HOLD")
         assert self.daemon_logged("paused-noel", RESUME_LOGGED) == resumes + 1
-        self.call("restart", env, lead)
+        self.call("restart", env, "--session", lead)
         self.told_pause_then_final(lead, message)
 
     def stop_intent(self, name):
@@ -746,7 +746,7 @@ class Journey:
                 / "stop-intent.json")
 
     def stop_without_helper(self, name, killed_first):
-        """`cw stop NAME` while the host daemon's record helper fails: the
+        """`cw stop ENV --session NAME` while the host daemon's record helper fails: the
         daemon refuses to run its helper from an image with a second link, so
         nothing interrupts the run and no stop interrupt is recorded. With
         KILLED_FIRST the driver cannot act on its signal either: it is
@@ -762,7 +762,7 @@ class Journey:
         try:
             if killed_first:
                 os.kill(driver, signal.SIGSTOP)
-            stopped = self.call("stop", self.environment, name, "--output", "json", data=True)[0]
+            stopped = self.call("stop", self.environment, "--session", name, "--output", "json", data=True)[0]
         finally:
             link.unlink()
         assert stopped["state"] == "Stopped" and not stopped["cleanup_unknown"], stopped
@@ -787,7 +787,7 @@ class Journey:
         stops = [r for r in (json.loads(path.read_text()) for path in records.glob("*.json"))
                  if r["action"] == "interrupt" and r.get("expected_active_message_id") == message["id"]]
         assert not stops, stops
-        self.call("restart", env, name)
+        self.call("restart", env, "--session", name)
         self.idle(name)
         done = self.wait_message(message["id"], ok=False)
         assert done["state"] == "unknown" and "pause" not in done and "native_resumed" not in done, done
@@ -806,7 +806,7 @@ class Journey:
         """Removing an environment removes a paused message with it. A `cw
         wait` on that message ends at once: its outcome is unknown."""
         main = self.environment
-        created = self.call("env", "create", "--local", "--type", "host", "--name", "removed",
+        created = self.call("create", "--local", "--type", "host", "--name", "removed",
                             "--path", str(self.workspace), "--output", "json", data=True)
         self.environment = created["id"]
         self.extra_environments.append(created["id"])
@@ -815,9 +815,9 @@ class Journey:
             self.idle("removed-noel")
             message, _ = self.hold("removed-noel")
             waiter = self.waiting(message["id"])
-            self.call("env", "stop", "--local", self.environment)
+            self.call("stop", "--local", self.environment)
             assert self.record_file("removed-noel", message["id"])["state"] == "paused"
-            self.call("env", "rm", "--local", self.environment, "--yes")
+            self.call("rm", "--local", self.environment, "--yes")
             self.extra_environments.remove(created["id"])
             out, err = waiter.communicate(timeout=120)
             assert waiter.returncode != 0, (out, err)
@@ -849,25 +849,25 @@ class Journey:
             "sys.stdout.buffer.write(b'[0m\\n'); sys.stdout.buffer.flush()"
         )
         self.launch("history", [sys.executable, "-c", program])
-        self.until(lambda: self.call("list", self.environment, "--output", "json", data=True),
+        self.until(lambda: self.call("ls", self.environment, "--output", "json", data=True),
                    lambda views: any(v["name"] == "history" and
                                      v["output_end_offset"] == len(encoded) for v in views))
         assert len(encoded) > page_size * 2
-        assert self.call("logs", self.environment, "history", timeout=10).stdout == plain.decode()
-        assert self.call("logs", self.environment, "history", "--raw", timeout=10).stdout == encoded.decode()
-        assert self.call("logs", self.environment, "history", "--tail", "0").stdout == ""
-        assert self.call("logs", self.environment, "history", "--tail", "1").stdout == marker.decode()
-        assert self.call("logs", self.environment, "history", "--tail", "70").stdout == (
+        assert self.call("logs", self.environment, "--session", "history", timeout=10).stdout == plain.decode()
+        assert self.call("logs", self.environment, "--session", "history", "--raw", timeout=10).stdout == encoded.decode()
+        assert self.call("logs", self.environment, "--session", "history", "--tail", "0").stdout == ""
+        assert self.call("logs", self.environment, "--session", "history", "--tail", "1").stdout == marker.decode()
+        assert self.call("logs", self.environment, "--session", "history", "--tail", "70").stdout == (
             b"history-line\n" * 69 + marker).decode()
-        assert self.call("logs", self.environment, "history", "--tail", "30002").stdout == (
+        assert self.call("logs", self.environment, "--session", "history", "--tail", "30002").stdout == (
             padding + visible + b"\n" + rows + marker).decode()
-        assert self.call("logs", self.environment, "history", "--tail", "30002", "--raw").stdout == (
+        assert self.call("logs", self.environment, "--session", "history", "--tail", "30002", "--raw").stdout == (
             padding + b"\x1b[31m" + visible + b"\x1b[0m\n" + rows + marker).decode()
 
         followers = []
         try:
             for raw in (False, True):
-                args = [self.cw, "logs", self.environment, "history", "--tail", "1", "--follow"]
+                args = [self.cw, "logs", self.environment, "--session", "history", "--tail", "1", "--follow"]
                 if raw:
                     args += ["--raw"]
                 follower = subprocess.Popen(args, env=self.env, cwd=self.workspace, text=True,
@@ -885,7 +885,7 @@ class Journey:
                                    ("reset", b"[0m\n")):
                 self.call("send", self.environment, "history", command)
                 live_end += len(piece)
-                self.until(lambda: self.call("list", self.environment, "--output", "json", data=True),
+                self.until(lambda: self.call("ls", self.environment, "--output", "json", data=True),
                            lambda views: any(v["name"] == "history" and
                                              v["output_end_offset"] == live_end for v in views))
             for raw, follower in followers:
@@ -907,13 +907,13 @@ class Journey:
         saved_thread = lead["driver"]["native_thread_id"]
         parked = self.launch("parked", agent="codex", parent="lead", prompt="HOLD")
         self.until(lambda: self.inbox("parked"), lambda v: v["driver"]["current_turn_id"] is not None)
-        self.call("stop", self.environment, "lead")
+        self.call("stop", self.environment, "--session", "lead")
         self.call("steer", self.environment, "parked", "finish")
         source = self.wait_message(parked["message"]["id"])
         self.until(lambda: self.inbox("lead"), lambda v: any(
             m["source"] and m["source"]["message_id"] == source["id"] and m["state"] == "undelivered"
             for m in v["messages"]))
-        self.call("stop", self.environment, "parked")
+        self.call("stop", self.environment, "--session", "parked")
         registry = self.root / "hosts" / self.environment / "agents"
         path = registry / parked["driver_id"] / "messages" / (source["id"] + ".json")
         persisted = json.loads(path.read_text())
@@ -928,9 +928,9 @@ class Journey:
         native_thread = self.inbox("parked")["driver"]["native_thread_id"]
         trace = self.workspace / ("peer-" + native_thread + ".jsonl")
         turns = trace.read_text().count('"turn/start"')
-        self.call("restart", self.environment, "parked")
+        self.call("restart", self.environment, "--session", "parked")
         self.until(receiver.exists, bool)
-        self.call("restart", self.environment, "lead")
+        self.call("restart", self.environment, "--session", "lead")
         result = self.wait_message(notification_id)
         assert result["state"] == "completed" and result["native_acknowledged"], result
         recovered = self.inbox("lead")
@@ -1028,10 +1028,10 @@ class Journey:
         return reply["data"].get("lastRun")
 
     def stop_confirmed(self, name):
-        """`cw stop NAME` at a terminal, answering yes when it asks whether to
+        """`cw stop ENV --session NAME` at a terminal, answering yes when it asks whether to
         stop the running children too."""
         controller, terminal = pty.openpty()
-        stop = subprocess.Popen([self.cw, "stop", self.environment, name, "--output", "json"],
+        stop = subprocess.Popen([self.cw, "stop", self.environment, "--session", name, "--output", "json"],
                                 env=self.env, cwd=self.workspace, stdin=terminal, stdout=subprocess.PIPE,
                                 stderr=terminal)
         os.close(terminal)
@@ -1110,7 +1110,7 @@ class Journey:
         assert driver["capabilities"]["steer"] and driver["capabilities"]["interrupt"], driver
         session = driver["native_thread_id"]
         assert "[faux/echo] Hello" in self.call("inbox", env, "noel-lead").stdout
-        assert "says: [faux/echo] Hello" in self.call("logs", env, "noel-lead").stdout
+        assert "says: [faux/echo] Hello" in self.call("logs", env, "--session", "noel-lead").stdout
         trace = self.noel_trace("noel-lead")
         skill, _ = self.delegation_skill("noel-lead")
         assert trace[0]["event"] == "start" and trace[0]["argv"] == [
@@ -1179,7 +1179,7 @@ class Journey:
         notified = self.call("msg", env, "noel-lead", "NOTIFY", "--output", "json", data=True)
         assert self.wait_message(notified["id"])["result"] == "[faux/echo] NOTIFY"
         assert [r for r in self.received("noel-lead") if r["type"] == "extension_ui_response"] == answers
-        logs = self.call("logs", env, "noel-lead").stdout
+        logs = self.call("logs", env, "--session", "noel-lead").stdout
         assert ("noel warning: fixture account first is rate limited until 14:05 UTC; "
                 "switched to second") in logs, logs[-2000:]
         assert "declined noel notify dialog" not in logs
@@ -1194,7 +1194,7 @@ class Journey:
         worker = self.launch("noel-worker", agent="noel", model="faux/echo", parent="noel-lead", prompt="WORKER")
         assert self.wait_message(worker["message"]["id"])["result"] == "[faux/echo] WORKER"
         self.wakes("noel-lead", 1)
-        # Every launch writes the skill again, as a cw update needs: a stale
+        # Every launch writes the skill again, as a cw upgrade needs: a stale
         # one that others could read is replaced when the worker restarts.
         skill, _ = self.delegation_skill("noel-worker")
         current = skill.read_text()
@@ -1236,7 +1236,7 @@ class Journey:
         self.check(f"noel-restart-mid-run-interrupted-in-{restart_time:.2f}s/codex-and-claude-restart-unknown")
 
         all_time = self.prove_cascade("tree", lambda lead: self.call(
-            "stop", "--all", env, lead, "--output", "json", data=True))
+            "stop", env, "--session", lead, "--all", "--output", "json", data=True))
         self.check(f"stop-all-interrupts-every-noel-run-first-in-{all_time:.2f}s/codex-and-claude-unknown")
         asked = []
 
@@ -1275,7 +1275,7 @@ class Journey:
         message, run = self.held("resumed", "HOLD")
         os.kill(self.driver_pid("resumed"), signal.SIGKILL)
         self.ended("resumed")
-        self.call("restart", env, "resumed")
+        self.call("restart", env, "--session", "resumed")
         resumed = self.wait_message(message["id"])
         assert resumed["state"] == "completed" and resumed["result"] == "[faux/echo] HOLD", resumed
         assert resumed["native_resumed"] == 1 and resumed["turn_id"] == run, resumed
@@ -1294,7 +1294,7 @@ class Journey:
         os.kill(self.driver_pid("resumed"), signal.SIGKILL)
         self.ended("resumed")
         assert self.message_record("resumed", message["id"])["state"] == "running"
-        self.call("restart", env, "resumed")
+        self.call("restart", env, "--session", "resumed")
         resumed = self.wait_message(message["id"])
         assert resumed["state"] == "completed" and resumed["result"] == "[faux/echo] HOLD2", resumed
         assert resumed["native_resumed"] == 2, resumed
@@ -1312,7 +1312,7 @@ class Journey:
             message, _ = self.hold(name, turn=agent == "codex")
             os.kill(self.driver_pid(name), signal.SIGKILL)
             self.ended(name)
-            self.call("restart", env, name)
+            self.call("restart", env, "--session", name)
             self.idle(name)
             record = self.wait_message(message["id"], ok=False)
             assert record["state"] == "unknown" and record["error"] == (
@@ -1328,7 +1328,7 @@ class Journey:
             self.ended(name)
             assert self.peer_starts(agent, name) == starts, f"{agent} was started again"
             self.heard_once(lead, message)
-            self.call("restart", env, name)
+            self.call("restart", env, "--session", name)
             self.idle(name)
             after = self.call("msg", env, name, "AFTER", "--output", "json", data=True)
             assert self.wait_message(after["id"])["result"] == "RESULT:AFTER"
@@ -1363,7 +1363,7 @@ class Journey:
 
     def ended(self, name):
         """Waits until conversation NAME's session no longer runs."""
-        return self.until(lambda: next(v for v in self.call("list", self.environment, "--output", "json",
+        return self.until(lambda: next(v for v in self.call("ls", self.environment, "--output", "json",
                                                              data=True) if v["name"] == name),
                           lambda view: view["state"] != "Running")
 
@@ -1406,7 +1406,7 @@ class Journey:
         note = "(resumed by noel)" if resumes == 1 else f"(resumed by noel {resumes} times)"
         inbox = self.call("inbox", self.environment, name).stdout
         assert next(line for line in inbox.splitlines() if line.startswith(message["id"])).endswith(note), inbox
-        logs = self.call("logs", self.environment, name).stdout
+        logs = self.call("logs", self.environment, "--session", name).stdout
         assert f"message {message['id']} resumed by noel: run {run}, resume {resumes} of 3" in logs, logs
 
     def tree(self, prefix, agents=("noel", "codex", "claude"), text="HOLD", env=()):
@@ -1456,18 +1456,18 @@ class Journey:
         for agent in agents[1:]:
             name = f"{prefix}-{agent}"
             assert self.interrupts_logged(name) == 0, name
-            self.call("restart", self.environment, name)
+            self.call("restart", self.environment, "--session", name)
             self.idle(name)
             assert self.wait_message(held[name][0]["id"], ok=False)["state"] == "unknown", name
             sources.add(held[name][0]["id"])
         # Restarted, the lead adopts each worker message's notification once.
-        self.call("restart", self.environment, lead)
+        self.call("restart", self.environment, "--session", lead)
         inbox = self.until(lambda: self.inbox(lead), lambda v: {
             m["source"]["message_id"] for m in v["messages"] if m["action"] == "notification"
             and m["state"] in ("accepted", "running", "completed")} >= sources, timeout=120)
         notifications = [m for m in inbox["messages"] if m["action"] == "notification"]
         assert len(notifications) == len(sources), notifications
-        self.call("stop", "--all", self.environment, lead, "--output", "json", data=True)
+        self.call("stop", self.environment, "--session", lead, "--all", "--output", "json", data=True)
         return took
 
     def stop_mid_run(self, name, turn, verb="stop"):
@@ -1478,10 +1478,10 @@ class Journey:
         holding, run = self.hold(name, turn=turn)
         started = time.monotonic()
         if verb == "stop":
-            stopped = self.call("stop", self.environment, name, "--output", "json", data=True)[0]
+            stopped = self.call("stop", self.environment, "--session", name, "--output", "json", data=True)[0]
             assert stopped["state"] == "Stopped" and not stopped["cleanup_unknown"], stopped
         took = time.monotonic() - started
-        self.call("restart", self.environment, name)
+        self.call("restart", self.environment, "--session", name)
         if verb == "restart":
             took = time.monotonic() - started
         self.idle(name)
@@ -1489,7 +1489,7 @@ class Journey:
 
     def run_real_noel(self):
         """The noel journey with the real binary: faux/echo, private pi state."""
-        created = self.call("env", "create", "--local", "--type", "host", "--name", "proof",
+        created = self.call("create", "--local", "--type", "host", "--name", "proof",
                             "--path", str(self.workspace), "--output", "json", data=True)
         self.environment = env = created["id"]
         self.preserved = "noel-proof.txt"
@@ -1569,7 +1569,7 @@ class Journey:
         # ends interrupted, and the lead hears about it.
         second_text = "Tell another long story, about the mountains."
         second, run = self.held("noel-slow", second_text)
-        stopped, stop_time = self.timed("stop", env, "noel-slow", "--output", "json")
+        stopped, stop_time = self.timed("stop", env, "--session", "noel-slow", "--output", "json")
         stopped = json.loads(stopped.stdout)[0]
         assert stopped["state"] == "Stopped" and not stopped["cleanup_unknown"], stopped
         slow_session = self.noel_session("noel-slow")
@@ -1578,7 +1578,7 @@ class Journey:
         second = self.wait_message(second["id"], ok=False)
         assert second["state"] == "interrupted" and second["turn_id"] == run, second
         assert self.interrupts_logged("noel-slow") == 1
-        self.call("restart", env, "noel-slow")
+        self.call("restart", env, "--session", "noel-slow")
         self.idle("noel-slow")
         print(f"cli-host: noel stop mid-run in {stop_time:.2f}s: message {second['state']}, "
               f"noel's run {last['status']}", flush=True)
@@ -1599,7 +1599,7 @@ class Journey:
         # cw restart interrupts the same way. noel's journal records the run
         # aborted before the restart's signal; no prompt has followed it.
         third, run = self.held("noel-slow", "One more long story, about a river.")
-        _, restart_time = self.timed("restart", env, "noel-slow")
+        _, restart_time = self.timed("restart", env, "--session", "noel-slow")
         self.idle("noel-slow")
         third = self.wait_message(third["id"], ok=False)
         assert third["state"] == "interrupted" and third["turn_id"] == run, third
@@ -1624,7 +1624,7 @@ class Journey:
         # Stopping a lead and its worker interrupts both runs first.
         long_story = "Write a long story about a lighthouse keeper and the sea."
         all_time = self.prove_cascade("rall", lambda lead: self.call(
-            "stop", "--all", env, lead, "--output", "json", data=True), ("noel",), long_story, slow)
+            "stop", env, "--session", lead, "--all", "--output", "json", data=True), ("noel",), long_story, slow)
         self.check(f"real-noel-stop-all-interrupts-lead-and-worker-first-in-{all_time:.2f}s")
         asked = []
 
@@ -1642,9 +1642,9 @@ class Journey:
         # after daemon recovery, so its paused message resolves once instead
         # of waiting for a start that cannot come.
         paused = self.pause(("noel",), "A long story about a bridge.", slow)
-        self.call("env", "stop", "--local", env)
+        self.call("stop", "--local", env)
         self.prove_paused(paused, slow)
-        self.call("env", "start", "--local", env)
+        self.call("start", "--local", env)
         message = self.wait_message(paused["paused-noel"][0]["id"], ok=False)
         assert message["state"] == "unknown", message
         assert message["error"].startswith(
@@ -1733,7 +1733,7 @@ class Journey:
             "tool call bash did not complete before the session continued",
         )
         assert len(results) == 1 and results[0][0] == "bash" and results[0][1] in interrupted, sent
-        assert "bash is reported interrupted, not run again" in self.call("logs", env, "noel-tool").stdout
+        assert "bash is reported interrupted, not run again" in self.call("logs", env, "--session", "noel-tool").stdout
         self.real_resumed("noel-tool", message, run)
         self.heard_once(lead, message, lead_said)
         print(f"cli-host: noel interrupted bash once; counter {counter.read_text().splitlines()}, "
@@ -1746,7 +1746,7 @@ class Journey:
         requests(log, 1)
         os.kill(self.driver_pid("noel-driver"), signal.SIGKILL)
         self.ended("noel-driver")
-        self.call("restart", env, "noel-driver")
+        self.call("restart", env, "--session", "noel-driver")
         done = self.wait_message(message["id"])
         assert done["state"] == "completed" and done["result"] == "Answered after the driver restarted.", done
         assert done["native_resumed"] == 1 and done["turn_id"] == run, done
@@ -1768,7 +1768,7 @@ class Journey:
         os.kill(self.driver_pid("noel-twice"), signal.SIGKILL)
         self.ended("noel-twice")
         assert self.message_record("noel-twice", message["id"])["state"] == "running"
-        self.call("restart", env, "noel-twice")
+        self.call("restart", env, "--session", "noel-twice")
         done = self.wait_message(message["id"])
         assert done["state"] == "completed" and done["result"] == "Survived both crashes.", done
         assert done["native_resumed"] == 2 and done["turn_id"] == run, done
@@ -1794,7 +1794,7 @@ class Journey:
         daemon = dict(self.env)
         daemon.update(value.split("=", 1) for value in private + [
             f"NOEL_FAUX_SCRIPT={script}", f"NOEL_FAUX_SCRIPT_LOG={log}", "SHELL=/bin/sh"])
-        created = self.call("env", "create", "--local", "--type", "host", "--name", "paused",
+        created = self.call("create", "--local", "--type", "host", "--name", "paused",
                             "--path", str(self.workspace), "--output", "json", data=True, env=daemon)
         self.environment = env = created["id"]
         self.extra_environments.append(env)
@@ -1822,7 +1822,7 @@ class Journey:
             journal = self.root / "noel-agent" / "sessions" / f"{session}.jsonl"
             lead_journal = self.root / "noel-agent" / "sessions" / f"{self.noel_session(lead)}.jsonl"
 
-            self.call("env", "stop", "--local", env)
+            self.call("stop", "--local", env)
             record = self.record_file("pause-worker", message["id"])
             assert record["state"] == "paused" and record["pause"]["reason"] == "environment_stopped", record
             assert self.daemon_logged("pause-worker", PAUSE_LOGGED) == 1
@@ -1832,7 +1832,7 @@ class Journey:
             notes = self.notices(lead, message["id"])
             assert len(notes) == 1 and "paused message" in notes[0]["text"], notes
 
-            self.call("env", "start", "--local", env, env=daemon)
+            self.call("start", "--local", env, env=daemon)
             done = self.wait_message(message["id"])
             assert done["state"] == "completed", done
             assert done["result"] == "Answered after the environment came back.", done
@@ -1848,15 +1848,15 @@ class Journey:
             line = next(line for line in inbox.splitlines() if line.startswith(message["id"]))
             assert line.endswith("(resumed after its environment stopped)"), inbox
             print(f"cli-host: noel inbox after its environment restarted: {line}", flush=True)
-            views = {v["name"]: v for v in self.call("list", env, "--output", "json", data=True)}
+            views = {v["name"]: v for v in self.call("ls", env, "--output", "json", data=True)}
             for name in list(others) + [lead]:
                 assert views[name]["state"] == "Stopped", views[name]
             for name, other in others.items():
-                self.call("restart", env, name)
+                self.call("restart", env, "--session", name)
                 self.idle(name)
                 ended = self.wait_message(other["id"], ok=False)
                 assert ended["state"] == "unknown" and "pause" not in ended, (name, ended)
-            self.call("restart", env, lead)
+            self.call("restart", env, "--session", lead)
 
             def lead_said():
                 entries = [json.loads(line) for line in lead_journal.read_text().splitlines()]
@@ -1878,7 +1878,7 @@ class Journey:
             self.until(sent, lambda requests: len(requests) == asked + 1)
             self.stop_without_helper("pause-worker", killed_first=True)
             assert self.record_file("pause-worker", stopped["id"])["state"] == "running"
-            self.call("restart", env, "pause-worker")
+            self.call("restart", env, "--session", "pause-worker")
             self.idle("pause-worker")
             done = self.wait_message(stopped["id"], ok=False)
             assert done["state"] == "unknown" and done["error"] == STOPPED_IN_FLIGHT, done
@@ -1889,7 +1889,7 @@ class Journey:
             assert len(sent()) == asked + 1, sent()
             self.check("real-noel-explicit-stop-with-failed-record-helper/driver-killed-first/"
                        "never-resumed/model-request-not-sent-again/lead-hears-once")
-            self.call("env", "rm", "--local", env, "--yes")
+            self.call("rm", "--local", env, "--yes")
             self.extra_environments.remove(env)
         finally:
             self.environment = main
@@ -1913,7 +1913,7 @@ class Journey:
         daemon.update(value.split("=", 1) for value in private + [
             f"NOEL_FAUX_SCRIPT={script}", f"NOEL_FAUX_SCRIPT_LOG={log}", "SHELL=/bin/sh",
             "NOEL_FAUX_STREAM_DELAY_MS=100", "NOEL_FAUX_STREAM_CHARS=1"])
-        created = self.call("env", "create", "--local", "--type", "host", "--name", "delegating",
+        created = self.call("create", "--local", "--type", "host", "--name", "delegating",
                             "--path", str(self.workspace), "--output", "json", data=True, env=daemon)
         self.environment = env = created["id"]
         self.extra_environments.append(env)
@@ -1925,9 +1925,10 @@ class Journey:
             responses, used = [], set()
 
             def skill(start, values):
-                """The skill's one command that begins `cw START`, with
-                VALUES in place of its placeholders."""
-                (command,) = [c for c in commands if c.startswith(f"{self.cw} {start} ")]
+                """The skill's one command that is `cw START`, or else that
+                begins with it, with VALUES in place of its placeholders."""
+                (command,) = ([c for c in commands if c == f"{self.cw} {start}"]
+                              or [c for c in commands if c.startswith(f"{self.cw} {start} ")])
                 used.add(command)
                 words = command[len(self.cw):]
                 for placeholder, value in values.items():
@@ -2002,7 +2003,7 @@ class Journey:
             ids = {worker: message_id(ran(launched)), "review-codex": message_id(ran(codex)),
                    "review-claude": message_id(ran(claude))}
             assert f"Launched managed noel conversation {worker} " in ran(launched), ran(launched)
-            listed = self.call("list", env, "--output", "json", data=True)
+            listed = self.call("ls", env, "--output", "json", data=True)
             views = {view["name"]: view for view in listed}
             assert all(views[name]["parent_session_id"] == self.session_ids[lead] for name in ids), listed
             results = {worker: f"[faux/echo] {task}", "review-codex": "RESULT:Review the count as codex.",
@@ -2044,8 +2045,9 @@ class Journey:
             waited, cut, interrupted, stopped, all_stopped, *_ = respond(
                 tool("bash", command=skill("wait", {"MESSAGE_ID": follow_id})), tool("bash", command=follow),
                 tool("bash", "delegate-interrupt", command=skill("interrupt", named)),
-                tool("bash", command=skill('stop "$CW_ENVIRONMENT"', named)),
-                tool("bash", command=skill("stop --all", named)), [{"text": "Stopped."}], said, said)
+                tool("bash", command=skill('stop "$CW_ENVIRONMENT" --session NAME', named)),
+                tool("bash", command=skill('stop "$CW_ENVIRONMENT" --session NAME --all', named)),
+                [{"text": "Stopped."}], said, said)
             (self.root / "delegate-steer").write_text("")
             cut_id = message_id(ran(cut))
             running(cut_id)
@@ -2057,14 +2059,14 @@ class Journey:
             assert self.wait_message(message_id(ran(steered)))["state"] == "completed"
             assert self.wait_message(message_id(ran(interrupted)))["state"] == "completed"
             assert self.wait_message(cut_id, ok=False)["state"] == "interrupted"
-            # Without a terminal `cw stop` leaves the worker's own worker
-            # running and names it; `cw stop --all` stops it too.
+            # Without a terminal `cw stop ENV --session NAME` leaves the
+            # worker's own worker running and names it; `--all` stops it too.
             assert re.search(rf"^{worker} +Stopped ", ran(stopped), re.M), ran(stopped)
             assert "child session lamp-keeper is still running" in ran(stopped), ran(stopped)
             assert "Command exited" not in ran(stopped) + ran(all_stopped), (ran(stopped), ran(all_stopped))
             assert all(re.search(rf"^{name} +Stopped ", ran(all_stopped), re.M)
                        for name in (worker, "lamp-keeper")), ran(all_stopped)
-            states = {view["name"]: view["state"] for view in self.call("list", env, "--output", "json", data=True)}
+            states = {view["name"]: view["state"] for view in self.call("ls", env, "--output", "json", data=True)}
             assert states == {lead: "Running", worker: "Stopped", "lamp-keeper": "Stopped",
                               "review-codex": "Running", "review-claude": "Running"}, states
             assert used == set(commands), set(commands) - used
@@ -2090,7 +2092,7 @@ class Journey:
                                       f"finished message {ids[worker]} as completed.\n\n[faux/echo] {task}\n"), counted
             assert sum(f"finished message {cut_id} as interrupted." in text for text in wakes) == 1, wakes
             self.check("real-noel-lead-woken-once-per-worker-message-with-its-result")
-            self.call("env", "rm", "--local", env, "--yes")
+            self.call("rm", "--local", env, "--yes")
             self.extra_environments.remove(env)
         finally:
             self.environment = main
@@ -2107,7 +2109,7 @@ class Journey:
         note = "(resumed by noel)" if resumes == 1 else f"(resumed by noel {resumes} times)"
         inbox = self.call("inbox", self.environment, name).stdout
         assert next(line for line in inbox.splitlines() if line.startswith(message["id"])).endswith(note), inbox
-        logs = self.call("logs", self.environment, name).stdout
+        logs = self.call("logs", self.environment, "--session", name).stdout
         assert f"message {message['id']} resumed by noel: run {run}, resume {resumes} of 3" in logs, logs
         print(f"cli-host: noel inbox: {next(l for l in inbox.splitlines() if l.startswith(message['id']))}",
               flush=True)
@@ -2117,13 +2119,13 @@ class Journey:
             try:
                 # An environment a failed step left behind stops with the rest.
                 for extra in self.extra_environments:
-                    self.call("env", "stop", "--local", extra, ok=None)
+                    self.call("stop", "--local", extra, ok=None)
                 if self.environment:
                     if preserve:
-                        self.call("env", "stop", "--local", self.environment)
+                        self.call("stop", "--local", self.environment)
                         print(f"cli-host: failed-journey evidence retained: {self.root}", file=sys.stderr)
                     else:
-                        result = self.call("env", "rm", "--local", self.environment, "--yes")
+                        result = self.call("rm", "--local", self.environment, "--yes")
                         assert (self.workspace / self.preserved).exists(), "workspace removed with runtime"
                         self.check("remove-runtime/preserve-project")
             finally:

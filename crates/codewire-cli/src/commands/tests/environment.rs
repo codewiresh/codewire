@@ -88,7 +88,6 @@ fn private_launcher_failure_is_value_blind_and_does_not_dispatch_normal_cli() {
 fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "create",
         "--local",
         "--name",
@@ -107,11 +106,7 @@ fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
         "json",
     ])
     .unwrap();
-    let Command::Env(EnvArgs {
-        local,
-        platform,
-        command: EnvCommand::Create(args),
-    }) = cli.command
+    let (local, platform, EnvCommand::Create(args)) = env_operation(cli)
     else {
         panic!("expected local env create command");
     };
@@ -131,7 +126,6 @@ fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
         assert!(
             Cli::try_parse_from([
                 "cw",
-                "env",
                 "--local",
                 "create",
                 "--backend",
@@ -146,7 +140,6 @@ fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
         assert!(
             Cli::try_parse_from([
                 "cw",
-                "env",
                 "--local",
                 "create",
                 "--backend",
@@ -158,24 +151,28 @@ fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
         );
     }
 
-    let cli = Cli::try_parse_from(["cw", "env", "--cloud", "list"]).unwrap();
-    let Command::Env(EnvArgs {
-        local,
-        platform,
-        command: EnvCommand::List(_),
-    }) = cli.command
-    else {
-        panic!("expected platform env list command");
-    };
-    assert!(!local);
-    assert!(platform);
-
-    assert!(Cli::try_parse_from(["cw", "env", "--local", "--cloud", "list"]).is_err());
+    // The one global placement pair, before or after the command.
+    for argv in [["cw", "--cloud", "ls"], ["cw", "ls", "--cloud"]] {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        assert_eq!(cli.placement().unwrap(), Some(EnvironmentPlacement::Platform));
+        assert!(matches!(cli.command, Command::Ls(_)));
+    }
+    for argv in [
+        vec!["cw", "--local", "--cloud", "ls"],
+        vec!["cw", "--local", "ls", "--cloud"],
+        vec!["cw", "ls", "--cloud", "--local"],
+    ] {
+        let cli = Cli::try_parse_from(argv.clone()).unwrap();
+        assert_eq!(
+            cli.placement().unwrap_err().to_string(),
+            "--local and --cloud select different placements; pass only one",
+            "{argv:?}"
+        );
+    }
     assert!(Cli::try_parse_from(["cw", "environment", "list"]).is_err());
     assert!(
         Cli::try_parse_from([
             "cw",
-            "env",
             "create",
             "--local",
             "--docker-disk",
@@ -186,7 +183,6 @@ fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
     );
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "--local",
         "resize",
         "workspace",
@@ -199,11 +195,7 @@ fn env_placement_parser_accepts_explicit_local_and_platform_lifecycle_forms() {
         "--yes",
     ])
     .unwrap();
-    let Command::Env(EnvArgs {
-        local,
-        platform,
-        command: EnvCommand::Resize(args),
-    }) = cli.command
+    let (local, platform, EnvCommand::Resize(args)) = env_operation(cli)
     else {
         panic!("expected local env resize command");
     };
@@ -526,7 +518,7 @@ fn platform_daemon_readiness_requires_a_ready_daemon() {
         environment_daemon_readiness(&status)
             .unwrap_err()
             .to_string(),
-        "environment daemon requires an upgrade; run `cw env daemon repair`"
+        "environment daemon requires an upgrade; run `cw daemon repair`"
     );
 
     status.state = "unhealthy".to_string();
@@ -535,7 +527,7 @@ fn platform_daemon_readiness_requires_a_ready_daemon() {
         environment_daemon_readiness(&status)
             .unwrap_err()
             .to_string(),
-        "environment daemon is unhealthy (session store unavailable); run `cw env daemon status` or `cw env daemon repair`"
+        "environment daemon is unhealthy (session store unavailable); run `cw daemon status` or `cw daemon repair`"
     );
 }
 
@@ -558,22 +550,18 @@ fn platform_lifecycle_wait_horizon_matches_server_class() {
 #[test]
 fn platform_create_rejects_native_only_options() {
     let cli =
-        Cli::try_parse_from(["cw", "env", "--cloud", "create", "--backend", "native"]).unwrap();
-    let Command::Env(EnvArgs {
-        command: EnvCommand::Create(args),
-        ..
-    }) = cli.command
+        Cli::try_parse_from(["cw", "--cloud", "create", "--backend", "native"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli)
     else {
         panic!("expected platform environment create");
     };
     assert_eq!(
         reject_local_create_options(&args).unwrap_err().to_string(),
-        "--backend, --path, --path-mode, --spec, --docker-disk, and --no-docker require `cw env create --local`"
+        "--backend, --path, --path-mode, --spec, --docker-disk, and --no-docker require `cw create --local`"
     );
 
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "--local",
         "create",
         "--name",
@@ -582,10 +570,7 @@ fn platform_create_rejects_native_only_options() {
         "user/work",
     ])
     .unwrap();
-    let Command::Env(EnvArgs {
-        command: EnvCommand::Create(args),
-        ..
-    }) = cli.command
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli)
     else {
         panic!("expected native local environment create");
     };
@@ -595,17 +580,13 @@ fn platform_create_rejects_native_only_options() {
 
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "--cloud",
         "create",
         "--profile",
         "user/work",
     ])
     .unwrap();
-    let Command::Env(EnvArgs {
-        command: EnvCommand::Create(args),
-        ..
-    }) = cli.command
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli)
     else {
         panic!("expected platform environment create");
     };
@@ -619,10 +600,10 @@ fn platform_create_rejects_native_only_options() {
             .profile,
         "user/work"
     );
-    assert!(Cli::try_parse_from(["cw", "env", "create", "--access-profile", "work"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "create", "--access-profile", "work"]).is_err());
 
     assert!(
-        Cli::try_parse_from(["cw", "env", "create", "--local", "--path-mode", "direct",]).is_err()
+        Cli::try_parse_from(["cw", "create", "--local", "--path-mode", "direct",]).is_err()
     );
 }
 
@@ -630,40 +611,38 @@ fn platform_create_rejects_native_only_options() {
 fn ambiguous_placement_error_gives_both_exact_commands() {
     assert_eq!(
         ambiguous_environment_placement_error("start", "workspace").to_string(),
-        "environment \"workspace\" exists in both placements; use `cw env start --local workspace` or `cw env start --cloud workspace`"
+        "environment \"workspace\" exists in both placements; use `cw --local start workspace` or `cw --cloud start workspace`"
     );
 }
 
 #[test]
 fn use_parser_accepts_explicit_environment_placement() {
-    let cli = Cli::try_parse_from(["cw", "use", "--local", "workbench"]).unwrap();
-    let Command::Use(UseTargetArgs {
-        local,
-        platform,
-        target,
-    }) = cli.command
-    else {
-        panic!("expected use command");
-    };
-    assert!(local);
-    assert!(!platform);
-    assert_eq!(target, "workbench");
-    assert!(Cli::try_parse_from(["cw", "use", "--local", "--cloud", "workbench"]).is_err());
+    for argv in [
+        ["cw", "use", "--local", "workbench"],
+        ["cw", "--local", "use", "workbench"],
+    ] {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        assert_eq!(cli.placement().unwrap(), Some(EnvironmentPlacement::Local));
+        let Command::Use(UseTargetArgs { target }) = cli.command else {
+            panic!("expected use command");
+        };
+        assert_eq!(target, "workbench");
+    }
+    let cli = Cli::try_parse_from(["cw", "--cloud", "use", "--local", "workbench"]).unwrap();
+    assert!(cli.placement().is_err());
 }
 
 #[test]
 fn env_command_parser_accepts_filters_without_a_legacy_alias() {
     let cli = Cli::try_parse_from([
-        "cw", "env", "list", "--type", "sandbox", "--state", "running", "--all", "--output", "json",
+        "cw", "ls", "--type", "sandbox", "--state", "running", "--all", "--output", "json",
     ])
     .unwrap();
 
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
+    let Command::Ls(args) = cli.command else {
+        panic!("expected ls command");
     };
-    let EnvCommand::List(args) = command else {
-        panic!("expected env list command");
-    };
+    assert_eq!(args.environment, None);
     assert_eq!(args.environment_type.as_deref(), Some("sandbox"));
     assert_eq!(args.state.as_deref(), Some("running"));
     assert!(args.all);
@@ -693,7 +672,6 @@ fn list_command_parser_rejects_legacy_platform_flags() {
 fn env_create_parser_accepts_direct_create_flags() {
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "create",
         "https://github.com/codewiresh/codewire@main",
         "--repo",
@@ -725,10 +703,7 @@ fn env_create_parser_accepts_direct_create_flags() {
     ])
     .unwrap();
 
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
 
@@ -755,7 +730,7 @@ fn env_create_parser_accepts_direct_create_flags() {
         "--user-secrets",
     ] {
         assert!(
-            Cli::try_parse_from(["cw", "env", "create", unsupported]).is_err(),
+            Cli::try_parse_from(["cw", "create", unsupported]).is_err(),
             "unsupported secret-scope flag {unsupported:?} must fail closed"
         );
         assert!(
@@ -770,7 +745,7 @@ fn creation_commands_reject_retired_secret_project_flags_without_echoing_the_val
     const MARKER: &str = "synthetic-retired-secret-project-canary";
     for args in [
         vec!["cw", "init", "--secrets-project", MARKER],
-        vec!["cw", "env", "create", "--secrets-project", MARKER],
+        vec!["cw", "create", "--secrets-project", MARKER],
         vec![
             "cw",
             "preset",
@@ -793,7 +768,6 @@ fn creation_commands_reject_retired_secret_project_flags_without_echoing_the_val
 fn env_create_request_builds_one_canonical_project_spec() {
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "create",
         "https://github.com/codewiresh/codewire@main",
         "--preset",
@@ -820,10 +794,7 @@ fn env_create_request_builds_one_canonical_project_spec() {
         "FOO=bar",
     ])
     .unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
 
@@ -858,7 +829,7 @@ fn env_create_request_builds_one_canonical_project_spec() {
 
 #[test]
 fn environment_commands_reject_two_preset_selectors() {
-    for command in [["env", "create"].as_slice(), ["init"].as_slice()] {
+    for command in [["create"].as_slice(), ["init"].as_slice()] {
         let mut args = vec!["cw"];
         args.extend_from_slice(command);
         args.extend_from_slice(&["--preset", "go", "--preset-id", "preset_123"]);
@@ -889,7 +860,6 @@ credentials: {profile: platform:user/work}
     .unwrap();
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "--cloud",
         "create",
         "--file",
@@ -901,10 +871,7 @@ credentials: {profile: platform:user/work}
         "--env=LOG_LEVEL=debug",
     ])
     .unwrap();
-    let Command::Env(EnvArgs {
-        command: EnvCommand::Create(args),
-        ..
-    }) = cli.command
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli)
     else {
         panic!("create");
     };
@@ -943,11 +910,8 @@ fn platform_create_rejects_local_origins_and_local_yaml_intent() {
         "--secrets=local:development",
         "--user-secrets=local",
     ] {
-        let cli = Cli::try_parse_from(["cw", "env", "create", selection]).unwrap();
-        let Command::Env(EnvArgs {
-            command: EnvCommand::Create(args),
-            ..
-        }) = cli.command
+        let cli = Cli::try_parse_from(["cw", "create", selection]).unwrap();
+        let (_, _, EnvCommand::Create(args)) = env_operation(cli)
         else {
             panic!("create");
         };
@@ -966,11 +930,8 @@ fn platform_create_rejects_local_origins_and_local_yaml_intent() {
     ] {
         fs::write(&file, yaml).unwrap();
         let cli =
-            Cli::try_parse_from(["cw", "env", "create", "--file", file.to_str().unwrap()]).unwrap();
-        let Command::Env(EnvArgs {
-            command: EnvCommand::Create(args),
-            ..
-        }) = cli.command
+            Cli::try_parse_from(["cw", "create", "--file", file.to_str().unwrap()]).unwrap();
+        let (_, _, EnvCommand::Create(args)) = env_operation(cli)
         else {
             panic!("create");
         };
@@ -985,11 +946,8 @@ fn platform_create_rejects_local_origins_and_local_yaml_intent() {
     )
     .unwrap();
     let cli =
-        Cli::try_parse_from(["cw", "env", "create", "--file", file.to_str().unwrap()]).unwrap();
-    let Command::Env(EnvArgs {
-        command: EnvCommand::Create(args),
-        ..
-    }) = cli.command
+        Cli::try_parse_from(["cw", "create", "--file", file.to_str().unwrap()]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli)
     else {
         panic!("create");
     };
@@ -1003,7 +961,6 @@ fn platform_create_rejects_local_origins_and_local_yaml_intent() {
 fn env_create_preset_authoring_flags_do_not_block_request_resolution() {
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "create",
         "--image",
         "workspace",
@@ -1012,10 +969,7 @@ fn env_create_preset_authoring_flags_do_not_block_request_resolution() {
         "Fullstack Dev",
     ])
     .unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
 
@@ -1031,11 +985,8 @@ fn env_create_preset_authoring_flags_do_not_block_request_resolution() {
 
 #[test]
 fn env_create_bare_defaults_to_workspace_image() {
-    let cli = Cli::try_parse_from(["cw", "env", "create"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "create"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
 
@@ -1057,7 +1008,6 @@ fn env_create_bare_defaults_to_workspace_image() {
 fn direct_cli_and_codewire_yaml_produce_identical_portable_intent() {
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "create",
         "https://example.test/org/app.git@main::/workspace/app",
         "--image",
@@ -1078,10 +1028,7 @@ fn direct_cli_and_codewire_yaml_produce_identical_portable_intent() {
         "40",
     ])
     .unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
     let from_cli = env_create_request_from_args(&args).unwrap().project_spec;
@@ -1114,22 +1061,16 @@ fn direct_cli_and_codewire_yaml_produce_identical_portable_intent() {
 
 #[test]
 fn env_create_explicit_sources_do_not_add_the_default_image() {
-    let cli = Cli::try_parse_from(["cw", "env", "create", "--preset", "rust"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "create", "--preset", "rust"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
     let request = prepare_platform_env_create_request(&args).unwrap();
     assert_eq!(request.project_spec.preset, "rust");
     assert!(request.project_spec.image.is_empty());
 
-    let cli = Cli::try_parse_from(["cw", "env", "create", "--preset-id", "preset_123"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "create", "--preset-id", "preset_123"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
     let request = prepare_platform_env_create_request(&args).unwrap();
@@ -1138,15 +1079,11 @@ fn env_create_explicit_sources_do_not_add_the_default_image() {
 
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "create",
         "https://github.com/codewiresh/codewire",
     ])
     .unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
     let request = prepare_platform_env_create_request(&args).unwrap();
@@ -1227,6 +1164,7 @@ async fn init_command_writes_codewire_yaml_from_direct_flags() {
     let globals = Globals {
         server: None,
         member: None,
+        placement: None,
     };
     handle_init_command(&globals, args).await.unwrap();
 
@@ -1270,6 +1208,7 @@ async fn init_command_refuses_existing_file_without_force() {
     let globals = Globals {
         server: None,
         member: None,
+        placement: None,
     };
     let err = handle_init_command(&globals, args).await.unwrap_err();
 
@@ -1709,11 +1648,8 @@ fn env_create_github_ssh_repositories_carry_githubs_published_host_keys() {
 
 #[test]
 fn env_create_accepts_mesh_bootstrap_flags() {
-    let cli = Cli::try_parse_from(["cw", "env", "create", "--network", "project-alpha"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "create", "--network", "project-alpha"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
     let request = env_create_request_from_args(&args).unwrap();
@@ -1726,11 +1662,8 @@ fn env_create_accepts_mesh_bootstrap_flags() {
         "network invite bootstrap is injected only after Mesh resolution"
     );
 
-    let cli = Cli::try_parse_from(["cw", "env", "create", "--no-network"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "create", "--no-network"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
     assert!(args.no_network);
@@ -1739,21 +1672,15 @@ fn env_create_accepts_mesh_bootstrap_flags() {
 
 #[test]
 fn env_create_requires_canonical_agent_ids() {
-    let cli = Cli::try_parse_from(["cw", "env", "create", "--coding-agent", "kimi-code"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "create", "--coding-agent", "kimi-code"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
     let request = env_create_request_from_args(&args).unwrap();
     assert_eq!(request.project_spec.agents.tools, ["kimi-code"]);
 
-    let cli = Cli::try_parse_from(["cw", "env", "create", "--coding-agent", "kimi"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Create(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "create", "--coding-agent", "kimi"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
         panic!("expected env create command");
     };
     assert_eq!(
@@ -1775,11 +1702,8 @@ fn platform_project_boundary_rejects_all_reserved_runtime_environment_keys() {
 
         let value = format!("{key}=synthetic");
         let cli =
-            Cli::try_parse_from(["cw", "env", "create", "--no-network", "--env", &value]).unwrap();
-        let Command::Env(EnvArgs { command, .. }) = cli.command else {
-            panic!("expected env command");
-        };
-        let EnvCommand::Create(args) = command else {
+            Cli::try_parse_from(["cw", "create", "--no-network", "--env", &value]).unwrap();
+        let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
             panic!("expected env create command");
         };
         assert_eq!(
@@ -1932,33 +1856,47 @@ fn env_create_text_matches_go_messages() {
 
 #[test]
 fn env_lifecycle_parsers_accept_targets_and_output() {
-    let cli = Cli::try_parse_from(["cw", "env", "start", "builder", "--output", "json"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Start(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "start", "builder", "--output", "json"]).unwrap();
+    let (_, _, EnvCommand::Start(args)) = env_operation(cli) else {
         panic!("expected env start command");
     };
     assert_eq!(args.environment, "builder");
     assert!(matches!(args.output, OutputFormat::Json));
 
-    let cli = Cli::try_parse_from([
-        "cw", "env", "restart", "--local", "builder", "--output", "json",
-    ])
-    .unwrap();
-    let Command::Env(EnvArgs { command, local, .. }) = cli.command else {
-        panic!("expected env command");
+    // Without --session, stop and restart name a whole environment.
+    for (argv, expected) in [
+        (vec!["cw", "restart", "--local", "builder", "--output", "json"], "restart"),
+        (vec!["cw", "--local", "stop", "--in", "builder", "-o", "json"], "stop"),
+    ] {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        assert!(cli.local);
+        let scope = match cli.command {
+            Command::Restart(scope) if expected == "restart" => scope,
+            Command::Stop(stop) if expected == "stop" => {
+                assert!(!stop.all);
+                stop.scope
+            }
+            other => panic!("expected {expected}, got {other:?}"),
+        };
+        assert_eq!(
+            scope.environment.as_deref().or(scope.in_environment.as_deref()),
+            Some("builder")
+        );
+        assert_eq!(scope.session, None);
+        assert!(scope.retired_session.is_empty());
+        assert!(matches!(scope.output, OutputFormat::Json));
+    }
+    let Command::Stop(stop) = Cli::try_parse_from(["cw", "stop", "--session", "coding"])
+        .unwrap()
+        .command
+    else {
+        panic!("expected stop");
     };
-    let EnvCommand::Restart(args) = command else {
-        panic!("expected env restart command");
-    };
-    assert!(local);
-    assert_eq!(args.environment, "builder");
-    assert!(matches!(args.output, OutputFormat::Json));
+    assert_eq!(stop.scope.environment, None);
+    assert_eq!(stop.scope.session.as_deref(), Some("coding"));
 
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "refresh-skills",
         "--local",
         "builder",
@@ -1966,27 +1904,21 @@ fn env_lifecycle_parsers_accept_targets_and_output() {
         "json",
     ])
     .unwrap();
-    let Command::Env(EnvArgs { command, local, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::RefreshSkills(args) = command else {
+    let (local, _, EnvCommand::RefreshSkills(args)) = env_operation(cli) else {
         panic!("expected env refresh-skills command");
     };
     assert!(local);
     assert_eq!(args.environment, "builder");
     assert!(matches!(args.output, OutputFormat::Json));
 
-    let cli = Cli::try_parse_from(["cw", "env", "rm", "builder", "--yes"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Rm(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "rm", "builder", "--yes"]).unwrap();
+    let (_, _, EnvCommand::Rm(args)) = env_operation(cli) else {
         panic!("expected env delete command");
     };
     assert_eq!(args.environment, "builder");
     assert!(args.yes);
-    assert!(Cli::try_parse_from(["cw", "env", "delete", "builder"]).is_err());
-    assert!(Cli::try_parse_from(["cw", "env", "ls"]).is_ok());
+    assert!(Cli::try_parse_from(["cw", "delete", "builder"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "ls"]).is_ok());
 }
 
 #[test]
@@ -2000,13 +1932,10 @@ fn env_daemon_parsers_accept_status_logs_and_repair() {
     );
 
     let cli = Cli::try_parse_from([
-        "cw", "env", "daemon", "status", "builder", "--output", "json",
+        "cw", "daemon", "status", "builder", "--output", "json",
     ])
     .unwrap();
-    let Command::Env(EnvArgs {
-        command: EnvCommand::Daemon(args),
-        ..
-    }) = cli.command
+    let (_, _, EnvCommand::Daemon(args)) = env_operation(cli)
     else {
         panic!("expected env daemon command");
     };
@@ -2016,11 +1945,8 @@ fn env_daemon_parsers_accept_status_logs_and_repair() {
     assert_eq!(args.environment.as_deref(), Some("builder"));
     assert!(matches!(args.output, OutputFormat::Json));
 
-    let cli = Cli::try_parse_from(["cw", "env", "daemon", "logs", "builder"]).unwrap();
-    let Command::Env(EnvArgs {
-        command: EnvCommand::Daemon(args),
-        ..
-    }) = cli.command
+    let cli = Cli::try_parse_from(["cw", "daemon", "logs", "builder"]).unwrap();
+    let (_, _, EnvCommand::Daemon(args)) = env_operation(cli)
     else {
         panic!("expected env daemon command");
     };
@@ -2029,22 +1955,15 @@ fn env_daemon_parsers_accept_status_logs_and_repair() {
     };
     assert_eq!(args.environment.as_deref(), Some("builder"));
 
-    let cli = Cli::try_parse_from(["cw", "env", "daemon", "repair", "builder"]).unwrap();
-    let Command::Env(EnvArgs {
-        command: EnvCommand::Daemon(args),
-        ..
-    }) = cli.command
+    let cli = Cli::try_parse_from(["cw", "daemon", "repair", "builder"]).unwrap();
+    let (_, _, EnvCommand::Daemon(args)) = env_operation(cli)
     else {
         panic!("expected env daemon command");
     };
     assert!(matches!(args.command, EnvDaemonCommand::Repair(_)));
 
-    let cli = Cli::try_parse_from(["cw", "env", "--local", "daemon", "status"]).unwrap();
-    let Command::Env(EnvArgs {
-        local,
-        command: EnvCommand::Daemon(args),
-        ..
-    }) = cli.command
+    let cli = Cli::try_parse_from(["cw", "--local", "daemon", "status"]).unwrap();
+    let (local, _, EnvCommand::Daemon(args)) = env_operation(cli)
     else {
         panic!("expected selected local daemon command");
     };
@@ -2083,26 +2002,17 @@ fn env_daemon_status_renders_actionable_upgrade_state_without_credentials() {
 fn env_cp_parser_accepts_source_and_destination() {
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "cp",
         "--local",
         "local.txt",
         "builder:/workspace/local.txt",
     ])
     .unwrap();
-    let Command::Env(EnvArgs {
-        local,
-        platform,
-        command,
-    }) = cli.command
-    else {
-        panic!("expected env command");
+    let (local, platform, EnvCommand::Cp(args)) = env_operation(cli) else {
+        panic!("expected environment command");
     };
     assert!(local);
     assert!(!platform);
-    let EnvCommand::Cp(args) = command else {
-        panic!("expected env cp command");
-    };
     assert_eq!(args.src, "local.txt");
     assert_eq!(args.dst, "builder:/workspace/local.txt");
 }
@@ -2153,20 +2063,14 @@ fn env_cp_text_matches_go_messages() {
 
 #[test]
 fn env_protection_parsers_accept_targets_and_hours() {
-    let cli = Cli::try_parse_from(["cw", "env", "protect", "builder"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Protect(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "protect", "builder"]).unwrap();
+    let (_, _, EnvCommand::Protect(args)) = env_operation(cli) else {
         panic!("expected env protect command");
     };
     assert_eq!(args.environment, "builder");
 
-    let cli = Cli::try_parse_from(["cw", "env", "extend", "builder", "--hours", "3"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Extend(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "extend", "builder", "--hours", "3"]).unwrap();
+    let (_, _, EnvCommand::Extend(args)) = env_operation(cli) else {
         panic!("expected env extend command");
     };
     assert_eq!(args.environment, "builder");
@@ -2176,13 +2080,10 @@ fn env_protection_parsers_accept_targets_and_hours() {
 #[test]
 fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
     let cli = Cli::try_parse_from([
-        "cw", "env", "--local", "access", "builder", "--output", "json",
+        "cw", "--local", "access", "builder", "--output", "json",
     ])
     .unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Access(args) = command else {
+    let (_, _, EnvCommand::Access(args)) = env_operation(cli) else {
         panic!("expected env access command");
     };
     assert_eq!(args.environment.as_deref(), Some("builder"));
@@ -2191,7 +2092,6 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
     assert!(
         Cli::try_parse_from([
             "cw",
-            "env",
             "--local",
             "access",
             "apply",
@@ -2207,7 +2107,6 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
     assert!(
         Cli::try_parse_from([
             "cw",
-            "env",
             "--local",
             "access",
             "apply",
@@ -2221,14 +2120,13 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
 
     for retired in ["list", "grant", "revoke"] {
         assert!(
-            Cli::try_parse_from(["cw", "env", "access", retired, "builder"]).is_err(),
+            Cli::try_parse_from(["cw", "access", retired, "builder"]).is_err(),
             "retired environment-access collaborator command {retired:?} must fail closed"
         );
     }
 
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "--cloud",
         "share",
         "list",
@@ -2237,19 +2135,11 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
         "json",
     ])
     .unwrap();
-    let Command::Env(EnvArgs {
-        local,
-        platform,
-        command,
-    }) = cli.command
-    else {
-        panic!("expected env command");
+    let (local, platform, EnvCommand::Share(args)) = env_operation(cli) else {
+        panic!("expected environment command");
     };
     assert!(!local);
     assert!(platform);
-    let EnvCommand::Share(args) = command else {
-        panic!("expected env share command");
-    };
     let EnvShareCommand::List(args) = args.command else {
         panic!("expected env share list command");
     };
@@ -2258,7 +2148,6 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
 
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "share",
         "grant",
         "builder",
@@ -2268,10 +2157,7 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
         "operator",
     ])
     .unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Share(args) = command else {
+    let (_, _, EnvCommand::Share(args)) = env_operation(cli) else {
         panic!("expected env share command");
     };
     let EnvShareCommand::Grant(args) = args.command else {
@@ -2282,13 +2168,10 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
     assert_eq!(args.permission, "operator");
 
     let cli = Cli::try_parse_from([
-        "cw", "env", "share", "revoke", "builder", "--user", "user-2",
+        "cw", "share", "revoke", "builder", "--user", "user-2",
     ])
     .unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Share(args) = command else {
+    let (_, _, EnvCommand::Share(args)) = env_operation(cli) else {
         panic!("expected env share command");
     };
     let EnvShareCommand::Revoke(args) = args.command else {
@@ -2297,21 +2180,23 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
     assert_eq!(args.environment, "builder");
     assert_eq!(args.user, "user-2");
 
-    assert!(Cli::try_parse_from(["cw", "env", "share", "ls", "builder"]).is_ok());
+    assert!(Cli::try_parse_from(["cw", "share", "ls", "builder"]).is_ok());
 }
 
 #[tokio::test]
 async fn env_share_rejects_local_before_platform_resolution() {
-    let cli = Cli::try_parse_from(["cw", "env", "--local", "share", "list", "builder"]).unwrap();
-    let Command::Env(args) = cli.command else {
-        panic!("expected env command");
-    };
+    let cli = Cli::try_parse_from(["cw", "--local", "share", "list", "builder"]).unwrap();
+    let placement = cli.placement().unwrap();
+    let (_, _, operation) = env_operation(cli);
     let globals = Globals {
         server: None,
         member: None,
+        placement,
     };
 
-    let error = handle_env_command(&globals, args).await.unwrap_err();
+    let error = handle_env_command(&globals, placement, operation)
+        .await
+        .unwrap_err();
     assert_eq!(
         error.to_string(),
         "environment sharing is available only with --cloud"
@@ -2319,102 +2204,124 @@ async fn env_share_rejects_local_before_platform_resolution() {
 }
 
 #[test]
-fn env_port_parsers_accept_add_list_rm() {
+fn ports_parser_lists_publishes_and_unpublishes_one_port() {
     let cli = Cli::try_parse_from([
-        "cw", "env", "port", "add", "3000", "--label", "web", "--access", "public", "--env",
-        "builder", "--output", "json",
+        "cw", "ports", "builder", "--publish", "3000", "--label", "web", "--access", "public",
+        "--output", "json",
     ])
     .unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
+    let Command::Ports(args) = cli.command else {
+        panic!("expected ports command");
     };
-    let EnvCommand::Port(args) = command else {
-        panic!("expected env port command");
-    };
-    let EnvPortCommand::Add(args) = args.command else {
-        panic!("expected env port add command");
-    };
-    assert_eq!(args.port, "3000");
+    assert_eq!(args.environment.as_deref(), Some("builder"));
+    assert_eq!(args.publish, Some(3000));
     assert_eq!(args.label.as_deref(), Some("web"));
     assert_eq!(args.access.as_deref(), Some("public"));
     assert_eq!(args.host_port, None);
-    assert_eq!(args.env.as_deref(), Some("builder"));
     assert!(matches!(args.output, OutputFormat::Json));
 
-    let cli = Cli::try_parse_from([
-        "cw", "env", "port", "add", "47321", "--host-port", "18080", "--local", "--env", "web",
-    ])
-    .unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Port(args) = command else {
-        panic!("expected env port command");
-    };
-    let EnvPortCommand::Add(args) = args.command else {
-        panic!("expected env port add command");
-    };
-    assert_eq!(args.port, "47321");
-    assert_eq!(args.host_port, Some(18_080));
-    assert_eq!(args.label, None);
-    assert_eq!(args.access, None);
-    assert!(
-        Cli::try_parse_from(["cw", "env", "port", "add", "47321", "--host-port", "0"]).is_err()
-    );
+    for argv in [
+        vec!["cw", "--local", "ports", "web", "--publish", "47321", "--host-port", "18080"],
+        vec!["cw", "ports", "--in", "web", "--publish", "47321", "--host-port", "18080", "--local"],
+    ] {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        assert_eq!(cli.placement().unwrap(), Some(EnvironmentPlacement::Local));
+        let Command::Ports(args) = cli.command else {
+            panic!("expected ports command");
+        };
+        assert_eq!(
+            args.environment.as_deref().or(args.in_environment.as_deref()),
+            Some("web")
+        );
+        assert_eq!(args.publish, Some(47_321));
+        assert_eq!(args.host_port, Some(18_080));
+    }
+    for invalid in [
+        vec!["cw", "ports", "web", "--publish", "47321", "--host-port", "0"],
+        vec!["cw", "ports", "web", "--publish", "0"],
+        vec!["cw", "ports", "web", "--publish", "3000", "--unpublish", "3000"],
+        vec!["cw", "ports", "web", "--publish", "web"],
+        vec!["cw", "ports", "web", "--env", "web"],
+        vec!["cw", "ports", "web", "--unpublish", "3000", "--unpublish", "3001"],
+    ] {
+        assert!(Cli::try_parse_from(invalid.clone()).is_err(), "{invalid:?}");
+    }
 
-    let cli = Cli::try_parse_from(["cw", "env", "port", "ls", "--env", "builder"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
+    let cli = Cli::try_parse_from(["cw", "ports", "builder"]).unwrap();
+    let Command::Ports(args) = cli.command else {
+        panic!("expected ports command");
     };
-    let EnvCommand::Port(args) = command else {
-        panic!("expected env port command");
-    };
-    let EnvPortCommand::List(args) = args.command else {
-        panic!("expected env port list command");
-    };
-    assert_eq!(args.env.as_deref(), Some("builder"));
+    assert_eq!(args.environment.as_deref(), Some("builder"));
+    assert_eq!((args.publish, args.unpublish), (None, None));
+}
 
-    let cli = Cli::try_parse_from(["cw", "env", "port", "rm", "web"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
+#[tokio::test]
+async fn ports_refuses_combinations_and_ignored_options_before_any_lookup() {
+    let globals = Globals {
+        server: None,
+        member: None,
+        placement: None,
     };
-    let EnvCommand::Port(args) = command else {
-        panic!("expected env port command");
-    };
-    let EnvPortCommand::Rm(args) = args.command else {
-        panic!("expected env port rm command");
-    };
-    assert_eq!(args.port, "web");
+    for (argv, message) in [
+        (
+            vec!["cw", "ports", "web", "--host-port", "3001"],
+            "--host-port, --label and --access apply to --publish PORT or --unpublish PORT",
+        ),
+        (
+            vec!["cw", "ports", "web", "--label", "site"],
+            "--host-port, --label and --access apply to --publish PORT or --unpublish PORT",
+        ),
+        (
+            vec!["cw", "ports", "web", "--unpublish", "3000", "--access", "public"],
+            "--access applies to --publish; an unpublished port has no access level",
+        ),
+        (
+            vec!["cw", "ports", "web", "--in", "web"],
+            "name the environment once: `cw ports ENV` or `cw ports --in ENV`, not both",
+        ),
+    ] {
+        let Command::Ports(args) = Cli::try_parse_from(argv.clone()).unwrap().command else {
+            panic!("expected ports command");
+        };
+        let error = crate::commands::flat::handle_ports(&globals, args)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), message, "{argv:?}");
+    }
 }
 
 #[test]
-fn env_logs_parser_accepts_follow_flag_forms() {
-    let cli = Cli::try_parse_from(["cw", "env", "logs", "builder"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
+fn setup_logs_and_session_logs_are_explicit_sources() {
+    let cli = Cli::try_parse_from(["cw", "logs", "builder", "--setup"]).unwrap();
+    let Command::Logs(args) = cli.command else {
+        panic!("expected logs command");
     };
-    let EnvCommand::Logs(args) = command else {
-        panic!("expected env logs command");
-    };
-    assert_eq!(args.environment, "builder");
-    assert!(args.follow);
+    assert_eq!(args.environment.as_deref(), Some("builder"));
+    assert!(args.setup && !args.follow);
 
-    let cli = Cli::try_parse_from(["cw", "env", "logs", "builder", "--follow=false"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
+    let cli = Cli::try_parse_from(["cw", "logs", "builder", "--setup", "--follow"]).unwrap();
+    let Command::Logs(args) = cli.command else {
+        panic!("expected logs command");
     };
-    let EnvCommand::Logs(args) = command else {
-        panic!("expected env logs command");
+    assert!(args.setup && args.follow);
+
+    let cli = Cli::try_parse_from(["cw", "logs", "--in", "builder", "--session", "coding", "-f"])
+        .unwrap();
+    let Command::Logs(args) = cli.command else {
+        panic!("expected logs command");
     };
-    assert_eq!(args.environment, "builder");
-    assert!(!args.follow);
+    assert_eq!(args.in_environment.as_deref(), Some("builder"));
+    assert_eq!(args.session.as_deref(), Some("coding"));
+    assert!(args.follow && !args.setup);
+
+    assert!(Cli::try_parse_from(["cw", "logs", "builder", "--setup", "--session", "coding"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "logs", "builder", "--follow=false"]).is_err());
 }
 
 #[test]
 fn env_prune_nuke_parsers_accept_safety_flags() {
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "prune",
         "--state",
         "error,failed",
@@ -2422,21 +2329,15 @@ fn env_prune_nuke_parsers_accept_safety_flags() {
         "--yes",
     ])
     .unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Prune(args) = command else {
+    let (_, _, EnvCommand::Prune(args)) = env_operation(cli) else {
         panic!("expected env prune command");
     };
     assert_eq!(args.state, "error,failed");
     assert!(args.dry_run);
     assert!(args.yes);
 
-    let cli = Cli::try_parse_from(["cw", "env", "nuke", "--yes"]).unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Nuke(args) = command else {
+    let cli = Cli::try_parse_from(["cw", "nuke", "--yes"]).unwrap();
+    let (_, _, EnvCommand::Nuke(args)) = env_operation(cli) else {
         panic!("expected env nuke command");
     };
     assert!(args.yes);
@@ -2575,41 +2476,43 @@ fn env_port_text_matches_go_messages() {
 }
 
 #[test]
-fn env_port_resolution_matches_label_number_or_id() {
-    let ports = vec![EnvironmentPort {
-        id: "port-1".to_string(),
+fn cloud_unpublish_selects_one_preview_by_guest_port_and_label() {
+    let preview = |id: &str, port, label: &str| EnvironmentPort {
+        id: id.to_string(),
         environment_id: "env-1".to_string(),
-        port: 3000,
-        label: "web".to_string(),
+        port,
+        label: label.to_string(),
         access: "creator".to_string(),
         preview_url: String::new(),
         created_at: String::new(),
-    }];
-
+    };
+    let ports = vec![
+        preview("port-1", 3000, "web"),
+        preview("port-2", 8080, "api"),
+        preview("port-3", 8080, "admin"),
+    ];
+    assert_eq!(select_unpublished_preview(&ports, 3000, None).unwrap().id, "port-1");
     assert_eq!(
-        resolve_environment_port(&ports, "web").unwrap().id,
-        "port-1"
+        select_unpublished_preview(&ports, 8080, Some("admin"))
+            .unwrap()
+            .id,
+        "port-3"
     );
     assert_eq!(
-        resolve_environment_port(&ports, "3000").unwrap().id,
-        "port-1"
-    );
-    assert_eq!(
-        resolve_environment_port(&ports, "port-1").unwrap().id,
-        "port-1"
-    );
-    assert_eq!(
-        resolve_environment_port(&ports, "missing")
+        select_unpublished_preview(&ports, 8080, None)
             .unwrap_err()
             .to_string(),
-        "port \"missing\" not found"
+        "port 8080 is published as api, admin; choose one with --label"
     );
-    assert_eq!(parse_env_port_number("1").unwrap(), 1);
-    assert_eq!(parse_env_port_number("65535").unwrap(), 65535);
     assert_eq!(
-        parse_env_port_number("0").unwrap_err().to_string(),
-        "invalid port number: 0"
+        select_unpublished_preview(&ports, 22, None)
+            .unwrap_err()
+            .to_string(),
+        "no preview publishes port 22"
     );
+    // A label never stands in for the guest port.
+    assert!(select_unpublished_preview(&ports, 3000, Some("api")).is_err());
+    assert_eq!(default_port_label(3000), "port-3000");
 }
 
 #[test]
@@ -2620,7 +2523,7 @@ fn map_env_delete_error_keeps_actionable_go_wording() {
     );
     assert_eq!(
         protected.to_string(),
-        "environment is protected. Run 'cw env unprotect builder' first"
+        "environment is protected. Run 'cw unprotect builder' first"
     );
 
     let denied = map_env_delete_error("builder", anyhow::anyhow!("access_denied"));
@@ -2663,35 +2566,6 @@ fn filter_environments_honors_type_state_and_destroyed_default() {
     assert_eq!(
         filter_environments(&environments, Some("sandbox"), Some("destroyed"), true),
         vec![destroyed]
-    );
-}
-
-#[test]
-fn format_env_list_text_marks_current_and_connectable_sandbox() {
-    let mut environment = test_environment(
-        "12345678-abcd-4000-9000-000000000001",
-        Some("builder"),
-        "running",
-    );
-    environment.environment_type = "sandbox".to_string();
-    environment.cpu_millicores = 2000;
-    environment.memory_mb = 4096;
-    environment.ttl_seconds = Some(3600);
-    environment.network = Some("mesh-dev".to_string());
-    let current = config::CurrentTargetConfig {
-        kind: "env".to_string(),
-        target_ref: environment.id.clone(),
-        name: "builder".to_string(),
-    };
-
-    assert_eq!(
-        format_env_list_text(&[environment], Some(&current)),
-        concat!(
-            "builder [12345678]  running  -- (current)\n",
-            "  sandbox  2000m/4096MB  ttl 3600s\n",
-            "  network: mesh-dev\n",
-            "  connect: cw shell 12345678\n",
-        )
     );
 }
 

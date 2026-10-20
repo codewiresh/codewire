@@ -242,7 +242,7 @@ Environment:
   SMOKE_DOCKER_OOM_STRESS  Defaults to 1 when SMOKE_DOCKER_STRESS=1
   SMOKE_APP_PREVIEW        Defaults to 0; when set to 1, writes and starts a
                            tiny HTTP service in /workspace, registers it with
-                           cw env port, fetches its preview URL, removes the
+                           cw ports --publish, fetches its preview URL, removes the
                            port, and verifies the preview no longer serves it
   SMOKE_APP_PREVIEW_PORT   Defaults to 8080
   SMOKE_APP_PREVIEW_LABEL  Defaults to app
@@ -490,7 +490,7 @@ cleanup() {
     fi
   elif [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" != "1" && -x "${CW_BIN:-}" ]]; then
     log "deleting smoke environment $ENV_ID"
-    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" env rm --yes "$ENV_ID" >/dev/null 2>&1 || true
+    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" rm --yes "$ENV_ID" >/dev/null 2>&1 || true
   elif [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" == "1" ]]; then
     log "kept smoke environment $ENV_ID"
   fi
@@ -955,7 +955,7 @@ assert_smoke_principal() {
 
   local environments_out="$TMPDIR_SMOKE/environments.json"
   local environments_err="$TMPDIR_SMOKE/environments.err"
-  if ! cw env list --output json >"$environments_out" 2>"$environments_err"; then
+  if ! cw ls --output json >"$environments_out" 2>"$environments_err"; then
     sed 's/[[:cntrl:]]//g' "$environments_err" >&2 || true
     die "authenticated smoke principal cannot list environments for its current organization"
   fi
@@ -1015,7 +1015,7 @@ assert_admin_oauth_principal() {
 
   local environments_out="$TMPDIR_SMOKE/admin-environments.json"
   local environments_err="$TMPDIR_SMOKE/admin-environments.err"
-  if ! cw env list --output json >"$environments_out" 2>"$environments_err"; then
+  if ! cw ls --output json >"$environments_out" 2>"$environments_err"; then
     sed 's/[[:cntrl:]]//g' "$environments_err" >&2 || true
     die "saved admin OIDC login cannot list environments for its current organization"
   fi
@@ -1043,7 +1043,7 @@ create_environment() {
   esac
 
   log "creating environment $SMOKE_NAME on $CODEWIRE_SERVER_URL"
-  if ! cw env create \
+  if ! cw create \
       "${source_args[@]}" \
       --image "$SMOKE_IMAGE" \
       --name "$SMOKE_NAME" \
@@ -1056,13 +1056,13 @@ create_environment() {
       --no-wait \
       --yes >"$create_out" 2>&1; then
     sed 's/[[:cntrl:]]//g' "$create_out" >&2 || true
-    die "cw env create failed"
+    die "cw create failed"
   fi
 
   ENV_ID="$(awk '/^[[:space:]]*ID:/ {print $2; exit}' "$create_out")"
   [[ -n "$ENV_ID" ]] || {
     sed 's/[[:cntrl:]]//g' "$create_out" >&2 || true
-    die "failed to parse environment ID from cw env create output"
+    die "failed to parse environment ID from cw create output"
   }
   log "environment id $ENV_ID"
 }
@@ -1370,7 +1370,7 @@ prepare_application_all_scope_secrets() {
   fi
   cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-projects-before.json" ||
     die 'dedicated all-scope identity cannot list platform secret projects'
-  cw_with_timeout 30 env --cloud list --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
+  cw_with_timeout 30 --cloud ls --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
     die 'dedicated all-scope identity cannot inspect its environment names'
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/app-environments-before.json" >/dev/null ||
@@ -1481,7 +1481,7 @@ prepare_application_secrets() {
   # Use only the already checked dedicated smoke org, never a personal scope.
   cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-projects-before.json" ||
     die 'dedicated smoke identity cannot list platform secret projects'
-  cw_with_timeout 30 env --cloud list --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
+  cw_with_timeout 30 --cloud ls --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
     die 'dedicated smoke identity cannot inspect its environment names'
   jq -e --arg name "$SMOKE_NAME" 'all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/app-environments-before.json" >/dev/null ||
@@ -1515,7 +1515,7 @@ prepare_application_secrets() {
 
 application_environment_ready() {
   local project="$1" previous_generation="$2"
-  cw_with_timeout 30 env --cloud info "$ENV_ID" --output json \
+  cw_with_timeout 30 --cloud info "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/app-environment.json" 2>"$TMPDIR_SMOKE/app-info.err" || return 1
   if jq -e '.setup_error | type == "string" and length > 0' \
       "$TMPDIR_SMOKE/app-environment.json" >/dev/null; then
@@ -1717,7 +1717,7 @@ application_restart_witness_ready() {
   local sessions="$TMPDIR_SMOKE/app-restart-witness-$phase-ready.json"
   local error="$TMPDIR_SMOKE/app-restart-witness-$phase-ready.err"
 
-  if ! cw_with_timeout 30 logs "$ENV_ID" "$session_id" --raw >"$logs" 2>"$error"; then
+  if ! cw_with_timeout 30 logs "$ENV_ID" --session "$session_id" --raw >"$logs" 2>"$error"; then
     SMOKE_LAST_WAIT_DETAIL="public logs did not return exact managed session $session_id"
     return 1
   fi
@@ -1725,7 +1725,7 @@ application_restart_witness_ready() {
     SMOKE_LAST_WAIT_DETAIL="exact managed session $session_id has not emitted its ready receipt"
     return 1
   fi
-  if ! cw_with_timeout 30 list "$ENV_ID" --output json >"$sessions" 2>"$error"; then
+  if ! cw_with_timeout 30 ls "$ENV_ID" --output json >"$sessions" 2>"$error"; then
     SMOKE_LAST_WAIT_DETAIL="public session list did not return for exact managed session $session_id"
     return 1
   fi
@@ -1767,7 +1767,7 @@ application_restart_witness_terminal() {
   local phase="$1" session_id="$2"
   local sessions="$TMPDIR_SMOKE/app-restart-witness-$phase-terminal.json"
   local error="$TMPDIR_SMOKE/app-restart-witness-$phase-terminal.err"
-  if ! cw_with_timeout 30 list "$ENV_ID" --output json >"$sessions" 2>"$error"; then
+  if ! cw_with_timeout 30 ls "$ENV_ID" --output json >"$sessions" 2>"$error"; then
     SMOKE_LAST_WAIT_DETAIL="public session list did not return for exact managed session $session_id"
     return 1
   fi
@@ -1879,7 +1879,7 @@ run_application_secrets_smoke() {
         if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
           scope_args=(--user-secrets platform --org-secrets)
         fi
-        if cw_with_timeout 30 env --cloud update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --output json </dev/null \
+        if cw_with_timeout 30 --cloud update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --output json </dev/null \
             >"$TMPDIR_SMOKE/app-unconfirmed.out" 2>"$TMPDIR_SMOKE/app-unconfirmed.err"; then
           die 'unconfirmed application source replacement unexpectedly succeeded'
         fi
@@ -1891,7 +1891,7 @@ run_application_secrets_smoke() {
         if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
           start_application_restart_witness APP_SECRET_ALL_HASHES_A "$phase"
         fi
-        cw_with_timeout 30 env --cloud update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --yes --output json \
+        cw_with_timeout 30 --cloud update "$ENV_ID" --secrets "$project" "${scope_args[@]}" --yes --output json \
           >"$TMPDIR_SMOKE/app-update-b.json" 2>"$TMPDIR_SMOKE/app-update-b.err" || die 'application source replacement failed'
         assert_application_source_update "$TMPDIR_SMOKE/app-update-b.json" "$project" "$generation"
         ;;
@@ -1901,7 +1901,7 @@ run_application_secrets_smoke() {
         if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
           start_application_restart_witness APP_SECRET_ALL_HASHES_B "$phase"
         fi
-        cw_with_timeout 30 env --cloud update "$ENV_ID" --clear-secrets --yes --output json \
+        cw_with_timeout 30 --cloud update "$ENV_ID" --clear-secrets --yes --output json \
           >"$TMPDIR_SMOKE/app-update-clear.json" 2>"$TMPDIR_SMOKE/app-update-clear.err" || die 'application source clear failed'
         assert_application_source_update "$TMPDIR_SMOKE/app-update-clear.json" "$project" "$generation"
         ;;
@@ -1940,7 +1940,7 @@ run_application_secrets_smoke() {
     fi
     run_application_secret_exec "$guest_script" "$phase" "$phase_deadline"
     run_application_secret_pty "$guest_script" "$phase"
-    cw_with_timeout 30 list "$ENV_ID" --output json >"$TMPDIR_SMOKE/app-sessions-$phase.json" || die 'session metadata inspection failed'
+    cw_with_timeout 30 ls "$ENV_ID" --output json >"$TMPDIR_SMOKE/app-sessions-$phase.json" || die 'session metadata inspection failed'
     assert_application_artifacts_redacted "$TMPDIR_SMOKE"/app-*.json "$TMPDIR_SMOKE"/app-*.out "$TMPDIR_SMOKE"/app-*.err "$TMPDIR_SMOKE"/app-pty-*.log "$TMPDIR_SMOKE/create.out"
   done
   if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
@@ -1955,7 +1955,7 @@ application_environment_destroyed() {
   # info deliberately resolves only live environments, and absence is not
   # terminal cleanup proof. report reads this exact ID, deleted or not, so the
   # check never depends on the size of the organization's deleted history.
-  cw_with_timeout 30 env report "$ENV_ID" --output json \
+  cw_with_timeout 30 report "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/app-cleanup-environment.json" 2>/dev/null || return 1
   state="$(jq -ers --arg id "$ENV_ID" '
     if length != 1 or (.[0].environment | type) != "object" then error("expected one environment report") else .[0].environment end |
@@ -2015,7 +2015,7 @@ cleanup_application_shared_scope() {
 cleanup_application_secrets() {
   local project project_id selector index status rc=0 deadline
   if [[ -z "$ENV_ID" && "$APP_SECRET_CREATE_ATTEMPTED" == 1 ]]; then
-    if cw_with_timeout 30 env --cloud list --output json >"$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null; then
+    if cw_with_timeout 30 --cloud ls --output json >"$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null; then
       ENV_ID="$(jq -ers --arg name "$SMOKE_NAME" '
         if length != 1 or (.[0] | type) != "array" then error("expected environment array") else .[0] end |
         [.[] | select(.name == $name)] |
@@ -2025,7 +2025,7 @@ cleanup_application_secrets() {
     else rc=1; fi
   fi
   if [[ -n "$ENV_ID" ]]; then
-    cw_with_timeout 60 env --cloud rm --yes "$ENV_ID" >"$TMPDIR_SMOKE/app-cleanup-env.out" 2>"$TMPDIR_SMOKE/app-cleanup-env.err" || rc=1
+    cw_with_timeout 60 --cloud rm --yes "$ENV_ID" >"$TMPDIR_SMOKE/app-cleanup-env.out" 2>"$TMPDIR_SMOKE/app-cleanup-env.err" || rc=1
     deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
     while :; do
       if application_environment_destroyed; then break; else status=$?; fi
@@ -2110,7 +2110,7 @@ fail_if_workspace_crashloop() {
 
 env_is_running() {
   local info_out="$TMPDIR_SMOKE/env-info.out"
-  if ! cw env info "$ENV_ID" >"$info_out" 2>&1; then
+  if ! cw info "$ENV_ID" >"$info_out" 2>&1; then
     return 1
   fi
   local state error_reason
@@ -2998,7 +2998,7 @@ run_environment_session_smoke() {
   grep -qF 'session exited with code 42' "$failure_err" ||
     die "failed platform session exit status was not propagated"
 
-  cw list "$ENV_ID" --output json >"$sessions_json"
+  cw ls "$ENV_ID" --output json >"$sessions_json"
   jq -e '
     any(.[];
       .command == ["printf", "platform-session-smoke"] and
@@ -3025,7 +3025,7 @@ run_environment_session_smoke() {
       | .session_id
     ' "$sessions_json"
   )"
-  cw logs "$ENV_ID" "$success_session" --raw |
+  cw logs "$ENV_ID" --session "$success_session" --raw |
     grep -qF 'platform-session-smoke' ||
     die "saved platform session output was not readable"
 }
@@ -3614,19 +3614,18 @@ SCRIPT
   port_json="$TMPDIR_SMOKE/app-preview-port.json"
   port_err="$TMPDIR_SMOKE/app-preview-port.err"
   log "registering preview port $SMOKE_APP_PREVIEW_PORT label=$SMOKE_APP_PREVIEW_LABEL"
-  if ! cw env port add "$SMOKE_APP_PREVIEW_PORT" \
-      --env "$ENV_ID" \
+  if ! cw ports "$ENV_ID" --publish "$SMOKE_APP_PREVIEW_PORT" \
       --label "$SMOKE_APP_PREVIEW_LABEL" \
       --access public \
       --output json >"$port_json" 2>"$port_err"; then
     sed 's/[[:cntrl:]]//g' "$port_err" >&2 || true
-    die "cw env port add failed"
+    die "cw ports --publish failed"
   fi
 
   preview_url="$(jq -r '.preview_url // empty' "$port_json")"
-  [[ -n "$preview_url" ]] || die "cw env port add returned empty preview_url"
+  [[ -n "$preview_url" ]] || die "cw ports --publish returned empty preview_url"
   [[ "$preview_url" == http://* || "$preview_url" == https://* ]] || \
-    die "cw env port add returned invalid preview_url=$preview_url"
+    die "cw ports --publish returned invalid preview_url=$preview_url"
   preview_host_port="${preview_url#http://}"
   preview_host_port="${preview_host_port#https://}"
   if [[ "$preview_host_port" == */* ]]; then
@@ -3674,11 +3673,11 @@ SCRIPT
   port_cleanup_ok=1
   cleanup_failure=""
   log "removing preview port label=$SMOKE_APP_PREVIEW_LABEL"
-  if ! cw env port rm "$SMOKE_APP_PREVIEW_LABEL" \
-      --env "$ENV_ID" \
+  if ! cw ports "$ENV_ID" --unpublish "$SMOKE_APP_PREVIEW_PORT" \
+      --label "$SMOKE_APP_PREVIEW_LABEL" \
       --output json >"$rm_json" 2>"$rm_err"; then
     port_cleanup_ok=0
-    cleanup_failure="cw env port rm failed"
+    cleanup_failure="cw ports --unpublish failed"
   fi
 
   cleanup_body="$TMPDIR_SMOKE/app-preview-after-delete.txt"
@@ -3766,7 +3765,7 @@ run_resize_guest_smoke() {
   [[ -z "$SMOKE_EXISTING_ENV_ID" ]] ||
     die "resize-guest changes resources and may replace the workspace Pod; run it on a fresh disposable environment"
 
-  cw env info "$ENV_ID" --output json >"$info_json" ||
+  cw info "$ENV_ID" --output json >"$info_json" ||
     die "failed to read environment resources before resize"
   previous_cpu="$(jq -er '.cpu_millicores' "$info_json")"
   previous_memory="$(jq -er '.memory_mb' "$info_json")"
@@ -3781,7 +3780,7 @@ run_resize_guest_smoke() {
   log "guest before resize: nproc=$before_nproc MemTotal=${before_mem_kib}kB (workspace ${previous_cpu}m/${previous_memory}Mi)"
 
   log "resizing to ${desired_cpu}m/${desired_memory}Mi with restart consent"
-  if ! cw_with_timeout "$SMOKE_TIMEOUT_SECONDS" env resize "$ENV_ID" \
+  if ! cw_with_timeout "$SMOKE_TIMEOUT_SECONDS" resize "$ENV_ID" \
       --cpu "${desired_cpu}m" \
       --memory "${desired_memory}MB" \
       --allow-restart \
@@ -3789,7 +3788,7 @@ run_resize_guest_smoke() {
       --yes \
       --output json >"$resize_json" 2>"$resize_err"; then
     sed 's/[[:cntrl:]]//g' "$resize_err" >&2 || true
-    die "cw env resize failed"
+    die "cw resize failed"
   fi
   jq -e --argjson cpu "$desired_cpu" --argjson memory "$desired_memory" '
     .operation.state == "completed"
@@ -4715,14 +4714,14 @@ run_ssh_transport_smoke() {
 # StrictHostKeyChecking yes and no first use. With no pinned file, the only
 # trust source is `cw ssh known-hosts`, the key the environment's bound Pod
 # recorded with the platform.
-# The block `cw config-ssh` writes, exactly as a user gets it. Its commands
+# The block `cw setup ssh` writes, exactly as a user gets it. Its commands
 # carry no server: they find it through CODEWIRE_SERVER_URL, which every
 # user-path ssh below exports.
 user_ssh_config() {
   local config="$TMPDIR_SMOKE/ssh_config"
   if [[ ! -s "$config" ]]; then
-    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" config-ssh --ssh-config-file "$config" >/dev/null ||
-      die "cw config-ssh could not write the managed SSH block"
+    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" setup ssh --ssh-config-file "$config" >/dev/null ||
+      die "cw setup ssh could not write the managed SSH block"
   fi
   printf '%s\n' "$config"
 }
@@ -4855,7 +4854,7 @@ recorded_host_key_line() {
 
 env_is_stopped() {
   local info_out="$TMPDIR_SMOKE/env-info-stop.out"
-  cw env info "$ENV_ID" >"$info_out" 2>&1 || return 1
+  cw info "$ENV_ID" >"$info_out" 2>&1 || return 1
   [[ "$(awk '$1 == "State:" {print $2; exit}' "$info_out")" == "stopped" ]]
 }
 
@@ -4889,9 +4888,9 @@ run_host_key_smoke() {
     return
   fi
   log "stopping and starting $ENV_ID to prove the host key rotates with the Pod"
-  cw env stop "$ENV_ID" >/dev/null
+  cw stop "$ENV_ID" >/dev/null
   wait_until "environment stopped" "$(( "$(seconds_now)" + SMOKE_TIMEOUT_SECONDS ))" env_is_stopped
-  cw env start "$ENV_ID" >/dev/null
+  cw start "$ENV_ID" >/dev/null
   wait_environment
   POD_NAME=""
   if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then

@@ -145,7 +145,7 @@ checkout_validate_inputs() {
 }
 
 checkout_inventory() {
-  cw_with_timeout 30 env --cloud list --output json \
+  cw_with_timeout 30 --cloud ls --output json \
     >"$TMPDIR_SMOKE/checkout-inventory.json" 2>"$TMPDIR_SMOKE/checkout-inventory.err" || return 1
   jq -e 'type == "array"' "$TMPDIR_SMOKE/checkout-inventory.json" >/dev/null 2>&1
 }
@@ -169,7 +169,7 @@ checkout_create() {
   CHECKOUT_ATTEMPTED=1
   (
     cd "$CHECKOUT_WORKSPACE"
-    cw_with_timeout 90 env create --cloud --name "$SMOKE_NAME" --cpu 2000 --memory 4096 \
+    cw_with_timeout 90 create --cloud --name "$SMOKE_NAME" --cpu 2000 --memory 4096 \
       --ttl 30m --no-network --file "${document##*/}" --no-wait --yes --output json
   ) >"$TMPDIR_SMOKE/checkout-$phase.json" 2>"$TMPDIR_SMOKE/checkout-$phase.err"
 }
@@ -187,7 +187,7 @@ checkout_reject() {
 }
 
 checkout_environment_ready() {
-  cw_with_timeout 30 env --cloud info "$ENV_ID" --output json \
+  cw_with_timeout 30 --cloud info "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/checkout-info.json" 2>"$TMPDIR_SMOKE/checkout-info.err" || return 1
   if jq -e '.setup_error | type == "string" and length > 0' "$TMPDIR_SMOKE/checkout-info.json" >/dev/null; then
     die 'hosted checkout setup failed; private diagnostics retained until cleanup'
@@ -211,7 +211,7 @@ checkout_cleanup_environment() {
   resolved="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/checkout-inventory.json" "$SMOKE_NAME")" || return 1
   [[ -z "$ENV_ID" || "$ENV_ID" == "$resolved" ]] || return 1
   ENV_ID="$resolved"
-  cw_with_timeout 60 env --cloud rm --yes "$ENV_ID" \
+  cw_with_timeout 60 --cloud rm --yes "$ENV_ID" \
     >"$TMPDIR_SMOKE/checkout-delete.out" 2>"$TMPDIR_SMOKE/checkout-delete.err" || return 1
   deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
   while (( $(seconds_now) < deadline )); do

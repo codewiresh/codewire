@@ -36,7 +36,7 @@ gateway or sidecar.
 In a hosted sandbox the daemon starts, binds to the platform with its
 workspace token, receives its access grant, then serves SSH and joins the
 tailnet. The platform records the daemon's SSH host key, and
-`cw config-ssh` configures OpenSSH to ask the platform for it, so there is no
+`cw setup ssh` configures OpenSSH to ask the platform for it, so there is no
 trust-on-first-use.
 
 ## Reaching an environment

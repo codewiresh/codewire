@@ -25,10 +25,10 @@ export class OwnedUxSandbox {
     private readonly command: Command) {}
 
   // Every read is bounded by what this run owns, never by the organization's
-  // history: `list` without `--all` returns only live rows (the server omits
+  // history: `ls` without `--all` returns only live rows (the server omits
   // destroying and destroyed ones), and the terminal read names one exact ID.
   private async lookup(deadline: number, retryBound = true): Promise<OwnedEnvironment | undefined> {
-    const result = await this.command(["env", "--cloud", "list", "--output", "json"], deadline);
+    const result = await this.command(["--cloud", "ls", "--output", "json"], deadline);
     if (!Array.isArray(result) || result.some((row) => !row || typeof row !== "object")) {
       throw new DevUxError("ux-owned-resource-list");
     }
@@ -50,7 +50,7 @@ export class OwnedUxSandbox {
     }
     let value: unknown;
     try {
-      value = await this.command(["env", "--cloud", "info", row.id, "--output", "json"], deadline);
+      value = await this.command(["--cloud", "info", row.id, "--output", "json"], deadline);
     } catch {
       // A bound environment may enter destruction between list and info.
       if (this.id && retryBound) return this.lookup(deadline, false);
@@ -67,12 +67,12 @@ export class OwnedUxSandbox {
     return { id: row.id, state: detail.state };
   }
 
-  // `cw env report` resolves an exact ID with GetEnvironment, which, unlike
+  // `cw report` resolves an exact ID with GetEnvironment, which, unlike
   // info's name resolution, includes destroying and destroyed environments.
   // It takes no placement flag. Only states the live list omits are accepted:
   // anything else moved between the two reads, so read once more.
   private async terminal(deadline: number, retryBound: boolean): Promise<OwnedEnvironment | undefined> {
-    const value = await this.command(["env", "report", this.id, "--output", "json"], deadline);
+    const value = await this.command(["report", this.id, "--output", "json"], deadline);
     const environment = value && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>).environment as Record<string, unknown> | null | undefined
       : undefined;
@@ -111,7 +111,7 @@ export class OwnedUxSandbox {
     let row = await this.lookup(deadline);
     if (!row) throw new DevUxError("ux-cleanup-create-unconfirmed");
     if (row.state !== "destroyed" && row.state !== "destroying") {
-      await this.command(["env", "--cloud", "rm", "--yes", row.id], deadline);
+      await this.command(["--cloud", "rm", "--yes", row.id], deadline);
     }
     while (row.state !== "destroyed") {
       if (Date.now() >= deadline) throw new DevUxError("ux-cleanup-timeout");

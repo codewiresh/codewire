@@ -1,20 +1,20 @@
 ---
 title: The project file
-description: Describe an environment once in codewire.yaml so that cw env create builds it the same way every time, locally or on the platform.
+description: Describe an environment once in codewire.yaml so that cw create builds it the same way every time, locally or on the platform.
 weight: 7
 ---
 
 `codewire.yaml` in a project's root describes the environment that project
-wants. `cw env create --local --path .` reads it from the directory; the
+wants. `cw create --local --path .` reads it from the directory; the
 platform reads it from `--file codewire.yaml` or from the repository. Explicit
 flags override the file.
 
 ```sh
 cw init                                                   # writes codewire.yaml from the current directory
 cw init --image workspace --install 'pnpm install' --startup 'pnpm dev'
-cw env create --local --name app --path .
-cw env create --name app --file codewire.yaml
-cw env create --name app --image workspace --write-preset  # write the resolved preset back
+cw create --local --name app --path .
+cw create --name app --file codewire.yaml
+cw create --name app --image workspace --write-preset  # write the resolved preset back
 ```
 
 `cw init` refuses to overwrite an existing file without `--force`. Given only
@@ -91,5 +91,5 @@ Keep secret values, key file paths and store references out of this file:
 
 `--repo` is refused for a local VM; declare repositories in the file and the
 host's Git fetches them. `mounts` and `workspace.vm_only` apply to local VMs,
-where `--path` is mounted live by default. `cw env create --local` shows the
+where `--path` is mounted live by default. `cw create --local` shows the
 resolved settings and asks before creating.

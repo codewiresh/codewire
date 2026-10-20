@@ -1586,19 +1586,15 @@ mod tests {
             let mut argv = vec!["cw", "credentials"];
             argv.extend(tail);
             argv.extend(["--output", "json"]);
-            let crate::Command::Credentials(args) =
-                crate::Cli::try_parse_from(argv).unwrap().command
-            else {
+            let cli = crate::Cli::try_parse_from(argv).unwrap();
+            let (local, platform) = (cli.local, cli.cloud);
+            let crate::Command::Credentials(args) = cli.command else {
                 panic!("expected credentials command")
             };
             assert!(credential_command_json(&args.command));
             assert!(
-                resolve_storage_placement(
-                    args.local,
-                    args.platform,
-                    credential_command_json(&args.command)
-                )
-                .is_err()
+                resolve_storage_placement(local, platform, credential_command_json(&args.command))
+                    .is_err()
             );
         }
     }
@@ -1858,9 +1854,9 @@ mod tests {
             "--name=claude",
         ])
         .unwrap();
+        assert!(parsed.cloud && !parsed.local);
         assert!(
             matches!(parsed.command, Command::Credentials(CredentialsArgs {
-            platform: true,
             command: CredentialsCommand::Add(CredentialAddArgs { provider, name, .. }), ..
         }) if provider == "claude-subscription" && name == "claude")
         );
@@ -1893,11 +1889,10 @@ mod tests {
             "work-codex",
         ])
         .unwrap();
+        assert!(connect.local && !connect.cloud);
         assert!(matches!(
             connect.command,
             Command::Credentials(CredentialsArgs {
-                local: true,
-                platform: false,
                 command: CredentialsCommand::Connect(CredentialConnectArgs {
                     provider: CredentialConnectProviderArg::Codex,
                     ..
@@ -1916,11 +1911,10 @@ mod tests {
             "work-github",
         ])
         .unwrap();
+        assert!(connect_github.local && !connect_github.cloud);
         assert!(matches!(
             connect_github.command,
             Command::Credentials(CredentialsArgs {
-                local: true,
-                platform: false,
                 command: CredentialsCommand::Connect(CredentialConnectArgs {
                     provider: CredentialConnectProviderArg::Github,
                     ..
@@ -1939,11 +1933,10 @@ mod tests {
             "work-openai",
         ])
         .unwrap();
+        assert!(add.local && !add.cloud);
         assert!(matches!(
             add.command,
             Command::Credentials(CredentialsArgs {
-                local: true,
-                platform: false,
                 command: CredentialsCommand::Add(_),
                 ..
             })

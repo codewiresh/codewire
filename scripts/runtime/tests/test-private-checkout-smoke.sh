@@ -87,7 +87,7 @@ cw_with_timeout() { shift; cw "$@"; }
 cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
-    'env --cloud list --output json'|'credentials --cloud list --output json'|\
+    '--cloud ls --output json'|'credentials --cloud list --output json'|\
     'credentials --cloud profiles list --output json') printf '[]\n' ;;
     'credentials --cloud generate ssh --name '*) [[ "$6" == "$PROVIDER_SSH_CREDENTIAL_NAME" ]] ;;
     'credentials --cloud get '*" --output json")
@@ -99,14 +99,14 @@ cw() {
       local key="$KEY_ID"; [[ "$FAILURE" != wrong-key ]] || key="$VM_ID"
       jq -n --arg id "$PROFILE_ID" --arg name "$PROVIDER_SSH_PROFILE_NAME" --arg key "$key" \
         '[{id:$id,name:$name,revision:"1",entries:[{capabilitySlot:"ssh",credentialId:$key}]}]' ;;
-    'env list --local --output json')
+    'ls --local --output json')
       if [[ -e "$TMPDIR_SMOKE/created" ]]; then
         jq -n --arg id "$VM_ID" --arg name "$SMOKE_NAME" '[{id:$id,name:$name,state:"running"}]'
       else printf '[]\n'; fi ;;
-    'env create --local '*)
-      [[ $# == 16 && "$*" == "env create --local --name $SMOKE_NAME --cpu 2 --memory 16GB --no-docker --no-network --file "*" --yes --output json" ]] ||
+    'create --local '*)
+      [[ $# == 15 && "$*" == "create --local --name $SMOKE_NAME --cpu 2 --memory 16GB --no-docker --no-network --file "*" --yes --output json" ]] ||
         fail 'normal repository create gained path-copy or different resource arguments'
-      local document="${13}" reason
+      local document="${12}" reason
       [[ "$PWD" == "$LP_WORKSPACE" && -n "$document" && "$document" == "${document##*/}" ]] ||
         fail 'normal repository create requires owned workspace cwd and a relative document basename'
       if ! jq -e '.credentials.profile != null' "$document" >/dev/null; then
@@ -129,7 +129,7 @@ cw() {
       [[ "$FAILURE" != unauthenticated ]] || { printf '{"id":"%s"}\n' "$VM_ID"; return; }
       printf '{"version":1,"authenticated":1,"denied":0,"unsupported_commands":0}\n' >"$CHECKOUT_FIXTURE_DIR/counter.json"
       printf '{"id":"%s"}\n' "$VM_ID" ;;
-    'env info --local '*" --output json")
+    'info --local '*" --output json")
       local profile="platform:id:$PROFILE_ID"; [[ "$FAILURE" != wrong-profile ]] || profile="platform:id:$KEY_ID"
       jq -n --arg id "$VM_ID" --arg profile "$profile" --arg reference "user/$PROVIDER_SSH_PROFILE_NAME" \
         --arg server "$CODEWIRE_SERVER_URL" --arg org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" --arg user "$LP_USER_ID" \
@@ -138,7 +138,7 @@ cw() {
           platform:{server_url:$server,organization_id:$org,user_id:$user}}}' ;;
     'use --local '*) [[ "$3" == "$VM_ID" ]] ;;
     'run --no-tty -- /bin/sh -c '*) run_guest "$6" ;;
-    'env rm --local --yes '*) [[ "$5" == "$VM_ID" ]]; rm -- "$TMPDIR_SMOKE/created" ;;
+    'rm --local --yes '*) [[ "$4" == "$VM_ID" ]]; rm -- "$TMPDIR_SMOKE/created" ;;
     *) fail "unexpected public command: $*" ;;
   esac
 }

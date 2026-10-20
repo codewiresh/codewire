@@ -95,7 +95,7 @@ class HostileGuestBattery(journey_module.LocalVmJourney):
         subprocess.run(["/usr/bin/security", "set-keychain-settings", str(self.keychain)], check=True)
         self.call("setup", "--local", "--from", self.runtime, timeout=600)
         self.created = True
-        self.call("env", "--local", "create", "--name", journey_module.NAME, "--image", journey_module.IMAGE,
+        self.call("--local", "create", "--name", journey_module.NAME, "--image", journey_module.IMAGE,
                   "--no-docker", "--yes", timeout=900)
         self.environment_id = self.info()["id"]
         arguments = [argument for address in battery.host_addresses() for argument in ("--host-address", address)]
@@ -104,7 +104,7 @@ class HostileGuestBattery(journey_module.LocalVmJourney):
         rows = guest.workload(arguments)
         if self.docker:
             self.docker_created = True
-            self.call("env", "--local", "create", "--name", DOCKER_NAME, "--image", DOCKER_IMAGE,
+            self.call("--local", "create", "--name", DOCKER_NAME, "--image", DOCKER_IMAGE,
                       "--docker-disk", "1Gi", "--yes", timeout=1200)
             docker = battery.GuestRunner(self.call, DOCKER_NAME)
             docker.stage()
@@ -135,23 +135,25 @@ class HostileGuestBattery(journey_module.LocalVmJourney):
         docker_vm("docker rm -f hostile-publish >/dev/null 2>&1 || true", timeout=120)
 
         port = str(free_port())
-        self.call("env", "port", "add", "3000", "--host-port", port, "--env", journey_module.NAME, timeout=120)
-        second = self.call("env", "port", "add", "3000", "--host-port", port, "--env", DOCKER_NAME,
+        self.call("ports", journey_module.NAME, "--local", "--publish", "3000", "--host-port", port, timeout=120)
+        second = self.call("ports", DOCKER_NAME, "--local", "--publish", "3000", "--host-port", port,
                            ok=False, timeout=120)
         row("port-owner-second-refused", "refused" if second.returncode != 0 else "accepted",
             (second.stderr or second.stdout).strip()[:160])
-        self.call("env", "port", "rm", port, "--env", journey_module.NAME, timeout=120)
-        handover = self.call("env", "port", "add", "3000", "--host-port", port, "--env", DOCKER_NAME,
+        self.call("ports", journey_module.NAME, "--local", "--unpublish", "3000", "--host-port", port,
+                  timeout=120)
+        handover = self.call("ports", DOCKER_NAME, "--local", "--publish", "3000", "--host-port", port,
                              ok=False, timeout=120)
         row("port-owner-handover", "published" if handover.returncode == 0 else "failed",
             (handover.stderr or handover.stdout).strip()[:160])
         if handover.returncode == 0:
-            self.call("env", "port", "rm", port, "--env", DOCKER_NAME, ok=False, timeout=120)
+            self.call("ports", DOCKER_NAME, "--local", "--unpublish", "3000", "--host-port", port,
+                      ok=False, timeout=120)
         return rows
 
     def remove_environment(self):
         if self.docker_created:
-            self.call("env", "--local", "rm", DOCKER_NAME, "--yes", ok=False, timeout=600)
+            self.call("--local", "rm", DOCKER_NAME, "--yes", ok=False, timeout=600)
         super().remove_environment()
 
 

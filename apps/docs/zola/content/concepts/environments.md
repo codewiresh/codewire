@@ -18,7 +18,7 @@ does work names one, by name or ID, or uses the one you selected with
   stop and a start. This is live storage, not a snapshot: Codewire does not
   keep point-in-time copies of it.
 - **Resources.** CPU, memory and disk, chosen at creation and changed with
-  `cw env resize`. Disks grow and never shrink.
+  `cw resize`. Disks grow and never shrink.
 - **Sessions.** Shells, commands and managed agent conversations, owned by
   the environment and kept across your disconnects. See
   [Sessions and agents](@/concepts/sessions-and-agents.md).
@@ -39,17 +39,17 @@ Inside every environment runs the Codewire daemon: the same `cw` binary, in a
 private mode. It serves terminal and agent sessions, file transfer, an SSH
 server with SFTP and SCP on port 2222, and the environment's tailnet peer. The
 dashboard terminal, `cw shell`, `ssh`, `scp` and VS Code all end at this
-daemon. `cw env daemon status ENV` shows its version and health, and
-`cw env daemon repair ENV` reconciles it without recreating the environment.
+daemon. `cw daemon status ENV` shows its version and health, and
+`cw daemon repair ENV` reconciles it without recreating the environment.
 
 ## Lifecycle
 
 ```sh
-cw env create ...
-cw env stop ENV      # compute released, storage kept
-cw env start ENV
-cw env restart ENV   # local VMs and hosts
-cw env rm ENV        # gone, with its storage
+cw create ...
+cw stop ENV      # compute released, storage kept
+cw start ENV
+cw restart ENV   # local VMs and hosts
+cw rm ENV        # gone, with its storage
 ```
 
 Stopping gives every process SIGTERM and a few seconds before the VM powers
@@ -57,7 +57,7 @@ off. Starting a hosted sandbox again resumes the managed agent conversations
 it held; see [Orchestrate agents](@/guides/run-agents.md).
 
 The states an environment reports are listed in
-[Environment statuses](@/reference/environment-statuses.md). `cw env info ENV`
+[Environment statuses](@/reference/environment-statuses.md). `cw info ENV`
 shows the current one, with the error code when something failed.
 
 ## Selecting an environment
@@ -77,11 +77,11 @@ current organization, and refuses an ambiguous name.
 A hosted environment belongs to one organization, counts toward its plan, and
 is visible to the organization's members according to their role and to any
 access grant on that environment. The dashboard calls it a *Sandbox*: **Create
-Sandbox** is the form behind `cw env create`, and the Sandbox page offers the
+Sandbox** is the form behind `cw create`, and the Sandbox page offers the
 browser terminal, **Open in VS Code**, the Ports dialog, Start, Stop, Resize
 and Delete. Deleting is immediate.
 
 Hosted-only lifecycle extras: `--ttl` deletes an environment after a
-lifetime (`cw env extend ENV --hours N` postpones it); `cw env protect ENV`
-refuses deletion until `cw env unprotect`; `cw env prune` removes
+lifetime (`cw extend ENV --hours N` postpones it); `cw protect ENV`
+refuses deletion until `cw unprotect`; `cw prune` removes
 environments stuck in error, creating or pending states.

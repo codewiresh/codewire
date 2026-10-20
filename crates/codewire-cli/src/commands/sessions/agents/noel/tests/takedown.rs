@@ -68,7 +68,7 @@ pub(super) fn host(agent: AgentKind) -> Harness {
     }
 }
 
-/// The environment's takedown marker, as `cw env stop` and a host daemon
+/// The environment's takedown marker, as `cw stop ENV` and a host daemon
 /// that shuts down write it before any session is signalled.
 fn mark_takedown(h: &Harness) {
     stop_evidence::mark_takedown(&h.driver.environment.root()).unwrap();

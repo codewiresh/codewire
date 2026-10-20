@@ -322,7 +322,7 @@ impl Endpoint {
                 );
             }
             anyhow::anyhow!(
-                "{e}; use cw env agent observe {} --request-id {id}; no retry was sent",
+                "{e}; use cw agent observe {} --request-id {id}; no retry was sent",
                 self.environment_id
             )
         })?;
@@ -341,7 +341,7 @@ impl Endpoint {
         );
         anyhow::ensure!(
             operation.phase.as_known() == Some(rpc::EnvironmentAgentPhase::Completed),
-            "request {id} remains {}; use cw env agent observe {} --request-id {id}; no replay was sent",
+            "request {id} remains {}; use cw agent observe {} --request-id {id}; no replay was sent",
             phase_name(&operation.phase),
             self.environment_id
         );
@@ -463,7 +463,7 @@ fn is_platform_driver(command: &[String]) -> bool {
 fn stopped_with_environment(environment: &str, reference: &str) -> String {
     format!(
         "managed conversation {reference:?} stopped with its environment; \
-         `cw msg {environment} {reference} TEXT` or `cw restart {environment} {reference}` \
+         `cw msg {environment} {reference} TEXT` or `cw restart {environment} --session {reference}` \
          continues it here"
     )
 }
@@ -556,7 +556,7 @@ pub(super) async fn run(
     let provider = support
         .iter()
         .find(|a| a.agent.as_known() == Some(kind) && a.proxy_only_qualified)
-        .context("selected agent has no qualified provider proxy in this environment; create it with --profile PROFILE for a credential profile that includes this provider, and check `cw env agent info ENV`")?;
+        .context("selected agent has no qualified provider proxy in this environment; create it with --profile PROFILE for a credential profile that includes this provider, and check `cw agent info ENV`")?;
     let (parent, parent_generation) = match args.parent.as_deref() {
         Some(reference) => {
             let parent = endpoint.find(reference).await?;

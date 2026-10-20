@@ -12,12 +12,15 @@ is the separate local `--from` journey for development builds.)
 
 It proves, against the public release origin and the published install.sh:
 - install.sh installs FROM as a managed cw for a user with nothing installed;
-- `cw update --version TO` (or bare `cw update`, which follows the stable
+- `cw upgrade --version TO` (or bare `cw upgrade`, which follows the stable
   channel, with --channel) selects TO for new invocations, while FROM's
   stored bytes keep running for anything that saved their path;
-- `cw update rollback` selects FROM again, and `cw update rollback --to TO`
+- `cw upgrade rollback` selects FROM again, and `cw upgrade rollback --to TO`
   selects TO;
-- `cw update status --json` reports each selection exactly.
+- `cw upgrade status --json` reports each selection exactly.
+
+Releases before the flat command grammar spell the updater `cw update`; each
+step asks the cw that runs it which spelling it has (see `Journey.updater`).
 
 Everything runs as a new user would: its own HOME and XDG directories under a
 private scratch root, a stock PATH, and no inherited Codewire environment. The
@@ -72,6 +75,7 @@ class Journey:
         for name in ("home", "tmp"):
             (root / name).mkdir(mode=0o700)
         self.steps = []
+        self.spellings = {}
 
     def run(self, argv, timeout=900, operator=False):
         """Run as the journey's new user, or with operator=True as the caller."""
@@ -89,8 +93,20 @@ class Journey:
     def cw(self, *args, timeout=900):
         return self.run([self.bin / "cw", *args], timeout=timeout)
 
+    def updater(self):
+        """The CLI updater command of the cw the entry selects now: `upgrade`,
+        or `update` for a release from before `cw upgrade`. A cw with `cw
+        upgrade` answers its help; an older one has no such command."""
+        target = os.path.realpath(self.bin / "cw")
+        if target not in self.spellings:
+            probe = subprocess.run([target, "upgrade", "--help"], env=self.env, cwd=self.env["HOME"],
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                   timeout=60, check=False)
+            self.spellings[target] = "upgrade" if probe.returncode == 0 else "update"
+        return self.spellings[target]
+
     def status(self):
-        return json.loads(self.cw("update", "status", "--json"))
+        return json.loads(self.cw(self.updater(), "status", "--json"))
 
     def version(self, path=None):
         return self.run([path or self.bin / "cw", "--version"]).strip()
@@ -139,7 +155,8 @@ def main(argv=None):
     parser.add_argument("--from", dest="source", required=True, help="release tag installed first")
     parser.add_argument("--to", required=True, help="release tag updated to")
     parser.add_argument("--channel", action="store_true",
-                        help="update with bare `cw update` (stable channel); TO must be the stable release")
+                        help="update with bare `cw upgrade` (`cw update` before it; stable channel); "
+                             "TO must be the stable release")
     parser.add_argument("--install-url", default=INSTALL_URL)
     parser.add_argument("--before-network", help="command run with the path of a cw about to use the network")
     parser.add_argument("--keep", action="store_true", help="keep the scratch root")
@@ -169,7 +186,8 @@ def main(argv=None):
 
         if args.before_network:
             journey.run([*args.before_network.split(), source_bytes], timeout=300, operator=True)
-        update = ["update"] if args.channel else ["update", "--version", args.to]
+        updater = journey.updater()
+        update = [updater] if args.channel else [updater, "--version", args.to]
         output = journey.cw(*update)
         require(f"Selected cw {args.to}" in output, f"the update did not select {args.to}:\n{output}")
         target_sha = journey.selected(args.to, previous=args.source)
@@ -177,10 +195,10 @@ def main(argv=None):
         # A saved path to FROM's bytes keeps running FROM.
         require(args.source.lstrip("v") in journey.version(source_bytes), "FROM's stored bytes changed")
 
-        output = journey.cw("update", "rollback")
+        output = journey.cw(journey.updater(), "rollback")
         require(f"cw {args.source}" in output, f"rollback did not select {args.source}:\n{output}")
         journey.selected(args.source, previous=args.to)
-        output = journey.cw("update", "rollback", "--to", args.to)
+        output = journey.cw(journey.updater(), "rollback", "--to", args.to)
         require(f"cw {args.to}" in output, f"rollback --to did not select {args.to}:\n{output}")
         journey.selected(args.to, previous=args.source)
 

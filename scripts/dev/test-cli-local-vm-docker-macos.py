@@ -18,7 +18,7 @@ It proves #1913's acceptance list on Apple silicon, with stock arm64 images:
   only, container logs stay bounded, and the disk keeps its size;
 - images, volumes and the guest's Docker login persist across restart, a
   runtime install while stopped, VMM death, runner death and a dockerd crash
-  (each repaired with `cw env --local daemon repair`);
+  (each repaired with `cw --local daemon repair`);
 - removing the environment removes its Docker disk and ends the VM.
 
 It uses the same private root, HOME, throwaway keychain and owned-family
@@ -132,7 +132,7 @@ class DockerJourney(local_vm.LocalVmJourney):
         print(f"local-vm-docker: {what} -> error {info.get('error_code')}", flush=True)
         assert info.get("error_code"), f"{what} left error without an error_code: {info}"
         assert error_code is None or info["error_code"] == error_code, info
-        self.call("env", "--local", "daemon", "repair", local_vm.NAME, "--output", "json", timeout=600)
+        self.call("--local", "daemon", "repair", local_vm.NAME, "--output", "json", timeout=600)
         self.wait_state("running", 120)
         self.require(self.sh(PERSISTENCE).stdout, "docker-persistence-ok")
         self.check(f"{what}: repaired and Docker state persists")
@@ -142,7 +142,7 @@ class DockerJourney(local_vm.LocalVmJourney):
         subprocess.run(["/usr/bin/security", "set-keychain-settings", str(self.keychain)], check=True)
         self.call("setup", "--local", "--from", self.runtime, timeout=600)
         self.created = True
-        self.call("env", "--local", "create", "--name", local_vm.NAME, "--image", IMAGE,
+        self.call("--local", "create", "--name", local_vm.NAME, "--image", IMAGE,
                   "--docker-disk", "1Gi", "--yes", timeout=900)
         info = self.info()
         self.environment_id = info["id"]
@@ -188,17 +188,17 @@ class DockerJourney(local_vm.LocalVmJourney):
         assert self.docker_disk().stat().st_size == DOCKER_DISK_BYTES
         self.check("byte and inode exhaustion stay inside docker.raw, logs stay bounded")
 
-        self.call("env", "--local", "restart", local_vm.NAME, timeout=600)
+        self.call("--local", "restart", local_vm.NAME, timeout=600)
         self.wait_state("running", 120)
         self.require(self.sh(PERSISTENCE).stdout, "docker-persistence-ok")
         self.check("restart keeps images, volumes and the guest login")
 
-        before = json.loads(self.call("env", "--local", "runtime", "info", local_vm.NAME, "--output", "json",
+        before = json.loads(self.call("--local", "runtime", "info", local_vm.NAME, "--output", "json",
                                       timeout=300).stdout)
-        self.call("env", "--local", "stop", local_vm.NAME, timeout=300)
+        self.call("--local", "stop", local_vm.NAME, timeout=300)
         self.call("setup", "--local", "--from", self.next_runtime, "--replace", timeout=600)
-        self.call("env", "--local", "start", local_vm.NAME, timeout=600)
-        after = json.loads(self.call("env", "--local", "runtime", "info", local_vm.NAME, "--output", "json",
+        self.call("--local", "start", local_vm.NAME, timeout=600)
+        after = json.loads(self.call("--local", "runtime", "info", local_vm.NAME, "--output", "json",
                                      timeout=300).stdout)
         def runtime(view):
             return (view.get("selection") or {}).get("catalog", {}).get("active_sha256", "")[:12]

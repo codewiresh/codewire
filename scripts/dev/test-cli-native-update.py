@@ -678,7 +678,7 @@ class Journey(managed.Journey):
             }
 
     def runtime(self, *args, **kwargs):
-        return self.data("env", "--local", "runtime", *args, "--output", "json", **kwargs)
+        return self.data("runtime", *args, "--local", "--output", "json", **kwargs)
 
     def runtime_info(self):
         _, result = self.runtime("info", self.environment, timeout=150)
@@ -782,7 +782,7 @@ class Journey(managed.Journey):
             self.call("send", self.environment, self.observer, json.dumps(request, separators=(",",":")))
         prefix = "CWNU_" + self.observer_nonce + " "
         def probe():
-            output = self.call("logs", self.environment, self.observer, "--tail", "50")[1]
+            output = self.call("logs", self.environment, "--session", self.observer, "--tail", "50")[1]
             found = []
             for line in output.splitlines():
                 if not line.startswith(prefix):
@@ -805,7 +805,7 @@ class Journey(managed.Journey):
         self.call("send", self.environment, self.sentinel,
                   f"printf '\\n{marker}_PATH:%s\\n' \"$(command -v cw)\"; "
                   f"printf '{marker}_VERSION:'; command cw --version; printf '{marker}_END\\n'")
-        output = self.until(lambda:self.call("logs", self.environment, self.sentinel, "--tail", "50")[1],
+        output = self.until(lambda:self.call("logs", self.environment, "--session", self.sentinel, "--tail", "50")[1],
                             lambda text:f"{marker}_END" in text and f"{marker}_VERSION:cw " in text,
                             30, f"same shell selected {stage}")
         shell_default_witness(output, marker, asset.identity["package_version"])
@@ -861,7 +861,7 @@ print(json.dumps({"operation":op,"identity":identity(before)}))
             print("cli-native-update: runtime-request " + json.dumps(record,sort_keys=True),
                   file=sys.stderr,flush=True)
             code, stdout, stderr = self.call(
-                "env", "--local", "runtime", "update", self.environment,
+                "runtime", "update", "--local", self.environment,
                 "--source", str(self.b.lock), "--image-sha256", image,
                 "--target-sha256", self.b.identity["sha256"], "--expected-revision", str(revision),
                 "--request-id", request, "--output", "json", expect="fail", timeout=150)
@@ -924,7 +924,7 @@ print(json.dumps({"operation":op,"identity":identity(before)}))
         original = self.snapshot()
         sentinel_marker = "CWNU_" + self.observer_nonce + "_PID:"
         self.call("send", self.environment, self.sentinel, f"printf '\\n{sentinel_marker}%s\\n' \"$$\"")
-        output = self.until(lambda:self.call("logs", self.environment, self.sentinel, "--tail", "50")[1],
+        output = self.until(lambda:self.call("logs", self.environment, "--session", self.sentinel, "--tail", "50")[1],
                             lambda text:re.search(re.escape(sentinel_marker)+r"[0-9]+", text), 30, "original shell PID")
         pid = int(re.search(re.escape(sentinel_marker)+r"([0-9]+)", output)[1])
         peers = [self.peer(self.lead, "lead", self.a), self.peer(self.worker, "worker", self.a)]

@@ -1,14 +1,16 @@
 ---
 title: Sessions
-description: run, list, attach, logs, send, wait, stop and restart, and the attach key bindings.
+description: run, ls, attach, logs, send, wait, stop and restart, and the attach key bindings.
 weight: 2
 ---
 
 Every session belongs to one environment. `ENV` is a name or ID and defaults
 to the environment selected with `cw use`; `SESSION` is a name or ID within
-it. For `run`, `list`, `attach` and `logs` a single positional is an
-environment (`attach` and `logs` also accept a session of the selected
-environment); for the others a single positional is a session.
+it. `stop`, `restart` and `logs` name the environment as a positional or with
+`--in ENV` (not both) and the session with `--session`. For `run`, `ls` and
+`attach` a single positional is an environment (`attach` also accepts a
+session of the selected environment); for `send`, `wait`, `msg`, `steer`,
+`interrupt` and `inbox` a single positional is a session.
 
 ## cw run
 
@@ -35,14 +37,16 @@ A foreground run streams output and fails when the command exits
 unsuccessfully. A hosted sandbox refuses `--tty`, a command and `--env`
 together with `--agent`.
 
-## cw list
+## cw ls
 
 ```sh
-cw list [ENV] [--all] [--output json]     # alias: ls
+cw ls [ENV] [--output json]     # alias: list
 ```
 
-Without `ENV`, lists every accessible environment and its sessions, and exits
-nonzero if any environment could not be read.
+Without `ENV`, lists every environment with its location, state and session
+count; see [Environments](@/cli/environments.md). With `ENV`, lists that
+environment's sessions with their state, mode (`normal` or `managed`),
+parent and command.
 
 ## cw attach
 
@@ -67,11 +71,16 @@ managed agent is refused: use `cw msg`, `cw steer` and `cw logs`.
 ## cw logs
 
 ```sh
-cw logs [ENV] SESSION [-f|--follow] [-t|--tail N] [--raw]
+cw logs [ENV] --session SESSION [-f|--follow] [-t|--tail N] [--raw]
+cw logs ENV --setup [-f|--follow]
 ```
 
-Saved output, retained across disconnects and across an environment's stop
-and start. `--raw` keeps ANSI escape codes.
+Saved session output, retained across disconnects and across an
+environment's stop and start. `--raw` keeps ANSI escape codes. `--setup`
+shows how a cloud environment was set up instead: provisioning, repository
+clones, and the install and startup steps. Without `--session` or `--setup`,
+an interactive call shows the environment's only session (naming it) or
+offers a choice; a script must name the source.
 
 ## cw send
 
@@ -99,22 +108,29 @@ ID alone names its session.
 ## cw stop
 
 ```sh
-cw stop [ENV] SESSION [--all] [-o json]
+cw stop ENV [-o json]                          # the whole environment
+cw stop [ENV] --session SESSION [--all] [-o json]
 ```
 
-Stops an owned session. At a terminal it asks whether to stop the session's
-running children; `--all` stops every descendant without asking; without a
-terminal, children keep running and are named. A managed hosted session also
-accepts `--cleanup-request-id UUID` to clean up an earlier operation whose
-reply was lost.
+Without `--session`, `stop` stops the whole environment and needs `ENV`. With
+`--session` it stops one owned session, in the selected environment unless
+`ENV` names another, and leaves its siblings running. At a terminal it asks
+whether to stop the session's running children; `--all` stops every
+descendant without asking; without a terminal, children keep running and are
+named. `--all` needs `--session`. A managed hosted session also accepts
+`--cleanup-request-id UUID` to clean up an earlier operation whose reply was
+lost.
 
 ## cw restart
 
 ```sh
-cw restart [ENV] SESSION [-o json]
+cw restart ENV [-o json]                       # the whole environment: local VMs and hosts
+cw restart [ENV] --session SESSION [-o json]
 ```
 
-Restarts a retained session with its canonical identity. A managed
+Without `--session`, `restart` restarts a whole local environment; a cloud
+environment is refused. With `--session` it restarts a retained session with
+its canonical identity. A managed
 conversation resumes from its saved session; restart is refused when the
 saved process identity is missing or no longer matches.
 

@@ -151,8 +151,8 @@ const CLAUDE_SANDBOX_POLICY: &str = "Sandbox execution: installed Claude CLI in 
 /// mode: there the user's own rules decide, on their own machine.
 const CLAUDE_SANDBOX_PERMISSION_MODE: [&str; 2] = ["--permission-mode", "auto"];
 const NOEL_POLICY: &str = "trusted host execution: installed noel with the user's ordinary noel settings, login and project trust; its tools run without approval prompts, and extension dialogs are declined";
-const NOEL_HOST_ONLY: &str = "noel managed conversations are qualified only on trusted Linux hosts (`cw env create --local --type host`)";
-const NOT_QUALIFIED: &str = "managed agent conversations are qualified only on trusted host environments (`cw env create --local --type host`); sandbox and platform placements are not qualified yet";
+const NOEL_HOST_ONLY: &str = "noel managed conversations are qualified only on trusted Linux hosts (`cw --local create --type host`)";
+const NOT_QUALIFIED: &str = "managed agent conversations are qualified only on trusted host environments (`cw --local create --type host`); sandbox and platform placements are not qualified yet";
 
 // ---------------------------------------------------------------------------
 // Durable records

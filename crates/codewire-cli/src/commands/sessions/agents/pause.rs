@@ -1,7 +1,7 @@
 //! A managed noel message whose environment is taken down is paused, not
 //! ended, and the conversation's next start resumes its run.
 //!
-//! Only a takedown of the whole environment pauses: `cw env stop`, `restart`
+//! Only a takedown of the whole environment pauses: `cw stop ENV`, `restart`
 //! and `rm`, a shutdown of its host daemon, and a host's orderly reboot. The
 //! host daemon's record helper pauses the active run before the daemon's
 //! first signal reaches the conversation (`pause_before_shutdown`), so how
@@ -350,7 +350,7 @@ pub(super) fn resolve_paused(
     Ok(resolved)
 }
 
-/// The environment's takedown marker: `cw env stop`, `restart` and `rm`
+/// The environment's takedown marker: `cw stop ENV`, `restart` and `rm`
 /// write it to ask the host daemon to stop, and the daemon writes it itself
 /// before any other shutdown stops a session. The daemon removes it when it
 /// starts.

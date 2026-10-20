@@ -1,6 +1,6 @@
 //! The local VM runtime document (#2539). A release's cw embeds it, so the
 //! runtime's exact digests are covered by the trust already placed in that cw
-//! (install.sh's SHA256SUMS or `cw update`'s compiled-key signature); a
+//! (install.sh's SHA256SUMS or `cw upgrade`'s compiled-key signature); a
 //! `--from` directory carries the same document beside its blobs. These
 //! functions perform no I/O and grant no trust.
 //!

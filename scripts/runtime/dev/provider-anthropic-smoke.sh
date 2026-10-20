@@ -70,7 +70,7 @@ prepare_provider_anthropic() {
 }
 
 run_provider_anthropic_smoke() {
-  cw_with_timeout 30 env info --local "$ENV_ID" --output json \
+  cw_with_timeout 30 info --local "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/provider-anthropic-environment.json" 2>"$TMPDIR_SMOKE/provider-anthropic-info.err" ||
     die 'cannot inspect the local Anthropic environment binding'
   jq -e --arg id "$ENV_ID" --arg profile "platform:id:$PROVIDER_ANTHROPIC_PROFILE_ID" \

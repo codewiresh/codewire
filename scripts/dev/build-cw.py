@@ -12,8 +12,8 @@ compiled is part of the source digest. A checkout without Git cannot supply
 provenance and is refused; nothing is guessed.
 
 With --release-dir, the admitted cw is written beside its canonical
-cw-runtime.json, the release directory that `cw update --from DIR` and
-scripts/dev/test-cli-update.py consume. `cw update --from` admits only
+cw-runtime.json, the release directory that `cw upgrade --from DIR` and
+scripts/dev/test-cli-update.py consume. `cw upgrade --from` admits only
 release targets, so build the update journey's A and B for the release target
 (cross-compiled with cargo-zigbuild, as release delivery does) from the same
 committed checkout with different versions, for example:

@@ -32,7 +32,7 @@ cw_with_timeout() { shift; cw "$@"; }
 cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
-    'env info --local '*" --output json")
+    'info --local '*" --output json")
       local id="$ENV_ID" profile="platform:id:$PROFILE_ID" reference=user/owned-profile cpu=2 memory=16Gi
       [[ "$FAILURE" != info ]] || return 1
       [[ "$FAILURE" != wrong-id ]] || id="$PROFILE_ID"
@@ -68,7 +68,7 @@ expect_failure() {
 
 fixture
 run_provider_openai_smoke
-grep -qxF 'env info --local 33333333-3333-4333-8333-333333333333 --output json ' "$TMPDIR_SMOKE/calls" ||
+grep -qxF 'info --local 33333333-3333-4333-8333-333333333333 --output json ' "$TMPDIR_SMOKE/calls" ||
   fail 'local environment binding used an ambiguous command'
 pass
 for failure in info wrong-id wrong-profile wrong-reference wrong-topology run empty nul stderr notice-nul notice-duplicate; do

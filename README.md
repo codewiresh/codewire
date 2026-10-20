@@ -26,7 +26,7 @@ curl -fsSL https://codewire.sh/install.sh | sh
 The installer needs only a POSIX shell, `curl` and a SHA-256 tool. It
 downloads the stable release for your platform (Linux x86_64/arm64, macOS
 Apple Silicon/Intel), checks it against the release's `SHA256SUMS`, and
-installs it as a managed `cw` that `cw update` keeps current with signed
+installs it as a managed `cw` that `cw upgrade` keeps current with signed
 releases from `releases.codewire.sh`. See
 [docs/dev/CLI-MANAGED-INSTALL.md](docs/dev/CLI-MANAGED-INSTALL.md).
 
@@ -49,10 +49,10 @@ Apple Silicon Mac it uses Virtualization.framework.
 
 ```sh
 cw setup --local                       # install the pinned VM runtime
-cw env create --local --name my-app --path .
+cw create --local --name my-app --path .
 cw shell                               # creation selected my-app
-cw run -- cargo test                   # a durable session; cw list, cw attach
-cw env stop --local my-app
+cw run -- cargo test                   # a durable session; cw ls, cw attach
+cw stop --local my-app
 ```
 
 `--path .` mounts the folder live in the VM; dependency and build folders
@@ -62,7 +62,7 @@ A hosted sandbox:
 
 ```sh
 cw setup                               # sign in, pick an organization
-cw env create --name my-app --image workspace
+cw create --name my-app --image workspace
 cw shell my-app
 cw run my-app --name lead --agent codex --detach --prompt 'Review this repo'
 cw inbox my-app lead
@@ -93,7 +93,7 @@ either placement can use.
   outside the sandbox. There is no sidecar or gateway.
 - **Access.** `cw` reaches a hosted environment over WireGuard: direct UDP
   first, then the UDP relay, then DERP, and finally a WebSocket SSH proxy
-  through orchestration. `cw config-ssh` lets OpenSSH, VS Code and `rsync`
+  through orchestration. `cw setup ssh` lets OpenSSH, VS Code and `rsync`
   use the same path.
 - **Local VM.** `cw` supervises the VM on your machine with the same guest
   daemon and workspace image; secrets and provider credentials stay in a host

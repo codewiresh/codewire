@@ -15,7 +15,7 @@ dashboard terminal -> platform -> daemon
 ```
 
 `cw shell`, `ssh cw-ENV`, `scp`, `sftp`, `rsync` and VS Code all take the
-first path that works. `cw config-ssh` (run by `cw setup`) writes an OpenSSH
+first path that works. `cw setup ssh` (run by `cw setup`) writes an OpenSSH
 block whose `KnownHostsCommand` asks the platform for the environment's
 recorded host key, so there is no trust-on-first-use. `cw doctor tailnet ENV`
 shows which transport you got and why.
@@ -30,12 +30,13 @@ https://{label}-{sandbox-id-prefix}-{organization-slug}.{preview domain}
 ```
 
 ```sh
-cw env port add 3000 --label web --access public -e my-app
-cw env port list -e my-app
-cw env port rm web -e my-app
+cw ports my-app --publish 3000 --label web --access public
+cw ports my-app
+cw ports my-app --unpublish 3000
 ```
 
-Access is `creator` (default), `org_members` or `public`. A private preview
+The label defaults to `port-PORT`. Access is `creator` (default),
+`org_members` or `public`. A private preview
 sends a signed-out browser through the normal sign-in, then returns to the
 page; Codewire's own cookies and headers never reach the application, and the
 proxy removes the credential it authenticated with. Labels are 2 to 22
@@ -51,10 +52,11 @@ A local VM has no public address. Publish a guest port on your machine's
 loopback:
 
 ```sh
-cw env port add 3000 --host-port 3000 -e my-app     # 127.0.0.1:3000 -> VM:3000
+cw ports my-app --publish 3000 --host-port 3000     # 127.0.0.1:3000 -> VM:3000
 ```
 
-A stopped VM records the change and publishes it at the next start.
+Publishing needs a running VM; `cw ports my-app` lists the published ports
+without starting it.
 `codewire.yaml` can declare the same ports; see
 [The project file](@/guides/project-file.md).
 
@@ -74,7 +76,7 @@ setup.
 
 ```sh
 cw network create team --org ORG_ID     # also selects it
-cw env create --local --name app --path . --network team
+cw create --local --name app --path . --network team
 cw network nodes --org ORG_ID
 ```
 

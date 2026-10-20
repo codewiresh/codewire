@@ -1,6 +1,6 @@
 ---
 title: Install the CLI
-description: Install a managed cw with one command, then keep it current with cw update.
+description: Install a managed cw with one command, then keep it current with cw upgrade.
 weight: 1
 ---
 
@@ -38,13 +38,14 @@ Make sure `~/.local/bin` is on your `PATH`.
 ## Keep it current
 
 ```sh
-cw update            # follow the stable channel
-cw update status     # what is installed and selected
-cw update rollback   # go back to the previous version
+cw upgrade            # choose the newer CLI (and any VM restarts) from a checklist
+cw upgrade status     # what is installed and selected
+cw upgrade rollback   # go back to the previous version
 ```
 
-`cw update` installs only signed releases and refuses a regression on the
-stable channel. Local VMs keep running across an update; see
+`cw upgrade` installs only signed releases and refuses a regression on the
+stable channel. Local VMs keep running across an upgrade unless you choose
+their restart; see
 [Update cw](@/guides/update.md).
 
 ## Shell completion

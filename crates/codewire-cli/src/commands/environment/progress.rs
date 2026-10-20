@@ -204,7 +204,7 @@ impl StageFailure {
             format!(": {}", self.message)
         };
         anyhow::anyhow!(
-            "environment {environment_id} failed at stage {:?}{detail} (see `cw env logs {environment_id}`)",
+            "environment {environment_id} failed at stage {:?}{detail} (see `cw logs {environment_id} --setup`)",
             self.stage
         )
     }
@@ -756,7 +756,9 @@ pub(crate) fn setup_failure(environment: &Environment) -> Option<anyhow::Error> 
             .map(terminal_text)
             .filter(|error| !error.is_empty())
             .map(|error| {
-                anyhow::anyhow!("environment {id} setup failed: {error} (see `cw env logs {id}`)")
+                anyhow::anyhow!(
+                    "environment {id} setup failed: {error} (see `cw logs {id} --setup`)"
+                )
             }),
     }
 }

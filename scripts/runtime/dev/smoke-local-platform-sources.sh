@@ -406,7 +406,7 @@ local_platform_binding() {
     credentials="$(jq -nc --arg profile "platform:id:$PROVIDER_SSH_PROFILE_ID" \
       --arg reference "user/$PROVIDER_SSH_PROFILE_NAME" '{profile:$profile,reference:$reference,revision:1}')"
   fi
-  cw_with_timeout 30 env info --local "$SMOKE_NAME" --output json \
+  cw_with_timeout 30 info --local "$SMOKE_NAME" --output json \
     >"$TMPDIR_SMOKE/local-environment.json" 2>"$TMPDIR_SMOKE/local-info.err" || return 1
   jq -e --arg id "$ENV_ID" --arg project "$project" \
     --argjson credentials "$credentials" \
@@ -447,7 +447,7 @@ root = Path.home() / '.codewire'
 # unlike platform placement it never persists an environment.json file.
 assert not (root / 'environment.json').exists()
 # Native daemon state is private to the out-of-container daemon, not a
-# workload home projection. Public cw list binds the launched session below;
+# workload home projection. Public cw ls binds the launched session below;
 # privileged daemon projection tests own durable metadata redaction proof.
 assert not os.access(root / 'daemon' / 'sessions', os.R_OK | os.X_OK), 'private daemon sessions are accessible'
 PY
@@ -468,7 +468,7 @@ local_platform_application_phase() {
     "$TMPDIR_SMOKE/local-app-$phase.err")"
   [[ "$session_id" =~ ^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
     die 'local managed exec omitted an exact unique session acknowledgement'
-  cw_with_timeout 30 list "$ENV_ID" --output json >"$TMPDIR_SMOKE/local-app-sessions-$phase.json" \
+  cw_with_timeout 30 ls "$ENV_ID" --output json >"$TMPDIR_SMOKE/local-app-sessions-$phase.json" \
     2>"$TMPDIR_SMOKE/local-app-sessions-$phase.err" || die 'local managed session inspection failed'
   jq -es --arg id "$session_id" --arg guest "$guest" '
     length == 1 and (.[0] | type == "array" and
@@ -535,11 +535,11 @@ local_platform_ssh_revoke() {
     .[0].status == "CREDENTIAL_STATUS_REVOKED" and .[0].revocationGeneration == "2"' \
     "$TMPDIR_SMOKE/local-revoked.json" >/dev/null || die 'platform revocation acknowledgement drifted'
   printf 'revoked\n' >"$TMPDIR_SMOKE/local-revoked-trigger"
-  cw_with_timeout 30 env cp --local "$TMPDIR_SMOKE/local-revoked-trigger" \
+  cw_with_timeout 30 cp --local "$TMPDIR_SMOKE/local-revoked-trigger" \
     "$SMOKE_NAME:/workspace/.cw-ssh-smoke/revoked-trigger" >"$TMPDIR_SMOKE/local-trigger.out" ||
     die 'cannot signal the admitted local workload'
   wait_until 'local fresh SSH denial' "$(( $(seconds_now) + 30 ))" provider_ssh_waiter_complete "$session_id"
-  cw_with_timeout 30 logs "$ENV_ID" "$session_id" --raw >"$TMPDIR_SMOKE/local-denial.out" || die 'cannot read local denial receipt'
+  cw_with_timeout 30 logs "$ENV_ID" --session "$session_id" --raw >"$TMPDIR_SMOKE/local-denial.out" || die 'cannot read local denial receipt'
   grep -qx stock-ssh-workload-revoked "$TMPDIR_SMOKE/local-denial.out" || die 'local fresh signing denial was not proved'
   if cw_with_timeout 30 run --no-tty -- /bin/true >"$TMPDIR_SMOKE/local-denied-launch.out" \
       2>"$TMPDIR_SMOKE/local-denied-launch.err"; then
@@ -619,7 +619,7 @@ PY
 local_platform_cleanup_environment() {
   local rc=0 resolved=''
   if [[ "$LP_CREATE_ATTEMPTED" == 1 ]]; then
-    if cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-cleanup-environments.json" 2>/dev/null &&
+    if cw_with_timeout 30 ls --local --output json >"$TMPDIR_SMOKE/local-cleanup-environments.json" 2>/dev/null &&
         jq -e 'type == "array"' "$TMPDIR_SMOKE/local-cleanup-environments.json" >/dev/null; then
       if jq -e --arg name "$SMOKE_NAME" 'any(.[]; .name == $name)' "$TMPDIR_SMOKE/local-cleanup-environments.json" >/dev/null; then
         resolved="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/local-cleanup-environments.json" "$SMOKE_NAME")" || rc=1
@@ -627,7 +627,7 @@ local_platform_cleanup_environment() {
           if [[ "${1:-0}" != 0 ]]; then
             # Retain only public, fixed launch metadata before deleting this
             # exact owned VM. Observer failure never changes cleanup authority.
-            if ! cw_with_timeout 30 env info --local "$resolved" --output json 2>/dev/null |
+            if ! cw_with_timeout 30 info --local "$resolved" --output json 2>/dev/null |
               jq -e --arg id "$resolved" '
                 select(.id == $id and
                   (.state | IN("starting", "running", "stopped", "error", "orphaned"))) |
@@ -645,10 +645,10 @@ local_platform_cleanup_environment() {
               jq -n '{observation:"unavailable"}' >"$TMPDIR_SMOKE/local-failed-launch.json"
             fi
           fi
-          cw_with_timeout 180 env rm --local --yes "$resolved" >"$TMPDIR_SMOKE/local-cleanup.out" 2>&1 || rc=1
+          cw_with_timeout 180 rm --local --yes "$resolved" >"$TMPDIR_SMOKE/local-cleanup.out" 2>&1 || rc=1
         else rc=1; fi
       fi
-      cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-cleanup-environments.json" 2>/dev/null &&
+      cw_with_timeout 30 ls --local --output json >"$TMPDIR_SMOKE/local-cleanup-environments.json" 2>/dev/null &&
         jq -e --arg name "$SMOKE_NAME" --arg id "$ENV_ID" 'type == "array" and all(.[]; .name != $name and .id != $id)' \
           "$TMPDIR_SMOKE/local-cleanup-environments.json" >/dev/null || rc=1
     else rc=1; fi
@@ -808,7 +808,7 @@ main() {
 
 local_platform_github_journey() {
   SMOKE_NAME="local-github-$(tr -d '-' </proc/sys/kernel/random/uuid)"
-  cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-before.json"
+  cw_with_timeout 30 ls --local --output json >"$TMPDIR_SMOKE/local-before.json"
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/local-before.json" >/dev/null || die 'local environment name collision'
   prepare_provider_github
@@ -816,7 +816,7 @@ local_platform_github_journey() {
     "$PROVIDER_GITHUB_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
   # Bind ownership in the parent before creation, including an uncertain reply.
   LP_CREATE_ATTEMPTED=1
-  cw_with_timeout 1500 env create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker --no-network \
+  cw_with_timeout 1500 create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker --no-network \
     --path "$LP_WORKSPACE" --path-mode copy --file codewire.yaml --yes --output json \
     >"$TMPDIR_SMOKE/local-create.json" 2>"$TMPDIR_SMOKE/local-create.err" || die 'local VM with platform GitHub failed to start'
   ENV_ID="$(jq -er '.id | select(. != "00000000-0000-0000-0000-000000000000" and
@@ -829,7 +829,7 @@ local_platform_github_journey() {
 
 local_platform_codex_journey() {
   SMOKE_NAME="local-codex-$(tr -d '-' </proc/sys/kernel/random/uuid)"
-  cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-before.json"
+  cw_with_timeout 30 ls --local --output json >"$TMPDIR_SMOKE/local-before.json"
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/local-before.json" >/dev/null || die 'local environment name collision'
   prepare_provider_codex
@@ -837,7 +837,7 @@ local_platform_codex_journey() {
     "$PROVIDER_CODEX_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
   # Bind ownership in the parent before creation, including an uncertain reply.
   LP_CREATE_ATTEMPTED=1
-  cw_with_timeout 1500 env create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker --no-network \
+  cw_with_timeout 1500 create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker --no-network \
     --path "$LP_WORKSPACE" --path-mode copy --file codewire.yaml --yes --output json \
     >"$TMPDIR_SMOKE/local-create.json" 2>"$TMPDIR_SMOKE/local-create.err" || die 'local VM with platform Codex failed to start'
   ENV_ID="$(jq -er '.id | select(. != "00000000-0000-0000-0000-000000000000" and
@@ -849,7 +849,7 @@ local_platform_codex_journey() {
 
 local_platform_anthropic_journey() {
   SMOKE_NAME="local-anthropic-$(tr -d '-' </proc/sys/kernel/random/uuid)"
-  cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-before.json"
+  cw_with_timeout 30 ls --local --output json >"$TMPDIR_SMOKE/local-before.json"
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/local-before.json" >/dev/null || die 'local environment name collision'
   prepare_provider_anthropic
@@ -857,7 +857,7 @@ local_platform_anthropic_journey() {
     "$PROVIDER_ANTHROPIC_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
   # Reuse the parent's creation-uncertainty and terminal cleanup contract.
   LP_CREATE_ATTEMPTED=1
-  cw_with_timeout 1500 env create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker --no-network \
+  cw_with_timeout 1500 create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker --no-network \
     --path "$LP_WORKSPACE" --path-mode copy --file codewire.yaml --yes --output json \
     >"$TMPDIR_SMOKE/local-create.json" 2>"$TMPDIR_SMOKE/local-create.err" || die 'local VM with platform Anthropic failed to start'
   ENV_ID="$(jq -er '.id | select(. != "00000000-0000-0000-0000-000000000000" and
@@ -869,7 +869,7 @@ local_platform_anthropic_journey() {
 
 local_platform_openai_journey() {
   SMOKE_NAME="local-openai-$(tr -d '-' </proc/sys/kernel/random/uuid)"
-  cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-before.json"
+  cw_with_timeout 30 ls --local --output json >"$TMPDIR_SMOKE/local-before.json"
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/local-before.json" >/dev/null || die 'local environment name collision'
   prepare_provider_openai
@@ -877,7 +877,7 @@ local_platform_openai_journey() {
     "$PROVIDER_OPENAI_DOCUMENT" >"$LP_WORKSPACE/codewire.yaml"
   # Reuse the parent's creation-uncertainty and terminal cleanup contract.
   LP_CREATE_ATTEMPTED=1
-  cw_with_timeout 1500 env create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker --no-network \
+  cw_with_timeout 1500 create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker --no-network \
     --path "$LP_WORKSPACE" --path-mode copy --file codewire.yaml --yes --output json \
     >"$TMPDIR_SMOKE/local-create.json" 2>"$TMPDIR_SMOKE/local-create.err" || die 'local VM with platform OpenAI failed to start'
   ENV_ID="$(jq -er '.id | select(. != "00000000-0000-0000-0000-000000000000" and
@@ -889,7 +889,7 @@ local_platform_openai_journey() {
 
 local_platform_journey() {
   SMOKE_NAME="local-platform-$(tr -d '-' </proc/sys/kernel/random/uuid)"
-  cw_with_timeout 30 env list --local --output json >"$TMPDIR_SMOKE/local-before.json"
+  cw_with_timeout 30 ls --local --output json >"$TMPDIR_SMOKE/local-before.json"
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/local-before.json" >/dev/null || die 'local environment name collision'
   local_platform_prepare_mesh_owner
@@ -912,7 +912,7 @@ local_platform_journey() {
   local -a LP_NETWORK_ARGS=()
   local_platform_set_network_args
   local_platform_bind_network_attempt
-  cw_with_timeout 1500 env create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker "${LP_NETWORK_ARGS[@]}" \
+  cw_with_timeout 1500 create --local --name "$SMOKE_NAME" --cpu 2 --memory 16GB --no-docker "${LP_NETWORK_ARGS[@]}" \
     --path "$LP_WORKSPACE" --path-mode copy --file codewire.yaml --yes --output json \
     >"$TMPDIR_SMOKE/local-create.json" 2>"$TMPDIR_SMOKE/local-create.err" || die 'local VM with platform sources failed to start'
   ENV_ID="$(jq -er '.id | select(. != "00000000-0000-0000-0000-000000000000" and
@@ -922,10 +922,10 @@ local_platform_journey() {
   local_platform_mesh_probe
   local_platform_application_phase a "platform:id:${APP_SECRET_IDS[0]}" "${APP_SECRET_HASHES[0]}"
   if [[ "$LP_APPLICATION_ONLY" != 1 ]]; then local_platform_ssh_prove; fi
-  cw_with_timeout 300 env update --local "$ENV_ID" --secrets "platform:id:${APP_SECRET_IDS[1]}" --yes --output json \
+  cw_with_timeout 300 update --local "$ENV_ID" --secrets "platform:id:${APP_SECRET_IDS[1]}" --yes --output json \
     >"$TMPDIR_SMOKE/local-update.json" 2>"$TMPDIR_SMOKE/local-update.err" || die 'platform source replacement in the local VM failed'
   local_platform_application_phase b "platform:id:${APP_SECRET_IDS[1]}" "${APP_SECRET_HASHES[1]}"
-  cw_with_timeout 300 env update --local "$ENV_ID" --clear-secrets --yes --output json \
+  cw_with_timeout 300 update --local "$ENV_ID" --clear-secrets --yes --output json \
     >"$TMPDIR_SMOKE/local-clear.json" 2>"$TMPDIR_SMOKE/local-clear.err" || die 'local platform-source clear failed'
   local_platform_application_phase clear '' absent
   if [[ "$LP_APPLICATION_ONLY" != 1 ]]; then

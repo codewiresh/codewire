@@ -83,23 +83,23 @@
           </div>
         </li>
 
-        <li class="cw-workflow-step" id="workflow-step-4" data-title="04 / start fresh" data-command="cw env create \&#10;    github.com/acme/api \&#10;    --preset api --secrets api --name auth" data-result="Environment created: auth&#10;Secret project mounted: api">
+        <li class="cw-workflow-step" id="workflow-step-4" data-title="04 / start fresh" data-command="cw create \&#10;    github.com/acme/api \&#10;    --preset api --secrets api --name auth" data-result="Environment created: auth&#10;Secret project mounted: api">
           <span class="cw-workflow-number" aria-hidden="true">04</span>
           <div>
             <h3>Start a fresh sandbox every time</h3>
             <p>One click in the dashboard, or one command. The same complete sandbox is ready again—with its tools and credentials.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw env create \
+            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw create \
     github.com/acme/api \
     --preset api --secrets api --name auth</code></pre>
           </div>
         </li>
 
-        <li class="cw-workflow-step" id="workflow-step-5" data-title="05 / connect" data-command="cw config-ssh&#10;ssh cw-auth" data-result="Connected to auth.">
+        <li class="cw-workflow-step" id="workflow-step-5" data-title="05 / connect" data-command="cw setup ssh&#10;ssh cw-auth" data-result="Connected to auth.">
           <span class="cw-workflow-number" aria-hidden="true">05</span>
           <div>
             <h3>Connect over SSH or VS Code</h3>
             <p>Run this once. Then use OpenSSH, scp, rsync, or VS Code to connect to the same machine as the agent.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw config-ssh
+            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw setup ssh
 <span class="cw-prompt">$</span> ssh cw-auth</code></pre>
           </div>
         </li>
@@ -124,13 +124,13 @@
           </div>
         </li>
 
-        <li class="cw-workflow-step" id="workflow-step-8" data-title="08 / open a preview" data-command="cw env port add 3000 --label app --access org_members --env auth" data-result="Port 3000 registered as app&#10;URL: https://app-7f3c2-acme.cwpreview.sh&#10;Access: org_members">
+        <li class="cw-workflow-step" id="workflow-step-8" data-title="08 / open a preview" data-command="cw ports auth --publish 3000 --label app --access org_members" data-result="Port 3000 registered as app&#10;URL: https://app-7f3c2-acme.cwpreview.sh&#10;Access: org_members">
           <span class="cw-workflow-number" aria-hidden="true">08</span>
           <div>
             <h3>Open a preview URL</h3>
             <p>Turn any running port into an authenticated URL for your team. No tunnel or manual proxy to keep alive.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw env port add 3000 --label app \
-    --access org_members --env auth</code></pre>
+            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw ports auth --publish 3000 \
+    --label app --access org_members</code></pre>
           </div>
         </li>
 
@@ -365,7 +365,7 @@ port = env.create_port(port=3000, label="app")</pre>
             </div>
           </div>
 
-          <p class="cw-isolation-copy">Hardware encrypts the sandbox’s memory while it runs. Use <code>cw env report auth</code> to get a trust report showing the confidential runtime and attestation status.</p>
+          <p class="cw-isolation-copy">Hardware encrypts the sandbox’s memory while it runs. Use <code>cw report auth</code> to get a trust report showing the confidential runtime and attestation status.</p>
         </article>
       </div>
 

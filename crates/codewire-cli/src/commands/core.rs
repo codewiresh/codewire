@@ -54,13 +54,8 @@ pub(crate) async fn handle_use_command(
 ) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let placement = if args.local {
-        Some(EnvironmentPlacement::Local)
-    } else if args.platform {
-        Some(EnvironmentPlacement::Platform)
-    } else {
-        None
-    };
+    // `--local` / `--cloud` scope the lookup; they never select by fallback.
+    let placement = globals.placement;
     #[cfg(unix)]
     let host = if placement != Some(EnvironmentPlacement::Platform) {
         resolve_host_reference(globals, &args.target, placement).await?
@@ -168,9 +163,9 @@ pub(crate) async fn handle_init_command(globals: &Globals, args: InitArgs) -> an
         eprintln!("Preset saved: {} ({}).", preset.name, preset.id);
     }
     eprintln!("Next:");
-    eprintln!("  cw env create --local --name <environment>");
+    eprintln!("  cw create --local --name <environment>");
     eprintln!("  cw run <environment> -- <command>");
-    eprintln!("  cw env create");
+    eprintln!("  cw create");
     Ok(())
 }
 
@@ -212,7 +207,7 @@ pub(crate) async fn handle_vscode_command(
     )
     .await?;
 
-    handle_config_ssh_command(ConfigSshArgs {
+    handle_config_ssh_command(SshSetupArgs {
         ssh_config_file: None,
         dry_run: false,
         ssh_options: Vec::new(),

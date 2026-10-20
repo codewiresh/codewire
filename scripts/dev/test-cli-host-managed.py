@@ -899,7 +899,7 @@ class Journey:
         self.sentinel_actor.verify()
 
     def selection(self, identity, generation, previous):
-        status = self.call("update", "status", "--json", data=True)
+        status = self.call("upgrade", "status", "--json", data=True)
         require(status["consistent"] and status["pending"] is None and status["current"] == identity["sha256"] and
                 status["generation"] == generation and status["previous"] == previous and
                 self.entry.resolve() == self.store / "versions" / identity["sha256"] / "cw", "cw selection differs")
@@ -917,7 +917,7 @@ class Journey:
         (bad / "cw").chmod(0o500)
         (bad / "cw-runtime.json").write_text(json.dumps(b) + "\n")
         (bad / "cw-runtime.json").chmod(0o400)
-        require(self.call("update", "--from", str(bad), "--sha256", b["sha256"],
+        require(self.call("upgrade", "--from", str(bad), "--sha256", b["sha256"],
                           "--expect-generation", str(generation), "--json", expected=None).returncode != 0,
                 "corrupt candidate was selected")
         (bad / "cw").chmod(0o600)
@@ -927,10 +927,10 @@ class Journey:
         (bad / "cw-runtime.json").chmod(0o600)
         (bad / "cw-runtime.json").write_text(json.dumps(unsupported) + "\n")
         (bad / "cw-runtime.json").chmod(0o400)
-        require(self.call("update", "--from", str(bad), "--sha256", b["sha256"],
+        require(self.call("upgrade", "--from", str(bad), "--sha256", b["sha256"],
                           "--expect-generation", str(generation), "--json", expected=None).returncode != 0,
                 "unsupported candidate identity was selected")
-        require(self.call("update", "status", "--json", data=True) == before, "refused candidate changed selection")
+        require(self.call("upgrade", "status", "--json", data=True) == before, "refused candidate changed selection")
         self.verify_actors()
 
     def start_broker(self):
@@ -968,7 +968,7 @@ class Journey:
         require(self.environment is None and not self.owned and not self.conversations and
                 self.daemon_binding is None and not self.actors, "host setup is not fresh")
         self.sentinel_actor.verify()
-        created = self.call("env", "create", "--local", "--type", "host", "--name", "host-managed-proof",
+        created = self.call("create", "--local", "--type", "host", "--name", "host-managed-proof",
                             "--path", str(self.workspace), "--output", "json", data=True)
         require(isinstance(created, dict) and type(created.get("id")) is str and
                 str(uuid.UUID(created["id"])) == created["id"] and created.get("state") == "running" and
@@ -992,12 +992,12 @@ class Journey:
                 "host broker projection is unavailable")
         self.broker_actor.verify()
         self.setup_daemon_actor.verify()
-        stopped = self.call("env", "stop", "--local", self.environment, "--output", "json", data=True)
+        stopped = self.call("stop", "--local", self.environment, "--output", "json", data=True)
         require(stopped == dict(created, state="stopped"), "setup stop changed host identity or did not confirm cleanup")
         self.until(self.setup_daemon_actor.dead, bool, timeout=10)
         self.broker_actor.verify()
         self.sentinel_actor.verify()
-        started = self.call("env", "start", "--local", self.environment, "--output", "json", data=True)
+        started = self.call("start", "--local", self.environment, "--output", "json", data=True)
         require(started == created, "setup start changed host identity")
         daemon, self.socket_identity = socket_process(socket_path)
         self.actors.append(daemon)
@@ -1083,9 +1083,9 @@ class Journey:
                                 parent=lead if session == worker else None)
         self.check("native-interrupt/claude-steer-and-undetected-controls-refused")
 
-        stopped = self.call("stop", self.environment, worker, "--output", "json", data=True)[0]
+        stopped = self.call("stop", self.environment, "--session", worker, "--output", "json", data=True)[0]
         require(stopped["state"] == "Stopped" and not stopped["cleanup_unknown"], "worker public Stop was not clean")
-        self.call("restart", self.environment, worker, "--output", "json", data=True)
+        self.call("restart", self.environment, "--session", worker, "--output", "json", data=True)
         self.idle(worker)
         resumed = self.turn(worker)
         require(self.inbox(worker)["driver"]["native_thread_id"] == worker_thread, "Claude restart changed its conversation")
@@ -1101,13 +1101,13 @@ class Journey:
         turn, thread = inbox["driver"]["current_turn_id"], inbox["driver"]["native_thread_id"]
         self.retain([lead, worker, active])
         originals = self.snapshot([lead, worker, active])
-        before = self.call("update", "status", "--json", data=True)
-        require(self.call("update", "--from", str(self.assets[1]["path"]), "--sha256", b["sha256"],
+        before = self.call("upgrade", "status", "--json", data=True)
+        require(self.call("upgrade", "--from", str(self.assets[1]["path"]), "--sha256", b["sha256"],
                           "--expect-generation", str(generation + 1), "--json", expected=None).returncode != 0,
                 "stale selection unexpectedly succeeded")
-        require(self.call("update", "status", "--json", data=True) == before, "stale selection changed state")
+        require(self.call("upgrade", "status", "--json", data=True) == before, "stale selection changed state")
         self.rejected_candidates(before, b, generation)
-        selected = self.call("update", "--from", str(self.assets[1]["path"]), "--sha256", b["sha256"],
+        selected = self.call("upgrade", "--from", str(self.assets[1]["path"]), "--sha256", b["sha256"],
                              "--expect-generation", str(generation), "--json", data=True)
         require(selected["changed"], "B selection did not change")
         self.selection(b, generation + 1, a["sha256"])
@@ -1135,7 +1135,7 @@ class Journey:
         self.check("A-to-B/live-real-actors/no-replay/native-ack-before-B-release/original-turn-steer")
 
         original = self.snapshot([lead, worker, active, fresh])
-        self.call("update", "rollback", "--expect-generation", str(generation + 1), "--json", data=True)
+        self.call("upgrade", "rollback", "--expect-generation", str(generation + 1), "--json", data=True)
         self.selection(a, generation + 2, b["sha256"])
         self.verify_actors()
         require(self.snapshot([lead, worker, active, fresh]) == original and marker.read_text() == token,
@@ -1157,10 +1157,10 @@ class Journey:
         try:
             if self.environment:
                 for session in self.owned:
-                    result = self.call("stop", self.environment, session, "--output", "json", data=True)
+                    result = self.call("stop", self.environment, "--session", session, "--output", "json", data=True)
                     require(result and all(v["state"] == "Stopped" and not v["cleanup_unknown"] for v in result),
                             "public managed stop did not prove clean driver exit")
-                self.call("env", "stop", "--local", self.environment)
+                self.call("stop", "--local", self.environment)
             if self.broker_process:
                 self.broker_process.stdin.write(b"STOP\n")
                 self.broker_process.stdin.flush()

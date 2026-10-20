@@ -8,9 +8,9 @@ A placement is where an environment runs. The same `cw` commands work in all
 three; what differs is isolation, who owns the compute, and a few features.
 
 ```sh
-cw env create --name app --image workspace            # hosted sandbox
-cw env create --local --name app --path .             # local VM
-cw env create --local --type host --name app --path . # trusted host session
+cw create --name app --image workspace            # hosted sandbox
+cw create --local --name app --path .             # local VM
+cw create --local --type host --name app --path . # trusted host session
 ```
 
 | | Hosted sandbox | Local VM | Trusted host |
@@ -21,7 +21,7 @@ cw env create --local --type host --name app --path . # trusted host session
 | Shell, durable sessions, logs | yes | yes | yes |
 | Managed Codex and Claude Code | yes | yes | yes, with your own installed clients |
 | Provider credentials | platform profile | local or platform profile, host broker | your own logins |
-| SSH, `scp`, VS Code | yes | `cw shell`, `cw env cp` | `cw shell` |
+| SSH, `scp`, VS Code | yes | `cw shell`, `cw cp` | `cw shell` |
 | Ports | HTTPS preview URLs | `127.0.0.1` on your host | n/a |
 | Docker inside | yes | yes | your Docker |
 | Resize | yes | yes | n/a |
@@ -42,7 +42,7 @@ and your own stores.
 
 ## Local VM
 
-`cw env create --local` runs the environment in a VM on your machine, using
+`cw create --local` runs the environment in a VM on your machine, using
 the runtime that your `cw` release pins and `cw setup --local` installs:
 Cloud Hypervisor on KVM with the Codewire guest kernel on Linux,
 Virtualization.framework through a signed helper on macOS. A supervisor on the

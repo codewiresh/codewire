@@ -193,12 +193,7 @@ async fn runtime_ordinary_name_and_prefix_keep_existing_resolution() {
 
 fn command(flags: &[&str]) -> (Option<EnvironmentPlacement>, EnvRuntimeCommand) {
     let cli = Cli::try_parse_from(flags).unwrap();
-    let Command::Env(EnvArgs {
-        local,
-        platform,
-        command: EnvCommand::Runtime(args),
-    }) = cli.command
-    else {
+    let (local, platform, EnvCommand::Runtime(args)) = env_operation(cli) else {
         panic!("runtime route")
     };
     (
@@ -219,7 +214,6 @@ fn platform_parser_requires_source_pin_and_full_u64_generation() {
     for generation in ["0", "18446744073709551615"] {
         let flags = [
             "cw",
-            "env",
             "--cloud",
             "runtime",
             "update",
@@ -256,7 +250,6 @@ fn platform_parser_requires_source_pin_and_full_u64_generation() {
         assert!(
             Cli::try_parse_from([
                 "cw",
-                "env",
                 "--cloud",
                 "runtime",
                 "rollback",
@@ -274,7 +267,6 @@ fn native_and_platform_fields_cannot_cross_before_effects() {
     let pin = "a".repeat(64);
     let (_, platform_command) = command(&[
         "cw",
-        "env",
         "--cloud",
         "runtime",
         "update",
@@ -293,7 +285,6 @@ fn native_and_platform_fields_cannot_cross_before_effects() {
     assert!(super::super::validate_placement(None, &platform_command).is_err());
     let (_, native_command) = command(&[
         "cw",
-        "env",
         "--local",
         "runtime",
         "update",
@@ -317,7 +308,6 @@ fn native_and_platform_fields_cannot_cross_before_effects() {
     );
     let (_, cancel) = command(&[
         "cw",
-        "env",
         "--cloud",
         "runtime",
         "cancel",

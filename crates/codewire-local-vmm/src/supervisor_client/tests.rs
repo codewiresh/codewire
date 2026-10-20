@@ -554,7 +554,7 @@ async fn a_failed_create_says_whether_its_rollback_removed_it() {
         ),
         (
             true,
-            " The failed environment could not be removed; run `cw env --local rm dev`.",
+            " The failed environment could not be removed; run `cw --local rm dev`.",
         ),
     ] {
         let mut failed = operation(v1::OperationPhase::Failed);

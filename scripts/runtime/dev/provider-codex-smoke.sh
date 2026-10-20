@@ -71,7 +71,7 @@ prepare_provider_codex() {
 }
 
 run_provider_codex_smoke() {
-  cw_with_timeout 30 env info --local "$ENV_ID" --output json \
+  cw_with_timeout 30 info --local "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/provider-codex-environment.json" 2>"$TMPDIR_SMOKE/provider-codex-info.err" ||
     die 'cannot inspect the local Codex environment binding'
   jq -e --arg id "$ENV_ID" --arg profile "platform:id:$PROVIDER_CODEX_PROFILE_ID" \

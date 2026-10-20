@@ -35,10 +35,10 @@ deletes every key in it and asks you to confirm (`--yes` in scripts).
 ## Select sources for an environment
 
 ```sh
-cw env create --name app --image workspace \
+cw create --name app --image workspace \
   --secrets development --user-secrets platform --org-secrets
-cw env update app --secrets development
-cw env update app --clear-secrets
+cw update app --secrets development
+cw update app --clear-secrets
 ```
 
 Or in `codewire.yaml`:

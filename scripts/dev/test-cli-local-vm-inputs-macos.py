@@ -20,7 +20,7 @@ proves, on this Mac:
 - the read-write share is live both ways;
 - neither share's symlink reaches the directory outside it;
 - the skill snapshot (3 skills, generation 1) keeps its content when the host
-  sources change; `cw env refresh-skills --local` makes generation 2 with the
+  sources change; `cw refresh-skills --local` makes generation 2 with the
   new content, read-only in the guest, and leaves the host sources unchanged;
 - after stop and start, host changes made while stopped are live in both
   shares;
@@ -141,7 +141,7 @@ skills:
         self.call("setup", "--local", "--from", self.runtime, timeout=600)
 
         self.created = True
-        created = self.call("env", "--local", "create", "--name", NAME, "--path", str(self.workspace),
+        created = self.call("--local", "create", "--name", NAME, "--path", str(self.workspace),
                             "--no-docker", "--yes", "--output", "json", timeout=900)
         for warning in ("direct mounts let guest root inspect every file",
                         "Read-write grants let guest root modify or delete that host content"):
@@ -200,7 +200,7 @@ skills:
             'test "$("$CODEX_HOME/skills/repo-smoke/scripts/verify.sh")" = skill-executable-ok')
         self.check("skill snapshot keeps generation one after host changes")
 
-        refreshed = json.loads(self.call("env", "refresh-skills", "--local", NAME, "--output", "json",
+        refreshed = json.loads(self.call("refresh-skills", "--local", NAME, "--output", "json",
                                          timeout=600).stdout)
         assert refreshed.get("skill_count") == 3 and refreshed.get("skill_snapshot_generation") == 2, refreshed
         assert refreshed.get("skill_snapshot") not in ("", None, initial_snapshot), refreshed
@@ -216,10 +216,10 @@ skills:
             "skill refresh changed a host skill source"
         self.check("refresh-skills makes generation two, read-only, host sources unchanged")
 
-        self.call("env", "--local", "stop", NAME, timeout=300)
+        self.call("--local", "stop", NAME, timeout=300)
         (self.direct_ro / "restart.txt").write_text("direct read-only offline host change\n")
         (self.direct_rw / "restart.txt").write_text("direct read-write offline host change\n")
-        self.call("env", "--local", "start", NAME, timeout=600)
+        self.call("--local", "start", NAME, timeout=600)
         self.guest(
             "set -eu; grep -qx 'direct read-only offline host change' /workspace/direct-ro/restart.txt; "
             "grep -qx 'direct read-write offline host change' /workspace/direct-rw/restart.txt; "
@@ -241,9 +241,9 @@ skills:
         os.link(source / "data.txt", source / "hardlink.txt")
         (source / "link.txt").symlink_to("data.txt")
         self.copy_created = True
-        self.call("env", "--local", "create", "--name", COPY_NAME, "--image", IMAGE, "--path", str(source),
+        self.call("--local", "create", "--name", COPY_NAME, "--image", IMAGE, "--path", str(source),
                   "--path-mode", "copy", "--no-network", "--no-docker", "--yes", timeout=900)
-        info = json.loads(self.call("env", "--local", "info", COPY_NAME, "--output", "json").stdout)
+        info = json.loads(self.call("--local", "info", COPY_NAME, "--output", "json").stdout)
         assert info["state"] == "running" and info.get("workspace_inputs") == 1, info
         assert info.get("working_directory") == "/workspace", info
         (source / "data.txt").write_text("host changed after copy creation\n")
@@ -257,7 +257,7 @@ skills:
         assert "copy-executable-ok" in result.stdout, result.stdout
         assert (source / "data.txt").read_text() == "host changed after copy creation\n"
         assert not (source / "guest-only.txt").exists(), "a copy-mode guest write reached the host"
-        self.call("env", "--local", "rm", COPY_NAME, "--yes", timeout=300)
+        self.call("--local", "rm", COPY_NAME, "--yes", timeout=300)
         self.copy_created = False
         assert (source / "data.txt").read_text() == "host changed after copy creation\n", \
             "removing the copy-mode environment changed its source"
@@ -265,7 +265,7 @@ skills:
 
     def remove_environment(self):
         if self.copy_created:
-            self.call("env", "--local", "rm", COPY_NAME, "--yes", ok=False, timeout=300)
+            self.call("--local", "rm", COPY_NAME, "--yes", ok=False, timeout=300)
         super().remove_environment()
 
 

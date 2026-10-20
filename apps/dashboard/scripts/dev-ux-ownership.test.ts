@@ -7,14 +7,14 @@ const ID = "00000000-0000-4000-8000-000000000001";
 const deadline = () => Date.now() + 1000;
 
 const TERMINAL = ["destroying", "destroyed"];
-// Rendered as the CLI renders `cw env list --output json`: pretty JSON, one
+// Rendered as the CLI renders `cw --cloud ls --output json`: pretty JSON, one
 // unified entry per row, about 250 bytes each.
 const listed = (rows: Record<string, unknown>[]) => rows.map((row) => ({
   type: "sandbox", name: row.name, placement: row.placement, selected: false,
   state: row.state, daemon_health: "unavailable", id: row.id,
 }));
 
-// Mirrors the server: `list` without `--all` omits destroying and destroyed
+// Mirrors the server: `ls` without `--all` omits destroying and destroyed
 // rows; `report` resolves one exact ID in any state.
 function fixture(options: { history?: Record<string, unknown>[]; liveIncludesTerminal?: boolean } = {}) {
   let rows: unknown = [];
@@ -34,7 +34,7 @@ function fixture(options: { history?: Record<string, unknown>[]; liveIncludesTer
     }
     if (args.includes("report")) {
       if (overrideReport) return reportOverride;
-      const matched = Array.isArray(all) ? all.find((row) => row.id === args[2]) : undefined;
+      const matched = Array.isArray(all) ? all.find((row) => row.id === args[1]) : undefined;
       if (!matched) throw new Error("not found");
       return { environment: { id: matched.id, org_id: matched.org_id, type: "sandbox",
         state: matched.state, isolation_tier: "standard" } };
@@ -45,7 +45,7 @@ function fixture(options: { history?: Record<string, unknown>[]; liveIncludesTer
         throw new Error("not found");
       }
       if (overrideDetail) return detailOverride;
-      const matched = Array.isArray(rows) ? rows.find((row) => row.id === args[3]) : undefined;
+      const matched = Array.isArray(rows) ? rows.find((row) => row.id === args[2]) : undefined;
       if (!matched || TERMINAL.includes(matched.state)) throw new Error("not found");
       return matched;
     }
@@ -94,7 +94,7 @@ test("ambiguous Create response reconciles only exact claimed name, actor and or
   const f = fixture(); await f.owned.admit(deadline()); f.owned.beforeCreate();
   f.set([{ ...f.row(), id: "00000000-0000-4000-8000-000000000002", name: "unrelated" }, f.row()]);
   await f.owned.cleanup(deadline());
-  expect(f.calls.filter((args) => args.includes("rm"))).toEqual([["env", "--cloud", "rm", "--yes", ID]]);
+  expect(f.calls.filter((args) => args.includes("rm"))).toEqual([["--cloud", "rm", "--yes", ID]]);
 });
 
 test("missing, duplicate, foreign or malformed records fail closed without deletion", async () => {
@@ -168,8 +168,8 @@ test("bound terminal cleanup does not call info or repeat deletion", async () =>
   f.set([{ ...f.row(), state: "destroyed" }]);
   await f.owned.cleanup(deadline());
   expect(f.calls.slice(calls)).toEqual([
-    ["env", "--cloud", "list", "--output", "json"],
-    ["env", "report", ID, "--output", "json"],
+    ["--cloud", "ls", "--output", "json"],
+    ["report", ID, "--output", "json"],
   ]);
 });
 
@@ -182,7 +182,7 @@ test("bound list-info destruction race rechecks once, never treating an info err
     if (nextState === "destroyed") await f.owned.cleanup(deadline());
     else await expect(f.owned.cleanup(deadline())).rejects.toThrow("ux-owned-resource-mismatch");
     const calls = f.calls.slice(before);
-    expect(calls.filter(args => args.includes("list"))).toHaveLength(2);
+    expect(calls.filter(args => args.includes("ls"))).toHaveLength(2);
     expect(calls.filter(args => args.includes("info"))).toHaveLength(nextState === "destroyed" ? 1 : 2);
     expect(calls.some(args => args.includes("rm"))).toBe(false);
   }
@@ -201,8 +201,8 @@ test("a destroyed history too large for one private output never enters admit, c
   f.set([f.row()]);
   expect(await f.owned.createdId(deadline())).toBe(ID);
   await f.owned.cleanup(deadline());
-  expect(f.calls.filter((args) => args.includes("rm"))).toEqual([["env", "--cloud", "rm", "--yes", ID]]);
-  expect(f.calls.at(-1)).toEqual(["env", "report", ID, "--output", "json"]);
+  expect(f.calls.filter((args) => args.includes("rm"))).toEqual([["--cloud", "rm", "--yes", ID]]);
+  expect(f.calls.at(-1)).toEqual(["report", ID, "--output", "json"]);
   expect(f.calls.some((args) => args.includes("--all"))).toBe(false);
   expect(f.largestList()).toBeLessThan(1024);
 });
@@ -238,7 +238,7 @@ test("a live state in the terminal report rereads once, then fails closed", asyn
   f.report({ environment: { id: ID, org_id: ORG, state: "running" } });
   await expect(f.owned.cleanup(deadline())).rejects.toThrow("ux-owned-resource-mismatch");
   const calls = f.calls.slice(before);
-  expect(calls.filter((args) => args.includes("list"))).toHaveLength(2);
+  expect(calls.filter((args) => args.includes("ls"))).toHaveLength(2);
   expect(calls.filter((args) => args.includes("report"))).toHaveLength(2);
   expect(calls.some((args) => args.includes("rm"))).toBe(false);
 });

@@ -46,7 +46,7 @@ const SIGNALLED_SOCKET_DIRECTORY_PROTOCOLS: [u32; 1] = [11];
 #[derive(Debug, thiserror::Error)]
 pub enum TakeoverError {
     #[error(
-        "your local VMs {0} still run on the cw you updated from; this cw starts and changes local VMs once they stop (`cw env --local stop NAME`)"
+        "your local VMs {0} still run on the cw you updated from; this cw starts and changes local VMs once they stop (`cw --local stop NAME`)"
     )]
     Busy(String),
     #[error(
@@ -167,7 +167,7 @@ fn authority_replaceable(environments: &[v1::Environment]) -> bool {
 
 /// A previous cw's supervisor still serving this root: an older protocol, or
 /// this protocol from another cw executable (#2549 keeps that one serving).
-/// `cw env --local upgrade` moves its VMs to this cw.
+/// `cw upgrade --vms` moves its VMs to this cw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviousCw {
     socket: PathBuf,
@@ -262,7 +262,7 @@ fn sort_previous(socket: PathBuf, pid: u32, environments: &[v1::Environment]) ->
 #[derive(Debug, thiserror::Error)]
 pub enum MoveError {
     #[error(
-        "your local VMs changed since they were listed; nothing was stopped. Run `cw env --local upgrade` again"
+        "your local VMs changed since they were listed; nothing was stopped. Run `cw upgrade --vms` again"
     )]
     Changed,
     #[error("{stage}{}", restored_note(.restored, .not_restored))]
@@ -285,7 +285,7 @@ fn restored_note(restored: &[String], not_restored: &[String]) -> String {
     }
     if !not_restored.is_empty() {
         note.push_str(&format!(
-            "; {} stayed stopped (`cw env --local start NAME` once this is fixed)",
+            "; {} stayed stopped (`cw --local start NAME` once this is fixed)",
             not_restored.join(", ")
         ));
     }
@@ -389,7 +389,7 @@ pub enum OlderCwRelease {
     Busy(Vec<String>),
 }
 
-/// Before a cw older than this one takes over the root (`cw update rollback`
+/// Before a cw older than this one takes over the root (`cw upgrade rollback`
 /// to a release before #2870), retire this protocol's supervisor while it
 /// runs no VM. An older cw refuses a newer supervisor and has no way to
 /// retire it. Under the takeover lock; starts nothing.
@@ -637,7 +637,7 @@ mod tests {
         };
         assert_eq!(
             failed.to_string(),
-            "stopping local VM b failed: busy; a run again on the previous cw; c stayed stopped (`cw env --local start NAME` once this is fixed)"
+            "stopping local VM b failed: busy; a run again on the previous cw; c stayed stopped (`cw --local start NAME` once this is fixed)"
         );
         let nothing_to_restore = MoveError::Stopped {
             stage: "stopping local VM a failed: busy".to_owned(),

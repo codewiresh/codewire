@@ -107,10 +107,10 @@ environments keep the revision they selected.
 ## Use it in an environment
 
 ```sh
-cw env create --name app --image workspace --profile platform:work
-cw env create --local --name app --path . --profile local:work
-cw env update app --profile platform:work      # a confirmed restart; workspace data stays
-cw env update app --clear-profile
+cw create --name app --image workspace --profile platform:work
+cw create --local --name app --path . --profile local:work
+cw update app --profile platform:work      # a confirmed restart; workspace data stays
+cw update app --clear-profile
 ```
 
 In the dashboard, **Create Sandbox** has a credential profile picker, and a

@@ -94,4 +94,4 @@ subscription token or a Claude sign-in, and `ssh` an SSH key. There is no
 makes a new revision; environments keep the revision they selected.
 
 Profiles are referenced from environments as `local:NAME` or `platform:NAME`
-(`cw env create --profile`, `cw env update --profile`).
+(`cw create --profile`, `cw update ENV --profile`).

@@ -319,7 +319,7 @@ pub(crate) struct LocalMeshRuntime {
 
 /// Credential-free projection consumed by native environment creation. It is
 /// intentionally separate from both process state and the protected Mesh
-/// config so the ordinary `cw env` process never deserializes a bearer.
+/// config so the ordinary `cw` environment process never deserializes a bearer.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LocalMeshOwnerContext {

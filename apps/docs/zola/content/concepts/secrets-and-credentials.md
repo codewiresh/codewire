@@ -76,12 +76,12 @@ A profile is a named selection of identities, one per slot:
 Your GitHub connection is part of every profile automatically. A profile holds
 identities only: no secret mappings, no exposure rules. Editing a profile
 creates a new revision; an environment keeps the revision it selected until
-you run `cw env update ENV --profile NAME` again.
+you run `cw update ENV --profile NAME` again.
 
 ```sh
 cw credentials --cloud --profile work set codex work-codex
 cw credentials --cloud --profile work set anthropic work-claude
-cw env create --name app --image workspace --profile platform:work
+cw create --name app --image workspace --profile platform:work
 ```
 
 Managed Codex takes the `codex` slot, or the `openai` slot without one; Claude

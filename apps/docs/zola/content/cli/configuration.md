@@ -15,7 +15,7 @@ weight: 8
 | `~/.codewire/credentials-v1/` | Local credential records (material is in the Secret Service or Keychain) |
 | `~/.cache/codewire/local-vmm-v1/` | The pinned local VM runtime |
 | `~/.local/share/codewire/cli/` | The managed `cw` version store; `~/.local/bin/cw` links into it |
-| `~/.ssh/config` | The managed `# ---- START CODEWIRE ----` block written by `cw config-ssh` |
+| `~/.ssh/config` | The managed `# ---- START CODEWIRE ----` block written by `cw setup ssh` |
 
 Session records and output live inside each environment; there is no
 host-side session database.

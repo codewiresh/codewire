@@ -307,7 +307,7 @@ SELECT state FROM environments
 WHERE id = :'environment' AND org_id = 'org_contract_1';
 SQL
       )"
-    elif ! state="$(kind_credential_cli env --cloud info "$environment" --output json |
+    elif ! state="$(kind_credential_cli --cloud info "$environment" --output json |
         jq -er '.state')" || [ -z "$state" ]; then
       # A failed observation must name itself. jq exits 4 without a word when
       # its input is empty, and older jq variants return success with no
@@ -334,7 +334,7 @@ SQL
 wait_kind_credential_setup_complete() {
   local environment="$1" attempt
   for ((attempt = 0; attempt < 180; attempt++)); do
-    if kind_credential_cli env --cloud info "$environment" --output json |
+    if kind_credential_cli --cloud info "$environment" --output json |
         jq -e '.state == "running" and .setup_complete == true' >/dev/null; then
       return 0
     fi
@@ -596,7 +596,7 @@ SQL
 
 # Rebind a running environment to its profile's current revision, or to the
 # exact REVISION given, through the managed Kind database. The product's
-# rebind (`env update --profile`) restarts the environment and so admits a new
+# rebind (`cw update ENV --profile`) restarts the environment and so admits a new
 # epoch; this write is the one way to change the binding under a connected
 # epoch, which must then be denied (or admitted again, when the binding
 # returns to the revision it was admitted with).
@@ -628,9 +628,9 @@ replace_kind_credential_sandbox() {
   local environment="$1" before after
   before="$(kubectl -n "$SANDBOX_NS" get pod "$(kind_credential_workspace "$environment")" \
     -o 'jsonpath={.metadata.uid}')" || return $?
-  kind_credential_cli env --cloud stop "$environment" --output json >/dev/null || return $?
+  kind_credential_cli --cloud stop "$environment" --output json >/dev/null || return $?
   wait_kind_credential_environment "$environment" stopped || return $?
-  kind_credential_cli env --cloud start "$environment" --output json >/dev/null || return $?
+  kind_credential_cli --cloud start "$environment" --output json >/dev/null || return $?
   wait_kind_credential_environment "$environment" running || return $?
   after="$(kubectl -n "$SANDBOX_NS" get pod "$(kind_credential_workspace "$environment")" \
     -o 'jsonpath={.metadata.uid}')" || return $?
@@ -1179,7 +1179,7 @@ cleanup_kind_credential_stage() {
   [ -n "${environment}${profiles}${credentials}" ] || return 0
   log "removing what the stage left: environment ${environment:-none}; profiles ${profiles:-none}; credentials ${credentials:-none}"
   if [ -n "$environment" ]; then
-    if kind_credential_cli env --cloud rm "$environment" --yes --output json >/dev/null 2>&1 \
+    if kind_credential_cli --cloud rm "$environment" --yes --output json >/dev/null 2>&1 \
         && wait_kind_credential_environment "$environment" destroyed >/dev/null 2>&1; then
       log "removed environment ${environment}"
     else
@@ -1250,7 +1250,7 @@ kind_credential_native_smoke() (
   kind_credential_cli credentials --cloud --profile "$profile_name" set codex "$credential_name"
   # Let the public create path resolve a runnable preset for the exact runtime
   # image. preset_contract_1 is an API contract fixture with no template config.
-  environment="$(kind_credential_cli env --cloud create --name "$profile_name" \
+  environment="$(kind_credential_cli --cloud create --name "$profile_name" \
     --image "$workspace_image" \
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
@@ -1261,7 +1261,7 @@ kind_credential_native_smoke() (
   # before, so the two Pods' tokens expire within a minute of each other and
   # the renewal below runs in that band every time (#2641).
   restart_kind_orchestration
-  update="$(kind_credential_cli env --cloud update "$environment" \
+  update="$(kind_credential_cli --cloud update "$environment" \
     --profile "platform:$profile_name" --yes --output json)"
   printf '%s\n' "$update"
   restart_generation="$(jq -er '.operation_generation |
@@ -1332,9 +1332,9 @@ kind_credential_native_smoke() (
   kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- \
     sh -ec 'umask 077; printf "%s\n" "$1" > /home/codewire/.codex/kind-persistence' sh "$marker" ||
     return $?
-  kind_credential_cli env --cloud stop "$environment" --output json
+  kind_credential_cli --cloud stop "$environment" --output json
   wait_kind_credential_environment "$environment" stopped
-  kind_credential_cli env --cloud start "$environment" --output json
+  kind_credential_cli --cloud start "$environment" --output json
   wait_kind_credential_environment "$environment" running
   pod="$(kind_credential_workspace "$environment")" || return $?
   [ "$(kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- \
@@ -1423,7 +1423,7 @@ kind_credential_native_smoke() (
 
   # Do not unbind before destroy: terminal cleanup itself must remove the
   # binding, so a tombstone cannot permanently pin the profile and credential.
-  kind_credential_cli env --cloud rm "$environment" --yes --output json
+  kind_credential_cli --cloud rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   stage_environment=""
   kind_credential_cli credentials --cloud --profile "$profile_name" delete --yes
@@ -1555,7 +1555,7 @@ kind_credential_claude_run() {
       *) break ;;
     esac
   done
-  output="$(kind_credential_cli logs "$environment" "$session" --raw)" || return $?
+  output="$(kind_credential_cli logs "$environment" --session "$session" --raw)" || return $?
   output="$(jq -Rc 'fromjson? | select(type == "object" and has("event"))' <<<"$output")"
   printf '%s\n' "$output" >> "$RUN_DIR/credential-claude-session.jsonl" || return $?
   printf '%s\n' "$output"
@@ -1665,7 +1665,7 @@ kind_credential_claude_session() (
   stage_profiles="$key_profile $token_profile"
   kind_credential_cli credentials --cloud --profile "$key_profile" set anthropic "$key_name"
   kind_credential_cli credentials --cloud --profile "$token_profile" set anthropic "$token_name"
-  environment="$(kind_credential_cli env --cloud create --name "$key_profile" \
+  environment="$(kind_credential_cli --cloud create --name "$key_profile" \
     --image "$workspace_image" \
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
@@ -1677,7 +1677,7 @@ kind_credential_claude_session() (
   for form in api_key subscription_token; do
     profile="$key_profile"
     [ "$form" = api_key ] || profile="$token_profile"
-    update="$(kind_credential_cli env --cloud update "$environment" \
+    update="$(kind_credential_cli --cloud update "$environment" \
       --profile "platform:$profile" --yes --output json)"
     generation="$(jq -er '.operation_generation |
       if type == "number" and . > 0 and . == floor then .
@@ -1708,7 +1708,7 @@ kind_credential_claude_session() (
   kind_credential_claude_run "$environment" "$driver" subscription_token success
   baseline="$(assert_kind_credential_anthropic_events "$baseline" subscription_token 200)"
 
-  kind_credential_cli env --cloud rm "$environment" --yes --output json
+  kind_credential_cli --cloud rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   stage_environment=""
   for profile in "$key_profile" "$token_profile"; do
@@ -1953,14 +1953,14 @@ kind_credential_claude_sign_in() (
 
   stage_profiles="$profile"
   kind_credential_cli credentials --cloud --profile "$profile" set anthropic "$name"
-  environment="$(kind_credential_cli env --cloud create --name "$profile" \
+  environment="$(kind_credential_cli --cloud create --name "$profile" \
     --image "$workspace_image" \
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   stage_environment="$environment"
   wait_kind_credential_environment "$environment" running
   wait_kind_credential_setup_complete "$environment"
-  update="$(kind_credential_cli env --cloud update "$environment" \
+  update="$(kind_credential_cli --cloud update "$environment" \
     --profile "platform:$profile" --yes --output json)"
   generation="$(jq -er '.operation_generation |
     if type == "number" and . > 0 and . == floor then .
@@ -2017,9 +2017,9 @@ kind_credential_claude_sign_in() (
 
   # A new container forgets the logout and delivers the login again, beside
   # the key the probe planted in the persistent home.
-  kind_credential_cli env --cloud stop "$environment" --output json >/dev/null
+  kind_credential_cli --cloud stop "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" stopped
-  kind_credential_cli env --cloud start "$environment" --output json >/dev/null
+  kind_credential_cli --cloud start "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" running
   login_events="$(kind_credential_claude_login "$environment" redelivered)"
   jq -e 'select(.event == "redelivered") | .unrelated == "kept"' <<<"$login_events" >/dev/null || {
@@ -2042,7 +2042,7 @@ kind_credential_claude_sign_in() (
     return 1
   }
 
-  kind_credential_cli env --cloud rm "$environment" --yes --output json
+  kind_credential_cli --cloud rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   stage_environment=""
   kind_credential_cli credentials --cloud --profile "$profile" delete --yes

@@ -3529,14 +3529,14 @@ workspace_service_smokes() {
 KIND_USER_SSH_READY_SECONDS=180
 
 # The user's SSH path, exactly as a user gets it: a synthetic personal login,
-# the block `cw config-ssh` writes, and real OpenSSH through it (its
+# the block `cw setup ssh` writes, and real OpenSSH through it (its
 # ProxyCommand and its only host-key trust, `cw ssh known-hosts`). A new
 # Sandbox must answer its first command within the bound; then a command line
 # the workspace shell parses keeps its exit status, scp round-trips in SFTP
 # and legacy mode, sftp and rsync work, and a key other than the recorded one
 # is refused.
 workspace_user_ssh_smoke() (
-  log "running the user SSH journey through the block cw config-ssh writes"
+  log "running the user SSH journey through the block cw setup ssh writes"
   require_tool ssh
   require_tool scp
   require_tool sftp
@@ -3550,7 +3550,7 @@ workspace_user_ssh_smoke() (
     trap - EXIT
     set +e
     if [ -n "$environment" ]; then
-      kind_credential_cli env --cloud rm "$environment" --yes --output json >/dev/null ||
+      kind_credential_cli --cloud rm "$environment" --yes --output json >/dev/null ||
         status=1
       wait_kind_credential_environment "$environment" destroyed || status=1
     fi
@@ -3561,7 +3561,7 @@ workspace_user_ssh_smoke() (
   prepare_kind_credential_cli
   kind_credential_cli org set org_contract_1 >/dev/null
   config="$KIND_CREDENTIAL_CLI_HOME/ssh_config"
-  kind_credential_cli config-ssh --ssh-config-file "$config" >/dev/null
+  kind_credential_cli setup ssh --ssh-config-file "$config" >/dev/null
   # OpenSSH's TOOL with the ssh config CONFIG. The block names the cw that
   # wrote it by absolute path, and its commands find the server and login
   # as that cw does, from this environment.
@@ -3577,7 +3577,7 @@ workspace_user_ssh_smoke() (
   image="$(kind_workspace_runtime_image)"
   host="cw-$name"
   started="$SECONDS"
-  environment="$(kind_credential_cli env --cloud create --name "$name" --image "$image" \
+  environment="$(kind_credential_cli --cloud create --name "$name" --image "$image" \
     --cpu 500 --memory 1Gi --disk 1Gi --ttl 1h --yes --output json | jq -er '.id')"
   first=""
   while [ $((SECONDS - started)) -lt "$KIND_USER_SSH_READY_SECONDS" ]; do

@@ -52,9 +52,9 @@ creation.
 ## Environments
 
 **Can I change an environment after creating it?** Resize it
-(`cw env resize`), change its selected secrets and credential profile
-(`cw env update`), and publish ports. For a different image or repositories,
-create a new one.
+(`cw resize`), change its selected secrets and credential profile
+(`cw update ENV`), and publish ports (`cw ports ENV --publish PORT`). For a
+different image or repositories, create a new one.
 
 **What happens to my data when I stop an environment?** Workspace storage is
 kept and compute is released. Deleting removes the storage.
@@ -64,12 +64,13 @@ you selected (by name), and a local route to the providers in its credential
 profile. Never the provider credentials themselves; see the
 [security model](@/security.md).
 
-**An environment is stuck.** `cw env info ENV` shows the state and error
-code; `cw env daemon status ENV` and `cw env daemon repair ENV` inspect and
+**An environment is stuck.** `cw info ENV` shows the state and error
+code; `cw daemon status ENV` and `cw daemon repair ENV` inspect and
 reconcile the daemon; otherwise stop and start it.
 
-**Does `cw update` stop my local VMs?** No. They keep running on the previous
-version until you restart them with `cw env --local upgrade`.
+**Does `cw upgrade` stop my local VMs?** Only if you choose to restart them.
+They keep running on the previous version until you check the restart in
+`cw upgrade`'s checklist or run `cw upgrade --vms`.
 
 ## Billing
 
@@ -82,4 +83,4 @@ the organization's plan allowance; see
 ## Support
 
 Email [hello@codewire.sh](mailto:hello@codewire.sh). For an environment
-problem, include the environment ID and the error code from `cw env info`.
+problem, include the environment ID and the error code from `cw info`.

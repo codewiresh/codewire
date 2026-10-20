@@ -1,6 +1,6 @@
 ---
 title: SSH, VS Code and files
-description: Use OpenSSH, scp, sftp and rsync, open a hosted sandbox in VS Code, copy files with cw env cp, and use the browser terminal.
+description: Use OpenSSH, scp, sftp and rsync, open a hosted sandbox in VS Code, copy files with cw cp, and use the browser terminal.
 weight: 2
 ---
 
@@ -10,7 +10,7 @@ config can use `cw` as its proxy.
 
 ## OpenSSH
 
-`cw setup` runs `cw config-ssh`, which adds a managed block to
+`cw setup ssh`, which `cw setup` also runs, adds a managed block to
 `~/.ssh/config`:
 
 ```text
@@ -33,7 +33,7 @@ sftp cw-my-app
 
 `KnownHostsCommand` asks the platform for the host key it recorded when the
 environment bound, so there is no trust-on-first-use prompt. Re-run
-`cw config-ssh` after changing SSH options (`--ssh-option` adds lines to the
+`cw setup ssh` after changing SSH options (`--ssh-option` adds lines to the
 block; `--dry-run` prints the result). `cw doctor` checks the block.
 
 `cw shell --stdio` is for hosted sandboxes. For a local VM or a trusted host,
@@ -54,8 +54,8 @@ has the same **Open in VS Code** action.
 ## Copy files
 
 ```sh
-cw env cp ./local.txt my-app:/workspace/local.txt
-cw env cp my-app:/workspace/build.log ./build.log
+cw cp ./local.txt my-app:/workspace/local.txt
+cw cp my-app:/workspace/build.log ./build.log
 ```
 
 Exactly one side names an environment. This works for hosted sandboxes and

@@ -104,7 +104,7 @@ class LocalVmJourney:
         return self.call("run", NAME, "--no-tty", "--", "sh", "-c", command, ok=ok, timeout=timeout)
 
     def info(self):
-        return json.loads(self.call("env", "--local", "info", NAME, "--output", "json").stdout)
+        return json.loads(self.call("--local", "info", NAME, "--output", "json").stdout)
 
     def check(self, label):
         assert self.sentinel.poll() is None, "unrelated process was killed"
@@ -170,7 +170,7 @@ class LocalVmJourney:
 
         # A create that fails part way may still leave a VM; cleanup removes it.
         self.created = True
-        self.call("env", "--local", "create", "--name", NAME, "--image", IMAGE, "--no-docker", "--yes", timeout=900)
+        self.call("--local", "create", "--name", NAME, "--image", IMAGE, "--no-docker", "--yes", timeout=900)
         info = self.info()
         self.environment_id = info["id"]
         assert info["state"] == "running", info
@@ -216,8 +216,8 @@ class LocalVmJourney:
         assert all(code == "000" for code in after), f"probes after the kill: {after}"
         holders = self.internet_holders()
         assert not holders, f"processes hold internet sockets after {role} loss: {holders}"
-        self.call("env", "--local", "stop", NAME, timeout=300)
-        self.call("env", "--local", "start", NAME, timeout=600)
+        self.call("--local", "stop", NAME, timeout=300)
+        self.call("--local", "start", NAME, timeout=600)
         assert self.info()["state"] == "running"
         self.guest("wget -q -T 10 -O /dev/null http://example.com")
         self.check(f"{role} loss fails closed and stop/start restores egress")
@@ -280,7 +280,7 @@ class LocalVmJourney:
         self.check("helper posture")
 
     def remove_environment(self):
-        self.call("env", "--local", "rm", NAME, "--yes", timeout=300)
+        self.call("--local", "rm", NAME, "--yes", timeout=300)
         if self.environment_id:
             self.until(self.vz_vm_pid, lambda pid: pid is None, 30, "VZ's VM process ending after env rm")
             vms = socket_dir.predicted(self.state_root / "engine") / "vms"

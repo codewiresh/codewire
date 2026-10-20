@@ -6,14 +6,10 @@ const PROFILE_ID: &str = "33333333-3333-4333-8333-333333333333";
 const REVISION: u64 = 9_007_199_254_740_993;
 
 fn args(flags: &[&str]) -> EnvUpdateArgs {
-    let mut argv = vec!["cw", "env", "update", "--local", "dev"];
+    let mut argv = vec!["cw", "update", "--local", "dev"];
     argv.extend_from_slice(flags);
     let cli = Cli::try_parse_from(argv).unwrap();
-    let Command::Env(EnvArgs {
-        command: EnvCommand::Update(args),
-        ..
-    }) = cli.command
-    else {
+    let (_, _, EnvCommand::Update(args)) = env_operation(cli) else {
         panic!("update");
     };
     args
@@ -502,7 +498,6 @@ fn confirmation_is_bounded_default_no_and_eof_safe() {
 fn create_and_update_accept_only_the_reviewed_source_flag_names() {
     let cli = Cli::try_parse_from([
         "cw",
-        "env",
         "create",
         "--local",
         "--name=dev",
@@ -512,11 +507,7 @@ fn create_and_update_accept_only_the_reviewed_source_flag_names() {
         "--org-secrets",
     ])
     .unwrap();
-    let Command::Env(EnvArgs {
-        command: EnvCommand::Create(create),
-        ..
-    }) = cli.command
-    else {
+    let (_, _, EnvCommand::Create(create)) = env_operation(cli) else {
         panic!("create");
     };
     let mut selected = ProjectSpec::default();
@@ -531,8 +522,8 @@ fn create_and_update_accept_only_the_reviewed_source_flag_names() {
         "--secrets-organization",
         "--access-profile=work",
     ] {
-        assert!(Cli::try_parse_from(["cw", "env", "create", retired]).is_err());
-        assert!(Cli::try_parse_from(["cw", "env", "update", "dev", retired]).is_err());
+        assert!(Cli::try_parse_from(["cw", "create", retired]).is_err());
+        assert!(Cli::try_parse_from(["cw", "update", "dev", retired]).is_err());
     }
     assert!(validate_update_args(&args(&[])).is_err());
     assert!(validate_update_args(&args(&["--secrets="])).is_err());
@@ -665,6 +656,7 @@ async fn resolve_platform_metadata(slots: &[&str]) {
         &Globals {
             server: None,
             member: None,
+            placement: None,
         },
         &paths,
         &env,
@@ -721,6 +713,7 @@ async fn platform_api_keys_fail_before_identity_or_source_requests_without_ambie
         &Globals {
             server: None,
             member: None,
+            placement: None,
         },
         &paths,
         &env,
@@ -759,6 +752,7 @@ async fn local_only_empty_resolution_never_reads_platform_configuration_or_authe
         &Globals {
             server: None,
             member: None,
+            placement: None,
         },
         &paths,
         &NoEnvReads,

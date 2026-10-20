@@ -20,7 +20,7 @@ cargo build -p codewire-cli-bin --bin cw
 Create a native local environment using the workspace image:
 
 ```bash
-cw env create --local \
+cw create --local \
   --type sandbox \
   --name my-app \
   --image workspace \
@@ -30,14 +30,14 @@ cw env create --local \
 For execution directly on your host, use its project directory:
 
 ```bash
-cw env create --local --type host --name host-work --path .
+cw create --local --type host --name host-work --path .
 ```
 
-Platform environments use the same `env` family without `--local`:
+Platform environments use the same commands without `--local`:
 
 ```bash
 cw login
-cw env create --name my-app --image workspace
+cw create --name my-app --image workspace
 ```
 
 `codewire.yaml` can define the image, repositories, setup, ports, and coding
@@ -45,7 +45,7 @@ agent for either placement:
 
 ```bash
 cw init --image workspace --coding-agent codex
-cw env create --local --name my-app --file codewire.yaml
+cw create --local --name my-app --file codewire.yaml
 ```
 
 ## Coding-agent tools and credentials
@@ -97,11 +97,11 @@ cw current
 Inspect and resume its sessions:
 
 ```bash
-cw list my-app
+cw ls my-app
 cw attach my-app
 cw attach my-app <session-id>
-cw logs my-app <session-id>
-cw logs --follow my-app <session-id>
+cw logs my-app --session <session-id>
+cw logs my-app --session <session-id> --follow
 cw shell my-app
 ```
 
@@ -117,11 +117,11 @@ cw run host-work --name orchestrator --agent codex \
   --prompt 'Coordinate the backlog review and collect worker results.'
 cw run host-work --name review --parent orchestrator --agent claude \
   --prompt 'Review the assigned issues and report dependencies and acceptance criteria.'
-cw list host-work
-cw list
+cw ls host-work
+cw ls
 cw msg host-work review 'Include the Linux sandbox dependencies in your report.'
 cw inbox host-work review
-cw logs host-work review
+cw logs host-work --session review
 ```
 
 `--agent` launches a managed conversation. `cw msg` sends a task or follow-up
@@ -140,27 +140,27 @@ cw attach host-work checks
 
 For a local sandbox, create it with `--local --type sandbox`; for a platform
 sandbox, create it without `--local`. Pass that environment name to the same
-`run`, `list`, `msg`, `inbox`, `attach` and `logs` commands.
+`run`, `ls`, `msg`, `inbox`, `attach` and `logs` commands.
 
 ## Manage lifecycle
 
 ```bash
-cw env info --local my-app
-cw env stop --local my-app
-cw env start --local my-app
-cw env restart --local my-app
-cw env daemon status --local my-app
-cw env daemon repair --local my-app
-cw env rm --local my-app
+cw info --local my-app
+cw stop --local my-app
+cw start --local my-app
+cw restart --local my-app
+cw daemon status --local my-app
+cw daemon repair --local my-app
+cw rm --local my-app
 ```
 
 For a platform environment, omit `--local`:
 
 ```bash
-cw env info my-app
-cw env stop my-app
-cw env start my-app
-cw env rm my-app
+cw info my-app
+cw stop my-app
+cw start my-app
+cw rm my-app
 ```
 
 ## Mesh inventory
@@ -181,24 +181,9 @@ cw member status
 After enrolling and pinning a trusted member, target its environment explicitly:
 
 ```bash
-cw --member build-linux list host-work
+cw --member build-linux ls
 cw --member build-linux run host-work --name checks -- cargo test
 ```
 
 Use `cw mesh up`, `cw mesh status`, and `cw mesh down` only to manage a local
 Mesh service installation.
-
-## Removed grammar
-
-There is no compatibility execution path. The CLI reports exact migration
-guidance for removed commands:
-
-- `cw local ...` → `cw env COMMAND --local ...`
-- `cw exec ENV -- COMMAND` → `cw run ENV -- COMMAND`
-- `cw node` → environment daemon lifecycle or `cw network nodes`
-- `cw run --local` → `cw env create --local --type host|sandbox`, then pass
-  that environment to `cw run`
-- `cw run --node` → enroll and pin a trusted member, then use `--member`
-- `--agent` on environment creation → `--coding-agent`; `cw run --agent`
-  selects the managed conversation driver
-- `node:session` → separate `ENV SESSION` arguments

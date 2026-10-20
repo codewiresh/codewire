@@ -193,7 +193,7 @@ dashboard terminal -> orchestration -> daemon gRPC
 
 The CLI builds a WireGuard tunnel to the environment's daemon and tries
 direct UDP, then the shared UDP relay, then DERP; the WebSocket proxy through
-orchestration is the last resort and the browser path. `cw config-ssh` writes
+orchestration is the last resort and the browser path. `cw setup ssh` writes
 an OpenSSH block whose `KnownHostsCommand` asks the platform for the recorded
 host key, so there is no trust-on-first-use. Previews are HTTPS URLs that
 orchestration forwards to an application port inside the sandbox. See
@@ -234,7 +234,7 @@ snapshots restore saved state; checkpoints resume execution.
 
 ## 6. Local placements
 
-`cw env create --local` runs the environment on the user's machine
+`cw create --local` runs the environment on the user's machine
 ([dev/LINUX-LOCAL-VMS.md](dev/LINUX-LOCAL-VMS.md),
 [dev/MACOS-CLI.md](dev/MACOS-CLI.md)):
 

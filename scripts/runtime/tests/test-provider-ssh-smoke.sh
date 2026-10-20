@@ -36,8 +36,8 @@ cw_with_timeout() { shift; cw "$@"; }
 cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
-    'env --cloud info '*" --output json")
-      [[ "$4" == "$ENV_ID" ]] || fail 'inspected a different environment'
+    '--cloud info '*" --output json")
+      [[ "$3" == "$ENV_ID" ]] || fail 'inspected a different environment'
       [[ "$FAILURE" != info ]] || return 1
       local id="$ENV_ID" profile="platform:id:$PROFILE_ID" revision=1
       [[ "$FAILURE" != wrong-environment ]] || id="$KEY_ID"
@@ -65,13 +65,13 @@ cw() {
       if [[ "$FAILURE" == bad-revoke ]]; then printf '[]\n'; else
         jq -n --arg id "$KEY_ID" '[{id:$id,status:"CREDENTIAL_STATUS_REVOKED",revocationGeneration:"2"}]'
       fi ;;
-    'env --cloud cp '*)
-      [[ -e "$TMPDIR_SMOKE/revoked" && "$5" == "$ENV_ID:/workspace/.cw-ssh-smoke/revoked-trigger" ]] ||
+    '--cloud cp '*)
+      [[ -e "$TMPDIR_SMOKE/revoked" && "$4" == "$ENV_ID:/workspace/.cw-ssh-smoke/revoked-trigger" ]] ||
         fail 'wrong trigger ordering or destination'
-      [[ "$(cat "$4")" == revoked ]] || fail 'wrong trigger bytes'
+      [[ "$(cat "$3")" == revoked ]] || fail 'wrong trigger bytes'
       touch "$TMPDIR_SMOKE/triggered" ;;
     'logs '*" --raw")
-      [[ "$3" == owned-session ]] || fail 'read a different session'
+      [[ "$3" == --session && "$4" == owned-session ]] || fail 'read a different session'
       if [[ -e "$TMPDIR_SMOKE/triggered" ]]; then
         [[ "$FAILURE" == empty-denial ]] || printf 'stock-ssh-workload-revoked\n'
       else
@@ -79,7 +79,7 @@ cw() {
         touch "$TMPDIR_SMOKE/ready"
         printf 'stock-ssh-workload-awaiting-revocation\n'
       fi ;;
-    'list '*" --output json")
+    'ls '*" --output json")
       [[ -e "$TMPDIR_SMOKE/triggered" ]] || fail 'completion before trigger'
       [[ "$FAILURE" != denial ]] || return 1
       printf '[{"session_id":"owned-session","state":"Exited","exit_code":0}]\n' ;;

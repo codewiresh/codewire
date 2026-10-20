@@ -266,15 +266,15 @@ case " $* " in
   *" whoami --output json "*) printf '%s\\n' '${whoami}' ;;
   *" org list --output json "*) printf '%s\\n' '[{"id":"${ORG}","role":"owner","slug":"dedicated-smoke"}]' ;;
   *" org current "*) printf 'ID: ${ORG}\\nRole: owner\\n' ;;
-  *" env --cloud list --output json "*) "${process.execPath}" -e "$list_rows" live ;;
-  *" env --cloud list --all --output json "*)
+  *" --cloud ls --output json "*) "${process.execPath}" -e "$list_rows" live ;;
+  *" --cloud ls --all --output json "*)
     printf 'list-all\\n' >>"${directory}/audit"
     "${process.execPath}" -e "$list_rows" all ;;
-  *" env report "*)
-    "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); const row=rows.find(row=>row.id===process.argv[1]); if(!row)process.exit(92); console.log(JSON.stringify({environment:{id:row.id,org_id:row.org_id,type:"sandbox",state:row.state,isolation_tier:"standard"}},null,2));' "$5" ;;
-  *" env --cloud info "*)
-    "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); const row=rows.find(row=>row.id===process.argv[1]); if(!row||["destroying","destroyed"].includes(row.state))process.exit(92); console.log(JSON.stringify(row));' "$6" ;;
-  *" env --cloud rm --yes "*)
+  *" report "*)
+    "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); const row=rows.find(row=>row.id===process.argv[1]); if(!row)process.exit(92); console.log(JSON.stringify({environment:{id:row.id,org_id:row.org_id,type:"sandbox",state:row.state,isolation_tier:"standard"}},null,2));' "$4" ;;
+  *" --cloud info "*)
+    "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); const row=rows.find(row=>row.id===process.argv[1]); if(!row||["destroying","destroyed"].includes(row.state))process.exit(92); console.log(JSON.stringify(row));' "$5" ;;
+  *" --cloud rm --yes "*)
     printf 'destroy\\n' >>"${directory}/audit"
     ${mode === "ux-cleanup-failure" ? "exit 96" : ":"}
     sed 's/"state":"running"/"state":"destroyed"/' "$CW_CONFIG_DIR/ux-resource.json" >"$CW_CONFIG_DIR/ux-destroyed.json"

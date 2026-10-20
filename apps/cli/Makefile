@@ -35,7 +35,7 @@ lint:
 install: install-user
 
 # Add this build as an immutable version behind the managed $(USER_BIN_DIR)/cw
-# entry. Running cw processes keep their version; `cw update rollback` selects
+# entry. Running cw processes keep their version; `cw upgrade rollback` selects
 # the previous one. An existing regular-file cw is refused, never replaced.
 install-user: smoke
 	@test -n "$(USER_BIN_DIR)" || { echo "USER_BIN_DIR is empty; set HOME, XDG_BIN_HOME, or USER_BIN_DIR" >&2; exit 1; }

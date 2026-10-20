@@ -294,7 +294,7 @@ if [ -n "$leftovers" ]; then
   while read -r leftover; do
     log "  ${leftover}"
   done <<<"$leftovers"
-  log 'if no suite is running, remove each with the product CLI as the suites do (env --cloud rm ID), then its kind-* profiles and credentials'
+  log 'if no suite is running, remove each with the product CLI as the suites do (cw --cloud rm ID), then its kind-* profiles and credentials'
   exit 1
 fi
 

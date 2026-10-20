@@ -681,12 +681,12 @@ fi
 
 bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$DASHBOARD_BROWSER" "$FINAL_FENCING" \
   "$ENVIRONMENT_SESSION" "$SANDBOX_SUPPLY_CHAIN" "$RUNTIME_ACCEPTANCE" "$0"
-# The user SSH journey runs real OpenSSH through the block `cw config-ssh`
+# The user SSH journey runs real OpenSSH through the block `cw setup ssh`
 # writes, never hand-built trust options, and the CLI and workspace-access
 # crates select its suite.
 user_ssh="$(sed -n '/^workspace_user_ssh_smoke() (/,/^)$/p' "$COMMON")"
 grep -Fq '  workspace_user_ssh_smoke' "$COMMON" || fail 'workspace services do not run the user SSH journey'
-for binding in 'kind_credential_cli config-ssh --ssh-config-file "$config"' \
+for binding in 'kind_credential_cli setup ssh --ssh-config-file "$config"' \
     'timeout 60 "$tool" -F "$ssh_config"' "'printf a && printf b | tr b B; echo \" \$((1+2)) \$HOME\"; exit 7'" \
     'scp -O' 'sftp -b' '[ "$status" -eq 255 ]' 'wait_kind_credential_environment "$environment" destroyed'; do
   grep -Fq -- "$binding" <<<"$user_ssh" || fail "user SSH journey is missing: $binding"
@@ -3580,8 +3580,8 @@ python3 -B "$ROOT/scripts/ci/tests/test-kind-cw-runtime.py"
       'credentials --cloud add '*) cat >/dev/null ;;
       'credentials --cloud get '*)
         printf '[{"name":"%s","provider":"anthropic","status":"CREDENTIAL_STATUS_ACTIVE","authenticationKind":"CREDENTIAL_AUTHENTICATION_KIND_API_KEY"}]\n' "$4" ;;
-      'env --cloud create '*) printf '{"id":"00000000-0000-4000-8000-0000000000cc"}\n' ;;
-      'env --cloud rm '*) return 1 ;;
+      '--cloud create '*) printf '{"id":"00000000-0000-4000-8000-0000000000cc"}\n' ;;
+      '--cloud rm '*) return 1 ;;
     esac
   }
   # The new environment never becomes running.
@@ -3592,9 +3592,9 @@ python3 -B "$ROOT/scripts/ci/tests/test-kind-cw-runtime.py"
   stage_status=$?
   set -e
   [ "$stage_status" -ne 0 ] || fail 'the failing Claude stage fixture passed'
-  sed -n 's/^cli:\(env --cloud rm\|credentials --cloud --profile [^ ]* delete\|credentials --cloud revoke\|credentials --cloud delete\) .*/\1/p' "$CALLS" \
+  sed -n 's/^cli:\(--cloud rm\|credentials --cloud --profile [^ ]* delete\|credentials --cloud revoke\|credentials --cloud delete\) .*/\1/p' "$CALLS" \
     >"$FIXTURE/claude-cleanup.calls"
-  printf '%s\n' 'env --cloud rm' \
+  printf '%s\n' '--cloud rm' \
       'credentials --cloud --profile kind-claude-key-* delete' \
       'credentials --cloud --profile kind-claude-token-* delete' \
       'credentials --cloud revoke' 'credentials --cloud delete' \

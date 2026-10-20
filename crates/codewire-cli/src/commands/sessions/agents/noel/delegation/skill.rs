@@ -52,8 +52,8 @@ go on with your own part or end your turn. Do not poll and do not sleep.
 {{cw}} msg "$CW_ENVIRONMENT" NAME 'TEXT'
 {{cw}} steer "$CW_ENVIRONMENT" NAME 'TEXT'
 {{cw}} interrupt "$CW_ENVIRONMENT" NAME
-{{cw}} stop "$CW_ENVIRONMENT" NAME
-{{cw}} stop --all "$CW_ENVIRONMENT" NAME
+{{cw}} stop "$CW_ENVIRONMENT" --session NAME
+{{cw}} stop "$CW_ENVIRONMENT" --session NAME --all
 ```
 
 - `wait` blocks on one result when your next step needs it: it prints the reply
@@ -63,6 +63,6 @@ go on with your own part or end your turn. Do not poll and do not sleep.
   when no task is running, and a Claude worker refuses `steer`.
 - `stop` ends the worker, which then accepts no more messages. There is no
   terminal here, so nothing prompts: `stop` leaves the worker's own running
-  workers alone and names them; `stop --all` stops them too.
+  workers alone and names them; `stop ... --all` stops them too.
 - Use these only on conversations you launched.
 "##;

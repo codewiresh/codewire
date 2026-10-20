@@ -75,7 +75,7 @@ pub(crate) struct CompletionArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct ConfigSshArgs {
+pub(crate) struct SshSetupArgs {
     #[arg(long, value_name = "PATH", help = "Path to the SSH config file")]
     ssh_config_file: Option<PathBuf>,
     #[arg(
@@ -151,47 +151,50 @@ pub(crate) struct LoginArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub(crate) struct SetupArgs {
+    #[command(subcommand)]
+    pub(crate) command: Option<SetupCommand>,
     #[arg(long, value_name = "ID_OR_SLUG", help = "Default organization to save")]
-    org: Option<String>,
+    pub(crate) org: Option<String>,
     #[arg(
         long,
         value_name = "NAME",
         help = "Create this organization when selecting the default org"
     )]
-    create_org: Option<String>,
+    pub(crate) create_org: Option<String>,
     #[arg(
         long,
         value_name = "SLUG",
         requires = "create_org",
         help = "Slug for --create-org"
     )]
-    org_slug: Option<String>,
+    pub(crate) org_slug: Option<String>,
     #[arg(long, help = "Skip OpenSSH config update")]
-    skip_ssh: bool,
-    /// Install and verify the local VM runtime instead of signing in.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[arg(
-        long,
-        conflicts_with_all = ["org", "create_org", "org_slug", "skip_ssh"],
-        help = "Install and verify the local VM runtime instead of signing in"
-    )]
-    pub(crate) local: bool,
+    pub(crate) skip_ssh: bool,
+    /// With --local: install the local VM runtime from this release directory.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[arg(
         long,
         value_name = "DIR",
-        requires = "local",
-        help = "Install the local VM runtime from this release directory"
+        help = "With --local: install the local VM runtime from this release directory"
     )]
     pub(crate) from: Option<std::path::PathBuf>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[arg(
         long,
-        requires = "local",
-        help = "Replace a different installed local VM runtime"
+        help = "With --local: replace a different installed local VM runtime"
     )]
     pub(crate) replace: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SetupCommand {
+    #[command(
+        about = "Write the OpenSSH integration for Codewire environments",
+        long_about = "Adds or updates the managed Codewire section in your SSH config so OpenSSH, scp, sftp, rsync, and Remote-SSH can use `cw shell --stdio` as ProxyCommand."
+    )]
+    Ssh(SshSetupArgs),
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -210,18 +213,6 @@ pub(crate) struct WhoamiArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct UseTargetArgs {
-    #[arg(
-        long,
-        conflicts_with = "platform",
-        help = "Select a local environment explicitly"
-    )]
-    pub(crate) local: bool,
-    #[arg(
-        long = "cloud",
-        conflicts_with = "local",
-        help = "Select a cloud environment explicitly"
-    )]
-    pub(crate) platform: bool,
     #[arg(value_name = "TARGET")]
     pub(crate) target: String,
 }
@@ -230,26 +221,6 @@ pub(crate) struct UseTargetArgs {
 pub(crate) enum EnvironmentPlacement {
     Local,
     Platform,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct EnvArgs {
-    #[arg(
-        long,
-        global = true,
-        conflicts_with = "platform",
-        help = "Operate on local environments only"
-    )]
-    pub(crate) local: bool,
-    #[arg(
-        long = "cloud",
-        global = true,
-        conflicts_with = "local",
-        help = "Operate on current-organization cloud environments only"
-    )]
-    pub(crate) platform: bool,
-    #[command(subcommand)]
-    pub(crate) command: EnvCommand,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -434,20 +405,10 @@ pub(crate) struct LocalGitCredentialHelperArgs {
     pub(crate) operation: String,
 }
 
+/// `--local` or `--cloud` (global) selects the protected storage; without
+/// one an interactive call prompts.
 #[derive(Debug, Args)]
 pub(crate) struct CredentialsArgs {
-    #[arg(
-        long,
-        conflicts_with = "platform",
-        help = "Use local protected storage (prompts when omitted interactively)"
-    )]
-    pub(crate) local: bool,
-    #[arg(
-        long = "cloud",
-        conflicts_with = "local",
-        help = "Use cloud protected storage (prompts when omitted interactively)"
-    )]
-    pub(crate) platform: bool,
     #[arg(
         long,
         value_name = "PROFILE",
@@ -656,34 +617,10 @@ pub(crate) struct CredentialProfileSlotArgs {
     pub(crate) slot: String,
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct EnvUpgradeArgs {
-    /// Restart them without asking; a restart ends the work running in them.
-    #[arg(long)]
-    pub(crate) yes: bool,
-    /// The hand-off a `cw update` runs: silent when nothing needs a restart.
-    /// Every later cw keeps accepting `env --local upgrade --after-update
-    /// [--yes]`, since the cw being updated from builds that command line.
-    #[arg(long, hide = true)]
-    pub(crate) after_update: bool,
-}
-
 #[derive(Debug)]
 pub(crate) struct CredentialProfileDeleteArgs {
     pub(crate) profile: String,
     pub(crate) yes: bool,
-}
-
-impl EnvArgs {
-    pub(crate) fn placement(&self) -> Option<EnvironmentPlacement> {
-        if self.local {
-            Some(EnvironmentPlacement::Local)
-        } else if self.platform {
-            Some(EnvironmentPlacement::Platform)
-        } else {
-            None
-        }
-    }
 }
 
 #[derive(Debug, Args)]
@@ -852,80 +789,34 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) command: Vec<String>,
 }
 
-#[derive(Debug, Subcommand)]
+/// One environment operation, built by the flat top-level commands
+/// (`commands/flat.rs`) and dispatched by `handle_env_command` with the
+/// global placement. Not a parser: the public grammar has no `env` namespace.
+#[derive(Debug)]
 pub(crate) enum EnvCommand {
-    #[command(about = "Inspect platform managed agent support and saved requests")]
     Agent(EnvAgentArgs),
-    #[command(about = "Inspect or change cw defaults in a running environment")]
     Runtime(EnvRuntimeArgs),
-    #[command(
-        about = "Create a new environment",
-        long_about = "Create a new environment from direct CLI flags.\n\nMultiple repos can be specified as positional args or with --repo flags.\nUse URL[@branch][::/workspace/path] to set a branch and optional checkout path per repo."
-    )]
     Create(Box<EnvCreateArgs>),
-    #[command(visible_alias = "ls", about = "List environments")]
-    List(EnvListArgs),
-    #[command(about = "Show environment details")]
     Info(EnvInfoArgs),
-    #[command(about = "Change selected application secrets and credential profile")]
     Update(EnvUpdateArgs),
-    #[command(about = "Resize a local or platform environment")]
     Resize(EnvResizeArgs),
-    #[command(
-        name = "report",
-        about = "Show isolation, runtime, and trust evidence for an environment"
-    )]
     Report(EnvReportArgs),
-    #[command(about = "Stop an environment")]
     Stop(EnvTargetArgs),
-    #[command(about = "Start an environment")]
     Start(EnvTargetArgs),
-    #[command(about = "Restart a native local environment")]
     Restart(EnvTargetArgs),
-    #[command(
-        name = "refresh-skills",
-        about = "Refresh immutable skills for a native local environment"
-    )]
     RefreshSkills(EnvTargetArgs),
-    #[command(about = "Restart the local VMs still running on a previous cw so they use this one")]
-    Upgrade(EnvUpgradeArgs),
-    #[command(about = "Delete an environment")]
     Rm(EnvDeleteArgs),
-    #[command(
-        about = "Bulk delete stale environments",
-        long_about = "Delete environments stuck in error, creating, or pending states."
-    )]
     Prune(EnvPruneArgs),
-    #[command(
-        about = "Delete ALL environments",
-        long_about = "Delete every environment in the current org. Requires typed confirmation unless --yes is passed."
-    )]
     Nuke(EnvNukeArgs),
-    #[command(
-        about = "Copy files to or from an environment",
-        long_about = "Copy files between the local filesystem and a sandbox environment.\n\nUse <env_id>:<path> syntax for remote paths:\n  cw env cp local.txt <env_id>:/workspace/local.txt\n  cw env cp <env_id>:/workspace/file.txt ./file.txt"
-    )]
     Cp(EnvCpArgs),
-    #[command(about = "Protect an environment from deletion")]
     Protect(EnvTargetArgs),
-    #[command(about = "Remove deletion protection from an environment")]
     Unprotect(EnvTargetArgs),
-    #[command(
-        name = "cancel-delete",
-        about = "Cancel a pending environment deletion"
-    )]
     CancelDelete(EnvTargetArgs),
-    #[command(about = "Extend the TTL of an environment")]
     Extend(EnvExtendArgs),
-    #[command(about = "Inspect or apply an environment access profile")]
     Access(EnvAccessArgs),
-    #[command(about = "Manage platform environment collaborators")]
     Share(EnvShareArgs),
-    #[command(about = "Manage environment ports")]
-    Port(EnvPortArgs),
-    #[command(about = "Show environment setup logs")]
+    Port(EnvPortTarget),
     Logs(EnvLogsArgs),
-    #[command(about = "Inspect or repair the managed environment daemon")]
     Daemon(EnvDaemonArgs),
 }
 
@@ -1230,7 +1121,7 @@ pub(crate) struct EnvCreateArgs {
     save_preset: Option<String>,
 }
 
-/// How `cw env create --local` turns the `--path` directory into the
+/// How `cw create --local` turns the `--path` directory into the
 /// workspace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum PathModeArg {
@@ -1268,36 +1159,113 @@ pub(crate) enum StoragePlacementArg {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvUpdateArgs {
-    #[arg(value_name = "ENV", help = "Environment name or ID")]
+    /// Filled from the `cw update` ENV positional or `--in ENV`.
+    #[arg(skip)]
     environment: String,
-    #[arg(long, value_name = "PROJECT")]
+    #[arg(
+        long,
+        value_name = "PROJECT",
+        help = "Select this application-secret project"
+    )]
     secrets: Option<String>,
-    #[arg(long, value_enum)]
+    #[arg(
+        long,
+        value_enum,
+        help = "Include personal application secrets from this store"
+    )]
     user_secrets: Option<StoragePlacementArg>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Include the current platform organization's application secrets"
+    )]
     org_secrets: bool,
-    #[arg(long, conflicts_with_all = ["secrets", "user_secrets", "org_secrets"])]
+    #[arg(long, conflicts_with_all = ["secrets", "user_secrets", "org_secrets"], help = "Clear every selected application-secret source")]
     clear_secrets: bool,
-    #[arg(long, conflicts_with = "clear_profile")]
+    #[arg(
+        long,
+        conflicts_with = "clear_profile",
+        help = "Select this credential profile"
+    )]
     profile: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Clear the selected credential profile")]
     clear_profile: bool,
-    #[arg(short, long)]
+    #[arg(short, long, help = "Apply without the confirmation prompt")]
     yes: bool,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     output: OutputFormat,
 }
 
+/// `cw update ENV`: the environment and its selection changes. The CLI
+/// updater's flags are accepted only to refuse them with the `cw upgrade`
+/// spelling before any effect.
 #[derive(Debug, Args)]
+pub(crate) struct UpdateEnvironmentArgs {
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
+    pub(crate) environment: Option<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
+    #[command(flatten)]
+    pub(crate) update: EnvUpdateArgs,
+    #[command(flatten)]
+    pub(crate) upgrade_flags: RetiredUpdaterFlags,
+}
+
+/// The CLI updater's flags, refused by `cw update` with a `cw upgrade` pointer.
+#[derive(Debug, Default, Args)]
+pub(crate) struct RetiredUpdaterFlags {
+    #[arg(long, hide = true)]
+    pub(crate) cli: bool,
+    #[arg(long, hide = true)]
+    pub(crate) vms: bool,
+    #[arg(long, hide = true)]
+    pub(crate) restart_vms: bool,
+    #[arg(long, hide = true, value_name = "VERSION")]
+    pub(crate) to: Option<String>,
+    #[arg(long, hide = true, value_name = "CHANNEL")]
+    pub(crate) channel: Option<String>,
+    #[arg(long, hide = true, value_name = "VERSION")]
+    pub(crate) version: Option<String>,
+    #[arg(long, hide = true, value_name = "DIR")]
+    pub(crate) from: Option<PathBuf>,
+    #[arg(long, hide = true, value_name = "HEX")]
+    pub(crate) sha256: Option<String>,
+    #[arg(long, hide = true, value_name = "N")]
+    pub(crate) expect_generation: Option<u64>,
+    #[arg(long, hide = true, value_name = "DIR")]
+    pub(crate) store: Option<PathBuf>,
+}
+
+impl RetiredUpdaterFlags {
+    pub(crate) fn names(&self) -> Vec<&'static str> {
+        [
+            (self.cli, "--cli"),
+            (self.vms, "--vms"),
+            (self.restart_vms, "--restart-vms"),
+            (self.to.is_some(), "--to"),
+            (self.channel.is_some(), "--channel"),
+            (self.version.is_some(), "--version"),
+            (self.from.is_some(), "--from"),
+            (self.sha256.is_some(), "--sha256"),
+            (self.expect_generation.is_some(), "--expect-generation"),
+            (self.store.is_some(), "--store"),
+        ]
+        .into_iter()
+        .filter_map(|(set, name)| set.then_some(name))
+        .collect()
+    }
+}
+
+/// Inventory filters shared by `cw ls` and the attach workspace chooser.
+#[derive(Debug)]
 pub(crate) struct EnvListArgs {
-    #[arg(long = "type", help = "Filter by type, for example sandbox")]
-    environment_type: Option<String>,
-    #[arg(long, help = "Filter by state")]
-    state: Option<String>,
-    #[arg(short, long, help = "Include destroyed environments")]
-    all: bool,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
-    output: OutputFormat,
+    pub(crate) environment_type: Option<String>,
+    pub(crate) state: Option<String>,
+    pub(crate) all: bool,
+    pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -1464,83 +1432,88 @@ pub(crate) struct EnvShareRevokeArgs {
     output: OutputFormat,
 }
 
+/// `cw ports [ENV]`: list, or change one mapping with --publish or
+/// --unpublish. Listing never starts a VM.
 #[derive(Debug, Args)]
-pub(crate) struct EnvPortArgs {
-    #[command(subcommand)]
-    command: EnvPortCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum EnvPortCommand {
-    #[command(
-        about = "Publish a port: a preview URL on the platform, 127.0.0.1 on this host for a local environment"
-    )]
-    Add(EnvPortAddArgs),
-    #[command(visible_alias = "ls", about = "List published ports")]
-    List(EnvPortListArgs),
-    #[command(about = "Withdraw a published port (local: by host port)")]
-    Rm(EnvPortRmArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct EnvPortAddArgs {
-    #[arg(value_name = "PORT", help = "Port inside the environment")]
-    port: String,
+pub(crate) struct PortsArgs {
     #[arg(
-        short,
-        long,
-        help = "DNS-safe label for the preview URL (platform; required there)"
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
     )]
-    label: Option<String>,
+    pub(crate) environment: Option<String>,
     #[arg(
-        short,
-        long,
-        help = "Access level: public, org_members, or creator (platform; default creator)"
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
     )]
-    access: Option<String>,
+    pub(crate) in_environment: Option<String>,
+    #[arg(
+        long,
+        value_name = "PORT",
+        value_parser = clap::value_parser!(u16).range(1..),
+        conflicts_with = "unpublish",
+        help = "Publish this guest port: 127.0.0.1 on this host (local) or a preview URL (cloud)"
+    )]
+    pub(crate) publish: Option<u16>,
+    #[arg(
+        long,
+        value_name = "PORT",
+        value_parser = clap::value_parser!(u16).range(1..),
+        help = "Withdraw the mapping of this guest port"
+    )]
+    pub(crate) unpublish: Option<u16>,
     #[arg(
         long,
         value_name = "HOST_PORT",
         value_parser = clap::value_parser!(u16).range(1..),
-        help = "Port on this host's 127.0.0.1 (local; default: PORT)"
+        help = "Local only: the port on this host's 127.0.0.1 (default: the guest port); selects the binding to unpublish"
     )]
-    host_port: Option<u16>,
-    #[arg(short, long, help = "Environment ID or name (default: current)")]
-    env: Option<String>,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
-    output: OutputFormat,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct EnvPortListArgs {
-    #[arg(short, long, help = "Environment ID or name (default: current)")]
-    env: Option<String>,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
-    output: OutputFormat,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct EnvPortRmArgs {
-    #[arg(value_name = "PORT_NUMBER_OR_LABEL")]
-    port: String,
-    #[arg(short, long, help = "Environment ID or name (default: current)")]
-    env: Option<String>,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
-    output: OutputFormat,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct EnvLogsArgs {
-    #[arg(value_name = "ID_OR_NAME")]
-    environment: String,
+    pub(crate) host_port: Option<u16>,
     #[arg(
         short,
         long,
-        default_value_t = true,
-        action = clap::ArgAction::Set,
-        help = "Follow live logs"
+        help = "Cloud only: DNS-safe preview label (default: port-PORT); selects the preview to unpublish"
     )]
-    follow: bool,
+    pub(crate) label: Option<String>,
+    #[arg(
+        short,
+        long,
+        help = "Cloud only: preview access, public, org_members or creator (default: creator)"
+    )]
+    pub(crate) access: Option<String>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    pub(crate) output: OutputFormat,
+}
+
+/// A `cw ports` request after its environment selector was resolved.
+#[derive(Debug)]
+pub(crate) struct EnvPortTarget {
+    pub(crate) environment: Option<String>,
+    pub(crate) operation: PortOperation,
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug)]
+pub(crate) enum PortOperation {
+    List,
+    Publish {
+        port: u16,
+        host_port: Option<u16>,
+        label: Option<String>,
+        access: Option<String>,
+    },
+    Unpublish {
+        port: u16,
+        host_port: Option<u16>,
+        label: Option<String>,
+    },
+}
+
+/// Setup logs of a cloud environment (`cw logs ENV --setup`).
+#[derive(Debug)]
+pub(crate) struct EnvLogsArgs {
+    pub(crate) environment: String,
+    pub(crate) follow: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1766,20 +1739,10 @@ pub(crate) enum SecretsCommand {
     },
 }
 
+/// `--local` or `--cloud` (global) selects the protected storage; without
+/// one an interactive call prompts.
 #[derive(Debug, Args)]
 pub(crate) struct SecretsArgs {
-    #[arg(
-        long,
-        conflicts_with = "platform",
-        help = "Use local protected storage (prompts when omitted interactively)"
-    )]
-    pub(crate) local: bool,
-    #[arg(
-        long = "cloud",
-        conflicts_with = "local",
-        help = "Use cloud protected storage (prompts when omitted interactively)"
-    )]
-    pub(crate) platform: bool,
     #[arg(long, value_name = "NAME", conflicts_with_all = ["user", "organization"], value_parser = parse_secret_project_reference, help = "Explicit named project for key operations; never inferred from cw use or YAML")]
     pub(crate) project: Option<String>,
     #[arg(long, conflicts_with_all = ["project", "organization"], help = "Operate on user-scoped keys")]
@@ -2132,27 +2095,70 @@ impl std::fmt::Debug for NetworkEnrollRedeemArgs {
 #[derive(Debug, Args)]
 pub(crate) struct ListArgs {
     #[arg(
-        long,
-        conflicts_with = "environment",
-        help = "List every accessible environment (the default without ENV)"
-    )]
-    pub(crate) all: bool,
-    #[arg(
         value_name = "ENV",
-        help = "Environment name or ID; omit to list every environment"
+        help = "List this environment's sessions; omit to list every environment"
     )]
     pub(crate) environment: Option<String>,
+    #[arg(long = "type", help = "Inventory filter by type: sandbox or host")]
+    pub(crate) environment_type: Option<String>,
+    #[arg(long, help = "Inventory filter by state")]
+    pub(crate) state: Option<String>,
+    #[arg(
+        short,
+        long,
+        help = "Include destroyed cloud environments in the inventory"
+    )]
+    pub(crate) all: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    pub(crate) output: OutputFormat,
+}
+
+/// The environment and optional session that `stop` and `restart` act on.
+/// Without `--session` they act on the whole environment, which must be
+/// named; with it, on one session, in the current environment by default.
+#[derive(Debug, Args)]
+pub(crate) struct SessionScopeArgs {
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
+    pub(crate) environment: Option<String>,
+    /// A second positional, refused with the `--session` spelling.
+    #[arg(hide = true, value_name = "SESSION")]
+    pub(crate) retired_session: Vec<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
+    #[arg(
+        long,
+        value_name = "SESSION",
+        help = "Act on this session only; without ENV, in the selected environment"
+    )]
+    pub(crate) session: Option<String>,
+    #[arg(
+        long,
+        help = "Durable request UUID for a member mutation (with --session)"
+    )]
+    pub(crate) request_id: Option<String>,
+    #[arg(
+        long,
+        help = "Exact positive member session generation (with --session)"
+    )]
+    pub(crate) expected_launch_generation: Option<u64>,
+    #[arg(long, value_name = "UUID", value_parser = parse_runtime_request_id,
+        help = "Platform session stop: original uncertain operation to clean up")]
+    pub(crate) cleanup_request_id: Option<uuid::Uuid>,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct StopArgs {
     #[command(flatten)]
-    pub(crate) session: SessionTargetArgs,
+    pub(crate) scope: SessionScopeArgs,
     #[arg(
         long,
-        help = "Also stop every running descendant session without asking"
+        help = "With --session: also stop every running descendant session without asking"
     )]
     pub(crate) all: bool,
 }
@@ -2241,18 +2247,41 @@ pub(crate) struct AttachArgs {
 #[derive(Debug, Args)]
 pub(crate) struct LogsArgs {
     #[arg(
-        value_name = "ENV_OR_SESSION",
-        help = "Environment, or session in the selected environment"
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
     )]
     pub(crate) environment: Option<String>,
-    #[arg(value_name = "SESSION")]
+    /// A second positional, refused with the `--session` spelling.
+    #[arg(hide = true, value_name = "SESSION")]
+    pub(crate) retired_session: Vec<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
+    #[arg(
+        long,
+        value_name = "SESSION",
+        help = "Show this session's saved output"
+    )]
     pub(crate) session: Option<String>,
-    #[arg(short, long, help = "Follow log output")]
-    follow: bool,
-    #[arg(short, long, help = "Number of lines to show from end")]
-    tail: Option<u32>,
-    #[arg(long, help = "Output raw log data without stripping ANSI escape codes")]
-    raw: bool,
+    #[arg(
+        long,
+        conflicts_with = "session",
+        help = "Show how the environment was set up: provisioning, repository clones, install and startup steps (cloud)"
+    )]
+    pub(crate) setup: bool,
+    #[arg(short, long, help = "Follow new output")]
+    pub(crate) follow: bool,
+    #[arg(
+        short,
+        long,
+        help = "Session output: number of lines to show from the end"
+    )]
+    pub(crate) tail: Option<u32>,
+    #[arg(long, help = "Session output: keep ANSI escape codes")]
+    pub(crate) raw: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -2264,6 +2293,7 @@ pub(crate) enum OutputFormat {
 mod collaboration;
 mod core;
 mod environment;
+pub(crate) mod flat;
 mod mesh_commands;
 mod platform_commands;
 mod secrets;
@@ -2274,6 +2304,9 @@ mod storage_placement;
 pub(crate) use collaboration::*;
 pub(crate) use core::*;
 pub(crate) use environment::*;
+#[cfg(test)]
+pub(crate) use flat::env_operation;
+pub(crate) use flat::{HelpArgs, RetiredEnvArgs};
 #[cfg(target_os = "linux")]
 pub(crate) use mesh_commands::retained::StateDir as MeshStateDir;
 pub(crate) use mesh_commands::*;

@@ -37,11 +37,11 @@ Every member of the organization can see its environments. To give a specific
 user more on one environment:
 
 ```sh
-cw env share grant my-app --user USER_ID --permission viewer
-cw env share grant my-app --user USER_ID --permission operator
-cw env share grant my-app --user USER_ID --permission owner    # may delete it
-cw env share list my-app
-cw env share revoke my-app --user USER_ID
+cw share grant my-app --user USER_ID --permission viewer
+cw share grant my-app --user USER_ID --permission operator
+cw share grant my-app --user USER_ID --permission owner    # may delete it
+cw share list my-app
+cw share revoke my-app --user USER_ID
 ```
 
 Deleting an environment is for its creator, an organization owner or admin,

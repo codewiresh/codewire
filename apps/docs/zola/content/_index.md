@@ -33,9 +33,9 @@ billing, preview URLs and remote access.
 ```sh
 curl -fsSL https://get.codewire.sh | sh    # install cw
 cw setup --local                           # install the local VM runtime
-cw env create --local --name my-app --path .
+cw create --local --name my-app --path .
 cw shell my-app                            # a shell in the VM
-cw run my-app -- cargo test                # a durable session; cw list, cw attach
+cw run my-app -- cargo test                # a durable session; cw ls, cw attach
 ```
 
 {{ card_grid(

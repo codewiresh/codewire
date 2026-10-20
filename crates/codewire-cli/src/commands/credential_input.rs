@@ -51,9 +51,10 @@ pub(crate) async fn handle_credentials_command(
     globals: &Globals,
     args: CredentialsArgs,
 ) -> anyhow::Result<()> {
+    // The global `--local` / `--cloud` is the explicit storage choice here.
     let placement = resolve_storage_placement(
-        args.local,
-        args.platform,
+        globals.placement == Some(super::EnvironmentPlacement::Local),
+        globals.placement == Some(super::EnvironmentPlacement::Platform),
         credential_command_json(&args.command),
     )?;
     // Decide host support before profile resolution and, more importantly,

@@ -53,7 +53,7 @@ prepare_provider_ssh_identity() {
   local nonce credential_name profile_name public_key
   nonce="$(tr -d '-' </proc/sys/kernel/random/uuid)"
   [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 'cannot generate disposable SSH fixture names'
-  cw_with_timeout 30 env --cloud list --output json >"$TMPDIR_SMOKE/provider-ssh-environments-before.json" ||
+  cw_with_timeout 30 --cloud ls --output json >"$TMPDIR_SMOKE/provider-ssh-environments-before.json" ||
     die 'cannot inspect Dev environment ownership before SSH smoke'
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/provider-ssh-environments-before.json" >/dev/null ||
@@ -117,7 +117,7 @@ prepare_provider_ssh() {
 run_provider_ssh_smoke() {
   run_kube_assertions
   wait_for_cw_run
-  cw_with_timeout 30 env --cloud info "$ENV_ID" --output json \
+  cw_with_timeout 30 --cloud info "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/provider-ssh-environment.json" 2>"$TMPDIR_SMOKE/provider-ssh-info.err" ||
     die 'cannot inspect the SSH environment binding'
   jq -e --arg id "$ENV_ID" --arg profile "platform:id:$PROVIDER_SSH_PROFILE_ID" '
@@ -166,13 +166,13 @@ run_provider_ssh_smoke() {
     .[0].status == "CREDENTIAL_STATUS_REVOKED" and .[0].revocationGeneration == "2"' \
     "$TMPDIR_SMOKE/provider-ssh-revoked.json" >/dev/null || die 'SSH revocation acknowledgement drifted'
   printf 'revoked\n' >"$TMPDIR_SMOKE/provider-ssh-revoked-trigger"
-  cw_with_timeout 30 env --cloud cp "$TMPDIR_SMOKE/provider-ssh-revoked-trigger" \
+  cw_with_timeout 30 --cloud cp "$TMPDIR_SMOKE/provider-ssh-revoked-trigger" \
     "$ENV_ID:/workspace/.cw-ssh-smoke/revoked-trigger" \
     >"$TMPDIR_SMOKE/provider-ssh-trigger.out" 2>"$TMPDIR_SMOKE/provider-ssh-trigger.err" ||
     die 'cannot signal the already-admitted probe through the normal file API'
   wait_until 'fresh SSH denial in admitted workload' "$(( $(seconds_now) + 30 ))" \
     provider_ssh_waiter_complete "$session_id"
-  cw_with_timeout 30 logs "$ENV_ID" "$session_id" --raw \
+  cw_with_timeout 30 logs "$ENV_ID" --session "$session_id" --raw \
     >"$TMPDIR_SMOKE/provider-ssh-denied.out" || die 'cannot inspect exact revocation probe output'
   grep -qx stock-ssh-workload-revoked "$TMPDIR_SMOKE/provider-ssh-denied.out" ||
     die 'fresh SSH denial omitted its completion marker'
@@ -186,12 +186,12 @@ run_provider_ssh_smoke() {
 }
 
 provider_ssh_waiter_ready() {
-  cw_with_timeout 10 logs "$ENV_ID" "$1" --raw >"$TMPDIR_SMOKE/provider-ssh-waiter.out" 2>/dev/null &&
+  cw_with_timeout 10 logs "$ENV_ID" --session "$1" --raw >"$TMPDIR_SMOKE/provider-ssh-waiter.out" 2>/dev/null &&
     grep -qx stock-ssh-workload-awaiting-revocation "$TMPDIR_SMOKE/provider-ssh-waiter.out"
 }
 
 provider_ssh_waiter_complete() {
-  cw_with_timeout 10 list "$ENV_ID" --output json >"$TMPDIR_SMOKE/provider-ssh-sessions.json" 2>/dev/null &&
+  cw_with_timeout 10 ls "$ENV_ID" --output json >"$TMPDIR_SMOKE/provider-ssh-sessions.json" 2>/dev/null &&
     jq -e --arg id "$1" '[.[] | select(.session_id == $id)] |
       length == 1 and .[0].state == "Exited" and .[0].exit_code == 0' \
       "$TMPDIR_SMOKE/provider-ssh-sessions.json" >/dev/null
@@ -200,11 +200,11 @@ provider_ssh_waiter_complete() {
 cleanup_provider_ssh() {
   local rc=0 deadline status
   if [[ -z "$ENV_ID" && "$PROVIDER_SSH_CREATE_ATTEMPTED" == 1 ]]; then
-    cw_with_timeout 30 env --cloud list --output json >"$TMPDIR_SMOKE/provider-ssh-cleanup-environments.json" 2>/dev/null &&
+    cw_with_timeout 30 --cloud ls --output json >"$TMPDIR_SMOKE/provider-ssh-cleanup-environments.json" 2>/dev/null &&
       ENV_ID="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/provider-ssh-cleanup-environments.json" "$SMOKE_NAME")" || rc=1
   fi
   if [[ -n "$ENV_ID" ]]; then
-    cw_with_timeout 60 env --cloud rm --yes "$ENV_ID" >"$TMPDIR_SMOKE/provider-ssh-cleanup-env.out" 2>&1 || rc=1
+    cw_with_timeout 60 --cloud rm --yes "$ENV_ID" >"$TMPDIR_SMOKE/provider-ssh-cleanup-env.out" 2>&1 || rc=1
     deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
     while :; do
       if application_environment_destroyed; then break; else status=$?; fi

@@ -2,7 +2,7 @@
 """Observe pinned cw A -> B -> A with retained Linux host conversations.
 
 Both directories must contain a real built cw and its complete cw-runtime.json,
-for a release target: `cw update --from` admits only release targets. Build them
+for a release target: `cw upgrade --from` admits only release targets. Build them
 from this committed checkout with distinct versions, for example
 `CODEWIRE_VERSION=0.1.0-journey.a scripts/dev/build-cw.py --target
 x86_64-unknown-linux-musl --release-dir A`.
@@ -145,7 +145,7 @@ class Journey(host.Journey):
         self.network_original = None
 
     def remove_files(self):
-        # This hook runs after public env-rm and workspace-preservation checks.
+        # This hook runs after public rm and workspace-preservation checks.
         # Only a successful journey may make its immutable test store disposable.
         assert not self.mesh_started, "retained Mesh helpers have not been stopped"
         handles = [process.fd for process in [*self.processes, *self.mesh_processes]]
@@ -196,10 +196,10 @@ class Journey(host.Journey):
         return result
 
     def status(self):
-        return self.call("update", "status", "--json", data=True)
+        return self.call("upgrade", "status", "--json", data=True)
 
     def update(self, generation, **kwargs):
-        return self.call("update", "--from", str(self.b[0]), "--sha256", self.b[1]["sha256"],
+        return self.call("upgrade", "--from", str(self.b[0]), "--sha256", self.b[1]["sha256"],
                          "--expect-generation", str(generation), "--json", **kwargs)
 
     def selection(self, identity, generation, previous):
@@ -238,7 +238,7 @@ class Journey(host.Journey):
             byte = file.read(1)
             file.seek(-1, os.SEEK_END)
             file.write(bytes([byte[0] ^ 1]))
-        result = self.call("update", "--from", str(negative), "--sha256", self.b[1]["sha256"],
+        result = self.call("upgrade", "--from", str(negative), "--sha256", self.b[1]["sha256"],
                            "--expect-generation", str(generation), ok=False)
         assert "digest differs from the pin" in result.stderr, result.stderr
         assert self.status() == before, "corrupt release changed the store"
@@ -246,7 +246,7 @@ class Journey(host.Journey):
         shutil.copyfile(self.b[0] / "cw", negative / "cw")
         incompatible = dict(self.b[1], protocol_version=self.b[1]["protocol_version"] + 1)
         (negative / "cw-runtime.json").write_text(json.dumps(incompatible))
-        result = self.call("update", "--from", str(negative), "--sha256", self.b[1]["sha256"],
+        result = self.call("upgrade", "--from", str(negative), "--sha256", self.b[1]["sha256"],
                            "--expect-generation", str(generation), ok=False)
         assert "unsupported cw identity: protocol_version" in result.stderr, result.stderr
         assert self.status() == before, "unsupported release changed the store"
@@ -303,7 +303,7 @@ class Journey(host.Journey):
             process.verify()
 
     def stop_owned(self):
-        self.call("env", "stop", "--local", self.environment)
+        self.call("stop", "--local", self.environment)
         self.wait_death(self.processes)
         if self.mesh_started:
             self.mesh_down()
@@ -396,13 +396,13 @@ class Journey(host.Journey):
             assert "update-proof" in self.network_original["current"]
             self.verify_mesh()
 
-        created = self.call("env", "create", "--local", "--type", "host", "--name", "update-proof",
+        created = self.call("create", "--local", "--type", "host", "--name", "update-proof",
                             "--path", str(self.workspace), "--output", "json", data=True)
         self.environment = created["id"]
         self.launch("terminal", ["sh", "-c", 'echo $$ > "$1"; echo TERMINAL_READY; '
                     'while IFS= read -r line; do printf "TERMINAL:%s\\n" "$line"; '
                     '[ "$line" = finish ] && break; done', "sh", str(self.workspace / "child.pid")])
-        self.until(lambda: self.call("logs", self.environment, "terminal").stdout,
+        self.until(lambda: self.call("logs", self.environment, "--session", "terminal").stdout,
                    lambda value: value == "TERMINAL_READY\n")
         marker = self.workspace / "retained-workspace.txt"
         marker.write_text("workspace belongs to this journey\n")
@@ -431,7 +431,7 @@ class Journey(host.Journey):
         self.observations.append({"default": "B", "conversations": unchanged})
         assert marker.read_text() == "workspace belongs to this journey\n"
         self.call("send", self.environment, "terminal", "from-B")
-        self.until(lambda: self.call("logs", self.environment, "terminal").stdout,
+        self.until(lambda: self.call("logs", self.environment, "--session", "terminal").stdout,
                    lambda value: value == "TERMINAL_READY\nTERMINAL:from-B\n")
         message = self.call("msg", self.environment, "lead", "FROM_B", "--output", "json", data=True)
         assert self.wait_message(message["id"])["result"] == "RESULT:FROM_B"
@@ -457,7 +457,7 @@ class Journey(host.Journey):
         self.observations.append({"default": "B-after-new-work", "conversations": at_b})
         self.check("B-default/original-processes/no-replay/terminal-message/new-B-driver")
 
-        rolled = self.call("update", "rollback", "--expect-generation", str(generation + 1), "--json", data=True)
+        rolled = self.call("upgrade", "rollback", "--expect-generation", str(generation + 1), "--json", data=True)
         assert rolled["changed"] and rolled["sha256"] == self.a[1]["sha256"]
         self.selection(self.a[1], generation + 2, self.b[1]["sha256"])
         self.verify_processes()
@@ -469,7 +469,7 @@ class Journey(host.Journey):
         for identity in (self.a[1], self.b[1]):
             assert digest(self.store / "versions" / identity["sha256"] / "cw") == identity["sha256"]
         self.call("send", self.environment, "terminal", "from-A")
-        self.until(lambda: self.call("logs", self.environment, "terminal").stdout,
+        self.until(lambda: self.call("logs", self.environment, "--session", "terminal").stdout,
                    lambda value: value == "TERMINAL_READY\nTERMINAL:from-B\nTERMINAL:from-A\n")
         steered = self.call("steer", self.environment, "active", "finish", "--output", "json", data=True)
         assert self.wait_message(steered["id"])["state"] == "completed"
@@ -485,7 +485,7 @@ class Journey(host.Journey):
             fresh = self.mesh_up(self.b[1])
             assert fresh["custody"]["launch_nonce"] != self.mesh_original["custody"]["launch_nonce"]
             self.mesh_down()
-            self.call("update", "rollback", "--expect-generation", str(generation + 3), "--json", data=True)
+            self.call("upgrade", "rollback", "--expect-generation", str(generation + 3), "--json", data=True)
             self.selection(self.a[1], generation + 4, self.b[1]["sha256"])
             self.verify_processes()
             self.check("retained-Mesh-DERP/A-B-A/no-PATH-helpers/explicit-stop/new-selected-B-roles")

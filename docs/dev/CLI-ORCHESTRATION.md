@@ -2,10 +2,14 @@
 
 The CLI uses an environment as the execution placement and a durable session
 as the process identity. Session names are unique within an environment;
-commands resolve an exact ID before a name. `cw list` (alias `cw ls`)
-inventories every accessible environment and its sessions, shows stopped
-environments as not running, and reports running environments it cannot
-reach as errors; `cw list ENV` lists one environment.
+commands resolve an exact ID before a name. `cw ls` (alias `cw list`)
+inventories every accessible environment with its location, state and session
+count, keeps stopped environments, and marks a running environment whose
+sessions it cannot read as unavailable without failing; it exits non-zero
+only when a location (cloud, local runtime) cannot be listed, after printing
+every environment it could. `cw ls ENV` lists one environment's
+sessions with their normal or managed mode, and fails when they cannot be
+read.
 
 ## Placements
 
@@ -18,9 +22,9 @@ reach as errors; `cw list ENV` lists one environment.
 | macOS local sandbox | `--local --type sandbox` on Apple Silicon | Shared supervisor, VZ helper and arm64 guest daemon | Same host route as a native Linux sandbox; needs a local credential profile, see [MACOS-CLI.md](MACOS-CLI.md) |
 
 ```sh
-cw env create --local --type host --name host-team --path .
-cw env create --local --type sandbox --name vm-team --path .
-cw env create --cloud --type sandbox --name cloud-team --repo REPOSITORY_URL
+cw create --local --type host --name host-team --path .
+cw create --local --type sandbox --name vm-team --path .
+cw create --cloud --type sandbox --name cloud-team --repo REPOSITORY_URL
 ```
 
 A trusted host runs as the local user with their ordinary HOME and installed
@@ -49,9 +53,10 @@ one deterministic notification into that parent's private inbox; the parent
 adopts it when idle or after restart. Guest agents do not have authority to
 launch sessions through the host CLI.
 
-Managed native shutdown is durable: if the local `cw stop` caller is cancelled,
-the driver can still finish cleanup. Run `cw stop` again to join that operation.
-`cw restart` waits for confirmed child cleanup and driver exit, then compares the
+Managed native shutdown is durable: if the local `cw stop --session` caller is
+cancelled, the driver can still finish cleanup. Run the same `cw stop` again to
+join that operation. `cw restart --session` waits for confirmed child cleanup
+and driver exit, then compares the
 selected launch generation at the daemon. If another caller has replaced that
 launch, the request fails before stopping the replacement. JSON session output
 includes `launch_generation`; zero means the daemon does not support this fence.
@@ -64,12 +69,12 @@ Use the same session commands with `host-team`, `vm-team`, or `cloud-team`:
 
 ```sh
 cw run host-team --name tests --detach --no-tty -- make test
-cw list host-team
-cw list
+cw ls host-team
+cw ls
 cw wait host-team tests --timeout 10m
-cw logs host-team tests
-cw stop host-team tests
-cw restart host-team tests
+cw logs host-team --session tests
+cw stop host-team --session tests
+cw restart host-team --session tests
 ```
 
 `wait` succeeds only after observed zero exit, confirmed cleanup and drained
@@ -116,8 +121,8 @@ cw inbox host-team lead
 cw wait --message MESSAGE_ID --timeout 10m
 cw steer host-team review 'Focus on ownership and cleanup.' --turn-id TURN_ID
 cw interrupt host-team runtime
-cw stop host-team runtime
-cw restart host-team runtime
+cw stop host-team --session runtime
+cw restart host-team --session runtime
 ```
 
 Agent launches with `--prompt` and message commands return durable message
@@ -125,12 +130,13 @@ IDs. `msg` sends a semantic task, follow-up or reply to the native agent protoco
 A raw terminal write is refused for managed sessions. Parents are bound to canonical session
 and driver identities in the same host environment; an unmanaged process
 cannot receive semantic worker results. `cw wait --message ID` returns the final
-reply; the message ID alone names its session. `cw logs ENV SESSION` shows each
+reply; the message ID alone names its session. `cw logs ENV --session SESSION` shows each
 turn's prompt, the commands, edits and tools the agent uses, and its reply.
-`cw stop` asks at a terminal whether to stop a session's running children too;
-`cw stop --all` stops every running descendant without asking. Without a
-terminal, children keep running and `cw stop` names them. `cw restart` affects
-only the named session.
+`cw stop ENV --session NAME` asks at a terminal whether to stop the session's
+running children too; adding `--all` stops every running descendant without
+asking. Without a terminal, children keep running and `cw stop` names them.
+`cw restart ENV --session NAME` affects only the named session. Without
+`--session`, `stop` and `restart` act on the whole environment.
 
 A host conversation's native agent gets its own identity: `CW_ENVIRONMENT`
 and `CW_SESSION_ID` hold its host environment and session IDs, so a lead
@@ -227,7 +233,8 @@ model reads the file when a task calls for delegation.
   task, so launching the same task again fails with `session name is already
   retained` instead of starting a second worker; that results arrive as
   messages, without polling; and `cw wait --message`, `cw inbox`, `cw msg`,
-  `cw steer`, `cw interrupt`, `cw stop` and `cw stop --all`.
+  `cw steer`, `cw interrupt`, and `cw stop --session` with and without
+  `--all`.
 - **Which `cw`.** Every command names the `cw` that runs the driver by its
   absolute path, so the lead needs no `cw` on its PATH. The skill is written
   again at every launch: after a `cw` update, the conversation's next start
@@ -243,13 +250,15 @@ model reads the file when a task calls for delegation.
   before, its model is told nothing, and nothing reports it.
 
 **Stopping or restarting a conversation cancels its active noel run.** This
-covers `cw stop`, `cw stop --all`, the confirmed parent cascade, `cw restart`,
+covers `cw stop --session`, its `--all`, the confirmed parent cascade,
+`cw restart --session`,
 and StopSession or RestartSession from any client. The run is interrupted
 first, bounded at 10 s, and the message ends interrupted.
 
 **Taking the whole environment down pauses it, and starting the environment
-again resumes it.** This covers `cw env stop`, `restart` and `rm`, a shutdown
-of the environment's host daemon, and a host's orderly reboot. The
+again resumes it.** This covers `cw stop ENV`, `cw restart ENV` and
+`cw rm ENV`, a shutdown of the environment's host daemon, and a host's
+orderly reboot. The
 conversation keeps going; the environment is only its executor. The active
 message goes to `paused`, which is not a final state, and its parent hears
 once that it paused. noel's journal keeps the run interrupted, not aborted.
@@ -262,9 +271,9 @@ once that it paused. noel's journal keeps the run interrupted, not aborted.
   "(resumed after its environment stopped)".
 - **Resume.** When the environment's host daemon starts again, it restarts
   each noel conversation that holds a paused message, and no other
-  conversation. That is `cw env start`, the second half of `cw env restart`,
+  conversation. That is `cw start`, the second half of `cw restart ENV`,
   and the first command after a reboot in an environment that was never
-  stopped. No `cw restart` is needed; `cw restart ENV SESSION` does the same
+  stopped. No session restart is needed; `cw restart ENV --session SESSION` does the same
   by hand. The conversation's startup handshake decides the run by the table
   below, within its 120 s. A resume after a pause is not a crash and does
   not count toward the three crash resumes. The parent hears once of the
@@ -290,7 +299,7 @@ records never carry `paused` or the `pause` fields.
 
 **Why:** an environment-level takedown is indistinguishable from a reboot in
 the daemon, and the owner-approved plan keeps a run that host shutdown stops
-resumable in noel's journal. `env restart` exists to come back. So the
+resumable in noel's journal. `cw restart ENV` exists to come back. So the
 semantic depends on the scope of the stop, not on the client or route, which
 keeps everything consistent.
 
@@ -322,15 +331,16 @@ the evidence itself, before anything of a stop can signal a session, so it
 does not depend on the record helper:
 
 - **A takedown:** the environment's takedown marker, `shutdown.json` in the
-  environment's runtime root. `cw env stop`, `restart` and `rm` write it to
-  ask the daemon to stop. For any other shutdown the daemon writes it before
+  environment's runtime root. `cw stop ENV`, `cw restart ENV` and
+  `cw rm ENV` write it to ask the daemon to stop. For any other shutdown the daemon writes it before
   it cancels a launch or stops a session. The daemon removes it when it
   starts. The message the helper paused is a takedown's second evidence.
 - **An explicit stop or restart:** a stop intent, `stop-intent.json` in the
   session's directory under the environment's runtime root. The daemon
   writes it for a host owner's managed conversation before the stop cancels
-  a launch, runs the helper or signals. `cw stop` records it whether or not
-  the conversation is running. `cw restart` records it only when it stops a
+  a launch, runs the helper or signals. `cw stop --session` records it whether
+  or not the conversation is running. `cw restart --session` records it only
+  when it stops a
   running conversation: restarting a stopped one is how a run resumes. A
   stop whose intent cannot be written signals nothing and fails. From the
   intent on, the stop finishes even if its caller goes away. The
@@ -364,7 +374,7 @@ A driver that is signalled reads the disk:
   the helper did record the stop's interrupt, that start aborts the run
   instead and the message ends interrupted. Neither resumes it, and the
   parent hears once.
-- `cw stop` of a conversation that is not running ends a message its
+- `cw stop --session` of a conversation that is not running ends a message its
   environment's takedown paused (`stop_paused`): unknown, "its conversation
   was stopped before it resumed". So a paused run is cancelled by stopping
   its conversation, whether or not it has resumed yet. If that helper fails,
@@ -394,7 +404,7 @@ explicit stop:
 
 **A paused message never waits for a start that cannot come.**
 
-- `cw env rm` deletes the environment's records, so the paused message goes
+- `cw rm` deletes the environment's records, so the paused message goes
   with every conversation that could be its parent: a parent is always in
   the same environment.
 - A conversation the daemon can never start again resolves its paused
@@ -417,7 +427,7 @@ driver or noel dies without a stop (`kill -9`, an out-of-memory kill, a
 crash, a host that loses power), the message is still running. noel's journal
 decides it:
 
-- **The driver died.** `cw restart` starts a new driver. Instead of ending
+- **The driver died.** `cw restart ENV --session NAME` starts a new driver. Instead of ending
   the running message unknown, it sets the message aside until noel's startup
   handshake. The handshake must finish within 120 s, or the message ends
   unknown.
@@ -478,15 +488,15 @@ cw --member build-linux run --name implement --parent "$LEAD_ID" \
 cw --member build-linux run --name review --parent "$LEAD_ID" \
   --agent claude --detach --prompt 'Review the assigned slice.'
 
-cw --member build-linux list
+cw --member build-linux ls
 cw --member build-linux msg "$WORKER_ID" 'Include the recovery case.' --output json
 cw --member build-linux inbox "$LEAD_ID" --output json
 cw --member build-linux wait --message "$MESSAGE_ID" --timeout 10m
 cw --member build-linux steer "$WORKER_ID" 'Focus on cleanup.' --turn-id "$TURN_ID"
-cw --member build-linux stop "$WORKER_ID"
+cw --member build-linux stop --session "$WORKER_ID"
 ```
 
-Use the Codex implement worker's canonical ID from `list` as `WORKER_ID`, the
+Use the Codex implement worker's canonical ID from `ls` as `WORKER_ID`, the
 ID returned by `msg` as `MESSAGE_ID`, and its active turn ID from `inbox` as
 `TURN_ID`.
 
@@ -590,13 +600,13 @@ managed helpers continue to execute their original member paths.
 Use an explicit environment and the revision returned by `info`:
 
 ```sh
-cw env --local runtime info vm-a --output json
-cw env --local runtime update vm-a \
+cw --local runtime info vm-a --output json
+cw --local runtime update vm-a \
   --source /absolute/owned/cw-runtime/cw-runtime.lock.json \
   --image-sha256 <admitted image index SHA256> \
   --target-sha256 <admitted executable SHA256> \
   --expected-revision 1 --request-id <stable request UUID>
-cw env --local runtime rollback vm-a --expected-revision 2
+cw --local runtime rollback vm-a --expected-revision 2
 ```
 
 These commands do not restart the VM or invoke workspace/image lifecycle
@@ -608,8 +618,8 @@ Keep the printed request UUID after a lost or cancelled local reply. Query or
 cancel that same operation, rather than submitting a new update:
 
 ```sh
-cw env --local runtime observe vm-a --request-id <original request UUID>
-cw env --local runtime cancel vm-a --request-id <original request UUID>
+cw --local runtime observe vm-a --request-id <original request UUID>
+cw --local runtime cancel vm-a --request-id <original request UUID>
 ```
 
 A cancellation before commit leaves the default unchanged. A cancellation
@@ -663,11 +673,11 @@ next message answers normally in the same session. Both prove the stop rules
 above: a direct stop, a restart, `stop --all` and the confirmed cascade
 interrupt every noel run first (the synthetic noel receives `abort
 {expectedRunId}` before its signal; the real noel's journal records the run
-aborted), while `cw env stop` leaves it interrupted in noel's journal, as
+aborted), while `cw stop ENV` leaves it interrupted in noel's journal, as
 `get_state.lastRun` reports, and its message paused. Both also prove the
 pause: the host daemon pauses the message before it signals, the lead's inbox
 holds one pause notice, a waiting `cw wait` says the message is paused and
-goes on, and `cw env start` resumes the run with no `cw restart`. The wait
+goes on, and `cw start` resumes the run with no session restart. The wait
 then returns the reply, and the restarted lead hears of the pause once and
 then of the final state once. Codex and Claude end unknown and are not
 restarted. The synthetic journey repeats the takedown with the driver stopped,
@@ -697,7 +707,7 @@ launches a noel, a Codex and a Claude worker under itself; launching the first
 again is refused and starts no second worker; and the lead is woken once per
 finished worker message, with its result. It then reads a worker's state,
 follows up, steers, waits for one result, interrupts, and stops a worker that
-has a worker of its own, with `cw stop` and `cw stop --all`.
+has a worker of its own, with `cw stop --session` and its `--all`.
 The real-noel journey needs a noel built from noeljackson/noel `main` at
 `08566af5` or later, which lists `--skill` directories; its other checks need
 `ef09c03f`.

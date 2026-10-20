@@ -38,9 +38,9 @@ Every member sees the organization's environments. Deleting one is for its
 creator, an owner or admin, or someone with an `owner` grant on it:
 
 ```sh
-cw env share grant my-app --user USER_ID --permission viewer|operator|owner
-cw env share list my-app
-cw env share revoke my-app --user USER_ID
+cw share grant my-app --user USER_ID --permission viewer|operator|owner
+cw share list my-app
+cw share revoke my-app --user USER_ID
 ```
 
 Removing a member removes their access to the organization and its
@@ -52,7 +52,7 @@ environments.
   owners and admins. See [Application secrets](@/guides/application-secrets.md).
 - **Presets**: creation defaults (image, commands, resources, TTL) with a
   slug: `cw preset list`, `cw preset create SLUG --image ...`,
-  `cw env create --preset SLUG`.
+  `cw create --preset SLUG`.
 - **API keys**: `cw api-keys create NAME [--expires DAYS]` prints a `cw_` key
   once. Set `CODEWIRE_API_KEY` to use it instead of a browser sign-in; it acts
   in the organization it was created in.

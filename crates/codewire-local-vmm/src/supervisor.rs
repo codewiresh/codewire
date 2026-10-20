@@ -114,7 +114,7 @@ use codewire_project::valid_vm_only_patterns;
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// An environment's runner is gone while the environment should be running;
-/// `cw env --local daemon repair` or a restart recovers it.
+/// `cw --local daemon repair` or a restart recovers it.
 const RUNNER_EXIT_ERROR_CODE: &str = "runner_exit";
 /// The profile slot that holds an SSH key, on both placements.
 const SSH_PROFILE_SLOT: &str = "ssh";
@@ -5692,7 +5692,7 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         request: Request<v1::RetireSupervisorRequest>,
     ) -> Result<Response<v1::RetireSupervisorResponse>, Status> {
-        // The same protocol too: `cw env --local upgrade` moves idle VMs from
+        // The same protocol too: `cw upgrade --vms` moves idle VMs from
         // another cw of this protocol to its own supervisor (#2549 keeps that
         // one serving otherwise). Never for an older one.
         if request.into_inner().successor_protocol < NATIVE_SUPERVISOR_PROTOCOL_VERSION {
@@ -5713,7 +5713,7 @@ impl LocalSupervisorService for SupervisorRpc {
             return Err(Status::from(SupervisorError::RetireRefused(name.clone())));
         }
         // A stopped environment's runner holds no VM, but on Linux it outlives
-        // this supervisor, and an older successor (`cw update rollback`)
+        // this supervisor, and an older successor (`cw upgrade rollback`)
         // cannot use a newer runner: end each one this supervisor tracks
         // before handing over. A newer successor would end it anyway.
         let idle: Vec<(String, RunnerRecord)> = core

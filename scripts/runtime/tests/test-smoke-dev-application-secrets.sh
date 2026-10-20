@@ -124,11 +124,11 @@ cw() {
         printf '%s\n' "${APP_SECRET_ALL_KEYS[@]:1:1}" "${APP_SECRET_ALL_KEYS[@]:3:3}" |
           jq -Rsc 'split("\n")[:-1] | map({key:.,created_at:"now",updated_at:"now"})'
       else printf '[{"key":"DATABASE_URL"},{"key":"CW_DEV_PRECEDENCE"}]\n'; fi ;;
-    'env --cloud list --output json') jq 'map(select(.state != "destroying" and .state != "destroyed"))' "$TMPDIR_SMOKE/environments.db" ;;
-    'env report '*' --output json')
-      jq -e --arg id "$3" 'any(.[]; .id == $id)' "$TMPDIR_SMOKE/environments.db" >/dev/null || return 1
-      jq --arg id "$3" '{environment: (.[] | select(.id == $id))}' "$TMPDIR_SMOKE/environments.db" ;;
-    'env create --cloud --file '*)
+    '--cloud ls --output json') jq 'map(select(.state != "destroying" and .state != "destroyed"))' "$TMPDIR_SMOKE/environments.db" ;;
+    'report '*' --output json')
+      jq -e --arg id "$2" 'any(.[]; .id == $id)' "$TMPDIR_SMOKE/environments.db" >/dev/null || return 1
+      jq --arg id "$2" '{environment: (.[] | select(.id == $id))}' "$TMPDIR_SMOKE/environments.db" ;;
+    'create --cloud --file '*)
       local project
       project="$(jq -r .secrets.project "$APP_SECRET_DOCUMENT")"
       local user organization
@@ -141,17 +141,17 @@ cw() {
             (if $user == "" then {} else {user:$user} end) +
             (if $organization then {organization:true} else {} end)),credentials:null,profile_revision:null}}]' >"$TMPDIR_SMOKE/environments.db"
       printf 'ID: 00000000-0000-4000-8000-000000000099\n' ;;
-    'env --cloud info '*" --output json")
+    '--cloud info '*" --output json")
       jq -e '.[0].state != "destroying" and .[0].state != "destroyed"' "$TMPDIR_SMOKE/environments.db" >/dev/null || return 1
       jq '.[0]' "$TMPDIR_SMOKE/environments.db" ;;
-    'env --cloud update '*)
+    '--cloud update '*)
       if [[ " $* " != *' --yes '* ]]; then
         printf 'source selection requires --yes for noninteractive or JSON commands; no source change was submitted\n' >&2
         return 2
       fi
       local project='' before user='' organization=false
       before="$(jq '.[0].operation_generation' "$TMPDIR_SMOKE/environments.db")"
-      [[ " $* " != *' --secrets '* ]] || project="$6"
+      [[ " $* " != *' --secrets '* ]] || project="$5"
       [[ " $* " != *' --user-secrets platform '* ]] || user=platform
       [[ " $* " != *' --org-secrets '* ]] || organization=true
       # The real workflow retains its generation across source restarts.
@@ -186,7 +186,7 @@ cw() {
           outcome:"restart_required",selection:(.source_selection |
             if .secrets.project == "" then .secrets={} else . end)}' "$TMPDIR_SMOKE/environments.db"
       fi ;;
-    'env --cloud rm --yes '*)
+    '--cloud rm --yes '*)
       jq '.[0].state="destroyed"' "$TMPDIR_SMOKE/environments.db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/environments.db" ;;
     'run --no-tty '*'/dev/urandom'*)
@@ -210,7 +210,8 @@ cw() {
       printf 'application-restart-witness-ready\n' >"$TMPDIR_SMOKE/session-$session_id.log"
       jq --arg id "$session_id" '.[] | select(.session_id == $id)' "$TMPDIR_SMOKE/sessions.db" ;;
     'logs '*' --raw')
-      local session_id="$3"
+      [[ "$3" == --session ]] || return 1
+      local session_id="$4"
       jq -e --arg id "$session_id" 'any(.[]; .session_id == $id)' "$TMPDIR_SMOKE/sessions.db" >/dev/null || return 1
       cat "$TMPDIR_SMOKE/session-$session_id.log" ;;
     'run --no-tty '*)
@@ -219,7 +220,7 @@ cw() {
         [[ "$(sha256sum "$TMPDIR_SMOKE/workspace-marker" | cut -d ' ' -f 1)" == "$APP_WORKSPACE_MARKER_SHA256" ]] || return 1
       fi
       printf 'application-secret-check-ok\n' ;;
-    'list '*" --output json") cat "$TMPDIR_SMOKE/sessions.db" ;;
+    'ls '*" --output json") cat "$TMPDIR_SMOKE/sessions.db" ;;
     *) fail "unexpected mock CLI operation: $*" ;;
   esac
 }
@@ -402,7 +403,7 @@ case "$*" in
     role=owner
     [[ "$(cat "$state/variant" 2>/dev/null || true)" != current-role ]] || role=member
     printf 'ID: 22222222222222222222222222222222\nRole: %s\n' "$role" ;;
-  *' env list --output json') printf '[]\n' ;;
+  *' ls --output json') printf '[]\n' ;;
   *' org list --output json')
     case "$(cat "$state/variant" 2>/dev/null || true)" in
       duplicate) printf '[{"id":"22222222222222222222222222222222","role":"owner"},{"id":"22222222222222222222222222222222","role":"owner"}]\n' ;;
@@ -672,9 +673,9 @@ cleanup_application_secrets
 [[ "$(jq length "$TMPDIR_SMOKE/projects.db")" == 0 ]]
 [[ "$(jq -r '.[0].state' "$TMPDIR_SMOKE/environments.db")" == destroyed ]]
 pass
-expect_failure terminal-info-hidden cw env --cloud info "$ENV_ID" --output json
+expect_failure terminal-info-hidden cw --cloud info "$ENV_ID" --output json
 application_environment_destroyed
-grep -Fq "env report $ENV_ID --output json" "$TMPDIR_SMOKE/calls"
+grep -Fq "report $ENV_ID --output json" "$TMPDIR_SMOKE/calls"
 if grep -Fq -- '--all' "$TMPDIR_SMOKE/calls"; then fail 'smoke listed deleted environments'; fi
 pass
 
@@ -703,7 +704,7 @@ prepare_application_secrets
 jq '. + [{key:"FOREIGN",created_at:"now",updated_at:"now"}]' "$TMPDIR_SMOKE/user.db" >"$TMPDIR_SMOKE/db.next"
 mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/user.db"
 expect_failure extra-final-key create_environment
-if grep -Fq 'env create' "$TMPDIR_SMOKE/calls"; then fail 'environment create ran after the final scope fence failed'; fi
+if grep -Eq '^(--cloud )?create ' "$TMPDIR_SMOKE/calls"; then fail 'environment create ran after the final scope fence failed'; fi
 expect_failure unknown-key-cleanup cleanup_application_secrets
 jq -e 'map(.key) == ["FOREIGN"]' "$TMPDIR_SMOKE/user.db" >/dev/null ||
   fail 'cleanup removed an unknown shared-scope key or retained an owned key'
@@ -863,7 +864,7 @@ for failure in attachment-terminated-session-running marker-replacement marker-m
       jq -e 'length == 1 and .[0].session_id == "fixture-witness-1" and .[0].state == "Terminated"' \
         "$APP_TEST_ROOT/failure-host-attachments.json" >/dev/null
       grep -Fq 'run --no-tty --output json' "$APP_TEST_ROOT/failure-calls"
-      grep -Fq 'logs 00000000-0000-4000-8000-000000000099 fixture-witness-1 --raw' \
+      grep -Fq 'logs 00000000-0000-4000-8000-000000000099 --session fixture-witness-1 --raw' \
         "$APP_TEST_ROOT/failure-calls" ;;
     marker-replacement|marker-missing)
       grep -Fq 'managed application-secret exec failed; output suppressed' "$APP_TEST_ROOT/failure.err" ;;

@@ -1,22 +1,24 @@
 ---
 title: Environments
-description: cw env and its subcommands, plus use, current, init, shell, vscode, config-ssh and preset.
+description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh and preset.
 weight: 1
 ---
 
-## cw env
+Environment commands are top-level. `--local` restricts a name to local
+environments and `--cloud` to the current organization's; either flag goes
+before or after the command (`cw --cloud stop app` is `cw stop --cloud app`)
+and never falls back to the other placement. Without either, a name is looked
+up across trusted hosts, local VMs and the current organization, and a name
+that exists in both placements is refused. Cloud-only and local-only commands
+are marked.
 
-`cw env [--local|--cloud] SUBCOMMAND`. `--local` restricts a name to local
-environments, `--cloud` to the current organization's. Hosted-only and
-local-only subcommands are marked.
-
-### env create
+## cw create
 
 ```sh
-cw env create [REPO_URL]... [OPTIONS]
+cw create [REPO_URL]... [OPTIONS]
 ```
 
-Creates a hosted sandbox unless `--local` is given. Repositories are
+Creates a cloud sandbox unless `--local` is given. Repositories are
 `URL[@branch][::/workspace/path]`, as positionals or with `--repo`.
 
 | Flag | Meaning |
@@ -24,22 +26,22 @@ Creates a hosted sandbox unless `--local` is given. Repositories are
 | `--name NAME` | Environment name |
 | `--type sandbox\|host` | Sandbox (default) or explicitly trusted host execution; `host` needs `--local` |
 | `--image IMAGE` | Container image; `workspace` is shorthand for the Codewire workspace image |
-| `--preset SLUG`, `--preset-id ID` | Hosted: create from a preset |
-| `--repo URL`, `--branch` | Hosted: repositories to check out |
+| `--preset SLUG`, `--preset-id ID` | Cloud: create from a preset |
+| `--repo URL`, `--branch` | Cloud: repositories to check out |
 | `--file FILE` | Project YAML file (relative to `--path` for local creation) |
 | `--path PATH` | Local: the project directory (default `.`) |
 | `--path-mode mount\|snapshot\|clone\|copy\|empty` | Local: mount the directory live (default), copy it once (a Git repository's committed state, or the directory), or start empty |
 | `--cpu`, `--memory`, `--disk` | Resources, for example `--cpu 2 --memory 8GB --disk 40GB` |
 | `--docker-disk SIZE`, `--no-docker` | Local: the guest Docker data disk (default 8 GiB), or no Docker daemon |
 | `--install CMD`, `--startup CMD` | Install command and startup script |
-| `--env KEY=VALUE` | Hosted: plain environment variables (repeatable) |
+| `--env KEY=VALUE` | Cloud: plain environment variables (repeatable) |
 | `--profile NAME` | Credential profile: `local:NAME` or `platform:NAME` |
 | `--secrets NAME`, `--user-secrets local\|platform`, `--org-secrets` | Application-secret sources |
-| `--ttl 8h` | Hosted: delete after a lifetime |
-| `--isolation standard\|confidential` | Hosted: isolation tier |
+| `--ttl 8h` | Cloud: delete after a lifetime |
+| `--isolation standard\|confidential` | Cloud: isolation tier |
 | `--network NAME`, `--no-network` | Local: join a Codewire Mesh network, or none |
-| `--no-wait` | Hosted: return at once instead of watching startup |
-| `--write-preset`, `--save-preset NAME` | Hosted: write the resolved preset to `./codewire.yaml`, or save it on the server |
+| `--no-wait` | Cloud: return at once instead of watching startup |
+| `--write-preset`, `--save-preset NAME` | Cloud: write the resolved preset to `./codewire.yaml`, or save it on the server |
 | `-y, --yes` | Skip confirmation prompts |
 | `--output json` | |
 
@@ -47,108 +49,137 @@ At a terminal a local create shows the resolved settings and asks
 `[Y]es / [e]dit / [n]o`. A trusted host (`--local --type host`) takes only
 `--name` and `--path`.
 
-### env list, info, report
+## cw ls, info, report
 
 ```sh
-cw env list [--type TYPE] [--state STATE] [-a|--all] [--output json]   # alias: ls
-cw env info ENV
-cw env report ENV        # isolation, runtime and trust evidence (hosted and host)
+cw ls [--type sandbox|host] [--state STATE] [-a|--all] [--output json]   # alias: list
+cw ls ENV [--output json]
+cw info ENV
+cw report ENV        # isolation, runtime and trust evidence (cloud and host)
 ```
 
-`list` merges trusted hosts, local VMs and, when signed in, the current
-organization; `--all` includes destroyed environments.
+Without `ENV`, `ls` lists every environment, running or stopped: trusted
+hosts, local VMs and, when signed in, the current organization's, one row
+each with its location (`local`, `cloud` or `host`), state and session count;
+`*` marks the selected one. `--all` includes destroyed cloud environments.
+An environment whose sessions cannot be read keeps its row, its SESSIONS
+marked `unavailable` (the reason is in the JSON `error`), and `ls` still
+succeeds. When a location cannot be listed at all, such as the cloud or the
+local runtime, `ls` prints every environment it could list, names the
+missing location and exits non-zero: an unavailable location is never shown
+as empty. With `ENV`, `ls` lists that environment's sessions with their
+mode: `normal` for a terminal or command session, `managed` for a managed
+agent conversation.
 
-### env start, stop, restart, rm
+## cw start, stop, restart, rm
 
 ```sh
-cw env start ENV
-cw env stop ENV
-cw env restart ENV       # local VMs and hosts
-cw env rm ENV [-y]       # a host asks first and keeps its project directory; a VM or sandbox is removed at once
+cw start ENV
+cw stop ENV
+cw restart ENV       # local VMs and hosts; a cloud environment restarts sessions only
+cw rm ENV [-y]       # a host asks first and keeps its project directory; a VM or sandbox is removed at once
 ```
 
-### env update, resize, refresh-skills
+`stop` and `restart` without `--session` act on the whole environment and
+need `ENV` (or `--in ENV`). With `--session` they act on one session instead;
+see [Sessions](@/cli/sessions.md).
+
+## cw update, resize, refresh-skills
 
 ```sh
-cw env update ENV [--secrets NAME] [--user-secrets local|platform] [--org-secrets] [--clear-secrets]
-                  [--profile NAME] [--clear-profile] [-y]
-cw env resize ENV [--cpu N] [--memory SIZE] [--disk SIZE] [--force] [--allow-restart] [-y]
-cw env refresh-skills ENV   # local VM: re-snapshot user and repository skills
+cw update ENV [--secrets NAME] [--user-secrets local|platform] [--org-secrets] [--clear-secrets]
+              [--profile NAME] [--clear-profile] [-y]
+cw resize ENV [--cpu N] [--memory SIZE] [--disk SIZE] [--force] [--allow-restart] [-y]
+cw refresh-skills ENV   # local VM: re-snapshot user and repository skills
 ```
 
-`update` changes only the selected application-secret sources and credential
-profile, with a confirmed restart that keeps workspace data. `resize` runs a
-wizard at a terminal when no quantity is given; disks never shrink; a local VM
-restarts, and `--force` ends active hosted sessions when a restart is
-required.
+`update` (also `cw update --in ENV`) changes only the selected
+application-secret sources and credential profile, with a confirmed restart
+that keeps workspace data; without `ENV` it is refused. It never upgrades
+`cw` itself: that is `cw upgrade`. `resize` runs a wizard at a terminal when
+no quantity is given; disks never shrink; a local VM restarts, and `--force`
+ends active cloud sessions when a restart is required.
 
-### env port
+## cw ports
 
 ```sh
-cw env port add PORT [-l|--label LABEL] [-a|--access creator|org_members|public] [--host-port PORT] [-e|--env ENV]
-cw env port list [-e ENV]       # alias: ls
-cw env port rm LABEL_OR_HOST_PORT [-e ENV]
+cw ports [ENV]
+cw ports ENV --publish PORT [--host-port PORT]                                  # local
+cw ports ENV --publish PORT [-l|--label LABEL] [-a|--access creator|org_members|public]   # cloud
+cw ports ENV --unpublish PORT [--host-port PORT | --label LABEL]
 ```
 
-On the platform, `--label` is required and the port becomes a preview URL
-(`--access` defaults to `creator`). For a local VM, `--host-port` (default:
-the guest port) binds `127.0.0.1` on your machine; `--label` and `--access`
-are refused. `-e` defaults to the selected environment.
+Without `--publish` or `--unpublish`, `ports` lists the published ports and
+never starts an environment. `ENV` (or `--in ENV`) defaults to the selected
+environment. One port changes per call, and publishing needs a running
+environment: a stopped one is refused with the `cw start ENV` repair.
 
-### env share (hosted)
+For a local VM, a port is published on `127.0.0.1` of your machine,
+`--host-port` choosing the host port (default: the guest port); `--label` and
+`--access` are refused. In the cloud the port becomes a preview URL labelled
+`port-PORT` unless `--label` names it, with `creator` access unless
+`--access` says otherwise; `--host-port` is refused. `--unpublish` names the
+guest port; when a local guest port is published on several host ports,
+`--host-port` chooses one, and when a cloud port has several previews,
+`--label` does.
+
+## cw share (cloud)
 
 ```sh
-cw env share grant ENV --user USER_ID [--permission viewer|operator|owner]   # default viewer
-cw env share list ENV
-cw env share revoke ENV --user USER_ID
+cw share grant ENV --user USER_ID [--permission viewer|operator|owner]   # default viewer
+cw share list ENV
+cw share revoke ENV --user USER_ID
 ```
 
-### env logs, daemon, agent (hosted)
+## cw logs --setup, daemon, agent (cloud)
 
 ```sh
-cw env logs ENV [--follow true|false]          # setup logs
-cw env daemon status [ENV] [--output json]      # version, capabilities, health; also local VMs and hosts
-cw env daemon logs [ENV]
-cw env daemon repair [ENV]                      # reconcile the daemon without recreating the environment
-cw env agent info ENV                           # qualified managed agents
-cw env agent observe ENV --request-id UUID      # observe a managed request without replaying it
+cw logs ENV --setup [--follow]               # how the environment was set up
+cw daemon status [ENV] [--output json]       # version, capabilities, health; also local VMs and hosts
+cw daemon logs [ENV]
+cw daemon repair [ENV]                       # reconcile the daemon without recreating the environment
+cw agent info ENV                            # qualified managed agents
+cw agent observe ENV --request-id UUID       # observe a managed request without replaying it
 ```
 
-### env extend, protect, unprotect, cancel-delete, prune, nuke (hosted)
+`cw logs ENV --setup` shows how a cloud environment was set up:
+provisioning, repository clones, and the install and startup steps.
+`--follow` keeps streaming until setup ends.
+
+## cw extend, protect, unprotect, cancel-delete, prune, nuke (cloud)
 
 ```sh
-cw env extend ENV [--hours N]                  # postpone a TTL deletion (default 1)
-cw env protect ENV                             # refuse deletion
-cw env unprotect ENV
-cw env cancel-delete ENV
-cw env prune [--state error,creating,pending] [--dry-run] [-y]
-cw env nuke [-y]                               # delete every environment in the organization; asks you to type a phrase
+cw extend ENV [--hours N]                  # postpone a TTL deletion (default 1)
+cw protect ENV                             # refuse deletion
+cw unprotect ENV
+cw cancel-delete ENV
+cw prune [--state error,creating,pending] [--dry-run] [-y]
+cw nuke [-y]                               # delete every environment in the organization; asks you to type a phrase
 ```
 
-### env cp
+These accept `--cloud` and refuse `--local`.
+
+## cw cp
 
 ```sh
-cw env cp ./local my-app:/workspace/remote
-cw env cp my-app:/workspace/remote ./local
+cw cp ./local my-app:/workspace/remote
+cw cp my-app:/workspace/remote ./local
 ```
 
-Exactly one side names an environment (hosted sandbox or local VM).
+Exactly one side names an environment (cloud sandbox or local VM).
 
-### env upgrade (local)
+## Local VMs on an older cw
 
-```sh
-cw env --local upgrade [--yes]
-```
+After an upgrade, local VMs keep running on the `cw` that started them.
+`cw upgrade --vms` restarts them onto the selected `cw`; see
+[Update cw](@/guides/update.md).
 
-Restarts the local VMs still running on a previous `cw` so they use this one.
-See [Update cw](@/guides/update.md).
+## cw access, runtime (advanced)
 
-### env access, runtime (advanced)
-
-`cw env --local access ENV` inspects a local environment's access profile.
-`cw env runtime info|update|rollback|observe|cancel ENV` selects the `cw`
-that runs inside a running environment without restarting it; `info` shows
-the bootstrap and current selection.
+`cw --local access ENV` inspects a local environment's access profile.
+`cw runtime info|update|rollback|observe|cancel ENV` selects the `cw` that
+runs inside a running environment without restarting it; `info` shows the
+bootstrap and current selection.
 
 ## cw use, cw current
 
@@ -158,8 +189,8 @@ cw current [-v|--verbose]
 ```
 
 `use` makes `ENV` the default for session commands, looking in trusted hosts,
-then local VMs, then the current organization; `--local` or `--cloud` settles
-a name that exists in both.
+then local VMs, then the current organization; `--local` or `--cloud` limits
+the lookup to one placement and settles a name that exists in both.
 
 ## cw init
 
@@ -176,30 +207,33 @@ without `--force`. See [The project file](@/guides/project-file.md).
 
 ```sh
 cw shell [ENV]
-cw shell --stdio ENV     # for OpenSSH ProxyCommand (hosted)
+cw shell --stdio ENV     # for OpenSSH ProxyCommand (cloud)
 ```
 
 Opens a login shell as a new session in the selected or named environment.
 
-## cw vscode (hosted)
+## cw vscode (cloud)
 
 ```sh
 cw vscode [ENV] [--folder /workspace] [--org ORG]
 ```
 
-Refreshes the SSH config and opens VS Code with Remote-SSH on `cw-<id>`.
+Refreshes the SSH config, as `cw setup ssh` does, and opens VS Code with
+Remote-SSH on `cw-<id>`.
 
-## cw config-ssh
+## cw setup ssh
 
 ```sh
-cw config-ssh [--ssh-config-file ~/.ssh/config] [-o|--ssh-option OPTION]... [-n|--dry-run]
+cw setup ssh [--ssh-config-file ~/.ssh/config] [-o|--ssh-option OPTION]... [-n|--dry-run]
 ```
 
 Writes the managed `Host cw-*` block with `ProxyCommand cw shell --stdio %n`
 and `KnownHostsCommand cw ssh known-hosts %H`, so that `ssh`, `scp`, `sftp`,
-`rsync` and VS Code Remote-SSH reach hosted environments.
+`rsync` and VS Code Remote-SSH reach cloud environments. `--dry-run` prints
+the result instead of writing it. `cw setup` writes the same block unless
+`--skip-ssh` is given.
 
-## cw preset (hosted)
+## cw preset (cloud)
 
 ```sh
 cw preset list                                   # alias: ls

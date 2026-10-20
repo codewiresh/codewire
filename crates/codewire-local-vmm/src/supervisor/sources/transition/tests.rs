@@ -1027,7 +1027,7 @@ async fn failed_source_effect_records_and_logs_its_own_cause_without_secret_valu
             Some(effect)
         );
         assert_eq!(failed.error_code.as_deref(), Some(expected));
-        // `cw env info` shows it, and so does the failed `cw env update`.
+        // `cw info` shows it, and so does the failed `cw update`.
         let shown = core.environment_proto("dev").unwrap();
         assert_eq!(shown.state, v1::EnvironmentState::Error as i32);
         assert_eq!(shown.error_code, expected);

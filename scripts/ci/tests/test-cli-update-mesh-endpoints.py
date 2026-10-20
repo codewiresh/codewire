@@ -255,7 +255,7 @@ class ReleaseStoreCleanupTests(unittest.TestCase):
         # The inherited cleanup used to fail here on an actual0555 directory.
         self.journey.cleanup()
         self.assertFalse(self.root.exists())
-        self.assertEqual(self.calls, [("env", "rm", "--local", "synthetic-environment", "--yes")])
+        self.assertEqual(self.calls, [("rm", "--local", "synthetic-environment", "--yes")])
         self.assertEqual(self.checks, ["remove-runtime/preserve-project"])
         self.assertEqual(self.sentinel_events, ["terminate", ("wait", 5)])
 
@@ -263,7 +263,7 @@ class ReleaseStoreCleanupTests(unittest.TestCase):
         self.journey.cleanup(preserve=True)
         self.assert_immutable()
         self.assertTrue((self.journey.workspace / "child.pid").exists())
-        self.assertEqual(self.calls, [("env", "stop", "--local", "synthetic-environment")])
+        self.assertEqual(self.calls, [("stop", "--local", "synthetic-environment")])
         self.assertEqual(self.checks, [])
 
     def test_invalid_second_member_never_changes_first_or_deletes_project(self):

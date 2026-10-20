@@ -854,7 +854,6 @@ async fn journey(
     let created = target
         .json(
             &[
-                "env",
                 "create",
                 "--local",
                 "--type",
@@ -966,7 +965,7 @@ async fn journey(
     let sentinel_pid = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let output = target
-                .run(&["logs", env, sentinel_sid, "--raw"], None)
+                .run(&["logs", env, "--session", sentinel_sid, "--raw"], None)
                 .await;
             assert!(output.status.success());
             if let Ok(pid) = std::str::from_utf8(&output.stdout)
@@ -1104,7 +1103,7 @@ async fn journey(
     );
     assert_eq!(waited["session"]["exit_code"], 0);
     let list = caller
-        .json(&["--member", "target", "list", "--output", "json"], None)
+        .json(&["--member", "target", "ls", "--output", "json"], None)
         .await;
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["session_id"], sid);
@@ -1116,6 +1115,7 @@ async fn journey(
                 "stop",
                 "--expected-launch-generation",
                 "2",
+                "--session",
                 sid,
             ],
             None,
@@ -1182,7 +1182,15 @@ async fn journey(
         .await;
     let logs = caller
         .run(
-            &["--member", "target", "logs", large_sid, "--tail", "1"],
+            &[
+                "--member",
+                "target",
+                "logs",
+                "--session",
+                large_sid,
+                "--tail",
+                "1",
+            ],
             None,
         )
         .await;
@@ -1218,6 +1226,7 @@ async fn journey(
                 &stop_id,
                 "--expected-launch-generation",
                 "1",
+                "--session",
                 held_sid,
                 "--output",
                 "json",
@@ -1227,7 +1236,10 @@ async fn journey(
         .await;
     assert_eq!(stopped[0]["cleanup_unknown"], false);
     let replacement = target
-        .json(&["restart", env, held_sid, "--output", "json"], None)
+        .json(
+            &["restart", env, "--session", held_sid, "--output", "json"],
+            None,
+        )
         .await;
     assert_eq!(replacement[0]["launch_generation"], 2);
     assert!(
@@ -1248,7 +1260,7 @@ async fn journey(
             .status
             .success()
     );
-    let local = target.json(&["list", env, "--output", "json"], None).await;
+    let local = target.json(&["ls", env, "--output", "json"], None).await;
     assert!(
         local
             .as_array()
@@ -1259,7 +1271,10 @@ async fn journey(
                 && record["state"] == "Running")
     );
     target
-        .json(&["stop", env, held_sid, "--output", "json"], None)
+        .json(
+            &["stop", env, "--session", held_sid, "--output", "json"],
+            None,
+        )
         .await;
     let delegated = caller
         .json(
@@ -1305,7 +1320,7 @@ async fn journey(
     assert_eq!(revoked["book_revision"], 2);
     assert!(
         !caller
-            .run(&["--member", "target", "list", "--output", "json"], None)
+            .run(&["--member", "target", "ls", "--output", "json"], None)
             .await
             .status
             .success()
@@ -1338,7 +1353,10 @@ async fn journey(
     );
     // Remote managed/PTY/general lifecycle commands are refused before routes.
     for args in [
-        vec!["--member", "target", "restart", sid],
+        vec!["--member", "target", "restart", "--session", sid],
+        // A member never stops or restarts a whole environment.
+        vec!["--member", "target", "stop", env],
+        vec!["--member", "target", "restart", env],
         vec!["--member", "target", "attach", sid],
         vec![
             "--member",
@@ -1412,7 +1430,7 @@ async fn journey(
     );
     assert!(!terminal(&daemon.fd));
     assert!(!terminal(&sentinel_process));
-    let remaining = target.json(&["list", env, "--output", "json"], None).await;
+    let remaining = target.json(&["ls", env, "--output", "json"], None).await;
     assert!(
         remaining
             .as_array()
@@ -1439,14 +1457,20 @@ async fn journey(
             .exists()
     );
     target
-        .json(&["stop", env, delegated_sid, "--output", "json"], None)
+        .json(
+            &["stop", env, "--session", delegated_sid, "--output", "json"],
+            None,
+        )
         .await;
     target
-        .json(&["stop", env, sentinel_sid, "--output", "json"], None)
+        .json(
+            &["stop", env, "--session", sentinel_sid, "--output", "json"],
+            None,
+        )
         .await;
     assert!(terminal(&sentinel_process));
     target
-        .json(&["env", "stop", env, "--local", "--output", "json"], None)
+        .json(&["stop", env, "--local", "--output", "json"], None)
         .await;
     // The daemon releases its ownership lock before its Tokio runtime and
     // process finish exiting. Observe the original pidfd within the existing
@@ -1748,7 +1772,7 @@ mod member_diagnostic_tests {
         for args in [
             &["member", "down"][..],
             &["--member", "peer", "run"],
-            &["env", "create"],
+            &["create"],
         ] {
             assert!(
                 member_up_failure_context(Path::new("/missing-synthetic-root"), args).is_empty()

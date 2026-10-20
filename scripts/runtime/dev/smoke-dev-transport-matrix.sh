@@ -226,7 +226,7 @@ wait_for_environment_destroyed() {
     if state_json="$({
       CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY" \
         CW_CONFIG_DIR="${INITIAL_EVIDENCE_DIR:-$MATRIX_DIR}/cw-config" \
-        "$CW_BIN" --server "$CODEWIRE_SERVER_URL" env info "$ENV_ID" --output json
+        "$CW_BIN" --server "$CODEWIRE_SERVER_URL" info "$ENV_ID" --output json
     } 2>/dev/null)" &&
       jq -e '.state == "destroyed" and .desired_state == "destroyed"' \
         >/dev/null <<<"$state_json"; then
@@ -247,7 +247,7 @@ cleanup() {
     log "deleting smoke environment $ENV_ID"
     if ! CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY" \
       CW_CONFIG_DIR="${INITIAL_EVIDENCE_DIR:-$MATRIX_DIR}/cw-config" \
-      "$CW_BIN" --server "$CODEWIRE_SERVER_URL" env rm --yes "$ENV_ID" >/dev/null 2>&1; then
+      "$CW_BIN" --server "$CODEWIRE_SERVER_URL" rm --yes "$ENV_ID" >/dev/null 2>&1; then
       log "environment delete request failed; keeping namespace $MATRIX_SANDBOX_NAMESPACE"
       rc=1
     elif ! wait_for_environment_destroyed; then

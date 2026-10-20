@@ -115,7 +115,10 @@ pub(crate) async fn run(globals: &Globals, args: EnvironmentRunArgs) -> anyhow::
     .await
 }
 pub(crate) async fn list(globals: &Globals, args: ListArgs) -> anyhow::Result<()> {
-    ensure!(!args.all, "member list does not accept --all");
+    ensure!(
+        !args.all && args.environment_type.is_none() && args.state.is_none(),
+        "member ls lists the pinned environment's sessions; --all, --type and --state are not admitted"
+    );
     let (_, mut remote) = open(globals, args.environment.as_deref()).await?;
     let mut sessions = Vec::new();
     let mut cursor = String::new();
@@ -260,12 +263,11 @@ async fn wait_loop(
         }
     }).await.context("member wait timed out; outcome unknown, command not replayed")?
 }
-pub(crate) async fn logs(globals: &Globals, args: LogsArgs) -> anyhow::Result<()> {
-    let values = match (&args.environment, &args.session) {
-        (Some(e), Some(s)) => vec![e.clone(), s.clone()],
-        (Some(s), None) => vec![s.clone()],
-        _ => anyhow::bail!("member logs requires exact SESSION or ENV_UUID SESSION"),
+pub(crate) async fn logs(globals: &Globals, args: SessionLogs) -> anyhow::Result<()> {
+    let Some(session) = args.session.clone() else {
+        anyhow::bail!("member logs requires --session with the exact session ID");
     };
+    let values: Vec<String> = args.environment.iter().cloned().chain([session]).collect();
     let (_, mut remote) = open(globals, None).await?;
     let sid = target(&values, &remote.alias.binding.environment_id)?;
     let initial = remote.get(sid).await?;
