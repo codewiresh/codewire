@@ -120,6 +120,7 @@ dispatch_kind_e2e() {
       return 2
     fi
     KIND_SHARD_TRANSACTION=1
+    KIND_SHARD_SUITE_NAMES=("${@:2}")
     run_kind_up
     log "cluster ${KIND_CLUSTER_NAME} is up; running shard suites: ${*:2}"
     shift

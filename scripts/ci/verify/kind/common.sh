@@ -123,6 +123,10 @@ KIND_TRANSACTION_NODE_ID=""
 KIND_SHARD_TRANSACTION=0
 # Nested external observations never inherit the creating process's cleanup.
 export -n KIND_SHARD_TRANSACTION
+# A shard transaction's background workspace import. kind-e2e.sh sets the
+# shard's suites, KIND_SHARD_SUITE_NAMES.
+KIND_WORKSPACE_LOAD_PID=""
+KIND_WORKSPACE_LOAD_LOG=""
 KIND_PROFILE_ARTIFACTS_VERIFIED=0
 if [ -z "${DEFAULT_KIND_WORKSPACE_IMAGE+x}" ]; then
   # The published workspace pin (crates/codewire-workspace-image), never a copy.
@@ -508,6 +512,7 @@ dump_cluster_state() {
 
 cleanup() {
   local status="${1:-$?}"
+  stop_workspace_image_load
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
   fi
@@ -1540,8 +1545,74 @@ prepare_kind_support_images() {
   prepare_kind_credential_support_images || return $?
 }
 
+# Kind suites that never run a Sandbox, and so never need the workspace image
+# in the node. Any other suite, and a run that names no suites (the full gate,
+# `up`), loads it (#2971).
+KIND_SUITES_WITHOUT_SANDBOXES=(edge-contract integrated)
+
+kind_suites_need_workspace_image() {
+  local suite
+  [ "$#" -gt 0 ] || return 0
+  for suite in "$@"; do
+    [[ " ${KIND_SUITES_WITHOUT_SANDBOXES[*]} " == *" ${suite} "* ]] || return 0
+  done
+  return 1
+}
+
+load_workspace_image_into_kind() {
+  local image
+  image="$(kind_workspace_runtime_image)" || return $?
+  log "loading the selected verified workspace image into Kind"
+  kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
+  wait_for_kind_api_after_image_load
+}
+
+# A shard imports its multi-gigabyte workspace image beside the platform
+# rollouts instead of before them. Every other image is already in the node,
+# and nothing else imports until finish_workspace_image_load, so imports stay
+# one at a time with the API recovery gate after each (#2971). A shard whose
+# suites run no Sandbox skips the import.
+start_workspace_image_load() {
+  KIND_WORKSPACE_LOAD_PID=""
+  [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ] || return 0
+  if ! kind_suites_need_workspace_image "$@"; then
+    log "no suite in this shard runs a Sandbox (${*}); the workspace image stays out of Kind"
+    return 0
+  fi
+  KIND_WORKSPACE_LOAD_LOG="$RUN_DIR/workspace-image-load.log"
+  log "loading the workspace image into Kind beside the platform rollouts"
+  (set -e; load_workspace_image_into_kind) >"$KIND_WORKSPACE_LOAD_LOG" 2>&1 &
+  KIND_WORKSPACE_LOAD_PID=$!
+}
+
+finish_workspace_image_load() {
+  local pid="${KIND_WORKSPACE_LOAD_PID:-}" status=0
+  [ -n "$pid" ] || return 0
+  wait "$pid" || status=$?
+  KIND_WORKSPACE_LOAD_PID=""
+  cat "$KIND_WORKSPACE_LOAD_LOG" >&2 || true
+  if [ "$status" -ne 0 ]; then
+    echo "::error::loading the workspace image into Kind failed (status ${status})"
+    return "$status"
+  fi
+  log "workspace image loaded into Kind"
+}
+
+# A failed transaction stops a workspace import still running in the
+# background before its cluster is removed.
+stop_workspace_image_load() {
+  local pid="${KIND_WORKSPACE_LOAD_PID:-}"
+  [ -n "$pid" ] || return 0
+  KIND_WORKSPACE_LOAD_PID=""
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+# The argument `defer-workspace` leaves the workspace image to
+# start_workspace_image_load.
 load_images_into_kind() {
-  local image sealed source alias
+  local image sealed source alias defer_workspace=0
+  [ "${1:-}" != defer-workspace ] || defer_workspace=1
 
   # Importing several release images back-to-back can make the nested
   # kube-apiserver temporarily unavailable while containerd commits layers.
@@ -1571,11 +1642,9 @@ load_images_into_kind() {
 
   load_kind_credential_support_images || return $?
 
-  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
-    image="$(kind_workspace_runtime_image)" || return $?
-    log "loading the selected verified workspace image into Kind"
-    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
-    wait_for_kind_api_after_image_load || return $?
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ] \
+      && [ "$defer_workspace" = 0 ]; then
+    load_workspace_image_into_kind || return $?
   fi
 
   if validate_sealed_kind_images; then

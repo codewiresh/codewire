@@ -961,6 +961,14 @@ printf '%s\n' up | cmp -s - "$CALLS" || fail 'up dispatch changed'
 dispatch_kind_e2e shard environment-session runtime-acceptance
 printf '%s\n' up environment-session runtime-acceptance | cmp -s - "$CALLS" ||
   fail 'shard dispatch did not chain up and its suites in order'
+# The transaction knows the shard's suites, to import only the images they
+# need (#2971).
+: >"$CALLS"
+run_kind_up() { record "up ${KIND_SHARD_SUITE_NAMES[*]}"; }
+dispatch_kind_e2e shard environment-session runtime-acceptance
+printf '%s\n' 'up environment-session runtime-acceptance' environment-session runtime-acceptance |
+  cmp -s - "$CALLS" || fail 'the shard transaction does not receive its suite list'
+run_kind_up() { record up; }
 
 : >"$CALLS"
 # shellcheck disable=SC2329 # Invoked indirectly by the shard dispatcher.
@@ -1036,32 +1044,61 @@ source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
   ingress_path_drift_check() { record ingress-drift; }
   build_images_and_smokes() { record build; }
   create_cluster() { record create-cluster; }
-  load_images_into_kind() { record load; }
+  load_images_into_kind() { record "load $*"; }
   deploy_overlay() { record deploy; }
   deploy_agent_sandbox() { record agent-sandbox; }
   mark_retained_cluster_prepared() { record prepared-marker; }
+  record_retained_cluster_sources() { record record-sources; }
   kind() {
     [ "$*" = 'get clusters' ] || fail "unexpected up kind invocation: $*"
     printf '%s\n' other-cluster
   }
   KIND_CLUSTER_NAME=up-fixture KIND_CLUSTER_NAME_EXPLICIT=1
+  # A developer's `up`, not a shard (the dispatch fixtures above set it).
+  KIND_SHARD_TRANSACTION=0
   run_kind_up
 )
-cat >"$FIXTURE/want-up-order" <<'EOF'
-temp-runtime
-acquire-lock
-port-preflight
-ingress-drift
-build
-create-cluster
-load
-deploy
-agent-sandbox
-prepared-marker
-EOF
+printf '%s\n' temp-runtime acquire-lock port-preflight ingress-drift build create-cluster \
+  'load ' deploy agent-sandbox prepared-marker record-sources >"$FIXTURE/want-up-order"
 cmp -s "$FIXTURE/want-up-order" "$CALLS" || {
   diff -u "$FIXTURE/want-up-order" "$CALLS" >&2 || true
   fail 'kind up order changed'
+}
+
+# #2971: a CI shard defers the workspace image, imports it in the background
+# beside its rollouts, and waits for it before the cluster is marked prepared.
+# A developer `up` keeps the serial import above.
+: >"$CALLS"
+(
+  require_tool() { :; }
+  require_kind_host_ports_available() { record port-preflight; }
+  prepare_kind_temp_runtime() { record temp-runtime; }
+  acquire_kind_host_lock() { record acquire-lock; }
+  cleanup() { :; }
+  ingress_path_drift_check() { record ingress-drift; }
+  build_images_and_smokes() { record build; }
+  create_cluster() { record create-cluster; }
+  load_images_into_kind() { record "load $*"; }
+  start_workspace_image_load() { record "start-workspace $*"; }
+  deploy_overlay() { record deploy; }
+  deploy_agent_sandbox() { record agent-sandbox; }
+  finish_workspace_image_load() { record finish-workspace; }
+  mark_retained_cluster_prepared() { record prepared-marker; }
+  record_retained_cluster_sources() { record record-sources; }
+  kind() {
+    [ "$*" = 'get clusters' ] || fail "unexpected up kind invocation: $*"
+    printf '%s\n' other-cluster
+  }
+  KIND_CLUSTER_NAME=up-fixture KIND_CLUSTER_NAME_EXPLICIT=1
+  KIND_SHARD_TRANSACTION=1
+  KIND_SHARD_SUITE_NAMES=(workspace-services final-fencing)
+  run_kind_up
+)
+printf '%s\n' temp-runtime acquire-lock port-preflight ingress-drift build create-cluster \
+  'load defer-workspace' 'start-workspace workspace-services final-fencing' deploy agent-sandbox \
+  finish-workspace prepared-marker | cmp -s - "$CALLS" || {
+  cat "$CALLS" >&2
+  fail 'a shard does not import its workspace image beside its rollouts'
 }
 
 : >"$CALLS"
@@ -2202,6 +2239,67 @@ cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
     index($0, image) { getline; if ($0 != "wait-api") exit 1; found = 1 }
     END { if (!found) exit 1 }
   ' "$CALLS" || fail 'source image import omitted API recovery'
+)
+
+# #2971: `defer-workspace` imports every image but the workspace. A shard then
+# imports it in the background beside its rollouts, still one import at a time
+# with the API recovery gate, and only when one of its suites runs a Sandbox.
+(
+  : >"$CALLS"
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
+  RUN_DIR="$FIXTURE/workspace-load-run"
+  mkdir -p "$RUN_DIR"
+  source_alias="localhost/codewire-ci/workspace:source-$(printf '%064d' 4)"
+  python3() { printf '%s\n' "$source_alias"; }
+  load_images_into_kind defer-workspace
+  ! grep -Fq "$source_alias" "$CALLS" || fail 'a deferred image load still imported the workspace'
+  grep -Fq 'kind:load docker-image' "$CALLS" || fail 'a deferred image load imported nothing'
+
+  kind_suites_need_workspace_image || fail 'a run that names no suites skipped the workspace image'
+  kind_suites_need_workspace_image edge-contract credentials ||
+    fail 'a shard with a Sandbox suite skipped the workspace image'
+  ! kind_suites_need_workspace_image edge-contract integrated ||
+    fail 'a shard without Sandboxes needs the workspace image'
+
+  : >"$CALLS"
+  start_workspace_image_load edge-contract integrated 2>/dev/null
+  [ -z "$KIND_WORKSPACE_LOAD_PID" ] || fail 'a shard without Sandboxes started a workspace import'
+  finish_workspace_image_load
+  [ ! -s "$CALLS" ] || fail 'a shard without Sandboxes imported the workspace image'
+
+  : >"$CALLS"
+  start_workspace_image_load edge-contract credentials 2>/dev/null
+  [ -n "$KIND_WORKSPACE_LOAD_PID" ] || fail 'a shard with a Sandbox suite did not start its workspace import'
+  finish_workspace_image_load 2>/dev/null
+  [ -z "$KIND_WORKSPACE_LOAD_PID" ] || fail 'a finished workspace import kept its process'
+  printf '%s\n' "kind:load docker-image --name $KIND_CLUSTER_NAME $source_alias" wait-api |
+    cmp -s - "$CALLS" || fail 'the background workspace import lost its exact image or API recovery gate'
+
+  : >"$CALLS"
+  kind() { record "kind:$*"; return 9; }
+  start_workspace_image_load runtime-acceptance 2>/dev/null
+  set +e
+  finish_workspace_image_load >"$FIXTURE/failed-workspace-load.out" 2>&1
+  workspace_load_status=$?
+  set -e
+  [ "$workspace_load_status" -eq 9 ] || fail 'a failed background workspace import did not fail the shard'
+  grep -Fq 'loading the workspace image into Kind failed' "$FIXTURE/failed-workspace-load.out" ||
+    fail 'a failed background workspace import was not reported'
+  ! grep -Fq 'wait-api' "$CALLS" || fail 'a failed workspace import passed its API recovery gate'
+
+  # A failed transaction stops an import still running before cleanup.
+  kind() { sleep 5; }
+  start_workspace_image_load credentials 2>/dev/null
+  workspace_load_pid="$KIND_WORKSPACE_LOAD_PID"
+  stop_workspace_image_load
+  [ -z "$KIND_WORKSPACE_LOAD_PID" ] || fail 'a stopped workspace import kept its process'
+  ! kill -0 "$workspace_load_pid" 2>/dev/null || fail 'a failed transaction left its workspace import running'
+  grep -Fq 'stop_workspace_image_load' <<<"$(declare -f cleanup)" ||
+    fail 'cleanup does not stop a background workspace import'
+
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release
+  start_workspace_image_load credentials 2>/dev/null
+  [ -z "$KIND_WORKSPACE_LOAD_PID" ] || fail 'a release-image shard imported a source workspace image'
 )
 
 # Forgejo CI names only the five approved Harbor platform manifests. They must

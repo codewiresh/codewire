@@ -45,9 +45,17 @@ run_kind_up() {
   ingress_path_drift_check
   KIND_BUILD_SMOKES=0 build_images_and_smokes
   create_cluster
-  load_images_into_kind
+  if [ "$KIND_SHARD_TRANSACTION" = 1 ]; then
+    # A CI shard imports the workspace image beside its rollouts, and only
+    # when one of its suites runs a Sandbox (#2971).
+    load_images_into_kind defer-workspace
+    start_workspace_image_load "${KIND_SHARD_SUITE_NAMES[@]}"
+  else
+    load_images_into_kind
+  fi
   deploy_overlay
   deploy_agent_sandbox
+  finish_workspace_image_load
   mark_retained_cluster_prepared
   # A shard's cluster is disposable; a developer's is kept for kind-test.
   if [ "$KIND_SHARD_TRANSACTION" != 1 ]; then
