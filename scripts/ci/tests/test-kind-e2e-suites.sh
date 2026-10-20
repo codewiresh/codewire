@@ -735,10 +735,10 @@ awk '
 grep -Fq 'PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$workspace_image"' "$COMMON" ||
   fail 'dashboard lifecycle does not select the sealed workspace alias'
 grep -Fq 'process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE || workspaceImage' \
-  "$ROOT/apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts" ||
+  "$ROOT/apps/dashboard/e2e/helpers/environment-journey.ts" ||
   fail 'dashboard lifecycle preset cannot consume the sealed workspace alias'
 grep -Fq '(${presetId}, ${workspaceRuntimeImage},' \
-  "$ROOT/apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts" ||
+  "$ROOT/apps/dashboard/e2e/helpers/environment-journey.ts" ||
   fail 'dashboard lifecycle preset ignores its selected runtime workspace image'
 grep -Fq 'KIND_INGRESS_HOST_PORT="${KIND_INGRESS_HOST_PORT:-${KIND_INGRESS_HTTP_HOST_PORT:-8090}}"' "$COMMON" ||
   fail 'Kind ingress host port is not configurable with the accepted default'
@@ -2668,8 +2668,8 @@ grep -Fq "contains(needs.verification-selection.outputs.selection, '|edge_kind|'
 if grep -Fq 'run-product-verification.sh edge' <<<"$edge_kind_block"; then
   fail 'Edge static verification moved back into a Kind shard'
 fi
-[ "$(grep -Fc "matrix.shard.slug == 'dashboard'" <<<"$edge_kind_block")" -eq 3 ] ||
-  fail 'browser host dependencies and the failure upload are not pinned to the dashboard shard'
+[ "$(grep -Fc "matrix.shard.slug == 'dashboard'" <<<"$edge_kind_block")" -eq 4 ] ||
+  fail 'browser host dependencies and the browser report uploads are not pinned to the dashboard shard'
 # Sandbox supply-chain provenance requires a live product workspace: every
 # workspace-service fixture self-cleans, so no shard may invoke it standalone.
 # It runs only nested inside the TTL acceptance (pinned above against

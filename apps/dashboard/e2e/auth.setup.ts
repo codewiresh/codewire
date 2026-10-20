@@ -1,12 +1,10 @@
 import { test as setup, expect, Page } from "@playwright/test";
-import * as path from "path";
-import { fileURLToPath } from "url";
 import { USERS, TEST_PASSWORD } from "./helpers/seed";
 import { ACCOUNT_HOME } from "./helpers/org";
 import * as OTPAuth from "otpauth";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const authFile = path.join(__dirname, "../playwright/.auth/user.json");
+// The seeded login's real form sign-in and two-factor proof. It saves no
+// session: specs sign in as their own per-worker identities (helpers/test.ts).
 
 // Use an explicit commit wait so authentication redirects are observed.
 const goto = async (page: Page, url: string) => {
@@ -97,8 +95,4 @@ setup("authenticate", async ({ page }) => {
     cookie.name === "codewire.session_token"
   ));
   expect(session).toMatchObject({ httpOnly: true, sameSite: "Lax" });
-
-  // Save authentication state
-  await page.context().storageState({ path: authFile });
-  console.log("Auth state saved to:", authFile);
 });

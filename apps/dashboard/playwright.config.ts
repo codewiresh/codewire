@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { designFixtureSpecPattern } from "./e2e/helpers/design-fixtures";
+import { mobileLayoutSpecPattern } from "./e2e/helpers/mobile-layout";
 
 const dashboardDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(dashboardDir, "../..");
@@ -50,7 +51,9 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   workers: 1,
-  reporter: "html",
+  // The JSON report records every test's duration, retries and outcome. CI
+  // uploads it from every dashboard run, green or red (#2974).
+  reporter: [["html"], ["json", { outputFile: path.join(dashboardDir, "test-report/results.json") }]],
   snapshotPathTemplate: `{testDir}/{testFilePath}-snapshots/{arg}-{projectName}-${snapshotEnvironment}{ext}`,
   expect: {
     toHaveScreenshot: { maxDiffPixelRatio: 0.015 },
@@ -63,6 +66,9 @@ export default defineConfig({
     },
   },
   projects: [
+    // The seeded login's form sign-in and two-factor proof. Specs sign in as
+    // their own per-worker identities (e2e/helpers/test.ts), so nothing waits
+    // for this project or reads a session from it.
     {
       name: "setup",
       testMatch: /apps\/dashboard\/e2e\/auth\.setup\.ts/,
@@ -72,7 +78,6 @@ export default defineConfig({
       name: "dashboard-ssr-desktop",
       testMatch: /apps\/dashboard\/e2e\/ssr-dashboard\..*\.ssr\.ts/,
       testIgnore: designFixtureSpecPattern,
-      dependencies: skipSharedSetup ? [] : ["setup"],
       use: {
         ...devices["Desktop Chrome"],
         baseURL: dashboardUrl,
@@ -81,11 +86,10 @@ export default defineConfig({
         screenshot: "only-on-failure",
       },
     },
+    // Only the specs that check the mobile layout (e2e/helpers/mobile-layout.ts).
     {
       name: "dashboard-ssr-mobile",
-      testMatch: /apps\/dashboard\/e2e\/ssr-dashboard\..*\.ssr\.ts/,
-      testIgnore: designFixtureSpecPattern,
-      dependencies: skipSharedSetup ? [] : ["setup"],
+      testMatch: mobileLayoutSpecPattern,
       use: {
         ...devices["Pixel 5"],
         baseURL: dashboardUrl,

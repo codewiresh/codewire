@@ -2070,8 +2070,8 @@ jobs:
           - slug: environment
             suites: workspace-services final-fencing runtime-acceptance
           # dashboard: the full Rust dashboard Playwright suite. Its per-worker
-          # identities (#2381) let the suite run four workers in this leg;
-          # the config default stays 1 for local runs.
+          # identities (#2381) let the suite run four workers in this leg, as
+          # make kind-test does; the full local gate keeps one.
           - slug: dashboard
             suites: dashboard-browser
             playwright_workers: 4
@@ -2221,6 +2221,17 @@ jobs:
           path: apps/dashboard/test-results/
           if-no-files-found: ignore
           retention-days: 5
+
+      - name: Upload dashboard browser JSON report
+        # Every test's duration, retries and outcome, from every dashboard
+        # run, green or red, so slow and flaky tests are visible (#2974).
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') && matrix.shard.slug == 'dashboard' }}
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: kind-dashboard-json-report-${{ github.run_id }}-${{ matrix.shard.slug }}
+          path: apps/dashboard/test-report/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Delete the shard Kind cluster
         # The saved profile proves nonce and node identity before deletion;

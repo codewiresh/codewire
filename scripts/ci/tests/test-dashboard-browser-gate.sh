@@ -6,6 +6,7 @@ AUTH_SETUP="$ROOT/apps/dashboard/e2e/auth.setup.ts"
 AUTH_FLOWS="$ROOT/apps/dashboard/e2e/ssr-dashboard.auth.ssr.ts"
 PLAYWRIGHT_CONFIG="$ROOT/apps/dashboard/playwright.config.ts"
 ENVIRONMENTS="$ROOT/apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts"
+LIFECYCLE="$ROOT/apps/dashboard/e2e/ssr-dashboard.environment-lifecycle.ssr.ts"
 SECRETS_PRESETS="$ROOT/apps/dashboard/e2e/ssr-dashboard.secrets-presets.ssr.ts"
 GOVERNANCE="$ROOT/apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts"
 CREDENTIALS="$ROOT/apps/dashboard/e2e/ssr-dashboard.credentials.ssr.ts"
@@ -280,9 +281,9 @@ grep -Fq -- '"$playwright" test --config "$ROOT/apps/dashboard/playwright.config
   fail 'Kind browser wrapper does not thread the dashboard worker count'
 
 grep -Fq 'creates, runs, exposes a port, stops, starts, and destroys through real Kind' \
-  "$ENVIRONMENTS" || fail 'real environment lifecycle browser proof is missing'
+  "$LIFECYCLE" || fail 'real environment lifecycle browser proof is missing'
 if rg -n 'SSR_ENVIRONMENT_LIFECYCLE|requires the coherent local Kind sandbox worker' \
-    "$ENVIRONMENTS"; then
+    "$ENVIRONMENTS" "$LIFECYCLE"; then
   fail 'real environment lifecycle browser proof is still opt-in'
 fi
 
@@ -317,6 +318,7 @@ for spec in \
   ssr-dashboard.organization.ssr.ts \
   ssr-dashboard.governance.ssr.ts \
   ssr-dashboard.environments.ssr.ts \
+  ssr-dashboard.environment-lifecycle.ssr.ts \
   ssr-dashboard.secrets-presets.ssr.ts \
   ssr-dashboard.billing-admin.ssr.ts; do
   [ -f "$ROOT/apps/dashboard/e2e/$spec" ] ||

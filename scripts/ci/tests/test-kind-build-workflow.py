@@ -465,6 +465,30 @@ class WorkflowContractTests(unittest.TestCase):
             edge["steps"].index(upload),
             edge["steps"].index(named_step(edge, "Delete the shard Kind cluster")),
         )
+        # Every dashboard run, green or red, uploads its JSON report: per-test
+        # durations, retries and outcomes (#2974).
+        report = named_step(edge, "Upload dashboard browser JSON report")
+        self.assertEqual(report["uses"], UPLOAD)
+        self.assertEqual(
+            report["if"],
+            "${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted'"
+            " && contains(needs.verification-selection.outputs.selection, '|kind|')"
+            " && matrix.shard.slug == 'dashboard' }}",
+        )
+        self.assertEqual(report["with"], {
+            "name": "kind-dashboard-json-report-${{ github.run_id }}-${{ matrix.shard.slug }}",
+            "path": "apps/dashboard/test-report/",
+            "if-no-files-found": "ignore",
+            "retention-days": 14,
+        })
+        config = (ROOT / "apps/dashboard/playwright.config.ts").read_text(encoding="utf-8")
+        self.assertIn(
+            '["json", { outputFile: path.join(dashboardDir, "test-report/results.json") }]', config,
+        )
+        self.assertLess(
+            edge["steps"].index(report),
+            edge["steps"].index(named_step(edge, "Delete the shard Kind cluster")),
+        )
 
         # Edge static verification needs no cluster: it runs once, in tooling,
         # so an edge-only selection starts no Kind leg. The locked browser

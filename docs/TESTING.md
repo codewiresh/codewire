@@ -42,8 +42,7 @@ scripts/dev/kind/test-dashboard-kind.sh \
   apps/dashboard/e2e/ssr-dashboard.auth.ssr.ts
 
 scripts/dev/kind/test-dashboard-kind.sh \
-  apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts \
-  --grep 'creates, runs, exposes a port'
+  apps/dashboard/e2e/ssr-dashboard.environment-lifecycle.ssr.ts
 ```
 
 The gate requires the repository-pinned Chromium version that matches
@@ -90,20 +89,31 @@ failures.
 
 | Project | Purpose |
 |---|---|
-| `setup` | Performs a real Rust form login, proves the dashboard and scoped HttpOnly session cookie, then writes local storage state |
+| `setup` | Performs a real Rust form login and proves the dashboard and scoped HttpOnly session cookie |
 | `dashboard-ssr-desktop` | Runs the complete server-rendered behavior suite at desktop size |
-| `dashboard-ssr-mobile` | Runs the responsive behavior and visual contracts; desktop-only secret and lifecycle mutations are explicitly skipped |
+| `dashboard-ssr-mobile` | Runs the specs that check the mobile layout, listed in `e2e/helpers/mobile-layout.ts`; their desktop-only secret and lifecycle mutations are explicitly skipped |
 | `design-fixtures-desktop`, `design-fixtures-mobile` | Run the editable design-fixture specs at 1440 and 390 pixels; defined only when `CODEWIRE_DESIGN_ORIGIN` is set, as `make design-check` does |
 
-The desktop and mobile projects depend on `setup`. There are no `chromium`,
-`lifecycle`, `signup`, `billing`, or `oidc` projects; those were names from the
-retired React suite.
+No project depends on `setup`: every spec signs in as its own worker identity,
+so nothing waits for the shared login. A spec belongs in the mobile project
+when one of its tests checks the mobile layout; `e2e/helpers/mobile-layout.test.ts`
+fails when a spec with a mobile check is missing from the list, or a listed
+spec no longer has one. There are no `chromium`, `lifecycle`, `signup`,
+`billing`, or `oidc` projects; those were names from the retired React suite.
+
+Every run writes a JSON report, with each test's duration, retries and
+outcome, to `apps/dashboard/test-report/results.json`. The CI dashboard leg
+uploads it from every run, green or red.
 
 ## Parallel workers and identity isolation
 
-The config keeps `workers: 1`; `--workers=N` opts in per run (start at 2, with
-4 as the ceiling — sandbox pods contend on a small Kind cluster). Switching CI
-to pass the flag is a deliberate follow-up, not part of the default local run.
+The config keeps `workers: 1` for direct runs; `--workers=N` opts in, with 4 as
+the ceiling (sandbox pods contend on a small Kind cluster). The CI dashboard
+leg and `make kind-test` run four workers; `CODEWIRE_KIND_DASHBOARD_WORKERS`
+sets another count, and the full local gate keeps one. The real Sandbox
+lifecycle (`ssr-dashboard.environment-lifecycle.ssr.ts`) has its own spec and
+organization, so it runs on one worker while the serial Create checks run on
+another.
 
 Each Playwright worker process acts as its own master-class seeded identity,
 `e2e-worker-<workerIndex>@codewire.sh`. Global setup seeds identities up to the

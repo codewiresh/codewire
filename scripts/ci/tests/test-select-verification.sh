@@ -4591,6 +4591,7 @@ SUPPORT = {
     "Download exact smoke producer output", "Download exact daemon producer output",
     "Write the pinned workspace record",
     "Upload dashboard browser test results on failure",
+    "Upload dashboard browser JSON report",
     "Delete the shard Kind cluster", "Export verified workspace", "Upload successful workspace output",
     "Export non-promotable product images", "Upload successful product output",
     "Export non-promotable daemon image", "Upload successful daemon output",

@@ -49,6 +49,7 @@ coverage/
 playwright-report/
 test-results/
 apps/dashboard/playwright/.auth/
+apps/dashboard/test-report/
 
 # Go
 apps/worker/worker

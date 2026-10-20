@@ -320,6 +320,9 @@ if [[ " ${selected[*]} " == *" dashboard-browser "* ]] \
   (cd "$ROOT" && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts) \
     || die 'the frozen dashboard dependency install failed'
 fi
+# Its per-worker identities (#2381) let the browser suite run four workers, as
+# CI does; CODEWIRE_KIND_DASHBOARD_WORKERS sets another count (#2974).
+export CODEWIRE_KIND_DASHBOARD_WORKERS="${CODEWIRE_KIND_DASHBOARD_WORKERS:-4}"
 
 started=$SECONDS
 for service in "${SERVICES[@]}"; do

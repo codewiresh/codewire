@@ -187,6 +187,7 @@ with (pathlib.Path(os.environ["FAKE_STATE"]) / "calls").open("a") as log:
         "kubeconfig":os.environ.get("KUBECONFIG"), "smokes":os.environ.get("CARGO_CI_DIR"),
         "lock_fd":os.environ.get("KIND_PROFILE_LOCK_FD"),
         "credential_stages":os.environ.get("KIND_CREDENTIAL_STAGES"),
+        "dashboard_workers":os.environ.get("CODEWIRE_KIND_DASHBOARD_WORKERS"),
         "postgres_port":os.environ.get("KIND_POSTGRES_HOST_PORT")}) + "\n")
 sys.exit(int(os.environ.get("FAKE_SUITE_STATUS", "0")))
 '''
@@ -1165,6 +1166,18 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
                                  FAKE_FRONTEND_URL="http://127.0.0.1:31100")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([call["args"] for call in self.calls("suite")], [["suite", "dashboard-browser"]])
+
+    def test_browser_suite_runs_four_workers_unless_told_otherwise(self) -> None:
+        # #2974: the per-worker identities let a local run use four workers, as CI does.
+        (self.tree / "apps/dashboard/node_modules/.bin").mkdir(parents=True)
+        self.write_program(self.tree / "apps/dashboard/node_modules/.bin/playwright", "#!/bin/sh\n")
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="dashboard-browser",
+                                 FAKE_FRONTEND_URL="http://127.0.0.1:31100")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="dashboard-browser",
+                                 FAKE_FRONTEND_URL="http://127.0.0.1:31100", CODEWIRE_KIND_DASHBOARD_WORKERS="2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([call["dashboard_workers"] for call in self.calls("suite")], ["4", "2"])
 
     def test_credential_stages_reach_only_the_credentials_suite(self) -> None:
         # #2890: rerun one credentials stage; it never reads as a green suite.
