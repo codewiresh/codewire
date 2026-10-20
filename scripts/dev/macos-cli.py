@@ -32,7 +32,7 @@ PUBLIC_GIT = {
     "https://github.com/noeljackson/av.git": "av",
     "https://github.com/microsoft/regorus": "regorus",
 }
-SMOKE = [[], ["env"], ["run"], ["list"], ["mesh"], ["network"]]
+SMOKE = [[], ["create"], ["run"], ["list"], ["mesh"], ["network"]]
 SSH_OPTIONS = ["-oBatchMode=yes", "-oForwardAgent=no", "-oConnectTimeout=10",
                "-oServerAliveInterval=10", "-oServerAliveCountMax=2"]
 VZ_FIXTURES = {
