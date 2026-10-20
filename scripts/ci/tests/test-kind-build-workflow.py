@@ -181,7 +181,7 @@ class WorkflowContractTests(unittest.TestCase):
             "PUSH_BEFORE_SHA": "${{ github.event.before }}",
         })
         for event, expected in (("pull_request", "pr-base"), ("push", "push-before"),
-                                ("workflow_dispatch", "")):
+                                ("workflow_dispatch", ""), ("schedule", "")):
             with self.subTest(event=event):
                 script = choose["run"].replace(
                     "python3 -B scripts/ci/verify/kind-build-artifacts.py workspace-source",
@@ -863,6 +863,113 @@ coordinator_ingress_smoke() {
         )
         self.assertEqual(refused.returncode, 1)
         self.assertEqual(refused.stdout, "")
+
+
+def actions_value(template: str, context: dict[str, str]):
+    """TEMPLATE as Actions renders it, for the forms the concurrency block and
+    runner labels use: github context values, quoted strings, ==, && and ||.
+    A value that is one whole expression keeps its type."""
+    def evaluate(expression: str):
+        python = re.sub(r"github\.[a-z_]+", lambda match: repr(context[match.group(0)]), expression)
+        python = python.replace("&&", " and ").replace("||", " or ")
+        if not re.fullmatch(r"(?:\s|'[^']*'|==|!=|and|or|\(|\))*", python):
+            raise AssertionError(f"unsupported expression {expression!r}")
+        return eval(python, {"__builtins__": {}}, {})  # noqa: S307 - checked above
+    whole = re.fullmatch(r"\$\{\{(.*?)\}\}", template.strip())
+    if whole:
+        return evaluate(whole.group(1))
+    return re.sub(r"\$\{\{(.*?)\}\}", lambda match: str(evaluate(match.group(1))), template)
+
+
+class MainPushDeferralContractTests(unittest.TestCase):
+    """Kind leaves the push to main for a schedule (owner decision 2026-10-20).
+
+    The selector drops Kind from a push to main while
+    scripts/ci/select/main-push-switch.sh says so (test-select-verification.sh
+    proves the selections). The workflow runs Kind every four hours against the
+    latest main, in a concurrency group of its own, on the shared Heavy pool.
+    """
+
+    EVENTS = {
+        "push": "refs/heads/main",
+        "pull_request": "refs/pull/7/head",
+        "schedule": "refs/heads/main",
+        "workflow_dispatch": "refs/heads/main",
+    }
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+    def context(self, event: str) -> dict[str, str]:
+        return {"github.event_name": event, "github.ref": self.EVENTS[event],
+                "github.workflow": self.workflow["name"]}
+
+    def test_kind_is_scheduled_every_four_hours(self) -> None:
+        triggers = self.workflow.get("on", self.workflow.get(True))
+        self.assertEqual(triggers["schedule"], [{"cron": "15 */4 * * *"}])
+        self.assertEqual(triggers["push"], {"branches": ["main"]})
+        self.assertIn("workflow_dispatch", triggers)
+
+    def test_scheduled_and_dispatched_runs_never_cancel_or_wait_for_main(self) -> None:
+        concurrency = self.workflow["concurrency"]
+        rendered = {
+            event: (actions_value(concurrency["group"], self.context(event)),
+                    actions_value(concurrency["cancel-in-progress"], self.context(event)))
+            for event in self.EVENTS
+        }
+        self.assertEqual(rendered, {
+            # Main runs finish and queue one behind another.
+            "push": ("ci-CI-refs/heads/main", False),
+            # A newer pull-request push supersedes its older run.
+            "pull_request": ("ci-CI-refs/pull/7/head", True),
+            # A newer schedule supersedes an older scheduled run only.
+            "schedule": ("ci-CI-refs/heads/main-schedule", True),
+            # A dispatched release candidate never cancels or waits for main.
+            "workflow_dispatch": ("ci-CI-refs/heads/main-dispatch", False),
+        })
+        # On main, a push, a schedule and a dispatch each have their own
+        # group, so a long Kind run never holds a push to main behind it.
+        on_main = [rendered[event][0] for event in ("push", "schedule", "workflow_dispatch")]
+        self.assertEqual(len(set(on_main)), 3, on_main)
+
+    def test_scheduled_kind_takes_the_shared_heavy_pool(self) -> None:
+        for job_id in ("kind-workspace", "kind-product", "kind-daemon", "kind-smokes", "edge-kind"):
+            with self.subTest(job=job_id):
+                runs_on = self.workflow["jobs"][job_id]["runs-on"]
+                self.assertEqual(actions_value(runs_on, self.context("schedule")), "ci-heavy")
+                self.assertEqual(actions_value(runs_on, self.context("push")), "ci-heavy-main")
+
+    def test_only_a_scheduled_run_reads_its_baseline(self) -> None:
+        steps = self.workflow["jobs"]["verification-selection"]["steps"]
+        ids = [step.get("id") for step in steps]
+        baseline = steps[ids.index("schedule-baseline")]
+        self.assertLess(ids.index("schedule-baseline"), ids.index("select"))
+        self.assertEqual(baseline["if"], "${{ github.event_name == 'schedule' }}")
+        self.assertEqual(baseline["env"], {"GITEA_TOKEN": "${{ github.token }}"})
+        self.assertEqual(
+            baseline["run"],
+            "python3 -I -B scripts/ci/select/last-scheduled-run.py --workflow ci.yaml --github-output")
+        select = steps[ids.index("select")]
+        self.assertEqual(select["env"]["SCHEDULE_BASELINE_SHA"],
+                         "${{ steps.schedule-baseline.outputs.schedule_baseline }}")
+        # The selection step's own token is still a push's alone.
+        self.assertEqual(select["env"]["GITEA_TOKEN"],
+                         "${{ github.event_name == 'push' && github.token || '' }}")
+
+    def test_the_switch_is_one_checked_in_setting(self) -> None:
+        switch = ROOT / "scripts/ci/select/main-push-switch.sh"
+        settings = re.findall(r"^([A-Z_]+)=(.*)$", switch.read_text(encoding="utf-8"), re.M)
+        self.assertEqual(len(settings), 1)
+        self.assertEqual(settings[0][0], "MAIN_PUSH_RUNS_KIND_AND_DRY_RUN")
+        self.assertIn(settings[0][1], ("true", "false"))
+        selector = SELECTOR.read_text(encoding="utf-8")
+        self.assertIn('main_push_switch="$selector_root/scripts/ci/select/main-push-switch.sh"', selector)
+        deferral = (ROOT / "scripts/ci/release/dry-run-deferral.sh").read_text(encoding="utf-8")
+        self.assertIn('source "$ROOT/scripts/ci/select/main-push-switch.sh"', deferral)
+        # Neither workflow carries a second copy of the setting.
+        for workflow in (WORKFLOW, ROOT / ".gitea/workflows/cw-release-dry-run.yaml"):
+            self.assertNotIn("MAIN_PUSH_RUNS_KIND_AND_DRY_RUN", workflow.read_text(encoding="utf-8"))
 
 
 class SelectorContractTests(unittest.TestCase):

@@ -10,6 +10,11 @@ name: cw four-target dry run
 # unsigned four-target delivery, which is verified. Nothing is signed or
 # published, and no job holds a credential.
 #
+# Temporarily (owner decision 2026-10-20) a push to main builds nothing while
+# scripts/ci/select/main-push-switch.sh says so. A dispatch on a release
+# candidate and the four-hourly schedule still build, and the release tag
+# receipt needs a dry run of the exact candidate.
+#
 # The macOS arm64 cw embeds the local VM runtime (#2539). When one of the
 # runtime's inputs changed (local_runtime_parts.py RUNTIME_INPUTS), or on
 # dispatch, the runtime is built as a release builds it but only from cached
@@ -83,14 +88,24 @@ on:
       - '.gitea/workflows/cli-release.yaml'
       - '.gitea/workflows/cw-release-dry-run.yaml'
   workflow_dispatch:
+  # Every four hours against the latest main: builds only when one of the push
+  # paths above changed since the last successful scheduled run (see "Decide
+  # whether this run builds"), while scripts/ci/select/main-push-switch.sh
+  # defers the dry run on a push to main. While it does not, the schedule
+  # builds nothing.
+  schedule:
+    - cron: '45 */4 * * *'
 
-# A newer main push cancels this run, queued or building (#2893); a manual
-# dispatch never cancels another run. A run that starts after main moved on
-# still builds nothing when a newer run covers it (see "Skip a superseded
-# commit"). Tagged releases run cli-release.yaml, which this never touches.
+# A newer main push cancels a push run, queued or building (#2893), and a
+# newer scheduled run cancels a scheduled one. Pushes, schedules and manual
+# dispatches each have their own group, so none cancels or waits for another
+# kind; a dispatch never cancels another run. A run that starts after main
+# moved on still builds nothing when a newer run covers it (see "Skip a
+# superseded commit"). Tagged releases run cli-release.yaml, which this never
+# touches.
 concurrency:
-  group: cw-release-dry-run-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  group: cw-release-dry-run-${{ github.ref }}${{ github.event_name == 'schedule' && '-schedule' || github.event_name == 'workflow_dispatch' && '-dispatch' || '' }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
 
 env:
   CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
@@ -144,8 +159,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Only a scheduled run reads the repository's runs, with the job token.
+      - name: Find the last successful scheduled dry run
+        id: schedule-baseline
+        if: github.event_name == 'schedule'
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/last-scheduled-run.py --workflow cw-release-dry-run.yaml --github-output
+
+      # A deferred push or an unchanged schedule builds nothing: the
+      # supersession step below is skipped, so every builder job skips.
+      - name: Decide whether this run builds
+        id: deferral
+        env:
+          SCHEDULE_BASELINE_SHA: ${{ steps.schedule-baseline.outputs.schedule_baseline }}
+        run: scripts/ci/release/dry-run-deferral.sh "$GITHUB_SHA"
+
       - name: Skip a superseded commit
         id: canonical
+        if: steps.deferral.outputs.build == 'true'
         env:
           BEFORE: ${{ github.event.before }}
         run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"

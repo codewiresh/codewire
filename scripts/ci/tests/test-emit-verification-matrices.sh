@@ -219,7 +219,23 @@ for group in standard rust_shards rust_transport database services_control \
     services_runtime cw_release_assets workspace_image; do
   assert_output "$quick_kind_output" "$group" false
 done
-# The same artifact facts without pr_quick keep dispatching their groups.
+# A scheduled run (owner decision 2026-10-20) dispatches the Kind shards
+# alone when it selected Kind, and nothing when it did not, whatever the
+# artifact facts and the workspace owner say.
+for owner in ci support-images; do
+  scheduled_kind_output="$(WORKSPACE_IMAGE_OWNER="$owner" KIND_WORKSPACE_SOURCE=pinned \
+    emit '|valid:v3|kind|scheduled|complete|' fallback true true true)"
+  assert_output "$scheduled_kind_output" edge_kind true
+  scheduled_nothing_output="$(WORKSPACE_IMAGE_OWNER="$owner" \
+    emit '|valid:v3|scheduled|complete|' fallback true true true)"
+  for group in policy standard tooling rust_compile rust_shards rust_transport database \
+      services_control services_runtime cw_release_assets workspace_image; do
+    assert_output "$scheduled_kind_output" "$group" false
+    assert_output "$scheduled_nothing_output" "$group" false
+  done
+  assert_output "$scheduled_nothing_output" edge_kind false
+done
+# The same artifact facts without pr_quick or scheduled keep dispatching their groups.
 full_artifact_output="$(emit '|valid:v3|policy|policy_shell_omittable|complete|' fallback true true true)"
 for group in policy rust_compile rust_transport cw_release_assets workspace_image; do
   assert_output "$full_artifact_output" "$group" true

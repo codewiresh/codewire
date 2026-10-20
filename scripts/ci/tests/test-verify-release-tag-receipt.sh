@@ -77,21 +77,23 @@ set -euo pipefail
 [ "${FIXTURE_MODE:?}" != api_unavailable ] || exit 1
 [ "$1 $2" = 'actions runs' ] || { echo "unexpected fj command: $*" >&2; exit 2; }
 verb="$3"; shift 3
-repo=codewire; target=''; job=''; output=text
+repo=codewire; target=''; job=''; output=text; workflow=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -R) [ "$2" = origin ] || exit 2; shift 2 ;;
     -r) [ "$2" = codewire/deploy ] || exit 2; repo=deploy; shift 2 ;;
     -H) [ "$2" = git.example.invalid ] || exit 2; shift 2 ;;
-    --head|--workflow|--event|--status|-L) shift 2 ;;
+    --workflow) workflow="$2"; shift 2 ;;
+    --head|--event|--status|-L) shift 2 ;;
     --job) job="$2"; shift 2 ;;
     --output) output="$2"; shift 2 ;;
     [0-9]*) target="$1"; shift ;;
     *) echo "unexpected fj argument: $1" >&2; exit 2 ;;
   esac
 done
+head="$FIXTURE_TAG_COMMIT"
 ci_status=success
-[ "$FIXTURE_MODE" != failed_ci ] || ci_status=failure
+case "$FIXTURE_MODE" in failed_ci|scheduled_masks_failed_push) ci_status=failure ;; esac
 required_status=success
 [ "$FIXTURE_MODE" != failed_required ] || required_status=failure
 dev_status=success
@@ -101,23 +103,90 @@ dev_source="$FIXTURE_TAG_COMMIT"
 # A superseded run, or one that reused a tested tree, dispatches no group.
 group_status=success
 case "$FIXTURE_MODE" in superseded|dispatched_nothing|tested_tree) group_status=skipped ;; esac
+
+# ci.yaml on the tagged commit: the push run 701, whose Kind a push to main
+# deferred, and a later Kind run: scheduled 711 (which Forgejo lists with
+# event push) or dispatched 721.
+run() { # ID EVENT STATUS
+  printf '{"id":%s,"head_sha":"%s","workflow":"ci.yaml","status":"%s","event":"%s","ref":"main"}' \
+    "$1" "$head" "$3" "$2"
+}
+job() { # ID RUN NAME STATUS
+  printf '{"id":%s,"run_id":%s,"name":"%s","status":"%s","attempt":1}' "$1" "$2" "$3" "$4"
+}
+kind_run=711; kind_event=push
+[ "$FIXTURE_MODE" != kind_from_dispatch ] || { kind_run=721; kind_event=workflow_dispatch; }
+kind_status=success; shard_status=success; other_shard=success
+case "$FIXTURE_MODE" in
+  kind_shard_failed) other_shard=failure ;;
+  kind_run_failed) kind_status=failure; other_shard=failure ;;
+  kind_shards_skipped) shard_status=skipped; other_shard=skipped ;;
+esac
+dry_assemble=success
 case "$repo:$verb:$target" in
   codewire:list:)
     [ "$output" = json ]
-    printf '{"schema_version":1,"total_count":1,"runs":[{"id":701,"head_sha":"%s","workflow":"ci.yaml","status":"%s","event":"push","ref":"main"}]}' \
-      "$FIXTURE_TAG_COMMIT" "$ci_status"
+    case "$workflow" in
+      ci.yaml)
+        runs="$(run 701 push "$ci_status")"
+        [ "$FIXTURE_MODE" = no_kind_run ] || runs="$runs,$(run "$kind_run" "$kind_event" "$kind_status")"
+        ;;
+      cw-release-dry-run.yaml)
+        [ "$FIXTURE_MODE" != dry_runs_unavailable ] || exit 1
+        # 901: a deferred push run, which built nothing; 902: a dispatch.
+        runs="$(run 901 push success | sed 's/"ci.yaml"/"cw-release-dry-run.yaml"/')"
+        [ "$FIXTURE_MODE" = no_dry_run ] \
+          || runs="$runs,$(run 902 workflow_dispatch success | sed 's/"ci.yaml"/"cw-release-dry-run.yaml"/')"
+        ;;
+      *) exit 2 ;;
+    esac
+    printf '{"schema_version":1,"total_count":2,"runs":[%s]}' "$runs"
     ;;
   codewire:view:701)
-    printf '{"schema_version":1,"run":{"id":701,"head_sha":"%s","workflow":"ci.yaml","status":"%s","event":"push","ref":"main"},"jobs":[{"id":703,"run_id":701,"name":"Verification selection","status":"success","attempt":1},{"id":704,"run_id":701,"name":"Policy verification","status":"%s","attempt":1},{"id":705,"run_id":701,"name":"Workspace cache experiment (cold)","status":"success","attempt":1},{"id":702,"run_id":701,"name":"Required verification","status":"%s","attempt":1}]}' \
-      "$FIXTURE_TAG_COMMIT" "$ci_status" "$group_status" "$required_status"
+    printf '{"schema_version":1,"run":%s,"jobs":[%s,%s,%s,%s,%s,%s]}' \
+      "$(run 701 push "$ci_status")" \
+      "$(job 703 701 'Verification selection' success)" \
+      "$(job 704 701 'Policy verification' "$group_status")" \
+      "$(job 705 701 'Workspace cache experiment (cold)' success)" \
+      "$(job 706 701 'Edge / Kind verification (environment)' skipped)" \
+      "$(job 707 701 'Edge / Kind verification (dashboard)' skipped)" \
+      "$(job 702 701 'Required verification' "$required_status")"
     ;;
-  codewire:logs:701)
+  codewire:view:711|codewire:view:721)
+    printf '{"schema_version":1,"run":%s,"jobs":[%s,%s,%s,%s,%s]}' \
+      "$(run "$target" "$kind_event" "$kind_status")" \
+      "$(job "${target%1}3" "$target" 'Verification selection' success)" \
+      "$(job "${target%1}4" "$target" 'Policy verification' skipped)" \
+      "$(job "${target%1}6" "$target" 'Edge / Kind verification (environment)' "$shard_status")" \
+      "$(job "${target%1}7" "$target" 'Edge / Kind verification (dashboard)' "$other_shard")" \
+      "$(job "${target%1}2" "$target" 'Required verification' "$kind_status")"
+    ;;
+  codewire:view:901|codewire:view:902)
+    if [ "$target" = 901 ]; then assemble=skipped; else assemble="$dry_assemble"; fi
+    printf '{"schema_version":1,"run":%s,"jobs":[%s,%s,%s]}' \
+      "$(run "$target" "$([ "$target" = 901 ] && echo push || echo workflow_dispatch)" success \
+        | sed 's/"ci.yaml"/"cw-release-dry-run.yaml"/')" \
+      "$(job "${target}0" "$target" 'Refuse anything but protected main' success)" \
+      "$(job "${target}1" "$target" 'Skip a superseded commit' success)" \
+      "$(job "${target}2" "$target" 'Assemble and verify the unsigned four-target delivery' "$assemble")"
+    ;;
+  codewire:logs:701|codewire:logs:711|codewire:logs:721)
     case "$job" in
-      703)
+      703|713|723)
         [ "$FIXTURE_MODE" != selection_log_unavailable ] || exit 1
-        printf '== job 703 Verification selection (success) ==\r\n'
-        printf '2026-10-13T12:53:12.0000000Z selection=|valid:v3|policy|complete|\r\n'
-        if [ "$FIXTURE_MODE" = superseded ]; then
+        printf '== job %s Verification selection (success) ==\r\n' "$job"
+        if [ "$target" = 701 ]; then
+          printf '2026-10-20T12:53:12.0000000Z classification=changed\r\n'
+          printf '2026-10-20T12:53:12.0000000Z selection=|valid:v3|edge_kind|policy|complete|\r\n'
+          printf '2026-10-20T12:53:12.1000000Z main push: Kind deferred to the scheduled or dispatched Kind run (owner decision 2026-10-20)\r\n'
+        elif [ "$target" = 711 ]; then
+          printf '2026-10-20T16:15:03.0000000Z classification=scheduled\r\n'
+          printf '2026-10-20T16:15:03.0000000Z selection=|valid:v3|kind|scheduled|complete|\r\n'
+        else
+          printf '2026-10-20T13:40:00.0000000Z classification=requested\r\n'
+          printf '2026-10-20T13:40:00.0000000Z selection=|valid:v3|edge_kind|kind|complete|\r\n'
+        fi
+        if [ "$FIXTURE_MODE" = superseded ] && [ "$target" = 701 ]; then
           printf "2026-10-13T12:53:14.6412715Z superseded by %s: main's queued run verifies this commit's changes\r\n" "$FIXTURE_MAIN_SHA"
           printf '2026-10-13T12:53:14.6527220Z superseded main commit: no capability group is dispatched\r\n'
         fi
@@ -132,6 +201,17 @@ case "$repo:$verb:$target" in
         ;;
       *) exit 2 ;;
     esac
+    ;;
+  codewire:logs:902)
+    [ "$job" = 9022 ] || exit 2
+    printf '== job 9022 Assemble and verify the unsigned four-target delivery (success) ==\r\n'
+    if [ "$FIXTURE_MODE" = dry_run_superseded ]; then
+      printf "2026-10-20T14:01:00.0000000Z main is now %s; the queued dry run of %s builds this commit's changes\r\n" \
+        "$FIXTURE_MAIN_SHA" "$FIXTURE_MAIN_SHA"
+    else
+      printf '2026-10-20T14:01:00.0000000Z only a push to main can be superseded; this run builds\r\n'
+      printf '2026-10-20T14:20:00.0000000Z cw-release: verified targets=4 version=v0.0.0 runtime_equal=true signed=false\r\n'
+    fi
     ;;
   deploy:list:)
     run_status=success
@@ -179,6 +259,7 @@ run_case() {
     PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$tag_object" \
     PREFLIGHT_PUSH_REMOTE_NAME=origin \
     "$CHECK" 2>&1)" || fail "$name checker returned failure"
+  case_output="$output"
   if grep -Fq 'tea must not be used' <<<"$output"; then
     printf '%s\n' "$output" >&2
     fail "$name invoked the legacy tea CLI"
@@ -213,6 +294,31 @@ run_case main_superseded superseded v1.2.3 fallback exact-main-ci-superseded
 run_case not_on_main success v1.2.4 fallback release-tag-not-on-canonical-main
 # Canonical main this checkout does not have (and cannot fetch) is unproven.
 run_case stale_main stale_main v1.2.2 fallback canonical-main-commit-unavailable
+
+# Kind and the release dry run of the exact commit (owner decision
+# 2026-10-20). A push to main defers both, so a scheduled or dispatched run
+# must have run them green. The accepted cases above took Kind from scheduled
+# run 711 and the dry run from dispatched run 902, and name both runs.
+run_case accepted_names_runs success v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+for expected in release_tag_run=701 release_tag_kind_run=711 release_tag_dry_run=902 \
+    release_tag_dev_acceptance_run=801; do
+  grep -Fxq "$expected" <<<"$case_output" || fail "accepted receipt does not report $expected"
+done
+grep -Fq '(CI run 701; Kind run 711; dry run 902; Dev acceptance run 801)' <<<"$case_output" \
+  || fail 'accepted receipt message does not name the Kind and dry runs'
+run_case kind_from_dispatch kind_from_dispatch v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+grep -Fxq release_tag_kind_run=721 <<<"$case_output" || fail 'dispatched Kind run was not reported'
+run_case no_kind_run no_kind_run v1.2.3 fallback exact-commit-kind-not-verified
+run_case kind_shard_failed kind_shard_failed v1.2.3 fallback exact-commit-kind-not-verified
+run_case kind_run_failed kind_run_failed v1.2.3 fallback exact-commit-kind-not-verified
+run_case kind_shards_skipped kind_shards_skipped v1.2.3 fallback exact-commit-kind-not-verified
+run_case ancestor_no_kind_run no_kind_run v1.2.2 fallback exact-commit-kind-not-verified
+run_case no_dry_run no_dry_run v1.2.3 fallback exact-commit-dry-run-not-verified
+run_case dry_run_superseded dry_run_superseded v1.2.3 fallback exact-commit-dry-run-not-verified
+run_case dry_runs_unavailable dry_runs_unavailable v1.2.3 fallback exact-commit-dry-runs-unavailable
+# A scheduled run, which Forgejo lists with event push, is never taken for
+# the push run: a failed push run stays failed behind a green schedule.
+run_case scheduled_masks_failed_push scheduled_masks_failed_push v1.2.3 fallback exact-main-ci-not-successful
 
 if grep -qF "tags: ['v*']" "$ROOT/.gitea/workflows/ci.yaml"; then
   fail 'generic CI still runs redundantly for release tags'

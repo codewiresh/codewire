@@ -253,6 +253,17 @@ class MainPushPlanTests(unittest.TestCase):
         self.assertEqual(self.selected(outputs), EVERYTHING)
         self.assertIn("predecessor-run-not-successful", log)
 
+        # A newer scheduled run of the same commit, which Forgejo reports with
+        # event push, checked Kind alone; the push run still decides.
+        scheduled_after_push = FakeForgejo(
+            [run_record(before, run_id=41, trigger_event="push"),
+             run_record(before, run_id=44, trigger_event="schedule")],
+            {41: job_records(41), 44: job_records(44, policy="skipped")},
+        )
+        outputs, log = self.choose(head, before, scheduled_after_push)
+        self.assertEqual(self.selected(outputs), NOTHING)
+        self.assertIn(f"{before} was verified by CI run 41", log)
+
         # A pull-request run of the same commit proves nothing about main.
         pull_request_only = FakeForgejo(
             [run_record(before, event="pull_request", prettyref="#7")], {41: job_records(41)}

@@ -234,6 +234,7 @@ run_policy_core_one() {
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-run-side-by-side.sh
   scripts/ci/tests/test-select-verification.sh
+  python3 -B scripts/ci/tests/test-last-scheduled-run.py
   scripts/ci/tests/test-service-ssh-image-verifier.sh
   scripts/ci/tests/test-shellcheck-policy-domain.sh
   scripts/ci/tests/test-go-source-ownership.sh

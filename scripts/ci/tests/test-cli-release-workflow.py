@@ -126,6 +126,44 @@ def linked_crates(root=ROOT, package="crates/codewire-cli-bin"):
     return seen
 
 
+def actions_value(template, context):
+    """TEMPLATE as Actions renders it, for the expression forms the concurrency
+    blocks use: github context values, quoted strings, ==, && and ||. A value
+    that is one whole expression keeps its type."""
+    def evaluate(expression):
+        python = re.sub(r"github\.[a-z_]+", lambda match: repr(context[match.group(0)]), expression)
+        python = python.replace("&&", " and ").replace("||", " or ")
+        if not re.fullmatch(r"(?:\s|'[^']*'|==|!=|and|or|\(|\))*", python):
+            raise ValueError(f"unsupported expression {expression!r}")
+        return eval(python, {"__builtins__": {}}, {})  # noqa: S307 - checked above
+    whole = re.fullmatch(r"\$\{\{(.*?)\}\}", template.strip())
+    if whole:
+        return evaluate(whole.group(1))
+    return re.sub(r"\$\{\{(.*?)\}\}", lambda match: str(evaluate(match.group(1))), template)
+
+
+def concurrency_by_event(text, events, ref="refs/heads/main", workflow=""):
+    """EVENT -> (group, cancel-in-progress) for the workflow's top-level block."""
+    block = re.search(r"^concurrency:\n  group: (.+)\n  cancel-in-progress: (.+)$", text, re.M)
+    if not block:
+        return {}
+    result = {}
+    for event in events:
+        context = {"github.event_name": event, "github.ref": ref, "github.workflow": workflow}
+        result[event] = (actions_value(block.group(1), context), actions_value(block.group(2), context))
+    return result
+
+
+# Pushes, schedules and dispatches each have their own group. A newer push to
+# main cancels a push run (#2893) and a newer schedule a scheduled run; a
+# dispatch never cancels another run (owner decision 2026-10-20).
+DRY_RUN_CONCURRENCY = {
+    "push": ("cw-release-dry-run-refs/heads/main", True),
+    "schedule": ("cw-release-dry-run-refs/heads/main-schedule", True),
+    "workflow_dispatch": ("cw-release-dry-run-refs/heads/main-dispatch", False),
+}
+
+
 def push_paths(text):
     """The dry run's push paths, in order."""
     block = re.search(r"^    paths:\n((?:      - .+\n)+)", text, re.M)
@@ -884,11 +922,21 @@ def check_dry_run(text, release):
                        ("build-linux-musl", 60), ("build-linux-gnu", 60), ("assemble", 30)):
         found = re.findall(r"^    timeout-minutes: ([0-9]+)$", blocks.get(job, ""), re.M)
         need(found == [str(limit)], f"dry-run job {job} lacks its {limit}-minute limit")
-    # A newer main push cancels a superseded dry run, queued or building
-    # (#2893); a manual dispatch never cancels another run.
-    need("\nconcurrency:\n  group: cw-release-dry-run-${{ github.ref }}\n"
-         "  cancel-in-progress: ${{ github.event_name == 'push' }}\n\n" in text,
-         "a newer main push does not cancel a superseded dry run, or a dispatch cancels one")
+    # A newer main push cancels a superseded push run, queued or building
+    # (#2893), and a newer schedule an older scheduled run. A dispatch never
+    # cancels another run, and none of the three cancels or waits for another.
+    try:
+        groups = concurrency_by_event(text, DRY_RUN_CONCURRENCY)
+    except (KeyError, ValueError, SyntaxError) as error:
+        groups = {"error": str(error)}
+    need(groups == DRY_RUN_CONCURRENCY,
+         f"dry-run concurrency per event is {groups}, not {DRY_RUN_CONCURRENCY}")
+    need(len({group for group, _ in groups.values()}) == 3,
+         "a push, a schedule and a dispatch on main share a dry-run concurrency group")
+    # The schedule (owner decision 2026-10-20): every four hours, building
+    # only when a push path changed since the last successful scheduled run.
+    need("  workflow_dispatch:\n" in text and "  schedule:\n    - cron: '45 */4 * * *'\n" in text,
+         "the dry run is not dispatchable and scheduled every four hours")
     guard, runtime = blocks.get("protected-main", ""), blocks.get("build-runtime-linux", "")
     superseded = blocks.get("superseded", "")
     darwin, assemble = blocks.get("build-darwin", ""), blocks.get("assemble", "")
@@ -958,11 +1006,36 @@ def check_dry_run(text, release):
          "the dry-run assembly runs after a Linux cw build found the commit superseded")
     errors.extend(dry_run_path_errors(text))
     need("    needs: [protected-main]\n    runs-on: ci-lite\n" in superseded
-         and not re.search(r"^\s+if:", superseded, re.M)
+         and not re.search(r"^    if:", superseded, re.M)
          and "      superseded: ${{ steps.canonical.outputs.superseded }}\n" in superseded
          and "          BEFORE: ${{ github.event.before }}\n" in superseded
          and 'run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"' in superseded,
          "the dry run does not decide supersession with the checked-in rule after the main-only guard")
+    # Before supersession, the checked-in rule decides whether the run builds
+    # at all: a push to main only while main-push-switch.sh says so (owner
+    # decision 2026-10-20), a schedule only when a push path changed since the
+    # last successful scheduled run. A run that builds nothing skips the
+    # supersession step, so every builder job skips.
+    decided = steps(superseded)
+    need([name for name, _ in decided][1:] == [
+            "Find the last successful scheduled dry run", "Decide whether this run builds",
+            "Skip a superseded commit"],
+         "the dry run does not find the schedule baseline, then decide whether it builds, before supersession")
+    decided = dict(decided)
+    need("        id: schedule-baseline\n        if: github.event_name == 'schedule'\n        env:\n"
+         "          GITEA_TOKEN: ${{ github.token }}\n        run: python3 -I -B "
+         "scripts/ci/select/last-scheduled-run.py --workflow cw-release-dry-run.yaml --github-output"
+         in decided.get("Find the last successful scheduled dry run", "")
+         and text.count("${{ github.token }}") == 1,
+         "the dry run reads its last scheduled run other than once, on a schedule, with the job token")
+    need("        id: deferral\n        env:\n"
+         "          SCHEDULE_BASELINE_SHA: ${{ steps.schedule-baseline.outputs.schedule_baseline }}\n"
+         '        run: scripts/ci/release/dry-run-deferral.sh "$GITHUB_SHA"'
+         in decided.get("Decide whether this run builds", ""),
+         "the dry run does not decide whether it builds with the checked-in rule and the schedule baseline")
+    need("        id: canonical\n        if: steps.deferral.outputs.build == 'true'\n"
+         in decided.get("Skip a superseded commit", ""),
+         "a deferred or unchanged dry run still reaches the builders")
     # The runtime is built when one of its inputs changed, from cached slow
     # parts only; otherwise each side checks its slow parts are cached.
     select = dict(steps(runtime)).get("Select the local runtime check", "")
@@ -1080,12 +1153,34 @@ DRY_RUN_MUTATIONS = {
     "dry run with an unbounded protoc download": lambda t: t.replace(
         "          scripts/ci/release/fetch-pinned.sh \"https://github.com/protocolbuffers",
         "          curl -fsSL -o \"$HOME/protoc.zip\" \"https://github.com/protocolbuffers", 1),
-    "dry run a dispatch can cancel": lambda t: t.replace(
-        "  cancel-in-progress: ${{ github.event_name == 'push' }}\n", "  cancel-in-progress: true\n", 1),
-    "dry run a newer push never cancels": lambda t: t.replace(
-        "  cancel-in-progress: ${{ github.event_name == 'push' }}\n", "  cancel-in-progress: false\n", 1),
-    "dry run without a concurrency group": lambda t: t.replace(
-        "  group: cw-release-dry-run-${{ github.ref }}\n", "", 1),
+    "dry run a dispatch can cancel": lambda t: re.sub(
+        r"^  cancel-in-progress: .*\n", "  cancel-in-progress: true\n", t, count=1, flags=re.M),
+    "dry run a newer push never cancels": lambda t: re.sub(
+        r"^  cancel-in-progress: .*\n", "  cancel-in-progress: ${{ github.event_name == 'schedule' }}\n", t,
+        count=1, flags=re.M),
+    "dry run a newer schedule never cancels": lambda t: re.sub(
+        r"^  cancel-in-progress: .*\n", "  cancel-in-progress: ${{ github.event_name == 'push' }}\n", t,
+        count=1, flags=re.M),
+    "dry run without a concurrency group": lambda t: re.sub(r"^  group: .*\n", "", t, count=1, flags=re.M),
+    "schedule shares the push group": lambda t: t.replace(
+        "github.event_name == 'schedule' && '-schedule' || ", "", 1),
+    "dispatch shares the push group": lambda t: t.replace(
+        "github.event_name == 'workflow_dispatch' && '-dispatch' || ", "", 1),
+    "no schedule": lambda t: t.replace("  schedule:\n    - cron: '45 */4 * * *'\n", "", 1),
+    "deferred push still builds": lambda t: in_job(
+        t, "superseded", "        if: steps.deferral.outputs.build == 'true'\n", ""),
+    "deferral without the checked-in rule": lambda t: t.replace(
+        'run: scripts/ci/release/dry-run-deferral.sh "$GITHUB_SHA"', 'run: echo build=true >> "$GITHUB_OUTPUT"', 1),
+    "schedule baseline read on every event": lambda t: t.replace(
+        "        id: schedule-baseline\n        if: github.event_name == 'schedule'\n",
+        "        id: schedule-baseline\n", 1),
+    "schedule baseline of another workflow": lambda t: t.replace(
+        "last-scheduled-run.py --workflow cw-release-dry-run.yaml", "last-scheduled-run.py --workflow ci.yaml", 1),
+    "deferral without the schedule baseline": lambda t: t.replace(
+        "          SCHEDULE_BASELINE_SHA: ${{ steps.schedule-baseline.outputs.schedule_baseline }}\n", "", 1),
+    "job token beyond the schedule baseline": lambda t: in_job(
+        t, "assemble", "    runs-on: ci-protected\n",
+        "    runs-on: ci-protected\n    env:\n      GITEA_TOKEN: ${{ github.token }}\n"),
     "pull requests": lambda t: t.replace("on:\n  push:", "on:\n  pull_request:\n  push:", 1),
     "secret": lambda t: t.replace("    runs-on: ci-protected\n", "    runs-on: ci-protected\n    env:\n"
                                   "      KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}\n", 1),

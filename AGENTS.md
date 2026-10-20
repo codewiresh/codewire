@@ -224,6 +224,24 @@ Rust target); `main` runs the full verification after merge. Label the pull
 request `ci-full` to run that full verification, Kind included, on the pull
 request when such a hosted-only claim needs it.
 
+Temporary rule (owner decision, 2026-10-20): a push to `main` runs no Kind and
+no release dry run. Both still run on a dispatched release candidate, on a pull
+request labelled `ci-full`, and every four hours on a schedule against the
+latest `main` when their inputs changed. A release tag's receipt needs a green
+Kind run and a green dry run of the exact candidate commit. Dispatch both on
+`main` while it is the candidate, then tag the commit those runs report:
+
+```sh
+fj actions dispatch -R origin ci.yaml main -I verification=edge_kind
+fj actions dispatch -R origin cw-release-dry-run.yaml main
+```
+
+The switch is `MAIN_PUSH_RUNS_KIND_AND_DRY_RUN` in
+`scripts/ci/select/main-push-switch.sh`. Set it back to `true` once #2949 is
+fixed, #2970 to #2975 have landed, and the metal CI capacity (infra#1534) is
+live. That restores both on every push to `main` and leaves the schedules
+idle.
+
 Local and hosted policy checks share one checked-in core. Never maintain a
 separate local subset; preserve capability-selected expensive checks. A failing
 guard must fail qualification and prevent successful receipt emission.

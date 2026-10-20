@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[4]
 CORPUS_PATH = ROOT / "scripts/ci/plan/decision-corpus.json"
 SELECTOR = ROOT / "scripts/ci/select/select-verification.sh"
+MAIN_PUSH_SWITCH = ROOT / "scripts/ci/select/main-push-switch.sh"
 EXPECTED_TOP_LEVEL_KEYS = {"schema", "cases"}
 EXPECTED_CASE_KEYS = {"id", "event", "ref", "kind_e2e_opt_in", "paths", "expected"}
 EXPECTED_RESULT_KEYS = {"classification", "selection_tokens", "required_local_mode"}
@@ -133,6 +135,30 @@ def selector_result(case: dict[str, object]) -> dict[str, object]:
     }
 
 
+def main_push_runs_kind() -> bool:
+    values = re.findall(
+        r"^MAIN_PUSH_RUNS_KIND_AND_DRY_RUN=(true|false)$", MAIN_PUSH_SWITCH.read_text(), re.M
+    )
+    if len(values) != 1:
+        raise AssertionError("main-push-switch.sh must set the switch once, to true or false")
+    return values[0] == "true"
+
+
+def expected_result(case: dict[str, object]) -> dict[str, object]:
+    """The corpus decision, with the switch a push to main reads applied.
+
+    The corpus records path decisions, Kind included. While the one switch
+    defers Kind on a push to main (owner decision 2026-10-20), the selector
+    drops kind there and nowhere else.
+    """
+    expected = dict(case["expected"])
+    if case["event"] == "push" and case["ref"] == "refs/heads/main" and not main_push_runs_kind():
+        expected["selection_tokens"] = [
+            token for token in expected["selection_tokens"] if token != "kind"
+        ]
+    return expected
+
+
 class DecisionCorpusTests(unittest.TestCase):
     def test_current_selector_matches_corpus(self) -> None:
         corpus = load_corpus()
@@ -140,7 +166,7 @@ class DecisionCorpusTests(unittest.TestCase):
         for raw_case in corpus["cases"]:
             case = validate_case(raw_case, case_ids)
             with self.subTest(case=case["id"]):
-                self.assertEqual(selector_result(case), case["expected"])
+                self.assertEqual(selector_result(case), expected_result(case))
 
 
 if __name__ == "__main__":

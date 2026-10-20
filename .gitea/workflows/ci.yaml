@@ -23,13 +23,21 @@ on:
         description: Workspace layer cache mode (auto, local, or disabled)
         required: false
         default: local
+  # Every four hours against the latest main: Kind alone, and only when a Kind
+  # input changed since the last successful scheduled run, while
+  # scripts/ci/select/main-push-switch.sh defers Kind on a push to main. While
+  # it does not, the schedule runs nothing.
+  schedule:
+    - cron: '15 */4 * * *'
 
 # A newer push to a pull request supersedes its older run. Runs on main
 # are the post-merge confirmation, so each one finishes; later main runs
-# queue behind it instead of cancelling it.
+# queue behind it instead of cancelling it. Scheduled and dispatched runs
+# have their own groups, so they never cancel or wait for a push to main; a
+# newer scheduled run cancels an older one.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'schedule' && '-schedule' || github.event_name == 'workflow_dispatch' && '-dispatch' || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'schedule' }}
 
 env:
   CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
@@ -59,12 +67,16 @@ env:
 # rejected receipt falls back to the ordinary selected suite.
 # A pull request runs only the quick families (policy, ShellCheck and
 # compiling every Rust target, plus Kind when opted in) unless it carries the
-# ci-full label, which runs what a push to main would. A quick run emits no
-# receipt, so main verifies that change in full after merge.
+# ci-full label, which runs what a push to main would, with Kind. A quick run
+# emits no receipt, so main verifies that change in full after merge.
+# Temporarily (owner decision 2026-10-20) a push to main runs no Kind while
+# scripts/ci/select/main-push-switch.sh says so. Kind still runs on a
+# dispatched release candidate, on a ci-full pull request, and on the
+# four-hourly schedule, which runs Kind alone.
 # Forgejo hands jobs to runners first in, first out. A main push's Heavy jobs
 # select ci-heavy-main, which three Heavy runners take exclusively and the
 # others also take, so main never waits behind queued pull requests; every
-# other run selects ci-heavy.
+# other run, a scheduled one included, selects ci-heavy.
 jobs:
   verification-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job receives no write-capable integration.
@@ -137,11 +149,21 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
+      # A scheduled run checks Kind against the commit the last successful
+      # scheduled run checked. Only a scheduled run reads it.
+      - name: Find the last successful scheduled run
+        id: schedule-baseline
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/last-scheduled-run.py --workflow ci.yaml --github-output
+
       - name: Select capabilities and artifact facts
         id: select
         env:
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           PUSH_AFTER_SHA: ${{ github.sha }}
+          SCHEDULE_BASELINE_SHA: ${{ steps.schedule-baseline.outputs.schedule_baseline }}
           VERIFICATION_REQUEST: ${{ github.event.inputs.verification }}
           # Hosted pull-request CI selects the quick families unless the pull
           # request carries ci-full. Pushes and dispatches ignore it, and local

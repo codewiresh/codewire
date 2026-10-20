@@ -37,6 +37,30 @@ printf '{"packages":[]}\n'
 EOF
 chmod +x "$EDGELESS_CARGO/cargo"
 
+# The one switch for what a push to main runs (main-push-switch.sh, owner
+# decision 2026-10-20), as checked in. Every case below holds for either
+# value: MAIN_PUSH_KIND is the kind token a push to main selects with it.
+# Copies of the selector's tree with each value prove both behaviours.
+MAIN_PUSH_SWITCH="$ROOT/scripts/ci/select/main-push-switch.sh"
+case "$(sed -n 's/^MAIN_PUSH_RUNS_KIND_AND_DRY_RUN=//p' "$MAIN_PUSH_SWITCH")" in
+  true) MAIN_PUSH_KIND=kind ;;
+  false) MAIN_PUSH_KIND='' ;;
+  *) echo 'main-push-switch.sh does not set MAIN_PUSH_RUNS_KIND_AND_DRY_RUN to true or false' >&2; exit 1 ;;
+esac
+selector_with_switch() {
+  # VALUE -> a copy of the selector's tree whose switch is VALUE
+  local root="$TMP/switch-$1"
+  mkdir -p "$root/scripts/ci/select"
+  cp "$ROOT/scripts/ci/select/select-verification.sh" "$ROOT/scripts/ci/select/main-push-switch.sh" \
+    "$root/scripts/ci/select/"
+  cp "$ROOT/rust-toolchain.toml" "$root/"
+  sed -i "s/^MAIN_PUSH_RUNS_KIND_AND_DRY_RUN=.*/MAIN_PUSH_RUNS_KIND_AND_DRY_RUN=$1/" \
+    "$root/scripts/ci/select/main-push-switch.sh"
+  printf '%s\n' "$root/scripts/ci/select/select-verification.sh"
+}
+SELECTOR_KIND_ON="$(selector_with_switch true)"
+SELECTOR_KIND_OFF="$(selector_with_switch false)"
+
 selection_value() {
   sed -n 's/^selection=//p' <<<"$1"
 }
@@ -68,7 +92,7 @@ assert_tokens() {
     exit 1
   fi
   case "$(sed -n '2s/^classification=//p' <<<"$output")" in
-    changed|unchanged|unclassified|requested|release) ;;
+    changed|unchanged|unclassified|requested|release|scheduled) ;;
     *) echo "${name}: invalid classification" >&2; exit 1 ;;
   esac
   case "$(sed -n '4s/^required_local_mode=//p' <<<"$output")" in
@@ -475,7 +499,7 @@ run_paths_case kind_deploy_helper_main push refs/heads/main false \
   'policy policy_shell security security_js' scripts/dev/kind/deploy-service.sh scripts/dev/kind/trust-roots.sh \
   deployments/docker/kind-dev-binary.Dockerfile
 run_paths_case kind_dev_helper_main push refs/heads/main false \
-  'edge_kind kind policy policy_shell security security_js' scripts/dev/kind/kind-forwards.sh
+  "edge_kind ${MAIN_PUSH_KIND} policy policy_shell security security_js" scripts/dev/kind/kind-forwards.sh
 # The retained cluster's database helper runs its hermetic fixture, not Kind.
 run_paths_case kind_database_helper_main push refs/heads/main false \
   'edge_kind policy policy_shell security security_js' scripts/dev/kind/database.sh
@@ -1195,7 +1219,7 @@ run_paths_case dashboard_e2e_pull_request pull_request refs/pull/12/head false \
 run_paths_case dashboard_e2e_pull_request_opt_in pull_request refs/pull/12/head true \
   'edge_kind kind policy web' apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts
 run_paths_case dashboard_e2e_push push refs/heads/main false \
-  'edge_kind kind policy web' apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts
+  "edge_kind ${MAIN_PUSH_KIND} policy web" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts
 run_paths_case dashboard_browser_gate pull_request refs/pull/1202/head false \
   'policy security security_js web' scripts/ci/tests/test-dashboard-browser-gate.sh
 run_paths_case dashboard_design_preview pull_request refs/pull/120/head false \
@@ -1205,7 +1229,7 @@ run_paths_case design_fixture_spec_push push refs/heads/main false \
 run_paths_case design_fixture_spec_kind_opt_in pull_request refs/pull/2206/head true \
   'policy web' apps/dashboard/e2e/ssr-dashboard.date-picker.ssr.ts
 run_paths_case design_fixture_list_push push refs/heads/main false \
-  'edge_kind kind policy web' apps/dashboard/e2e/helpers/design-fixtures.ts
+  "edge_kind ${MAIN_PUSH_KIND} policy web" apps/dashboard/e2e/helpers/design-fixtures.ts
 run_paths_case design_fixture_runner pull_request refs/pull/2203/head false \
   'policy security security_js web' scripts/ci/verify/run-design-fixtures.sh
 run_paths_case design_fixture_runner_test pull_request refs/pull/2204/head false \
@@ -1846,6 +1870,11 @@ dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=release "$SELECTOR")"
 assert_tokens dispatch_release \
   'go_consumer_interop go_support release runtime_confidential' "$dispatch_output"
+# A release candidate dispatches Kind with edge_kind (Kind and Edge static
+# verification) or all; a push to main may defer Kind to it.
+dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
+  VERIFICATION_REQUEST=edge_kind "$SELECTOR")"
+assert_tokens dispatch_edge_kind 'edge_kind kind' "$dispatch_output"
 
 grep -qF "contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|')" \
   "$WORKFLOW"
@@ -2268,6 +2297,128 @@ fi
   exit 1
 }
 grep -qF 'push baseline is unavailable' "$missing_stderr"
+
+# A scheduled run (owner decision 2026-10-20) checks Kind alone against the
+# commit the last successful scheduled run checked (SCHEDULE_BASELINE_SHA),
+# while the switch defers Kind on a push to main; these cases use that copy.
+# The scheduled marker keeps artifact facts from dispatching other groups.
+feature="$(git -C "$repo" rev-parse feature)"
+schedule_discover() { # BASELINE -> selector output; stderr in $TMP/schedule.stderr
+  (cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+    GITHUB_EVENT_NAME=schedule GITHUB_REF=refs/heads/main GITHUB_SHA="$head" \
+    SCHEDULE_BASELINE_SHA="$1" "$SELECTOR_KIND_OFF" 2>"$TMP/schedule.stderr")
+}
+output="$(schedule_discover "$base")"
+assert_tokens schedule_unchanged_kind scheduled "$output"
+assert_contract_field schedule_unchanged_kind "$output" classification scheduled
+grep -Fxq "schedule: no Kind input changed since $base; Kind does not run" "$TMP/schedule.stderr"
+for unknown_baseline in '' "$feature" 0000000000000000000000000000000000000000 not-a-commit; do
+  output="$(schedule_discover "$unknown_baseline")"
+  assert_tokens "schedule_unknown_${unknown_baseline:-empty}" 'kind scheduled' "$output"
+  grep -Fxq 'schedule: no successful scheduled run to compare with; Kind runs' "$TMP/schedule.stderr"
+done
+schedule_paths() { # SELECTOR PATH... -> output; explicit paths stand for a known baseline
+  local selector="$1"
+  shift
+  printf '%s\n' "$@" > "$TMP/schedule.paths"
+  env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH PATH="$EDGELESS_CARGO:$PATH" \
+    GITHUB_EVENT_NAME=schedule GITHUB_REF=refs/heads/main \
+    "$selector" "$TMP/schedule.paths" 2>"$TMP/schedule.stderr"
+}
+output="$(schedule_paths "$SELECTOR_KIND_OFF" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts \
+  crates/codewire-cli/src/main.rs docs/dev/AGENT-WORKFLOW.md)"
+assert_tokens schedule_kind_input 'kind scheduled' "$output"
+grep -Fq 'schedule: a Kind input changed since' "$TMP/schedule.stderr"
+assert_tokens schedule_no_kind_input scheduled \
+  "$(schedule_paths "$SELECTOR_KIND_OFF" crates/codewire-cli/src/main.rs docs/dev/AGENT-WORKFLOW.md)"
+assert_tokens schedule_unclassified 'kind scheduled' \
+  "$(schedule_paths "$SELECTOR_KIND_OFF" unclassified-schedule-fixture.bin)"
+# While the switch gives pushes to main their Kind again, a schedule runs
+# nothing, changed Kind inputs or not, and says why.
+assert_tokens schedule_switch_on scheduled \
+  "$(schedule_paths "$SELECTOR_KIND_ON" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)"
+grep -Fxq 'schedule: a push to main runs Kind (main-push-switch.sh); the schedule runs nothing' \
+  "$TMP/schedule.stderr"
+# The checked-in tree schedules as its own switch says.
+if [ -n "$MAIN_PUSH_KIND" ]; then
+  schedule_twin="$SELECTOR_KIND_ON"
+else
+  schedule_twin="$SELECTOR_KIND_OFF"
+fi
+[ "$(schedule_paths "$SELECTOR" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)" \
+  = "$(schedule_paths "$schedule_twin" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)" ] || {
+  echo 'the checked-in selector does not schedule as its switch says' >&2
+  exit 1
+}
+# Dispatch: a scheduled selection dispatches the Kind shards alone, even with
+# every artifact fact affected, and an unchanged one dispatches nothing.
+for scheduled_selection in '|valid:v3|kind|scheduled|complete|' '|valid:v3|scheduled|complete|'; do
+  : > "$TMP/schedule-dispatch.out"
+  VERIFICATION_SELECTION="$scheduled_selection" VERIFICATION_TESTED_TREE_RECEIPT=fallback \
+    CW_PACKAGE_SELECTED=true DESKTOP_PACKAGE_SELECTED=true WORKSPACE_IMAGE_SELECTED=true \
+    KIND_WORKSPACE_SOURCE=pinned WORKSPACE_IMAGE_OWNER=ci GITHUB_OUTPUT="$TMP/schedule-dispatch.out" \
+    "$ROOT/scripts/ci/select/emit-verification-matrices.sh"
+  dispatched_groups="$({ grep '=true$' "$TMP/schedule-dispatch.out" || true; } | tr '\n' ' ')"
+  if [[ "$scheduled_selection" == *'|kind|'* ]]; then
+    [ "$dispatched_groups" = 'edge_kind_expected=true ' ] || {
+      echo "a scheduled Kind run dispatched more than Kind: $dispatched_groups" >&2; exit 1; }
+  else
+    [ -z "$dispatched_groups" ] || {
+      echo "an unchanged scheduled run dispatched $dispatched_groups" >&2; exit 1; }
+  fi
+done
+
+# The one switch (main-push-switch.sh, owner decision 2026-10-20). False: a
+# push to main selects no Kind and says so in one plain line; Edge static
+# verification and the local mode stay. True: today's selection, Kind
+# included. Nothing else differs, and no other event reads it.
+deferred_line='main push: Kind deferred to the scheduled or dispatched Kind run (owner decision 2026-10-20)'
+switch_push() { # SELECTOR PATH... -> output; stderr in $TMP/switch.stderr
+  local selector="$1"
+  shift
+  printf '%s\n' "$@" > "$TMP/switch.paths"
+  env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH PATH="$EDGELESS_CARGO:$PATH" \
+    GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main KIND_E2E_OPT_IN=false \
+    "$selector" "$TMP/switch.paths" 2>"$TMP/switch.stderr"
+}
+output="$(switch_push "$SELECTOR_KIND_OFF" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)"
+assert_tokens main_push_switch_off 'edge_kind policy web' "$output"
+assert_contract_field main_push_switch_off "$output" required_local_mode kind
+[ "$(grep -Fxc "$deferred_line" "$TMP/switch.stderr")" = 1 ] || {
+  echo 'a main push that deferred Kind did not say so in one line' >&2; exit 1; }
+output="$(switch_push "$SELECTOR_KIND_ON" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)"
+assert_tokens main_push_switch_on 'edge_kind kind policy web' "$output"
+assert_contract_field main_push_switch_on "$output" required_local_mode kind
+! grep -Fq 'Kind deferred' "$TMP/switch.stderr" || {
+  echo 'a main push that runs Kind said it deferred Kind' >&2; exit 1; }
+# A push that selects no Kind defers nothing and says nothing.
+assert_tokens main_push_switch_off_docs policy \
+  "$(switch_push "$SELECTOR_KIND_OFF" docs/dev/AGENT-WORKFLOW.md)"
+! grep -Fq 'Kind deferred' "$TMP/switch.stderr" || {
+  echo 'a main push without Kind said it deferred Kind' >&2; exit 1; }
+# The checked-in tree behaves as its own switch says.
+assert_tokens main_push_switch_checked_in "edge_kind ${MAIN_PUSH_KIND} policy web" \
+  "$(switch_push "$SELECTOR" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)"
+# Pull requests (ci-full, kind-e2e) and dispatches read no switch.
+for switch_selector in "$SELECTOR_KIND_ON" "$SELECTOR_KIND_OFF"; do
+  [ "$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH PATH="$EDGELESS_CARGO:$PATH" \
+      GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/7/head KIND_E2E_OPT_IN=true \
+      "$switch_selector" "$TMP/switch.paths" 2>/dev/null)" \
+    = "$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH PATH="$EDGELESS_CARGO:$PATH" \
+      GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/7/head KIND_E2E_OPT_IN=true \
+      "$SELECTOR" "$TMP/switch.paths" 2>/dev/null)" ] || {
+    echo 'the main-push switch changed a pull request' >&2; exit 1; }
+  assert_tokens "dispatch_edge_kind_${switch_selector##*/switch-}" 'edge_kind kind' \
+    "$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch VERIFICATION_REQUEST=edge_kind \
+      "$switch_selector")"
+done
+# Any other value fails without a machine-readable selection.
+invalid_switch_selector="$(selector_with_switch maybe)"
+if switch_push "$invalid_switch_selector" docs/dev/AGENT-WORKFLOW.md >"$TMP/switch-invalid.out"; then
+  echo 'the selector accepted an invalid main-push switch' >&2
+  exit 1
+fi
+[ ! -s "$TMP/switch-invalid.out" ] && grep -Fq 'MAIN_PUSH_RUNS_KIND_AND_DRY_RUN must be true or false' "$TMP/switch.stderr"
 
 # Workflow contract: ten bounded capability groups use trusted server-side job
 # conditions. Forgejo therefore gives an omitted group a terminal skipped result
@@ -4240,7 +4391,7 @@ scope_select() {
   if [ -n "$scope" ]; then inputs+=("VERIFICATION_PR_SCOPE=$scope"); fi
   env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u VERIFICATION_PR_SCOPE -u KIND_E2E_OPT_IN \
     "${inputs[@]}" GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
-    "$SELECTOR" "$paths" </dev/null
+    "${SCOPE_SELECTOR:-$SELECTOR}" "$paths" </dev/null
 }
 
 kind_subset() {
@@ -4257,13 +4408,26 @@ lookalike="$(scope_event lookalike 'feat: ci-full is not a label' ci ci/r2-cache
 while IFS='|' read -r name quick_expected paths_list; do
   paths="$TMP/scope-${name}.paths"
   tr ' ' '\n' <<<"$paths_list" > "$paths"
-  push_output="$(scope_select push '' '' "$paths")"
+  # A push to main as it selects with Kind (the switch true); ci-full and
+  # kind-e2e compare against it.
+  push_output="$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" scope_select push '' '' "$paths")"
   pr_full_output="$(scope_select pull_request '' "$no_labels" "$paths")"
   kinds="$(kind_subset "$push_output")"
 
+  # The checked-in switch keeps that selection on a push to main, less kind
+  # while it defers Kind, and nothing else.
+  main_output="$(scope_select push '' '' "$paths")"
+  main_tokens="$(selection_tokens "$(selection_value "$push_output")")"
+  if [ -z "$MAIN_PUSH_KIND" ]; then
+    main_tokens="$(grep -vx kind <<<"$main_tokens" || true)"
+  fi
+  [ "$(selection_tokens "$(selection_value "$main_output")")" = "$main_tokens" ] || {
+    echo "${name}: the switch changed a push to main beyond Kind" >&2
+    exit 1
+  }
   # A push to main is unchanged: the workflow sets the quick scope on every
   # event, and a push ignores it.
-  [ "$(scope_select push quick '' "$paths")" = "$push_output" ] || {
+  [ "$(scope_select push quick '' "$paths")" = "$main_output" ] || {
     echo "${name}: the quick scope changed a push to main" >&2
     exit 1
   }
@@ -4284,7 +4448,8 @@ while IFS='|' read -r name quick_expected paths_list; do
     echo "${name}: a lookalike label or title escalated a quick pull request" >&2
     exit 1
   }
-  # ci-full gets exactly what a push to main selects, Kind included.
+  # ci-full gets exactly what a push to main selects with Kind, even while
+  # the switch defers Kind on the push.
   [ "$(scope_select pull_request quick "$ci_full" "$paths")" = "$push_output" ] || {
     echo "${name}: ci-full does not select what a push to main does" >&2
     scope_select pull_request quick "$ci_full" "$paths" >&2
@@ -4313,7 +4478,8 @@ CASES
 
 # The Kind cases above must really exercise Kind.
 for kind_case in dashboard_kind browser_spec; do
-  [ -n "$(kind_subset "$(scope_select push '' '' "$TMP/scope-${kind_case}.paths")")" ] || {
+  kind_case_output="$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" scope_select push '' '' "$TMP/scope-${kind_case}.paths")"
+  grep -Fq '|kind|' <<<"$kind_case_output" || {
     echo "${kind_case}: fixture no longer selects Kind on main" >&2
     exit 1
   }
@@ -4340,7 +4506,7 @@ if grep -Fq '|pr_quick|' <<<"$unclassified_quick" || grep -Fq '|kind|' <<<"$uncl
   exit 1
 fi
 [ "$(scope_select pull_request quick "$ci_full" "$TMP/scope-unclassified.paths" 2>/dev/null)" \
-  = "$(scope_select push '' '' "$TMP/scope-unclassified.paths" 2>/dev/null)" ] || {
+  = "$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" scope_select push '' '' "$TMP/scope-unclassified.paths" 2>/dev/null)" ] || {
   echo 'ci-full on an unclassified pull request differs from main' >&2
   exit 1
 }
@@ -4507,6 +4673,8 @@ for scope_case in docs rust_cli broker_database transport dashboard_kind browser
   for scope_event_name in push pull_request; do
     if [ "$scope_event_name" = push ]; then
       scope_output="$(scope_select push '' '' "$TMP/scope-${scope_case}.paths")"
+      selection_value "$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" \
+        scope_select push '' '' "$TMP/scope-${scope_case}.paths")" >> "$job_work_selections"
     else
       scope_output="$(scope_select pull_request quick "$no_labels" "$TMP/scope-${scope_case}.paths")"
     fi
@@ -4515,6 +4683,10 @@ for scope_case in docs rust_cli broker_database transport dashboard_kind browser
 done
 selection_value "$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=all "$SELECTOR")" >> "$job_work_selections"
+# Scheduled runs: Kind alone, or nothing.
+selection_value "$(schedule_paths "$SELECTOR_KIND_OFF" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)" \
+  >> "$job_work_selections"
+selection_value "$(schedule_paths "$SELECTOR_KIND_OFF" docs/dev/AGENT-WORKFLOW.md)" >> "$job_work_selections"
 python3 -B - "$WORKFLOW" "$ROOT/scripts/ci/select/emit-verification-matrices.sh" \
     "$job_work_selections" <<'PY'
 import itertools
@@ -4793,10 +4965,11 @@ EVENTS = {
     "push to main": {"github.event_name": "push", "github.ref": "refs/heads/main"},
     "pull request": {"github.event_name": "pull_request", "github.ref": "refs/pull/7/head"},
     "dispatch": {"github.event_name": "workflow_dispatch", "github.ref": "refs/heads/main"},
+    "schedule": {"github.event_name": "schedule", "github.ref": "refs/heads/main"},
 }
 OWNERS = {event: env_value(dispatch_step["env"]["WORKSPACE_IMAGE_OWNER"], github)
           for event, github in EVENTS.items()}
-if OWNERS != {"push to main": "support-images", "pull request": "ci", "dispatch": "ci"}:
+if OWNERS != {"push to main": "support-images", "pull request": "ci", "dispatch": "ci", "schedule": "ci"}:
     raise SystemExit(f"the workspace image owner per event is {OWNERS}")
 WORKSPACE_BUILD = "Build and inspect without publication"
 
@@ -4813,7 +4986,8 @@ synthetic.add("|valid:v3|complete|")
 checked = 0
 builds = {event: 0 for event in ("push to main", "pull request")}
 for selection in sorted(set(realistic) | synthetic):
-    quick = "|pr_quick|" in selection
+    # A quick or scheduled selection dispatches no artifact group.
+    quick = "|pr_quick|" in selection or "|scheduled|" in selection
     # A workflow dispatch has the pull request's owner (checked above).
     for event, cw, desktop, workspace, kind_workspace in itertools.product(
             ("push to main", "pull request"),
@@ -4868,6 +5042,47 @@ for selection in sorted(set(realistic) | synthetic):
         checked += 1
 if not builds["pull request"] or builds["push to main"]:
     raise SystemExit(f"workspace builds per event: {builds}")
+
+# A scheduled run dispatches the Kind builds and shards alone, whatever the
+# artifact facts say, and an unchanged one dispatches nothing.
+KIND_JOBS = {"kind-workspace", "kind-product", "kind-daemon", "kind-smokes", "edge-kind"}
+scheduled = [selection for selection in realistic if "|scheduled|" in selection]
+if sorted(scheduled) != ["|valid:v3|kind|scheduled|complete|", "|valid:v3|scheduled|complete|"]:
+    raise SystemExit(f"scheduled selections are {scheduled}")
+for selection in scheduled:
+    for cw, desktop, workspace, kind_workspace in itertools.product(
+            ("true", "false"), ("true", "false"), ("true", "false"), ("source", "pinned")):
+        expected = dispatch(selection, cw, desktop, workspace, kind_workspace, OWNERS["schedule"])
+        context = {
+            **EVENTS["schedule"],
+            "needs.verification-selection.result": "success",
+            "needs.kind-workspace.result": "skipped" if kind_workspace == "pinned" else "success",
+            "needs.verification-selection.outputs.kind_workspace_source": kind_workspace,
+            "needs.kind-product.result": "success",
+            "needs.kind-daemon.result": "success",
+            "needs.kind-smokes.result": "success",
+            "needs.verification-selection.outputs.selection": selection,
+            "needs.verification-selection.outputs.tested_tree_receipt": "fallback",
+            "needs.verification-selection.outputs.superseded": "false",
+            "needs.verification-selection.outputs.workspace_cache_experiment": "false",
+            "needs.verification-selection.outputs.cw_package_selected": cw,
+            "needs.verification-selection.outputs.desktop_package_selected": desktop,
+            "needs.verification-selection.outputs.workspace_image_selected": workspace,
+        }
+        for name, value in expected.items():
+            context[f"needs.verification-selection.outputs.{name}"] = value
+        started = {job_id for job_id in WORK if evaluate(jobs[job_id]["if"], context)}
+        wanted = KIND_JOBS if "|kind|" in selection else set()
+        if kind_workspace == "pinned":
+            wanted = wanted - {"kind-workspace"}
+        if started != wanted:
+            raise SystemExit(f"a scheduled run with {selection} starts {sorted(started)}, "
+                             f"not {sorted(wanted)} (cw={cw} desktop={desktop} workspace={workspace} "
+                             f"kind={kind_workspace})")
+        for job_id in started:
+            if not all(job_work(job_id, context)):
+                raise SystemExit(f"a scheduled run starts {job_id} with no work for {selection}")
+        checked += 1
 print(f"dispatched jobs always have work: {checked} event, selection and artifact combinations; "
       f"workspace builds: {builds['pull request']} on pull requests, none on main")
 PY

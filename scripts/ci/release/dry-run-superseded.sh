@@ -12,9 +12,10 @@
 #     push selects it too. The runtime build follows a push's own changes, so
 #     a superseded push that changed a runtime input runs unless a newer full
 #     build is queued.
-# A dispatched run always builds. An unreadable or malformed canonical main
-# fails the step. The workflow runs this when the run starts and again at the
-# start of each builder job, on Linux and on the Mac.
+# A dispatched or scheduled run always builds; dry-run-deferral.sh decided
+# before this whether it builds at all. An unreadable or malformed canonical
+# main fails the step. The workflow runs this when the run starts and again
+# at the start of each builder job, on Linux and on the Mac.
 #
 # Usage: dry-run-superseded.sh SHA [BEFORE]   (writes superseded= to $GITHUB_OUTPUT)
 set -euo pipefail
@@ -43,7 +44,7 @@ decide() {
 }
 
 if [[ "${GITHUB_EVENT_NAME:-}" != push ]]; then
-  decide false 'a dispatched dry run always builds'
+  decide false 'only a push to main can be superseded; this run builds'
   exit 0
 fi
 

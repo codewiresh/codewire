@@ -78,6 +78,7 @@ while IFS= read -r path; do
   case "$path" in
     .gitea/workflows/ci.yaml|\
     scripts/ci/select/select-verification.sh|\
+    scripts/ci/select/main-push-switch.sh|\
     scripts/ci/select/emit-verification-matrices.sh|\
     scripts/ci/select/require-verification-results.sh|\
     scripts/ci/receipts/emit-verification-receipt.py|\

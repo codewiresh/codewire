@@ -24,6 +24,11 @@ every Rust target, plus Kind when opted in. The ci-full label keeps the
 selection a push to main would make for the same paths, Kind included.
 Unset or full keeps the complete pull-request selection that local merge
 qualification runs.
+
+While main-push-switch.sh says so, a push to main selects no Kind. A schedule
+event then selects Kind alone, and only when a path changed since
+SCHEDULE_BASELINE_SHA (the last successful scheduled run's commit) selects it,
+or when that baseline is unknown; otherwise it selects nothing.
 EOF
 }
 
@@ -58,6 +63,22 @@ trap 'rm -f "$tmp" "$tokens_tmp"; rm -rf "$graph_tmp"' EXIT
 
 event="${GITHUB_EVENT_NAME:-}"
 explicit_paths=false
+
+# The one switch for what a push to main runs (owner decision 2026-10-20),
+# read from this selector's own tree. Without the file a push keeps Kind.
+MAIN_PUSH_RUNS_KIND_AND_DRY_RUN=true
+main_push_switch="$selector_root/scripts/ci/select/main-push-switch.sh"
+if [ -f "$main_push_switch" ]; then
+  # shellcheck source=scripts/ci/select/main-push-switch.sh
+  source "$main_push_switch"
+fi
+case "$MAIN_PUSH_RUNS_KIND_AND_DRY_RUN" in
+  true|false) ;;
+  *)
+    echo "selector: MAIN_PUSH_RUNS_KIND_AND_DRY_RUN must be true or false" >&2
+    exit 2
+    ;;
+esac
 
 is_zero_sha() {
   [[ "${1:-}" =~ ^0+$ ]]
@@ -118,8 +139,27 @@ discover_push_changed_files() {
   return 1
 }
 
+# What changed since the last successful scheduled run's commit
+# (SCHEDULE_BASELINE_SHA). Fails when there is no such commit on this one's
+# history; the caller then treats the baseline as unknown.
+discover_schedule_changed_files() {
+  local out="$1"
+  local baseline="${SCHEDULE_BASELINE_SHA:-}"
+  local head="${GITHUB_SHA:-HEAD}"
+
+  [[ "$baseline" =~ ^[0-9a-f]{40}$ ]] || return 1
+  is_zero_sha "$baseline" && return 1
+  head="$(git rev-parse --verify "${head}^{commit}" 2>/dev/null)" || return 1
+  baseline="$(git rev-parse --verify "${baseline}^{commit}" 2>/dev/null)" || return 1
+  git merge-base --is-ancestor "$baseline" "$head" || return 1
+  git diff --name-only "$baseline" "$head" > "$out"
+}
+
+# Explicit changed paths stand for a known schedule baseline.
+schedule_baseline_known=false
 if [ $# -gt 0 ]; then
   explicit_paths=true
+  schedule_baseline_known=true
   if [ "$1" = "-" ]; then
     cat > "$tmp"
   else
@@ -467,6 +507,13 @@ if [ "$event_selected" = false ] && [ "$explicit_paths" = false ]; then
       select_dispatch_request
       event_selected=true
       ;;
+    schedule)
+      if discover_schedule_changed_files "$tmp"; then
+        schedule_baseline_known=true
+      else
+        : > "$tmp"
+      fi
+      ;;
     *)
       echo "selector: unsupported event '${event:-unset}'" >&2
       exit 2
@@ -592,6 +639,9 @@ if [ "$event_selected" = false ]; then
       scripts/dev/preflight-environment.sh|\
       scripts/ci/select/emit-verification-matrices.sh|\
       scripts/ci/select/require-verification-results.sh|\
+      scripts/ci/select/main-push-switch.sh|\
+      scripts/ci/select/last-scheduled-run.py|\
+      scripts/ci/tests/test-last-scheduled-run.py|\
       scripts/ci/receipts/local-prepush-receipt.py|\
       scripts/ci/receipts/emit-verification-receipt.py|\
       scripts/ci/receipts/verify-tested-tree-receipt.sh|\
@@ -1960,6 +2010,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/build-runtime-cw.sh|\
       scripts/ci/tests/test-local-runtime-parts.py|\
       scripts/ci/release/dry-run-superseded.sh|scripts/ci/tests/test-dry-run-superseded.sh|\
+      scripts/ci/release/dry-run-deferral.sh|scripts/ci/tests/test-dry-run-deferral.sh|\
+      scripts/ci/select/main-push-switch.sh|scripts/ci/select/last-scheduled-run.py|\
       scripts/ci/tests/test-cw-install.py|\
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-release-signing-key.sh|\
@@ -2145,8 +2197,9 @@ if token_selected policy; then
 fi
 
 # Kind takes over an hour. A pull request runs it only when opted in
-# ([kind-e2e] in its title or body, or the kind-e2e or ci-full label); pushes
-# to main and dispatched runs keep it as the post-merge gate.
+# ([kind-e2e] in its title or body, or the kind-e2e or ci-full label).
+# Dispatched and scheduled runs keep it, and so does a push to main unless
+# main-push-switch.sh defers it (below).
 if [ "$event" = pull_request ] && [ "$pr_kind_opt_in" != true ]; then
   unset 'selected[kind]' 'selected[edge_kind]'
 fi
@@ -2162,6 +2215,43 @@ elif [ "$kind_relevant" = true ] || token_selected kind; then
   required_local_mode=kind
 elif token_selected database || token_selected service_integration; then
   required_local_mode=integration
+fi
+
+# Temporary (owner decision 2026-10-20): while main-push-switch.sh says so, a
+# push to main defers Kind to the scheduled or dispatched Kind run. Edge
+# static verification (edge_kind) stays. The local mode above keeps Kind.
+if [ "$event" = push ] && [ "${GITHUB_REF:-}" = refs/heads/main ] \
+    && [ "$MAIN_PUSH_RUNS_KIND_AND_DRY_RUN" = false ] && token_selected kind; then
+  unset 'selected[kind]'
+  echo 'main push: Kind deferred to the scheduled or dispatched Kind run (owner decision 2026-10-20)' >&2
+fi
+
+# A scheduled run checks only Kind: the pushes to main ran everything else.
+# It runs Kind when a path changed since the last successful scheduled run
+# would select Kind on a push, or when there is no such run to compare with.
+# While the switch gives pushes to main their Kind again, it runs nothing.
+# The scheduled marker keeps artifact facts from dispatching any other group.
+if [ "$event" = schedule ]; then
+  classification=scheduled
+  schedule_kind=false
+  if [ "$MAIN_PUSH_RUNS_KIND_AND_DRY_RUN" = true ]; then
+    echo 'schedule: a push to main runs Kind (main-push-switch.sh); the schedule runs nothing' >&2
+  elif [ "$schedule_baseline_known" != true ]; then
+    schedule_kind=true
+    echo 'schedule: no successful scheduled run to compare with; Kind runs' >&2
+  elif token_selected kind; then
+    schedule_kind=true
+    echo "schedule: a Kind input changed since ${SCHEDULE_BASELINE_SHA:-the baseline}; Kind runs" >&2
+  else
+    echo "schedule: no Kind input changed since ${SCHEDULE_BASELINE_SHA:-the baseline}; Kind does not run" >&2
+  fi
+  for token in "${!selected[@]}"; do
+    unset "selected[$token]"
+  done
+  if [ "$schedule_kind" = true ]; then
+    select_token kind
+  fi
+  select_token scheduled
 fi
 
 # Hosted pull-request CI runs only the quick families by default: every pull

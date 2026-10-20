@@ -197,7 +197,9 @@ def verified_predecessor_run(fetch: Fetch, before: str) -> int:
         run
         for run in runs
         if (run.get("head_sha") or run.get("commit_sha")) == before
-        and (run.get("event") or run.get("trigger_event")) == "push"
+        # A scheduled run that a push to main registered reports event push;
+        # its trigger_event says schedule. Only the push run decides.
+        and (run.get("trigger_event") or run.get("event")) == "push"
         and (
             run.get("path") == f"{WORKFLOW}@{MAIN_REF}"
             or (run.get("workflow_id") == WORKFLOW and run.get("prettyref") == "main")

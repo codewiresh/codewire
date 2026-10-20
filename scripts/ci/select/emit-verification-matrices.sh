@@ -79,9 +79,10 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   # A hosted pull request's quick selection (pr_quick) runs only the quick
   # families it names. Artifact facts dispatch nothing there: the CW release
   # assets, container contract and desktop package run on main, or on a pull
-  # request labelled ci-full.
+  # request labelled ci-full. A scheduled run (scheduled) checks Kind alone,
+  # which the pushes to main may defer; they ran the artifact groups.
   artifact_groups=true
-  if selected pr_quick; then
+  if selected pr_quick || selected scheduled; then
     artifact_groups=false
   fi
   # Each group is expected exactly when one of its job's verification steps
@@ -149,7 +150,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   for token in "${selection_tokens[@]}"; do
     case "$token" in
       ''|valid:v3|complete|\
-      policy|policy_shell|policy_shell_omittable|pr_quick|rust_compile|\
+      policy|policy_shell|policy_shell_omittable|pr_quick|scheduled|rust_compile|\
       contracts|contracts_proto|go_support|go_tailnet|go_consumer_interop|\
       sdk_go|sdk_ts|sdk_python|web|ios|\
       deploy|release|runtime_confidential|runtime_dev_smoke|\
