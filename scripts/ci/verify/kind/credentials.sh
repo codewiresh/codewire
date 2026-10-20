@@ -1832,18 +1832,40 @@ kind_credential_claude_latest_token() {
 # Bound on the rotation probe reporting its first turn.
 KIND_CLAUDE_ROTATION_READY_SECONDS=180
 
+# The workspace daemon's Claude login checks in POD, as closed records only
+# (outcomes, never a token or path). Best-effort.
+kind_credential_claude_login_checks() {
+  kubectl -n "$SANDBOX_NS" logs "$1" -c workspace --since=30m 2>&1 \
+    | grep -F 'hosted Claude login' | tail -n 20 || true
+}
+
 # Why a Claude login step failed, from closed records only: the workspace
 # daemon's login checks (outcomes, never a token) and the fixture's sign-in
 # events (grant and generation). Best-effort.
 kind_credential_claude_login_diagnostics() {
   local pod="$1"
   echo "::group::Claude login checks of ${pod} and the fixture's sign-in events"
-  kubectl -n "$SANDBOX_NS" logs "$pod" -c workspace --since=30m 2>&1 \
-    | grep -F 'hosted Claude login' | tail -n 20 || true
+  kind_credential_claude_login_checks "$pod"
   kind_credential_fixture_events 2>/dev/null | jq -c '.[]
     | select(.event | test("^(claude_sign_in_token|claude_sign_in_refused|claude_profile|provider_unserved|anthropic_rejected)$"))' \
     2>/dev/null | tail -n 20 || true
   echo '::endgroup::'
+}
+
+# Why the login a new container delivered lacks the key the probe planted,
+# from closed records only: the probe's events before and after Stop/Start,
+# the old container's login checks, saved before Stop replaced its Pod, and
+# the new container's. Best-effort.
+kind_credential_claude_redelivery_diagnostics() {
+  local environment="$1" events="$2" checks="$3" pod
+  echo '::group::Claude login probe events and login checks around Stop/Start'
+  printf '%s\n' "$events"
+  echo '-- login checks of the container before Stop'
+  cat -- "$checks" 2>/dev/null || true
+  echo '::endgroup::'
+  if pod="$(kind_credential_workspace "$environment" 2>/dev/null)"; then
+    kind_credential_claude_login_diagnostics "$pod"
+  fi
 }
 
 # claude_login.py `rotation` in the background of the calling shell: once its
@@ -1914,7 +1936,7 @@ kind_credential_claude_sign_in() (
   log "running a Claude sign-in through the public CLI with stock Claude Code"
   local KIND_CREDENTIAL_CLI_HOME suffix name profile environment workspace_image update
   local generation pod pod_uid clients driver baseline tokens revision latest exchanged
-  local login_events delivered rotated
+  local login_events delivered rotated own_events logout_events checks redelivery
   local stage_environment="" stage_profiles="" stage_credentials=""
   set -E
   trap 'echo "::error::Claude sign-in acceptance failed: command=${BASH_COMMAND} status=$?" >&2' ERR
@@ -2012,8 +2034,11 @@ kind_credential_claude_sign_in() (
   rotated="$(kind_credential_claude_rotation "$environment" "$name" "$delivered")"
   [ "$rotated" -gt "$delivered" ] || return 1
   # A user's own login is never touched, and a logout stays logged out.
-  kind_credential_claude_login "$environment" own-login >/dev/null
-  kind_credential_claude_login "$environment" logout >/dev/null
+  own_events="$(kind_credential_claude_login "$environment" own-login)"
+  logout_events="$(kind_credential_claude_login "$environment" logout)"
+  # Stop replaces the Pod, and its daemon's login checks with it.
+  checks="$RUN_DIR/credential-claude-login-checks-before-stop.log"
+  kind_credential_claude_login_checks "$pod" >"$checks"
 
   # A new container forgets the logout and delivers the login again, beside
   # the key the probe planted in the persistent home.
@@ -2021,11 +2046,16 @@ kind_credential_claude_sign_in() (
   wait_kind_credential_environment "$environment" stopped
   kind_credential_cli --cloud start "$environment" --output json >/dev/null
   wait_kind_credential_environment "$environment" running
-  login_events="$(kind_credential_claude_login "$environment" redelivered)"
-  jq -e 'select(.event == "redelivered") | .unrelated == "kept"' <<<"$login_events" >/dev/null || {
-    echo "::error::the redelivered Claude login dropped the file's other keys" >&2
+  redelivery=0
+  login_events="$(kind_credential_claude_login "$environment" redelivered)" || redelivery=$?
+  if [ "$redelivery" -ne 0 ] || ! jq -e 'select(.event == "redelivered") | .unrelated == "kept"' \
+      <<<"$login_events" >/dev/null; then
+    [ "$redelivery" -ne 0 ] \
+      || echo "::error::the redelivered Claude login dropped the file's other keys" >&2
+    kind_credential_claude_redelivery_diagnostics "$environment" \
+      "$own_events"$'\n'"$logout_events"$'\n'"$login_events" "$checks" >&2
     return 1
-  }
+  fi
 
   # Revocation removes Codewire's login at the daemon's next check and keeps
   # the file's other keys. Claude Code then has no login, and nothing reaches

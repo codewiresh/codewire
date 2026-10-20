@@ -502,6 +502,12 @@ class Modes(unittest.TestCase):
         status, events = self.run_mode("own-login")
         self.assertEqual(status, 0, events)
         self.assertEqual(self.workspace.credentials.read_bytes(), original)
+        # It reports whether the planted key reached it, and judges nothing.
+        self.assertEqual(events[0]["unrelated"], "absent")
+        self.workspace.reset()
+        self.workspace.deliver(login(3, extra={driver.UNRELATED_KEY: driver.UNRELATED_VALUE}))
+        status, events = self.run_mode("own-login")
+        self.assertEqual((status, events[0]["unrelated"]), (0, "kept"), events)
 
     def test_own_login_fails_when_the_daemon_replaces_it(self):
         self.workspace.deliver(login(3))
@@ -530,7 +536,17 @@ class Modes(unittest.TestCase):
             login(6, extra={driver.UNRELATED_KEY: driver.UNRELATED_VALUE})))
         status, events = self.run_mode("redelivered")
         self.assertEqual(status, 0, events)
-        self.assertEqual((events[0]["generation"], events[0]["unrelated"]), (6, "kept"))
+        self.assertEqual(
+            (events[0]["generation"], events[0]["unrelated"], events[0]["other_keys"]),
+            (6, "kept", 0))
+        # A login redelivered without the planted key is reported, with how
+        # many other members the file holds and never their names.
+        self.workspace.reset()
+        self.workspace.deliver(login(7, extra={"anotherToolsKey": {"x": 1}}))
+        status, events = self.run_mode("redelivered")
+        self.assertEqual(status, 0, events)
+        self.assertEqual((events[0]["unrelated"], events[0]["other_keys"]), ("absent", 1))
+        self.assertNotIn("anotherToolsKey", self.workspace.output.getvalue())
 
         self.workspace.reset()
         later(0.2, lambda: self.workspace.deliver(

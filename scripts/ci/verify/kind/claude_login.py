@@ -254,6 +254,11 @@ def unrelated_kept():
     return document is not None and document.get(UNRELATED_KEY) == UNRELATED_VALUE
 
 
+def kept(document, key, value):
+    """The closed state of one member for an event: never its value."""
+    return "kept" if document is not None and document.get(key) == value else "absent"
+
+
 def wait_for(condition, timeout, reason):
     """The first result of condition() that is neither None nor False (0 is
     a result), or Failure(reason) after timeout."""
@@ -703,6 +708,8 @@ def own_login():
         raise Failure("login_not_delivered")
     codewires = read_private(CREDENTIALS)[1]
     document = parse(codewires)
+    # Reported, not judged: whether the key `deliver` planted reached here.
+    unrelated = kept(document, UNRELATED_KEY, UNRELATED_VALUE)
     # `claude /login` rewrites claudeAiOauth with its own refresh token and
     # keeps every other key, Codewire's marker included.
     document[LOGIN_KEY] = {
@@ -724,7 +731,7 @@ def own_login():
         current = read_private(CREDENTIALS)
         if current is not None and current[1] == users:
             write_in_place(codewires)
-    emit("own_login_untouched", waited_ms=int(FULL_CHECK * 1000))
+    emit("own_login_untouched", unrelated=unrelated, waited_ms=int(FULL_CHECK * 1000))
 
 
 def logout():
@@ -739,15 +746,20 @@ def logout():
     current = parse(found[1]) if found is not None else None
     if current is None or LOGIN_KEY in current:
         raise Failure("logout_undone")
-    emit("logout_stays_logged_out", marker="kept" if current.get(MARKER_KEY) == 1 else "absent",
-         unrelated="kept" if current.get(UNRELATED_KEY) == UNRELATED_VALUE else "absent",
+    emit("logout_stays_logged_out", marker=kept(current, MARKER_KEY, 1),
+         unrelated=kept(current, UNRELATED_KEY, UNRELATED_VALUE),
          waited_ms=int(FULL_CHECK * 1000))
 
 
 def redelivered():
     generation, _ = wait_for(delivered, DELIVERY_TIMEOUT, "login_not_redelivered")
+    found = read_private(CREDENTIALS)
+    document = parse(found[1]) if found is not None else None
+    # How many members are neither Codewire's nor the planted key: a count,
+    # never a name or value.
+    others = len(set(document or ()) - {LOGIN_KEY, MARKER_KEY, UNRELATED_KEY})
     emit("redelivered", generation=generation,
-         unrelated="kept" if unrelated_kept() else "absent")
+         unrelated=kept(document, UNRELATED_KEY, UNRELATED_VALUE), other_keys=others)
 
 
 def revoked():

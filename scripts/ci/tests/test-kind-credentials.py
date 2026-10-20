@@ -3441,6 +3441,34 @@ kind_credential_claude_login '%s' %s %s
                 self.assertIn("Claude Code login acceptance failed in mode deliver",
                               result.stderr)
 
+    def test_a_failed_redelivery_prints_the_events_and_both_containers_login_checks(self):
+        directory = tempfile.TemporaryDirectory(prefix="kind-claude-redelivery-")
+        self.addCleanup(directory.cleanup)
+        checks = Path(directory.name) / "checks.log"
+        checks.write_text('{"fields":{"message":"hosted Claude login checked",'
+                          '"claude_login":"LoggedOut"}}\n')
+        events = ('{"event":"own_login_untouched","unrelated":"kept","waited_ms":45000}\n'
+                  '{"event":"logout_stays_logged_out","marker":"kept","unrelated":"kept",'
+                  '"waited_ms":45000}\n'
+                  '{"event":"redelivered","generation":5,"unrelated":"absent","other_keys":0}')
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+kind_credential_workspace() { [ "$1" = env-1 ] || return 97; printf 'workspace-pod\\n'; }
+kubectl() {
+  [ "$*" = '-n dev-sandboxes logs workspace-pod -c workspace --since=30m' ] || return 99
+  printf '%%s\\n' 'an unrelated daemon line' \\
+    '{"fields":{"message":"hosted Claude login checked","claude_login":"Written"}}'
+}
+kind_credential_fixture_events() { printf '[]\\n'; }
+kind_credential_claude_redelivery_diagnostics env-1 %s %s
+''' % (shlex.quote(events), shlex.quote(str(checks))))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for expected in ('"unrelated":"kept","waited_ms"', '"other_keys":0',
+                         '"claude_login":"LoggedOut"', '"claude_login":"Written"'):
+            self.assertIn(expected, result.stdout)
+        self.assertLess(result.stdout.index("LoggedOut"), result.stdout.index("Written"))
+        self.assertNotIn("an unrelated daemon line", result.stdout)
+
     def test_the_latest_sign_in_token_is_the_fixtures_last_issue(self):
         def latest(events):
             return self.shell("kind_credential_fixture_events() { printf '%s\\n' "
@@ -3538,9 +3566,13 @@ kind_credential_claude_rotation env-1 kind-claude 3
             'rotated="$(kind_credential_claude_rotation "$environment" "$name" "$delivered")"',
             'kind_credential_claude_login "$environment" own-login',
             'kind_credential_claude_login "$environment" logout',
+            # Stop replaces the Pod, so its login checks are saved first.
+            'kind_credential_claude_login_checks "$pod" >"$checks"',
             'kind_credential_cli --cloud stop "$environment"',
             'kind_credential_cli --cloud start "$environment"',
             'kind_credential_claude_login "$environment" redelivered',
+            "the redelivered Claude login dropped the file's other keys",
+            'kind_credential_claude_redelivery_diagnostics "$environment"',
             'kind_credential_cli credentials --cloud revoke "$name"',
             'kind_credential_claude_login "$environment" revoked',
             'driver="$(kind_credential_claude_stage "$pod")"',
