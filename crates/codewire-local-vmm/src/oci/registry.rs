@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 use url::Url;
 use zeroize::Zeroizing;
 
-use super::{ContentStore, RegistryReference, Sha256Digest};
+use super::{ContentStore, ContentStoreError, RegistryReference, Sha256Digest};
 use crate::supervisor_metadata::oci::{
     DescriptorKind, MAXIMUM_DOCUMENT_BYTES, MAXIMUM_LAYERS, MAXIMUM_TOTAL_LAYER_BYTES,
     OciArchitecture, RegistryResolverError, ResolvedDescriptor, ResolvedImage, ResolvedLayer,
@@ -27,7 +27,16 @@ const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.index.v1+json, applicat
 const MAXIMUM_TOKEN_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAXIMUM_MANIFESTS: usize = 256;
 const MAXIMUM_REDIRECTS: usize = 3;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Each small document (a token or a manifest) has a one-minute deadline. A
+/// blob's deadline is sized for a large layer on a slow link, so it completes;
+/// each read must also arrive within the idle timeout, which fails a stalled
+/// stream (#2952). The same bounds as the runtime download (`public_fetch`).
+const DOCUMENT_TIMEOUT: Duration = Duration::from_secs(60);
+const BLOB_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// A blob whose transfer breaks (a reset or a stalled stream) is fetched
+/// again from the start, at most this many times in all, within one create.
+const BLOB_ATTEMPTS: usize = 3;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl ResolvedImage {
@@ -144,6 +153,7 @@ pub(crate) fn validate_layout_index(index: &ImageIndex) -> Result<(), RegistryRe
 
 pub struct RegistryResolver<'a> {
     client: Client,
+    document_timeout: Duration,
     store: &'a ContentStore,
     architecture: OciArchitecture,
     base_override: Option<Url>,
@@ -164,7 +174,8 @@ impl std::fmt::Debug for RegistryResolver<'_> {
 impl<'a> RegistryResolver<'a> {
     pub fn new(store: &'a ContentStore) -> Result<Self, RegistryResolverError> {
         Ok(Self {
-            client: registry_client(true)?,
+            client: registry_client(true, READ_TIMEOUT)?,
+            document_timeout: DOCUMENT_TIMEOUT,
             store,
             architecture: OciArchitecture::native()?,
             base_override: None,
@@ -178,8 +189,20 @@ impl<'a> RegistryResolver<'a> {
         base: Url,
         architecture: OciArchitecture,
     ) -> Result<Self, RegistryResolverError> {
+        Self::for_test_with_timeouts(store, base, architecture, DOCUMENT_TIMEOUT, READ_TIMEOUT)
+    }
+
+    #[cfg(test)]
+    fn for_test_with_timeouts(
+        store: &'a ContentStore,
+        base: Url,
+        architecture: OciArchitecture,
+        document_timeout: Duration,
+        read_timeout: Duration,
+    ) -> Result<Self, RegistryResolverError> {
         Ok(Self {
-            client: registry_client(false)?,
+            client: registry_client(false, read_timeout)?,
+            document_timeout,
             store,
             architecture,
             base_override: Some(base),
@@ -275,7 +298,11 @@ impl<'a> RegistryResolver<'a> {
         url: &Url,
         bearer: Option<&BearerToken>,
     ) -> Result<Response, RegistryResolverError> {
-        let mut request = self.client.get(url.clone()).header(ACCEPT, MANIFEST_ACCEPT);
+        let mut request = self
+            .client
+            .get(url.clone())
+            .header(ACCEPT, MANIFEST_ACCEPT)
+            .timeout(self.document_timeout);
         if let Some(bearer) = bearer {
             request = request.header(AUTHORIZATION, bearer.header_value()?);
         }
@@ -347,6 +374,28 @@ impl<'a> RegistryResolver<'a> {
         {
             return Ok(());
         }
+        let mut attempt = 1;
+        loop {
+            match self
+                .fetch_blob_once(base, repository, descriptor, bearer)
+                .await
+            {
+                Err(
+                    RegistryResolverError::Transport
+                    | RegistryResolverError::Content(ContentStoreError::Stream),
+                ) if attempt < BLOB_ATTEMPTS => attempt += 1,
+                result => return result,
+            }
+        }
+    }
+
+    async fn fetch_blob_once(
+        &self,
+        base: &Url,
+        repository: &str,
+        descriptor: &ResolvedDescriptor,
+        bearer: Option<&BearerToken>,
+    ) -> Result<(), RegistryResolverError> {
         let mut url = distribution_url(base, repository, "blobs", descriptor.digest.as_str())?;
         let mut response = self.send_blob(&url, bearer).await?;
         for _ in 0..MAXIMUM_REDIRECTS {
@@ -387,7 +436,7 @@ impl<'a> RegistryResolver<'a> {
         url: &Url,
         bearer: Option<&BearerToken>,
     ) -> Result<Response, RegistryResolverError> {
-        let mut request = self.client.get(url.clone());
+        let mut request = self.client.get(url.clone()).timeout(BLOB_TIMEOUT);
         if let Some(bearer) = bearer {
             request = request.header(AUTHORIZATION, bearer.header_value()?);
         }
@@ -412,6 +461,7 @@ impl<'a> RegistryResolver<'a> {
         let response = self
             .client
             .get(url)
+            .timeout(self.document_timeout)
             .send()
             .await
             .map_err(|_| RegistryResolverError::Transport)?;
@@ -431,12 +481,15 @@ impl<'a> RegistryResolver<'a> {
     }
 }
 
-fn registry_client(https_only: bool) -> Result<Client, RegistryResolverError> {
+fn registry_client(
+    https_only: bool,
+    read_timeout: Duration,
+) -> Result<Client, RegistryResolverError> {
     Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .https_only(https_only)
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
+        .read_timeout(read_timeout)
         .user_agent("codewire-local-vmm/1")
         .build()
         .map_err(|_| RegistryResolverError::Client)
@@ -833,7 +886,6 @@ mod tests {
 
     use super::*;
     use crate::host::path::PrivateRoot;
-    use crate::oci::ContentStoreError;
 
     struct Fixture {
         _parent: tempfile::TempDir,
@@ -1125,6 +1177,157 @@ mod tests {
         let redirected_requests = destination.received_requests().await.unwrap();
         assert_eq!(redirected_requests.len(), 1);
         assert!(!redirected_requests[0].headers.contains_key("authorization"));
+    }
+
+    /// Answers every request with `body` in `pieces` writes, each after `gap`.
+    /// The first `broken` connections close after the first piece.
+    async fn drip_server(
+        body: Vec<u8>,
+        pieces: usize,
+        gap: Duration,
+        broken: usize,
+    ) -> (Url, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let connections = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = connections.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let body = body.clone();
+                let breaks = counted.fetch_add(1, Ordering::SeqCst) < broken;
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match socket.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => request.extend_from_slice(&buffer[..read]),
+                        }
+                    }
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    if socket.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    for piece in body.chunks(body.len().div_ceil(pieces)) {
+                        tokio::time::sleep(gap).await;
+                        if socket.write_all(piece).await.is_err() || breaks {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (
+            Url::parse(&format!("http://{address}/")).unwrap(),
+            connections,
+        )
+    }
+
+    fn layer_descriptor(fixture: &Fixture) -> ResolvedDescriptor {
+        ResolvedDescriptor {
+            media_type: OCI_LAYER_GZIP.to_owned(),
+            digest: fixture.layer_digest.clone(),
+            size: fixture.layer.len() as u64,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_blob_outlasts_the_document_deadline_while_it_keeps_arriving() {
+        // A large layer on a slow link takes longer than a document may, but
+        // each read arrives within the idle timeout (#2952).
+        let fixture = Fixture::new();
+        let (base, _) = drip_server(fixture.layer.clone(), 6, Duration::from_millis(150), 0).await;
+        let resolver = RegistryResolver::for_test_with_timeouts(
+            &fixture.store,
+            base.clone(),
+            OciArchitecture::Amd64,
+            Duration::from_millis(300),
+            Duration::from_millis(600),
+        )
+        .unwrap();
+
+        resolver
+            .fetch_blob(&base, "test/workspace", &layer_descriptor(&fixture), None)
+            .await
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .contains_verified(&fixture.layer_digest, fixture.layer.len() as u64)
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broken_blob_transfer_is_fetched_again_from_the_start() {
+        let fixture = Fixture::new();
+        let (base, connections) = drip_server(
+            fixture.layer.clone(),
+            2,
+            Duration::from_millis(10),
+            BLOB_ATTEMPTS - 1,
+        )
+        .await;
+        let resolver =
+            RegistryResolver::for_test(&fixture.store, base.clone(), OciArchitecture::Amd64)
+                .unwrap();
+
+        resolver
+            .fetch_blob(&base, "test/workspace", &layer_descriptor(&fixture), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::SeqCst),
+            BLOB_ATTEMPTS
+        );
+        assert!(
+            fixture
+                .store
+                .contains_verified(&fixture.layer_digest, fixture.layer.len() as u64)
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_blob_stream_fails_without_admitting_the_blob() {
+        let fixture = Fixture::new();
+        let (base, connections) =
+            drip_server(fixture.layer.clone(), 2, Duration::from_secs(5), 0).await;
+        let resolver = RegistryResolver::for_test_with_timeouts(
+            &fixture.store,
+            base.clone(),
+            OciArchitecture::Amd64,
+            DOCUMENT_TIMEOUT,
+            Duration::from_millis(300),
+        )
+        .unwrap();
+
+        // Each attempt stalls past the read timeout; the last one's error is
+        // the result, long before the stream would have finished.
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            resolver
+                .fetch_blob(&base, "test/workspace", &layer_descriptor(&fixture), None)
+                .await,
+            Err(RegistryResolverError::Content(ContentStoreError::Stream))
+        ));
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::SeqCst),
+            BLOB_ATTEMPTS
+        );
+        assert!(
+            !fixture
+                .store
+                .contains_verified(&fixture.layer_digest, fixture.layer.len() as u64)
+                .unwrap()
+        );
     }
 
     #[test]
