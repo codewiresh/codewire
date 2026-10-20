@@ -245,6 +245,15 @@ web_output="$(emit '|valid:v3|web|complete|' fallback false false false)"
 assert_output "$web_output" standard true
 assert_output "$web_output" workspace_image true
 
+# The docs site runs in the standard group alone: no container, browser or
+# Kind work, and docs is a known token (an unknown one dispatches everything).
+docs_output="$(emit '|valid:v3|docs|complete|' fallback false false false)"
+assert_output "$docs_output" standard true
+for group in policy tooling rust_compile rust_shards rust_transport database \
+    services_control services_runtime edge_kind cw_release_assets workspace_image; do
+  assert_output "$docs_output" "$group" false
+done
+
 kind_web_output="$(emit '|valid:v3|web|kind|complete|' fallback false false false)"
 assert_output "$kind_web_output" workspace_image false
 assert_output "$kind_web_output" edge_kind true

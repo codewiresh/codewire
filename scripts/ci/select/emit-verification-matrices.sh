@@ -96,7 +96,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
     desktop_package=true
   fi
   selected policy && expected[policy]=true
-  selected_any contracts go_support web sdk_go sdk_ts sdk_python \
+  selected_any contracts go_support web docs sdk_go sdk_ts sdk_python \
     && expected[standard]=true
   selected_any \
     deploy release runtime_confidential runtime_dev_smoke security \
@@ -152,7 +152,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
       ''|valid:v3|complete|\
       policy|policy_shell|policy_shell_omittable|pr_quick|scheduled|rust_compile|\
       contracts|contracts_proto|go_support|go_tailnet|go_consumer_interop|\
-      sdk_go|sdk_ts|sdk_python|web|ios|\
+      sdk_go|sdk_ts|sdk_python|web|docs|ios|\
       deploy|release|runtime_confidential|runtime_dev_smoke|\
       security|security_go|security_js|security_dev_smoke_auth|security_idp_kek|\
       rust|rust_workspace|rust_curated_locks|rust_pkg_*|\

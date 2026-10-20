@@ -761,6 +761,10 @@ jobs:
           CODEWIRE_DASHBOARD_IMAGE_DEFERRED: "true"
         run: scripts/ci/verify/run-product-verification.sh web
 
+      - name: Run Docs
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|docs|') }}
+        run: scripts/ci/verify/run-product-verification.sh docs
+
       - name: Run SDK Go
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_go|') }}
         run: scripts/ci/verify/run-product-verification.sh sdk-go

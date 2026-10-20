@@ -476,6 +476,14 @@ run_web() {
   fi
 }
 
+# The Zola docs site, built and checked (internal links, deterministic output,
+# routes and page contracts) by the dashboard image's own docs stage with its
+# checksum-pinned Zola. Nothing is exported; the image build is web's.
+run_docs() {
+  docker buildx build --file apps/dashboard/Dockerfile --target docs-builder \
+    --output type=cacheonly .
+}
+
 run_dashboard_image() {
   make verify-dashboard-image \
     DASHBOARD_VERIFY_IMAGE="codewire-dashboard:verification-${GITHUB_RUN_ID:-local}"
@@ -1143,6 +1151,7 @@ case "$FAMILY" in
   contracts) run_contracts ;;
   go-support) run_go_support ;;
   web) run_web ;;
+  docs) run_docs ;;
   dashboard-image) run_dashboard_image ;;
   ios) run_ios ;;
   ios-config) run_ios_config ;;
@@ -1162,7 +1171,7 @@ case "$FAMILY" in
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-core-1|policy-core-2|policy-shell|contracts|go-support|web|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-core-1|policy-core-2|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|release|deploy|security" >&2
     exit 2
     ;;
 esac

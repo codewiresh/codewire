@@ -1242,6 +1242,20 @@ run_paths_case design_fixture_browser_runtime pull_request refs/pull/2205/head f
   'policy security security_js web' scripts/ci/verify/playwright-browser-runtime.sh
 run_paths_case marketing_brand_assets pull_request refs/pull/1201/head false \
   'policy web' favicon.svg logo/wordmark.svg
+# The Zola docs site selects the docs family (a Zola build and its link
+# check), never the dashboard browser gate in web (#3021). The JavaScript
+# audit still scans its templates and static script.
+run_paths_case docs_site_page pull_request refs/pull/3021/head false \
+  'docs policy security security_js' apps/docs/zola/content/cli/overview.md
+run_paths_case docs_site_sources push refs/heads/main false \
+  'docs policy security security_js' \
+  apps/docs/zola/templates/base.html apps/docs/zola/static/search.js \
+  apps/docs/zola/routes.toml apps/docs/zola/config.toml
+run_paths_case docs_site_outside_zola pull_request refs/pull/3021/head false \
+  'docs policy' apps/docs/astro.config.mjs
+run_paths_case docs_and_dashboard pull_request refs/pull/3021/head false \
+  'docs policy security security_js web' \
+  apps/docs/zola/content/_index.md apps/dashboard/playwright.config.ts
 run_paths_case dashboard_runtime_inventory pull_request refs/pull/121/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential security web' \
   apps/dashboard/runtime-inventory.json
@@ -1535,7 +1549,7 @@ run_paths_case temporal_installer_without_kind pull_request refs/pull/171/head f
 run_paths_case temporal_installer_with_kind pull_request refs/pull/172/head true \
   'edge_kind kind policy security security_js' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
 run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
-  'go_consumer_interop go_support policy release runtime_confidential runtime_dev_smoke rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_desktop rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts security security_js service_integration service_orchestration service_temporal web' \
+  'docs go_consumer_interop go_support policy release runtime_confidential runtime_dev_smoke rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_desktop rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts security security_js service_integration service_orchestration service_temporal web' \
   CONTRIBUTING.md \
   README.md \
   apps/cli/.env.example \
@@ -1627,9 +1641,9 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
-all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product='contracts contracts_proto database deploy docs edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 # A pull request without the Kind opt-in never selects Kind.
-all_product_pr='contracts contracts_proto database deploy go_consumer_interop go_support go_tailnet policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product_pr='contracts contracts_proto database deploy docs go_consumer_interop go_support go_tailnet policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy security security_js" scripts/dev/dashboard-watch.py
 run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
@@ -1863,6 +1877,9 @@ assert_tokens dispatch_go_support \
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=ios "$SELECTOR")"
 assert_tokens dispatch_ios 'ios' "$dispatch_output"
+dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
+  VERIFICATION_REQUEST=docs "$SELECTOR")"
+assert_tokens dispatch_docs 'docs' "$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=policy "$SELECTOR")"
 assert_tokens dispatch_policy 'policy policy_shell' "$dispatch_output"
@@ -3144,6 +3161,7 @@ for contract in \
     'Run Contracts|contracts' \
     'Run Go support|go_support' \
     'Run Web|web' \
+    'Run Docs|docs' \
     'Run SDK Go|sdk_go' \
     'Run SDK TypeScript|sdk_ts' \
     'Run SDK Python|sdk_python'; do
@@ -4718,7 +4736,7 @@ WORK = {
     },
     "policy": {"Run Policy"},
     "standard": {
-        "Run Contracts", "Run Go support", "Run Web", "Run SDK Go",
+        "Run Contracts", "Run Go support", "Run Web", "Run Docs", "Run SDK Go",
         "Run SDK TypeScript typecheck and unit suite", "Run SDK Python",
     },
     "tooling": {

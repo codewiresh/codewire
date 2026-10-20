@@ -363,7 +363,7 @@ PY
 select_all_product() {
   local include_ios="${1:-false}" family
   for family in \
-      policy policy_shell rust go_support web sdk_go sdk_ts sdk_python database \
+      policy policy_shell rust go_support web docs sdk_go sdk_ts sdk_python database \
       service_integration edge_kind release deploy security \
       runtime_confidential runtime_dev_smoke; do
     select_token "$family"
@@ -427,7 +427,7 @@ select_dispatch_request() {
       select_token policy
       select_token policy_shell
       ;;
-    web|sdk_go|sdk_ts|sdk_python|database|release|deploy|ios)
+    web|docs|sdk_go|sdk_ts|sdk_python|database|release|deploy|ios)
       select_token "$request"
       ;;
     rust-stack)
@@ -1116,7 +1116,14 @@ if [ "$event_selected" = false ]; then
         select_token runtime_dev_smoke
         recognized=true
         ;;
-      apps/dashboard/*|apps/docs/*|favicon.svg|logo/*|\
+      apps/docs/*)
+        # The Zola docs site. The docs family builds and checks it (internal
+        # links included) with the image's pinned Zola; the dashboard browser
+        # gate in web never reads it.
+        select_token docs
+        recognized=true
+        ;;
+      apps/dashboard/*|favicon.svg|logo/*|\
       scripts/dev/design-system-server.py|scripts/ci/tests/test-dashboard-browser-gate.sh|\
       scripts/ci/verify/run-design-fixtures.sh|scripts/ci/tests/test-run-design-fixtures.sh|\
       scripts/ci/verify/playwright-browser-runtime.sh|scripts/ci/install-pinned-playwright-chromium.sh)

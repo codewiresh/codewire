@@ -505,6 +505,7 @@ run_selected_family rust_curated_locks rust-curated-locks \
   "curated Rust workspace lock verification"
 run_selected_family go_support go-support "Go support verification"
 run_selected_family web web "web verification"
+run_selected_family docs docs "docs site verification"
 run_selected_family ios ios "iOS verification"
 run_selected_family sdk_go sdk-go "Go SDK verification"
 run_selected_family sdk_ts sdk-ts "TypeScript SDK verification"
