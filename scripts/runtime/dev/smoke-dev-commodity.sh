@@ -955,7 +955,7 @@ assert_smoke_principal() {
 
   local environments_out="$TMPDIR_SMOKE/environments.json"
   local environments_err="$TMPDIR_SMOKE/environments.err"
-  if ! cw ls --output json >"$environments_out" 2>"$environments_err"; then
+  if ! cw --cloud ls --output json >"$environments_out" 2>"$environments_err"; then
     sed 's/[[:cntrl:]]//g' "$environments_err" >&2 || true
     die "authenticated smoke principal cannot list environments for its current organization"
   fi
@@ -1015,7 +1015,7 @@ assert_admin_oauth_principal() {
 
   local environments_out="$TMPDIR_SMOKE/admin-environments.json"
   local environments_err="$TMPDIR_SMOKE/admin-environments.err"
-  if ! cw ls --output json >"$environments_out" 2>"$environments_err"; then
+  if ! cw --cloud ls --output json >"$environments_out" 2>"$environments_err"; then
     sed 's/[[:cntrl:]]//g' "$environments_err" >&2 || true
     die "saved admin OIDC login cannot list environments for its current organization"
   fi
