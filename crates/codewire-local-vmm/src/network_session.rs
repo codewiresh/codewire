@@ -6,6 +6,7 @@
 //! boundaries in `network_worker`; the macOS developer fixture uses this same
 //! production handshake and packet engine with a socket-free synthetic broker.
 
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
@@ -15,7 +16,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use codewire_netstack::{
     DnsAnswer, DnsQuestion, Netstack, NetstackConfig, NetstackLimits, TcpListener,
-    build_ipv4_dns_response, parse_canonical_ipv4_tcp_packet, parse_ipv4_dns_question,
+    build_ipv4_dns_response, build_ipv4_tcp_refusal, parse_canonical_ipv4_tcp_packet,
+    parse_ipv4_dns_question,
 };
 use codewire_vmm_guest_probe::{
     NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN, NETWORK_MAX_PACKET_BYTES, NetworkGuestAck,
@@ -37,9 +39,12 @@ const DNS_MESSAGE_LIMIT: usize = 1_232;
 /// bound is answered SERVFAIL at once.
 pub(crate) const MAX_DNS_IN_FLIGHT: usize = 32;
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-/// New guest connections whose authorization the broker is still answering.
-/// A SYN beyond this is dropped; the guest retries it.
-pub(crate) const MAX_TCP_AUTHORIZATIONS_IN_FLIGHT: usize = 64;
+/// New guest connections the broker is still authorizing and dialing. A SYN
+/// beyond this is dropped; the guest retries it.
+pub(crate) const MAX_TCP_DIALS_IN_FLIGHT: usize = 64;
+/// How long an upstream dialed for a guest SYN waits for the guest's
+/// handshake to reach the listener.
+const DIALED_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 const WORKER_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
@@ -310,6 +315,35 @@ where
     Err(NetworkSessionError::Engine)
 }
 
+/// Upstream connections dialed for guest SYNs, keyed by the guest's source
+/// and destination, waiting for the catch-all listener to accept the guest
+/// side. One whose guest never completes its handshake is dropped after
+/// [`DIALED_UPSTREAM_TIMEOUT`].
+#[derive(Default)]
+struct DialedUpstreams(
+    std::sync::Mutex<HashMap<(SocketAddr, SocketAddr), (BoxedBrokerStream, tokio::time::Instant)>>,
+);
+
+impl DialedUpstreams {
+    fn insert(&self, flow: (SocketAddr, SocketAddr), upstream: BoxedBrokerStream) {
+        let now = tokio::time::Instant::now();
+        let mut dialed = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        dialed.retain(|_, (_, at)| now.duration_since(*at) < DIALED_UPSTREAM_TIMEOUT);
+        dialed.insert(flow, (upstream, now));
+    }
+
+    fn take(&self, flow: &(SocketAddr, SocketAddr)) -> Option<BoxedBrokerStream> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(flow)
+            .map(|(upstream, _)| upstream)
+    }
+}
+
 async fn dispatch_packets<B: EgressBroker>(
     mut packets: mpsc::Receiver<Vec<u8>>,
     stack: Netstack,
@@ -324,9 +358,11 @@ async fn dispatch_packets<B: EgressBroker>(
         .bind_catch_all()
         .await
         .map_err(|_| NetworkSessionError::Engine)?;
+    let dialed = Arc::new(DialedUpstreams::default());
     let mut egress = JoinSet::new();
-    egress.spawn(serve_listener(listener, Arc::clone(&broker)));
-    let mut authorizations = JoinSet::new();
+    egress.spawn(serve_listener(listener, Arc::clone(&dialed)));
+    let mut dials = JoinSet::new();
+    let mut dialing = HashSet::<(SocketAddr, SocketAddr)>::new();
     let mut inbound_bridges = JoinSet::new();
     let mut dns_questions = JoinSet::new();
     loop {
@@ -358,12 +394,29 @@ async fn dispatch_packets<B: EgressBroker>(
                 });
                 continue;
             }
-            authorized = authorizations.join_next(), if !authorizations.is_empty() => {
-                if let Some(Ok(Some(syn))) = authorized {
-                    to_stack
-                        .send(syn)
-                        .await
-                        .map_err(|_| NetworkSessionError::Engine)?;
+            dial = dials.join_next(), if !dials.is_empty() => {
+                let Some(Ok((flow, syn, upstream))) = dial else { continue; };
+                dialing.remove(&flow);
+                match upstream {
+                    Some(upstream) => {
+                        dialed.insert(flow, upstream);
+                        to_stack
+                            .send(syn)
+                            .await
+                            .map_err(|_| NetworkSessionError::Engine)?;
+                    }
+                    None => {
+                        // Refused, or the destination could not be reached:
+                        // answer the SYN with RST, so the guest sees a refused
+                        // connection, never a handshake that is later reset
+                        // (#3003).
+                        if let Ok(refusal) = build_ipv4_tcp_refusal(&syn) {
+                            outbound
+                                .send(refusal)
+                                .await
+                                .map_err(|_| NetworkSessionError::Engine)?;
+                        }
+                    }
                 }
                 continue;
             }
@@ -441,19 +494,32 @@ async fn dispatch_packets<B: EgressBroker>(
                 .map_err(|_| NetworkSessionError::Engine)?;
             continue;
         }
-        // A new connection: the broker decides it off this loop, then its SYN
-        // goes to the stack. Each one is decided, not just a destination's
-        // first, so a policy change applies to the next connection.
-        if authorizations.len() >= MAX_TCP_AUTHORIZATIONS_IN_FLIGHT {
+        // A new connection: off this loop, the broker authorizes it and dials
+        // the destination. Only then does the SYN reach the stack, so the
+        // guest's handshake completes only once the upstream is connected,
+        // and a refusal is answered as one (#3003). Every connection is
+        // decided, so a policy change applies to the next one.
+        let flow = (tcp.source, tcp.destination);
+        if dialing.contains(&flow) {
+            // The guest retransmitted the SYN while its dial runs.
             continue;
         }
-        let flow = TcpFlow {
+        if dials.len() >= MAX_TCP_DIALS_IN_FLIGHT {
+            continue;
+        }
+        dialing.insert(flow);
+        let tcp_flow = TcpFlow {
             source: tcp.source,
             destination: tcp.destination,
         };
         let broker = Arc::clone(&broker);
-        authorizations
-            .spawn(async move { broker.authorize_tcp(flow).await.is_ok().then_some(packet) });
+        dials.spawn(async move {
+            let upstream = match broker.authorize_tcp(tcp_flow).await {
+                Ok(()) => broker.connect_tcp(tcp_flow).await.ok(),
+                Err(_) => None,
+            };
+            (flow, packet, upstream)
+        });
     }
 }
 
@@ -496,26 +562,22 @@ async fn next_inbound_guest_stream(
 }
 
 /// Bridge every guest connection the catch-all listener accepts to the
-/// broker. Each dial runs in its connection's own task, so a slow upstream
-/// never holds up the next accept.
-async fn serve_listener<B: EgressBroker>(mut listener: TcpListener, broker: Arc<B>) {
+/// upstream already dialed for it.
+async fn serve_listener(mut listener: TcpListener, dialed: Arc<DialedUpstreams>) {
     let mut bridges = JoinSet::new();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let Some(mut guest) = accepted else { return; };
-                let broker = Arc::clone(&broker);
+                // Dialed before its SYN reached the stack; one that expired
+                // leaves the guest connection to be reset.
+                let Some(mut upstream) = dialed.take(&(guest.peer_addr(), guest.local_addr())) else {
+                    continue;
+                };
                 bridges.spawn(async move {
-                    let flow = TcpFlow {
-                        source: guest.peer_addr(),
-                        destination: guest.local_addr(),
-                    };
-                    let Ok(mut connected) = broker.connect_tcp(flow).await else {
-                        return;
-                    };
-                    let _ = tokio::io::copy_bidirectional(&mut guest, &mut connected).await;
+                    let _ = tokio::io::copy_bidirectional(&mut guest, &mut upstream).await;
                     let _ = guest.shutdown().await;
-                    let _ = connected.shutdown().await;
+                    let _ = upstream.shutdown().await;
                 });
             }
             completed = bridges.join_next(), if !bridges.is_empty() => {
@@ -815,7 +877,8 @@ mod tests {
         }
 
         async fn connect_tcp(&self, _flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
-            Err(denied())
+            let (upstream, _) = duplex(1024);
+            Ok(Box::pin(upstream))
         }
 
         async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
@@ -943,6 +1006,115 @@ mod tests {
             packets.push(packet.unwrap());
         }
         packets
+    }
+
+    /// Authorizes and dials as configured, counting dials, with an optional
+    /// delay before each dial answers.
+    struct DialBroker {
+        authorize: bool,
+        connect: bool,
+        dial: Duration,
+        dials: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl EgressBroker for DialBroker {
+        async fn authorize_tcp(&self, _flow: TcpFlow) -> io::Result<()> {
+            if self.authorize {
+                Ok(())
+            } else {
+                Err(denied())
+            }
+        }
+
+        async fn connect_tcp(&self, _flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
+            self.dials.fetch_add(1, Ordering::AcqRel);
+            tokio::time::sleep(self.dial).await;
+            if !self.connect {
+                return Err(io::Error::from(io::ErrorKind::ConnectionRefused));
+            }
+            let (upstream, _) = duplex(1024);
+            Ok(Box::pin(upstream))
+        }
+
+        async fn resolve_dns(&self, _question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
+            Err(denied())
+        }
+    }
+
+    /// #3003: a connection the broker refuses, or one it cannot dial, is
+    /// answered with RST to the SYN, so the guest sees a refused connection;
+    /// no handshake ever completes first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_or_undialable_connection_is_refused_never_reset_after_a_handshake() {
+        for (authorize, connect) in [(false, true), (true, false)] {
+            let broker = Arc::new(DialBroker {
+                authorize,
+                connect,
+                dial: Duration::ZERO,
+                dials: AtomicUsize::new(0),
+            });
+            let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
+            let destination = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 80), 443);
+            let syn = tcp_packet(40_000, destination, 1, 0, 0x02);
+            write_guest_packet(&mut guest, &mut session, &syn)
+                .await
+                .unwrap();
+            let packets = drain(&mut guest, &mut session, Duration::from_millis(300)).await;
+            let tcp: Vec<&Vec<u8>> = packets.iter().filter(|packet| packet[9] == 6).collect();
+            assert!(
+                !tcp.iter().any(|packet| tcp_flags(packet) & 0x12 == 0x12),
+                "authorize {authorize}, connect {connect}: a handshake was offered"
+            );
+            let refusal = tcp
+                .iter()
+                .find(|packet| tcp_flags(packet) & 0x04 != 0)
+                .unwrap_or_else(|| panic!("authorize {authorize}, connect {connect}: no RST"));
+            assert_eq!(tcp_flags(refusal), 0x14, "RST and ACK");
+            assert_eq!(
+                u32::from_be_bytes([refusal[28], refusal[29], refusal[30], refusal[31]]),
+                2,
+                "the RST acknowledges the SYN"
+            );
+            assert_eq!(u16::from_be_bytes([refusal[22], refusal[23]]), 40_000);
+            assert_eq!(broker.dials.load(Ordering::Acquire), usize::from(authorize));
+        }
+    }
+
+    /// #3003: the guest's handshake waits for the upstream dial, and a SYN the
+    /// guest retransmits while it runs does not dial again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_handshake_waits_for_the_dial_and_a_retransmitted_syn_dials_once() {
+        let broker = Arc::new(DialBroker {
+            authorize: true,
+            connect: true,
+            dial: Duration::from_millis(400),
+            dials: AtomicUsize::new(0),
+        });
+        let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
+        let destination = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 81), 443);
+        let syn = tcp_packet(40_001, destination, 1, 0, 0x02);
+        write_guest_packet(&mut guest, &mut session, &syn)
+            .await
+            .unwrap();
+        let early = drain(&mut guest, &mut session, Duration::from_millis(150)).await;
+        assert!(
+            !early
+                .iter()
+                .any(|packet| packet[9] == 6 && tcp_flags(packet) == 0x12),
+            "SYN-ACK before the dial finished"
+        );
+        write_guest_packet(&mut guest, &mut session, &syn)
+            .await
+            .unwrap();
+        let later = drain(&mut guest, &mut session, Duration::from_millis(800)).await;
+        assert!(
+            later
+                .iter()
+                .any(|packet| packet[9] == 6 && tcp_flags(packet) == 0x12),
+            "no SYN-ACK once the dial connected"
+        );
+        assert_eq!(broker.dials.load(Ordering::Acquire), 1);
     }
 
     fn note_syn_acks(answered: &mut std::collections::BTreeMap<u16, u32>, packets: Vec<Vec<u8>>) {

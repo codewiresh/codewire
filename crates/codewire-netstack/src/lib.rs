@@ -42,8 +42,8 @@ pub use dns::{
     DnsRecordType,
 };
 pub use ingress::{
-    parse_canonical_ipv4_tcp_packet, parse_initial_ipv4_tcp_syn, CanonicalIpv4TcpPacket,
-    InitialTcpSyn, InitialTcpSynError,
+    build_ipv4_tcp_refusal, parse_canonical_ipv4_tcp_packet, parse_initial_ipv4_tcp_syn,
+    CanonicalIpv4TcpPacket, InitialTcpSyn, InitialTcpSynError,
 };
 pub use stream::{TcpListener, TcpStream};
 

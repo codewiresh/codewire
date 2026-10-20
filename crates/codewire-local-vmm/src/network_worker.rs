@@ -2542,8 +2542,11 @@ mod tests {
         ));
     }
 
+    /// DNS is answered locally. A SYN to a destination the policy refuses is
+    /// answered with RST, so the guest sees the refusal at once (#3003); every
+    /// other unbrokered packet class is dropped without a response.
     #[tokio::test]
-    async fn dns_is_local_and_every_unbrokered_packet_class_is_dropped() {
+    async fn dns_is_local_refused_syns_get_rst_and_every_other_unbrokered_packet_is_dropped() {
         let (vm_id, generation) = identity();
         let (host_endpoint, mut guest_endpoint) = duplex(128 * 1024);
         let broker = Arc::new(FixtureBroker::new(None, None));
@@ -2606,6 +2609,30 @@ mod tests {
             denied_destinations
         );
         assert_eq!(broker.resolved.load(Ordering::Relaxed), 1);
+        for destination in denied_destinations {
+            let refusal = tokio::time::timeout(
+                Duration::from_secs(2),
+                read_guest_packet(&mut guest_endpoint, &mut session),
+            )
+            .await
+            .expect("a refused SYN is answered")
+            .unwrap();
+            assert_eq!(refusal[9], 6, "the refusal is TCP");
+            assert_eq!(refusal[20 + 13], 0x14, "RST and ACK");
+            assert_eq!(
+                SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(
+                        refusal[12],
+                        refusal[13],
+                        refusal[14],
+                        refusal[15]
+                    )),
+                    u16::from_be_bytes([refusal[20], refusal[21]]),
+                ),
+                destination,
+                "the refusal comes from the refused destination"
+            );
+        }
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(100),

@@ -25,7 +25,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use super::{
-    parse_initial_ipv4_tcp_syn, InitialTcpSynError, Netstack, NetstackConfig, NetstackLimits,
+    build_ipv4_tcp_refusal, parse_initial_ipv4_tcp_syn, InitialTcpSynError, Netstack,
+    NetstackConfig, NetstackLimits,
 };
 
 /// Documentation-only ULA addresses for the in-process endpoints.
@@ -1315,4 +1316,78 @@ async fn the_catch_all_drops_syns_beyond_the_connection_limit_until_a_slot_frees
         .expect("accepted stream");
     assert_eq!(accepted.local_addr(), remote(2));
     drop(half_open);
+}
+
+/// #3003: a SYN refused with `build_ipv4_tcp_refusal` fails the client's
+/// connect as refused, before any handshake completes.
+#[tokio::test]
+async fn a_refused_syn_fails_the_connect_as_refused() {
+    const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
+    const WORKER_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+    const DESTINATION: SocketAddr =
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 19)), 443);
+    let (guest_out, mut guest_packets) = mpsc::channel(PACKET_QUEUE);
+    let (to_guest, guest_in) = mpsc::channel(PACKET_QUEUE);
+    let guest = Netstack::with_config(
+        NetstackConfig {
+            local_ip: IpAddr::V4(GUEST_IP),
+            prefix_len: 30,
+            mtu: 1_500,
+            verify_rx_checksums: true,
+            accept_any_ip: false,
+            default_gateway: Some(IpAddr::V4(WORKER_IP)),
+        },
+        guest_in,
+        guest_out,
+    )
+    .expect("guest netstack config");
+    let mut stream = guest.connect(DESTINATION).await.expect("connect starts");
+    let syn = tokio::time::timeout(Duration::from_secs(5), guest_packets.recv())
+        .await
+        .expect("guest sent its SYN")
+        .expect("guest packet channel open");
+    let initial = parse_initial_ipv4_tcp_syn(&syn).expect("initial SYN");
+
+    let refusal = build_ipv4_tcp_refusal(&syn).expect("refusal");
+    {
+        let ipv4 = Ipv4Packet::new_checked(&refusal[..]).expect("IPv4");
+        assert!(ipv4.verify_checksum());
+        assert_eq!(
+            IpAddr::V4(Ipv4Addr::from(ipv4.src_addr().octets())),
+            DESTINATION.ip()
+        );
+        assert_eq!(
+            IpAddr::V4(Ipv4Addr::from(ipv4.dst_addr().octets())),
+            initial.source.ip()
+        );
+        let tcp = TcpPacket::new_checked(ipv4.payload()).expect("TCP");
+        assert!(tcp.verify_checksum(
+            &IpAddress::Ipv4(ipv4.src_addr()),
+            &IpAddress::Ipv4(ipv4.dst_addr())
+        ));
+        assert!(tcp.rst() && tcp.ack() && !tcp.syn());
+        assert_eq!(tcp.src_port(), DESTINATION.port());
+        assert_eq!(tcp.dst_port(), initial.source.port());
+        let syn_tcp = TcpPacket::new_checked(Ipv4Packet::new_checked(&syn[..]).unwrap().payload())
+            .unwrap()
+            .seq_number();
+        assert_eq!(tcp.ack_number(), syn_tcp + 1);
+    }
+    assert_eq!(
+        build_ipv4_tcp_refusal(&refusal),
+        Err(InitialTcpSynError::NotInitialSyn),
+        "only an initial SYN is refused"
+    );
+
+    to_guest.send(refusal).await.expect("deliver the refusal");
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut byte))
+        .await
+        .expect("the refused connect ends at once");
+    // A Linux guest reports ECONNREFUSED for this RST+ACK in SYN-SENT (RFC
+    // 793); here it is enough that the connect ends without any data.
+    assert!(
+        !matches!(read, Ok(n) if n > 0),
+        "the refused connect delivered data: {read:?}"
+    );
 }

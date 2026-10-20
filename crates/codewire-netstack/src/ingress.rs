@@ -9,7 +9,7 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use smoltcp::wire::{IpAddress, IpProtocol, Ipv4Packet, TcpPacket};
+use smoltcp::wire::{IpAddress, IpProtocol, Ipv4Address, Ipv4Packet, TcpPacket, TcpSeqNumber};
 
 /// Source and original destination carried by one initial TCP SYN.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +78,58 @@ pub fn parse_initial_ipv4_tcp_syn(packet: &[u8]) -> Result<InitialTcpSyn, Initia
         source: parsed.source,
         destination: parsed.destination,
     })
+}
+
+/// The segment that refuses one initial IPv4 TCP SYN, as a closed port
+/// answers it: RST and ACK of the SYN, from its destination back to its
+/// source. The client sees a refused connection at once, never a handshake
+/// that is later reset.
+pub fn build_ipv4_tcp_refusal(syn: &[u8]) -> Result<Vec<u8>, InitialTcpSynError> {
+    let initial = parse_initial_ipv4_tcp_syn(syn)?;
+    let (IpAddr::V4(client), IpAddr::V4(destination)) =
+        (initial.source.ip(), initial.destination.ip())
+    else {
+        return Err(InitialTcpSynError::InvalidIpv4);
+    };
+    let acknowledged = {
+        let ipv4 = Ipv4Packet::new_unchecked(syn);
+        TcpPacket::new_unchecked(ipv4.payload()).seq_number() + 1
+    };
+    const IPV4_HEADER_LEN: usize = 20;
+    const TCP_HEADER_LEN: usize = 20;
+    let mut packet = vec![0u8; IPV4_HEADER_LEN + TCP_HEADER_LEN];
+    let source_ip = Ipv4Address::from_octets(destination.octets());
+    let destination_ip = Ipv4Address::from_octets(client.octets());
+    {
+        let mut tcp = TcpPacket::new_unchecked(&mut packet[IPV4_HEADER_LEN..]);
+        tcp.set_src_port(initial.destination.port());
+        tcp.set_dst_port(initial.source.port());
+        tcp.set_seq_number(TcpSeqNumber(0));
+        tcp.set_ack_number(acknowledged);
+        tcp.set_header_len(TCP_HEADER_LEN as u8);
+        tcp.clear_flags();
+        tcp.set_rst(true);
+        tcp.set_ack(true);
+        tcp.set_window_len(0);
+        tcp.set_urgent_at(0);
+        tcp.fill_checksum(
+            &IpAddress::Ipv4(source_ip),
+            &IpAddress::Ipv4(destination_ip),
+        );
+    }
+    {
+        let mut ipv4 = Ipv4Packet::new_unchecked(packet.as_mut_slice());
+        ipv4.set_version(4);
+        ipv4.set_header_len(IPV4_HEADER_LEN as u8);
+        ipv4.set_total_len((IPV4_HEADER_LEN + TCP_HEADER_LEN) as u16);
+        ipv4.set_dont_frag(true);
+        ipv4.set_hop_limit(64);
+        ipv4.set_next_header(IpProtocol::Tcp);
+        ipv4.set_src_addr(source_ip);
+        ipv4.set_dst_addr(destination_ip);
+        ipv4.fill_checksum();
+    }
+    Ok(packet)
 }
 
 /// Parse one canonical, unfragmented IPv4 TCP packet without allocating.
