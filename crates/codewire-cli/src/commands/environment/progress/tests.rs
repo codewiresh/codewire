@@ -1,10 +1,18 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
+use std::ops::{Deref, DerefMut};
 use std::sync::Mutex;
 
 use serde_json::json;
 
 use super::*;
+use crate::config::MapEnv;
+use crate::output::TerminalFacts;
+
+/// Clears the current terminal line.
+const CLEAR_LINE: &str = "\r\x1b[2K";
+const WRAP_OFF: &str = "\x1b[?7l";
+const WRAP_ON: &str = "\x1b[?7h";
 
 const CLONE_PROGRESS_FIXTURE: &str =
     include_str!("../../../../tests/fixtures/environment-log-clone-progress-v1.json");
@@ -55,12 +63,75 @@ fn permanent_lines(output: &str) -> Vec<String> {
         .collect()
 }
 
-fn plain_view(began: Instant) -> StartProgress<Vec<u8>> {
-    StartProgress::new(Vec::new(), false, began, "Starting")
+/// A progress view writing into memory.
+struct View {
+    progress: StartProgress<CapturedOutput>,
+    out: CapturedOutput,
 }
 
-fn output(view: StartProgress<Vec<u8>>) -> String {
-    String::from_utf8(view.into_inner()).unwrap()
+impl Deref for View {
+    type Target = StartProgress<CapturedOutput>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.progress
+    }
+}
+
+impl DerefMut for View {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.progress
+    }
+}
+
+fn caps(facts: TerminalFacts, vars: &[(&str, &str)]) -> Capabilities {
+    Capabilities::detect(OutputMode::Text, &facts, &MapEnv::new(vars.iter().copied()))
+}
+
+fn view_with(caps: &Capabilities, began: Instant) -> View {
+    let out = CapturedOutput::default();
+    View {
+        progress: StartProgress::new(out.clone(), caps, began, "Starting"),
+        out,
+    }
+}
+
+/// Redirected text output: one plain line per row, no colour.
+fn plain_view(began: Instant) -> View {
+    view_with(&caps(TerminalFacts::default(), &[]), began)
+}
+
+/// A terminal without colour and with a static spinner glyph, so live rows
+/// are exact.
+fn live_view(began: Instant) -> View {
+    let terminal = TerminalFacts {
+        stdin_tty: true,
+        stdout_tty: true,
+        stderr_tty: true,
+        columns: Some(200),
+        rows: Some(40),
+    };
+    view_with(
+        &caps(
+            terminal,
+            &[("NO_COLOR", "1"), ("CODEWIRE_REDUCED_MOTION", "1")],
+        ),
+        began,
+    )
+}
+
+fn output(view: View) -> String {
+    let View { progress, out } = view;
+    drop(progress);
+    out.text()
+}
+
+/// Plain stored-row rendering without colour.
+fn stored(logs: &[EnvironmentLog]) -> String {
+    format_environment_logs_plain(logs, &caps(TerminalFacts::default(), &[]))
+}
+
+fn live_frame(text: &str) -> String {
+    format!("{CLEAR_LINE}{WRAP_OFF}{text}{WRAP_ON}")
 }
 
 enum ConnectionEnd {
@@ -148,20 +219,20 @@ fn fast_policy() -> FollowPolicy {
 #[test]
 fn clone_progress_fixture_renders_every_stage_with_elapsed_time() {
     assert_eq!(
-        format_environment_logs_plain(&fixture_rows()),
-        "  ◌ Creating namespace...\n\
+        stored(&fixture_rows()),
+        "  ◐ Creating namespace\n\
          \x20 ✓ Creating namespace  0s\n\
-         \x20 ◌ Creating sandbox...\n\
+         \x20 ◐ Creating sandbox\n\
          \x20 ✓ Creating sandbox  21s\n\
          \x20 ✓ Storing backend info\n\
-         \x20 ◌ Checking sidecar readiness...\n\
+         \x20 ◐ Checking sidecar readiness\n\
          \x20 ✓ Checking sidecar readiness  0.2s\n\
-         \x20 ◌ Cloning repositories...\n\
-         \x20   ◌ Cloning repository 1 of 2...\n\
+         \x20 ◐ Cloning repositories\n\
+         \x20   ◐ Cloning repository 1 of 2\n\
          \x20   · Cloning repository 1 of 2: receiving objects 45%\n\
          \x20   · Cloning repository 1 of 2: resolving deltas 100%\n\
          \x20   ✓ Cloned repository 1 of 2  3s\n\
-         \x20   ◌ Cloning repository 2 of 2...\n\
+         \x20   ◐ Cloning repository 2 of 2\n\
          \x20   · Cloning repository 2 of 2: receiving objects 100%\n\
          \x20   ✓ Cloned repository 2 of 2  2s\n\
          \x20 ✓ Cloning repositories  5s\n\
@@ -172,12 +243,10 @@ fn clone_progress_fixture_renders_every_stage_with_elapsed_time() {
 #[test]
 fn clone_progress_fixture_updates_one_live_line_on_a_terminal() {
     let t0 = Instant::now();
-    let mut view = StartProgress::new(Vec::new(), true, t0, "Starting");
-    let mut frames = Vec::new();
+    let mut view = live_view(t0);
     for (offset, log) in fixture_rows().iter().enumerate() {
         let received = t0 + Duration::from_secs(offset as u64);
         view.apply(log, received).unwrap();
-        frames.push(view.live_text(received));
     }
     view.finish().unwrap();
     let rendered = output(view);
@@ -195,24 +264,24 @@ fn clone_progress_fixture_updates_one_live_line_on_a_terminal() {
             "  ✓ Setup complete",
         ]
     );
-    // Rows 10 and 11 update the per-repository stage in place; its clock
-    // runs from the local receipt of its `started` row (row 9).
-    assert_eq!(
-        frames[9],
-        "  ◌ Cloning repository 1 of 2 (receiving objects 45%)  1s"
-    );
-    assert_eq!(
-        frames[10],
-        "  ◌ Cloning repository 1 of 2 (resolving deltas 100%)  2s"
-    );
-    // Back to the phase-level stage between repositories.
-    assert_eq!(frames[11], "  ◌ Cloning repositories  4s");
-    assert!(rendered.contains(&format!(
-        "{CLEAR_LINE}{WRAP_OFF}  ◌ Cloning repository 1 of 2 (receiving objects 45%)  1s{WRAP_ON}"
-    )));
-    // No stage remains open after `complete`, and the line is cleared.
-    assert_eq!(frames[16], "  ◌ Starting  16s");
+    // Progress rows update the per-repository stage in place; its clock
+    // runs from the local receipt of its `started` row.
+    for frame in [
+        "  ◐ Cloning repository 1 of 2 · receiving objects 45%  1s",
+        "  ◐ Cloning repository 1 of 2 · resolving deltas 100%  2s",
+        // Back to the phase-level stage between repositories.
+        "  ◐ Cloning repositories  4s",
+        // No stage remains open after `complete`.
+        "  ◐ Starting  16s",
+    ] {
+        assert!(
+            rendered.contains(&live_frame(frame)),
+            "{frame}\n{rendered:?}"
+        );
+    }
+    // The live row is cleared at the end.
     assert!(rendered.ends_with(CLEAR_LINE));
+    assert!(!rendered.contains('◌'));
 }
 
 #[test]
@@ -331,19 +400,23 @@ fn clone_progress_without_per_repository_rows_attaches_to_the_clone_stage() {
     }
     assert_eq!(
         output(view),
-        "  ◌ Cloning repositories...\n\
+        "  ◐ Cloning repositories\n\
          \x20   · Cloning repositories: repository 2/3, receiving objects 10%\n\
          \x20   · Cloning repositories\n\
          \x20 ✓ Cloning repositories  1m 07s\n"
     );
 
     // On a terminal the progress row updates the open clone stage.
-    let mut view = StartProgress::new(Vec::new(), true, t0, "Starting");
+    let mut view = live_view(t0);
     view.apply(&rows[0], t0).unwrap();
     view.apply(&rows[1], t0 + Duration::from_secs(3)).unwrap();
-    assert_eq!(
-        view.live_text(t0 + Duration::from_secs(3)),
-        "  ◌ Cloning repositories (repository 2/3, receiving objects 10%)  3s"
+    let rendered = output(view);
+    assert!(
+        rendered.ends_with(&format!(
+            "{}{CLEAR_LINE}",
+            live_frame("  ◐ Cloning repositories · repository 2/3, receiving objects 10%  3s")
+        )),
+        "{rendered:?}"
     );
 }
 
@@ -389,7 +462,7 @@ fn unknown_phases_statuses_and_control_characters_render_generically() {
     }
     assert_eq!(
         output(view),
-        "  ◌ Warm pool bind...\n\
+        "  ◐ Warm pool bind\n\
          \x20 ✓ Warm pool bind  4s\n\
          \x20 · Waiting for capacity\n\
          \x20 ! exit [2J status 3\n"
@@ -450,14 +523,19 @@ fn stored_logs_keep_the_established_plain_shapes() {
         ),
     ];
     assert_eq!(
-        format_environment_logs_plain(&logs),
-        "  ◌ Cloning repository...\n\
+        stored(&logs),
+        "  ◐ Cloning repository\n\
          \x20 ✓ Repository cloned  7s\n\
          \x20 ! Package cache unavailable\n\
          \x20 ✗ Install failed\n\
-         \x20 ◌ Syncing...\n\
+         \x20 ◐ Syncing\n\
          \x20 ✓ Synced  0s\n"
     );
+    // A basic terminal gets ASCII marks.
+    let ascii =
+        format_environment_logs_plain(&logs, &caps(TerminalFacts::default(), &[("TERM", "dumb")]));
+    assert!(ascii.is_ascii(), "{ascii}");
+    assert!(ascii.starts_with("  | Cloning repository\n  + Repository cloned  7s\n"));
 }
 
 #[test]
@@ -500,7 +578,7 @@ fn a_failed_row_names_its_stage_and_becomes_the_command_error() {
     );
     assert_eq!(
         output(view),
-        "  ◌ Running install command...\n  ✗ Running install command: npm ci exploded  4s\n"
+        "  ◐ Running install command\n  ✗ Running install command: npm ci exploded  4s\n"
     );
     assert_eq!(
         failure.into_error("env-1").to_string(),
@@ -533,11 +611,6 @@ fn durations_and_backoff_are_bounded_and_readable() {
     assert_eq!(policy.backoff(4), Duration::from_secs(8));
     assert_eq!(policy.backoff(40), Duration::from_secs(8));
     assert_eq!(policy.idle_timeout, Duration::from_secs(45));
-
-    assert_eq!(
-        format_env_ready_text("builder", Duration::from_millis(25_400)),
-        "Environment builder is ready (25s).\n"
-    );
 }
 
 #[tokio::test]
@@ -569,7 +642,7 @@ async fn follow_resumes_after_the_last_row_when_the_stream_fails() {
     ]);
     let mut view = plain_view(Instant::now());
     let mut cursor = None;
-    let end = follow_start_progress(&feed, &mut view, &mut cursor, &fast_policy())
+    let end = follow_start_progress(&feed, &mut view.progress, &mut cursor, &fast_policy())
         .await
         .unwrap();
 
@@ -578,7 +651,7 @@ async fn follow_resumes_after_the_last_row_when_the_stream_fails() {
     assert_eq!(cursor.as_deref(), Some("log-3"));
     assert_eq!(
         output(view),
-        "  ◌ Creating sandbox...\n\
+        "  ◐ Creating sandbox\n\
          \x20 ✓ Creating sandbox  20s\n\
          \x20 ! Log stream interrupted (connection reset); resuming, attempt 1 of 3\n\
          \x20 ✓ Setup complete\n"
@@ -611,7 +684,7 @@ async fn follow_resumes_silently_when_the_call_deadline_rotates_a_healthy_stream
         connection(vec![log_event(complete_row("log-2"))], ConnectionEnd::Close),
     ]);
     let mut view = plain_view(Instant::now());
-    let end = follow_start_progress(&feed, &mut view, &mut None, &fast_policy())
+    let end = follow_start_progress(&feed, &mut view.progress, &mut None, &fast_policy())
         .await
         .unwrap();
     assert_eq!(end, FollowEnd::Complete);
@@ -621,7 +694,7 @@ async fn follow_resumes_silently_when_the_call_deadline_rotates_a_healthy_stream
     );
     assert_eq!(
         output(view),
-        "  ◌ Creating sandbox...\n\
+        "  ◐ Creating sandbox\n\
          \x20 ! Log stream interrupted (deadline exceeded); resuming, attempt 1 of 3\n\
          \x20 ✓ Setup complete\n"
     );
@@ -646,7 +719,7 @@ async fn follow_reconnects_when_heartbeats_stop_or_the_stream_closes_early() {
     ]);
     let mut view = plain_view(Instant::now());
     let mut cursor = None;
-    let end = follow_start_progress(&feed, &mut view, &mut cursor, &fast_policy())
+    let end = follow_start_progress(&feed, &mut view.progress, &mut cursor, &fast_policy())
         .await
         .unwrap();
 
@@ -680,7 +753,7 @@ async fn heartbeats_reset_the_reconnect_budget() {
     ));
     let feed = ScriptedFeed::new(connections);
     let mut view = plain_view(Instant::now());
-    let end = follow_start_progress(&feed, &mut view, &mut None, &fast_policy())
+    let end = follow_start_progress(&feed, &mut view.progress, &mut None, &fast_policy())
         .await
         .unwrap();
     assert_eq!(end, FollowEnd::Complete);
@@ -691,7 +764,7 @@ async fn heartbeats_reset_the_reconnect_budget() {
 async fn follow_gives_up_after_bounded_reconnects() {
     let feed = ScriptedFeed::new(Vec::new());
     let mut view = plain_view(Instant::now());
-    let error = follow_start_progress(&feed, &mut view, &mut None, &fast_policy())
+    let error = follow_start_progress(&feed, &mut view.progress, &mut None, &fast_policy())
         .await
         .unwrap_err();
     assert_eq!(
@@ -711,7 +784,7 @@ async fn a_non_retryable_stream_failure_ends_the_follow_at_once() {
         ConnectionEnd::Close,
     )]);
     let mut view = plain_view(Instant::now());
-    let error = follow_start_progress(&feed, &mut view, &mut None, &fast_policy())
+    let error = follow_start_progress(&feed, &mut view.progress, &mut None, &fast_policy())
         .await
         .unwrap_err();
     assert_eq!(
@@ -731,7 +804,7 @@ async fn create_waits_for_setup_complete_then_daemon_readiness() {
     let daemon_checked = Cell::new(false);
     await_environment_setup(
         &feed,
-        &mut view,
+        &mut view.progress,
         &fast_policy(),
         "env-fixture",
         std::future::pending(),
@@ -748,7 +821,7 @@ async fn create_waits_for_setup_complete_then_daemon_readiness() {
     let lines: Vec<_> = rendered.lines().collect();
     let tail = &lines[lines.len() - 3..];
     assert_eq!(tail[0], "  ✓ Setup complete");
-    assert_eq!(tail[1], "  ◌ Waiting for the workspace daemon...");
+    assert_eq!(tail[1], "  ◐ Waiting for the workspace daemon");
     assert!(
         tail[2].starts_with("  ✓ Workspace daemon ready  0."),
         "{rendered}"
@@ -782,7 +855,7 @@ async fn create_exits_non_zero_on_a_failed_stage_without_waiting_for_the_daemon(
     let daemon_checked = Cell::new(false);
     let error = await_environment_setup(
         &feed,
-        &mut view,
+        &mut view.progress,
         &fast_policy(),
         "env-1",
         std::future::pending(),
@@ -832,14 +905,25 @@ async fn create_fails_when_setup_stops_without_a_failed_row() {
         })
         .unwrap()
     };
-    let error = await_environment_setup(&feed, &mut view, &policy, "env-1", guard, || async {
-        Ok(())
-    })
+    let error = await_environment_setup(
+        &feed,
+        &mut view.progress,
+        &policy,
+        "env-1",
+        guard,
+        || async { Ok(()) },
+    )
     .await
     .unwrap_err();
     assert_eq!(
-        error.to_string(),
-        "environment env-1 setup failed: sync workspace env: timed out (see `cw logs env-1 --setup`)"
+        format!("{error:#}"),
+        "stopped at stage \"Configuring environment\": environment env-1 setup failed: sync workspace env: timed out (see `cw logs env-1 --setup`)"
+    );
+    // The stage that was running is closed with a cross, not left open.
+    let rendered = output(view);
+    assert!(
+        rendered.contains("  ✗ Configuring environment  0."),
+        "{rendered}"
     );
 }
 
@@ -852,7 +936,7 @@ async fn create_reports_a_daemon_that_never_becomes_ready() {
     let mut view = plain_view(Instant::now());
     let error = await_environment_setup(
         &feed,
-        &mut view,
+        &mut view.progress,
         &fast_policy(),
         "env-1",
         std::future::pending(),
@@ -860,8 +944,16 @@ async fn create_reports_a_daemon_that_never_becomes_ready() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.to_string(), "environment daemon is unhealthy");
-    assert!(!output(view).contains("Workspace daemon ready"));
+    assert_eq!(
+        format!("{error:#}"),
+        "stopped at stage \"Waiting for the workspace daemon\": environment daemon is unhealthy"
+    );
+    let rendered = output(view);
+    assert!(!rendered.contains("Workspace daemon ready"));
+    assert!(
+        rendered.contains("  ✗ Waiting for the workspace daemon  "),
+        "{rendered}"
+    );
 }
 
 #[tokio::test]
@@ -887,11 +979,17 @@ async fn start_shows_rows_after_the_cursor_until_the_daemon_is_ready() {
         ],
         ConnectionEnd::Hang,
     )]);
+    // The stream stays open without heartbeats; a long idle deadline keeps a
+    // loaded machine from interleaving a reconnect notice before readiness.
+    let policy = FollowPolicy {
+        idle_timeout: Duration::from_secs(30),
+        ..fast_policy()
+    };
     let mut view = plain_view(Instant::now());
     await_environment_start(
         &feed,
-        &mut view,
-        &fast_policy(),
+        &mut view.progress,
+        &policy,
         "env-1",
         Some("log-6".to_owned()),
         async {
@@ -905,7 +1003,7 @@ async fn start_shows_rows_after_the_cursor_until_the_daemon_is_ready() {
     assert_eq!(feed.opened(), [Some("log-6".to_owned())]);
     let rendered = output(view);
     let lines: Vec<_> = rendered.lines().collect();
-    assert_eq!(lines[0], "  ◌ Waiting for the workspace daemon...");
+    assert_eq!(lines[0], "  ◐ Waiting for the workspace daemon");
     assert_eq!(lines[1], "  ✓ desired state -> started");
     assert_eq!(lines[2], "  ✓ Gateway ready  2.3s");
     assert!(
@@ -930,7 +1028,7 @@ async fn start_exits_non_zero_on_a_failed_row() {
     let mut view = plain_view(Instant::now());
     let error = await_environment_start(
         &feed,
-        &mut view,
+        &mut view.progress,
         &fast_policy(),
         "env-1",
         None,
@@ -954,10 +1052,17 @@ async fn start_still_waits_for_the_daemon_when_progress_is_unavailable() {
         ConnectionEnd::Close,
     )]);
     let mut view = plain_view(Instant::now());
-    await_environment_start(&feed, &mut view, &fast_policy(), "env-1", None, async {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        Ok(())
-    })
+    await_environment_start(
+        &feed,
+        &mut view.progress,
+        &fast_policy(),
+        "env-1",
+        None,
+        async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(())
+        },
+    )
     .await
     .unwrap();
     let rendered = output(view);

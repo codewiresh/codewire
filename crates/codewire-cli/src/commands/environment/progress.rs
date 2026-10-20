@@ -1,13 +1,15 @@
-//! Live start progress for `cw env create`, `cw env start` and
-//! `cw env logs --follow`.
+//! Start progress for a cloud environment's `cw create`, `cw start` and
+//! `cw logs ENV --setup --follow`.
 //!
 //! Stages come from `environment_logs` rows delivered by `StreamLogs`. The
 //! follower resumes after the last row it rendered when a connection drops or
 //! stops sending heartbeats, so a reconnect neither repeats nor skips a row.
-//! The renderer keeps one live status line on a terminal and writes one plain
-//! line per row everywhere else. Each finished stage shows its elapsed time,
-//! taken from the row's `duration_ms` metadata when present and otherwise from
-//! the server `created_at` of its `started` and final rows.
+//! Rows are drawn through the shared [`StatusLine`]: one live row with the
+//! rotating spinner for the newest open stage on a terminal, one plain line
+//! per row when redirected, and nothing for machine output. Each finished
+//! stage shows its elapsed time, taken from the row's `duration_ms` metadata
+//! when present and otherwise from the server `created_at` of its `started`
+//! and final rows.
 //!
 //! # Clone progress rows (Program #2238, A5a contract, version 1)
 //!
@@ -46,9 +48,12 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
+use std::sync::{Arc, Mutex};
+
 use crate::environment_client::{
     EnvironmentClient, EnvironmentLogStreamEvent, EnvironmentLogStreamFailure, LogStreamRecovery,
 };
+use crate::output::{Capabilities, Motion, OutputMode, Status, StatusLine};
 use crate::presentation::{Environment, EnvironmentLog};
 
 /// The server sends a heartbeat every 15 seconds; three missed heartbeats
@@ -59,20 +64,12 @@ const LOG_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const LOG_STREAM_MAX_RECONNECTS: u32 = 5;
 const LOG_STREAM_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const LOG_STREAM_MAX_BACKOFF: Duration = Duration::from_secs(8);
+/// The slowest the live row redraws; the spinner sets the actual pace.
 const LIVE_TICK: Duration = Duration::from_secs(1);
 const SETUP_GUARD_INTERVAL: Duration = Duration::from_secs(5);
-const LIVE_LINE_MAX_CHARS: usize = 160;
 const DAEMON_STAGE_KEY: &str = "cli:daemon_ready";
 const DAEMON_WAIT_LABEL: &str = "Waiting for the workspace daemon";
 const DAEMON_READY_LABEL: &str = "Workspace daemon ready";
-
-/// Clears the current terminal line.
-const CLEAR_LINE: &str = "\r\x1b[2K";
-/// Turn terminal auto-wrap off while drawing the live line so a line wider
-/// than the terminal is clipped instead of wrapped, which `CLEAR_LINE` could
-/// not fully erase.
-const WRAP_OFF: &str = "\x1b[?7l";
-const WRAP_ON: &str = "\x1b[?7h";
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FollowPolicy {
@@ -213,49 +210,85 @@ impl StageFailure {
 struct OpenStage {
     key: String,
     label: String,
-    nested: bool,
+    /// Indent depth: 0 for a phase, 1 for a per-repository stage.
+    depth: usize,
     started_at: Option<DateTime<Utc>>,
-    /// Local instant the stage was first seen; the live line ticks from it so
+    /// Local instant the stage was first seen; the live row ticks from it so
     /// a skewed local clock cannot distort it.
     anchor: Instant,
     detail: Option<String>,
 }
 
-/// Renders environment log rows as start progress.
+/// A writer whose bytes stay readable after the progress view that wrote
+/// them, for rendering rows into a string.
+#[derive(Clone, Default)]
+pub(crate) struct CapturedOutput(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedOutput {
+    pub(crate) fn text(&self) -> String {
+        let bytes = self.0.lock().map(|bytes| bytes.clone()).unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+impl Write for CapturedOutput {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("captured output lock poisoned"))?
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Renders environment log rows as start progress through the shared
+/// [`StatusLine`]: one live row for the newest open stage on a terminal,
+/// plain lines when redirected, nothing for machine output.
 pub(crate) struct StartProgress<W: Write> {
-    out: W,
+    status: StatusLine<W>,
+    /// The time the status line reads; set from each call's `now`, so the
+    /// stage clocks follow the instants the caller observed.
+    now: Arc<Mutex<Instant>>,
     live: bool,
     began: Instant,
     idle_label: &'static str,
     open: Vec<OpenStage>,
-    live_drawn: bool,
 }
 
 impl<W: Write> StartProgress<W> {
-    /// `live` draws one updating status line (a terminal); otherwise every
-    /// row becomes one plain line.
-    pub(crate) fn new(out: W, live: bool, began: Instant, idle_label: &'static str) -> Self {
+    /// Progress drawn as `caps` allows: a live row on a terminal, one plain
+    /// line per row elsewhere, nothing in machine mode.
+    pub(crate) fn new(
+        out: W,
+        caps: &Capabilities,
+        began: Instant,
+        idle_label: &'static str,
+    ) -> Self {
+        let now = Arc::new(Mutex::new(began));
+        let clock = Arc::clone(&now);
         Self {
-            out,
-            live,
+            status: StatusLine::with_clock(out, caps, move || {
+                clock
+                    .lock()
+                    .map(|now| *now)
+                    .unwrap_or_else(|_| Instant::now())
+            }),
+            now,
+            live: caps.live && !caps.is_machine(),
             began,
             idle_label,
             open: Vec::new(),
-            live_drawn: false,
         }
     }
 
-    pub(crate) fn is_live(&self) -> bool {
-        self.live
-    }
-
-    pub(crate) fn total_elapsed(&self, now: Instant) -> Duration {
-        now.saturating_duration_since(self.began)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn into_inner(self) -> W {
-        self.out
+    /// How often [`StartProgress::redraw`] should run: `None` when nothing
+    /// on screen moves.
+    pub(crate) fn tick_interval(&self) -> Option<Duration> {
+        self.status.tick_interval()
     }
 
     /// Renders one row. Returns the failure when the row is a `failed` row.
@@ -264,21 +297,23 @@ impl<W: Write> StartProgress<W> {
         event: &EnvironmentLog,
         received: Instant,
     ) -> std::io::Result<Option<StageFailure>> {
+        self.set_now(received);
         let repo = repository_scope(event.metadata.as_ref());
         let key = stage_key(&event.phase, repo);
-        let indent = if repo.is_some() { "    " } else { "  " };
+        let depth = usize::from(repo.is_some());
         let label = display_label(event);
         let mut failure = None;
         match event.status.as_str() {
             "started" => {
                 if !self.live {
-                    self.line(&format!("{indent}◌ {label}..."))?;
+                    self.status
+                        .record(depth, Some(Status::Active), &label, None)?;
                 }
                 self.open.retain(|stage| stage.key != key);
                 self.open.push(OpenStage {
                     key,
                     label,
-                    nested: repo.is_some(),
+                    depth,
                     started_at: parse_log_time(&event.created_at),
                     anchor: received,
                     detail: None,
@@ -286,7 +321,7 @@ impl<W: Write> StartProgress<W> {
             }
             "progress" => {
                 let position = self.progress_stage(&key, &event.phase);
-                let nested = position.is_some_and(|index| self.open[index].nested);
+                let nested = position.is_some_and(|index| self.open[index].depth > 0);
                 let detail =
                     format_clone_progress(event.metadata.as_ref(), !nested).or_else(|| {
                         let message = terminal_text(&event.message);
@@ -301,7 +336,7 @@ impl<W: Write> StartProgress<W> {
                             self.open.push(OpenStage {
                                 key,
                                 label: stage_label,
-                                nested: repo.is_some(),
+                                depth,
                                 started_at: parse_log_time(&event.created_at),
                                 anchor: received,
                                 detail: None,
@@ -312,10 +347,11 @@ impl<W: Write> StartProgress<W> {
                     self.open[index].detail = detail;
                 } else {
                     // Progress lines always sit under the stage they report on.
-                    match detail {
-                        Some(detail) => self.line(&format!("    · {stage_label}: {detail}"))?,
-                        None => self.line(&format!("    · {stage_label}"))?,
-                    }
+                    let text = match detail {
+                        Some(detail) => format!("{stage_label}: {detail}"),
+                        None => stage_label,
+                    };
+                    self.status.record(1, None, &text, None)?;
                 }
             }
             "completed" | "warning" | "failed" => {
@@ -324,20 +360,35 @@ impl<W: Write> StartProgress<W> {
                     .iter()
                     .rposition(|stage| stage.key == key)
                     .map(|index| self.open.remove(index));
-                let elapsed = stage_elapsed(event, stage.as_ref())
-                    .map(|elapsed| format!("  {elapsed}"))
-                    .unwrap_or_default();
+                let elapsed = stage_elapsed(event, stage.as_ref());
                 let stage_label = stage.as_ref().map(|stage| stage.label.clone());
                 let message = terminal_text(&event.message);
                 match event.status.as_str() {
-                    "completed" => self.line(&format!("{indent}✓ {label}{elapsed}"))?,
+                    "completed" => {
+                        self.status.record(
+                            depth,
+                            Some(Status::Done),
+                            &label,
+                            elapsed.as_deref(),
+                        )?;
+                    }
                     "warning" => {
                         let text = labelled(stage_label.as_deref(), &message, &label);
-                        self.line(&format!("{indent}! {text}{elapsed}"))?;
+                        self.status.record(
+                            depth,
+                            Some(Status::Attention),
+                            &text,
+                            elapsed.as_deref(),
+                        )?;
                     }
                     _ => {
                         let text = labelled(stage_label.as_deref(), &message, &label);
-                        self.line(&format!("{indent}✗ {text}{elapsed}"))?;
+                        self.status.record(
+                            depth,
+                            Some(Status::Failed),
+                            &text,
+                            elapsed.as_deref(),
+                        )?;
                         failure = Some(StageFailure {
                             phase: event.phase.clone(),
                             stage: stage_label.unwrap_or_else(|| humanize_phase(&event.phase)),
@@ -346,12 +397,12 @@ impl<W: Write> StartProgress<W> {
                     }
                 }
             }
-            _ => self.line(&format!("{indent}· {label}"))?,
+            _ => self.status.record(depth, None, &label, None)?,
         }
         if event.phase == "complete" {
             self.open.retain(|stage| stage.key.starts_with("cli:"));
         }
-        self.redraw(received)?;
+        self.refresh()?;
         Ok(failure)
     }
 
@@ -362,19 +413,20 @@ impl<W: Write> StartProgress<W> {
         label: &str,
         now: Instant,
     ) -> std::io::Result<()> {
+        self.set_now(now);
         if !self.live {
-            self.line(&format!("  ◌ {label}..."))?;
+            self.status.record(0, Some(Status::Active), label, None)?;
         }
         self.open.retain(|stage| stage.key != key);
         self.open.push(OpenStage {
             key: key.to_owned(),
             label: label.to_owned(),
-            nested: false,
+            depth: 0,
             started_at: None,
             anchor: now,
             detail: None,
         });
-        self.redraw(now)
+        self.refresh()
     }
 
     pub(crate) fn complete_local_stage(
@@ -383,65 +435,80 @@ impl<W: Write> StartProgress<W> {
         label: &str,
         now: Instant,
     ) -> std::io::Result<()> {
+        self.set_now(now);
         let elapsed = self
             .open
             .iter()
             .rposition(|stage| stage.key == key)
             .map(|index| self.open.remove(index))
-            .map(|stage| {
-                format!(
-                    "  {}",
-                    format_duration(now.saturating_duration_since(stage.anchor), true)
-                )
-            })
-            .unwrap_or_default();
-        self.line(&format!("  ✓ {label}{elapsed}"))?;
-        self.redraw(now)
+            .map(|stage| format_duration(now.saturating_duration_since(stage.anchor), true));
+        self.status
+            .record(0, Some(Status::Done), label, elapsed.as_deref())?;
+        self.refresh()
     }
 
-    /// Sets or clears the detail shown beside an open local stage on the live
-    /// line, such as what a booting guest is doing. Plain output omits it.
-    pub(crate) fn set_local_detail(
+    /// Ends the open stage `key`, or the newest one, with a failure line
+    /// naming it, when the outcome came from outside the log rows (a lost
+    /// stream, a setup guard or an unready daemon). Returns its label.
+    pub(crate) fn fail_open_stage(
         &mut self,
-        key: &str,
-        detail: Option<&str>,
+        key: Option<&str>,
         now: Instant,
-    ) -> std::io::Result<()> {
-        let Some(stage) = self.open.iter_mut().rev().find(|stage| stage.key == key) else {
-            return Ok(());
+    ) -> std::io::Result<Option<String>> {
+        self.set_now(now);
+        let position = match key {
+            Some(key) => self.open.iter().rposition(|stage| stage.key == key),
+            None => self.open.len().checked_sub(1),
         };
-        let detail = detail.map(str::to_owned);
-        if stage.detail == detail {
-            return Ok(());
-        }
-        stage.detail = detail;
-        self.redraw(now)
+        let Some(stage) = position.map(|index| self.open.remove(index)) else {
+            return Ok(None);
+        };
+        let elapsed = format_duration(now.saturating_duration_since(stage.anchor), true);
+        self.status.record(
+            stage.depth,
+            Some(Status::Failed),
+            &stage.label,
+            Some(&elapsed),
+        )?;
+        self.refresh()?;
+        Ok(Some(stage.label))
     }
 
     /// Writes a permanent notice line.
     pub(crate) fn note(&mut self, text: &str) -> std::io::Result<()> {
-        self.line(&format!("  ! {}", terminal_text(text)))?;
-        self.redraw(Instant::now())
+        self.set_now(Instant::now());
+        self.status.record(0, Some(Status::Attention), text, None)
     }
 
-    /// Redraws the live status line. Plain output has none.
+    /// Draws the live row, advancing its spinner and elapsed time. Plain
+    /// output has no live row.
     pub(crate) fn redraw(&mut self, now: Instant) -> std::io::Result<()> {
-        if !self.live {
-            return self.out.flush();
-        }
-        let text = self.live_text(now);
-        write!(self.out, "{CLEAR_LINE}{WRAP_OFF}{text}{WRAP_ON}")?;
-        self.live_drawn = true;
-        self.out.flush()
+        self.set_now(now);
+        self.refresh()
     }
 
-    /// Removes the live status line so later output starts on a clean line.
+    /// Removes the live row so later output starts on a clean line.
     pub(crate) fn finish(&mut self) -> std::io::Result<()> {
-        if self.live_drawn {
-            write!(self.out, "{CLEAR_LINE}")?;
-            self.live_drawn = false;
+        self.status.clear()
+    }
+
+    fn set_now(&self, now: Instant) {
+        if let Ok(mut current) = self.now.lock() {
+            *current = now;
         }
-        self.out.flush()
+    }
+
+    /// Shows the newest open stage, or the idle label, on the live row.
+    fn refresh(&mut self) -> std::io::Result<()> {
+        if !self.live {
+            return Ok(());
+        }
+        match self.open.last() {
+            Some(stage) => self
+                .status
+                .show(&stage.label, stage.detail.as_deref(), stage.anchor),
+            None => self.status.show(self.idle_label, None, self.began),
+        }
     }
 
     fn progress_stage(&self, key: &str, phase: &str) -> Option<usize> {
@@ -449,37 +516,6 @@ impl<W: Write> StartProgress<W> {
             .iter()
             .rposition(|stage| stage.key == key)
             .or_else(|| self.open.iter().rposition(|stage| stage.key == phase))
-    }
-
-    fn live_text(&self, now: Instant) -> String {
-        let text = match self.open.last() {
-            Some(stage) => {
-                let detail = stage
-                    .detail
-                    .as_deref()
-                    .map(|detail| format!(" ({detail})"))
-                    .unwrap_or_default();
-                format!(
-                    "  ◌ {}{detail}  {}",
-                    stage.label,
-                    format_duration(now.saturating_duration_since(stage.anchor), false)
-                )
-            }
-            None => format!(
-                "  ◌ {}  {}",
-                self.idle_label,
-                format_duration(self.total_elapsed(now), false)
-            ),
-        };
-        text.chars().take(LIVE_LINE_MAX_CHARS).collect()
-    }
-
-    fn line(&mut self, text: &str) -> std::io::Result<()> {
-        if self.live_drawn {
-            write!(self.out, "{CLEAR_LINE}")?;
-            self.live_drawn = false;
-        }
-        writeln!(self.out, "{text}")
     }
 }
 
@@ -500,7 +536,9 @@ where
         let mut connection = feed.open(cursor.clone());
         let idle = tokio::time::sleep(policy.idle_timeout);
         tokio::pin!(idle);
-        let mut ticker = tokio::time::interval(policy.tick);
+        view.redraw(Instant::now())?;
+        let tick = view.tick_interval().map(|tick| tick.min(policy.tick));
+        let mut ticker = tokio::time::interval(tick.unwrap_or(policy.tick));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut healthy = false;
         let reason = loop {
@@ -542,7 +580,7 @@ where
                         format_duration(policy.idle_timeout, false)
                     ));
                 }
-                _ = ticker.tick(), if view.is_live() => view.redraw(Instant::now())?,
+                _ = ticker.tick(), if tick.is_some() => view.redraw(Instant::now())?,
             }
         };
         drop(connection);
@@ -569,20 +607,22 @@ where
     }
 }
 
-/// Awaits `future`, redrawing the live line every `tick` meanwhile.
+/// Awaits `future`, redrawing the live row meanwhile at the spinner's pace,
+/// and at least every `max_tick`.
 pub(crate) async fn wait_with_ticks<W, T>(
     view: &mut StartProgress<W>,
-    tick: Duration,
+    max_tick: Duration,
     future: impl Future<Output = T>,
 ) -> anyhow::Result<T>
 where
     W: Write,
 {
     tokio::pin!(future);
-    if !view.is_live() {
+    view.redraw(Instant::now())?;
+    let Some(tick) = view.tick_interval() else {
         return Ok(future.await);
-    }
-    let mut ticker = tokio::time::interval(tick);
+    };
+    let mut ticker = tokio::time::interval(tick.min(max_tick));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -592,7 +632,7 @@ where
     }
 }
 
-/// `cw env create`: every setup stage through `complete`, then daemon
+/// `cw create`: every setup stage through `complete`, then daemon
 /// readiness. Fails on a `failed` row or when `setup_guard` reports that the
 /// environment can no longer finish setup.
 pub(crate) async fn await_environment_setup<F, W, D, R>(
@@ -625,14 +665,15 @@ where
             return Err(failure.into_error(environment_id));
         }
         Err(error) => {
+            let stage = view.fail_open_stage(None, Instant::now())?;
             view.finish()?;
-            return Err(error);
+            return Err(stage_error(error, stage));
         }
     }
     await_daemon_ready(view, policy, daemon_ready()).await
 }
 
-/// `cw env start`: shows the rows the start produces after `cursor` while
+/// `cw start`: shows the rows the start produces after `cursor` while
 /// waiting for daemon readiness. Fails on a `failed` row. Losing the log
 /// stream only loses the display; readiness still decides the outcome.
 pub(crate) async fn await_environment_start<F, W>(
@@ -657,8 +698,9 @@ where
             end = follow => Some(end),
             ready = &mut daemon_ready => {
                 if let Err(error) = ready {
+                    let stage = view.fail_open_stage(Some(DAEMON_STAGE_KEY), Instant::now())?;
                     view.finish()?;
-                    return Err(error);
+                    return Err(stage_error(error, stage));
                 }
                 None
             }
@@ -689,10 +731,20 @@ async fn finish_daemon_wait<W: Write>(
     daemon_ready: impl Future<Output = anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
     if let Err(error) = wait_with_ticks(view, policy.tick, daemon_ready).await? {
+        let stage = view.fail_open_stage(Some(DAEMON_STAGE_KEY), Instant::now())?;
         view.finish()?;
-        return Err(error);
+        return Err(stage_error(error, stage));
     }
     Ok(())
+}
+
+/// A failure that came from outside the log rows names the stage that was
+/// running when it happened.
+fn stage_error(error: anyhow::Error, stage: Option<String>) -> anyhow::Error {
+    match stage {
+        Some(stage) => error.context(format!("stopped at stage {stage:?}")),
+        None => error,
+    }
 }
 
 /// Waits for daemon readiness as its own stage.
@@ -768,28 +820,38 @@ pub(crate) fn last_log_id(logs: &[EnvironmentLog]) -> Option<String> {
     logs.last().map(|log| log.id.clone())
 }
 
-/// Renders stored rows as plain lines.
-pub(crate) fn format_environment_logs_plain(logs: &[EnvironmentLog]) -> String {
+/// Renders stored rows as plain lines, styled as `caps` allows but never
+/// as a live row.
+pub(crate) fn format_environment_logs_plain(
+    logs: &[EnvironmentLog],
+    caps: &Capabilities,
+) -> String {
     let now = Instant::now();
-    let mut view = StartProgress::new(Vec::new(), false, now, "");
-    for log in logs {
-        // Writing to a Vec cannot fail.
-        let _ = view.apply(log, now);
+    let captured = CapturedOutput::default();
+    {
+        let mut view = StartProgress::new(captured.clone(), &without_live_row(*caps), now, "");
+        for log in logs {
+            // Writing to memory cannot fail.
+            let _ = view.apply(log, now);
+        }
     }
-    String::from_utf8_lossy(&view.out).into_owned()
+    captured.text()
 }
 
-/// `true` when stderr is a terminal that can redraw a status line.
-pub(crate) fn live_progress_enabled() -> bool {
-    use std::io::IsTerminal as _;
-    std::io::stderr().is_terminal() && std::env::var_os("TERM").is_none_or(|term| term != "dumb")
+/// The same presentation with one plain line per event instead of a live
+/// row.
+pub(crate) fn without_live_row(caps: Capabilities) -> Capabilities {
+    Capabilities {
+        live: false,
+        motion: Motion::Off,
+        ..caps
+    }
 }
 
-pub(crate) fn format_env_ready_text(name: &str, total: Duration) -> String {
-    format!(
-        "Environment {name} is ready ({}).\n",
-        format_duration(total, false)
-    )
+/// Text-mode progress capabilities of this process: a live row when stderr
+/// is a terminal.
+pub(crate) fn text_progress_capabilities() -> Capabilities {
+    Capabilities::from_process(OutputMode::Text)
 }
 
 /// Parsed A5a clone progress metadata. Every field is optional.

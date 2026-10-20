@@ -237,18 +237,18 @@ create_env() {
   for attempt in 1 2 3; do
     if cw create --image "$PROOF_IMAGE" --name "$name" --cpu "$PROOF_CPU" \
       --memory "$PROOF_MEMORY" --disk "$PROOF_DISK" --isolation standard --ttl "$PROOF_TTL" \
-      --no-network --no-wait --yes >"$out" 2>&1; then
+      --no-network --no-wait --yes --output json >"$out" 2>"$out.err"; then
       break
     fi
-    if ((attempt < 3)) && grep -q 'too many environment creates' "$out"; then
+    if ((attempt < 3)) && grep -q 'too many environment creates' "$out.err"; then
       log "create rate limited; waiting 65 s"
       sleep 65
       continue
     fi
-    sed 's/[[:cntrl:]]//g' "$out" >&2
+    sed 's/[[:cntrl:]]//g' "$out" "$out.err" >&2
     return 1
   done
-  id="$(awk '/^[[:space:]]*ID:/ {print $2; exit}' "$out")"
+  id="$(jq -r '.id // empty' "$out" 2>/dev/null || true)"
   [[ "$id" =~ ^[0-9a-f-]{36}$ ]] || return 1
   CREATED_ENVS+=("$id")
   printf '%s\n' "$id"

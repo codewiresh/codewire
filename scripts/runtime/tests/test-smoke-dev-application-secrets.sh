@@ -140,7 +140,7 @@ cw() {
           source_selection:{secrets:({project:$project} +
             (if $user == "" then {} else {user:$user} end) +
             (if $organization then {organization:true} else {} end)),credentials:null,profile_revision:null}}]' >"$TMPDIR_SMOKE/environments.db"
-      printf 'ID: 00000000-0000-4000-8000-000000000099\n' ;;
+      jq '.[0]' "$TMPDIR_SMOKE/environments.db" ;;
     '--cloud info '*" --output json")
       jq -e '.[0].state != "destroying" and .[0].state != "destroyed"' "$TMPDIR_SMOKE/environments.db" >/dev/null || return 1
       jq '.[0]' "$TMPDIR_SMOKE/environments.db" ;;

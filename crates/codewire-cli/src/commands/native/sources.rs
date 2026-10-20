@@ -30,6 +30,9 @@ pub(super) struct ResolvedProfile {
 pub(super) struct ResolvedSources {
     pub(super) profile: Option<ResolvedProfile>,
     pub(super) platform: Option<v1::PlatformSourceAuthority>,
+    /// The selected secret project's name, for display only; the request
+    /// carries the canonical reference.
+    pub(super) project_name: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -503,6 +506,7 @@ pub(super) async fn resolve_requested_sources(
         let candidate = select_candidate(candidates, reference)?;
         used_platform |= candidate.placement == StoragePlacement::Platform;
         spec.secrets.project = canonical_reference(&candidate);
+        selected.project_name = Some(candidate.name);
     }
     if let Some(reference) = profile {
         let candidates = profile_candidates(local, platform.as_ref(), reference).await?;

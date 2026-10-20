@@ -138,14 +138,43 @@ pub(crate) enum SourceRef {
     },
     /// A canonical reference whose name could not be resolved, shown as is.
     Unresolved(String),
+    /// A whole store scope rather than one named source, such as the
+    /// organization's application secrets: `organization secrets (platform)`.
+    Scope {
+        placement: SourcePlacement,
+        scope: &'static str,
+    },
+    /// Several selections shown together, such as a secret project and the
+    /// organization's secrets. Build it with [`SourceRef::several`].
+    Several(Vec<SourceRef>),
 }
 
 impl SourceRef {
-    pub(crate) fn is_none(&self) -> bool {
-        matches!(self, SourceRef::None)
+    /// The selections as one reference: `None` for none, the reference
+    /// itself for one, [`SourceRef::Several`] otherwise.
+    pub(crate) fn several(references: Vec<SourceRef>) -> Self {
+        let mut references: Vec<SourceRef> = references
+            .into_iter()
+            .filter(|reference| !reference.is_none())
+            .collect();
+        match references.len() {
+            0 => SourceRef::None,
+            1 => references.remove(0),
+            _ => SourceRef::Several(references),
+        }
     }
 
-    /// `platform:work`, `local:app-dev`, the unresolved reference, or `none`.
+    pub(crate) fn is_none(&self) -> bool {
+        match self {
+            SourceRef::None => true,
+            SourceRef::Several(references) => references.iter().all(SourceRef::is_none),
+            _ => false,
+        }
+    }
+
+    /// `platform:work`, `local:app-dev`, the unresolved reference, a scope
+    /// such as `organization secrets (platform)`, several of these joined by
+    /// commas, or `none`.
     pub(crate) fn text(&self) -> String {
         match self {
             SourceRef::None => "none".to_owned(),
@@ -153,6 +182,19 @@ impl SourceRef {
                 format!("{}:{}", placement.prefix(), terminal_text(name))
             }
             SourceRef::Unresolved(reference) => terminal_text(reference),
+            SourceRef::Scope { placement, scope } => format!("{scope} ({})", placement.prefix()),
+            SourceRef::Several(references) => {
+                let parts: Vec<String> = references
+                    .iter()
+                    .filter(|reference| !reference.is_none())
+                    .map(SourceRef::text)
+                    .collect();
+                if parts.is_empty() {
+                    "none".to_owned()
+                } else {
+                    parts.join(", ")
+                }
+            }
         }
     }
 }
@@ -196,12 +238,15 @@ impl NetworkRef {
     }
 }
 
-/// The confirmed lifecycle outcome a summary reports.
+/// The lifecycle outcome a summary reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Created,
     Started,
     Restarted,
+    /// The create was accepted but its readiness was not observed, as with
+    /// `--no-wait`: a pending result, not a confirmed one.
+    Creating,
 }
 
 impl Outcome {
@@ -210,6 +255,14 @@ impl Outcome {
             Outcome::Created => "created",
             Outcome::Started => "started",
             Outcome::Restarted => "restarted",
+            Outcome::Creating => "is being created",
+        }
+    }
+
+    fn status(self) -> Status {
+        match self {
+            Outcome::Created | Outcome::Started | Outcome::Restarted => Status::Done,
+            Outcome::Creating => Status::Attention,
         }
     }
 }
@@ -244,7 +297,7 @@ impl LifecycleSummary {
     pub(crate) fn render(&self, style: Style) -> String {
         let mut out = format!(
             "{} Environment {} {}{}\n",
-            style.status(Status::Done),
+            style.status(self.outcome.status()),
             terminal_text(&self.name),
             self.outcome.verb(),
             style.paint(
@@ -506,6 +559,53 @@ mod tests {
         assert!(text.contains("Secrets:     platform:id: x\n"));
         assert!(text.contains("Network:     cloud:lab 31m\n"));
         assert!(text.contains("→ cw run [A claude\n"));
+    }
+
+    #[test]
+    fn secret_scopes_join_the_named_project() {
+        let secrets = SourceRef::several(vec![
+            SourceRef::Named {
+                placement: SourcePlacement::Platform,
+                name: "app-dev".to_owned(),
+            },
+            SourceRef::Scope {
+                placement: SourcePlacement::Platform,
+                scope: "organization secrets",
+            },
+            SourceRef::None,
+            SourceRef::Scope {
+                placement: SourcePlacement::Local,
+                scope: "personal secrets",
+            },
+        ]);
+        assert_eq!(
+            secrets.text(),
+            "platform:app-dev, organization secrets (platform), personal secrets (local)"
+        );
+        assert!(!secrets.is_none());
+        assert_eq!(
+            SourceRef::several(vec![SourceRef::None, SourceRef::None]),
+            SourceRef::None
+        );
+        let one = SourceRef::Unresolved("local:id:x".to_owned());
+        assert_eq!(SourceRef::several(vec![one.clone()]), one);
+        assert_eq!(SourceRef::Several(vec![SourceRef::None]).text(), "none");
+        assert!(SourceRef::Several(Vec::new()).is_none());
+    }
+
+    #[test]
+    fn an_accepted_create_is_pending_not_confirmed() {
+        let summary = LifecycleSummary {
+            outcome: Outcome::Creating,
+            location: VmLocation::Cloud,
+            next: Some("cw --cloud info app".to_owned()),
+            ..summary()
+        };
+        let text = summary.render(PLAIN);
+        assert!(text.starts_with("! Environment app is being created · cloud VM\n"));
+        assert!(text.ends_with("→ cw --cloud info app\n"));
+        let colour = summary.render(Style::new(true, Charset::Unicode));
+        assert!(colour.starts_with("\x1b[33m!\x1b[0m Environment app is being created"));
     }
 
     #[test]

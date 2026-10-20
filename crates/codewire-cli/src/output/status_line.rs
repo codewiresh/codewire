@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::commands::progress::{format_duration, terminal_text};
 
-use super::caps::{Capabilities, Motion, OutputMode};
+use super::caps::{Capabilities, Charset, Motion, OutputMode};
 use super::spinner::{FRAME_INTERVAL, REDUCED_INTERVAL, Spinner};
 use super::style::{Line, Role, Status, Style};
 
@@ -150,6 +150,64 @@ impl<W: Write> StatusLine<W> {
             .plain("  ")
             .status(self.style, status)
             .plain(format!(" {}", terminal_text(text)));
+        self.permanent(&line)?;
+        if self.live && self.active.is_some() {
+            self.redraw()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Shows a stage that began at `started` on the live row, without a plain
+    /// line: for example the outer stage again once a nested one finished.
+    /// Plain and machine output show nothing.
+    pub(crate) fn show(
+        &mut self,
+        label: &str,
+        detail: Option<&str>,
+        started: Instant,
+    ) -> std::io::Result<()> {
+        if self.mode == OutputMode::Machine {
+            return Ok(());
+        }
+        self.active = Some(Active {
+            label: terminal_text(label),
+            detail: detail.map(terminal_text).filter(|text| !text.is_empty()),
+            started,
+        });
+        if self.live { self.redraw() } else { Ok(()) }
+    }
+
+    /// Writes a permanent line above the live row for a stage this row does
+    /// not time: `depth` extra levels of indent and the `elapsed` text the
+    /// caller measured, such as a server-reported stage duration. `None`
+    /// marks a neutral informational line (`·`, ASCII `-`). The live row
+    /// keeps running.
+    pub(crate) fn record(
+        &mut self,
+        depth: usize,
+        status: Option<Status>,
+        text: &str,
+        elapsed: Option<&str>,
+    ) -> std::io::Result<()> {
+        if self.mode == OutputMode::Machine {
+            return Ok(());
+        }
+        let line = Line::new().plain("  ".repeat(depth + 1));
+        let line = match status {
+            Some(status) => line.status(self.style, status),
+            None => line.styled(
+                Role::Dim,
+                match self.style.charset() {
+                    Charset::Unicode => "·",
+                    Charset::Ascii => "-",
+                },
+            ),
+        };
+        let mut line = line.plain(format!(" {}", terminal_text(text)));
+        if let Some(elapsed) = elapsed.filter(|elapsed| !elapsed.is_empty()) {
+            line = line.styled(Role::Dim, format!("  {}", terminal_text(elapsed)));
+        }
         self.permanent(&line)?;
         if self.live && self.active.is_some() {
             self.redraw()
@@ -467,6 +525,95 @@ mod tests {
         assert!(without_framing.contains("Start ]0;owned ing now"));
         assert!(without_framing.contains("[31mred"));
         assert!(without_framing.contains("✓ Done [2J"));
+    }
+
+    #[test]
+    fn shown_stages_keep_their_own_start_and_print_no_plain_line() {
+        let clock = TestClock::new();
+        let began = clock.reader()();
+        let mut plain = Vec::new();
+        {
+            let mut line = StatusLine::with_clock(&mut plain, &plain_caps(), clock.reader());
+            line.show("Cloning repositories", None, began).unwrap();
+            assert_eq!(line.tick_interval(), None);
+        }
+        assert!(plain.is_empty(), "{:?}", text(&plain));
+
+        let mut live = Vec::new();
+        {
+            let mut line =
+                StatusLine::with_clock(&mut live, &live_caps(&[("NO_COLOR", "1")]), clock.reader());
+            clock.advance(Duration::from_secs(4));
+            line.show("Cloning repositories", Some("repository 2/3"), began)
+                .unwrap();
+            assert_eq!(line.tick_interval(), Some(FRAME_INTERVAL));
+        }
+        assert_eq!(
+            text(&live),
+            concat!(
+                "\r\x1b[2K\x1b[?7l  ◐ Cloning repositories · repository 2/3  4s\x1b[?7h",
+                "\r\x1b[2K",
+            )
+        );
+    }
+
+    #[test]
+    fn recorded_lines_carry_their_depth_and_measured_time() {
+        let clock = TestClock::new();
+        let mut out = Vec::new();
+        {
+            let mut line =
+                StatusLine::with_clock(&mut out, &live_caps(&[("NO_COLOR", "1")]), clock.reader());
+            line.begin("Cloning repositories").unwrap();
+            line.record(
+                1,
+                Some(Status::Done),
+                "Cloned repository 1 of 2",
+                Some("3s"),
+            )
+            .unwrap();
+            line.record(0, Some(Status::Attention), "Retrying\x1b[2J", None)
+                .unwrap();
+        }
+        assert_eq!(
+            text(&out),
+            concat!(
+                "\r\x1b[2K\x1b[?7l  ◐ Cloning repositories  0s\x1b[?7h",
+                "\r\x1b[2K    ✓ Cloned repository 1 of 2  3s\n",
+                "\r\x1b[2K\x1b[?7l  ◐ Cloning repositories  0s\x1b[?7h",
+                "\r\x1b[2K  ! Retrying [2J\n",
+                "\r\x1b[2K\x1b[?7l  ◐ Cloning repositories  0s\x1b[?7h",
+                "\r\x1b[2K",
+            )
+        );
+
+        let mut plain = Vec::new();
+        let mut machine = Vec::new();
+        {
+            let mut line = StatusLine::with_clock(&mut plain, &plain_caps(), clock.reader());
+            line.record(1, Some(Status::Active), "Cloning repository 1 of 2", None)
+                .unwrap();
+            line.record(
+                1,
+                None,
+                "Cloning repository 1 of 2: receiving objects 45%",
+                None,
+            )
+            .unwrap();
+            line.record(1, Some(Status::Failed), "Clone failed", Some("2s"))
+                .unwrap();
+            let caps = caps(OutputMode::Machine, TERMINAL, &[]);
+            let mut quiet = StatusLine::new(&mut machine, &caps);
+            quiet.show("Starting", None, clock.reader()()).unwrap();
+            quiet
+                .record(0, Some(Status::Done), "Started", Some("1s"))
+                .unwrap();
+        }
+        assert_eq!(
+            text(&plain),
+            "    ◐ Cloning repository 1 of 2\n    · Cloning repository 1 of 2: receiving objects 45%\n    ✗ Clone failed  2s\n"
+        );
+        assert!(machine.is_empty());
     }
 
     #[test]

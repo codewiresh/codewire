@@ -1900,27 +1900,37 @@ fn platform_env_mesh_prompt_names_hosted_origin_organization_and_network() {
 }
 
 #[test]
-fn env_create_text_matches_go_messages() {
+fn env_create_text_is_the_lifecycle_summary() {
     let mut environment = test_environment("env_123", Some("builder"), "creating");
     environment.environment_type = "sandbox".to_string();
     environment.isolation_tier = "confidential".to_string();
     environment.cpu_millicores = 2000;
     environment.memory_mb = 4096;
     environment.disk_gb = 40;
+    let plain = crate::output::Style::new(false, crate::output::Charset::Unicode);
+    use super::environment::lifecycle;
+    let names = lifecycle::SourceNames::default();
 
     assert_eq!(
-        format_env_create_text(&environment),
+        lifecycle::cloud_summary(&environment, crate::output::Outcome::Created, &names)
+            .render(plain),
         concat!(
-            "Environment created: builder\n",
-            "  ID:        env_123\n",
-            "  State:     creating\n",
-            "  Type:      sandbox\n",
-            "  Isolation: confidential\n",
-            "  CPU:       2000m\n",
-            "  Mem:       4096MB\n",
-            "  Disk:      40GB\n",
+            "✓ Environment builder created · cloud VM\n",
+            "  2 vCPU · 4 GiB RAM · 40 GiB disk\n",
+            "\n",
+            "  Credentials: none\n",
+            "  Secrets:     none\n",
+            "  Network:     not attached\n",
+            "\n",
+            "→ cw --cloud run claude --in builder\n",
         )
     );
+    // Without --wait, readiness is not observed: the result is pending.
+    let pending =
+        lifecycle::cloud_summary(&environment, crate::output::Outcome::Creating, &names)
+            .render(plain);
+    assert!(pending.starts_with("! Environment builder is being created · cloud VM\n"));
+    assert!(pending.ends_with("→ cw --cloud info builder\n"));
 }
 
 #[test]
@@ -2473,10 +2483,6 @@ fn env_status_and_delete_text_match_go_messages() {
         "Environment builder: stopped.\n"
     );
     assert_eq!(
-        format_env_delete_text("builder"),
-        "Environment builder deleted.\n"
-    );
-    assert_eq!(
         format_env_extend_status_text(
             "builder",
             &StatusResponse {
@@ -2585,14 +2591,14 @@ fn cloud_unpublish_selects_one_preview_by_guest_port_and_label() {
 }
 
 #[test]
-fn map_env_delete_error_keeps_actionable_go_wording() {
+fn map_env_delete_error_keeps_an_actionable_repair() {
     let protected = map_env_delete_error(
         "builder",
         anyhow::anyhow!("HTTP 400: environment_protected"),
     );
     assert_eq!(
         protected.to_string(),
-        "environment is protected. Run 'cw unprotect builder' first"
+        "environment builder is protected, so nothing was removed; remove the protection first with `cw --cloud unprotect builder`"
     );
 
     let denied = map_env_delete_error("builder", anyhow::anyhow!("access_denied"));

@@ -3,11 +3,12 @@ use std::path::Path;
 use super::*;
 use crate::commands::progress::terminal_text;
 
+pub(crate) mod lifecycle;
 pub(crate) mod progress;
 mod runtime;
 mod sources;
 
-use progress::{FollowPolicy, StartProgress, format_env_ready_text, format_environment_logs_plain};
+use progress::{FollowPolicy, StartProgress, format_environment_logs_plain};
 
 // Match the server-owned sandbox lifecycle first, then give daemon setup its
 // own post-running window. Confidential guests deliberately have a longer boot
@@ -16,6 +17,29 @@ use progress::{FollowPolicy, StartProgress, format_env_ready_text, format_enviro
 const PLATFORM_READY_TIMEOUT: Duration = Duration::from_secs(600);
 const PLATFORM_CONFIDENTIAL_READY_TIMEOUT: Duration = Duration::from_secs(1800);
 const PLATFORM_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(180);
+const STOPPING_LABEL: &str = "Stopping the environment";
+const REMOVING_LABEL: &str = "Removing the environment";
+
+use crate::output::{Outcome, StatusLine};
+
+/// The environment's name for a text result, read once; scripts (machine
+/// output) and a failed read keep the reference they gave.
+async fn display_name_for(
+    client: &EnvironmentClient,
+    org_id: &str,
+    environment_id: &str,
+    environment_ref: &str,
+    caps: &crate::output::Capabilities,
+) -> String {
+    if caps.is_machine() {
+        return environment_ref.to_owned();
+    }
+    client
+        .get_environment(org_id, environment_id)
+        .await
+        .map(|environment| lifecycle::display_name(&environment))
+        .unwrap_or_else(|_| environment_ref.to_owned())
+}
 
 /// The hosted Mesh network a new cloud environment asks to join. A cloud
 /// environment's resolver is pinned to its platform's hosted Mesh.
@@ -499,7 +523,7 @@ pub(crate) async fn handle_platform_env_command(
             )? {
                 return Err(cloud_mesh_attachment_refusal(&request));
             }
-            sources::prepare_create_sources(
+            let names = sources::prepare_create_sources(
                 &platform,
                 &environment_client,
                 &org_id,
@@ -529,16 +553,28 @@ pub(crate) async fn handle_platform_env_command(
                 OutputFormat::Json => {
                     println!("{}", serde_json::to_string_pretty(&environment)?)
                 }
-                OutputFormat::Text => print!("{}", format_env_create_text(&environment)),
-            }
-            if matches!(args.output, OutputFormat::Text) && args.follow && !args.no_wait {
-                wait_for_platform_environment_setup(
-                    &environment_client,
-                    &org_id,
-                    &environment,
-                    began,
-                )
-                .await?;
+                OutputFormat::Text if args.follow && !args.no_wait => {
+                    let caps = super::lifecycle_output::capabilities(args.output);
+                    let summary = lifecycle::cloud_summary(&environment, Outcome::Created, &names);
+                    super::lifecycle_output::print_context(&summary, &caps);
+                    wait_for_platform_environment_setup(
+                        &environment_client,
+                        &org_id,
+                        &environment,
+                        began,
+                        &caps,
+                    )
+                    .await?;
+                    super::lifecycle_output::print_summary(&summary, &caps);
+                }
+                OutputFormat::Text => {
+                    // Readiness was not observed: the result is pending.
+                    let caps = super::lifecycle_output::capabilities(args.output);
+                    super::lifecycle_output::print_summary(
+                        &lifecycle::cloud_summary(&environment, Outcome::Creating, &names),
+                        &caps,
+                    );
+                }
             }
         }
         EnvCommand::Update(args) => {
@@ -565,25 +601,65 @@ pub(crate) async fn handle_platform_env_command(
         EnvCommand::Stop(args) => {
             let environment_id =
                 resolve_environment_id(&environment_client, &org_id, &args.environment).await?;
-            let response = environment_client
-                .stop_environment(&org_id, &environment_id)
-                .await
-                .context("stop environment")?;
-            print_env_status(&args.environment, &response, args.output)?;
+            let caps = super::lifecycle_output::capabilities(args.output);
+            let name = display_name_for(
+                &environment_client,
+                &org_id,
+                &environment_id,
+                &args.environment,
+                &caps,
+            )
+            .await;
+            let mut line = StatusLine::new(std::io::stderr(), &caps);
+            line.begin(STOPPING_LABEL)?;
+            let response = lifecycle::tick_while(
+                &mut line,
+                environment_client.stop_environment(&org_id, &environment_id),
+            )
+            .await;
+            let response = match response {
+                Ok(response) => {
+                    line.clear()?;
+                    response
+                }
+                Err(error) => {
+                    line.fail(STOPPING_LABEL)?;
+                    return Err(error.context(format!("stop {name}")));
+                }
+            };
+            match args.output {
+                OutputFormat::Json => print_env_status(&args.environment, &response, args.output)?,
+                OutputFormat::Text => lifecycle::stop_result(&name, &response).print(&caps),
+            }
         }
         EnvCommand::Start(args) => {
             let began = Instant::now();
             let environment_id =
                 resolve_environment_id(&environment_client, &org_id, &args.environment).await?;
             if matches!(args.output, OutputFormat::Text) {
+                let caps = super::lifecycle_output::capabilities(args.output);
+                let environment = environment_client
+                    .get_environment(&org_id, &environment_id)
+                    .await
+                    .context("get environment")?;
+                let names = lifecycle::resolve_source_names(
+                    &platform,
+                    &environment_client,
+                    &org_id,
+                    &environment,
+                )
+                .await;
+                let summary = lifecycle::cloud_summary(&environment, Outcome::Started, &names);
+                super::lifecycle_output::print_context(&summary, &caps);
                 start_platform_environment_with_progress(
                     &environment_client,
                     &org_id,
                     &environment_id,
-                    &args.environment,
                     began,
+                    &caps,
                 )
                 .await?;
+                super::lifecycle_output::print_summary(&summary, &caps);
                 return Ok(());
             }
             let response = environment_client
@@ -609,13 +685,45 @@ pub(crate) async fn handle_platform_env_command(
             let _skip_confirmation = args.yes;
             let environment_id =
                 resolve_environment_id(&environment_client, &org_id, &args.environment).await?;
-            if let Err(err) = environment_client
-                .delete_environment(&org_id, &environment_id)
-                .await
-            {
-                return Err(map_env_delete_error(&args.environment, err));
+            let caps = super::lifecycle_output::capabilities(args.output);
+            let name = display_name_for(
+                &environment_client,
+                &org_id,
+                &environment_id,
+                &args.environment,
+                &caps,
+            )
+            .await;
+            let mut line = StatusLine::new(std::io::stderr(), &caps);
+            line.begin(REMOVING_LABEL)?;
+            let removal = lifecycle::tick_while(
+                &mut line,
+                lifecycle::remove_cloud_environment(
+                    &environment_client,
+                    &org_id,
+                    &environment_id,
+                    &name,
+                ),
+            )
+            .await;
+            let removal = match removal {
+                Ok(removal) => {
+                    line.clear()?;
+                    removal
+                }
+                Err(error) => {
+                    line.fail(REMOVING_LABEL)?;
+                    return Err(error);
+                }
+            };
+            match args.output {
+                OutputFormat::Json => print_env_delete_result(
+                    &args.environment,
+                    &environment_id,
+                    !matches!(removal, lifecycle::CloudRemoval::Scheduled { .. }),
+                )?,
+                OutputFormat::Text => removal.result(&name).print(&caps),
             }
-            print_env_delete_result(&args.environment, &environment_id, args.output)?;
         }
         EnvCommand::Prune(args) => {
             let environments = environment_client
@@ -1238,13 +1346,11 @@ async fn handle_unified_environment_create(
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 native_create_selected(&args)?;
-                let Some(environment) = create_native_environment(globals, *args).await? else {
+                let caps = super::lifecycle_output::capabilities(output);
+                let Some(created) = create_native_environment(globals, *args, &caps).await? else {
                     return Ok(());
                 };
-                if matches!(output, OutputFormat::Text) {
-                    eprintln!("Local environment created: {}.", environment.name);
-                }
-                print_native_environment(&environment, output)
+                print_native_created(&created, output, &caps)
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
@@ -1830,49 +1936,22 @@ async fn handle_unified_environment_lifecycle(
     match (target, command) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (UnifiedEnvironmentTarget::NativeLocal(name), UnifiedEnvironmentLifecycle::Start(args)) => {
-            let environment = start_native_environment(&name).await?;
-            print_native_environment(&environment, args.output)
+            start_native_environment(globals, &name, args.output).await
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (UnifiedEnvironmentTarget::NativeLocal(name), UnifiedEnvironmentLifecycle::Stop(args)) => {
-            let environment = stop_native_environment(&name).await?;
-            print_native_environment(&environment, args.output)
+            stop_native_environment(&name, args.output).await
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (
             UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Restart(args),
-        ) => {
-            let environment = restart_native_environment(&name).await?;
-            print_native_environment(&environment, args.output)
-        }
+        ) => restart_native_environment(globals, &name, args.output).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (
             UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Remove(args),
-        ) => {
-            let removed = delete_native_environment(&name).await?;
-            reconcile_native_current_after_delete(&removed.name).await;
-            match args.output {
-                OutputFormat::Json => println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "name": removed.name,
-                        "removed": removed.removed,
-                        "cleanup_pending": removed.cleanup_pending,
-                    }))?
-                ),
-                OutputFormat::Text => {
-                    eprintln!("Local environment removed: {}.", removed.name);
-                    if removed.cleanup_pending {
-                        eprintln!(
-                            "An unsafe or unknown object remains quarantined for orphan inspection."
-                        );
-                    }
-                }
-            }
-            Ok(())
-        }
+        ) => remove_native_environment(&name, args.output).await,
         (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Start(args)) => {
             handle_platform_env_command(
                 globals,
@@ -1911,7 +1990,7 @@ async fn handle_unified_environment_lifecycle(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-async fn reconcile_native_current_after_delete(deleted_name: &str) {
+pub(crate) async fn reconcile_native_current_after_delete(deleted_name: &str) {
     let env = OsEnv;
     let paths = match ResolvePaths::from_env(&env) {
         Ok(paths) => paths,
@@ -2814,24 +2893,6 @@ pub(crate) fn parse_env_create_repo_spec(spec: &str) -> anyhow::Result<(String, 
     Ok((url.to_string(), branch.to_string(), mount_path))
 }
 
-pub(crate) fn format_env_create_text(environment: &Environment) -> String {
-    let env_name = environment.name.as_deref().unwrap_or(&environment.id);
-    format!(
-        "Environment created: {env_name}\n  ID:        {}\n  State:     {}\n  Type:      {}\n  Isolation: {}\n  CPU:       {}m\n  Mem:       {}MB\n  Disk:      {}GB\n",
-        environment.id,
-        environment.state,
-        environment.environment_type,
-        if environment.isolation_tier.is_empty() {
-            "standard"
-        } else {
-            &environment.isolation_tier
-        },
-        environment.cpu_millicores,
-        environment.memory_mb,
-        environment.disk_gb
-    )
-}
-
 pub(crate) async fn handle_env_share_command(
     client: &EnvironmentClient,
     org_id: &str,
@@ -3120,7 +3181,7 @@ pub(crate) async fn follow_environment_logs(
     };
     let mut view = StartProgress::new(
         std::io::stderr(),
-        progress::live_progress_enabled(),
+        &progress::text_progress_capabilities(),
         Instant::now(),
         "Waiting for logs",
     );
@@ -3140,6 +3201,7 @@ async fn wait_for_platform_environment_setup(
     org_id: &str,
     environment: &Environment,
     began: Instant,
+    caps: &crate::output::Capabilities,
 ) -> anyhow::Result<()> {
     let environment_id = environment.id.as_str();
     let feed = progress::PlatformLogFeed {
@@ -3147,12 +3209,7 @@ async fn wait_for_platform_environment_setup(
         org_id,
         environment_id,
     };
-    let mut view = StartProgress::new(
-        std::io::stderr(),
-        progress::live_progress_enabled(),
-        began,
-        "Starting",
-    );
+    let mut view = StartProgress::new(std::io::stderr(), caps, began, "Starting");
     progress::await_environment_setup(
         &feed,
         &mut view,
@@ -3165,13 +3222,7 @@ async fn wait_for_platform_environment_setup(
                 .context("wait for environment daemon readiness")
         },
     )
-    .await?;
-    let name = environment.name.as_deref().unwrap_or(environment_id);
-    print!(
-        "{}",
-        format_env_ready_text(name, view.total_elapsed(Instant::now()))
-    );
-    Ok(())
+    .await
 }
 
 /// `cw start` with text output: the start's stages, then daemon
@@ -3180,8 +3231,8 @@ async fn start_platform_environment_with_progress(
     client: &EnvironmentClient,
     org_id: &str,
     environment_id: &str,
-    environment_ref: &str,
     began: Instant,
+    caps: &crate::output::Capabilities,
 ) -> anyhow::Result<()> {
     // Rows up to now belong to earlier operations, including the terminal
     // row that would otherwise end the stream at once.
@@ -3193,12 +3244,7 @@ async fn start_platform_environment_with_progress(
         .start_environment(org_id, environment_id)
         .await
         .context("start environment")?;
-    let mut view = StartProgress::new(
-        std::io::stderr(),
-        progress::live_progress_enabled(),
-        began,
-        "Starting",
-    );
+    let mut view = StartProgress::new(std::io::stderr(), caps, began, "Starting");
     let daemon_ready = async {
         wait_for_platform_environment_daemon_ready(client, org_id, environment_id)
             .await
@@ -3226,10 +3272,6 @@ async fn start_platform_environment_with_progress(
             progress::await_daemon_ready(&mut view, &FollowPolicy::default(), daemon_ready).await?;
         }
     }
-    print!(
-        "{}",
-        format_env_ready_text(environment_ref, view.total_elapsed(Instant::now()))
-    );
     Ok(())
 }
 
@@ -3238,7 +3280,10 @@ pub(crate) fn print_environment_logs_historical(logs: &[EnvironmentLog]) {
         println!("No logs yet.");
         return;
     }
-    eprint!("{}", format_environment_logs_plain(logs));
+    eprint!(
+        "{}",
+        format_environment_logs_plain(logs, &progress::text_progress_capabilities())
+    );
 }
 
 pub(crate) fn filter_environments(
@@ -3663,45 +3708,36 @@ pub(crate) struct EnvDeleteResult<'a> {
     pub(crate) deleted: bool,
 }
 
+/// The JSON delete result. `deleted` is false only when the platform
+/// scheduled the deletion behind its grace period.
 pub(crate) fn print_env_delete_result(
     environment_ref: &str,
     environment_id: &str,
-    output: OutputFormat,
+    deleted: bool,
 ) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&EnvDeleteResult {
-                environment: environment_ref,
-                environment_id,
-                deleted: true,
-            })?
-        ),
-        OutputFormat::Text => print!("{}", format_env_delete_text(environment_ref)),
-    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&EnvDeleteResult {
+            environment: environment_ref,
+            environment_id,
+            deleted,
+        })?
+    );
     Ok(())
 }
 
-pub(crate) fn format_env_delete_text(environment_ref: &str) -> String {
-    format!("Environment {environment_ref} deleted.\n")
-}
-
+/// A delete refusal or failure, with its repair. A scheduled deletion is
+/// not an error; [`lifecycle::delete_was_scheduled`] recognises it first.
 pub(crate) fn map_env_delete_error(environment_ref: &str, err: anyhow::Error) -> anyhow::Error {
-    let message = err.to_string();
-    if message.contains("deletion_pending") || message.contains("202") {
+    if lifecycle::error_has_reason(&err, "environment_protected") {
         return anyhow::anyhow!(
-            "Environment {environment_ref} scheduled for deletion (grace period).\nUse 'cw cancel-delete {environment_ref}' to cancel."
+            "environment {environment_ref} is protected, so nothing was removed; remove the protection first with `cw --cloud unprotect {environment_ref}`"
         );
     }
-    if message.contains("environment_protected") {
-        return anyhow::anyhow!(
-            "environment is protected. Run 'cw unprotect {environment_ref}' first"
-        );
-    }
-    if message.contains("access_denied") {
+    if lifecycle::error_has_reason(&err, "access_denied") {
         return anyhow::anyhow!("access denied: only the environment owner can delete it");
     }
-    anyhow::anyhow!("delete environment: {message}")
+    anyhow::anyhow!("delete environment: {err:#}")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

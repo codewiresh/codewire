@@ -27,9 +27,14 @@ use super::*;
 use crate::commands::progress::terminal_text;
 
 mod host_support;
+mod lifecycle;
 mod ports;
 mod sources;
 
+pub(crate) use lifecycle::{
+    NativeCreated, print_native_created, remove_native_environment, restart_native_environment,
+    start_native_environment, stop_native_environment,
+};
 pub(crate) use ports::handle_native_environment_port;
 
 const NATIVE_STATE_ROOT_ENV: &str = "CODEWIRE_NATIVE_STATE_ROOT";
@@ -489,7 +494,8 @@ fn resolve_native_mesh_attachment(
 pub(crate) async fn create_native_environment(
     globals: &Globals,
     mut args: EnvCreateArgs,
-) -> anyhow::Result<Option<v1::Environment>> {
+    caps: &crate::output::Capabilities,
+) -> anyhow::Result<Option<NativeCreated>> {
     host_support::require_local_vm_host()?;
     reject_unsupported_native_create_options(&args)?;
     // Before the review: a VM of the cw this one updated from that still runs
@@ -624,6 +630,22 @@ pub(crate) async fn create_native_environment(
     let NativeProjectPlan {
         spec, local_mounts, ..
     } = project;
+    let context = lifecycle::CreateContext {
+        credentials: crate::commands::lifecycle_output::credential_ref(
+            spec.credentials
+                .as_ref()
+                .map(|binding| binding.profile.as_str()),
+            selected
+                .profile
+                .as_ref()
+                .map(|profile| profile.reference.as_str()),
+        ),
+        secrets: crate::commands::lifecycle_output::secret_refs(
+            &spec.secrets,
+            selected.project_name.as_deref(),
+        ),
+        network: lifecycle::network_ref(mesh.as_ref()),
+    };
     let (project_spec_json, project_spec_sha256) =
         canonical_native_project_intent(spec, vcpus, memory_mib, disk_bytes)?;
     ensure_pinned_runtime().await?;
@@ -659,21 +681,40 @@ pub(crate) async fn create_native_environment(
         local_mounts,
         implicit_vm_only,
     };
-    let progress = native_progress();
-    let created = match &progress {
-        Some(progress) => {
-            progress.begin_sources();
-            let mut observe = |operation: &v1::Operation| progress.observe(operation);
-            progress
-                .tick_while(client.create_observed(request.clone(), &mut observe))
-                .await
+    crate::commands::lifecycle_output::print_context(
+        &context.summary(&request.name, vcpus, memory_mib, disk_bytes),
+        caps,
+    );
+    let progress = NativeProgress::new(caps);
+    progress.begin_sources();
+    let mut observe = |operation: &v1::Operation| progress.observe(operation);
+    let created = progress
+        .tick_while(client.create_observed(request.clone(), &mut observe))
+        .await;
+    let environment = match created {
+        Ok(environment) => {
+            progress.complete();
+            environment
         }
-        None => client.create(request.clone()).await,
+        Err(status) => {
+            let stage = progress.fail();
+            // The supervisor's reason already says whether the failed
+            // environment was kept.
+            return Err(lifecycle::lifecycle_failure(
+                "create",
+                &request.name,
+                stage,
+                native_status(status),
+                false,
+            )
+            .await);
+        }
     };
-    finish_native_progress(progress.as_ref(), created.is_ok());
-    let environment = created.map_err(native_status)?;
     sources::validate_created_environment(&environment, &request)?;
-    Ok(Some(environment))
+    Ok(Some(NativeCreated {
+        environment,
+        secrets: context.secrets,
+    }))
 }
 
 /// The acknowledgement codewire.yaml direct mounts carry. The default project
@@ -860,7 +901,7 @@ fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
     lines.extend([
         format!("  Image        {image}"),
         format!(
-            "  Resources    {cpus} vCPU · {} memory · {} disk",
+            "  Resources    {cpus} vCPU · {} RAM · {} disk",
             gib_label(u64::from(memory_mib) * 1024 * 1024),
             gib_label(disk_bytes)
         ),
@@ -968,27 +1009,13 @@ fn edit_quantity(
     }
 }
 
+/// A binary size in GiB, the unit the VM is given: `20 GiB`, `1.5 GiB`.
 fn gib_label(bytes: u64) -> String {
     let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     if (gib - gib.round()).abs() < 0.05 {
-        format!("{} GB", gib.round() as u64)
+        format!("{} GiB", gib.round() as u64)
     } else {
-        format!("{gib:.1} GB")
-    }
-}
-
-/// Live stage progress for a local lifecycle call, on a terminal only, so
-/// scripts and captured output see nothing new.
-fn native_progress() -> Option<NativeProgress> {
-    super::environment::progress::live_progress_enabled()
-        .then(|| NativeProgress::new(std::time::Instant::now()))
-}
-
-fn finish_native_progress(progress: Option<&NativeProgress>, succeeded: bool) {
-    match progress {
-        Some(progress) if succeeded => progress.complete(),
-        Some(progress) => progress.abandon(),
-        None => {}
+        format!("{gib:.1} GiB")
     }
 }
 
@@ -1184,46 +1211,49 @@ pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::
         .map_err(native_status)
 }
 
-pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
-    host_support::require_local_vm_host()?;
-    start_native_environment_with(native_boot_client().await?, name).await
+/// What a start needs before it begins: the pinned runtime and the
+/// environment with its credential authority admitted.
+async fn prepare_native_start(
+    client: &mut NativeSupervisorClient,
+    name: &str,
+) -> anyhow::Result<v1::Environment> {
+    ensure_pinned_runtime().await?;
+    get_native_environment_with_required_authority(client, name).await
 }
 
+/// Starts `name` with its stages on `progress`. A failure carries the stage
+/// it stopped at.
+async fn run_native_start(
+    mut client: NativeSupervisorClient,
+    name: &str,
+    progress: &NativeProgress,
+) -> Result<v1::Environment, (Option<&'static str>, anyhow::Error)> {
+    let mut observe = |operation: &v1::Operation| progress.observe(operation);
+    match progress
+        .tick_while(client.start_observed(name, &mut observe))
+        .await
+    {
+        Ok(environment) => {
+            progress.complete();
+            Ok(environment)
+        }
+        Err(status) => Err((progress.fail(), native_status(status))),
+    }
+}
+
+/// Starts a local VM again after `cw upgrade` moved it to this cw.
 async fn start_native_environment_with(
     mut client: NativeSupervisorClient,
     name: &str,
 ) -> anyhow::Result<v1::Environment> {
-    ensure_pinned_runtime().await?;
-    get_native_environment_with_required_authority(&mut client, name).await?;
-    let progress = native_progress();
-    let started = match &progress {
-        Some(progress) => {
-            let mut observe = |operation: &v1::Operation| progress.observe(operation);
-            progress
-                .tick_while(client.start_observed(name, &mut observe))
-                .await
-        }
-        None => client.start(name).await,
-    };
-    finish_native_progress(progress.as_ref(), started.is_ok());
-    started.map_err(native_status)
-}
-
-pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
-    let mut client = native_client().await?;
-    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
-    client.stop(&environment.name).await.map_err(native_status)
-}
-
-pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
-    host_support::require_local_vm_host()?;
-    let mut client = native_boot_client().await?;
-    ensure_pinned_runtime().await?;
-    let environment = get_native_environment_with_required_authority(&mut client, name).await?;
-    client
-        .restart(name, &environment.id)
+    prepare_native_start(&mut client, name).await?;
+    let progress = NativeProgress::new(&super::environment::progress::text_progress_capabilities());
+    run_native_start(client, name, &progress)
         .await
-        .map_err(native_status)
+        .map_err(|(stage, error)| match stage {
+            Some(stage) => error.context(format!("start {name} failed at {stage:?}")),
+            None => error,
+        })
 }
 
 pub(crate) async fn refresh_native_environment_skills(
@@ -1393,20 +1423,6 @@ fn require_managed_agent_client(
         );
     }
     Ok(())
-}
-
-pub(crate) async fn delete_native_environment(
-    name: &str,
-) -> anyhow::Result<v1::DeleteEnvironmentResponse> {
-    let mut client = native_client().await?;
-    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
-    // Delete stops the environment's credential broker through the authority
-    // whenever it selected a profile or secrets.
-    ensure_native_credential_authority(&environment).await?;
-    client
-        .delete(&environment.name)
-        .await
-        .map_err(native_status)
 }
 
 pub(crate) async fn handle_native_environment_access(args: EnvAccessArgs) -> anyhow::Result<()> {
@@ -1706,7 +1722,15 @@ pub(crate) fn print_native_environment(
     let view = NativeEnvironmentView::try_from(environment)?;
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&view)?),
-        OutputFormat::Text => print!("{}", format_native_environment(&view)),
+        OutputFormat::Text => {
+            let configuration = (!environment.project_spec_json.is_empty())
+                .then(|| sources::project_from_environment(environment).ok())
+                .flatten();
+            print!(
+                "{}",
+                format_native_environment(&view, configuration.as_ref())
+            )
+        }
     }
     Ok(())
 }
@@ -1797,7 +1821,10 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
     }
 }
 
-fn format_native_environment(view: &NativeEnvironmentView) -> String {
+fn format_native_environment(
+    view: &NativeEnvironmentView,
+    configuration: Option<&codewire_project::ProjectSpec>,
+) -> String {
     let access = match (&view.access_profile, view.access_profile_revision) {
         (profile, Some(revision)) if !profile.is_empty() => {
             format!("{profile} (revision {revision})")
@@ -1817,6 +1844,9 @@ fn format_native_environment(view: &NativeEnvironmentView) -> String {
         view.working_directory,
         access,
     );
+    if let Some(configuration) = configuration {
+        output.push_str(&format_native_configuration(configuration));
+    }
     output.push_str(&format!(
         "Docker:      {}\n",
         view.docker_disk.as_deref().unwrap_or("disabled")
@@ -1842,6 +1872,40 @@ fn format_native_environment(view: &NativeEnvironmentView) -> String {
     output.push_str(&format!("Generation:  {}\n", view.generation));
     output.push_str(&sources::format_source_view(view.source_selection.as_ref()));
     output
+}
+
+/// The saved configuration a person set in codewire.yaml or on create: the
+/// install command, environment variable names (never their values) and
+/// agents.
+fn format_native_configuration(spec: &codewire_project::ProjectSpec) -> String {
+    use crate::commands::progress::terminal_text;
+    let install = Some(terminal_text(&spec.install_command))
+        .filter(|command| !command.is_empty())
+        .unwrap_or_else(|| "none".to_owned());
+    let names = spec
+        .environment
+        .keys()
+        .map(|name| terminal_text(name))
+        .collect::<Vec<_>>();
+    let variables = if names.is_empty() {
+        "none".to_owned()
+    } else {
+        names.join(", ")
+    };
+    let mut agents = spec
+        .agents
+        .tools
+        .iter()
+        .map(|tool| terminal_text(tool))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if agents.is_empty() {
+        agents = "none".to_owned();
+    }
+    if spec.agents.install == Some(false) {
+        agents.push_str(" (agent install off)");
+    }
+    format!("Install:     {install}\nEnv vars:    {variables}\nAgents:      {agents}\n")
 }
 
 pub(crate) fn native_state_label(state: i32) -> &'static str {
@@ -4614,8 +4678,8 @@ working_directory: /workspace/github
 
     #[test]
     fn gib_labels_round_whole_sizes() {
-        assert_eq!(gib_label(20 * 1024 * 1024 * 1024), "20 GB");
-        assert_eq!(gib_label(1536 * 1024 * 1024), "1.5 GB");
+        assert_eq!(gib_label(20 * 1024 * 1024 * 1024), "20 GiB");
+        assert_eq!(gib_label(1536 * 1024 * 1024), "1.5 GiB");
     }
 
     #[test]
@@ -4723,11 +4787,33 @@ working_directory: /workspace/github
             source_selection: None,
         };
 
-        let output = format_native_environment(&view);
+        let output = format_native_environment(&view, None);
         assert!(output.contains("Port:        127.0.0.1:18080 -> 8080\n"));
         assert!(output.contains("Network:     mesh-dev\n"));
         assert!(output.contains("Access:      user/work (revision 2)\n"));
         assert!(output.contains("Docker:      8Gi\n"));
+        assert!(!output.contains("Install:"));
+
+        let mut spec = codewire_project::ProjectSpec {
+            install_command: "npm ci\nnpm run build".to_owned(),
+            ..Default::default()
+        };
+        spec.environment.insert(
+            "NODE_ENV".to_owned(),
+            "synthetic-value-never-shown".to_owned(),
+        );
+        spec.environment
+            .insert("API_URL".to_owned(), "https://synthetic.invalid".to_owned());
+        spec.agents.tools = vec!["claude".to_owned(), "codex".to_owned()];
+        let output = format_native_environment(&view, Some(&spec));
+        assert!(output.contains(
+            "Working dir: /workspace\nAccess:      user/work (revision 2)\nInstall:     npm ci npm run build\nEnv vars:    API_URL, NODE_ENV\nAgents:      claude, codex\nDocker:      8Gi\n"
+        ), "{output}");
+        assert!(!output.contains("synthetic-value-never-shown"));
+        assert!(!output.contains("synthetic.invalid"));
+        let empty =
+            format_native_environment(&view, Some(&codewire_project::ProjectSpec::default()));
+        assert!(empty.contains("Install:     none\nEnv vars:    none\nAgents:      none\n"));
     }
 
     #[test]

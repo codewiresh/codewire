@@ -1054,15 +1054,16 @@ create_environment() {
       --ttl "$SMOKE_TTL" \
       --no-network \
       --no-wait \
-      --yes >"$create_out" 2>&1; then
-    sed 's/[[:cntrl:]]//g' "$create_out" >&2 || true
+      --yes \
+      --output json >"$create_out" 2>"$create_out.err"; then
+    sed 's/[[:cntrl:]]//g' "$create_out" "$create_out.err" >&2 || true
     die "cw create failed"
   fi
 
-  ENV_ID="$(awk '/^[[:space:]]*ID:/ {print $2; exit}' "$create_out")"
+  ENV_ID="$(jq -r '.id // empty' "$create_out" 2>/dev/null || true)"
   [[ -n "$ENV_ID" ]] || {
-    sed 's/[[:cntrl:]]//g' "$create_out" >&2 || true
-    die "failed to parse environment ID from cw create output"
+    sed 's/[[:cntrl:]]//g' "$create_out" "$create_out.err" >&2 || true
+    die "failed to read the environment ID from cw create --output json"
   }
   log "environment id $ENV_ID"
 }
@@ -2109,13 +2110,13 @@ fail_if_workspace_crashloop() {
 }
 
 env_is_running() {
-  local info_out="$TMPDIR_SMOKE/env-info.out"
-  if ! cw info "$ENV_ID" >"$info_out" 2>&1; then
+  local info_out="$TMPDIR_SMOKE/env-info.json"
+  if ! cw info "$ENV_ID" --output json >"$info_out" 2>/dev/null; then
     return 1
   fi
   local state error_reason
-  state="$(awk '$1 == "State:" {print $2; exit}' "$info_out")"
-  error_reason="$(awk '$1 == "ErrorReason:" {print substr($0, index($0, $2)); exit}' "$info_out")"
+  state="$(jq -r '.state // empty' "$info_out" 2>/dev/null || true)"
+  error_reason="$(jq -r '(.error_reason // "") | gsub("^\\s+|\\s+$"; "")' "$info_out" 2>/dev/null || true)"
   if [[ -n "$error_reason" ]]; then
     sed 's/[[:cntrl:]]//g' "$info_out" >&2 || true
     collect_failure_diagnostics "environment-error" || true
@@ -4853,9 +4854,9 @@ recorded_host_key_line() {
 }
 
 env_is_stopped() {
-  local info_out="$TMPDIR_SMOKE/env-info-stop.out"
-  cw info "$ENV_ID" >"$info_out" 2>&1 || return 1
-  [[ "$(awk '$1 == "State:" {print $2; exit}' "$info_out")" == "stopped" ]]
+  local info_out="$TMPDIR_SMOKE/env-info-stop.json"
+  cw info "$ENV_ID" --output json >"$info_out" 2>/dev/null || return 1
+  [[ "$(jq -r '.state // empty' "$info_out" 2>/dev/null || true)" == "stopped" ]]
 }
 
 # The daemon serves SSH with a host key it generated for its Pod; only its

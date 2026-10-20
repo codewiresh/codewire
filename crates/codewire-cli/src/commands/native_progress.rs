@@ -1,38 +1,39 @@
-//! Live progress for `cw env create --local` and `cw env start` on a local
-//! environment.
+//! Progress for a local environment's `cw create`, `cw start`, `cw restart`,
+//! `cw stop` and `cw rm`.
 //!
 //! The local supervisor publishes every lifecycle stage, and inside VM start
 //! every runner and guest-boot stage, on its operation stream. This maps them
-//! onto the same stage lines as platform creates: one updating status line on
-//! a terminal, one plain line per stage elsewhere. Bookkeeping stages (journal
-//! writes) stay quiet; only work a person waits on is shown.
+//! onto the shared [`StatusLine`]: one live row with the rotating spinner on a
+//! terminal, one plain line per stage when redirected, nothing for machine
+//! output. Bookkeeping stages (journal writes) stay quiet; only work a person
+//! waits on is shown. A failure ends the open stage with a cross that names
+//! it.
 
+use std::io::Stderr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use codewire_local_vmm::control::v1;
 
-use super::environment::progress::{StartProgress, live_progress_enabled};
+use crate::output::{Capabilities, StatusLine};
 
 /// The CLI-side stage before the supervisor has an operation: it inspects the
 /// workspace source and fetches repositories inside the create request.
 const SOURCES: (&str, &str) = ("cli:sources", "Preparing sources");
 
+/// Redraws at least this often while waiting, so elapsed time keeps counting.
+const MAX_TICK: Duration = Duration::from_secs(1);
+
 #[derive(Clone)]
 pub(crate) struct NativeProgress {
-    view: Arc<Mutex<StartProgress<std::io::Stderr>>>,
+    line: Arc<Mutex<StatusLine<Stderr>>>,
     current: Arc<Mutex<Option<(&'static str, &'static str)>>>,
 }
 
 impl NativeProgress {
-    pub(crate) fn new(began: Instant) -> Self {
+    pub(crate) fn new(caps: &Capabilities) -> Self {
         Self {
-            view: Arc::new(Mutex::new(StartProgress::new(
-                std::io::stderr(),
-                live_progress_enabled(),
-                began,
-                "Working",
-            ))),
+            line: Arc::new(Mutex::new(StatusLine::new(std::io::stderr(), caps))),
             current: Arc::new(Mutex::new(None)),
         }
     }
@@ -40,6 +41,12 @@ impl NativeProgress {
     /// Opens the CLI's own pre-operation stage.
     pub(crate) fn begin_sources(&self) {
         self.enter(SOURCES.0, SOURCES.1, None);
+    }
+
+    /// Opens one stage of the CLI's own, for an operation whose supervisor
+    /// stages are not observed, such as stop or remove.
+    pub(crate) fn begin(&self, key: &'static str, label: &'static str) {
+        self.enter(key, label, None);
     }
 
     /// Feeds one operation update from the supervisor.
@@ -58,24 +65,43 @@ impl NativeProgress {
     /// Closes the last open stage once the operation has succeeded.
     pub(crate) fn complete(&self) {
         self.close_current();
-        let _ = self.view.lock().map(|mut view| view.finish());
+        let _ = self.line.lock().map(|mut line| line.clear());
     }
 
-    /// Removes the live line without claiming the open stage completed.
-    pub(crate) fn abandon(&self) {
-        let _ = self.view.lock().map(|mut view| view.finish());
+    /// Ends the open stage with a failure line and returns its label, or
+    /// `None` when no stage was open.
+    pub(crate) fn fail(&self) -> Option<&'static str> {
+        let (Ok(mut current), Ok(mut line)) = (self.current.lock(), self.line.lock()) else {
+            return None;
+        };
+        let stage = current.take().map(|(_, label)| label);
+        match stage {
+            Some(label) => {
+                let _ = line.fail(label);
+            }
+            None => {
+                let _ = line.clear();
+            }
+        }
+        stage
     }
 
-    /// Redraws the live line once a second until `work` finishes, so elapsed
-    /// time keeps counting between supervisor updates.
+    /// Advances the live row while `work` runs, at the spinner's pace, so the
+    /// spinner turns and elapsed time keeps counting between supervisor
+    /// updates.
     pub(crate) async fn tick_while<T>(&self, work: impl Future<Output = T>) -> T {
         tokio::pin!(work);
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
+            let interval = self
+                .line
+                .lock()
+                .ok()
+                .and_then(|line| line.tick_interval())
+                .map_or(MAX_TICK, |interval| interval.min(MAX_TICK));
             tokio::select! {
                 result = &mut work => return result,
-                _ = tick.tick() => {
-                    let _ = self.view.lock().map(|mut view| view.redraw(Instant::now()));
+                () = tokio::time::sleep(interval) => {
+                    let _ = self.line.lock().map(|mut line| line.tick());
                 }
             }
         }
@@ -89,26 +115,25 @@ impl NativeProgress {
     }
 
     fn enter(&self, key: &'static str, label: &'static str, detail: Option<&'static str>) {
-        let (Ok(mut current), Ok(mut view)) = (self.current.lock(), self.view.lock()) else {
+        let (Ok(mut current), Ok(mut line)) = (self.current.lock(), self.line.lock()) else {
             return;
         };
-        let now = Instant::now();
         if current.map(|(open, _)| open) != Some(key) {
-            if let Some((open, open_label)) = current.take() {
-                let _ = view.complete_local_stage(open, open_label, now);
+            if let Some((_, open_label)) = current.take() {
+                let _ = line.done(open_label);
             }
-            let _ = view.begin_local_stage(key, label, now);
+            let _ = line.begin(label);
             *current = Some((key, label));
         }
-        let _ = view.set_local_detail(key, detail, now);
+        let _ = line.detail(detail);
     }
 
     fn close_current(&self) {
-        let (Ok(mut current), Ok(mut view)) = (self.current.lock(), self.view.lock()) else {
+        let (Ok(mut current), Ok(mut line)) = (self.current.lock(), self.line.lock()) else {
             return;
         };
-        if let Some((open, label)) = current.take() {
-            let _ = view.complete_local_stage(open, label, Instant::now());
+        if let Some((_, label)) = current.take() {
+            let _ = line.done(label);
         }
     }
 }

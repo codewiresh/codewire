@@ -88,6 +88,8 @@ fn replacement_sources(
     replacement
 }
 
+/// Resolves the requested names to canonical references, and returns those
+/// names for display.
 async fn resolve_platform_sources(
     platform: &config::ResolvedPlatformConfig,
     client: &EnvironmentClient,
@@ -95,7 +97,8 @@ async fn resolve_platform_sources(
     selection: &mut EnvironmentSourceSelection,
     resolve_project: bool,
     resolve_profile: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<super::lifecycle::SourceNames> {
+    let mut names = super::lifecycle::SourceNames::default();
     let spec = codewire_project::ProjectSpec {
         secrets: selection.secrets.clone(),
         credentials: selection.credentials.clone(),
@@ -111,6 +114,7 @@ async fn resolve_platform_sources(
             "platform returned a secret project owned by a different organization"
         );
         selection.secrets.project = format!("platform:id:{}", project.id);
+        names.project = Some(project.name);
     }
     if resolve_profile && let Some(credentials) = selection.credentials.as_mut() {
         let profile = client
@@ -118,8 +122,10 @@ async fn resolve_platform_sources(
             .await?;
         credentials.profile = format!("platform:id:{}", profile.id);
         selection.profile_revision = Some(profile.revision);
+        names.profile = Some(profile.name);
     }
-    validate_source_selection(selection, true)
+    validate_source_selection(selection, true)?;
+    Ok(names)
 }
 
 fn selection_preview(selection: &EnvironmentSourceSelection) -> String {
@@ -199,16 +205,17 @@ pub(super) async fn prepare_create_sources(
     org_id: &str,
     args: &EnvCreateArgs,
     request: &mut CreateEnvironmentRequest,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<super::lifecycle::SourceNames> {
     let mut selection = EnvironmentSourceSelection {
         secrets: request.project_spec.secrets.clone(),
         credentials: request.project_spec.credentials.clone(),
         profile_revision: None,
     };
     if selection.secrets.is_empty() && selection.credentials.is_none() {
-        return Ok(());
+        return Ok(Default::default());
     }
-    resolve_platform_sources(platform, client, org_id, &mut selection, true, true).await?;
+    let names =
+        resolve_platform_sources(platform, client, org_id, &mut selection, true, true).await?;
     eprintln!(
         "Create environment {:?} on platform {:?}, organization {:?}.\n{}Application secrets are visible to the managed workload; provider credentials remain behind their supported handlers.",
         request.name.as_deref().unwrap_or("(server assigned)"),
@@ -222,7 +229,7 @@ pub(super) async fn prepare_create_sources(
     request.expected_profile_revision = selection.profile_revision;
     request.project_spec.secrets = selection.secrets;
     request.project_spec.credentials = selection.credentials;
-    Ok(())
+    Ok(names)
 }
 
 pub(super) async fn update_platform_sources(

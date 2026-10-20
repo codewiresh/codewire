@@ -302,7 +302,7 @@ run_workspace_crashloop_fail_fast_case() {
     ENV_ID="test-environment-id"
     SANDBOX_NAMESPACE="test-sandboxes"
     cw() {
-      printf '%s\n' 'State: provisioning'
+      printf '%s\n' '{"state": "provisioning", "error_reason": null}'
     }
     kubectl_dev() {
       jq -n --arg sentinel "$SENSITIVE_SENTINEL" '{
@@ -540,7 +540,7 @@ run_explicit_isolation_tier_case() {
       SMOKE_KEEP_ENV=1
     cw() {
       printf '%s\n' "$@" >"$args_file"
-      printf 'ID: 11111111-1111-4111-8111-111111111111\n'
+      printf '{"id": "11111111-1111-4111-8111-111111111111"}\n'
     }
     create_environment
   ) >/dev/null 2>&1 || fail "explicit confidential isolation tier was rejected"

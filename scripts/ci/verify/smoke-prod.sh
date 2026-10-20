@@ -251,8 +251,9 @@ cw_prod() {
 }
 
 create_environment() {
-  local output
+  local output errors
   output="$(mktemp "$ROOT/.tmp/prod-smoke-create.XXXXXX")"
+  errors="$(mktemp "$ROOT/.tmp/prod-smoke-create-err.XXXXXX")"
   log "creating production smoke environment $SMOKE_NAME"
   if ! cw_prod create \
       --preset "$SMOKE_PRESET" \
@@ -261,19 +262,20 @@ create_environment() {
       --ttl "$SMOKE_TTL" \
       --no-network \
       --no-wait \
-      --yes >"$output" 2>&1; then
-    sed 's/[[:cntrl:]]//g' "$output" >&2 || true
-    rm -f "$output"
+      --yes \
+      --output json >"$output" 2>"$errors"; then
+    sed 's/[[:cntrl:]]//g' "$output" "$errors" >&2 || true
+    rm -f "$output" "$errors"
     die "cw create failed"
   fi
 
-  SMOKE_ENV_ID="$(awk '/^[[:space:]]*ID:/ {print $2; exit}' "$output")"
+  SMOKE_ENV_ID="$(jq -r '.id // empty' "$output" 2>/dev/null || true)"
   if [[ -z "$SMOKE_ENV_ID" ]]; then
-    sed 's/[[:cntrl:]]//g' "$output" >&2 || true
-    rm -f "$output"
-    die "failed to parse environment ID from cw create output"
+    sed 's/[[:cntrl:]]//g' "$output" "$errors" >&2 || true
+    rm -f "$output" "$errors"
+    die "failed to read the environment ID from cw create --output json"
   fi
-  rm -f "$output"
+  rm -f "$output" "$errors"
   log "production smoke environment id $SMOKE_ENV_ID"
 }
 
@@ -286,13 +288,13 @@ cleanup_environment() {
 }
 
 environment_state() {
-  local info_out="$1"
-  awk '$1 == "State:" {print $2; exit}' "$info_out"
+  local info_json="$1"
+  jq -r '.state // empty' "$info_json" 2>/dev/null || true
 }
 
 environment_error_reason() {
-  local info_out="$1"
-  awk '$1 == "ErrorReason:" {print substr($0, index($0, $2)); exit}' "$info_out"
+  local info_json="$1"
+  jq -r '(.error_reason // "") | gsub("^\\s+|\\s+$"; "")' "$info_json" 2>/dev/null || true
 }
 
 wait_environment_running() {
@@ -302,7 +304,7 @@ wait_environment_running() {
 
   log "waiting for environment $SMOKE_ENV_ID to reach running"
   while (( $(date +%s) < deadline )); do
-    if cw_prod info "$SMOKE_ENV_ID" >"$info" 2>&1; then
+    if cw_prod info "$SMOKE_ENV_ID" --output json >"$info" 2>/dev/null; then
       state="$(environment_state "$info")"
       error_reason="$(environment_error_reason "$info")"
       if [[ -n "$error_reason" ]]; then
