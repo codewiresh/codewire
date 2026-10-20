@@ -215,6 +215,63 @@ def external_download_errors(text):
     return errors
 
 
+# A target build that fails cancels its run, so the other targets stop instead
+# of building a delivery that can no longer be assembled (#2995). Each job that
+# can run beside another ends with ci.yaml's own fail-fast step, gated on its
+# own failure and on the job's existing step condition.
+TARGET_JOBS = ("build-runtime-linux", "build-helper-darwin", "sign-helper", "build-darwin",
+               "sign-darwin", "build-linux-musl", "build-linux-gnu")
+CANCEL_STEP = "Cancel the run after this failure"
+
+
+def ci_cancel_body(ci_text):
+    """The run and env lines of ci.yaml's fail-fast step, which every copy shares."""
+    bodies = set()
+    for block in jobs(ci_text).values():
+        lines = block.splitlines()
+        for index, line in enumerate(lines):
+            if line == f"      - name: {CANCEL_STEP}":
+                end = next((later for later in range(index + 1, len(lines))
+                            if lines[later].startswith("      - ")), len(lines))
+                body = "\n".join(lines[index:end]).rstrip("\n")
+                bodies.add("\n".join(text for text in body.splitlines()
+                                     if not text.startswith("        #") and not text.startswith("        if:")))
+    return bodies.pop() if len(bodies) == 1 else None
+
+
+def fail_fast_errors(text, ci_text, gates):
+    """Errors unless each target job ends with exactly one fail-fast step."""
+    errors, reference = [], ci_cancel_body(ci_text)
+    if reference is None:
+        return ["ci.yaml has no single fail-fast step to match"]
+    blocks = jobs(text)
+    for job in TARGET_JOBS:
+        named = steps(blocks.get(job, ""))
+        cancels = [body for name, body in named if name == CANCEL_STEP]
+        if len(cancels) != 1 or not named or named[-1][0] != CANCEL_STEP:
+            errors.append(f"target job {job} does not end with exactly one fail-fast step")
+            continue
+        body = cancels[0]
+        expected_if = f"        if: {gates[job]} && failure()" if job in gates else "        if: ${{ failure() }}"
+        if expected_if not in body.splitlines():
+            errors.append(f"target job {job} cancels the run on something other than its own failure")
+        own = "\n".join(line for line in body.rstrip("\n").splitlines()
+                        if not line.startswith("        #") and not line.startswith("        if:"))
+        if own != reference:
+            errors.append(f"target job {job} fail-fast step differs from ci.yaml's")
+    return errors
+
+
+def drop_cancel(text, job):
+    """TEXT without JOB's fail-fast step."""
+    start = text.index(f"\n  {job}:\n")
+    end = re.compile(r"\n  [a-z0-9-]+:\n").search(text, start + 1)
+    end = end.start() if end else len(text)
+    block = text[start:end]
+    cut = block.index(f"      - name: {CANCEL_STEP}\n")
+    return text[:start] + block[:cut].rstrip("\n") + text[end:]
+
+
 def check(text, ci_text):
     errors = []
     # Forgejo runners set no RUNNER_NAME: a step that requires it fails the
@@ -357,7 +414,8 @@ def check(text, ci_text):
     need("    needs: [release-selection, build-helper-darwin]\n    runs-on: ci-protected\n"
          "    enable-openid-connect: true\n" in helper_signing and not re.search(r"^    if:", helper_signing, re.M),
          "helper signing does not follow the helper build on a protected runner with its OIDC exchange")
-    need(all(HELPER_IF in step for name, step in steps(helper_signing)
+    need(all(HELPER_IF in step or HELPER_IF.removesuffix("\n") + " && failure()\n" in step
+             for name, step in steps(helper_signing)
              if name != "https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
              or "path: .release-source" in step),
          "helper signing acts without an unsigned helper to sign")
@@ -549,6 +607,8 @@ def check(text, ci_text):
         refs = set(re.findall(r"https://git\.example\.invalid/noel/" + action + r"[0-9a-f]{40}", text))
         need(len(refs) == 1 and refs <= set(re.findall(r"https://git\.example\.invalid/noel/" + action + r"[0-9a-f]{40}",
                                                        ci_text)), f"{action} is not the pinned mirrored action")
+    errors.extend(fail_fast_errors(
+        text, ci_text, {"sign-helper": HELPER_IF.strip().removeprefix("if: ")}))
     return errors
 
 
@@ -825,6 +885,14 @@ MUTATIONS = {
     "verification by another key": lambda t: t.replace(
         "            A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815 dist/cw-release",
         "            0000000000000000000000000000000000000000 dist/cw-release", 1),
+    "release target build without its fail-fast step": lambda t: drop_cancel(t, "build-linux-gnu"),
+    "release fail-fast step on always()": lambda t: in_job(
+        t, "build-darwin", "        if: ${{ failure() }}\n", "        if: ${{ always() }}\n"),
+    "release fail-fast step with another body": lambda t: in_job(
+        t, "sign-darwin", 'sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"', "true"),
+    "release helper fail-fast without the helper condition": lambda t: in_job(
+        t, "sign-helper", "        if: needs.build-helper-darwin.outputs.unsigned_sha256 != '' && failure()\n",
+        "        if: ${{ failure() }}\n"),
 }
 
 
@@ -1026,7 +1094,7 @@ def check_dry_run(text, release):
          "          GITEA_TOKEN: ${{ github.token }}\n        run: python3 -I -B "
          "scripts/ci/select/last-scheduled-run.py --workflow cw-release-dry-run.yaml --github-output"
          in decided.get("Find the last successful scheduled dry run", "")
-         and text.count("${{ github.token }}") == 1,
+         and text.count("${{ github.token }}") == 1 + text.count(f"      - name: {CANCEL_STEP}\n"),
          "the dry run reads its last scheduled run other than once, on a schedule, with the job token")
     need("        id: deferral\n        env:\n"
          "          SCHEDULE_BASELINE_SHA: ${{ steps.schedule-baseline.outputs.schedule_baseline }}\n"
@@ -1137,6 +1205,8 @@ def check_dry_run(text, release):
          f"sealed toolchain lacks: {runner_targets_sealed(text)}")
     need("    branches: [main]" in text and "pull_request" not in text,
          "the dry run is not limited to main")
+    errors.extend(fail_fast_errors(text, CI.read_text(), {job: "steps.superseded.outputs.superseded == 'false'" for job in (
+        "build-runtime-linux", "build-helper-darwin", "build-darwin", "build-linux-musl", "build-linux-gnu")}))
     return errors
 
 
@@ -1369,6 +1439,14 @@ DRY_RUN_MUTATIONS = {
     "received runtime unchecked": lambda t: t.replace(
         '            [ "$(sha256sum dist-darwin/local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]\n',
         "            true\n", 1),
+    "dry-run target build without its fail-fast step": lambda t: drop_cancel(t, "build-linux-musl"),
+    "dry-run fail-fast step on always()": lambda t: in_job(
+        t, "sign-helper", "        if: ${{ failure() }}\n", "        if: ${{ always() }}\n"),
+    "dry-run fail-fast step with another body": lambda t: in_job(
+        t, "build-darwin", 'sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"', "true"),
+    "dry-run fail-fast step for a superseded commit": lambda t: in_job(
+        t, "build-runtime-linux", "        if: steps.superseded.outputs.superseded == 'false' && failure()\n",
+        "        if: ${{ failure() }}\n"),
 }
 
 
