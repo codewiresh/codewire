@@ -299,6 +299,7 @@ run_policy_core_one() {
   python3 scripts/checks/repo_checks.py epoch-material-cache-owner --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
+  python3 scripts/checks/repo_checks.py public-address-literals --self-test
   python3 scripts/checks/source/check-native-desktop-ui.py
   python3 scripts/checks/repo_checks.py go-source-classification
 STEPS

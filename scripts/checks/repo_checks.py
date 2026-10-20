@@ -16,6 +16,7 @@ from repo_policy.mesh import check_mesh_surface_freeze
 from repo_policy.orchestration_security import check_orchestration_authz
 from repo_policy.permanent_raw import check_permanent_raw_surface
 from repo_policy.production import check_production_source_ownership
+from repo_policy.public_addresses import check_public_address_literals
 from repo_policy.proto import check_proto_package_boundaries
 from repo_policy.workspace_identity import check_identity_free_workspace
 from repo_policy.workspace_image_pin import check_workspace_image_pin
@@ -78,6 +79,9 @@ def main(argv: list[str] | None = None) -> int:
     material_cache_parser = subparsers.add_parser("epoch-material-cache-owner")
     material_cache_parser.add_argument("--self-test", action="store_true")
     material_cache_parser.set_defaults(func=check_epoch_material_cache_owner)
+    public_address_parser = subparsers.add_parser("public-address-literals")
+    public_address_parser.add_argument("--self-test", action="store_true")
+    public_address_parser.set_defaults(func=check_public_address_literals)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -7602,7 +7602,7 @@ mod tests {
             "metadata": {
                 "name": "cw-tailnet-udp-env-test",
                 "annotations": {
-                    "lbipam.cilium.io/ips": "192.0.2.36",
+                    "lbipam.cilium.io/ips": "203.0.113.36",
                 },
             },
             "spec": {
@@ -7613,7 +7613,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(direct_udp_service_ip_matches(&service, "192.0.2.36"));
+        assert!(direct_udp_service_ip_matches(&service, "203.0.113.36"));
         assert_eq!(direct_udp_service_port(&service), Some(33123));
     }
 

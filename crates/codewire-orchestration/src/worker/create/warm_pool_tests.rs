@@ -133,7 +133,7 @@ fn pool_template_equals_the_environment_rendering_of_its_shape() {
 fn environment_opts_are_the_shape_opts_plus_identity() {
     let cfg = SandboxWorkerCfg {
         direct_udp_lb_enabled: true,
-        direct_udp_lb_ip: "192.0.2.36".into(),
+        direct_udp_lb_ip: "203.0.113.36".into(),
         direct_udp_lb_port_start: "33000".into(),
         direct_udp_lb_port_end: "33010".into(),
         derp_host: "derp.codewire-dev.sh".into(),

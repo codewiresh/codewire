@@ -15,7 +15,7 @@ async fn relay_bind_endpoint_overrides_advertised_addr_ports() {
         vni: 42,
         bind_lifetime: Duration::from_secs(10),
         steady_state_lifetime: Duration::from_secs(60),
-        addr_ports: vec!["192.0.2.35:41641".parse().unwrap()],
+        addr_ports: vec!["203.0.113.35:41641".parse().unwrap()],
     };
 
     let bind = relay_bind_endpoint(&advertised, &["127.0.0.1:41641".into()])
@@ -26,7 +26,7 @@ async fn relay_bind_endpoint_overrides_advertised_addr_ports() {
     assert_eq!(bind.vni, advertised.vni);
     assert_eq!(
         advertised.addr_ports,
-        vec!["192.0.2.35:41641".parse().unwrap()]
+        vec!["203.0.113.35:41641".parse().unwrap()]
     );
 }
 

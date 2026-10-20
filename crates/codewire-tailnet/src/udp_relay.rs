@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn allocate_endpoint_sorts_pair_and_reuses_existing_vni() {
-        let mut server = Server::new(disco(0xaa), vec!["192.0.2.34:41641".parse().unwrap()]);
+        let mut server = Server::new(disco(0xaa), vec!["203.0.113.34:41641".parse().unwrap()]);
         let a = disco(0x22).public();
         let b = disco(0x11).public();
 
@@ -862,13 +862,13 @@ mod tests {
         let server_key = disco(0xaa);
         let mut server = Server::new(
             server_key.clone(),
-            vec!["192.0.2.34:41641".parse().unwrap()],
+            vec!["203.0.113.34:41641".parse().unwrap()],
         )
         .with_mac_secret_for_test([0x55; 32]);
         let a = disco(0x11);
         let b = disco(0x22);
         let a_addr: SocketAddr = "198.51.100.44:55231".parse().unwrap();
-        let b_addr: SocketAddr = "192.0.2.34:31000".parse().unwrap();
+        let b_addr: SocketAddr = "203.0.113.34:31000".parse().unwrap();
 
         let endpoint = server
             .allocate_endpoint(a.public(), b.public())
@@ -993,7 +993,7 @@ mod tests {
         let server_key = disco(0xaa);
         let mut server = Server::new(
             server_key.clone(),
-            vec!["192.0.2.34:41641".parse().unwrap()],
+            vec!["203.0.113.34:41641".parse().unwrap()],
         );
         let a = disco(0x11);
         let b = disco(0x22);
@@ -1025,7 +1025,7 @@ mod tests {
 
     #[test]
     fn expires_unbound_session() {
-        let mut server = Server::new(disco(0xaa), vec!["192.0.2.34:41641".parse().unwrap()])
+        let mut server = Server::new(disco(0xaa), vec!["203.0.113.34:41641".parse().unwrap()])
             .with_lifetimes(Duration::from_secs(1), Duration::from_secs(10));
         let endpoint = server
             .allocate_endpoint(disco(0x11).public(), disco(0x22).public())

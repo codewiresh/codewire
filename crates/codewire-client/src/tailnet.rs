@@ -1577,7 +1577,7 @@ mod tests {
             preferred_derp: 1,
             derp_latency: None,
             endpoints: vec![codewire_tailnet::node::AddrPort(
-                "192.0.2.36:33123".parse().unwrap(),
+                "203.0.113.36:33123".parse().unwrap(),
             )],
             addresses: vec![prefix_from_uuid(&id)],
         };

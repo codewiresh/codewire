@@ -107,7 +107,7 @@
     "git_commit": "e89fff89ac9af12e8d4ce9d5fd07beb408ca730f",
     "git_url": "https://github.com/BurntSushi/ripgrep",
     "namespace": "storage-measure",
-    "node": "cw-dev-prod-node-1",
+    "node": "node-a",
     "probe_image": "registry.k8s.io/e2e-test-images/busybox@sha256:caec39cad3b12c26600baf6e67ba811ac15d28a9288d0ccdfffb4b318992c3bb",
     "pvc_size": "20Gi",
     "remote_snapshot_class": "linstor-r2",
@@ -286,7 +286,7 @@
       }
     },
     "nodes": [
-      "cw-dev-prod-node-1"
+      "node-a"
     ],
     "runs_measured": 5,
     "runs_ok": 4,

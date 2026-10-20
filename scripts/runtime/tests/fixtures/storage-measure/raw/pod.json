@@ -6,7 +6,7 @@
     "namespace": "storage-measure",
     "creationTimestamp": "2026-09-29T10:00:00Z"
   },
-  "spec": {"nodeName": "cw-dev-prod-node-1", "runtimeClassName": "commodity"},
+  "spec": {"nodeName": "node-a", "runtimeClassName": "commodity"},
   "status": {
     "phase": "Running",
     "conditions": [

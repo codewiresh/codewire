@@ -2376,11 +2376,11 @@ mod tests {
         let opts = TemplateOpts {
             direct_udp_lb_enabled: true,
             daemon_auth_token: "test-daemon-token".into(),
-            direct_udp_lb_ip: "192.0.2.36".into(),
+            direct_udp_lb_ip: "203.0.113.36".into(),
             direct_udp_lb_port: 33123,
             direct_udp_lb_class: "io.cilium/l2-announcer".into(),
             direct_udp_lb_sharing_key: "codewire-direct-udp".into(),
-            direct_udp_transport_zone: "prod-node".into(),
+            direct_udp_transport_zone: "example-zone".into(),
             ..commodity_opts()
         };
 
@@ -2392,7 +2392,7 @@ mod tests {
         );
         assert_eq!(
             service["metadata"]["annotations"]["lbipam.cilium.io/ips"].as_str(),
-            Some("192.0.2.36")
+            Some("203.0.113.36")
         );
         assert_eq!(
             service["metadata"]["annotations"]["lbipam.cilium.io/sharing-key"].as_str(),
@@ -2412,7 +2412,7 @@ mod tests {
         );
         assert_eq!(
             service["metadata"]["labels"]["codewire.sh/transport-zone"].as_str(),
-            Some("prod-node")
+            Some("example-zone")
         );
         assert_eq!(service["spec"]["type"].as_str(), Some("LoadBalancer"));
         assert_eq!(

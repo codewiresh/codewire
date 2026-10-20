@@ -301,11 +301,11 @@ fn public_only_peer_endpoints_refuse_local_and_private_ranges() {
     }
     for accepted in [
         "203.0.113.7:41641",
-        "192.0.2.34:31000",
+        "203.0.113.34:31000",
         "100.128.0.1:41641",
         "[2001:db8::1]:41641",
         "[2a01:4f8::1]:41641",
-        "[::ffff:192.0.2.34]:41641",
+        "[::ffff:203.0.113.34]:41641",
     ] {
         let endpoint = accepted.parse().unwrap();
         assert!(

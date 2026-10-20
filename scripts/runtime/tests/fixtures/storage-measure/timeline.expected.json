@@ -13,7 +13,7 @@
   "create_to_ready_ms": 7000,
   "image_pulled": false,
   "pv_name": "pvc-11111111-2222-4333-8444-555555555555",
-  "node": "cw-dev-prod-node-1",
+  "node": "node-a",
   "csi_driver": "linstor.csi.linbit.com",
   "volume_mode": "Filesystem"
 }

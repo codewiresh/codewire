@@ -16,7 +16,7 @@
     "attach_ms": 2000,
     "create_to_ready_ms": 4000,
     "image_pulled": false,
-    "node": "cw-dev-prod-node-1",
+    "node": "node-a",
     "csi_driver": "linstor.csi.linbit.com",
     "volume_mode": "Filesystem"
   },

@@ -28,6 +28,7 @@ from repo_policy import (  # noqa: E402 - dispatcher directory is the import roo
     permanent_raw,
     production,
     proto,
+    public_addresses,
     source_classification,
     ses_security,
     turnstile_security,
@@ -99,6 +100,11 @@ COMMANDS = {
     "workspace-image-pin": (
         workspace_image_pin.check_workspace_image_pin,
         "workspace image pin: OK",
+        True,
+    ),
+    "public-address-literals": (
+        public_addresses.check_public_address_literals,
+        "public address literals: OK",
         True,
     ),
 }

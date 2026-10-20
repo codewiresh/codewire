@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 PRESSURE_NAMESPACE="${PRESSURE_NAMESPACE:-codewire-runtime-pressure}"
-PRESSURE_NODE="${PRESSURE_NODE:-${EXPECTED_NODE:-node1-codewire-dev}}"
+PRESSURE_NODE="${PRESSURE_NODE:-${EXPECTED_NODE:-}}"
 PRESSURE_RUNTIME_CLASS="${PRESSURE_RUNTIME_CLASS:-commodity}"
 PRESSURE_PODS="${PRESSURE_PODS:-8}"
 PRESSURE_CPU_M="${PRESSURE_CPU_M:-10}"
@@ -34,7 +34,7 @@ it does not write large files to node storage.
 Options:
   --confirm              Required for create/apply actions
   --cleanup-only         Delete PRESSURE_NAMESPACE and exit
-  --node NAME            Node name (default: node1-codewire-dev or EXPECTED_NODE)
+  --node NAME            Node name (required; defaults to EXPECTED_NODE)
   --namespace NAME       Namespace (default: codewire-runtime-pressure)
   --runtime-class NAME   RuntimeClass (default: commodity)
   --pods N               Number of pods to create (default: 8)
@@ -152,6 +152,8 @@ while (($# > 0)); do
       ;;
   esac
 done
+
+[[ "$CLEANUP_ONLY" == "1" || -n "$PRESSURE_NODE" ]] || die "--node or EXPECTED_NODE is required"
 
 kubectl_dev() {
   if [[ -n "$KUBE_CONTEXT" ]]; then

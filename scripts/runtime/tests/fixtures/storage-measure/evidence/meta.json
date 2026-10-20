@@ -9,7 +9,7 @@
     "snapshot_class": "linstor-local",
     "remote_snapshot_class": "linstor-r2",
     "runtime_class": "commodity",
-    "node": "cw-dev-prod-node-1",
+    "node": "node-a",
     "pvc_size": "20Gi",
     "runs": 5,
     "warmup": 1,

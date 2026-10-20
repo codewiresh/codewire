@@ -1031,7 +1031,7 @@ fn format_env_report_text_marks_confidential_dev_proof() {
                 "namespace": "dev-sandboxes",
                 "workspace_pod": "workspace-env-123",
                 "pod_ip": "10.42.0.12",
-                "node": "node1-codewire-dev",
+                "node": "node-a",
                 "zone": "hel1",
                 "region": "eu-central"
             },
@@ -1087,7 +1087,7 @@ fn format_env_report_text_marks_confidential_dev_proof() {
             "Runtime: confidential / RuntimeClass confidential / handler kata-qemu-snp\n"
         )
     );
-    assert!(text.contains("Node: node1-codewire-dev\n"));
+    assert!(text.contains("Node: node-a\n"));
     assert!(text.contains(
         "Daemon init image ID: docker-pullable://ghcr.io/codewiresh/codewire-daemon@sha256:456\n"
     ));

@@ -306,16 +306,16 @@ mod tests {
       "version": 1,
       "zones": [
         {
-          "name": "prod-node",
+          "name": "example-zone",
           "runtime_region": "dev-eu",
           "peer_relay": {
-            "public_endpoints": ["192.0.2.35:41641"],
-            "dns": "prod-node.mesh.codewire-dev.sh",
+            "public_endpoints": ["203.0.113.35:41641"],
+            "dns": "example-zone.mesh.codewire-dev.sh",
             "allocator_url": "http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations",
             "bind_addrs": ["codewire-udp-relay.dev.svc.cluster.local:41641"]
           },
           "direct_udp": {
-            "vip": "192.0.2.36",
+            "vip": "203.0.113.36",
             "port_start": 32000,
             "port_end": 60999
           },
@@ -330,13 +330,13 @@ mod tests {
         let catalog = parse_catalog(DEV_CATALOG).unwrap();
         assert_eq!(catalog.zones.len(), 1);
         let zone = &catalog.zones[0];
-        assert_eq!(zone.name, "prod-node");
+        assert_eq!(zone.name, "example-zone");
         assert_eq!(zone.runtime_region, "dev-eu");
         assert_eq!(
             zone.peer_relay.as_ref().unwrap().public_endpoints,
-            vec!["192.0.2.35:41641"]
+            vec!["203.0.113.35:41641"]
         );
-        assert_eq!(zone.binding().transport_zone, "prod-node");
+        assert_eq!(zone.binding().transport_zone, "example-zone");
     }
 
     #[test]
@@ -344,8 +344,8 @@ mod tests {
         let raw = r#"{
           "version": 1,
           "zones": [
-            {"name":"prod-node","runtime_region":"dev-eu"},
-            {"name":"prod-node","runtime_region":"dev-eu"}
+            {"name":"example-zone","runtime_region":"dev-eu"},
+            {"name":"example-zone","runtime_region":"dev-eu"}
           ]
         }"#;
         assert!(parse_catalog(raw).is_err());
@@ -357,9 +357,9 @@ mod tests {
           "version": 1,
           "zones": [
             {
-              "name":"prod-node",
+              "name":"example-zone",
               "runtime_region":"dev-eu",
-              "peer_relay": {"public_endpoints":["192.0.2.35"]}
+              "peer_relay": {"public_endpoints":["203.0.113.35"]}
             }
           ]
         }"#;

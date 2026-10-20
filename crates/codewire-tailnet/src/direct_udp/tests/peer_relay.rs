@@ -1618,7 +1618,7 @@ fn public_only_ignores_call_me_maybe_via_relays_on_private_addresses() {
         local_disco.public(),
         peer_disco,
         9002,
-        "192.0.2.35:41641".parse().unwrap(),
+        "203.0.113.35:41641".parse().unwrap(),
     );
     let actions = apply_call_me_maybe_via(&mut state, &shared, *peer_node.as_bytes(), public);
     assert_eq!(actions.len(), 1);

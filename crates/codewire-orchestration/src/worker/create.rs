@@ -3583,12 +3583,12 @@ mod tests {
         let cfg = SandboxWorkerCfg {
             runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
             direct_udp_lb_enabled: true,
-            direct_udp_lb_ip: "192.0.2.36".into(),
+            direct_udp_lb_ip: "203.0.113.36".into(),
             direct_udp_lb_port_start: "33000".into(),
             direct_udp_lb_port_end: "33010".into(),
             direct_udp_lb_class: "io.cilium/l2-announcer".into(),
             direct_udp_lb_sharing_key: "codewire-direct-udp".into(),
-            direct_udp_transport_zone: "prod-node".into(),
+            direct_udp_transport_zone: "example-zone".into(),
             ..Default::default()
         };
 
@@ -3603,18 +3603,18 @@ mod tests {
         .unwrap();
 
         assert!(opts.direct_udp_lb_enabled);
-        assert_eq!(opts.direct_udp_lb_ip, "192.0.2.36");
+        assert_eq!(opts.direct_udp_lb_ip, "203.0.113.36");
         assert_eq!(opts.direct_udp_lb_port, 0);
         assert_eq!(opts.direct_udp_lb_port_start, 33000);
         assert_eq!(opts.direct_udp_lb_port_end, 33010);
         assert_eq!(opts.direct_udp_lb_class, "io.cilium/l2-announcer");
         assert_eq!(opts.direct_udp_lb_sharing_key, "codewire-direct-udp");
-        assert_eq!(opts.direct_udp_transport_zone, "prod-node");
+        assert_eq!(opts.direct_udp_transport_zone, "example-zone");
 
         let diagnostic = SandboxWorkerCfg {
             runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_RUNC.into(),
             direct_udp_lb_enabled: true,
-            direct_udp_lb_ip: "192.0.2.36".into(),
+            direct_udp_lb_ip: "203.0.113.36".into(),
             ..cfg
         };
         let opts = environment_template_opts(
@@ -3651,7 +3651,7 @@ mod tests {
         };
         let cfg = SandboxWorkerCfg {
             runtime_transport_zones_json:
-                r#"{"version":1,"zones":[{"name":"prod-node","runtime_region":"dev-eu"}]}"#
+                r#"{"version":1,"zones":[{"name":"example-zone","runtime_region":"dev-eu"}]}"#
                     .into(),
             udp_relay_allocator_url:
                 "http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations"

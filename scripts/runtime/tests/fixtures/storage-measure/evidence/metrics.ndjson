@@ -1,8 +1,8 @@
-{"t_ms":1790676000000,"phase":"baseline","node":"cw-dev-prod-node-1","node_cpu_mcores":1000,"node_mem_mib":20000,"storage_pods":3,"storage_cpu_mcores":50,"storage_mem_mib":300}
-{"t_ms":1790676010000,"phase":"baseline","node":"cw-dev-prod-node-1","node_cpu_mcores":1200,"node_mem_mib":20100,"storage_pods":3,"storage_cpu_mcores":50,"storage_mem_mib":300}
-{"t_ms":1790676020000,"phase":"baseline","node":"cw-dev-prod-node-1","node_cpu_mcores":1100,"node_mem_mib":20200,"storage_pods":3,"storage_cpu_mcores":50,"storage_mem_mib":300}
-{"t_ms":1790676030000,"phase":"attach","node":"cw-dev-prod-node-1","node_cpu_mcores":3000,"node_mem_mib":21000,"storage_pods":3,"storage_cpu_mcores":150,"storage_mem_mib":320}
-{"t_ms":1790676040000,"phase":"attach","node":"cw-dev-prod-node-1","node_cpu_mcores":5000,"node_mem_mib":21400,"storage_pods":3,"storage_cpu_mcores":250,"storage_mem_mib":340}
+{"t_ms":1790676000000,"phase":"baseline","node":"node-a","node_cpu_mcores":1000,"node_mem_mib":20000,"storage_pods":3,"storage_cpu_mcores":50,"storage_mem_mib":300}
+{"t_ms":1790676010000,"phase":"baseline","node":"node-a","node_cpu_mcores":1200,"node_mem_mib":20100,"storage_pods":3,"storage_cpu_mcores":50,"storage_mem_mib":300}
+{"t_ms":1790676020000,"phase":"baseline","node":"node-a","node_cpu_mcores":1100,"node_mem_mib":20200,"storage_pods":3,"storage_cpu_mcores":50,"storage_mem_mib":300}
+{"t_ms":1790676030000,"phase":"attach","node":"node-a","node_cpu_mcores":3000,"node_mem_mib":21000,"storage_pods":3,"storage_cpu_mcores":150,"storage_mem_mib":320}
+{"t_ms":1790676040000,"phase":"attach","node":"node-a","node_cpu_mcores":5000,"node_mem_mib":21400,"storage_pods":3,"storage_cpu_mcores":250,"storage_mem_mib":340}
 {"t_ms":1790676050000,"phase":"workl
-{"t_ms":1790676060000,"phase":"workload","node":"cw-dev-prod-node-1","node_cpu_mcores":9000,"node_mem_mib":24000,"storage_pods":3,"storage_cpu_mcores":400,"storage_mem_mib":350}
-{"t_ms":1790676070000,"phase":"workload","node":"cw-dev-prod-node-1","node_cpu_mcores":11000,"node_mem_mib":26000,"storage_pods":3,"storage_cpu_mcores":600,"storage_mem_mib":370}
+{"t_ms":1790676060000,"phase":"workload","node":"node-a","node_cpu_mcores":9000,"node_mem_mib":24000,"storage_pods":3,"storage_cpu_mcores":400,"storage_mem_mib":350}
+{"t_ms":1790676070000,"phase":"workload","node":"node-a","node_cpu_mcores":11000,"node_mem_mib":26000,"storage_pods":3,"storage_cpu_mcores":600,"storage_mem_mib":370}

@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn config_uses_defaults_and_parses_advertised_addrs() {
         let cfg = Config::from_getenv(|key| match key {
-            UDP_ADVERTISE_ADDRS_ENV => Some("192.0.2.34:41641, [2001:db8::1]:41641".into()),
+            UDP_ADVERTISE_ADDRS_ENV => Some("203.0.113.34:41641, [2001:db8::1]:41641".into()),
             _ => None,
         })
         .unwrap();
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(
             cfg.udp_advertise_addr_ports,
             vec![
-                "192.0.2.34:41641".parse::<SocketAddr>().unwrap(),
+                "203.0.113.34:41641".parse::<SocketAddr>().unwrap(),
                 "[2001:db8::1]:41641".parse::<SocketAddr>().unwrap(),
             ]
         );

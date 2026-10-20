@@ -601,7 +601,7 @@ async fn channel_shim_path_probe_reports_derp_relay() {
 
 #[test]
 fn peer_relay_path_is_distinct_from_direct_udp() {
-    let endpoint = "192.0.2.34:31000".parse().unwrap();
+    let endpoint = "203.0.113.34:31000".parse().unwrap();
     let path = PeerPath::peer_relay(endpoint);
 
     assert_eq!(path.transport, PeerTransport::PeerRelay);

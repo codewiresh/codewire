@@ -326,8 +326,8 @@ mod tests {
             "codewire-orchestration".to_owned(),
             "codewire-orchestration-abc".to_owned(),
             "6c2c791e-f0ad-49db-b754-bb7d25b12989".to_owned(),
-            "https://10.60.0.100:6443".to_owned(),
-            "openbao-codewire-tenant-dev-cluster".to_owned(),
+            "https://192.0.2.100:6443".to_owned(),
+            "openbao-codewire-tenant-example-cluster".to_owned(),
         )
         .unwrap()
     }
@@ -365,8 +365,8 @@ mod tests {
         assert_eq!(
             request.spec.audiences,
             [
-                "https://10.60.0.100:6443",
-                "openbao-codewire-tenant-dev-cluster"
+                "https://192.0.2.100:6443",
+                "openbao-codewire-tenant-example-cluster"
             ]
         );
         assert_eq!(request.spec.expiration_seconds, Some(600));

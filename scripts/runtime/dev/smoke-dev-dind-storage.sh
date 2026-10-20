@@ -55,13 +55,13 @@ Examples:
   # Reproduce the current confidential target.
   scripts/runtime/dev/smoke-dev-dind-storage.sh \
     --runtime-class confidential \
-    --node node1-codewire-dev \
+    --node <confidential-node> \
     --data-root /var/lib/docker
 
   # Test the proposed workspace-local dockerd data root.
   scripts/runtime/dev/smoke-dev-dind-storage.sh \
     --runtime-class confidential \
-    --node node1-codewire-dev \
+    --node <confidential-node> \
     --data-root /workspace/.codewire/docker-root \
     --run-docker
 

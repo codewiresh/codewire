@@ -247,7 +247,7 @@ render_all() {
   )
 }
 
-render_all commodity cw-dev-prod-node-1 1 sm-b-fio sm-snap >"$WORK/full.json"
+render_all commodity node-a 1 sm-b-fio sm-snap >"$WORK/full.json"
 render_all none '' 0 '' '' >"$WORK/plain.json"
 for manifest in "$WORK/full.json" "$WORK/plain.json"; do
   check 'list' '.kind == "List" and (.items | length) == 6' "$manifest"
@@ -275,7 +275,7 @@ for manifest in "$WORK/full.json" "$WORK/plain.json"; do
       source: {persistentVolumeClaimName: "sm-b"}}' "$manifest"
 done
 check 'runtime class and node' '.items[1].spec.runtimeClassName == "commodity"
-  and .items[1].spec.nodeSelector == {"kubernetes.io/hostname": "cw-dev-prod-node-1"}
+  and .items[1].spec.nodeSelector == {"kubernetes.io/hostname": "node-a"}
   and .items[3].spec.runtimeClassName == "commodity"' "$WORK/full.json"
 check 'runtime class none' '[.items[] | select(.kind == "Pod") | .spec]
   | all((has("runtimeClassName") | not) and (has("nodeSelector") | not))' "$WORK/plain.json"
