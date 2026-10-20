@@ -267,7 +267,7 @@ class KindBuildArtifactTests(unittest.TestCase):
             return [{
                 "Id": images[reference]["id"], "Os": "linux", "Architecture": "amd64",
                 "Config": {"Labels": {
-                    "dev.codewire.build.profile": "ci",
+                    "dev.codewire.build.profile": "runtime",
                     "dev.codewire.promotable": "false",
                     "org.opencontainers.image.revision": "a" * 40,
                 }},
@@ -290,7 +290,7 @@ class KindBuildArtifactTests(unittest.TestCase):
             return {
                 "Id": images[reference]["id"], "Os": "linux", "Architecture": "amd64",
                 "Config": {"Labels": {
-                    "dev.codewire.build.profile": "ci",
+                    "dev.codewire.build.profile": "runtime",
                     "dev.codewire.promotable": "false",
                     "org.opencontainers.image.revision": "d" * 40,
                 }},
@@ -300,6 +300,30 @@ class KindBuildArtifactTests(unittest.TestCase):
                 mock.patch.object(artifact, "inspect_image", side_effect=inspect), \
                 self.assertRaises(artifact.ArtifactError):
             artifact.consume("product", self.directory)
+
+    def test_product_import_rejects_another_profile_or_a_promotable_image(self):
+        # Kind runs the runtime profile Dev and Production run; an image from
+        # the retired ci profile, the release profile or a promotable build
+        # is not this run's Kind artifact.
+        images = {name: {"id": "sha256:" + str(index) * 64}
+                  for index, name in enumerate(artifact.GROUP_IMAGES["product"], 1)}
+        self.write_artifact("product", {artifact.IMAGE_ARCHIVE: b"image archive"}, images=images)
+        for profile, promotable in (("ci", "false"), ("release", "false"), ("runtime", "true")):
+            def inspect(reference):
+                return {
+                    "Id": images[reference]["id"], "Os": "linux", "Architecture": "amd64",
+                    "Config": {"Labels": {
+                        "dev.codewire.build.profile": profile,
+                        "dev.codewire.promotable": promotable,
+                        "org.opencontainers.image.revision": "a" * 40,
+                    }},
+                }
+
+            with self.subTest(profile=profile, promotable=promotable), \
+                    mock.patch.object(artifact, "run"), \
+                    mock.patch.object(artifact, "inspect_image", side_effect=inspect), \
+                    self.assertRaises(artifact.ArtifactError):
+                artifact.consume("product", self.directory)
 
     def test_daemon_group_carries_only_the_daemon_image(self):
         self.assertEqual(artifact.GROUP_IMAGES["daemon"], ("codewire-daemon:e2e",))
@@ -314,7 +338,7 @@ class KindBuildArtifactTests(unittest.TestCase):
             return {
                 "Id": images[reference]["id"], "Os": "linux", "Architecture": "amd64",
                 "Config": {"Labels": {
-                    "dev.codewire.build.profile": "ci",
+                    "dev.codewire.build.profile": "runtime",
                     "dev.codewire.promotable": "false",
                     "org.opencontainers.image.revision": "a" * 40,
                 }},

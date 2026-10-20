@@ -13,12 +13,15 @@ KIND_GITHUB_APP_OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.i
 KIND_GITHUB_APP_OPENBAO_PATH="${KIND_GITHUB_APP_OPENBAO_PATH:-apps/codewire/dev/runtime}"
 KIND_REAL_CREDENTIAL_DATABASE_URL="postgres://codewire_credential_broker:kind-credential-broker-synthetic-only@postgres.${NS}.svc.cluster.local:5432/codewire?sslmode=verify-full&sslrootcert=/run/codewire-credential-db-roots/ca.pem"
 
+# Only the services-ci target is a non-promotable services image, so that label
+# identifies it. Every image builds the same runtime profile, so the profile
+# label no longer tells it apart; it was checked when the cluster's images were
+# built, and a retained cluster keeps the base images it was created with.
 require_kind_services_ci_image() {
-  local profile promotable image_ref
+  local promotable image_ref
   image_ref="${KIND_PROFILE_SERVICES_IMAGE_ID:-codewire-services:e2e}"
-  profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$image_ref")"
   promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$image_ref")"
-  if [ "$profile" != ci ] || [ "$promotable" != false ]; then
+  if [ "$promotable" != false ]; then
     echo '::error::credential modes require the exact non-promotable services-ci image' >&2
     return 1
   fi

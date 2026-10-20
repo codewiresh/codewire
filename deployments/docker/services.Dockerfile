@@ -85,7 +85,7 @@ ARG CODEWIRE_SCCACHE_MODE=disabled
 ARG SCCACHE_BUCKET
 ARG SCCACHE_ENDPOINT
 ARG CODEWIRE_SCCACHE_PREFIX
-ARG CODEWIRE_RUST_PROFILE=release
+ARG CODEWIRE_RUST_PROFILE=runtime
 ARG CODEWIRE_ORCHESTRATION_FEATURES=
 # One Cargo invocation builds every shipped binary: the three historical
 # invocations shared one target tree and lockfile, so their common dependency
@@ -127,11 +127,10 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-credential-service" /out/codewire-credential-service && \
     mkdir -p /out/kind-fixtures /out/kind-git-runtime && \
     if [ "$CODEWIRE_ORCHESTRATION_FEATURES" = kind-e2e ]; then \
-      test "$CODEWIRE_RUST_PROFILE" = ci && \
-      codewire-rust-build cargo test --locked --profile ci \
+      codewire-rust-build cargo test --locked --profile "$CODEWIRE_RUST_PROFILE" \
         -p codewire-credential-service --features enrollment,kind-e2e --lib --no-run \
         --message-format=json > /tmp/credential-fixture-artifacts.jsonl && \
-      credential_fixture="$(sed -n '/"reason":"compiler-artifact"/{/"test":true/{s@.*"executable":"\(/src/target/ci/deps/codewire_credential_service-[0-9a-f][0-9a-f]*\)".*@\1@p;}}' /tmp/credential-fixture-artifacts.jsonl)" && \
+      credential_fixture="$(sed -n '/"reason":"compiler-artifact"/{/"test":true/{s@.*"executable":"\(/src/target/'"$CODEWIRE_RUST_PROFILE"'/deps/codewire_credential_service-[0-9a-f][0-9a-f]*\)".*@\1@p;}}' /tmp/credential-fixture-artifacts.jsonl)" && \
       test -n "$credential_fixture" && test -x "$credential_fixture" && \
       "$credential_fixture" --list > /tmp/credential-fixture-tests.txt && \
       grep -qx 'runtime::kind::serve_kind_credential_fixture: test' /tmp/credential-fixture-tests.txt && \
@@ -155,8 +154,9 @@ COPY --from=builder /out/codewire-coordinator /codewire-coordinator
 COPY --from=builder /out/codewire-db-migrate /codewire-db-migrate
 COPY --from=builder /out/codewire-udp-relay /codewire-udp-relay
 COPY --from=builder /out/codewire-credential-service /codewire-credential-service
-# Empty in the release graph: cfg(test) code is built only by services-ci's
-# existing kind-e2e feature/profile pair. No production fixture switch exists.
+# Empty in the promotable graph: cfg(test) code is built only by services-ci's
+# kind-e2e feature, in the same runtime profile. No production fixture switch
+# exists.
 COPY --from=builder /out/kind-fixtures/ /codewire-kind-fixtures/
 # Stock Git from the already digest-pinned Rust/Bookworm toolchain, only for
 # the synthetic smart-HTTP provider. No client HTTP/SSH helpers, package resolver

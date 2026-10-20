@@ -151,9 +151,9 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertGreater(job["steps"].index(upload), export_index)
 
     def test_service_and_daemon_images_build_on_separate_producers(self) -> None:
-        product = named_step(self.jobs["kind-product"], "Build exact CI-profile service images")
+        product = named_step(self.jobs["kind-product"], "Build exact Kind service images")
         self.assertEqual(product["run"], "scripts/ci/images/build-kind-images.sh dashboard services mesh")
-        daemon = named_step(self.jobs["kind-daemon"], "Build exact CI-profile daemon image")
+        daemon = named_step(self.jobs["kind-daemon"], "Build exact Kind daemon image")
         self.assertEqual(daemon["run"], "scripts/ci/images/build-kind-images.sh daemon")
         for job_name in ("kind-product", "kind-daemon"):
             with self.subTest(job=job_name):
@@ -1262,7 +1262,7 @@ class CommonConsumerContractTests(unittest.TestCase):
                 docker() {
                   record "docker $*"
                   case "$*" in
-                    *dev.codewire.build.profile*) printf 'ci\n' ;;
+                    *dev.codewire.build.profile*) printf 'runtime\n' ;;
                     *dev.codewire.promotable*) printf 'false\n' ;;
                     *) return 92 ;;
                   esac

@@ -55,8 +55,11 @@ class Consumer(unittest.TestCase):
         self.temporary.cleanup()
 
     def validate(self, arguments=None, command=None):
-        return consumer.canonical_command(command or self.command[:3] + (arguments or self.command[3:]),
-                                          self.source, Path.cwd(), "ci")
+        command = command or self.command[:3] + (arguments or self.command[3:])
+        # A Bake graph builds only the runtime profile, so a Bake refusal here
+        # must come from the option under test, never from a profile mismatch.
+        profile = "runtime" if command[2] == "bake" else "ci"
+        return consumer.canonical_command(command, self.source, Path.cwd(), profile)
 
     def test_closed_cli_options_and_explicit_delimiter(self):
         options = ["consume", "--source-dir", str(self.source), "--source-sha", fixture.REVISION,
@@ -104,14 +107,14 @@ class Consumer(unittest.TestCase):
         prefix = ["docker", "buildx", "bake", "-f", str(self.source / "docker-bake.hcl"), "--builder", "remote"]
         for selection, expected in (("*.platform=linux/amd64", True), ("daemon-ci.platform=linux/arm64", False),
                                     ("*.platform=linux/amd64,linux/arm64", True)):
-            plan = consumer.canonical_plan(prefix + ["--set", selection, "daemon-ci"], self.source, Path.cwd(), "ci")
+            plan = consumer.canonical_plan(prefix + ["--set", selection, "daemon-ci"], self.source, Path.cwd(), "runtime")
             self.assertIs(plan["needs_cw_asset"], expected)
             self.assertIn("daemon-ci.platform=" + selection.split("=", 1)[1], plan["command"])
         with self.assertRaises(consumer.asset.Refused):
             consumer.canonical_plan(prefix + ["--set", "*.platform=linux/arm64", "--set",
-                                               "daemon-ci.platform=linux/amd64", "daemon-ci"], self.source, Path.cwd(), "ci")
+                                               "daemon-ci.platform=linux/amd64", "daemon-ci"], self.source, Path.cwd(), "runtime")
         with patch.object(consumer.os, "uname", return_value=SimpleNamespace(machine="arm64")):
-            plan = consumer.canonical_plan(prefix + ["daemon-ci"], self.source, Path.cwd(), "ci")
+            plan = consumer.canonical_plan(prefix + ["daemon-ci"], self.source, Path.cwd(), "runtime")
             self.assertEqual(plan["platforms"]["daemon-ci"], ["linux/arm64"])
             self.assertIn("daemon-ci.platform=linux/arm64", plan["command"])
 
@@ -119,13 +122,13 @@ class Consumer(unittest.TestCase):
         foreign = self.base / "foreign"
         foreign.mkdir()
         prefix = ["docker", "buildx", "bake", "-f", str(self.source / "docker-bake.hcl")]
-        plan = consumer.canonical_plan(prefix + ["kind"], self.source, foreign, "ci")
+        plan = consumer.canonical_plan(prefix + ["kind"], self.source, foreign, "runtime")
         settings = [plan["command"][index + 1] for index, value in enumerate(plan["command"])
                     if value == "--set"]
         for target in ("dashboard-ci", "services-ci", "mesh-ci", "daemon-ci", "rust-base"):
             self.assertIn(target + ".context=" + str(self.source), settings)
         with self.assertRaises(consumer.asset.Refused):
-            consumer.canonical_plan(prefix + ["--set", "*.context=.", "kind"], self.source, foreign, "ci")
+            consumer.canonical_plan(prefix + ["--set", "*.context=.", "kind"], self.source, foreign, "runtime")
 
     def test_selected_frontend_directives_precede_ordinary_comments(self):
         for recipe, directive in (("deployments/docker/daemon.Dockerfile", "# syntax=docker/dockerfile:1.20"),
@@ -139,17 +142,27 @@ class Consumer(unittest.TestCase):
             with self.assertRaises(consumer.asset.Refused):
                 self.validate(extra + self.command[3:])
         prefix = ["docker", "buildx", "bake", "-f", str(self.source / "docker-bake.hcl")]
+        # Bake fixes every target to the runtime profile; the caller's
+        # environment selects nothing, and the Kind daemon is no exception.
         with patch.dict(os.environ, {"CODEWIRE_RUST_PROFILE": "release"}):
-            with self.assertRaises(consumer.asset.Refused):
-                consumer.canonical_plan(prefix + ["daemon", "daemon-ci"], self.source, Path.cwd(), "release")
-            plan = consumer.canonical_plan(prefix + ["daemon", "dashboard-ci"], self.source, Path.cwd(), "release")
+            for profile in ("release", "ci"):
+                with self.subTest(profile=profile), self.assertRaises(consumer.asset.Refused):
+                    consumer.canonical_plan(prefix + ["daemon", "daemon-ci"], self.source, Path.cwd(), profile)
+            plan = consumer.canonical_plan(prefix + ["daemon", "daemon-ci"], self.source, Path.cwd(), "runtime")
+            self.assertEqual(plan["targets"], ["daemon", "daemon-ci"])
+            for target in ("daemon", "daemon-ci"):
+                self.assertIn(target + ".args.CODEWIRE_RUST_PROFILE=runtime", plan["command"])
+            plan = consumer.canonical_plan(prefix + ["daemon", "dashboard-ci"], self.source, Path.cwd(), "runtime")
             self.assertEqual(plan["targets"], ["daemon"])
-            self.assertIn("daemon.args.CODEWIRE_RUST_PROFILE=release", plan["command"])
+            self.assertIn("daemon.args.CODEWIRE_RUST_PROFILE=runtime", plan["command"])
+        with self.assertRaises(consumer.asset.Refused):
+            consumer.canonical_plan(prefix + ["--set", "daemon-ci.args.CODEWIRE_RUST_PROFILE=ci", "daemon", "daemon-ci"],
+                                    self.source, Path.cwd(), "runtime")
         plan = consumer.canonical_plan(self.command, self.source, Path.cwd(), "ci")
         self.assertIn("CODEWIRE_RUST_PROFILE=ci", plan["command"])
 
     def test_bake_groups_bind_only_the_selected_daemon(self):
-        for group, profile, expected in (("default", "release", "daemon"), ("kind", "ci", "daemon-ci")):
+        for group, profile, expected in (("default", "runtime", "daemon"), ("kind", "runtime", "daemon-ci")):
             command = ["docker", "buildx", "bake", "--file", str(self.source / "docker-bake.hcl"), group]
             targets, required = consumer.canonical_command(command, self.source, Path.cwd(), profile)
             self.assertEqual(targets, [expected])
@@ -159,8 +172,10 @@ class Consumer(unittest.TestCase):
             self.assertEqual(bound.count("--allow=fs.read=" + str(self.base / "verified")), 1)
             self.assertEqual([item for item in bound if item.startswith("--allow")],
                              ["--allow=fs.read=" + str(self.base / "verified")])
-        with self.assertRaises(consumer.asset.Refused):
-            consumer.canonical_command(command, self.source, Path.cwd(), "release")
+        # The Kind group no longer builds a separate ci profile.
+        for profile in ("ci", "release"):
+            with self.subTest(profile=profile), self.assertRaises(consumer.asset.Refused):
+                consumer.canonical_command(command, self.source, Path.cwd(), profile)
 
     def test_architecture_split_and_unknown_architecture_refusal(self):
         for platforms, expected in (("linux/amd64", True), ("linux/arm64", False),

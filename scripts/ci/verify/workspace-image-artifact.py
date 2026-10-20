@@ -374,8 +374,8 @@ class CwCopyOwner:
 
 # The Cargo profile of the verified amd64 cw producer. It is fixed here, not
 # taken from the producer pointer, and equals WORKSPACE_CW_PROFILE in
-# scripts/ci/images/workspace-cache.sh. Publication builds the release profile.
-WORKSPACE_CW_PROFILE = "ci"
+# scripts/ci/images/workspace-cache.sh. Publication builds the same profile.
+WORKSPACE_CW_PROFILE = "runtime"
 
 
 def verify_cw(root, image_id, result_path):

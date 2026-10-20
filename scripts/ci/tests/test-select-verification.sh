@@ -891,6 +891,10 @@ run_paths_case rust_toolchain_guard pull_request refs/pull/506/head false \
   .gitea/workflows/rust-latest-canary.yaml \
   scripts/ci/verify/check-rust-toolchain.sh \
   scripts/ci/tests/test-rust-toolchain.sh
+# The one runtime Cargo profile's guard runs in policy core (#2892).
+run_paths_case runtime_profile_guard pull_request refs/pull/2892/head false \
+  'policy security security_js' \
+  scripts/ci/tests/test-runtime-profile.py
 run_paths_case local_rust_cache_helper pull_request refs/pull/2753/head false \
   'policy security security_js' \
   scripts/ci/verify/local-rust-cache.sh \
@@ -4733,8 +4737,8 @@ WORK = {
     "services-control": {"Run Service integration"},
     "services-runtime": {"Run Service integration"},
     "kind-workspace": {"Build and verify exact source workspace"},
-    "kind-product": {"Build exact CI-profile service images"},
-    "kind-daemon": {"Build exact CI-profile daemon image"},
+    "kind-product": {"Build exact Kind service images"},
+    "kind-daemon": {"Build exact Kind daemon image"},
     "kind-smokes": {"Build all host smoke and contract binaries"},
     "edge-kind": {"Run the shard Kind gate"},
 }

@@ -1130,7 +1130,7 @@ build_images_and_smokes() {
       log "verifying the canonical source workspace image once for Kind"
       "$ROOT/scripts/ci/verify/rehearse-build-local-image.sh" || return $?
       "$ROOT/scripts/ci/verify/verify-workspace-image.sh" || return $?
-      log "building exact candidate product images once through the CI Bake profile"
+      log "building exact candidate product images once through the Kind Bake targets"
       local source_head
       source_head="$(git -C "$ROOT" rev-parse HEAD)" || return $?
       CODEWIRE_IMAGE_SOURCE_SHA="$source_head" \
@@ -1282,7 +1282,7 @@ assert_prebuilt_release_product_images() {
     profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$image_ref")"
     promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$image_ref")"
     revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image_ref")"
-    if [ "$profile" != release ] || [ "$promotable" != true ] \
+    if [ "$profile" != runtime ] || [ "$promotable" != true ] \
         || [ "$revision" != "$expected_sha" ]; then
       echo "::error::prebuilt release image identity mismatch: ${image_ref}"
       return 1

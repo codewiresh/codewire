@@ -6,13 +6,13 @@ readonly WORKSPACE_CACHE_BUCKET='example-ci-cache-untrusted'
 readonly WORKSPACE_CACHE_ENDPOINT='https://00000000000000000000000000000000.r2.cloudflarestorage.com'
 readonly WORKSPACE_CACHE_PREFIX='untrusted/codewire/buildkit/v1/'
 readonly WORKSPACE_DAEMON_CREDENTIALS='/run/codewire-cache/aws-credentials'
-# Verification builds the amd64 cw producer with the CI Cargo profile. The
-# contracts check behavior, not optimization, and the release profile's fat
-# LTO alone took about 22 minutes. Publication (build-push-image.sh) still
-# builds the release profile; this verified cw is never published. The Python
-# readers pin the same value (WORKSPACE_CW_PROFILE in workspace-image-artifact.py
-# and workspace-cache-report.py); test-workspace-image-artifact.py checks it.
-readonly WORKSPACE_CW_PROFILE=ci
+# Verification builds the amd64 cw producer with the runtime Cargo profile,
+# the one profile publication (build-push-image.sh) and every other image
+# build use, so Kind's workspace runs the cw profile Dev and Production run.
+# This verified cw is never published. The Python readers pin the same value
+# (WORKSPACE_CW_PROFILE in workspace-image-artifact.py and
+# workspace-cache-report.py); test-workspace-image-artifact.py checks it.
+readonly WORKSPACE_CW_PROFILE=runtime
 
 workspace_cache_validate() {
   local mode source_root

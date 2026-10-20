@@ -1890,7 +1890,10 @@ deploy_kind_credential_cert_manager
         self.assertNotIn("unexpected-kubectl", result.stdout)
 
     def test_wrong_image_profile_and_promotability_fail_before_provisioning(self):
-        for profile, promotable in (("release", "false"), ("ci", "true"), ("", "false")):
+        # A new cluster's services-ci image is built from this tree, so it
+        # carries the runtime profile; the retired ci profile is refused too.
+        for profile, promotable in (("release", "false"), ("ci", "false"), ("runtime", "true"),
+                                    ("", "false")):
             result = self.shell('''
 docker() {
   case "$4" in
@@ -1905,6 +1908,27 @@ start_kind_credential_fixture
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("exact non-promotable", result.stderr)
             self.assertNotIn("unexpected-kubectl", result.stdout)
+
+    def test_credential_mode_switch_identifies_services_ci_by_promotability(self):
+        # A retained cluster keeps the base images it was created with, which
+        # may predate the one runtime profile, so the mode switch identifies
+        # services-ci by its non-promotable label alone.
+        for profile, promotable, expected in (("runtime", "false", 0), ("ci", "false", 0),
+                                              ("runtime", "true", 1), ("", "", 1)):
+            with self.subTest(profile=profile, promotable=promotable):
+                result = subprocess.run(
+                    ["/bin/bash", "-c", 'set -euo pipefail\nNS=codewire-e2e\nsource "$1"\n'
+                     'docker() {\n  case "$4" in\n    *build.profile*) echo "$FAKE_PROFILE" ;;\n'
+                     '    *promotable*) echo "$FAKE_PROMOTABLE" ;;\n    *) return 99 ;;\n  esac\n}\n'
+                     'require_kind_services_ci_image\n',
+                     "kind-credential-mode", str(ROOT / "scripts/ci/verify/kind/credential-mode.sh")],
+                    env={"PATH": "/usr/bin:/bin", "ROOT": str(ROOT), "FAKE_PROFILE": profile,
+                         "FAKE_PROMOTABLE": promotable},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if expected:
+                    self.assertIn("exact non-promotable services-ci image", result.stderr)
 
     def test_saved_synthetic_login_requires_membership_and_selects_org(self):
         for orgs, expected in (([], 1), ([{"id": "foreign"}], 1),

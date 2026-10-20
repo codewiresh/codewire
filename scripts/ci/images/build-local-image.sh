@@ -71,7 +71,8 @@ case "$(realpath -m -- "$dockerfile")" in
     umask 077
     mkdir -p "$ROOT/.tmp"
     cw_local_work="$(mktemp -d "$ROOT/.tmp/cw-local-image.XXXXXX")"
-    cw_image_run "${CODEWIRE_RUST_PROFILE:-release}" "$(realpath -m -- "$context")" "$cw_local_work" "${command[@]}"
+    # The cw producer builds the one runtime profile every image builds.
+    cw_image_run runtime "$(realpath -m -- "$context")" "$cw_local_work" "${command[@]}"
     ;;
   *) "${command[@]}" ;;
 esac

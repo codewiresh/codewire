@@ -160,7 +160,7 @@ import json
 from pathlib import Path
 import sys
 value = json.loads(Path(sys.argv[1]).read_text().splitlines()[-1])
-assert value['source_revision'] == sys.argv[2] and value['profile'] == 'release'
+assert value['source_revision'] == sys.argv[2] and value['profile'] == 'runtime'
 assert len(value['payload_sha256']) == len(value['producer_receipt_sha256']) == 64
 print(value['work'])
 PY

@@ -22,7 +22,7 @@ PRODUCER_FIELDS = {"status", "receipt", "producer_receipt", "image", "index_sha2
 _consumer = None
 # The Cargo profile of the measured workspace cw producer; equals
 # WORKSPACE_CW_PROFILE in scripts/ci/images/workspace-cache.sh.
-WORKSPACE_CW_PROFILE = "ci"
+WORKSPACE_CW_PROFILE = "runtime"
 
 
 def consumer_library():

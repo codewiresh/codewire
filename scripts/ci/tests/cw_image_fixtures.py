@@ -224,7 +224,7 @@ def main(argv=None):
     create = commands.add_parser("source", allow_abbrev=False)
     create.add_argument("destination")
     produced = commands.add_parser("producer", allow_abbrev=False)
-    produced.add_argument("--profile", choices=("ci", "release"), default="release")
+    produced.add_argument("--profile", choices=("ci", "release", "runtime"), default="release")
     produced.add_argument("source")
     produced.add_argument("output")
     produced.add_argument("result")

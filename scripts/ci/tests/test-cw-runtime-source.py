@@ -294,8 +294,8 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
             self.assertIn("--profile", finalizer.command("ci"))
             self.assertIn("--release", finalizer.command("release"))
             self.assertNotIn("--profile", finalizer.command("release"))
-            # The Dev daemon producer: the thin-LTO runtime profile, owning its
-            # whole worker; the release (support image) producer keeps its bound.
+            # Every image producer: the runtime profile, owning its whole
+            # worker; the release producer keeps its bound.
             runtime_command = finalizer.command("runtime")
             self.assertEqual(runtime_command[runtime_command.index("--profile") + 1], "runtime")
             self.assertNotIn("--release", runtime_command)

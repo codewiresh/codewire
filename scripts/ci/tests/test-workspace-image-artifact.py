@@ -771,7 +771,7 @@ class InspectionTests(SyntheticSource):
 
 
 class VerificationProfileTests(unittest.TestCase):
-    def test_every_reader_pins_one_ci_profile_and_publication_keeps_its_profiles(self):
+    def test_every_reader_pins_the_runtime_profile_publication_uses(self):
         root = HELPER.parents[3]
         shell = (root / "scripts/ci/images/workspace-cache.sh").read_text()
         pins = [line.split("=", 1)[1] for line in shell.splitlines()
@@ -780,14 +780,14 @@ class VerificationProfileTests(unittest.TestCase):
             "workspace_cache_report_profile", root / "scripts/ci/verify/workspace-cache-report.py")
         report = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(report)
-        self.assertEqual(pins, ["ci"])
-        self.assertEqual(artifact.WORKSPACE_CW_PROFILE, "ci")
-        self.assertEqual(report.WORKSPACE_CW_PROFILE, "ci")
+        self.assertEqual(pins, ["runtime"])
+        self.assertEqual(artifact.WORKSPACE_CW_PROFILE, "runtime")
+        self.assertEqual(report.WORKSPACE_CW_PROFILE, "runtime")
         self.assertEqual(shell.count('cw-image-consumer.sh" "$WORKSPACE_CW_PROFILE" '), 2)
         self.assertNotIn('cw-image-consumer.sh" release', shell)
-        # Only verification changes. Publication builds the workspace image's
-        # cw with the same thin-LTO runtime profile as the runtime images
-        # (#2855): the fat-LTO release profile was a 25 minute serial link.
+        # Verification and publication build the workspace image's cw with the
+        # one runtime profile every image builds (#2892); the fat-LTO release
+        # profile was a 25 minute serial link (#2855).
         publish = (root / "scripts/ci/images/build-push-image.sh").read_text()
         self.assertEqual(publish.count('cw-image-consumer.sh" '), 3)
         self.assertEqual(publish.count('cw-image-consumer.sh" runtime '), 2)

@@ -19,7 +19,7 @@ ARG CODEWIRE_SCCACHE_MODE=disabled
 ARG SCCACHE_BUCKET
 ARG SCCACHE_ENDPOINT
 ARG CODEWIRE_SCCACHE_PREFIX
-ARG CODEWIRE_RUST_PROFILE=release
+ARG CODEWIRE_RUST_PROFILE=runtime
 RUN --mount=type=cache,id=codewire-derp-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=codewire-derp-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \

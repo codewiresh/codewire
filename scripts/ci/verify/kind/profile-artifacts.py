@@ -661,8 +661,8 @@ def inspect_products(inventory, head: str) -> dict[str, str]:
         value = decode(run("docker", "image", "inspect", "--format", template, reference))
         require(isinstance(value, dict) and re.fullmatch(r"sha256:[0-9a-f]{64}", value.get("id", ""))
                 and value.get("os") == "linux" and value.get("arch") == "amd64"
-                and value.get("profile") == "ci" and value.get("promotable") == "false"
-                and value.get("source") == head, "product image identity or CI profile differs")
+                and value.get("profile") == "runtime" and value.get("promotable") == "false"
+                and value.get("source") == head, "product image identity or runtime profile differs")
         result[reference] = value["id"]
     return result
 

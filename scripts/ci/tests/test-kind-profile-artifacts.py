@@ -592,7 +592,7 @@ class TransactionTests(unittest.TestCase):
             self.inspect_count += 1
             name = argv[-1].removeprefix("codewire-").removesuffix(":e2e")
             return json.dumps({"id": self.docker.images[name], "os": "linux", "arch": "amd64",
-                               "profile": "ci", "promotable": "false", "source": self.head})
+                               "profile": "runtime", "promotable": "false", "source": self.head})
         if argv[:3] == ("docker", "image", "save"):
             self.save_archive(Path(argv[4]))
             if self.after_save is not None:

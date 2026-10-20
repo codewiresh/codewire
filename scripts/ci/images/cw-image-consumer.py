@@ -54,6 +54,8 @@ VALUE_FLAGS = {"--file", "-f", "--builder", "--progress", "--metadata-file", "--
                "--provenance", "--sbom", "--no-cache-filter"}
 BUILD_VALUE_FLAGS = {"--platform", "--build-context", "--build-arg", "--secret", "--tag", "-t", "--label", "--output", "-o"}
 BOOLEAN_FLAGS = {"--pull", "--load", "--push", "--no-cache"}
+# The one Cargo profile docker-bake.hcl builds for every target.
+BAKE_PROFILE = "runtime"
 
 
 class SolveFailure(Exception):
@@ -205,8 +207,9 @@ def canonical_plan(command, source_dir, cwd, profile, docker_bin="docker"):
                       "consumer Bake targets refused")
         selected_targets = sorted({target for name in operands for target in GROUPS.get(name, [name])})
         targets = [target for target in selected_targets if target in ("daemon", "daemon-ci")]
-        base_profile = os.environ.get("CODEWIRE_RUST_PROFILE", "release")
-        effective_profiles = {target: "ci" if target.endswith("-ci") else base_profile for target in selected_targets}
+        # docker-bake.hcl fixes every target, Kind's included, to the runtime
+        # profile; only an explicit args override below can differ from it.
+        effective_profiles = {target: BAKE_PROFILE for target in selected_targets}
         effective_platforms = {target: None for target in selected_targets}
         for key, value in values:
             if key != "--set":

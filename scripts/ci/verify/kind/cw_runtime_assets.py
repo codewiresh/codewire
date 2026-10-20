@@ -199,7 +199,9 @@ def admitted_inputs(source_root, selected_sha, selections):
             model = release.parse_canonical(header.data)
             source.require(type(model) is dict and release.valid_version(model.get("version")),
                            "CW journey producer version refused")
-            profile = "ci" if name == "support_cw" else "release"
+            # The support daemon's cw is the Kind image producer, which builds
+            # the runtime profile every image builds; A and B are cw releases.
+            profile = "runtime" if name == "support_cw" else "release"
             admitted = stack.enter_context(driver.reopen(
                 path, selected["build_sha256"], source_root, selected_sha, profile, model["version"]))
             retained[name] = admitted

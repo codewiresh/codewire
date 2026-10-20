@@ -171,8 +171,8 @@ done
 [[ ! -s "$work/invalid-build.log" && ! -s "$work/invalid-output" ]] ||
   fail "an invalid runtime group reached a build"
 
-# Runtime images build the thin-LTO runtime profile. A candidate labeled with
-# any other profile, including the CLI's full-LTO release, is refused.
+# Runtime images build the one runtime profile. A candidate labeled with any
+# other profile, including the CLI's full-LTO release, is refused.
 for wrong in release ci; do
   if run_group daemon "$work/profile-$wrong-output" "$work/profile-$wrong-docker.log" \
       "$work/profile-$wrong-build.log" 43 FAKE_PROFILE="$wrong" \

@@ -280,7 +280,7 @@ chmod 0400 "$workspace_archive"
 # The published arm64 leg cross-compiles cw on the build platform. Build only
 # that stage here, without emulation, so a cross-compile break fails before
 # protected publication. Like the amd64 producer (WORKSPACE_CW_PROFILE), it
-# uses the CI profile and skips release LTO; neither verified cw is the
+# uses the runtime profile the published leg uses; neither verified cw is the
 # published one. Measurements keep their unchanged build set.
 if [[ "$architecture" == amd64 && -z "$workspace_measurement_case" ]]; then
   # The cw stage never consumes the base image, but a frontend may resolve
@@ -295,7 +295,7 @@ if [[ "$architecture" == amd64 && -z "$workspace_measurement_case" ]]; then
     --provenance=false --sbom=false \
     --output type=cacheonly \
     "${compiler_args[@]}" \
-    --build-arg CODEWIRE_RUST_PROFILE=ci \
+    --build-arg CODEWIRE_RUST_PROFILE=runtime \
     --build-arg "BASE_IMAGE_REF=$base_foundation" \
     --file "$ROOT/images/workspace/Dockerfile" \
     "$ROOT"

@@ -168,13 +168,18 @@ verify_services_dockerfile_contract() {
     fail 'final services image does not inherit the qualified SSH runtime stage'
   # shellcheck disable=SC2016 # Match the Dockerfile's literal shell variable.
   fixture_block="$(sed -n '/^    if \[ "\$CODEWIRE_ORCHESTRATION_FEATURES" = kind-e2e \]; then/,/^    fi$/p' "$SERVICES_DOCKERFILE")"
-  # The existing feature AND CI profile fence the only test-artifact build.
-  # A release image receives an empty directory, never a runtime test switch.
+  # The kind-e2e feature, which only the non-promotable services-ci target
+  # sets, fences the only test-artifact build. It compiles in the image's one
+  # runtime profile and reads that profile's target directory. A promotable
+  # image receives an empty directory, never a runtime test switch.
   # shellcheck disable=SC2016
-  grep -qF 'test "$CODEWIRE_RUST_PROFILE" = ci' <<<"$fixture_block" ||
-    fail 'credential fixture is not bounded to the non-promotable CI profile'
-  grep -qF 'codewire-rust-build cargo test --locked --profile ci' <<<"$fixture_block" ||
-    fail 'credential fixture compilation escaped its test-only branch'
+  grep -qF 'codewire-rust-build cargo test --locked --profile "$CODEWIRE_RUST_PROFILE"' <<<"$fixture_block" ||
+    fail 'credential fixture compilation escaped its test-only branch or the selected profile'
+  # shellcheck disable=SC2016
+  grep -qF '"executable":"\(/src/target/'\''"$CODEWIRE_RUST_PROFILE"'\''/deps/codewire_credential_service-' <<<"$fixture_block" ||
+    fail 'credential fixture is not read from the selected profile target directory'
+  ! grep -qE -- '--profile ci|target/ci/|= ci( |$)' <<<"$fixture_block" ||
+    fail 'credential fixture still selects the ci profile'
   [[ "$(grep -cF 'cargo test --locked' "$SERVICES_DOCKERFILE")" -eq 1 ]] ||
     fail 'services image contains an unexpected test-artifact build'
   grep -qF 'runtime::kind::serve_kind_credential_fixture: test' <<<"$fixture_block" ||
@@ -182,7 +187,7 @@ verify_services_dockerfile_contract() {
   grep -qF 'COPY --from=builder /out/kind-fixtures/ /codewire-kind-fixtures/' "$SERVICES_DOCKERFILE" ||
     fail 'services-ci fixture has no explicit image artifact path'
   # The synthetic provider's stock Git comes only from the pinned toolchain,
-  # inside the same feature/profile fence. Never add it to production, copy
+  # inside the same feature fence. Never add it to production, copy
   # client network helpers or replace the final base's runtime libraries.
   # shellcheck disable=SC2016
   grep -qF 'test "$(git --version)" = '\''git version 2.39.5'\''' <<<"$fixture_block" ||
@@ -304,8 +309,24 @@ verify_kind_build_cache_contract() {
     fail 'Compose may start the build-only Rust base as a runtime service'
   grep -qF 'export SCCACHE_SERVER_UDS=' "$RUST_BUILD_WRAPPER" ||
     fail 'sccache daemon is not isolated to one BuildKit executor'
-  grep -qF 'dev.codewire.promotable"    = "false"' "$BAKE_FILE" ||
-    fail 'Kind images are not marked non-promotable'
+  # Kind images differ from promotable ones only in promotability (and
+  # services-ci's kind-e2e features): every target builds the one runtime
+  # profile, which the shared product target fixes and no Kind target or
+  # caller's environment overrides (#2892).
+  local kind_target kind_block
+  for kind_target in dashboard-ci services-ci mesh-ci daemon-ci; do
+    kind_block="$(sed -n "/^target \"$kind_target\" {/,/^}/p" "$BAKE_FILE")"
+    grep -Eq '"dev\.codewire\.promotable"[[:space:]]*=[[:space:]]*"false"' <<<"$kind_block" ||
+      fail "Kind image $kind_target is not marked non-promotable"
+    ! grep -Eq 'CODEWIRE_RUST_PROFILE|dev\.codewire\.build\.profile' <<<"$kind_block" ||
+      fail "Kind image $kind_target overrides the runtime profile"
+  done
+  kind_block="$(sed -n '/^target "_rust-product" {/,/^}/p' "$BAKE_FILE")"
+  grep -Eq '"dev\.codewire\.build\.profile"[[:space:]]*=[[:space:]]*"runtime"' <<<"$kind_block" &&
+    grep -Eq 'CODEWIRE_RUST_PROFILE[[:space:]]*=[[:space:]]*"runtime"' <<<"$kind_block" ||
+    fail 'the shared product target does not fix the runtime profile'
+  ! grep -q '^variable "CODEWIRE_RUST_PROFILE"' "$BAKE_FILE" ||
+    fail 'a caller environment can select the image profile through a Bake variable'
   # shellcheck disable=SC2016
   count="$(grep -cF 'cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"' "$DAEMON_DOCKERFILE")"
   [[ "$count" -eq 1 ]] || fail 'the support image must build only cw, profile-selected'
@@ -752,7 +773,8 @@ case "${1:-} ${2:-} ${3:-}" in
   image\ inspect\ *)
     case "$*" in
       *dev.codewire.build.profile*)
-        if [[ "${FAKE_KIND_IMAGE_INVALID:-0}" = 1 ]]; then printf 'release\n'; else printf 'ci\n'; fi
+        # A Kind image from the retired ci profile is the invalid case.
+        if [[ "${FAKE_KIND_IMAGE_INVALID:-0}" = 1 ]]; then printf 'ci\n'; else printf 'runtime\n'; fi
         ;;
       *dev.codewire.promotable*) printf 'false\n' ;;
     esac
@@ -897,7 +919,7 @@ grep -qF -- "daemon.tags=registry.example.invalid/codewire/daemon:$source_sha" "
 grep -qF -- "CODEWIRE_IMAGE_SOURCE_SHA=$source_sha" "$FAKE_DOCKER_CALLS" ||
   fail 'exact source revision did not reach canonical Bake'
 grep -qF -- 'CODEWIRE_RUST_PROFILE=runtime' "$FAKE_DOCKER_CALLS" ||
-  fail 'protected publication did not force the thin-LTO runtime profile'
+  fail 'protected publication did not force the runtime profile'
 grep -qF -- 'builder-id=https://codewire.sh/ci/builders/protected-delivery/v1' "$FAKE_DOCKER_CALLS" ||
   fail 'protected product build omitted its explicit minimal BuildKit SLSA provenance identity'
 grep -qF -- 'version=v1' "$FAKE_DOCKER_CALLS" ||
@@ -1229,8 +1251,8 @@ docker_config="$(sed -nE 's/^DOCKER_CONFIG=([^ ]+).* login.*/\1/p' \
 grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
   fail 'Kind did not pass the exact private credential file path to Bake'
 [[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
-  fail 'Kind R2 caller did not use one CI-profile original CW producer'
-assert_cw_context ci
+  fail 'Kind R2 caller did not use one runtime-profile original CW producer'
+assert_cw_context runtime
 
 : >"$FAKE_DOCKER_CALLS"
 (
@@ -1369,8 +1391,8 @@ grep -Eq ' buildx rm --force codewire-kind-' "$FAKE_DOCKER_CALLS" ||
 grep -qF 'CODEWIRE_CI_PHASE name=product-image-build' "$work/kind-build.out" ||
   fail 'Kind image builder omitted its structured phase result'
 [[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
-  fail 'local Kind caller did not use one additional CI-profile original CW producer'
-assert_cw_context ci
+  fail 'local Kind caller did not use one additional runtime-profile original CW producer'
+assert_cw_context runtime
 kind_default_work="$(cat "$work/kind-default-work")"
 [[ "$kind_default_work" == "$work/kind-default/"codewire-kind-images.* \
     && ! -e "$kind_default_work" && ! -L "$kind_default_work" ]] ||
@@ -1464,7 +1486,7 @@ with closing(fixture.source.HeldSourceFile(result_path, fixture.release.MAX_JSON
     assert hashlib.sha256(reference.read_bytes()).hexdigest() == locators[0][1]
     payload = fixture.selected_asset(source, result_path)
     context_rows = [json.loads(line) for line in contexts.read_text().splitlines()]
-    assert len(context_rows) == 1 and context_rows[0]['profile'] == 'ci'
+    assert len(context_rows) == 1 and context_rows[0]['profile'] == 'runtime'
     assert context_rows[0]['payload_sha256'] == hashlib.sha256(payload).hexdigest()
     assert context_rows[0]['producer_receipt_sha256'] == result['receipt']['sha256']
     consumers = list(work.glob('.cw-consumer-parent.*/solve/consumer.json'))
@@ -1491,7 +1513,7 @@ PY
             fail 'failed image solve published successful consumer evidence'
           grep -qF '503 Service Unavailable' "$case_dir/output" || fail 'solve failure lost its diagnostic'
         else
-          grep -qF 'Kind image is not marked with the ci profile' "$case_dir/output" || fail 'image-label failure lost its diagnostic'
+          grep -qF 'Kind image is not marked with the runtime profile' "$case_dir/output" || fail 'image-label failure lost its diagnostic'
         fi
         ;;
     esac
@@ -1813,10 +1835,10 @@ from pathlib import Path
 import sys
 records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
 # The service runtime set binds no CW: the daemon builds alone on its own
-# protected worker, with the thin-LTO runtime profile; the workspace builds its
-# cw with the same runtime profile. The apt snapshot cache case adds one
-# workspace build.
-assert len(records) == 10 and Counter(record['profile'] for record in records) == {'runtime': 8, 'ci': 2}
+# protected worker, with the runtime profile; the workspace and both Kind
+# daemon builds bind cw with the same runtime profile. The apt snapshot cache
+# case adds one workspace build.
+assert len(records) == 10 and Counter(record['profile'] for record in records) == {'runtime': 10}
 assert Counter(record['source_revision'] for record in records) == {sys.argv[2]: 9, sys.argv[3]: 1}
 assert len({record['producer_receipt_sha256'] for record in records}) == 10
 print('protected/runtime/Kind CW original-producer contexts: 10 verified')

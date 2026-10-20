@@ -594,7 +594,7 @@ class ProducerReportTests(unittest.TestCase):
         work.mkdir(mode=0o700)
         (work / "cw-producer-owned").mkdir(mode=0o700)
         producer = self.consumer.producer
-        with producer.prepare_plan(self.repo, self.revision, "ci", self.components.fixture.VERSION,
+        with producer.prepare_plan(self.repo, self.revision, "runtime", self.components.fixture.VERSION,
                                    work / "cw-producer-owned" / "build") as prepared:
             capsule = prepared.capsule
             binary, depinfo, target, cargo, result = self.source_fixture.build_bytes(capsule)
@@ -658,7 +658,7 @@ class ProducerReportTests(unittest.TestCase):
         self.assertNotEqual(workspace["build_ref"], compiled["build_ref"])
         self.assertTrue(compiled["compiler_layer_cached"])
         self.assertFalse(compiled["compiler_executed"])
-        self.assertEqual(compiled["profile"], "ci")
+        self.assertEqual(compiled["profile"], "runtime")
         self.assertEqual(compiled["source"]["revision"], self.revision)
         self.assertEqual(compiled["payload"]["source_revision"], self.revision)
         self.assertEqual(compiled["current_source"]["git_tree"], self.tree)

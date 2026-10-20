@@ -47,9 +47,10 @@ TARGET_ROOT = Path("/tmp/cargo-target")
 CARGO_HOME = Path("/usr/local/cargo")
 WORK = Path("/out")
 PROFILES = {"ci": ("--profile", "ci"), "release": ("--release",), "runtime": ("--profile", "runtime")}
-# The ci profile is the Kind daemon producer; runtime is the Dev daemon and
-# workspace support image producer. Every producer owns its worker and sizes its
-# jobs to it; the chosen count is part of the recorded command.
+# Every image producer, Kind's and the workspace verification's included,
+# builds runtime, the one image profile; a cw release producer builds release.
+# Every producer owns its worker and sizes its jobs to it; the chosen count is
+# part of the recorded command.
 MAX_JOBS = 16
 GIB_PER_JOB = 3
 

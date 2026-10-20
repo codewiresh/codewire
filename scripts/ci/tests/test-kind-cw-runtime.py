@@ -54,7 +54,7 @@ class AssetIntake(unittest.TestCase):
         for name, profile, version in (
             ("release_a", "release", "0.1.0"),
             ("release_b", "release", "0.1.1-cw-update"),
-            ("support_cw", "ci", "0.0.0-ci"),
+            ("support_cw", "runtime", "0.0.0-ci"),
         ):
             result = fixture.make_producer(cls.checkout, cls.root / name, profile, version)
             cls.originals[name] = result
@@ -79,7 +79,7 @@ class AssetIntake(unittest.TestCase):
                     "image", "index_sha256", "compilation_source", "profile", "version", "build_ref"})
                 self.assertEqual(entry["identity"], self.originals[name]["payload"])
                 self.assertEqual(entry["compilation_source"]["revision"], self.selected)
-                self.assertEqual(entry["profile"], "ci" if name == "support_cw" else "release")
+                self.assertEqual(entry["profile"], "runtime" if name == "support_cw" else "release")
                 self.assertEqual(entry["build_ref"], self.originals[name]["build_ref"])
                 self.assertEqual(entry["build_receipt"]["sha256"], self.selections[name]["build_sha256"])
             self.assertNotEqual(witness["release_a"]["identity"]["sha256"],

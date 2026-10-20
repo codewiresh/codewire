@@ -30,11 +30,6 @@ variable "CODEWIRE_SCCACHE_PREFIX" {
   default = ""
 }
 
-# Runtime images build the thin-LTO runtime profile; Kind targets override ci.
-variable "CODEWIRE_RUST_PROFILE" {
-  default = "runtime"
-}
-
 group "default" {
   targets = ["dashboard", "services", "mesh", "daemon", "derp"]
 }
@@ -48,6 +43,11 @@ target "rust-base" {
   dockerfile = "deployments/docker/rust-base.Dockerfile"
 }
 
+# Every image builds the one runtime profile ([profile.runtime] in Cargo.toml),
+# the Kind targets included. It is fixed here, not a variable, so no caller's
+# environment can select another. The Kind targets differ from the promotable
+# images only in their promotable=false label and services-ci's kind-e2e
+# features.
 target "_rust-product" {
   context = "."
   contexts = {
@@ -56,7 +56,7 @@ target "_rust-product" {
   labels = {
     "org.opencontainers.image.revision" = CODEWIRE_IMAGE_SOURCE_SHA
     "org.opencontainers.image.source"   = CODEWIRE_IMAGE_SOURCE_URL
-    "dev.codewire.build.profile"        = CODEWIRE_RUST_PROFILE
+    "dev.codewire.build.profile"        = "runtime"
     "dev.codewire.promotable"           = "true"
   }
   args = {
@@ -64,7 +64,7 @@ target "_rust-product" {
     SCCACHE_BUCKET        = SCCACHE_BUCKET
     SCCACHE_ENDPOINT      = SCCACHE_ENDPOINT
     CODEWIRE_SCCACHE_PREFIX = CODEWIRE_SCCACHE_PREFIX
-    CODEWIRE_RUST_PROFILE = CODEWIRE_RUST_PROFILE
+    CODEWIRE_RUST_PROFILE = "runtime"
   }
   pull = true
 }
@@ -122,12 +122,8 @@ target "derp" {
 
 target "dashboard-ci" {
   inherits = ["dashboard"]
-  args = {
-    CODEWIRE_RUST_PROFILE = "ci"
-  }
   labels = {
-    "dev.codewire.build.profile" = "ci"
-    "dev.codewire.promotable"    = "false"
+    "dev.codewire.promotable" = "false"
   }
 }
 
@@ -173,33 +169,23 @@ target "kind-dev-binary" {
 target "services-ci" {
   inherits = ["services"]
   args = {
-    CODEWIRE_RUST_PROFILE           = "ci"
     CODEWIRE_ORCHESTRATION_FEATURES = "kind-e2e"
   }
   labels = {
-    "dev.codewire.build.profile" = "ci"
-    "dev.codewire.promotable"    = "false"
+    "dev.codewire.promotable" = "false"
   }
 }
 
 target "mesh-ci" {
   inherits = ["mesh"]
-  args = {
-    CODEWIRE_RUST_PROFILE = "ci"
-  }
   labels = {
-    "dev.codewire.build.profile" = "ci"
-    "dev.codewire.promotable"    = "false"
+    "dev.codewire.promotable" = "false"
   }
 }
 
 target "daemon-ci" {
   inherits = ["daemon"]
-  args = {
-    CODEWIRE_RUST_PROFILE = "ci"
-  }
   labels = {
-    "dev.codewire.build.profile" = "ci"
-    "dev.codewire.promotable"    = "false"
+    "dev.codewire.promotable" = "false"
   }
 }

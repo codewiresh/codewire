@@ -276,14 +276,19 @@ lto = true
 codegen-units = 1
 strip = true
 
-# Runtime images (dashboard, services, mesh, derp, and the daemon's static cw):
-# release semantics with thin LTO and parallel codegen. Full LTO with one
-# codegen unit made every Dev delivery relink each shipped binary on one core.
-# The cw CLI release assets keep [profile.release].
+# The one profile every image builds, for Kind, Dev and Production alike:
+# dashboard, services, mesh, derp, the daemon's static cw and the workspace
+# image's cw. No LTO and parallel codegen, so delivery links fast. It is
+# written out in full and inherits only release defaults, so a change to
+# [profile.ci] or [profile.release] never ships in an image by accident.
+# deployments/docker/derp.Cargo.toml carries the same table, and
+# scripts/ci/tests/test-runtime-profile.py keeps the two equal. The cw CLI
+# release assets keep [profile.release].
 [profile.runtime]
 inherits = "release"
-lto = "thin"
+lto = false
 codegen-units = 16
+strip = true
 
 # Native tests hash the actual CW image at admission and custody checks. Keep
 # those hashes inside the same deadlines even with an unoptimized debug CW.
@@ -298,8 +303,8 @@ opt-level = 3
 strip = "debuginfo"
 
 # CI/dev-drill profile: release semantics without LTO or single-unit
-# codegen — host-built test binaries in CI use this (shipped images
-# still build the real release profile via the Dockerfiles).
+# codegen, for host-built test binaries in CI. No image builds it; every
+# image builds [profile.runtime].
 [profile.ci]
 inherits = "release"
 lto = false

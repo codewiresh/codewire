@@ -16,10 +16,10 @@
 # export KIND_PUBLIC_ORIGIN=http://localhost:4174
 # export KIND_BROWSER_API_ORIGIN=http://localhost:8090
 
-# Image build caches and profile.
+# Image build caches. Every image builds the one runtime Cargo profile, which
+# no setting selects.
 # export CODEWIRE_SCCACHE_MODE=local
 # export CODEWIRE_BUILDKIT_CACHE_MODE=local
-# export CODEWIRE_RUST_PROFILE=release
 
 # Per-worktree overrides stay out of the shared file.
 [ -f "$(dirname "${BASH_SOURCE[0]:-$0}")/.envrc.local" ] && . "$(dirname "${BASH_SOURCE[0]:-$0}")/.envrc.local"

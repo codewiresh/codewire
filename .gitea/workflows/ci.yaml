@@ -1851,7 +1851,7 @@ jobs:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
-      - name: Build exact CI-profile service images
+      - name: Build exact Kind service images
         run: scripts/ci/images/build-kind-images.sh dashboard services mesh
 
       - name: Clean compiler cache credentials
@@ -1928,7 +1928,7 @@ jobs:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
-      - name: Build exact CI-profile daemon image
+      - name: Build exact Kind daemon image
         run: scripts/ci/images/build-kind-images.sh daemon
 
       - name: Clean compiler cache credentials

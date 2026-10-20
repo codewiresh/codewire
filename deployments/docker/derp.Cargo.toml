@@ -42,7 +42,10 @@ lto = true
 codegen-units = 1
 strip = true
 
+# The same table as the workspace Cargo.toml's [profile.runtime], which every
+# image builds; scripts/ci/tests/test-runtime-profile.py keeps the two equal.
 [profile.runtime]
 inherits = "release"
-lto = "thin"
+lto = false
 codegen-units = 16
+strip = true

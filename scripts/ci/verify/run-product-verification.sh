@@ -246,6 +246,7 @@ run_policy_core_one() {
   scripts/ci/tests/test-darwin-cross-check.sh
   scripts/ci/tests/test-package-codewire-desktop.sh
   scripts/ci/tests/test-rust-toolchain.sh
+  python3 -B scripts/ci/tests/test-runtime-profile.py
   scripts/ci/tests/test-cargo-cache-capacity.sh
   scripts/ci/tests/test-admin-proto-boundary.sh
   scripts/ci/tests/test-ci-tool-downloads.sh

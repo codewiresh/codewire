@@ -668,6 +668,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-agent-sandbox-pin.sh|\
       scripts/ci/tests/test-rust-owned-fixtures.sh|\
       scripts/ci/tests/test-rust-toolchain.sh|\
+      scripts/ci/tests/test-runtime-profile.py|\
       scripts/ci/tests/test-cargo-cache-capacity.sh|\
       scripts/ci/tests/test-rust-cache-workflow.sh|\
       scripts/ci/tests/test-rust-cache-receipts.sh|\

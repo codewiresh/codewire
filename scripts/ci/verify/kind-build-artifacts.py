@@ -121,7 +121,9 @@ def identity(group: str, environment: dict[str, str] | None = None) -> dict[str,
         "head": head,
         "tree": tree,
         "platform": "linux/amd64",
-        "profile": "workspace-verify" if group == "workspace" else "ci",
+        # Product and daemon images build the runtime profile; the host smoke
+        # binaries keep the ci profile.
+        "profile": {"workspace": "workspace-verify", "smokes": "ci"}.get(group, "runtime"),
         "build_entrypoint_sha256": hashlib.sha256(
             (ROOT / BUILD_ENTRYPOINTS[group]).read_bytes()
         ).hexdigest(),
@@ -202,7 +204,7 @@ def validate_product_images(expected: dict[str, Any], source: str,
                 or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
                 or recorded["id"] != image_id
                 or value.get("Os") != "linux" or value.get("Architecture") != "amd64"
-                or labels.get("dev.codewire.build.profile") != "ci"
+                or labels.get("dev.codewire.build.profile") != "runtime"
                 or labels.get("dev.codewire.promotable") != "false"
                 or labels.get("org.opencontainers.image.revision") != source):
             raise ArtifactError(f"product image identity mismatch: {reference}")

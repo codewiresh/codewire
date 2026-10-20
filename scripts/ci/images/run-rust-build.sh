@@ -3,7 +3,7 @@
 set -euo pipefail
 
 mode="${CODEWIRE_SCCACHE_MODE:-disabled}"
-build_profile="${CODEWIRE_RUST_PROFILE:-release}"
+build_profile="${CODEWIRE_RUST_PROFILE:-runtime}"
 case "$build_profile" in
   ci|release|runtime) ;;
   *)

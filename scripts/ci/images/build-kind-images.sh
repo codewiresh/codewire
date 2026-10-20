@@ -155,7 +155,7 @@ case " ${families[*]} " in
     # so its own duration and compiler summary are reported; the image solve
     # below reuses this exact producer (cw_image_prepare is idempotent).
     producer_started_at="$(date +%s)"
-    CODEWIRE_SCCACHE_MODE="$sccache_mode" cw_image_prepare ci "$ROOT" "$work"
+    CODEWIRE_SCCACHE_MODE="$sccache_mode" cw_image_prepare runtime "$ROOT" "$work"
     printf 'CODEWIRE_CI_PHASE name=cw-producer seconds=%s\n' "$(( $(date +%s) - producer_started_at ))"
     while IFS= read -r producer_log; do
       grep -E 'Finished `|CODEWIRE_CI_PHASE|Compile requests  |Cache hits rate  |Cache misses  |Non-cacheable calls|Average compiler' \
@@ -170,14 +170,15 @@ case " ${families[*]} " in
     ;;
 esac
 CODEWIRE_SCCACHE_MODE="$sccache_mode" \
-  cw_image_run ci "$ROOT" "$work" "$docker_bin" buildx bake "${bake_args[@]}" "${bake_targets[@]}"
+  cw_image_run runtime "$ROOT" "$work" "$docker_bin" buildx bake "${bake_args[@]}" "${bake_targets[@]}"
 elapsed="$(( $(date +%s) - started_at ))"
 
 for image in "${families[@]}"; do
   image_ref="codewire-${image}:e2e"
   "$docker_bin" image inspect "$image_ref" >/dev/null
-  [ "$("$docker_bin" image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$image_ref")" = ci ] || {
-    printf 'Kind image is not marked with the ci profile: %s\n' "$image_ref" >&2
+  # Kind runs the profile Dev and Production run; only promotability differs.
+  [ "$("$docker_bin" image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$image_ref")" = runtime ] || {
+    printf 'Kind image is not marked with the runtime profile: %s\n' "$image_ref" >&2
     exit 1
   }
   [ "$("$docker_bin" image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$image_ref")" = false ] || {

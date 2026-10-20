@@ -212,7 +212,7 @@ start_kind_credential_fixture() {
   image_ref="${KIND_PROFILE_SERVICES_IMAGE_ID:-codewire-services:e2e}"
   profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$image_ref")"
   promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$image_ref")"
-  if [ "$profile" != ci ] || [ "$promotable" != false ]; then
+  if [ "$profile" != runtime ] || [ "$promotable" != false ]; then
     echo '::error::synthetic credentials require the exact non-promotable services-ci image' >&2
     return 1
   fi

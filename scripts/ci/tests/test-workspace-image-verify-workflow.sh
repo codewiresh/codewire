@@ -173,7 +173,7 @@ arm64_cw_block="$(sed -n '/^if \[\[ "$architecture" == amd64 && -z "$workspace_m
 for arm64_cw_input in \
     'workspace_cache_build cw-arm64 "$source_tree" arm64 ' '--target cw-builder-arm64' \
     '--output type=cacheonly' '--provenance=false --sbom=false' '"${compiler_args[@]}"' \
-    '--build-arg CODEWIRE_RUST_PROFILE=ci' '--build-arg "BASE_IMAGE_REF=$base_foundation"' \
+    '--build-arg CODEWIRE_RUST_PROFILE=runtime' '--build-arg "BASE_IMAGE_REF=$base_foundation"' \
     '--file "$ROOT/images/workspace/Dockerfile"'; do
   grep -qF -- "$arm64_cw_input" <<<"$arm64_cw_block" ||
     fail "arm64 cw cross-compile check omits: $arm64_cw_input"
@@ -919,7 +919,7 @@ grep -q -- '--driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:' "$work/d
 if [[ "$standalone_producers" == 1 ]]; then
   arm64_cw_call="$(grep '^buildx build ' "$work/docker.log" | grep -- '--target cw-builder-arm64')"
   for arm64_cw_input in '--platform linux/arm64' '--output type=cacheonly' \
-      '--build-arg CODEWIRE_RUST_PROFILE=ci' '--build-arg CODEWIRE_SCCACHE_MODE=local' \
+      '--build-arg CODEWIRE_RUST_PROFILE=runtime' '--build-arg CODEWIRE_SCCACHE_MODE=local' \
       "--build-arg BASE_IMAGE_REF=$(sed -n 's/^FROM \(ubuntu:noble@sha256:[0-9a-f]\{64\}\)$/\1/p' "$ROOT/images/base/Dockerfile")"; do
     grep -qF -- "$arm64_cw_input" <<<"$arm64_cw_call" || fail "arm64 cw cross-compile call omits $arm64_cw_input"
   done
@@ -991,7 +991,7 @@ with closing(module.asset.HeldFile(pointer, module.release.MAX_JSON)) as held:
                     'source': value['source'], 'original_build_ref': value['build_ref']}
     revision = module.producer.source.git(root, ['rev-parse', 'HEAD']).strip().decode()
     with module.producer.reopen(value['receipt']['path'], value['receipt']['sha256'], root,
-                                revision, 'ci', module.effective_version(root, None)) as retained:
+                                revision, 'runtime', module.effective_version(root, None)) as retained:
         assert value == {key: retained.summary[key] for key in value}
         original = pathlib.Path(value['receipt']['path']).parent
         assert original.is_relative_to(pointer.parent) and stat.S_IMODE(original.stat().st_mode) == 0o700
@@ -1448,7 +1448,7 @@ old = old.replace('cw_copy_started=false\n', '')
 assert hashlib.sha256(old.encode()).hexdigest() == '9bb5cdec3c4ddb0d46ea7c19e9ad3fafa86c454e5acca207ddde9c3eaf53aa66'
 Path(sys.argv[2]).write_text(old)
 PY
-  python3 -B "$fixture_helper" producer --profile ci "$fixture_root" "$work/copy-policy-producer" "$work/copy-policy-result.json"
+  python3 -B "$fixture_helper" producer --profile runtime "$fixture_root" "$work/copy-policy-producer" "$work/copy-policy-result.json"
   original_cw_sha="$(sha256sum "$work/copy-policy-producer/assets/cw" | cut -d' ' -f1)"
   fixture_policy() {
     cp "$1" "$fixture_root/scripts/ci/verify/verify-workspace-image.sh"

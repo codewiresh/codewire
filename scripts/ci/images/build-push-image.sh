@@ -39,7 +39,7 @@ readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5
 # infra#1383): the native arm64 support build runs its arm64 variant.
 readonly SBOM_GENERATOR_IMAGE='registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9'
 # The workspace image carries the same static cw as the runtime images, built
-# with the runtime profile (thin LTO, parallel codegen): the single-codegen-unit
+# with the runtime profile (no LTO, parallel codegen): the single-codegen-unit
 # fat-LTO release profile spent about 25 minutes per architecture in one serial
 # link. One profile everywhere is also what lets one cw build be shared.
 readonly SUPPORT_CW_PROFILE=runtime
@@ -855,7 +855,6 @@ if [ "$build_runtime_set" = 1 ]; then
     DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
-      CODEWIRE_RUST_PROFILE=runtime \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
       bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" runtime "$cw_selected_source_dir" "$cw_image_work" -- \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
@@ -939,7 +938,6 @@ else
     DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
-      CODEWIRE_RUST_PROFILE=runtime \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
       bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" runtime "$cw_selected_source_dir" "$cw_image_work" -- \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
