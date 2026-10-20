@@ -126,7 +126,7 @@ fn a_stopped_conversation_names_how_to_continue_it_and_is_recognised_on_every_cl
     assert_eq!(
         stopped_with_environment("env", "reviewer"),
         "managed conversation \"reviewer\" stopped with its environment; \
-         `cw msg env reviewer TEXT` or `cw restart env --session reviewer` continues it here"
+         `cw msg env --session reviewer TEXT` or `cw restart env --session reviewer` continues it here"
     );
     // The driver runs in the Sandbox, which is always Linux, so the client's
     // own OS never decides whether a listed session is a managed one.
@@ -406,7 +406,7 @@ async fn a_conversation_not_resumed_says_it_stopped_and_how_to_continue_it() {
         format!(
             "managed message {MESSAGE} was sent before its environment stopped; \
              managed conversation \"{session}\" stopped with its environment; \
-             `cw msg {ENVIRONMENT} {session} TEXT` or `cw restart {ENVIRONMENT} --session {session}` \
+             `cw msg {ENVIRONMENT} --session {session} TEXT` or `cw restart {ENVIRONMENT} --session {session}` \
              continues it here",
             session = session_id()
         )

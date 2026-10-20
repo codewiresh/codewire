@@ -469,7 +469,10 @@ fn shared_mesh_configuration_write_preserves_link_target_on_refusal() {
     fs::set_permissions(&sentinel, fs::Permissions::from_mode(0o600)).unwrap();
     let link = directory.path.join("config.toml");
     symlink(&sentinel, &link).unwrap();
-    assert!(config::save_selected_mesh_network(&directory.path, "attempt").is_err());
+    assert!(
+        config::save_mesh_connection(&directory.path, "http://127.0.0.1:18091", "cw_attempt")
+            .is_err()
+    );
     assert_eq!(fs::read(&sentinel).unwrap(), original);
     assert!(
         fs::symlink_metadata(&link)
@@ -536,7 +539,8 @@ fn shared_mesh_configuration_refuses_hardlink_fifo_and_overbound_entries() {
         let start = Instant::now();
         assert!(config::load_mesh_config(&directory.path).is_err(), "{kind}");
         assert!(
-            config::save_selected_mesh_network(&directory.path, "attempt").is_err(),
+            config::save_mesh_connection(&directory.path, "http://127.0.0.1:18091", "cw_attempt")
+                .is_err(),
             "{kind}"
         );
         assert!(start.elapsed() < Duration::from_secs(1));
@@ -558,7 +562,10 @@ fn shared_mesh_configuration_never_repairs_public_or_read_only_directories() {
         fs::set_permissions(&directory.path, fs::Permissions::from_mode(mode)).unwrap();
         let read = config::load_mesh_config(&directory.path);
         assert_eq!(read.is_ok(), mode == 0o500);
-        assert!(config::save_selected_mesh_network(&directory.path, "attempt").is_err());
+        assert!(
+            config::save_mesh_connection(&directory.path, "http://127.0.0.1:18091", "cw_attempt")
+                .is_err()
+        );
         assert_eq!(fs::metadata(&directory.path).unwrap().mode() & 0o777, mode);
         assert_eq!(
             fs::read(directory.path.join("config.toml")).unwrap(),
@@ -573,19 +580,16 @@ fn shared_mesh_configuration_never_repairs_public_or_read_only_directories() {
 fn shared_mesh_configuration_atomically_replaces_and_preserves_bytes_on_refusal() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("mesh");
-    config::save_selected_mesh_network(&path, "original").unwrap();
+    config::save_mesh_connection(&path, "http://127.0.0.1:18090", "cw_original").unwrap();
     let before = fs::metadata(path.join("config.toml")).unwrap();
-    config::save_selected_mesh_network(&path, "selected").unwrap();
+    config::save_mesh_connection(&path, "http://127.0.0.1:18091", "cw_selected").unwrap();
     let metadata = fs::metadata(path.join("config.toml")).unwrap();
     assert_ne!(before.ino(), metadata.ino());
     assert_eq!(metadata.mode() & 0o777, 0o600);
     assert_eq!(metadata.nlink(), 1);
     assert_eq!(
-        config::load_mesh_config(&path)
-            .unwrap()
-            .mesh_selected_network
-            .as_deref(),
-        Some("selected")
+        config::load_mesh_config(&path).unwrap().mesh_url.as_deref(),
+        Some("http://127.0.0.1:18091")
     );
     let original = fs::read(path.join("config.toml")).unwrap();
     let too_large = "x".repeat(MAX_STATE + 1);

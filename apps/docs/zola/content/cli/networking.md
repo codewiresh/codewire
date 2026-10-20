@@ -5,33 +5,65 @@ weight: 5
 ---
 
 Codewire Mesh connects local VMs and trusted hosts; see
-[Networking and previews](@/concepts/networking.md). Hosted Mesh at
-`mesh.codewire.sh` is used when you are signed in; `--mesh-url` or
-`CODEWIRE_MESH_URL` points at a standalone service.
+[Networking and previews](@/concepts/networking.md). Network commands work
+on one Mesh at a time:
+
+- `--cloud`: Codewire Cloud Mesh, the hosted Mesh of the platform you are
+  signed in to (`mesh.codewire.sh` for codewire.sh; a self-hosted server such
+  as a local Kind cluster serves it on its own address). It uses only your
+  platform sign-in.
+- `--local`: the Local Mesh service that `cw mesh up` runs. It is never used
+  for a `--cloud` command, and `--local` never falls back to the cloud.
+- `--mesh-url URL` (or `CODEWIRE_MESH_URL`): one exact endpoint; not combined
+  with `--cloud` or `--local`.
+
+Without any of them, a command uses the Mesh of the selected network, else
+the one Mesh available; when both the local service and the cloud are
+available it asks for `--local` or `--cloud`. Every result names the Mesh,
+its endpoint and the organization.
 
 ## cw network
 
 ```sh
-cw network list --org ORG_ID [--mesh-url URL] [--output json]      # alias: ls
-cw network create NAME --org ORG_ID [--no-use]                      # selects it unless --no-use
-cw network use NAME [--auto-connect]                                # local selection only
-cw network current
+cw --cloud network list --org ORG_ID [--output json]                # alias: ls
+cw --cloud network create NAME --org ORG_ID [--no-use]              # selects it unless --no-use
+cw --cloud network use NAME [--auto-connect]                        # for new environments only
+cw network current [--output json]
 cw network clear
-cw network nodes --org ORG_ID [--network NAME | --all] [--output json]
-cw network invite --org ORG_ID [--network NAME] [--ttl 1h] [--output json]
-cw network join INVITE_CODE [--mesh-url URL]                        # becomes the selected network
-cw network enroll create --org ORG_ID [--network NAME] [--node-name NAME] [--ttl 10m]
-cw network enroll redeem ENROLLMENT_CODE [--node-name NAME]
-cw network revoke NODE_NAME --org ORG_ID [--network NAME]
-cw network delete NAME --org ORG_ID [--yes]
+cw --cloud network nodes --org ORG_ID [--network NAME | --all] [--output json]
+cw --cloud network invite --org ORG_ID [--network NAME] [--ttl 1h] [--output json]
+cw network join INVITE_CODE --mesh-url URL
+cw --cloud network enroll create --org ORG_ID [--network NAME] [--node-name NAME] [--ttl 10m]
+cw network enroll redeem ENROLLMENT_CODE --mesh-url URL [--node-name NAME]
+cw --cloud network revoke NODE_NAME --org ORG_ID [--network NAME]
+cw --cloud network delete NAME --org ORG_ID [--yes]
 ```
 
-A local VM joins the network given by `--network`, `CODEWIRE_MESH_NETWORK` or
-the selection from `network use`; at a terminal `cw create --local` asks
-first unless the selection was made with `--auto-connect`, and `--no-network`
-opts out. Deleting a network retires its name for good (old connections must
-never reach a replacement); stop or detach its environments and revoke its
-nodes first.
+Use `--local` in place of `--cloud` for the local Mesh service, whose
+organization is printed by `cw mesh status`.
+
+`network use` saves the Mesh endpoint, the organization that owns new
+environments there (your default organization on the cloud; the local
+service's own on `--local`) and the network together, after checking the
+network exists in that organization. It never searches other organizations
+and attaches nothing: existing environments keep their attachments. `create`
+selects the new network only in that owner organization. `join` adds you to
+a network and prints how to select it.
+
+A local VM joins `--network cloud:NAME` (Codewire Cloud Mesh, even while a
+local Mesh service runs), `--network local:NAME` (the local Mesh service), or
+a bare `--network NAME` on the selected network's Mesh. Without `--network`
+it uses `CODEWIRE_MESH_NETWORK` or the selection; at a terminal `cw create
+--local` asks first unless the selection was made with `--auto-connect`, and
+`--no-network` opts out. A cloud environment cannot join a Mesh network yet:
+`cw --cloud create --network ...` is refused before anything is created.
+
+`network nodes` lists enrolled nodes and the status each node last reported;
+it does not check connectivity. Deleting a network retires its name for good
+(old connections must never reach a replacement); stop or detach its
+environments and revoke its nodes first. Deletion shows the exact Mesh,
+endpoint and organization before asking, and reports a saved selection it
+could not clear as a partial failure.
 
 ## cw mesh
 
@@ -43,7 +75,12 @@ cw mesh down
 ```
 
 Runs a standalone Codewire Mesh service, with a managed local DERP relay
-unless `--no-derp`, for a setup that does not use the hosted one.
+unless `--no-derp`, for a setup that does not use the hosted one. It is a
+service to operate on with `--local`, not a way to attach this machine to a
+hosted network. `cw mesh status` shows the local service's state and
+organization, the selected network and its Mesh, and the default Mesh, apart
+from connectivity, which it does not check. `cw mesh down` stops the service
+and forgets its endpoint; its organization stays for the next `cw mesh up`.
 
 ## Trusted host members (Linux)
 

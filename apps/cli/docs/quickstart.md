@@ -119,8 +119,8 @@ cw run --in host-work --name review --parent orchestrator --agent claude \
   --prompt 'Review the assigned issues and report dependencies and acceptance criteria.'
 cw ls host-work
 cw ls
-cw msg host-work review 'Include the Linux sandbox dependencies in your report.'
-cw inbox host-work review
+cw msg host-work --session review 'Include the Linux sandbox dependencies in your report.'
+cw inbox host-work --session review
 cw logs host-work --session review
 ```
 

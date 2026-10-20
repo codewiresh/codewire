@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use super::*;
+use crate::commands::progress::terminal_text;
 
 pub(crate) mod progress;
 mod runtime;
@@ -16,12 +17,56 @@ const PLATFORM_READY_TIMEOUT: Duration = Duration::from_secs(600);
 const PLATFORM_CONFIDENTIAL_READY_TIMEOUT: Duration = Duration::from_secs(1800);
 const PLATFORM_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(180);
 
-#[derive(Clone, Debug)]
-pub(crate) struct LocalMeshBootstrap {
-    pub(crate) mesh: config::ResolvedMeshConfig,
+/// The hosted Mesh network a new cloud environment asks to join. A cloud
+/// environment's resolver is pinned to its platform's hosted Mesh.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CloudMeshRequest {
+    pub(crate) mesh_url: String,
+    /// `None` before the current organization is known.
+    pub(crate) organization_id: Option<String>,
     pub(crate) network_id: String,
 }
 
+/// Refuses an explicit `--network` on a cloud create before anything is
+/// requested or allocated: `local:NAME` can never join a cloud environment,
+/// and a hosted attachment awaits credential-free runtime enrollment.
+pub(crate) fn refuse_requested_cloud_mesh(
+    platform: &config::ResolvedPlatformConfig,
+    requested_network: Option<&str>,
+    disable_network: bool,
+) -> anyhow::Result<()> {
+    let Some(requested) = requested_network
+        .and_then(trimmed_str)
+        .map(NetworkReference::parse)
+        .transpose()?
+    else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        !disable_network,
+        "--network and --no-network cannot be used together"
+    );
+    if requested.mesh == Some(MeshKind::Local) {
+        return Err(local_mesh_refusal(&requested.network));
+    }
+    Err(cloud_mesh_attachment_refusal(&CloudMeshRequest {
+        mesh_url: mesh_commands::selection::hosted_mesh_url(platform)?,
+        organization_id: platform.default_org.clone(),
+        network_id: requested.network,
+    }))
+}
+
+fn local_mesh_refusal(network: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "a cloud environment cannot join the local Mesh service. No environment was created; use --network cloud:{network}, or create a local VM with `cw --local create --network local:{network}`"
+    )
+}
+
+/// Resolves the Mesh attachment a cloud create asks for. `--network
+/// local:NAME` is refused: a cloud environment cannot join a local Mesh
+/// service. Without `--network`, `CODEWIRE_MESH_NETWORK` or a hosted
+/// selection for this platform and organization applies, asking first
+/// unless it connects automatically; a local selection does not apply.
 pub(crate) fn resolve_env_create_mesh_bootstrap(
     paths: &ResolvePaths,
     env: &impl config::Env,
@@ -30,92 +75,90 @@ pub(crate) fn resolve_env_create_mesh_bootstrap(
     assume_yes: bool,
     requested_network: Option<&str>,
     disable_network: bool,
-) -> anyhow::Result<Option<LocalMeshBootstrap>> {
+) -> anyhow::Result<Option<CloudMeshRequest>> {
+    let requested = requested_network
+        .and_then(trimmed_str)
+        .map(NetworkReference::parse)
+        .transpose()?;
+    if disable_network && requested.is_some() {
+        anyhow::bail!("--network and --no-network cannot be used together");
+    }
     if disable_network {
         return Ok(None);
     }
-
-    let requested_network = requested_network.and_then(trimmed_str);
-    let explicit_network = requested_network.is_some();
-    let Some(mesh_url) = config::derive_hosted_mesh_url_for_server(&platform.server_url) else {
-        if explicit_network {
-            anyhow::bail!(
-                "selected platform {} does not provide a hosted Mesh service",
-                platform.server_url
-            );
-        }
-        return Ok(None);
-    };
-
+    if let Some(NetworkReference {
+        mesh: Some(MeshKind::Local),
+        network,
+    }) = &requested
+    {
+        return Err(local_mesh_refusal(network));
+    }
+    let mesh_url = mesh_commands::selection::hosted_mesh_url(platform)?;
     let organization_id = trimmed_required(organization_id, "organization ID")?.to_string();
-    let owner = load_local_mesh_owner_context(&paths.mesh_data_dir)?;
-    let owner_network = owner
-        .as_ref()
-        .filter(|owner| {
-            owner.auth_source == LocalMeshOwnerAuthSource::HostedCurrent
-                && config::same_mesh_url(&owner.mesh_url, &mesh_url)
-                && owner.organization_id == organization_id
-        })
-        .and_then(|owner| owner.selected_network.as_deref())
-        .and_then(trimmed_str)
-        .map(str::to_owned);
-    let selected_override = requested_network
-        .map(str::to_owned)
-        .or_else(|| {
-            env.var(config::CODEWIRE_MESH_NETWORK_ENV)
-                .and_then(|network| trimmed_str(&network).map(str::to_owned))
-        })
-        .or(owner_network);
-    let mesh = match config::resolve_mesh_with_token_provider(
-        config::MeshResolveOptions {
-            mesh_url: Some(mesh_url),
-            auth_token: None,
-            network_id: selected_override,
-            platform_server_url: Some(platform.server_url.clone()),
-        },
-        paths,
-        env,
-        platform.token_provider()?,
-        config::MeshAuthSource::PlatformConfig,
+    if let Some(requested) = requested {
+        return Ok(Some(CloudMeshRequest {
+            mesh_url,
+            organization_id: Some(organization_id),
+            network_id: requested.network,
+        }));
+    }
+    let selection = load_network_selection(&paths.mesh_data_dir)?.filter(|selection| {
+        selection.mesh == MeshKind::Cloud && selection.is_for(&mesh_url, &organization_id)
+    });
+    let (network_id, auto_connect) = match (
+        env.var(config::CODEWIRE_MESH_NETWORK_ENV)
+            .and_then(|network| trimmed_str(&network).map(str::to_owned)),
+        selection,
     ) {
-        Ok(mesh) => mesh,
-        Err(err) if !explicit_network => {
-            let _ = err;
+        (Some(network), _) => (network, false),
+        (None, Some(selection)) => (selection.network_id, selection.auto_connect),
+        (None, None) => {
+            print_legacy_selection_notice(&paths.mesh_data_dir);
             return Ok(None);
         }
-        Err(err) => return Err(err.into()),
     };
-    let Some(network_id) = mesh
-        .selected_network
-        .as_deref()
-        .and_then(trimmed_str)
-        .map(str::to_string)
-    else {
-        return Ok(None);
-    };
-
-    let auto_connect = owner.as_ref().is_some_and(|owner| {
-        owner.auth_source == LocalMeshOwnerAuthSource::HostedCurrent
-            && config::same_mesh_url(&owner.mesh_url, &mesh.mesh_url)
-            && owner.organization_id == organization_id
-            && owner.selected_network.as_deref() == Some(network_id.as_str())
-            && owner.auto_connect
-    });
-    if !explicit_network && !assume_yes && !auto_connect {
+    if !assume_yes && !auto_connect {
         if !stdin_is_interactive() {
             return Ok(None);
         }
-        if !prompt_confirm_default_no(&env_create_mesh_prompt(&mesh.mesh_url, &network_id))? {
+        if !prompt_confirm_default_no(&env_create_mesh_prompt(
+            &mesh_url,
+            &organization_id,
+            &network_id,
+        ))? {
             return Ok(None);
         }
     }
-
-    Ok(Some(LocalMeshBootstrap { mesh, network_id }))
+    Ok(Some(CloudMeshRequest {
+        mesh_url,
+        organization_id: Some(organization_id),
+        network_id,
+    }))
 }
 
-pub(crate) fn env_create_mesh_prompt(mesh_url: &str, network_id: &str) -> String {
+pub(crate) fn env_create_mesh_prompt(
+    mesh_url: &str,
+    organization_id: &str,
+    network_id: &str,
+) -> String {
     format!(
-        "Join hosted Mesh network {network_id:?} at {mesh_url} for this platform environment. Continue"
+        "Join Codewire Cloud Mesh network cloud:{network_id} at {mesh_url} (organization {organization_id}) for this cloud environment. Continue"
+    )
+}
+
+/// The explicit refusal of a cloud environment's Mesh attachment, until
+/// credential-free runtime enrollment exists. It is returned before any
+/// source preparation or allocation.
+pub(crate) fn cloud_mesh_attachment_refusal(request: &CloudMeshRequest) -> anyhow::Error {
+    let organization = request
+        .organization_id
+        .as_deref()
+        .map(|organization| format!(" (organization {})", terminal_text(organization)))
+        .unwrap_or_default();
+    anyhow::anyhow!(
+        "a cloud environment cannot join Codewire Cloud Mesh network cloud:{} at {}{organization} yet: that needs credential-free runtime enrollment, which is not implemented. No environment was created; create it with --no-network",
+        terminal_text(&request.network_id),
+        terminal_text(&request.mesh_url),
     )
 }
 
@@ -419,6 +462,10 @@ pub(crate) async fn handle_platform_env_command(
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
+    // An explicit network on a cloud create is refused before any request.
+    if let EnvCommand::Create(args) = &command {
+        refuse_requested_cloud_mesh(&platform, args.network.as_deref(), args.no_network)?;
+    }
     let environment_client = EnvironmentClient::new(&platform)?;
     let organization_client = organization_client(&platform)?;
     let orgs = organization_client.list_orgs().await.context("list orgs")?;
@@ -441,7 +488,7 @@ pub(crate) async fn handle_platform_env_command(
         EnvCommand::Create(args) => {
             let began = Instant::now();
             let mut request = prepare_platform_env_create_request(&args)?;
-            if let Some(bootstrap) = resolve_env_create_mesh_bootstrap(
+            if let Some(request) = resolve_env_create_mesh_bootstrap(
                 &paths,
                 &env,
                 &platform,
@@ -450,11 +497,7 @@ pub(crate) async fn handle_platform_env_command(
                 args.network.as_deref(),
                 args.no_network,
             )? {
-                anyhow::bail!(
-                    "platform Mesh attachment to {:?} at {} is unavailable until credential-free runtime enrollment is implemented",
-                    bootstrap.network_id,
-                    bootstrap.mesh.mesh_url
-                );
+                return Err(cloud_mesh_attachment_refusal(&request));
             }
             sources::prepare_create_sources(
                 &platform,

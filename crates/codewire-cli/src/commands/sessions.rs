@@ -889,11 +889,14 @@ pub(crate) fn wait_selection(args: &WaitArgs) -> anyhow::Result<Option<SessionSe
     .map(Some)
 }
 
+/// A managed conversation's driver owns its input, on every client OS: the
+/// local driver (`_agent-driver`) and a cloud Sandbox's platform driver
+/// (`__platform-agent-driver`), which a client on any OS can reach.
 fn managed_session(session: &EnvironmentSessionView) -> bool {
-    #[cfg(unix)]
-    return agents::is_managed_session(session);
-    #[cfg(not(unix))]
-    session.command.iter().any(|arg| arg == "_agent-driver")
+    session
+        .command
+        .iter()
+        .any(|arg| arg == "_agent-driver" || arg == "__platform-agent-driver")
 }
 
 pub(crate) async fn handle_send_command(globals: &Globals, args: SendArgs) -> anyhow::Result<()> {
@@ -908,7 +911,14 @@ pub(crate) async fn handle_send_command(globals: &Globals, args: SendArgs) -> an
     let SendRequest { selection, data } = send_request(&args)?;
     let (target, session) = resolve_selected_session(globals, &selection.values()).await?;
     if managed_session(&session) {
-        anyhow::bail!("managed agents receive tasks through cw msg or cw steer");
+        let name = if session.name.is_empty() {
+            &session.session_id
+        } else {
+            &session.name
+        };
+        anyhow::bail!(
+            "{name} is a managed agent conversation and takes no raw input; send it a task with `cw msg ENV --session {name} TEXT`"
+        );
     }
     if args.key.is_some() && !session.pty {
         anyhow::bail!("--key requires a PTY session; it is a terminal control byte");

@@ -28,6 +28,28 @@ fn canonical_session(value: &str) -> anyhow::Result<&str> {
     )?;
     Ok(value)
 }
+/// `[ENV_UUID] --session SESSION`: the exact saved environment, if named,
+/// and a canonical session ID.
+fn selected_session<'a>(
+    environment: Option<&str>,
+    session: &'a str,
+    bound: &str,
+) -> anyhow::Result<&'a str> {
+    if let Some(environment) = environment {
+        ensure!(
+            environment == bound,
+            "member environment must be the exact saved UUID"
+        );
+    }
+    canonical_session(session)
+}
+/// Whether the target recorded this member session as a managed driver.
+fn member_managed(session: &v1::SessionRecord) -> bool {
+    session
+        .command
+        .get(1)
+        .is_some_and(|value| value == "_agent-driver")
+}
 fn selected<'a>(values: &'a [String], environment: &str) -> anyhow::Result<&'a str> {
     match values {
         [id] => canonical_session(id),
@@ -333,20 +355,35 @@ pub(crate) async fn run(globals: &Globals, args: EnvironmentRunArgs) -> anyhow::
     }
     Ok(())
 }
+/// `cw --member M msg|steer [ENV_UUID] --session SESSION TEXT`, dispatched
+/// by the session the target recorded: terminal input for a normal session,
+/// a durable message for a managed one. Steer is managed-only.
 pub(crate) async fn send_message(
     globals: &Globals,
     args: AgentMessageArgs,
     steer: bool,
 ) -> anyhow::Result<()> {
-    let mut values = args.target_and_text;
-    let text = values.pop().context("member message text required")?;
+    let (environment, session, text) = args.target(if steer { "steer" } else { "msg" })?;
+    let text = text.to_owned();
     ensure!(
         steer || args.turn_id.is_none(),
         "--turn-id applies only to steer"
     );
     let (dir, mut remote) = open(globals, None).await?;
-    let sid = selected(&values, &remote.alias.binding.environment_id)?.to_owned();
+    let sid =
+        selected_session(environment, session, &remote.alias.binding.environment_id)?.to_owned();
     let session = remote.get(&sid).await?;
+    if !member_managed(&session) {
+        ensure!(
+            !steer,
+            "member session {sid} is a terminal session; steering applies only to managed conversations. Type into it with `cw msg --session {sid} TEXT`"
+        );
+        ensure!(
+            args.reply_to.is_none(),
+            "--reply-to applies only to managed agent conversations"
+        );
+        return terminal_message(&dir, &mut remote, &session, &text, args).await;
+    }
     let driver_id = driver(&session)?;
     let mut control = v1::HostControlManagedControl {
         action: if steer {
@@ -401,9 +438,69 @@ pub(crate) async fn send_message(
         .await?;
     complete(&receipt)?;
     save_locator(&dir, &remote, &session, &id, receipt.launch_generation).await?;
-    let record = await_acceptance(&mut remote, &session, &id).await?;
-    value(record.clone(), args.output)?;
-    successful_message(&record)
+    let mut record = await_acceptance(&mut remote, &session, &id).await?;
+    let outcome = successful_message(&record);
+    if !steer && record.is_object() {
+        record["delivery"] = json!("managed");
+    }
+    value(record, args.output)?;
+    outcome
+}
+
+/// A normal member session gets the text and the key that submits it as
+/// one acknowledged input request, never retried.
+async fn terminal_message(
+    dir: &store::Directory,
+    remote: &mut transport::Remote,
+    session: &v1::SessionRecord,
+    text: &str,
+    args: AgentMessageArgs,
+) -> anyhow::Result<()> {
+    // A member session never has a terminal (member run requires --no-tty),
+    // so the text and its line end are one acknowledged write.
+    ensure!(
+        !session.pty,
+        "member session {} has a terminal; member input is admitted only for --no-tty sessions",
+        session.session_id
+    );
+    let data = crate::commands::terminal_message_bytes(text, false)?.text;
+    let generation = generation(session.launch_generation, args.expected_launch_generation)?;
+    let id = request_id(args.request_id)?;
+    let receipt = remote
+        .mutate(
+            dir,
+            v1::HostControlMutationRequest {
+                request_id: id,
+                scope: Some(remote.alias.binding.scope()),
+                operation: Some(v1::host_control_mutation_request::Operation::Input(
+                    v1::HostControlInput {
+                        session_id: session.session_id.clone(),
+                        expected_launch_generation: generation,
+                        data,
+                    },
+                )),
+            },
+        )
+        .await?;
+    complete(&receipt)?;
+    ensure!(
+        receipt.input_acknowledged,
+        "member input acknowledgement unavailable; observe only, never resend"
+    );
+    match args.output {
+        OutputFormat::Json => value(
+            json!({"delivery":"terminal","environment":remote.alias.binding.environment_id,
+                "session_id":session.session_id,"session":session.name,"submitted":true}),
+            OutputFormat::Json,
+        ),
+        OutputFormat::Text => {
+            println!(
+                "Sent to terminal {}/{}.",
+                remote.alias.binding.environment_id, session.session_id
+            );
+            Ok(())
+        }
+    }
 }
 pub(crate) async fn action(
     globals: &Globals,
@@ -496,16 +593,45 @@ pub(crate) async fn stop(globals: &Globals, args: SessionTargetArgs) -> anyhow::
         terminal::stop(globals, args).await
     }
 }
-pub(crate) async fn inbox(globals: &Globals, args: SessionTargetArgs) -> anyhow::Result<()> {
-    ensure!(args.request_id.is_none(), "member inbox is read-only");
+pub(crate) async fn inbox(globals: &Globals, args: InboxArgs) -> anyhow::Result<()> {
+    let environment = crate::commands::flat::select_environment(
+        "inbox",
+        args.environment.clone(),
+        args.in_environment.clone(),
+        &args.retired_session,
+    )?;
+    let session = args
+        .session
+        .as_deref()
+        .context("name the session with --session: `cw inbox [ENV] --session SESSION`")?;
     let (dir, mut remote) = open(globals, None).await?;
     let session = remote
-        .get(selected(
-            &args.target,
+        .get(selected_session(
+            environment.as_deref(),
+            session,
             &remote.alias.binding.environment_id,
         )?)
         .await?;
     generation(session.launch_generation, args.expected_launch_generation)?;
+    if !member_managed(&session) {
+        let member = globals.member.as_deref().unwrap_or("MEMBER");
+        let logs = format!("cw --member {member} logs --session {}", session.session_id);
+        return match args.output {
+            OutputFormat::Json => value(
+                json!({"delivery":"terminal","environment":remote.alias.binding.environment_id,
+                    "session_id":session.session_id,"session":session.name,"inbox":null,
+                    "logs_command":logs}),
+                OutputFormat::Json,
+            ),
+            OutputFormat::Text => {
+                println!(
+                    "Member session {} is a terminal session; it has no structured inbox.\n  `cw msg` types into its terminal and records no messages or replies.\n\nRead its output: {logs}",
+                    session.session_id
+                );
+                Ok(())
+            }
+        };
+    }
     let inbox = inbox_value(&mut remote, &session).await?;
     if let Some(messages) = inbox["messages"].as_array() {
         for message in messages {
@@ -527,7 +653,7 @@ pub(crate) async fn inbox(globals: &Globals, args: SessionTargetArgs) -> anyhow:
         }
     }
     value(
-        json!({"session":super::super::sessions::host_environment_session_view(session),
+        json!({"delivery":"managed","session":super::super::sessions::host_environment_session_view(session),
         "driver":inbox["driver"],"messages":inbox["messages"]}),
         args.output,
     )

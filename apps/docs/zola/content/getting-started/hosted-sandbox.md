@@ -85,9 +85,9 @@ for Claude Code. Create one once, then create the sandbox with
 
 ```sh
 cw run --in my-app --name lead --agent codex --detach --prompt 'Review this repository and list the three riskiest files.'
-cw inbox my-app lead                       # the conversation so far
+cw inbox my-app --session lead             # the conversation so far
 cw wait --message MESSAGE_ID --timeout 10m # the reply to one message
-cw msg my-app lead 'Now propose tests for the first one.'
+cw msg my-app --session lead 'Now propose tests for the first one.'
 ```
 
 See [Orchestrate agents](@/guides/run-agents.md) for workers, steering and

@@ -1723,41 +1723,96 @@ fn platform_env_mesh_bootstrap_pins_explicit_network_to_hosted_origin() {
     for (server_url, expected_mesh_url) in [
         ("https://codewire.sh", "https://mesh.codewire.sh"),
         ("https://codewire-dev.sh", "https://mesh.codewire-dev.sh"),
+        ("http://localhost:8090", "http://localhost:8090"),
     ] {
         let platform =
             config::ResolvedPlatformConfig::static_token(server_url, "platform-token", true, None);
-        let bootstrap = resolve_env_create_mesh_bootstrap(
-            &paths,
-            &env,
-            &platform,
-            "org-alpha",
-            true,
-            Some("local-dev"),
-            false,
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(bootstrap.mesh.mesh_url, expected_mesh_url);
-        assert_eq!(bootstrap.network_id, "local-dev");
+        for requested in ["local-dev", "cloud:local-dev"] {
+            let request = resolve_env_create_mesh_bootstrap(
+                &paths,
+                &env,
+                &platform,
+                "org-alpha",
+                true,
+                Some(requested),
+                false,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(request.mesh_url, expected_mesh_url);
+            assert_eq!(request.organization_id.as_deref(), Some("org-alpha"));
+            assert_eq!(request.network_id, "local-dev");
+        }
     }
 }
 
 #[test]
-fn platform_env_mesh_bootstrap_honors_only_the_matching_auto_connect_owner() {
+fn a_cloud_create_refuses_a_local_network_and_conflicting_flags() {
     let home = tempfile::tempdir().unwrap();
     let env = config::MapEnv::default();
     let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
-    save_local_mesh_owner_context(
+    let platform = config::ResolvedPlatformConfig::static_token(
+        "https://codewire-dev.sh",
+        "platform-token",
+        true,
+        Some("org-alpha".into()),
+    );
+    let local = resolve_env_create_mesh_bootstrap(
+        &paths,
+        &env,
+        &platform,
+        "org-alpha",
+        true,
+        Some("local:dev"),
+        false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(local.contains("cannot join the local Mesh service"), "{local}");
+    assert!(
+        resolve_env_create_mesh_bootstrap(
+            &paths, &env, &platform, "org-alpha", true, Some("dev"), true,
+        )
+        .is_err()
+    );
+    // The same refusals hold before any request is made.
+    let early = refuse_requested_cloud_mesh(&platform, Some("local:dev"), false)
+        .unwrap_err()
+        .to_string();
+    assert!(early.contains("cannot join the local Mesh service"), "{early}");
+    let hosted = refuse_requested_cloud_mesh(&platform, Some("cloud:work"), false)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        hosted.contains("network cloud:work at https://mesh.codewire-dev.sh (organization org-alpha)")
+            && hosted.contains("No environment was created"),
+        "{hosted}"
+    );
+    assert!(refuse_requested_cloud_mesh(&platform, None, false).is_ok());
+    assert!(refuse_requested_cloud_mesh(&platform, None, true).is_ok());
+}
+
+#[test]
+fn platform_env_mesh_bootstrap_honors_only_the_matching_hosted_selection() {
+    let home = tempfile::tempdir().unwrap();
+    let env = config::MapEnv::default();
+    let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
+    std::fs::create_dir_all(&paths.mesh_data_dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&paths.mesh_data_dir, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    save_network_selection(
         &paths.mesh_data_dir,
-        &LocalMeshOwnerContext {
-            schema_version: 1,
-            auth_source: LocalMeshOwnerAuthSource::HostedCurrent,
-            mesh_url: "https://mesh.codewire-dev.sh".to_owned(),
-            organization_id: "org-alpha".to_owned(),
-            selected_network: Some("shared-dev".to_owned()),
-            auto_connect: true,
-        },
+        &NetworkSelection::new(
+            MeshKind::Cloud,
+            "https://mesh.codewire-dev.sh",
+            "org-alpha",
+            "shared-dev",
+            true,
+        ),
     )
     .unwrap();
     let platform = config::ResolvedPlatformConfig::static_token(
@@ -1772,18 +1827,47 @@ fn platform_env_mesh_bootstrap_honors_only_the_matching_auto_connect_owner() {
             .unwrap()
             .unwrap();
     assert_eq!(automatic.network_id, "shared-dev");
-    assert_eq!(automatic.mesh.mesh_url, "https://mesh.codewire-dev.sh");
-
+    assert_eq!(automatic.mesh_url, "https://mesh.codewire-dev.sh");
     assert!(
-        resolve_env_create_mesh_bootstrap(&paths, &env, &platform, "org-beta", false, None, false,)
+        resolve_env_create_mesh_bootstrap(&paths, &env, &platform, "org-beta", false, None, false)
             .unwrap()
             .is_none(),
-        "a default from another organization must not attach"
+        "a selection for another organization must not attach"
+    );
+    let other = config::ResolvedPlatformConfig::static_token(
+        "https://codewire.sh",
+        "platform-token",
+        true,
+        None,
+    );
+    assert!(
+        resolve_env_create_mesh_bootstrap(&paths, &env, &other, "org-alpha", true, None, false)
+            .unwrap()
+            .is_none(),
+        "a selection on another platform's Mesh must not attach"
+    );
+
+    // A local selection never attaches a cloud environment.
+    save_network_selection(
+        &paths.mesh_data_dir,
+        &NetworkSelection::new(
+            MeshKind::Local,
+            "http://127.0.0.1:18090",
+            "local-org-alpha",
+            "local-dev",
+            true,
+        ),
+    )
+    .unwrap();
+    assert!(
+        resolve_env_create_mesh_bootstrap(&paths, &env, &platform, "org-alpha", true, None, false)
+            .unwrap()
+            .is_none()
     );
 }
 
 #[test]
-fn platform_env_mesh_bootstrap_does_not_inherit_saved_local_mesh_pairing() {
+fn platform_env_mesh_bootstrap_ignores_the_local_mesh_connection() {
     let home = tempfile::tempdir().unwrap();
     let env = config::MapEnv::default();
     let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
@@ -1793,40 +1877,25 @@ fn platform_env_mesh_bootstrap_does_not_inherit_saved_local_mesh_pairing() {
         "local-token",
     )
     .unwrap();
-    config::save_selected_mesh_network(&paths.mesh_data_dir, "local-dev").unwrap();
     let platform = config::ResolvedPlatformConfig::static_token(
         "https://codewire-dev.sh",
         "platform-token",
         true,
         None,
     );
-
     assert!(
-        resolve_env_create_mesh_bootstrap(&paths, &env, &platform, "org-alpha", true, None, false,)
-            .unwrap()
-            .is_none(),
-        "a saved local origin-network pair must not become a platform bootstrap"
-    );
-
-    config::save_mesh_connection(
-        &paths.mesh_data_dir,
-        "https://mesh.codewire-dev.sh",
-        "hosted-token",
-    )
-    .unwrap();
-    let hosted =
         resolve_env_create_mesh_bootstrap(&paths, &env, &platform, "org-alpha", true, None, false)
             .unwrap()
-            .unwrap();
-    assert_eq!(hosted.mesh.mesh_url, "https://mesh.codewire-dev.sh");
-    assert_eq!(hosted.network_id, "local-dev");
+            .is_none(),
+        "a saved local endpoint must not become a platform attachment"
+    );
 }
 
 #[test]
-fn platform_env_mesh_prompt_names_hosted_origin_and_network() {
+fn platform_env_mesh_prompt_names_hosted_origin_organization_and_network() {
     assert_eq!(
-        env_create_mesh_prompt("https://mesh.codewire-dev.sh", "local-dev"),
-        "Join hosted Mesh network \"local-dev\" at https://mesh.codewire-dev.sh for this platform environment. Continue"
+        env_create_mesh_prompt("https://mesh.codewire-dev.sh", "org-alpha", "local-dev"),
+        "Join Codewire Cloud Mesh network cloud:local-dev at https://mesh.codewire-dev.sh (organization org-alpha) for this cloud environment. Continue"
     );
 }
 

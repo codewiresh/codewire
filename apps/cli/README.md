@@ -133,11 +133,11 @@ cw run --in dev --name review --agent claude --parent lead --detach \
   --prompt 'Review the proposed changes and report concrete findings.'
 
 cw ls dev
-cw inbox dev review
-cw msg dev review 'Also check cancellation and cleanup.'
-cw inbox dev lead
+cw inbox dev --session review
+cw msg dev --session review 'Also check cancellation and cleanup.'
+cw inbox dev --session lead
 cw wait --message <message-id> --timeout 10m
-cw steer dev lead --turn-id <active-turn-id> 'Prioritize the Linux acceptance.'
+cw steer dev --session lead --turn-id <active-turn-id> 'Prioritize the Linux acceptance.'
 cw interrupt dev --session review
 cw stop dev --session review
 ```

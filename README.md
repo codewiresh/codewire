@@ -66,7 +66,7 @@ cw setup                               # sign in, pick an organization
 cw create --name my-app --image workspace
 cw shell my-app
 cw run --in my-app --name lead --agent codex --detach --prompt 'Review this repo'
-cw inbox my-app lead
+cw inbox my-app --session lead
 ```
 
 `cw --help` groups every command; `cw init` writes a `codewire.yaml` that

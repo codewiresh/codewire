@@ -86,7 +86,7 @@ pub(super) fn final_notice_text(
         source.state.name()
     );
     let footer = format!(
-        "Follow up with: cw msg {environment_id} {} \"...\" --reply-to {}",
+        "Follow up with: cw msg {environment_id} --session {} \"...\" --reply-to {}",
         binding.session_id, source.id
     );
     let body = match source.state {

@@ -43,10 +43,10 @@ tasks and read replies rather than typing at a terminal:
 
 ```sh
 cw run --in my-app --name lead --agent codex --detach --prompt 'Plan the change.'
-cw msg my-app lead 'Also cover the migration.'   # a task, follow-up or reply
-cw inbox my-app lead                             # messages and their results
+cw msg my-app --session lead 'Also cover the migration.'   # a task, follow-up or reply
+cw inbox my-app --session lead                   # messages and their results
 cw wait --message MESSAGE_ID --timeout 10m       # the reply to one message
-cw steer my-app lead 'Keep the public API stable.'
+cw steer my-app --session lead 'Keep the public API stable.'
 cw interrupt my-app --session lead
 cw logs my-app --session lead                              # each turn's prompt, tools and reply
 ```

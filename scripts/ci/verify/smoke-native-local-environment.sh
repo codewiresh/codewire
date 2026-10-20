@@ -2962,30 +2962,50 @@ jq -e \
     .auth_source == "standalone_local" and
     .mesh_url == $mesh_url and
     (.organization_id | type == "string" and length > 0) and
-    .selected_network == null and
-    .auto_connect == false
+    (has("selected_network") | not) and
+    (has("auto_connect") | not)
   ' "$MESH_OWNER_CONTEXT" >/dev/null || die 'standalone Mesh owner projection drifted'
 if rg -qi 'token|secret|credential|api[_-]?key' "$MESH_OWNER_CONTEXT"; then
   die 'credential material or a credential field entered the Mesh owner projection'
 fi
 MESH_ORGANIZATION_ID="$(jq -er '.organization_id' "$MESH_OWNER_CONTEXT")"
-run_cw network create "$MESH_NETWORK" --org "$MESH_ORGANIZATION_ID"
-rg -qF "Network \"$MESH_NETWORK\" created and selected" "$LAST_STDERR" ||
-  die 'standalone smoke network was not selected'
-run_cw network use "$MESH_NETWORK" --auto-connect
-rg -qF 'new environments connect automatically' "$LAST_STDERR" ||
+MESH_SELECTION="$SMOKE_HOME/.codewire/network_selection.json"
+run_cw --local network create "$MESH_NETWORK" --org "$MESH_ORGANIZATION_ID"
+for expected in "Network $MESH_NETWORK created" 'Local Mesh service' 'Selected for new environments'; do
+  rg -qF "$expected" "$LAST_STDOUT" ||
+    die "standalone smoke network was not created and selected on the local Mesh service: $expected"
+done
+run_cw --local network use "$MESH_NETWORK" --auto-connect
+rg -qF 'New environments connect automatically.' "$LAST_STDOUT" ||
   die 'standalone smoke network did not enable automatic attachment'
-jq -e --arg network "$MESH_NETWORK" '
-  .selected_network == $network and .auto_connect == true
-' \
-  "$MESH_OWNER_CONTEXT" >/dev/null || die 'selected network did not reach the owner projection'
-run_cw mesh status --output json
-jq -e --arg network "$MESH_NETWORK" --arg mesh_url "http://127.0.0.1:$MESH_PORT" '
-  .configured == true and
+[[ -f "$MESH_SELECTION" && ! -L "$MESH_SELECTION" ]] ||
+  die 'network selection was not saved in its own file'
+[[ "$(stat -c '%a' "$MESH_SELECTION")" == 600 ]] ||
+  die 'network selection is not mode 0600'
+jq -e --arg network "$MESH_NETWORK" --arg mesh_url "http://127.0.0.1:$MESH_PORT" \
+  --arg org "$MESH_ORGANIZATION_ID" '
+  .schema_version == 1 and
+  .mesh == "local" and
   .mesh_url == $mesh_url and
+  .organization_id == $org and
+  .network_id == $network and
+  .auto_connect == true
+' "$MESH_SELECTION" >/dev/null || die 'network selection does not name its Mesh, organization and network'
+if rg -qi 'token|secret|credential|api[_-]?key' "$MESH_SELECTION"; then
+  die 'credential material or a credential field entered the network selection'
+fi
+run_cw mesh status --output json
+jq -e --arg network "$MESH_NETWORK" --arg mesh_url "http://127.0.0.1:$MESH_PORT" \
+  --arg org "$MESH_ORGANIZATION_ID" '
+  .configured == true and
+  .mesh == "local" and
+  .mesh_url == $mesh_url and
+  .organization_id == $org and
   .selected_network == $network and
   .auto_connect == true and
+  .connectivity == "not_checked" and
   .local.state == "running" and
+  .local.organization_id == $org and
   .local.derp.state == "running"
 ' "$LAST_STDOUT" >/dev/null || die 'standalone Mesh status drifted after default selection'
 
@@ -4010,9 +4030,9 @@ jq -e '
 ' "$LAST_STDOUT" >/dev/null || die 'daemon status remained healthy after Mesh transport loss'
 start_smoke_mesh
 jq -e --arg network "$MESH_NETWORK" '
-  .selected_network == $network and .auto_connect == true
+  .mesh == "local" and .network_id == $network and .auto_connect == true
 ' \
-  "$MESH_OWNER_CONTEXT" >/dev/null || die 'Mesh restart lost the selected network projection'
+  "$MESH_SELECTION" >/dev/null || die 'Mesh restart lost the selected network'
 run_cw --local daemon repair "$NAME" --output json
 jq -e '
   .replaced_pod_name == "" and

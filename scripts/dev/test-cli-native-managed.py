@@ -836,7 +836,7 @@ class Journey:
     # -- Managed messages ------------------------------------------------
 
     def inbox(self, sid):
-        return self.data("inbox", self.environment, sid, "--output", "json")[1]
+        return self.data("inbox", self.environment, "--session", sid, "--output", "json")[1]
 
     def started_driver(self, sid, previous=None):
         def ready(view):
@@ -855,9 +855,8 @@ class Journey:
         return self.until(lambda: self.inbox(sid), active, 30, f"held turn {message_id}")["driver"]
 
     def deliver(self, verb, sid, *values):
-        # interrupt names its session with --session; msg and steer keep
-        # their own grammar.
-        target = ("--session", sid) if verb == "interrupt" else (sid,)
+        # Every session command names its session with --session.
+        target = ("--session", sid)
         code, record = self.data(verb, self.environment, *target, *values, "--output", "json",
                                  expect="any", timeout=60)
         if record is not None:
@@ -1207,9 +1206,9 @@ class Journey:
         self.stage = "controls"
         if not self.synthetic:
             before = {sid: self.inbox(sid)["messages_total"] for sid in (self.lead, self.worker)}
-            self.call("steer", self.environment, self.lead, "nothing active", expect="fail")
+            self.call("steer", self.environment, "--session", self.lead, "nothing active", expect="fail")
             self.call("interrupt", self.environment, "--session", self.lead, expect="fail")
-            self.call("steer", self.environment, self.worker, "unsupported", expect="fail")
+            self.call("steer", self.environment, "--session", self.worker, "unsupported", expect="fail")
             self.call("interrupt", self.environment, "--session", self.worker, expect="fail")
             require(all(self.inbox(sid)["messages_total"] == count for sid, count in before.items()),
                     "a refused control created a message record")
@@ -1241,7 +1240,7 @@ class Journey:
         require(result.get("result") == "STEERED", "the held turn did not finish through steering")
         self.expect_state(self.wait_message(steer["id"]), "completed")
         before = self.inbox(self.worker)["messages_total"]
-        self.call("steer", self.environment, self.worker, "unsupported", expect="fail")
+        self.call("steer", self.environment, "--session", self.worker, "unsupported", expect="fail")
         require(self.inbox(self.worker)["messages_total"] == before, "unsupported Claude steer created a record")
         hold = self.send(self.worker, "HOLD")
         self.held(self.worker, hold["id"], turn=False)
@@ -1324,7 +1323,7 @@ class Journey:
                 "stopping the lead changed a settled message")
         require(hold or not any(m["state"] == "unknown" for m in stopped["messages"]),
                 "stopping an idle lead left an unknown message")
-        self.call("msg", self.environment, self.lead, "refused while stopped", expect="fail")
+        self.call("msg", self.environment, "--session", self.lead, "refused while stopped", expect="fail")
         require(self.inbox(self.lead)["messages_total"] == stopped["messages_total"],
                 "a refused message to a stopped conversation created a record")
         worker_turn = self.turn(self.worker, "WHILE_PARENT_STOPPED", "CW_PARENT_STOPPED")
@@ -1378,7 +1377,7 @@ class Journey:
         ended = self.until(lambda: self.sessions().get(sid), lambda v: v and v["state"] in TERMINAL_SESSION,
                            30, "failed driver session end")
         require(not ended["cleanup_unknown"], "the failed driver left unknown cleanup")
-        self.call("msg", self.environment, sid, "refused after driver exit", expect="fail")
+        self.call("msg", self.environment, "--session", sid, "refused after driver exit", expect="fail")
         driver = self.inbox(sid)["driver"]
         require(driver["phase"] == "failed" and driver["last_error"], "the failed driver did not record its exit")
         self.check("driver-exit/native-startup-failure/task-error/parent-notified/session-ended/msg-refused")

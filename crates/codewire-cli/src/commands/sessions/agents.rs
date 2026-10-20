@@ -17,6 +17,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWriteExt as _};
 
+mod dispatch;
 mod guest_custody;
 #[cfg(target_os = "linux")]
 mod guest_peer;
@@ -27,6 +28,7 @@ mod native;
 mod native_host;
 mod noel;
 mod pause;
+pub(crate) use dispatch::{handle_inbox_command, handle_message_command, terminal_message_bytes};
 #[cfg(target_os = "linux")]
 mod platform_control;
 pub(crate) mod platform_host;
@@ -1183,9 +1185,7 @@ fn apply_delivery_failure(record: &mut MessageRecord, definitive: bool, error: &
 /// client on any OS recognises it and stops or restarts it through the
 /// platform control path (#2710).
 pub(crate) fn is_managed_session(view: &EnvironmentSessionView) -> bool {
-    view.command
-        .iter()
-        .any(|arg| arg == DRIVER_COMMAND || arg == "__platform-agent-driver")
+    super::managed_session(view)
 }
 
 pub(super) async fn stop_native_managed(
@@ -1654,67 +1654,6 @@ async fn launch_host_conversation(
     Ok(HostLaunched { session, dir })
 }
 
-pub(crate) async fn handle_agent_message_command(
-    globals: &Globals,
-    args: AgentMessageArgs,
-    steer: bool,
-) -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
-    if globals.member.is_some() {
-        return super::super::member_control::managed::send_message(globals, args, steer).await;
-    }
-    let (environment, session, text) = match args.target_and_text.as_slice() {
-        [session, text] => (None, session.as_str(), text.as_str()),
-        [environment, session, text] => {
-            (Some(environment.as_str()), session.as_str(), text.as_str())
-        }
-        _ => anyhow::bail!("expected SESSION TEXT or ENV SESSION TEXT"),
-    };
-    validate_text(text)?;
-    let reply_to = args.reply_to.as_deref().map(canonical_uuid).transpose()?;
-    if !steer && args.turn_id.is_some() {
-        anyhow::bail!("--turn-id applies only to `cw steer`");
-    }
-    if let Some(turn) = &args.turn_id {
-        validate_token("turn ID", turn)?;
-    }
-    let target = resolve_environment_session_target(globals, environment).await?;
-    if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
-        return platform_host::message(target, session, &args, text, steer).await;
-    }
-    {
-        let target = resolve_environment_session_target(globals, environment).await?;
-        if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
-            return native_host::message(
-                target,
-                session,
-                text,
-                reply_to,
-                args.turn_id.clone(),
-                steer,
-                args.output,
-            )
-            .await;
-        }
-    }
-    let managed = resolve_managed(globals, environment, session).await?;
-    ensure_accepting(&managed)?;
-    let record = host_message_record(
-        &managed,
-        uuid::Uuid::new_v4().to_string(),
-        text,
-        reply_to,
-        steer,
-        args.turn_id.clone(),
-    )?;
-    let record = deliver_cli_message(&managed, record).await?;
-    print_message_summary(&record, args.output)?;
-    match message_failure(&record) {
-        Some(failure) => Err(failure),
-        None => Ok(()),
-    }
-}
-
 /// The record a host message, or a steer of the turn `turn_id` names (else
 /// the current one), is delivered as, under `id`.
 fn host_message_record(
@@ -1820,124 +1759,6 @@ pub(crate) async fn handle_agent_interrupt_command(
     }
 }
 
-pub(crate) async fn handle_agent_inbox_command(
-    globals: &Globals,
-    args: SessionTargetArgs,
-) -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
-    if globals.member.is_some() {
-        return super::super::member_control::managed::inbox(globals, args).await;
-    }
-    let (environment, session) = split_session_target(&args.target)?;
-    let target = resolve_environment_session_target(globals, environment).await?;
-    if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
-        return platform_host::inbox(target, session, args.output).await;
-    }
-    {
-        let target = resolve_environment_session_target(globals, environment).await?;
-        if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
-            return native_host::inbox(target, session, args.output).await;
-        }
-    }
-    let managed = resolve_managed(globals, environment, session).await?;
-    let state = read_optional::<DriverState>(&managed.dir.join("state.json"))?;
-    let mut messages = list_messages(&managed.dir)?;
-    let total = messages.len();
-    if total > INBOX_LIMIT {
-        messages = messages.split_off(total - INBOX_LIMIT);
-    }
-    match args.output {
-        OutputFormat::Json => {
-            let views: Vec<Value> = messages
-                .iter()
-                .map(|record| message_view(&managed.environment, record))
-                .collect();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "environment_id": managed.environment.id,
-                    "session_id": managed.session.session_id,
-                    "session_state": managed.session.state,
-                    "driver_id": managed.config.driver_id,
-                    "agent": managed.config.agent.name(),
-                    "model": managed.config.model,
-                    "effort": managed.config.effort,
-                    "parent": managed.config.parent,
-                    "driver": state,
-                    "messages_total": total,
-                    "messages": views,
-                }))?
-            );
-        }
-        OutputFormat::Text => {
-            match &state {
-                Some(state) => println!(
-                    "{}\t{}\t{}\tsession {}\tdriver {}\tturn {}\tqueued {}\tsteer {}\tinterrupt {}",
-                    session_label(&managed.session),
-                    managed.config.agent.name(),
-                    managed.config.model,
-                    managed.session.state,
-                    serde_json::to_value(state.phase)?
-                        .as_str()
-                        .unwrap_or("unknown"),
-                    state
-                        .current_turn_id
-                        .as_deref()
-                        .or(state.active_message_id.as_deref())
-                        .unwrap_or("-"),
-                    state.queued,
-                    if state.capabilities.steer {
-                        "yes"
-                    } else {
-                        "no"
-                    },
-                    if state.capabilities.interrupt {
-                        "yes"
-                    } else {
-                        "no"
-                    },
-                ),
-                None => println!(
-                    "{}\t{}\t{}\tsession {}\tdriver has not reported state",
-                    session_label(&managed.session),
-                    managed.config.agent.name(),
-                    managed.config.model,
-                    managed.session.state
-                ),
-            }
-            if let Some(error) = state.as_ref().and_then(|state| state.last_error.as_deref()) {
-                println!("last error: {error}");
-            }
-            if messages.is_empty() {
-                println!("No messages");
-            }
-            if total > messages.len() {
-                println!("({} older messages omitted)", total - messages.len());
-            }
-            for record in &messages {
-                let summary = record
-                    .error
-                    .as_deref()
-                    .or(record.result.as_deref())
-                    .unwrap_or(record.text.as_str());
-                let summary = summary.lines().next().unwrap_or_default();
-                let (summary, truncated) = truncate_utf8(summary, 80);
-                println!(
-                    "{}\t{}\t{}\t{}\t{}{}{}",
-                    record.id,
-                    record.action.name(),
-                    state_label(record),
-                    record.created_at,
-                    summary,
-                    if truncated { "…" } else { "" },
-                    noel::resumed_note(record)
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Waits for a managed message's terminal result. Timeout is never success.
 pub(crate) async fn wait_agent_message(
     globals: &Globals,
@@ -1945,7 +1766,7 @@ pub(crate) async fn wait_agent_message(
     timeout: Duration,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
-    let message_id = canonical_uuid(message_id)?;
+    let message_id = canonical_uuid(message_id).map_err(|_| not_a_managed_message(message_id))?;
     if platform_host::wait(globals, &message_id, timeout, output).await? {
         return Ok(());
     }
@@ -1956,7 +1777,7 @@ pub(crate) async fn wait_agent_message(
         if native_host::recover_and_wait(globals, &message_id, timeout, output).await? {
             return Ok(());
         }
-        anyhow::bail!("managed message {message_id} not found");
+        return Err(not_a_managed_message(&message_id));
     };
     let (record, end) = wait_for_message(&environment, &dir, &message_id, timeout).await?;
     print_message_result(&record, output)?;
@@ -1964,6 +1785,14 @@ pub(crate) async fn wait_agent_message(
         Some(failure) => Err(failure),
         None => Ok(()),
     }
+}
+
+/// `wait --message` waits only for a managed message. A terminal write has
+/// no message ID and no outcome cw can observe, so it is refused, not waited.
+fn not_a_managed_message(message_id: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "managed message {message_id:?} not found. Only a message `cw msg` sends to a managed agent conversation has an ID to wait for; text sent to a terminal session has none and no outcome to wait for. Read that session with `cw logs ENV --session SESSION`"
+    )
 }
 
 /// Delivers a host message the way the CLI reports it: written to the

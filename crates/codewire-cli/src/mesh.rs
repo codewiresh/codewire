@@ -144,6 +144,7 @@ impl MeshClient {
             .ok_or_else(|| anyhow::anyhow!("JoinMeshNetwork returned no network"))?;
         Ok(NetworkJoin {
             network_id: network.id,
+            org_id: network.org_id,
         })
     }
 
@@ -212,6 +213,7 @@ impl MeshClient {
         Ok(RedeemedNodeEnrollment {
             node_name: node.name,
             network_id: node.network_id,
+            org_id: enrollment.org_id,
             enrollment_id: enrollment.id,
         })
     }
@@ -327,6 +329,7 @@ impl std::fmt::Debug for Invite {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct NetworkJoin {
     pub network_id: String,
+    pub org_id: String,
 }
 
 #[derive(Clone, Serialize, PartialEq, Eq)]
@@ -367,6 +370,7 @@ impl std::fmt::Debug for NodeEnrollment {
 pub struct RedeemedNodeEnrollment {
     pub node_name: String,
     pub network_id: String,
+    pub org_id: String,
     pub enrollment_id: String,
 }
 

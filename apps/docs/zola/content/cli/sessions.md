@@ -120,7 +120,9 @@ With `TEXT`, a single positional is the text and two are `ENV TEXT`; with
 
 Writes to a terminal or command session's stdin and acknowledges the write;
 it does not report that a command finished. Input is 1 to 65536 bytes.
-Managed agents refuse raw input.
+Managed agents refuse raw input. To type a line into a terminal program such
+as Claude Code or Codex, `cw msg ENV --session SESSION TEXT` writes the text
+and the Enter key it submits on; see [Agents](@/cli/agents.md#cw-msg).
 
 ## cw wait
 

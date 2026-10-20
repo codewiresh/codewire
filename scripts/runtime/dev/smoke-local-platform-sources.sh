@@ -225,7 +225,8 @@ local_platform_prepare_mesh_owner() {
   [[ -n "$LOCAL_PLATFORM_NETWORK_ID" || "$LOCAL_PLATFORM_DISPOSABLE_NETWORK" == 1 ]] || return 0
   # Browser-assisted OAuth owns a separate temporary HOME. Select the already
   # authenticated organization through the public CLI in this VM's HOME too,
-  # so native Mesh metadata is created here without copying any credential.
+  # so the hosted Mesh attachment's owner organization is saved here without
+  # copying any credential.
   cw_with_timeout 30 org set "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
     >"$TMPDIR_SMOKE/local-mesh-owner.out" 2>"$TMPDIR_SMOKE/local-mesh-owner.err" ||
     die 'isolated hosted Mesh organization selection failed'

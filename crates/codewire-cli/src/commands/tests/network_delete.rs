@@ -31,124 +31,70 @@ fn network_delete_requires_explicit_name_and_organization() {
 }
 
 #[test]
-fn deleted_network_clears_only_its_matching_local_selection() {
-    for (saved_name, default_url, owner_org, owner_name, clear_saved, clear_owner) in [
-        (
-            "network-alpha",
-            "https://mesh.example.test",
-            "org-alpha",
-            "network-alpha",
-            true,
-            true,
-        ),
-        (
-            "network-other",
-            "https://mesh.example.test",
-            "org-alpha",
-            "network-other",
-            false,
-            false,
-        ),
-        (
-            "network-alpha",
-            "https://other.example.test",
-            "org-alpha",
-            "network-alpha",
-            false,
-            true,
-        ),
-        (
-            "network-alpha",
-            "https://mesh.example.test",
-            "org-other",
-            "network-alpha",
-            true,
-            false,
-        ),
+fn deleted_network_clears_only_its_exact_selection() {
+    // (selected Mesh, organization, network) against a deletion of
+    // network-alpha in org-alpha on https://mesh.example.test.
+    for (mesh_url, organization, network, cleared) in [
+        ("https://mesh.example.test", "org-alpha", "network-alpha", true),
+        ("https://mesh.example.test/", "org-alpha", "network-alpha", true),
+        ("https://mesh.example.test", "org-alpha", "network-other", false),
+        ("https://other.example.test", "org-alpha", "network-alpha", false),
+        ("https://mesh.example.test", "org-other", "network-alpha", false),
     ] {
         let dir = private_mesh_data_fixture();
-        config::save_selected_mesh_network_preference(dir.path(), saved_name, true).unwrap();
-        let context = LocalMeshOwnerContext {
-            schema_version: 1,
-            auth_source: LocalMeshOwnerAuthSource::HostedCurrent,
-            mesh_url: "https://mesh.example.test".into(),
-            organization_id: owner_org.into(),
-            selected_network: Some(owner_name.into()),
-            auto_connect: true,
-        };
-        save_local_mesh_owner_context(dir.path(), &context).unwrap();
-        clear_deleted_network_selection(
+        let selection =
+            NetworkSelection::new(MeshKind::Cloud, mesh_url, organization, network, true);
+        save_network_selection(dir.path(), &selection).unwrap();
+        let cleanup = clear_deleted_network_selection(
             dir.path(),
-            Some(default_url),
             "https://mesh.example.test",
             "org-alpha",
             "network-alpha",
-        )
-        .unwrap();
-        let saved = config::load_mesh_config(dir.path()).unwrap();
-        assert_eq!(
-            saved.mesh_selected_network.as_deref(),
-            (!clear_saved).then_some(saved_name)
         );
-        assert_eq!(saved.mesh_auto_connect, (!clear_saved).then_some(true));
-        let owner = load_local_mesh_owner_context(dir.path()).unwrap().unwrap();
-        assert_eq!(
-            owner.selected_network.as_deref(),
-            (!clear_owner).then_some(owner_name)
-        );
-        assert_eq!(owner.auto_connect, !clear_owner);
-        assert_eq!(owner.organization_id, owner_org);
+        if cleared {
+            assert!(matches!(cleanup, mesh_commands::network_output::SelectionCleanup::Cleared), "{cleanup:?}");
+            assert_eq!(load_network_selection(dir.path()).unwrap(), None);
+        } else {
+            assert!(matches!(cleanup, mesh_commands::network_output::SelectionCleanup::Untouched), "{cleanup:?}");
+            assert_eq!(load_network_selection(dir.path()).unwrap(), Some(selection));
+        }
     }
 }
 
 #[test]
-fn deleted_network_preserves_owner_on_another_mesh_origin() {
+fn deleted_network_without_a_selection_changes_nothing() {
     let dir = private_mesh_data_fixture();
-    let context = LocalMeshOwnerContext {
-        schema_version: 1,
-        auth_source: LocalMeshOwnerAuthSource::StandaloneLocal,
-        mesh_url: "https://other.example.test".into(),
-        organization_id: "org-alpha".into(),
-        selected_network: Some("network-alpha".into()),
-        auto_connect: true,
-    };
-    save_local_mesh_owner_context(dir.path(), &context).unwrap();
-    clear_deleted_network_selection(
+    let cleanup = clear_deleted_network_selection(
         dir.path(),
-        Some("https://mesh.example.test"),
         "https://mesh.example.test",
         "org-alpha",
         "network-alpha",
-    )
-    .unwrap();
-    assert_eq!(
-        load_local_mesh_owner_context(dir.path()).unwrap(),
-        Some(context)
     );
+    assert!(matches!(cleanup, mesh_commands::network_output::SelectionCleanup::Untouched), "{cleanup:?}");
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }
 
 #[test]
-fn deleted_network_environment_override_does_not_clear_saved_other_origin() {
+fn an_unreadable_selection_after_deletion_is_a_reported_partial_failure() {
     let dir = private_mesh_data_fixture();
-    config::save_mesh_connection(dir.path(), "https://saved.example.test", "synthetic-owner")
+    std::fs::write(dir.path().join("network_selection.json"), b"{").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            dir.path().join("network_selection.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
         .unwrap();
-    config::save_selected_mesh_network_preference(dir.path(), "network-alpha", true).unwrap();
-    clear_deleted_network_selection(
+    }
+    let cleanup = clear_deleted_network_selection(
         dir.path(),
-        Some("https://override.example.test"),
-        "https://override.example.test",
+        "https://mesh.example.test",
         "org-alpha",
         "network-alpha",
-    )
-    .unwrap();
-    let saved = config::load_mesh_config(dir.path()).unwrap();
-    assert_eq!(
-        saved.mesh_url.as_deref(),
-        Some("https://saved.example.test")
     );
-    assert_eq!(
-        saved.mesh_selected_network.as_deref(),
-        Some("network-alpha")
-    );
-    assert_eq!(saved.mesh_auto_connect, Some(true));
+    let mesh_commands::network_output::SelectionCleanup::Failed(error) = cleanup else {
+        panic!("expected a failed cleanup, got {cleanup:?}");
+    };
+    assert!(error.contains("cw network clear"), "{error}");
 }

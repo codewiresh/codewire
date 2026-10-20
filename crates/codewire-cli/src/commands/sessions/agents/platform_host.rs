@@ -463,7 +463,7 @@ fn is_platform_driver(command: &[String]) -> bool {
 fn stopped_with_environment(environment: &str, reference: &str) -> String {
     format!(
         "managed conversation {reference:?} stopped with its environment; \
-         `cw msg {environment} {reference} TEXT` or `cw restart {environment} --session {reference}` \
+         `cw msg {environment} --session {reference} TEXT` or `cw restart {environment} --session {reference}` \
          continues it here"
     )
 }
@@ -634,6 +634,7 @@ pub(super) async fn message(
     args: &AgentMessageArgs,
     text: &str,
     steer: bool,
+    label: &str,
 ) -> anyhow::Result<()> {
     validate_text(text)?;
     // A new message continues a conversation its environment's Stop ended;
@@ -697,26 +698,83 @@ pub(super) async fn message(
     let id = request_id(args.request_id.as_deref())?;
     let location = conversation.location(&id, conversation.session.launch_generation);
     save_location(&location)?;
-    conversation
+    // A steer prints its request; a message prints its ID and its state.
+    let operation = conversation
         .endpoint
         .mutate(
             &id,
             rpc::mutate_environment_agent_request::Operation::Control(Box::new(control)),
-            Some(args.output),
+            steer.then_some(args.output),
         )
         .await?;
-    if steer {
-        // The pipe settles the request; only the provider decides the steer.
+    if !steer {
+        // The request completed, so the message reached the conversation;
+        // read its state once. A failed read leaves that state unknown here,
+        // never the delivery.
         let record = await_location(
             &location,
             &conversation.endpoint.client,
             ACCEPT_TIMEOUT,
-            MessageRecord::decided,
+            |_| true,
         )
-        .await?;
-        if let Some(error) = message_failure(&record) {
-            return Err(error);
+        .await;
+        return print_platform_message(&operation, &id, record, args.output, label);
+    }
+    // The pipe settles the request; only the provider decides the steer.
+    let record = await_location(
+        &location,
+        &conversation.endpoint.client,
+        ACCEPT_TIMEOUT,
+        MessageRecord::decided,
+    )
+    .await?;
+    match message_failure(&record) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// A cloud message: its ID and actual state. JSON keeps the operation's
+/// fields and adds `delivery` and the message's `message_state`.
+fn print_platform_message(
+    operation: &rpc::EnvironmentAgentOperation,
+    id: &str,
+    record: anyhow::Result<MessageRecord>,
+    output: OutputFormat,
+    label: &str,
+) -> anyhow::Result<()> {
+    let message_id = if operation.message_id.is_empty() {
+        id
+    } else {
+        operation.message_id.as_str()
+    };
+    let state = record.as_ref().ok().map(state_label);
+    match output {
+        OutputFormat::Json => {
+            #[derive(serde::Serialize)]
+            struct Sent<'a> {
+                #[serde(flatten)]
+                delivered: dispatch::Delivered<'a, rpc::EnvironmentAgentOperation>,
+                message_state: Option<&'a str>,
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&Sent {
+                    delivered: dispatch::Delivered {
+                        delivery: "managed",
+                        fields: operation,
+                    },
+                    message_state: state.as_deref(),
+                })?
+            );
         }
+        OutputFormat::Text => print!(
+            "{}",
+            dispatch::format_managed_message(message_id, state.as_deref(), label)
+        ),
+    }
+    if let Err(error) = record {
+        eprintln!("the message's state could not be read: {error:#}");
     }
     Ok(())
 }
@@ -789,11 +847,16 @@ pub(super) async fn inbox(
     output: OutputFormat,
 ) -> anyhow::Result<()> {
     let conversation = conversation(&target, reference).await?;
-    let value = conversation
+    let mut value = conversation
         .read(None, conversation.session.launch_generation)
         .await?;
     match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&value)?),
+        OutputFormat::Json => {
+            if value.is_object() {
+                value["delivery"] = json!("managed");
+            }
+            println!("{}", serde_json::to_string_pretty(&value)?)
+        }
         OutputFormat::Text => {
             println!(
                 "{}\tgeneration {}",

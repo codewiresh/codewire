@@ -1449,11 +1449,13 @@ pub(crate) async fn up(paths: &ResolvePaths, args: MeshUpArgs) -> anyhow::Result
             identity
         }
     };
-    let selected_network = mesh_config
-        .mesh_selected_network
-        .clone()
-        .and_then(|network| trimmed_str(&network).map(str::to_owned));
-    let auto_connect = selected_network.is_some() && mesh_config.mesh_auto_connect.unwrap_or(false);
+    // The local service keeps its catalog in memory: a restart recreates the
+    // selected local network, so the saved selection stays usable.
+    let selected_network = super::selection::local_selection_for(
+        &paths.mesh_data_dir,
+        &args.base_url,
+        &local_identity.organization_id,
+    );
     let spec = local_mesh_start_spec(paths, &args, local_identity)?;
     let operation_id = uuid::Uuid::new_v4().to_string();
     lock.check(&directory)?;
@@ -1543,8 +1545,8 @@ pub(crate) async fn up(paths: &ResolvePaths, args: MeshUpArgs) -> anyhow::Result
                 auth_source: LocalMeshOwnerAuthSource::StandaloneLocal,
                 mesh_url: spec.base_url.clone(),
                 organization_id: spec.local_identity.organization_id.clone(),
-                selected_network,
-                auto_connect,
+                selected_network: None,
+                auto_connect: false,
             },
         )?;
         save_local_mesh_runtime(&paths.mesh_data_dir, &runtime)?;
@@ -1626,6 +1628,9 @@ pub(crate) async fn down(paths: &ResolvePaths) -> anyhow::Result<MeshDownReport>
         &paths.mesh_data_dir,
         LocalMeshOwnerAuthSource::StandaloneLocal,
     )?;
+    // The stopped service's endpoint and key are no longer a usable Mesh;
+    // its durable identity stays for the next `cw mesh up`.
+    config::clear_local_mesh_connection(&paths.mesh_data_dir, &runtime.base_url)?;
     Ok(MeshDownReport {
         stopped: true,
         pid: Some(runtime.pid),

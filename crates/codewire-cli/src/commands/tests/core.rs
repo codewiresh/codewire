@@ -13,7 +13,7 @@ fn private_mesh_data_fixture() -> tempfile::TempDir {
 
 #[test]
 fn member_mutation_flags_require_member_on_shared_session_commands() {
-    for command in ["stop", "restart", "interrupt", "inbox"] {
+    for command in ["stop", "restart", "interrupt"] {
         let ordinary = Cli::try_parse_from(["cw", command, "session"]).unwrap();
         crate::validate_member_mutation_flags(&ordinary).unwrap();
         for (flag, value) in [
@@ -42,6 +42,49 @@ fn member_mutation_flags_require_member_on_shared_session_commands() {
     ])
     .unwrap();
     crate::validate_member_mutation_flags(&member).unwrap();
+
+    // A member inbox is read-only: only the launch generation applies.
+    let ordinary = Cli::try_parse_from(["cw", "inbox", "--session", "session"]).unwrap();
+    crate::validate_member_mutation_flags(&ordinary).unwrap();
+    let cli = Cli::try_parse_from([
+        "cw",
+        "inbox",
+        "--session",
+        "session",
+        "--expected-launch-generation",
+        "1",
+    ])
+    .unwrap();
+    assert!(
+        crate::validate_member_mutation_flags(&cli)
+            .unwrap_err()
+            .to_string()
+            .contains("member mutation flags require --member")
+    );
+    assert!(
+        Cli::try_parse_from([
+            "cw",
+            "inbox",
+            "--session",
+            "session",
+            "--request-id",
+            "00000000-0000-4000-8000-000000000001",
+        ])
+        .is_err()
+    );
+    for (flag, value) in [
+        ("--request-id", "00000000-0000-4000-8000-000000000001"),
+        ("--expected-launch-generation", "1"),
+    ] {
+        let cli = Cli::try_parse_from(["cw", "msg", "--session", "session", "text", flag, value])
+            .unwrap();
+        assert!(
+            crate::validate_member_mutation_flags(&cli)
+                .unwrap_err()
+                .to_string()
+                .contains("member mutation flags require --member")
+        );
+    }
 }
 
 #[test]
@@ -653,7 +696,7 @@ fn save_login_platform_config_persists_only_reconciled_default_org() {
 }
 
 #[test]
-fn platform_login_projects_only_hosted_mesh_owner_metadata() {
+fn platform_login_saves_the_owner_organization_and_no_mesh_projection() {
     let home = tempfile::tempdir().unwrap();
     let paths =
         ResolvePaths::from_home_and_env(home.path().to_path_buf(), &config::MapEnv::default())
@@ -676,17 +719,19 @@ fn platform_login_projects_only_hosted_mesh_owner_metadata() {
     )
     .unwrap();
 
-    let owner = load_local_mesh_owner_context(&paths.mesh_data_dir)
-        .unwrap()
-        .unwrap();
-    assert_eq!(owner.auth_source, LocalMeshOwnerAuthSource::HostedCurrent);
-    assert_eq!(owner.mesh_url, "https://mesh.codewire-dev.sh");
-    assert_eq!(owner.organization_id, "org-alpha");
-    assert!(owner.selected_network.is_none());
-    assert!(!owner.auto_connect);
-    let encoded = fs::read_to_string(local_mesh_owner_context_path(&paths.mesh_data_dir)).unwrap();
-    assert!(!encoded.contains("synthetic-access-canary"));
-    assert!(!encoded.contains("synthetic-refresh-canary"));
+    // The hosted Mesh owner is the saved platform and default organization;
+    // login writes no Mesh state of its own.
+    assert_eq!(
+        load_local_mesh_owner_context(&paths.mesh_data_dir).unwrap(),
+        None
+    );
+    assert!(!paths.mesh_data_dir.exists());
+    let saved = config::load_platform_config(&paths.platform_config_dir).unwrap();
+    assert_eq!(saved.default_org, "org-alpha");
+    assert_eq!(
+        config::derive_hosted_mesh_url_for_server(&saved.server_url).as_deref(),
+        Some("https://mesh.codewire-dev.sh")
+    );
 }
 
 #[cfg(target_os = "linux")]

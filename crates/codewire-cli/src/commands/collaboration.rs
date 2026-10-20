@@ -4,18 +4,6 @@ use super::*;
 /// environments pull anonymously and the platform resolves to Harbor.
 pub(crate) const CANONICAL_WORKSPACE_IMAGE: &str = codewire_workspace_image::PUBLIC_IMAGE;
 
-pub(crate) fn selected_network_or_error(mesh: &config::ResolvedMeshConfig) -> anyhow::Result<&str> {
-    mesh.selected_network
-        .as_deref()
-        .and_then(|network| {
-            let network = network.trim();
-            (!network.is_empty()).then_some(network)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!("network not selected (run 'cw network use <name>' or pass --network)")
-        })
-}
-
 pub(crate) fn resolve_mesh(
     globals: &Globals,
     paths: &ResolvePaths,
@@ -798,78 +786,6 @@ pub(crate) fn parse_go_duration_seconds(raw: &str) -> anyhow::Result<i32> {
     Ok(seconds as i32)
 }
 
-pub(crate) fn print_networks(
-    networks: &[Network],
-    current_network: Option<&str>,
-    output: OutputFormat,
-) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(networks)?),
-        OutputFormat::Text => {
-            if networks.is_empty() {
-                println!("No networks");
-                return Ok(());
-            }
-            println!(
-                "{:<8} {:<24} {:<7} {:<8} CREATED",
-                "CURRENT", "NAME", "NODES", "INVITES"
-            );
-            for network in networks {
-                let current =
-                    if current_network.is_some_and(|current| current.trim() == network.id.trim()) {
-                        "*"
-                    } else {
-                        ""
-                    };
-                println!(
-                    "{:<8} {:<24} {:<7} {:<8} {}",
-                    current,
-                    network.id,
-                    network.node_count,
-                    network.invite_count,
-                    network.created_at
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn print_nodes(nodes: &[Node], all: bool, output: OutputFormat) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(nodes)?),
-        OutputFormat::Text => {
-            if nodes.is_empty() {
-                println!("No registered nodes");
-                return Ok(());
-            }
-            let show_network = all || nodes_have_multiple_networks(nodes);
-            if show_network {
-                println!("{:<20} {:<20} {:<40} STATUS", "NETWORK", "NAME", "PEER URL");
-            } else {
-                println!("{:<20} {:<40} STATUS", "NAME", "PEER URL");
-            }
-            for node in nodes {
-                let status = if node.connected { "online" } else { "offline" };
-                if show_network {
-                    let network = if node.network_id.trim().is_empty() {
-                        "-"
-                    } else {
-                        node.network_id.trim()
-                    };
-                    println!(
-                        "{:<20} {:<20} {:<40} {}",
-                        network, node.name, node.peer_url, status
-                    );
-                } else {
-                    println!("{:<20} {:<40} {}", node.name, node.peer_url, status);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn parse_env_overrides(entries: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
     let mut env = BTreeMap::new();
     for entry in entries {
@@ -888,58 +804,11 @@ pub(crate) fn trimmed_str(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-pub(crate) fn print_invite(
-    invite: &Invite,
-    mesh_url: &str,
-    output: OutputFormat,
-) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(invite)?),
-        OutputFormat::Text => {
-            eprintln!("Invite created!\n");
-            eprintln!("  Code:    {}", invite.invite_code);
-            eprintln!("  Expires: {}", invite.expires_at);
-            eprintln!();
-            eprintln!("To join another device:");
-            eprintln!(
-                "  cw network join --mesh-url {} {}",
-                mesh_url, invite.invite_code
-            );
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn print_node_enrollment(
-    enrollment: &NodeEnrollment,
-    output: OutputFormat,
-) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(enrollment)?),
-        OutputFormat::Text => {
-            eprintln!("Enrollment created\n");
-            eprintln!("  Code:    {}", enrollment.enrollment_code);
-            eprintln!("  Network: {}", enrollment.network_id);
-            if !enrollment.node_name.trim().is_empty() {
-                eprintln!("  Node:    {}", enrollment.node_name);
-            }
-            eprintln!("  Expires: {}", enrollment.expires_at);
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn save_redeemed_node_enrollment(
     data_dir: &std::path::Path,
-    mesh_url: &str,
     redeemed: &RedeemedNodeEnrollment,
 ) -> anyhow::Result<()> {
-    config::save_node_registration(
-        data_dir,
-        mesh_url,
-        &redeemed.network_id,
-        &redeemed.node_name,
-    )?;
+    config::save_node_registration(data_dir, &redeemed.network_id, &redeemed.node_name)?;
     Ok(())
 }
 

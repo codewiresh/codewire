@@ -48,9 +48,9 @@ go on with your own part or end your turn. Do not poll and do not sleep.
 
 ```sh
 {{cw}} wait --message MESSAGE_ID --timeout 10m
-{{cw}} inbox "$CW_ENVIRONMENT" NAME
-{{cw}} msg "$CW_ENVIRONMENT" NAME 'TEXT'
-{{cw}} steer "$CW_ENVIRONMENT" NAME 'TEXT'
+{{cw}} inbox "$CW_ENVIRONMENT" --session NAME
+{{cw}} msg "$CW_ENVIRONMENT" --session NAME 'TEXT'
+{{cw}} steer "$CW_ENVIRONMENT" --session NAME 'TEXT'
 {{cw}} interrupt "$CW_ENVIRONMENT" --session NAME
 {{cw}} stop "$CW_ENVIRONMENT" --session NAME
 {{cw}} stop "$CW_ENVIRONMENT" --session NAME --all

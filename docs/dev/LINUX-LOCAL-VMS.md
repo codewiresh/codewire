@@ -100,7 +100,7 @@ cw credentials --local --profile work set anthropic my-anthropic
 # Create the VM with that profile, then start agents in it.
 cw create --local --name team --profile local:work --path .
 cw run --in team --name lead --agent codex --detach --prompt 'Plan the change.'
-cw inbox team lead
+cw inbox team --session lead
 cw wait --message MESSAGE_ID --timeout 10m
 ```
 

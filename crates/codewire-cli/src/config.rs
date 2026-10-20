@@ -331,6 +331,22 @@ pub fn resolve_platform(
     ))
 }
 
+/// The selected platform server without requiring a sign-in: `--server`,
+/// then `CODEWIRE_SERVER_URL`, then the saved login's server.
+pub fn resolve_platform_server_url(
+    explicit: Option<String>,
+    paths: &ResolvePaths,
+    env: &impl Env,
+) -> Option<String> {
+    trim_opt(explicit)
+        .or_else(|| trim_opt(env.var(CODEWIRE_SERVER_URL_ENV)))
+        .or_else(|| {
+            load_platform_config(&paths.platform_config_dir)
+                .ok()
+                .and_then(|config| non_empty(normalize_server_url(&config.server_url)))
+        })
+}
+
 pub fn load_platform_config(config_dir: &Path) -> Result<PlatformConfig, ConfigError> {
     let path = config_dir.join("config.json");
     let data = fs::read(&path).map_err(|source| ConfigError::ReadConfig {
@@ -397,9 +413,13 @@ pub struct MeshConfig {
     pub mesh_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_auth_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Parse-only: an older cw saved the network selection here, without
+    /// its Mesh. The selection now lives in `network_selection.json`; the
+    /// next write of this file drops the key.
+    #[serde(default, skip_serializing)]
     pub mesh_selected_network: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Parse-only, with [`MeshConfig::mesh_selected_network`].
+    #[serde(default, skip_serializing)]
     pub mesh_auto_connect: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_node_network: Option<String>,
@@ -535,13 +555,22 @@ pub struct ResolvedMeshConfig {
 impl ResolvedMeshConfig {
     #[cfg(target_os = "linux")]
     pub(crate) fn static_token(mesh_url: String, token: &str) -> Result<Self, ConfigError> {
+        Self::static_token_from(mesh_url, token, MeshAuthSource::Explicit)
+    }
+
+    /// One endpoint with one fixed bearer, recorded with where it came from.
+    pub(crate) fn static_token_from(
+        mesh_url: String,
+        token: &str,
+        auth_source: MeshAuthSource,
+    ) -> Result<Self, ConfigError> {
         let token_provider = StaticTokenProvider::new(token).map_err(|_| {
             ConfigError::InvalidMeshAuth("invalid standalone credential".to_owned())
         })?;
         Ok(Self {
             mesh_url,
             selected_network: None,
-            auth_source: MeshAuthSource::Explicit,
+            auth_source,
             token_provider: Arc::new(token_provider),
         })
     }
@@ -591,7 +620,6 @@ pub enum MeshAuthSource {
 enum MeshUrlSource {
     Explicit,
     MeshEnv,
-    MeshConfig,
     Hosted,
 }
 
@@ -603,10 +631,8 @@ pub fn resolve_mesh(
     env: &impl Env,
 ) -> Result<ResolvedMeshConfig, ConfigError> {
     let mesh_config = load_mesh_config(&paths.mesh_data_dir)?;
-    let (mesh_url, mesh_url_source) =
-        resolve_mesh_base_url_with_source(opts.clone(), &mesh_config, paths, env)?;
-    let selected_network =
-        resolve_mesh_network(&mesh_url, mesh_url_source, &opts, &mesh_config, env);
+    let (mesh_url, mesh_url_source) = resolve_mesh_base_url_with_source(opts.clone(), paths, env)?;
+    let selected_network = resolve_mesh_network(&opts, env);
     let config_auth_token = saved_mesh_value_for_selected_url(
         &mesh_url,
         mesh_url_source,
@@ -639,11 +665,8 @@ pub fn resolve_mesh_with_token_provider(
     token_provider: Arc<dyn TokenProvider>,
     auth_source: MeshAuthSource,
 ) -> Result<ResolvedMeshConfig, ConfigError> {
-    let mesh_config = load_mesh_config(&paths.mesh_data_dir)?;
-    let (mesh_url, mesh_url_source) =
-        resolve_mesh_base_url_with_source(opts.clone(), &mesh_config, paths, env)?;
-    let selected_network =
-        resolve_mesh_network(&mesh_url, mesh_url_source, &opts, &mesh_config, env);
+    let (mesh_url, _source) = resolve_mesh_base_url_with_source(opts.clone(), paths, env)?;
+    let selected_network = resolve_mesh_network(&opts, env);
     Ok(ResolvedMeshConfig {
         mesh_url,
         selected_network,
@@ -652,23 +675,11 @@ pub fn resolve_mesh_with_token_provider(
     })
 }
 
-fn resolve_mesh_network(
-    mesh_url: &str,
-    mesh_url_source: MeshUrlSource,
-    opts: &MeshResolveOptions,
-    mesh_config: &MeshConfig,
-    env: &impl Env,
-) -> Option<String> {
-    trim_opt(opts.network_id.clone())
-        .or_else(|| trim_opt(env.var(CODEWIRE_MESH_NETWORK_ENV)))
-        .or_else(|| {
-            saved_mesh_value_for_selected_url(
-                mesh_url,
-                mesh_url_source,
-                mesh_config.mesh_url.as_deref(),
-                mesh_config.mesh_selected_network.as_deref(),
-            )
-        })
+/// The network a request names: `--network`, else `CODEWIRE_MESH_NETWORK`.
+/// The saved selection is scoped to one Mesh and organization, so callers
+/// apply it themselves (`commands::mesh_commands::selection`).
+fn resolve_mesh_network(opts: &MeshResolveOptions, env: &impl Env) -> Option<String> {
+    trim_opt(opts.network_id.clone()).or_else(|| trim_opt(env.var(CODEWIRE_MESH_NETWORK_ENV)))
 }
 
 pub fn resolve_mesh_base_url(
@@ -676,19 +687,19 @@ pub fn resolve_mesh_base_url(
     paths: &ResolvePaths,
     env: &impl Env,
 ) -> Result<String, ConfigError> {
-    let mesh_config = load_mesh_config(&paths.mesh_data_dir)?;
-    resolve_mesh_base_url_with_source(opts, &mesh_config, paths, env).map(|(url, _source)| url)
+    resolve_mesh_base_url_with_source(opts, paths, env).map(|(url, _source)| url)
 }
 
+/// `--mesh-url`, then `CODEWIRE_MESH_URL`, then the selected platform's
+/// hosted Mesh. The local service's saved `mesh_url` is never a default: a
+/// running or stale local Mesh cannot redirect a hosted operation.
 fn resolve_mesh_base_url_with_source(
     opts: MeshResolveOptions,
-    mesh_config: &MeshConfig,
     paths: &ResolvePaths,
     env: &impl Env,
 ) -> Result<(String, MeshUrlSource), ConfigError> {
     let explicit_mesh = trim_opt(opts.mesh_url);
     let env_mesh = trim_opt(env.var(CODEWIRE_MESH_URL_ENV));
-    let config_mesh = trim_opt(mesh_config.mesh_url.clone());
     let hosted_mesh =
         derive_hosted_mesh_url(opts.platform_server_url.as_deref().unwrap_or(""), paths);
 
@@ -697,9 +708,6 @@ fn resolve_mesh_base_url_with_source(
     }
     if let Some(mesh_url) = env_mesh {
         return Ok((mesh_url, MeshUrlSource::MeshEnv));
-    }
-    if let Some(mesh_url) = config_mesh {
-        return Ok((mesh_url, MeshUrlSource::MeshConfig));
     }
     if let Some(mesh_url) = hosted_mesh {
         return Ok((mesh_url, MeshUrlSource::Hosted));
@@ -715,9 +723,6 @@ fn saved_mesh_value_for_selected_url(
     saved_value: Option<&str>,
 ) -> Option<String> {
     let saved_value = saved_value.and_then(|value| non_empty(value.trim().to_string()))?;
-    if mesh_url_source == MeshUrlSource::MeshConfig {
-        return Some(saved_value);
-    }
     let Some(saved_mesh_url) = saved_mesh_url.and_then(|url| non_empty(url.trim().to_string()))
     else {
         return (mesh_url_source == MeshUrlSource::Hosted).then_some(saved_value);
@@ -800,38 +805,33 @@ fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// The network new environments join: `CODEWIRE_MESH_NETWORK`, else the
+/// saved selection's name. The selection's Mesh and organization are in
+/// `commands::NetworkSelection`.
 pub fn selected_mesh_network(paths: &ResolvePaths, env: &impl Env) -> Option<String> {
-    let config = load_mesh_config(&paths.mesh_data_dir).ok();
     trim_opt(env.var(CODEWIRE_MESH_NETWORK_ENV)).or_else(|| {
-        config
-            .as_ref()
-            .and_then(|config| trim_opt(config.mesh_selected_network.clone()))
+        crate::commands::load_network_selection(&paths.mesh_data_dir)
+            .ok()
+            .flatten()
+            .map(|selection| selection.network_id)
     })
 }
 
-pub fn save_selected_mesh_network(data_dir: &Path, network_id: &str) -> Result<(), ConfigError> {
-    save_selected_mesh_network_preference(data_dir, network_id, false)
-}
-
-pub fn save_selected_mesh_network_preference(
-    data_dir: &Path,
-    network_id: &str,
-    auto_connect: bool,
-) -> Result<(), ConfigError> {
-    let network_id = network_id.trim();
-    if network_id.is_empty() {
-        return Err(ConfigError::InvalidMeshSelection);
+/// Forget the local Mesh service's endpoint and key after `cw mesh down`,
+/// only while they are still that service's: the durable local identity
+/// stays, and an unrelated endpoint is never removed.
+pub fn clear_local_mesh_connection(data_dir: &Path, base_url: &str) -> Result<(), ConfigError> {
+    let config = load_mesh_config(data_dir)?;
+    if !config
+        .mesh_url
+        .as_deref()
+        .is_some_and(|saved| same_mesh_url(saved, base_url))
+    {
+        return Ok(());
     }
     update_mesh_config(data_dir, |config| {
-        config.mesh_selected_network = Some(network_id.to_string());
-        config.mesh_auto_connect = Some(auto_connect);
-    })
-}
-
-pub fn clear_selected_mesh_network(data_dir: &Path) -> Result<(), ConfigError> {
-    update_mesh_config(data_dir, |config| {
-        config.mesh_selected_network = None;
-        config.mesh_auto_connect = None;
+        config.mesh_url = None;
+        config.mesh_auth_token = None;
     })
 }
 
@@ -909,20 +909,17 @@ pub fn save_current_target(
     })
 }
 
+/// Records the node this machine enrolled as. The Mesh endpoint is not
+/// saved: `mesh_url` names only the local Mesh service's endpoint.
 pub fn save_node_registration(
     data_dir: &Path,
-    mesh_url: &str,
     network_id: &str,
     node_name: &str,
 ) -> Result<(), ConfigError> {
-    let mesh_url = mesh_url.trim();
     let network_id = network_id.trim();
     let node_name = node_name.trim();
 
     update_mesh_config(data_dir, |config| {
-        if !mesh_url.is_empty() {
-            config.mesh_url = Some(mesh_url.to_string());
-        }
         if !network_id.is_empty() {
             config.mesh_node_network = Some(network_id.to_string());
         }
@@ -931,25 +928,6 @@ pub fn save_node_registration(
                 name: Some(node_name.to_string()),
             });
         }
-    })
-}
-
-pub fn save_joined_network(
-    data_dir: &Path,
-    mesh_url: &str,
-    network_id: &str,
-) -> Result<(), ConfigError> {
-    let mesh_url = mesh_url.trim();
-    let network_id = network_id.trim();
-    if network_id.is_empty() {
-        return Err(ConfigError::InvalidMeshSelection);
-    }
-    update_mesh_config(data_dir, |config| {
-        if !mesh_url.is_empty() {
-            config.mesh_url = Some(mesh_url.to_string());
-        }
-        config.mesh_selected_network = Some(network_id.to_string());
-        config.mesh_auto_connect = Some(false);
     })
 }
 
@@ -1104,8 +1082,15 @@ fn static_mesh_provider(
         .map_err(|error| ConfigError::InvalidMeshAuth(error.to_string()))
 }
 
+/// The hosted Mesh of a platform server. Codewire's own servers publish it
+/// at `mesh.` of their domain; any other server, such as a local Kind
+/// cluster, serves the Mesh services on its own origin, where its edge
+/// routes them by path (the Kind ingress and the Caddyfile).
 pub fn derive_hosted_mesh_url_for_server(raw_server_url: &str) -> Option<String> {
     let server = Url::parse(raw_server_url.trim()).ok()?;
+    if !matches!(server.scheme(), "http" | "https") {
+        return None;
+    }
     let host = match server.host_str()? {
         "codewire.sh" | "www.codewire.sh" | "app.codewire.sh" | "api.codewire.sh" => {
             "mesh.codewire.sh"
@@ -1114,14 +1099,9 @@ pub fn derive_hosted_mesh_url_for_server(raw_server_url: &str) -> Option<String>
         | "www.codewire-dev.sh"
         | "app.codewire-dev.sh"
         | "api.codewire-dev.sh" => "mesh.codewire-dev.sh",
-        _ => return None,
+        _ => return non_empty(normalize_server_url(raw_server_url)),
     };
-    let scheme = if server.scheme().is_empty() {
-        "https"
-    } else {
-        server.scheme()
-    };
-    Some(format!("{scheme}://{host}"))
+    Some(format!("{}://{host}", server.scheme()))
 }
 
 fn derive_hosted_mesh_url(platform_server_url: &str, paths: &ResolvePaths) -> Option<String> {
@@ -1584,9 +1564,15 @@ mod tests {
             Some("https://mesh.codewire-dev.sh")
         );
         assert_eq!(
-            derive_hosted_mesh_url_for_server("https://example.com"),
-            None
+            derive_hosted_mesh_url_for_server(" http://localhost:8090/ ").as_deref(),
+            Some("http://localhost:8090")
         );
+        assert_eq!(
+            derive_hosted_mesh_url_for_server("https://example.com/base/").as_deref(),
+            Some("https://example.com/base")
+        );
+        assert_eq!(derive_hosted_mesh_url_for_server("file:///tmp/mesh"), None);
+        assert_eq!(derive_hosted_mesh_url_for_server(""), None);
     }
 
     #[test]
@@ -1687,7 +1673,8 @@ mesh_selected_network = "project-alpha"
         let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
         assert!(data.contains("mesh_url = \"https://mesh.codewire.sh\""));
         assert!(data.contains("mesh_auth_token = \"mesh-token\""));
-        assert!(data.contains("mesh_selected_network = \"project-alpha\""));
+        // An older cw's selection key is parse-only and dropped on write.
+        assert!(!data.contains("mesh_selected_network"));
         assert!(data.contains("[current_target]"));
         assert!(data.contains("kind = \"env\""));
         assert!(data.contains("ref = \"12345678-abcd-4000-9000-000000000001\""));
@@ -1737,7 +1724,7 @@ mesh_selected_network = "project-alpha"
     }
 
     #[tokio::test]
-    async fn mesh_auth_uses_saved_mesh_config_token() {
+    async fn the_saved_local_mesh_endpoint_authenticates_only_its_own_url() {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
@@ -1749,9 +1736,22 @@ mesh_auth_token = "mesh-token"
 "#,
         );
 
-        let resolved = resolve_mesh(MeshResolveOptions::default(), &paths, &env).unwrap();
+        // The local service's saved endpoint is never a default Mesh.
+        assert!(matches!(
+            resolve_mesh(MeshResolveOptions::default(), &paths, &env),
+            Err(ConfigError::NoMeshUrl)
+        ));
+        let resolved = resolve_mesh(
+            MeshResolveOptions {
+                mesh_url: Some("http://127.0.0.1:18090/".to_owned()),
+                ..MeshResolveOptions::default()
+            },
+            &paths,
+            &env,
+        )
+        .unwrap();
 
-        assert_eq!(resolved.mesh_url, "http://127.0.0.1:18090");
+        assert_eq!(resolved.mesh_url, "http://127.0.0.1:18090/");
         assert_eq!(
             resolved
                 .token_provider()
@@ -1889,7 +1889,7 @@ mesh_auth_token = "saved-token"
     }
 
     #[test]
-    fn save_mesh_connection_writes_mesh_keys_and_preserves_selected_network() {
+    fn save_mesh_connection_writes_mesh_keys_and_drops_the_legacy_selection() {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
@@ -1905,7 +1905,38 @@ mesh_selected_network = "project-alpha"
         let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
         assert!(data.contains("mesh_url = \"http://127.0.0.1:18090\""));
         assert!(data.contains("mesh_auth_token = \"token\""));
-        assert!(data.contains("mesh_selected_network = \"project-alpha\""));
+        assert!(!data.contains("mesh_selected_network"));
+    }
+
+    #[test]
+    fn clearing_the_local_connection_keeps_identity_and_unrelated_endpoints() {
+        let home = tempfile::tempdir().unwrap();
+        let env = MapEnv::default();
+        let paths = paths(home.path(), &env);
+        write_mesh_config(
+            &paths.mesh_data_dir,
+            r#"
+mesh_url = "http://127.0.0.1:18090"
+mesh_auth_token = "cw_local"
+
+[local_identity]
+organization_id = "local-org-1"
+api_key = "cw_local"
+"#,
+        );
+
+        clear_local_mesh_connection(&paths.mesh_data_dir, "http://127.0.0.1:19090").unwrap();
+        let kept = load_mesh_config(&paths.mesh_data_dir).unwrap();
+        assert_eq!(kept.mesh_url.as_deref(), Some("http://127.0.0.1:18090"));
+
+        clear_local_mesh_connection(&paths.mesh_data_dir, "http://127.0.0.1:18090/").unwrap();
+        let cleared = load_mesh_config(&paths.mesh_data_dir).unwrap();
+        assert_eq!(cleared.mesh_url, None);
+        assert_eq!(cleared.mesh_auth_token, None);
+        assert_eq!(
+            cleared.local_identity.unwrap().organization_id,
+            "local-org-1"
+        );
     }
 
     #[test]
@@ -1995,7 +2026,8 @@ mesh_selected_network = "project-alpha"
                 .expose_secret(),
             "cw_dev_exact_org"
         );
-        assert_eq!(resolved.selected_network.as_deref(), Some("default"));
+        // An older cw's unscoped selection is never applied.
+        assert_eq!(resolved.selected_network, None);
         assert_eq!(resolved.auth_source, MeshAuthSource::ApiKeyEnv);
     }
 
@@ -2047,75 +2079,8 @@ mesh_selected_network = "project-alpha"
             selected_mesh_network(&paths, &env).as_deref(),
             Some("env-network")
         );
-    }
-
-    #[test]
-    fn save_selected_mesh_network_preserves_existing_mesh_config_keys() {
-        let home = tempfile::tempdir().unwrap();
-        let env = MapEnv::default();
-        let paths = paths(home.path(), &env);
-        write_mesh_config(
-            &paths.mesh_data_dir,
-            r#"
-mesh_url = "https://mesh.example.com"
-
-[node]
-name = "builder"
-"#,
-        );
-
-        save_selected_mesh_network(&paths.mesh_data_dir, "project-alpha").unwrap();
-
-        let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
-        assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
-        assert!(data.contains("mesh_selected_network = \"project-alpha\""));
-        assert!(data.contains("mesh_auto_connect = false"));
-        assert!(data.contains("[node]"));
-        assert!(data.contains("name = \"builder\""));
-    }
-
-    #[test]
-    fn selected_mesh_network_auto_connect_is_an_explicit_scoped_preference() {
-        let home = tempfile::tempdir().unwrap();
-        let env = MapEnv::default();
-        let paths = paths(home.path(), &env);
-
-        save_selected_mesh_network_preference(&paths.mesh_data_dir, "project-alpha", true).unwrap();
-        let selected = load_mesh_config(&paths.mesh_data_dir).unwrap();
-        assert_eq!(
-            selected.mesh_selected_network.as_deref(),
-            Some("project-alpha")
-        );
-        assert_eq!(selected.mesh_auto_connect, Some(true));
-
-        save_selected_mesh_network(&paths.mesh_data_dir, "project-beta").unwrap();
-        let selected = load_mesh_config(&paths.mesh_data_dir).unwrap();
-        assert_eq!(
-            selected.mesh_selected_network.as_deref(),
-            Some("project-beta")
-        );
-        assert_eq!(selected.mesh_auto_connect, Some(false));
-    }
-
-    #[test]
-    fn clear_selected_mesh_network_preserves_other_mesh_config_keys() {
-        let home = tempfile::tempdir().unwrap();
-        let env = MapEnv::default();
-        let paths = paths(home.path(), &env);
-        write_mesh_config(
-            &paths.mesh_data_dir,
-            r#"
-mesh_url = "https://mesh.example.com"
-mesh_selected_network = "project-alpha"
-"#,
-        );
-
-        clear_selected_mesh_network(&paths.mesh_data_dir).unwrap();
-
-        let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
-        assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
-        assert!(!data.contains("mesh_selected_network"));
-        assert!(!data.contains("mesh_auto_connect"));
+        // Without the environment, the legacy key is not a selection.
+        assert_eq!(selected_mesh_network(&paths, &MapEnv::default()), None);
     }
 
     #[test]
@@ -2134,47 +2099,15 @@ mesh_node_token = "legacy-node-token"
             load_mesh_config(&paths.mesh_data_dir),
             Err(ConfigError::ParseMesh { .. })
         ));
-        assert!(save_selected_mesh_network(&paths.mesh_data_dir, "project-alpha").is_err());
-        assert!(clear_selected_mesh_network(&paths.mesh_data_dir).is_err());
+        assert!(save_node_registration(&paths.mesh_data_dir, "project-alpha", "builder").is_err());
         assert!(
-            save_node_registration(
-                &paths.mesh_data_dir,
-                "https://mesh.example.com/",
-                "project-alpha",
-                "builder",
-            )
-            .is_err()
-        );
-        assert!(
-            save_joined_network(
-                &paths.mesh_data_dir,
-                "https://mesh.example.com",
-                "project-alpha",
-            )
-            .is_err()
+            clear_local_mesh_connection(&paths.mesh_data_dir, "http://127.0.0.1:18090").is_err()
         );
         assert!(
             fs::read_to_string(paths.mesh_data_dir.join("config.toml"))
                 .unwrap()
                 .contains("legacy-node-token")
         );
-    }
-
-    #[test]
-    fn save_joined_network_writes_selected_network() {
-        let home = tempfile::tempdir().unwrap();
-        let env = MapEnv::default();
-        let paths = paths(home.path(), &env);
-        save_joined_network(
-            &paths.mesh_data_dir,
-            "https://mesh.example.com",
-            "project-alpha",
-        )
-        .unwrap();
-
-        let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
-        assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
-        assert!(data.contains("mesh_selected_network = \"project-alpha\""));
     }
 
     #[test]

@@ -116,10 +116,10 @@ cw run --in host-team --name review --parent lead --agent codex \
   --model gpt-6.1-sol --effort max --detach \
   --prompt 'Review the runtime change without editing it.'
 
-cw msg host-team runtime 'Cover the failed-start recovery case too.'
-cw inbox host-team lead
+cw msg host-team --session runtime 'Cover the failed-start recovery case too.'
+cw inbox host-team --session lead
 cw wait --message MESSAGE_ID --timeout 10m
-cw steer host-team review 'Focus on ownership and cleanup.' --turn-id TURN_ID
+cw steer host-team --session review 'Focus on ownership and cleanup.' --turn-id TURN_ID
 cw interrupt host-team --session runtime
 cw stop host-team --session runtime
 cw restart host-team --session runtime

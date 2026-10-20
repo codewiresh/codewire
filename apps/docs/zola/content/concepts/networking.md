@@ -67,17 +67,22 @@ sandboxes: local VMs and trusted hosts. A **network** is a membership scope
 inside it; nodes in the same network can discover and reach each other, over
 direct UDP, then a UDP relay, then DERP.
 
-A local VM joins Mesh only when a network is selected at creation: with
-`--network NAME`, `CODEWIRE_MESH_NETWORK`, or the network chosen with
+There are two kinds of Mesh. Codewire Cloud Mesh is your platform's hosted
+Mesh (`mesh.codewire.sh`) and uses your Codewire sign-in; `cw mesh up` runs a
+Local Mesh service for an isolated setup. Network commands choose one with
+`--cloud` or `--local`. Where a VM runs and which Mesh it joins are
+independent: a local VM can join either.
+
+A local VM joins Mesh only when a network is chosen at creation: with
+`--network cloud:NAME`, `--network local:NAME`, a bare `--network NAME` on the
+selected network's Mesh, `CODEWIRE_MESH_NETWORK`, or the network chosen with
 `cw network use`. Your host owns the Mesh identity; the VM sees only admitted
-streams for its declared ports. Hosted Mesh at `mesh.codewire.sh` uses your
-Codewire sign-in; `cw mesh up` runs a standalone service for an isolated
-setup.
+streams for its declared ports.
 
 ```sh
-cw network create team --org ORG_ID     # also selects it
-cw create --local --name app --path . --network team
-cw network nodes --org ORG_ID
+cw --cloud network create team --org ORG_ID     # also selects it
+cw --local create --name app --path . --network cloud:team
+cw --cloud network nodes --org ORG_ID
 ```
 
 Hosted sandboxes do not join Mesh; they are reached as described above. See [CLI: networking](@/cli/networking.md).

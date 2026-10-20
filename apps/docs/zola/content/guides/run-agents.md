@@ -38,10 +38,10 @@ a running managed conversation in the same environment. `--model` and
 ## Send a task and read the result
 
 ```sh
-cw msg "$ENV" implement 'Include the failed-start recovery case.' --output json
-cw inbox "$ENV" implement
+cw msg "$ENV" --session implement 'Include the failed-start recovery case.' --output json
+cw inbox "$ENV" --session implement
 cw wait --message "$MESSAGE_ID" --timeout 10m
-cw inbox "$ENV" lead
+cw inbox "$ENV" --session lead
 ```
 
 `msg` sends a task, follow-up or reply and returns a message ID. When the
@@ -54,8 +54,8 @@ what to do next; Codewire never replays a completed or ambiguous task.
 ## Steer or interrupt
 
 ```sh
-cw inbox "$ENV" implement --output json      # .driver.current_turn_id, capabilities
-cw steer "$ENV" implement 'Focus on ownership and cleanup.' --turn-id "$TURN_ID"
+cw inbox "$ENV" --session implement --output json      # .driver.current_turn_id, capabilities
+cw steer "$ENV" --session implement 'Focus on ownership and cleanup.' --turn-id "$TURN_ID"
 cw interrupt "$ENV" --session implement
 ```
 
@@ -86,7 +86,7 @@ Closing your terminal changes nothing in the environment:
 ```sh
 cw ls "$ENV"
 cw logs "$ENV" --session implement
-cw inbox "$ENV" implement
+cw inbox "$ENV" --session implement
 ```
 
 `cw interrupt` ends an active turn. `cw stop "$ENV" --session NAME` cancels

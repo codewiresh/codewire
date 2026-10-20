@@ -24,6 +24,7 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use super::*;
+use crate::commands::progress::terminal_text;
 
 mod host_support;
 mod ports;
@@ -238,6 +239,111 @@ fn validate_private_auth_file(path: &Path) -> Result<(), ()> {
     Ok(())
 }
 
+/// The Mesh owner a local VM's attachment enrolls through: the local Mesh
+/// service, or the signed-in platform's hosted Mesh. Read only from
+/// credential-free records; never from a file that holds a bearer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeMeshOwner {
+    pub(crate) kind: MeshKind,
+    pub(crate) mesh_url: String,
+    pub(crate) organization_id: String,
+}
+
+/// The local Mesh service's owner, when its runtime is this user's own.
+fn native_local_mesh_owner(paths: &ResolvePaths, network: &str) -> anyhow::Result<NativeMeshOwner> {
+    let not_running = || {
+        anyhow::anyhow!(
+            "the local Mesh service is not running; run `cw mesh up` before attaching local:{network}"
+        )
+    };
+    let owner = load_local_mesh_owner_context(&paths.mesh_data_dir)?
+        .filter(|owner| owner.auth_source == LocalMeshOwnerAuthSource::StandaloneLocal)
+        .ok_or_else(not_running)?;
+    let runtime = load_local_mesh_runtime(&paths.mesh_data_dir)?.ok_or_else(not_running)?;
+    #[cfg(target_os = "linux")]
+    mesh_commands::retained::validate_owner(&runtime, &owner)
+        .context("standalone local Mesh runtime custody is unknown; no attachment was admitted")?;
+    #[cfg(not(target_os = "linux"))]
+    if !local_process_is_running(runtime.pid) {
+        anyhow::bail!(
+            "the local Mesh service is stale; run `cw mesh up` before attaching local:{network}"
+        );
+    }
+    anyhow::ensure!(
+        config::same_mesh_url(&owner.mesh_url, &runtime.base_url),
+        "local Mesh owner projection does not match the active standalone runtime"
+    );
+    Ok(NativeMeshOwner {
+        kind: MeshKind::Local,
+        mesh_url: owner.mesh_url,
+        organization_id: owner.organization_id,
+    })
+}
+
+/// The signed-in platform's hosted Mesh and the default organization that
+/// owns new environments there, exactly as the hosted enrollment issuer
+/// checks them. The saved OAuth credential is only required to exist.
+fn native_cloud_mesh_owner(paths: &ResolvePaths, network: &str) -> anyhow::Result<NativeMeshOwner> {
+    let platform = config::load_platform_config(&paths.platform_config_dir).map_err(|_| {
+        anyhow::anyhow!(
+            "Codewire Cloud Mesh needs a sign-in; run `cw login --org ORG` before attaching cloud:{network}"
+        )
+    })?;
+    anyhow::ensure!(
+        config::oauth_credentials_path(&paths.platform_config_dir).is_file(),
+        "Codewire Cloud Mesh needs a sign-in; run `cw login --org ORG` before attaching cloud:{network}"
+    );
+    let organization_id = trimmed_str(&platform.default_org)
+        .map(str::to_owned)
+        .with_context(|| {
+            format!(
+                "no default organization is saved; run `cw org set ORG` before attaching cloud:{network}"
+            )
+        })?;
+    let mesh_url = config::derive_hosted_mesh_url_for_server(&platform.server_url)
+        .context("the saved platform server has no hosted Mesh endpoint")?;
+    Ok(NativeMeshOwner {
+        kind: MeshKind::Cloud,
+        mesh_url,
+        organization_id,
+    })
+}
+
+fn native_mesh_owner(
+    paths: &ResolvePaths,
+    kind: MeshKind,
+    network: &str,
+) -> anyhow::Result<NativeMeshOwner> {
+    match kind {
+        MeshKind::Local => native_local_mesh_owner(paths, network),
+        MeshKind::Cloud => native_cloud_mesh_owner(paths, network),
+    }
+}
+
+/// The Mesh a bare network name on a local VM means: the selected network's
+/// Mesh, else the one Mesh available. Never both.
+fn native_default_mesh(
+    paths: &ResolvePaths,
+    selection: Option<&NetworkSelection>,
+    network: &str,
+) -> anyhow::Result<MeshKind> {
+    if let Some(selection) = selection {
+        return Ok(selection.mesh);
+    }
+    let local = native_local_mesh_owner(paths, network).is_ok();
+    let cloud = native_cloud_mesh_owner(paths, network).is_ok();
+    match (local, cloud) {
+        (true, true) => anyhow::bail!(
+            "network {network:?} could be on the local Mesh service or Codewire Cloud Mesh; pass --network local:{network} or --network cloud:{network}"
+        ),
+        (true, false) => Ok(MeshKind::Local),
+        (false, true) => Ok(MeshKind::Cloud),
+        (false, false) => anyhow::bail!(
+            "no Mesh is available for network {network:?}: run `cw mesh up` for a local Mesh service, or `cw login --org ORG` for Codewire Cloud Mesh"
+        ),
+    }
+}
+
 pub(crate) fn native_create_selected(args: &EnvCreateArgs) -> anyhow::Result<bool> {
     match args.backend.as_deref().map(str::trim) {
         None | Some("") | Some("native") | Some("cloud-hypervisor") => Ok(true),
@@ -245,6 +351,12 @@ pub(crate) fn native_create_selected(args: &EnvCreateArgs) -> anyhow::Result<boo
     }
 }
 
+/// The Mesh attachment of a new local VM. VM location and Mesh location are
+/// independent: `--network cloud:NAME` joins the hosted Mesh even while a
+/// local Mesh service runs, and `local:NAME` the local service. A bare name
+/// and `CODEWIRE_MESH_NETWORK` resolve against the selected Mesh; with
+/// neither, the saved selection applies, asking first unless it connects
+/// automatically.
 fn resolve_native_mesh_attachment(
     paths: &ResolvePaths,
     env: &impl config::Env,
@@ -254,91 +366,106 @@ fn resolve_native_mesh_attachment(
     disable_network: bool,
     assume_yes: bool,
 ) -> anyhow::Result<Option<v1::MeshAttachment>> {
-    let requested_network = requested_network.and_then(trimmed_str);
-    if disable_network && requested_network.is_some() {
+    let requested = requested_network
+        .and_then(trimmed_str)
+        .map(NetworkReference::parse)
+        .transpose()?;
+    if disable_network && requested.is_some() {
         anyhow::bail!("--network and --no-network cannot be used together");
     }
     if disable_network {
         return Ok(None);
     }
 
-    // This descriptor is deliberately separate from both credential stores.
-    // It contains only status-visible metadata written by Mesh/platform setup;
-    // ordinary environment creation must never deserialize a bearer.
-    let owner = load_local_mesh_owner_context(&paths.mesh_data_dir)?;
+    // Credential-free records only: the selection and owner projection.
+    let selection = load_network_selection(&paths.mesh_data_dir)?;
     let environment_network = env
         .var(config::CODEWIRE_MESH_NETWORK_ENV)
         .and_then(|network| trimmed_str(&network).map(str::to_owned));
-    let network_id = requested_network
-        .map(str::to_owned)
-        .or(environment_network)
-        .or_else(|| {
-            owner
-                .as_ref()
-                .and_then(|owner| owner.selected_network.as_deref())
-                .and_then(trimmed_str)
-                .map(str::to_owned)
-        });
-    let Some(network_id) = network_id else {
-        return Ok(None);
+    let (kind, network_id, explicit, from_selection) = match requested {
+        Some(NetworkReference {
+            mesh: Some(kind),
+            network,
+        }) => (kind, network, true, false),
+        Some(NetworkReference {
+            mesh: None,
+            network,
+        }) => (
+            native_default_mesh(paths, selection.as_ref(), &network)?,
+            network,
+            true,
+            false,
+        ),
+        None => match (environment_network, selection.as_ref()) {
+            (Some(network), _) => (
+                native_default_mesh(paths, selection.as_ref(), &network)?,
+                network,
+                false,
+                false,
+            ),
+            (None, Some(selection)) => (selection.mesh, selection.network_id.clone(), false, true),
+            (None, None) => {
+                if let Some(legacy) = load_local_mesh_owner_context(&paths.mesh_data_dir)
+                    .ok()
+                    .flatten()
+                    .and_then(|owner| owner.selected_network)
+                {
+                    eprintln!(
+                        "{}",
+                        mesh_commands::selection::legacy_selection_notice(&terminal_text(&legacy))
+                    );
+                }
+                return Ok(None);
+            }
+        },
     };
 
-    let auto_connect = owner.as_ref().is_some_and(|owner| {
-        owner.auto_connect && owner.selected_network.as_deref() == Some(network_id.as_str())
-    });
-    if requested_network.is_none() && !assume_yes && !auto_connect {
-        if !stdin_is_interactive() {
-            return Ok(None);
-        }
-        let mesh_url = owner
-            .as_ref()
-            .map(|owner| owner.mesh_url.as_str())
-            .unwrap_or("the local Mesh service");
-        if !prompt_confirm_default_no(&format!(
-            "Join Codewire Mesh network {network_id:?} at {mesh_url} for remote access. Continue"
-        ))? {
-            return Ok(None);
-        }
+    let auto_connect = from_selection && selection.as_ref().is_some_and(|s| s.auto_connect);
+    if !explicit && !assume_yes && !auto_connect && !stdin_is_interactive() {
+        return Ok(None);
+    }
+    let owner = native_mesh_owner(paths, kind, &network_id)?;
+    if from_selection
+        && let Some(selection) = selection.as_ref()
+        && !selection.is_for(&owner.mesh_url, &owner.organization_id)
+    {
+        anyhow::bail!(
+            "the selected network {} is for {} in organization {}, but {} is now {} in organization {}; select it again with `cw {} network use {}`",
+            selection.reference(),
+            terminal_text(&selection.mesh_url),
+            terminal_text(&selection.organization_id),
+            kind.label(),
+            terminal_text(&owner.mesh_url),
+            terminal_text(&owner.organization_id),
+            kind.flag(),
+            terminal_text(&network_id),
+        );
+    }
+    if !explicit
+        && !assume_yes
+        && !auto_connect
+        && !prompt_confirm_default_no(&format!(
+            "Join {} network {}:{} at {} (organization {}) for remote access. Continue",
+            kind.label(),
+            kind.prefix(),
+            terminal_text(&network_id),
+            terminal_text(&owner.mesh_url),
+            terminal_text(&owner.organization_id),
+        ))?
+    {
+        return Ok(None);
     }
 
-    let owner = owner.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no Mesh owner is configured; run 'cw login --org <org>' for hosted Mesh or run 'cw mesh up' for standalone Mesh before attaching network {network_id:?}"
-        )
-    })?;
-    let (auth_source, proto_auth_source) = match owner.auth_source {
-        LocalMeshOwnerAuthSource::StandaloneLocal => {
-            let runtime = load_local_mesh_runtime(&paths.mesh_data_dir)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "local Mesh is not running; run 'cw mesh up' before attaching network {network_id:?}"
-                )
-            })?;
-            #[cfg(target_os = "linux")]
-            mesh_commands::retained::validate_owner(&runtime, &owner).context(
-                "standalone local Mesh runtime custody is unknown; no attachment was admitted",
-            )?;
-            #[cfg(not(target_os = "linux"))]
-            if !local_process_is_running(runtime.pid) {
-                anyhow::bail!(
-                    "local Mesh runtime is stale; run 'cw mesh up' before attaching network {network_id:?}"
-                );
-            }
-            if !config::same_mesh_url(&owner.mesh_url, &runtime.base_url) {
-                anyhow::bail!(
-                    "local Mesh owner projection does not match the active standalone runtime"
-                );
-            }
-            (
-                codewire_local_vmm::mesh_ingress::MeshEnrollmentAuthSource::StandaloneLocal,
-                v1::MeshEnrollmentAuthSource::StandaloneLocal,
-            )
-        }
-        LocalMeshOwnerAuthSource::HostedCurrent => (
+    let (auth_source, proto_auth_source) = match owner.kind {
+        MeshKind::Local => (
+            codewire_local_vmm::mesh_ingress::MeshEnrollmentAuthSource::StandaloneLocal,
+            v1::MeshEnrollmentAuthSource::StandaloneLocal,
+        ),
+        MeshKind::Cloud => (
             codewire_local_vmm::mesh_ingress::MeshEnrollmentAuthSource::HostedCurrent,
             v1::MeshEnrollmentAuthSource::HostedCurrent,
         ),
     };
-
     let attachment = codewire_local_vmm::mesh_ingress::MeshAttachment::new_with_auth_source(
         auth_source,
         &owner.mesh_url,
@@ -3473,14 +3600,37 @@ mod tests {
         assert_eq!(parse_native_disk("40GiB").unwrap(), 40 * 1024 * 1024 * 1024);
     }
 
+    /// A signed-in platform as the hosted owner reads it: its saved server
+    /// and default organization, and an OAuth file that is never parsed.
+    fn signed_in_platform(platform_config_dir: &Path) {
+        config::save_platform_config(
+            platform_config_dir,
+            &config::PlatformConfig {
+                server_url: "https://api.codewire-dev.sh".to_owned(),
+                default_org: "org-hosted".to_owned(),
+            },
+        )
+        .unwrap();
+        std::fs::write(
+            config::oauth_credentials_path(platform_config_dir),
+            "not parsed by environment creation",
+        )
+        .unwrap();
+    }
+
+    fn private_dir(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
-    fn native_mesh_attachment_uses_only_the_public_owner_projection() {
+    fn native_mesh_attachment_uses_only_credential_free_records() {
         let root = tempfile::tempdir().unwrap();
         let mesh_data_dir = root.path().join("mesh");
         let paths = ResolvePaths {
             mesh_data_dir: mesh_data_dir.clone(),
-            platform_config_dir: root.path().join("unused-platform"),
+            platform_config_dir: root.path().join("platform"),
         };
         let runtime = LocalMeshRuntime {
             pid: std::process::id(),
@@ -3501,11 +3651,12 @@ mod tests {
                 auth_source: LocalMeshOwnerAuthSource::StandaloneLocal,
                 mesh_url: "http://127.0.0.1:18090".to_owned(),
                 organization_id: "local-org-alpha".to_owned(),
-                selected_network: Some("selected-network".to_owned()),
+                selected_network: None,
                 auto_connect: false,
             },
         )
         .unwrap();
+        signed_in_platform(&paths.platform_config_dir);
         // Native creation must not deserialize this credential-bearing file.
         std::fs::write(mesh_data_dir.join("config.toml"), "not valid toml = [").unwrap();
         let project = NativeProjectPlan {
@@ -3514,41 +3665,32 @@ mod tests {
                 .spec,
             ..NativeProjectPlan::default()
         };
+        let attach = |requested: Option<&str>, yes: bool| {
+            resolve_native_mesh_attachment(
+                &paths,
+                &config::MapEnv::default(),
+                "native-dev",
+                &project,
+                requested,
+                false,
+                yes,
+            )
+        };
 
-        let error = resolve_native_mesh_attachment(
-            &paths,
-            &config::MapEnv::default(),
-            "native-dev",
-            &project,
-            Some("explicit-network"),
-            false,
-            false,
-        )
-        .unwrap_err();
+        // local: needs the owned running service; its custody is unknown here.
+        let error = attach(Some("local:explicit-network"), false).unwrap_err();
         assert!(error.to_string().contains("custody is unknown"), "{error}");
         assert_eq!(
             load_local_mesh_runtime(&mesh_data_dir).unwrap().unwrap(),
             runtime
         );
-        let mut hosted = load_local_mesh_owner_context(&mesh_data_dir)
+
+        // cloud: joins the hosted Mesh even while a local Mesh record exists.
+        let explicit = attach(Some("cloud:explicit-network"), false)
             .unwrap()
             .unwrap();
-        hosted.auth_source = LocalMeshOwnerAuthSource::HostedCurrent;
-        save_local_mesh_owner_context(&mesh_data_dir, &hosted).unwrap();
-
-        let explicit = resolve_native_mesh_attachment(
-            &paths,
-            &config::MapEnv::default(),
-            "native-dev",
-            &project,
-            Some("explicit-network"),
-            false,
-            false,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(explicit.mesh_url, "http://127.0.0.1:18090");
-        assert_eq!(explicit.organization_id, "local-org-alpha");
+        assert_eq!(explicit.mesh_url, "https://mesh.codewire-dev.sh");
+        assert_eq!(explicit.organization_id, "org-hosted");
         assert_eq!(explicit.network_id, "explicit-network");
         assert_eq!(explicit.node_name, "native-dev");
         assert_eq!(explicit.guest_ports, vec![3_001, 8_080]);
@@ -3556,82 +3698,72 @@ mod tests {
             explicit.auth_source,
             v1::MeshEnrollmentAuthSource::HostedCurrent as i32
         );
+        // A bare name resolves against the one Mesh available: the cloud.
+        let bare = attach(Some("explicit-network"), false).unwrap().unwrap();
+        assert_eq!(bare.mesh_url, "https://mesh.codewire-dev.sh");
 
-        let selected = resolve_native_mesh_attachment(
-            &paths,
-            &config::MapEnv::default(),
-            "native-dev",
-            &project,
-            None,
+        // The saved selection: asked for unless --yes or auto-connect.
+        let mut selection = NetworkSelection::new(
+            MeshKind::Cloud,
+            "https://mesh.codewire-dev.sh",
+            "org-hosted",
+            "selected-network",
             false,
-            true,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(selected.network_id, "selected-network");
+        );
+        save_network_selection(&mesh_data_dir, &selection).unwrap();
+        assert!(
+            attach(None, false).unwrap().is_none(),
+            "noninteractive asks first"
+        );
+        assert_eq!(
+            attach(None, true).unwrap().unwrap().network_id,
+            "selected-network"
+        );
+        selection.auto_connect = true;
+        save_network_selection(&mesh_data_dir, &selection).unwrap();
+        assert_eq!(
+            attach(None, false).unwrap().unwrap().network_id,
+            "selected-network"
+        );
 
-        let mut owner = load_local_mesh_owner_context(&mesh_data_dir)
-            .unwrap()
-            .unwrap();
-        owner.auto_connect = true;
-        save_local_mesh_owner_context(&mesh_data_dir, &owner).unwrap();
-        let automatic = resolve_native_mesh_attachment(
-            &paths,
-            &config::MapEnv::default(),
-            "native-dev",
-            &project,
-            None,
-            false,
-            false,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(automatic.network_id, "selected-network");
+        // A selection for another organization is never applied silently.
+        selection.organization_id = "org-other".to_owned();
+        save_network_selection(&mesh_data_dir, &selection).unwrap();
+        let stale = attach(None, false).unwrap_err().to_string();
+        assert!(stale.contains("select it again"), "{stale}");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn native_mesh_attachment_honors_disable_and_requires_a_live_local_owner() {
+    fn native_mesh_attachment_honors_disable_and_requires_a_live_owner() {
         let root = tempfile::tempdir().unwrap();
         let paths = ResolvePaths {
             mesh_data_dir: root.path().join("missing-mesh"),
             platform_config_dir: root.path().join("unused-platform"),
         };
         let project = NativeProjectPlan::default();
-        assert!(
+        let attach = |requested: Option<&str>, disable: bool| {
             resolve_native_mesh_attachment(
                 &paths,
                 &config::MapEnv::default(),
                 "native-dev",
                 &project,
-                None,
-                true,
+                requested,
+                disable,
                 true,
             )
-            .unwrap()
-            .is_none()
-        );
-        let error = resolve_native_mesh_attachment(
-            &paths,
-            &config::MapEnv::default(),
-            "native-dev",
-            &project,
-            Some("project-alpha"),
-            false,
-            true,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("run 'cw mesh up'"), "{error}");
-        let conflict = resolve_native_mesh_attachment(
-            &paths,
-            &config::MapEnv::default(),
-            "native-dev",
-            &project,
-            Some("project-alpha"),
-            true,
-            true,
-        )
-        .unwrap_err();
+        };
+        assert!(attach(None, true).unwrap().is_none());
+        assert!(attach(None, false).unwrap().is_none(), "nothing selected");
+        let local = attach(Some("local:project-alpha"), false).unwrap_err();
+        assert!(local.to_string().contains("run `cw mesh up`"), "{local}");
+        let cloud = attach(Some("cloud:project-alpha"), false).unwrap_err();
+        assert!(cloud.to_string().contains("cw login"), "{cloud}");
+        let bare = attach(Some("project-alpha"), false).unwrap_err();
+        assert!(bare.to_string().contains("no Mesh is available"), "{bare}");
+        let unknown = attach(Some("platform:project-alpha"), false).unwrap_err();
+        assert!(unknown.to_string().contains("unknown Mesh"), "{unknown}");
+        let conflict = attach(Some("project-alpha"), true).unwrap_err();
         assert_eq!(
             conflict.to_string(),
             "--network and --no-network cannot be used together"
@@ -3639,22 +3771,23 @@ mod tests {
     }
 
     #[test]
-    fn native_hosted_mesh_attachment_uses_only_the_credential_free_projection() {
+    fn native_hosted_mesh_attachment_follows_the_hosted_selection() {
         let root = tempfile::tempdir().unwrap();
         let paths = ResolvePaths {
             mesh_data_dir: root.path().join("mesh"),
-            platform_config_dir: root.path().join("missing-protected-platform-store"),
+            platform_config_dir: root.path().join("platform"),
         };
-        save_local_mesh_owner_context(
+        private_dir(&paths.mesh_data_dir);
+        signed_in_platform(&paths.platform_config_dir);
+        save_network_selection(
             &paths.mesh_data_dir,
-            &LocalMeshOwnerContext {
-                schema_version: 1,
-                auth_source: LocalMeshOwnerAuthSource::HostedCurrent,
-                mesh_url: "https://mesh.codewire-dev.sh".to_owned(),
-                organization_id: "org-hosted".to_owned(),
-                selected_network: Some("project-alpha".to_owned()),
-                auto_connect: true,
-            },
+            &NetworkSelection::new(
+                MeshKind::Cloud,
+                "https://mesh.codewire-dev.sh",
+                "org-hosted",
+                "project-alpha",
+                true,
+            ),
         )
         .unwrap();
 

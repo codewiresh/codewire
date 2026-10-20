@@ -289,7 +289,7 @@ class Journey:
         return launched
 
     def inbox(self, name):
-        return self.call("inbox", self.environment, name, "--output", "json", data=True)
+        return self.call("inbox", self.environment, "--session", name, "--output", "json", data=True)
 
     def until(self, probe, predicate, timeout=60):
         deadline = time.monotonic() + timeout
@@ -350,7 +350,7 @@ class Journey:
         self.launch("lead", agent="codex")
         self.until(lambda: self.inbox("lead"), lambda v: v["driver"] and v["driver"]["phase"] == "idle")
         text = "Reply with exactly LEAD_READY. Do not use tools." if self.native else "FIRST"
-        message = self.call("msg", self.environment, "lead", text, "--output", "json", data=True)
+        message = self.call("msg", self.environment, "--session", "lead", text, "--output", "json", data=True)
         complete = self.wait_message(message["id"])
         assert complete["state"] == "completed" and complete["native_acknowledged"], complete
         self.call("send", self.environment, "--session", "lead", "raw", ok=False)
@@ -368,7 +368,7 @@ class Journey:
                             timeout=180)
         notifications = [m for m in parent["messages"] if m["action"] == "notification"]
         assert len(notifications) == 1 and notifications[0]["source"]["session_id"] == worker["session"]["session_id"]
-        self.call("steer", self.environment, "worker", "unsupported", ok=False)
+        self.call("steer", self.environment, "--session", "worker", "unsupported", ok=False)
         if not self.native:
             self.knows_itself("claude", "worker")
         self.check("claude-worker/native-ack/idle-parent-wake/no-duplicate")
@@ -382,7 +382,7 @@ class Journey:
             text = ("Run this exact command once, using your command tool: " +
                     " ".join(__import__("shlex").quote(a) for a in command) +
                     ". Do not run any other command or edit files. Then reply LEAD_COMMAND_STARTED.")
-            message = self.call("msg", self.environment, "lead", text, "--output", "json", data=True)
+            message = self.call("msg", self.environment, "--session", "lead", text, "--output", "json", data=True)
             result = self.wait_message(message["id"])
             assert result["state"] == "completed", result
             output = self.call("wait", self.environment, "--session", "lead-command", "--timeout", "10s").stdout
@@ -392,7 +392,7 @@ class Journey:
             saved_thread = self.inbox("worker")["driver"]["native_thread_id"]
             self.call("stop", self.environment, "--session", "worker")
             self.call("restart", self.environment, "--session", "worker")
-            resumed = self.call("msg", self.environment, "worker",
+            resumed = self.call("msg", self.environment, "--session", "worker",
                                 "Reply with exactly CLAUDE_RESUMED. Do not use tools.",
                                 "--output", "json", data=True)
             assert self.wait_message(resumed["id"])["state"] == "completed"
@@ -402,13 +402,13 @@ class Journey:
                 timeout=180)
             self.check("claude-xhigh/resume/same-conversation/parent-wake")
         else:
-            holding = self.call("msg", self.environment, "lead", "HOLD", "--output", "json", data=True)
+            holding = self.call("msg", self.environment, "--session", "lead", "HOLD", "--output", "json", data=True)
             self.until(lambda: self.inbox("lead"), lambda v: v["driver"]["current_turn_id"] is not None)
-            self.call("steer", self.environment, "lead", "bad", "--turn-id", "other-turn", ok=False)
-            steered = self.call("steer", self.environment, "lead", "finish", "--output", "json", data=True)
+            self.call("steer", self.environment, "--session", "lead", "bad", "--turn-id", "other-turn", ok=False)
+            steered = self.call("steer", self.environment, "--session", "lead", "finish", "--output", "json", data=True)
             assert self.wait_message(holding["id"])["result"] == "STEERED"
             assert self.wait_message(steered["id"])["state"] == "completed"
-            holding = self.call("msg", self.environment, "worker", "HOLD", "--output", "json", data=True)
+            holding = self.call("msg", self.environment, "--session", "worker", "HOLD", "--output", "json", data=True)
             # Acceptance precedes the driver's active-turn publication.
             self.until(lambda: self.inbox("worker"), lambda v: v["driver"]["active_message_id"] == holding["id"])
             interrupted = self.call("interrupt", self.environment, "--session", "worker", "--output", "json", data=True)
@@ -599,7 +599,7 @@ class Journey:
         inbox = self.until(lambda: self.inbox("paused-noel"), lambda v: v["session_state"] == "Running")
         shown = next(m for m in inbox["messages"] if m["id"] == message["id"])
         assert shown["state"] == "paused" and shown["pause"]["reason"] == "environment_stopped", shown
-        text = self.call("inbox", env, "paused-noel").stdout
+        text = self.call("inbox", env, "--session", "paused-noel").stdout
         line = next(line for line in text.splitlines() if line.startswith(message["id"]))
         assert line.split("\t")[2] == "paused: environment stopped", text
         print(f"cli-host: noel inbox while paused: {line}", flush=True)
@@ -651,7 +651,7 @@ class Journey:
         handshake = [e["received"] for e in trace[begin:] if "received" in e][:3]
         assert handshake == [{"id": 1, "type": "get_state"}, {"id": 2, "type": "clear_queue"},
                              {"id": 3, "type": "resume_run", "expectedRunId": run}], handshake
-        inbox = self.call("inbox", env, "paused-noel").stdout
+        inbox = self.call("inbox", env, "--session", "paused-noel").stdout
         line = next(line for line in inbox.splitlines() if line.startswith(message["id"]))
         assert line.endswith("(resumed after its environment stopped)"), inbox
         logs = self.call("logs", env, "--session", "paused-noel").stdout
@@ -670,7 +670,7 @@ class Journey:
             assert record["state"] == "unknown" and "pause" not in record, (name, record)
         self.call("restart", env, "--session", lead)
         self.told_pause_then_final(lead, message)
-        reply = self.call("msg", env, "paused-noel", "AFTER", "--output", "json", data=True)
+        reply = self.call("msg", env, "--session", "paused-noel", "AFTER", "--output", "json", data=True)
         assert self.wait_message(reply["id"])["result"] == "[faux/echo] AFTER"
 
     def prove_killed_first(self, lead):
@@ -799,7 +799,7 @@ class Journey:
         self.heard_once(lead, message)
         notes = self.notices(lead, message["id"])
         assert len(notes) == 1 and "paused message" not in notes[0]["text"], notes
-        reply = self.call("msg", env, name, "AFTER", "--output", "json", data=True)
+        reply = self.call("msg", env, "--session", name, "AFTER", "--output", "json", data=True)
         assert self.wait_message(reply["id"])["result"] == "[faux/echo] AFTER"
 
     def prove_removed(self):
@@ -908,7 +908,7 @@ class Journey:
         parked = self.launch("parked", agent="codex", parent="lead", prompt="HOLD")
         self.until(lambda: self.inbox("parked"), lambda v: v["driver"]["current_turn_id"] is not None)
         self.call("stop", self.environment, "--session", "lead")
-        self.call("steer", self.environment, "parked", "finish")
+        self.call("steer", self.environment, "--session", "parked", "finish")
         source = self.wait_message(parked["message"]["id"])
         self.until(lambda: self.inbox("lead"), lambda v: any(
             m["source"] and m["source"]["message_id"] == source["id"] and m["state"] == "undelivered"
@@ -970,7 +970,7 @@ class Journey:
 
     def held(self, name, text):
         """Send TEXT and wait until noel names the run it started."""
-        message = self.call("msg", self.environment, name, text, "--output", "json", data=True)
+        message = self.call("msg", self.environment, "--session", name, text, "--output", "json", data=True)
         self.until(lambda: self.inbox(name), lambda v: v["driver"]["active_message_id"] == message["id"]
                    and v["driver"]["current_turn_id"] is not None)
         return message, self.inbox(name)["driver"]["current_turn_id"]
@@ -978,7 +978,7 @@ class Journey:
     def hold(self, name, turn=True, text="HOLD"):
         """Send TEXT to NAME and wait until its driver runs it and, with TURN,
         until the agent names its turn, which Claude does not report."""
-        message = self.call("msg", self.environment, name, text, "--output", "json", data=True)
+        message = self.call("msg", self.environment, "--session", name, text, "--output", "json", data=True)
         self.until(lambda: self.inbox(name), lambda v: v["driver"]["active_message_id"] == message["id"]
                    and (not turn or v["driver"]["current_turn_id"] is not None))
         return message, self.inbox(name)["driver"]["current_turn_id"]
@@ -1109,7 +1109,7 @@ class Journey:
         self.knows_itself("noel", "noel-lead")
         assert driver["capabilities"]["steer"] and driver["capabilities"]["interrupt"], driver
         session = driver["native_thread_id"]
-        assert "[faux/echo] Hello" in self.call("inbox", env, "noel-lead").stdout
+        assert "[faux/echo] Hello" in self.call("inbox", env, "--session", "noel-lead").stdout
         assert "says: [faux/echo] Hello" in self.call("logs", env, "--session", "noel-lead").stdout
         trace = self.noel_trace("noel-lead")
         skill, _ = self.delegation_skill("noel-lead")
@@ -1125,12 +1125,12 @@ class Journey:
         # A message sent while noel is busy waits in the Codewire mailbox; a
         # steer for another run never reaches noel; a steer is acknowledged.
         holding, run = self.held("noel-lead", "HOLD")
-        queued = self.call("msg", env, "noel-lead", "QUEUED", "--output", "json", data=True)
+        queued = self.call("msg", env, "--session", "noel-lead", "QUEUED", "--output", "json", data=True)
         assert queued["state"] == "accepted" and self.inbox("noel-lead")["driver"]["queued"] == 1
-        fenced = self.call("steer", env, "noel-lead", "fenced", "--turn-id",
+        fenced = self.call("steer", env, "--session", "noel-lead", "fenced", "--turn-id",
                            "00000000-0000-4000-8000-000000000000", ok=False)
         assert "nothing was steered" in fenced.stderr, fenced.stderr
-        steered, steer_time = self.timed("steer", env, "noel-lead", "finish", "--turn-id", run,
+        steered, steer_time = self.timed("steer", env, "--session", "noel-lead", "finish", "--turn-id", run,
                                          "--output", "json")
         steered = json.loads(steered.stdout)
         # The synthetic run ends as soon as the steer is delivered.
@@ -1146,7 +1146,7 @@ class Journey:
 
         # A steer that reaches noel after its run settled is refused by noel.
         late, run = self.held("noel-lead", "LATE")
-        refused = self.call("steer", env, "noel-lead", "too late", ok=False)
+        refused = self.call("steer", env, "--session", "noel-lead", "too late", ok=False)
         assert f"noel refused the steer: expectedRunId {run} does not match: no run is active" in refused.stderr, \
             refused.stderr
         assert self.wait_message(late["id"])["result"] == "[faux/echo] LATE"
@@ -1155,7 +1155,7 @@ class Journey:
         # An abort is acknowledged by the run's settlement. The steer it left
         # queued in noel never joins the next message.
         holding, run = self.held("noel-lead", "HOLD")
-        waiting = self.call("steer", env, "noel-lead", "WAIT", "--output", "json", data=True)
+        waiting = self.call("steer", env, "--session", "noel-lead", "WAIT", "--output", "json", data=True)
         assert waiting["native_acknowledged"], waiting
         interrupted, abort_time = self.timed("interrupt", env, "--session", "noel-lead", "--output", "json")
         interrupted = json.loads(interrupted.stdout)
@@ -1164,11 +1164,11 @@ class Journey:
         assert self.wait_message(waiting["id"], ok=False)["state"] == "interrupted"
         aborts = [r for r in self.received("noel-lead") if r["type"] == "abort"]
         assert len(aborts) == 1 and aborts[0]["expectedRunId"] == run, aborts
-        following = self.call("msg", env, "noel-lead", "NEXT", "--output", "json", data=True)
+        following = self.call("msg", env, "--session", "noel-lead", "NEXT", "--output", "json", data=True)
         assert self.wait_message(following["id"])["result"] == "[faux/echo] NEXT"
         self.check(f"noel-interrupt-acknowledged-{abort_time:.2f}s/queued-steer-not-replayed")
 
-        dialog = self.call("msg", env, "noel-lead", "DIALOG", "--output", "json", data=True)
+        dialog = self.call("msg", env, "--session", "noel-lead", "DIALOG", "--output", "json", data=True)
         assert self.wait_message(dialog["id"])["result"] == "[faux/echo] DIALOG"
         answers = [r for r in self.received("noel-lead") if r["type"] == "extension_ui_response"]
         assert len(answers) == 1 and answers[0]["cancelled"] is True and answers[0]["id"], answers
@@ -1176,7 +1176,7 @@ class Journey:
 
         # A notification, such as an account failover switch, is shown in the
         # session log and needs no answer.
-        notified = self.call("msg", env, "noel-lead", "NOTIFY", "--output", "json", data=True)
+        notified = self.call("msg", env, "--session", "noel-lead", "NOTIFY", "--output", "json", data=True)
         assert self.wait_message(notified["id"])["result"] == "[faux/echo] NOTIFY"
         assert [r for r in self.received("noel-lead") if r["type"] == "extension_ui_response"] == answers
         logs = self.call("logs", env, "--session", "noel-lead").stdout
@@ -1204,7 +1204,7 @@ class Journey:
         assert cut["state"] == "interrupted" and cut["turn_id"] == run, cut
         self.aborted_before_signal("noel-worker", run)
         assert self.interrupts_logged("noel-worker") == 1
-        again = self.call("msg", env, "noel-worker", "AGAIN", "--output", "json", data=True)
+        again = self.call("msg", env, "--session", "noel-worker", "AGAIN", "--output", "json", data=True)
         assert self.wait_message(again["id"])["result"] == "[faux/echo] AGAIN"
         starts = [e for e in self.noel_trace("noel-worker") if e.get("event") == "start"]
         assert len(starts) == 2 and starts[0] == starts[1], starts
@@ -1227,7 +1227,7 @@ class Journey:
         assert cut["state"] == "interrupted" and cut["turn_id"] == run, cut
         assert self.interrupts_logged("noel-worker") == 2
         self.aborted_before_signal("noel-worker", run)
-        after = self.call("msg", env, "noel-worker", "AFTER", "--output", "json", data=True)
+        after = self.call("msg", env, "--session", "noel-worker", "AFTER", "--output", "json", data=True)
         assert self.wait_message(after["id"])["result"] == "[faux/echo] AFTER"
         for name, agent in (("codex-stopped", "codex"), ("claude-stopped", "claude")):
             other, _, _ = self.stop_mid_run(name, turn=agent == "codex", verb="restart")
@@ -1330,7 +1330,7 @@ class Journey:
             self.heard_once(lead, message)
             self.call("restart", env, "--session", name)
             self.idle(name)
-            after = self.call("msg", env, name, "AFTER", "--output", "json", data=True)
+            after = self.call("msg", env, "--session", name, "AFTER", "--output", "json", data=True)
             assert self.wait_message(after["id"])["result"] == "RESULT:AFTER"
         self.check("codex-and-claude-killed-driver-or-agent-unknown-as-before/never-restarted")
 
@@ -1404,7 +1404,7 @@ class Journey:
                                {"id": 3, "type": "resume_run", "expectedRunId": run}]] * resumes, handshakes
         assert sum(r["type"] == "resume_run" and r["expectedRunId"] == run for r in received) == resumes
         note = "(resumed by noel)" if resumes == 1 else f"(resumed by noel {resumes} times)"
-        inbox = self.call("inbox", self.environment, name).stdout
+        inbox = self.call("inbox", self.environment, "--session", name).stdout
         assert next(line for line in inbox.splitlines() if line.startswith(message["id"])).endswith(note), inbox
         logs = self.call("logs", self.environment, "--session", name).stdout
         assert f"message {message['id']} resumed by noel: run {run}, resume {resumes} of 3" in logs, logs
@@ -1503,7 +1503,7 @@ class Journey:
         lead = self.launch("noel-lead", agent="noel", model="faux/echo", prompt="Hello", env=private)
         first = self.wait_message(lead["message"]["id"])
         assert first["state"] == "completed" and first["result"] == "[faux/echo] Hello", first
-        inbox = self.call("inbox", env, "noel-lead").stdout
+        inbox = self.call("inbox", env, "--session", "noel-lead").stdout
         assert "[faux/echo] Hello" in inbox, inbox
         session = self.inbox("noel-lead")["driver"]["native_thread_id"]
         journal = agent / "sessions" / f"{session}.jsonl"
@@ -1521,7 +1521,7 @@ class Journey:
         print(f"cli-host: noel inbox: {inbox.splitlines()[-1]}", flush=True)
         self.check("real-noel-first-turn/inbox-shows-reply")
 
-        again = self.call("msg", env, "noel-lead", "Again", "--output", "json", data=True)
+        again = self.call("msg", env, "--session", "noel-lead", "Again", "--output", "json", data=True)
         assert self.wait_message(again["id"])["result"] == "[faux/echo] Again"
         assert self.inbox("noel-lead")["driver"]["native_thread_id"] == session
         assert said("user") == ["Hello", "Again"], said("user")
@@ -1547,10 +1547,10 @@ class Journey:
         self.until(lambda: self.inbox("noel-slow"), lambda v: v["driver"] and v["driver"]["phase"] == "idle")
         story_text = "Write a long story about a lighthouse keeper and the sea."
         story, run = self.held("noel-slow", story_text)
-        refused = self.call("steer", env, "noel-slow", "Wrong run", "--turn-id",
+        refused = self.call("steer", env, "--session", "noel-slow", "Wrong run", "--turn-id",
                             "00000000-0000-4000-8000-000000000000", ok=False)
         assert "nothing was steered" in refused.stderr, refused.stderr
-        steered, steer_time = self.timed("steer", env, "noel-slow", "Be brief.", "--turn-id", run,
+        steered, steer_time = self.timed("steer", env, "--session", "noel-slow", "Be brief.", "--turn-id", run,
                                          "--output", "json")
         steered = json.loads(steered.stdout)
         assert steered["native_acknowledged"] and steered["turn_id"] == run, steered
@@ -1584,7 +1584,7 @@ class Journey:
               f"noel's run {last['status']}", flush=True)
         self.check(f"real-noel-stop-interrupts-run-first-in-{stop_time:.2f}s/journal-aborted")
 
-        short = self.call("msg", env, "noel-slow", "Short.", "--output", "json", data=True)
+        short = self.call("msg", env, "--session", "noel-slow", "Short.", "--output", "json", data=True)
         assert self.wait_message(short["id"])["result"] == "[faux/echo] Short."
         assert self.inbox("noel-slow")["driver"]["native_thread_id"] == slow_session
         # noel saved both stories' prompts and no reply but the last: an
@@ -1844,7 +1844,7 @@ class Journey:
             assert len(sent) == 2 and sent[0]["messages"] == sent[1]["messages"] == [
                 {"role": "user", "content": prompt}], sent
             assert journal_runs(journal) == {run: "completed"}, journal_runs(journal)
-            inbox = self.call("inbox", env, "pause-worker").stdout
+            inbox = self.call("inbox", env, "--session", "pause-worker").stdout
             line = next(line for line in inbox.splitlines() if line.startswith(message["id"]))
             assert line.endswith("(resumed after its environment stopped)"), inbox
             print(f"cli-host: noel inbox after its environment restarted: {line}", flush=True)
@@ -1985,7 +1985,7 @@ class Journey:
                 tool("read", path=str(file)), tool("bash", command=launch), tool("bash", command=reviews["codex"]),
                 tool("bash", command=reviews["claude"]), tool("bash", command=launch),
                 [{"text": "Delegated."}], said, said, said)
-            first = self.call("msg", env, lead, "Have the lighthouses counted and the count reviewed.",
+            first = self.call("msg", env, "--session", lead, "Have the lighthouses counted and the count reviewed.",
                               "--output", "json", data=True)
             asked = sent(1)[0]
             # A noel without the skill listing sends no system prompt at all.
@@ -2037,7 +2037,7 @@ class Journey:
             looked, followed, steered = respond(
                 tool("bash", command=skill("inbox", named)), tool("bash", command=follow),
                 tool("bash", "delegate-steer", command=skill("steer", {**named, "TEXT": "Be brief."})))
-            second = self.call("msg", env, lead, "Follow up with the worker, then stop it.",
+            second = self.call("msg", env, "--session", lead, "Follow up with the worker, then stop it.",
                                "--output", "json", data=True)
             assert f"{ids[worker]}\tprompt\tcompleted\t" in ran(looked), ran(looked)
             follow_id = message_id(ran(followed))
@@ -2107,7 +2107,7 @@ class Journey:
         assert prompts == [message["text"]], prompts
         assert journal_runs(journal) == {run: "completed"}, journal_runs(journal)
         note = "(resumed by noel)" if resumes == 1 else f"(resumed by noel {resumes} times)"
-        inbox = self.call("inbox", self.environment, name).stdout
+        inbox = self.call("inbox", self.environment, "--session", name).stdout
         assert next(line for line in inbox.splitlines() if line.startswith(message["id"])).endswith(note), inbox
         logs = self.call("logs", self.environment, "--session", name).stdout
         assert f"message {message['id']} resumed by noel: run {run}, resume {resumes} of 3" in logs, logs
@@ -2157,9 +2157,12 @@ def skill_commands(text):
 
 
 def message_id(printed):
-    """The message ID in what `cw run --detach --prompt`, `cw msg`, `cw steer`
-    or `cw interrupt` printed: a line `ID<tab>STATE`."""
-    found = re.findall(r"^([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\t[a-z_]+$", printed, re.M)
+    """The message ID in what `cw run --detach --prompt`, `cw steer` or
+    `cw interrupt` printed (a line `ID<tab>STATE`), or `cw msg` printed (a
+    line `<mark> Message ID STATE`)."""
+    uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    found = re.findall(rf"^({uuid})\t[a-z_]+$", printed, re.M)
+    found += re.findall(rf"^\S+ Message ({uuid}) [a-z_]+", printed, re.M)
     assert len(found) == 1, printed
     return found[0]
 

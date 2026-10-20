@@ -5,30 +5,46 @@ weight: 3
 ---
 
 A managed conversation is started with `cw run --in ENV --agent codex|claude`;
-see [Sessions](@/cli/sessions.md#cw-run). These commands address it by `ENV`
-and `SESSION`; `interrupt` names the session with `--session`.
+see [Sessions](@/cli/sessions.md#cw-run). These commands name the
+environment as `ENV` or `--in ENV` (the selected environment when omitted)
+and the session with `--session`.
 
 ## cw msg
 
 ```sh
-cw msg [ENV] SESSION TEXT [--reply-to MESSAGE_ID] [-o json]
+cw msg [ENV] --session SESSION TEXT [--reply-to MESSAGE_ID] [-o json]
 ```
 
-Sends a task, follow-up or reply to the conversation and returns a message ID.
-`--reply-to` threads it under an earlier message. After a hosted sandbox was
-stopped and started, the first `msg` resumes the conversation in the new
-sandbox.
+One text command for both kinds of session. `cw msg` looks up the session
+before writing anything and acts on its recorded mode:
+
+- A managed conversation receives a durable task, follow-up or reply through
+  its driver. `cw msg` prints the message ID and its actual state; `cw wait
+  --message ID` waits for its result. `--reply-to` threads it under an
+  earlier message. After a hosted sandbox was stopped and started, the first
+  `msg` resumes the conversation in the new sandbox.
+- A normal terminal session, such as Claude Code or Codex in their own
+  terminal UI, receives the text and Enter through its terminal input, and
+  `cw msg` prints `Sent to terminal ENV/SESSION.` That acknowledges the write
+  only: the program may be busy or showing a dialog, and there is no message
+  ID to wait for. An unconfirmed write is never sent again automatically.
+
+`--output json` adds a top-level `"delivery"`: `"managed"` beside the
+message's fields, or `"terminal"`. A managed failure never falls back to
+terminal input. `cw send` stays the raw input command, for keys and partial
+text, and refuses managed conversations.
 
 ## cw steer
 
 ```sh
-cw steer [ENV] SESSION TEXT [--turn-id TURN_ID] [-o json]
+cw steer [ENV] --session SESSION TEXT [--turn-id TURN_ID] [-o json]
 ```
 
 Steers the agent's current turn. `--turn-id` names the turn you expect (from
 `cw inbox --output json`, `.driver.current_turn_id`); without it the current
 turn is used. Codex supports steering; Claude Code does not. The command
-returns only after the agent accepts or refuses.
+returns only after the agent accepts or refuses. A normal terminal session
+refuses `steer`; type into it with `cw msg`.
 
 ## cw interrupt
 
@@ -42,12 +58,16 @@ client advertises it. An idle conversation refuses.
 ## cw inbox
 
 ```sh
-cw inbox [ENV] SESSION [-o json]
+cw inbox [ENV] --session SESSION [-o json]
 ```
 
 Shows the conversation's messages (the latest 100) and their results,
 including the driver's current turn and capabilities in JSON. A worker's
 completed task appears here, in its parent's inbox, as a result notification.
+
+A normal terminal session has no structured inbox: `cw inbox` says so and
+prints the exact `cw logs ENV --session SESSION` and `cw attach ENV --session
+SESSION` commands that read and reattach it.
 
 ## Message states
 

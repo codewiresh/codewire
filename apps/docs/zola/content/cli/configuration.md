@@ -10,7 +10,8 @@ weight: 8
 | --- | --- |
 | `~/.config/cw/config.json` | Platform server URL and default organization (`CW_CONFIG_DIR` changes the directory) |
 | `~/.config/cw/credentials.json` | Your platform sign-in |
-| `~/.codewire/config.toml` | Mesh URL and selected network, the current `cw use` target, the local credential store kind |
+| `~/.codewire/config.toml` | The local Mesh service's endpoint and identity, the current `cw use` target, the local credential store kind |
+| `~/.codewire/network_selection.json` | The network new environments join, with its Mesh endpoint and organization (`cw network use`) |
 | `~/.codewire/native-v1/` | Local VM state, disks and logs |
 | `~/.codewire/credentials-v1/` | Local credential records (material is in the Secret Service or Keychain) |
 | `~/.cache/codewire/local-vmm-v1/` | The pinned local VM runtime |
@@ -32,9 +33,9 @@ cw config inspect --output json
 | `CODEWIRE_API_KEY` | A `cw_` API key instead of the saved sign-in; it acts in its organization |
 | `CW_CONFIG_DIR` | Platform configuration directory (default `~/.config/cw`) |
 | `CW_MESH_DATA_DIR` | Local state directory (default `~/.codewire`); must be an absolute path |
-| `CODEWIRE_MESH_URL` | Mesh base URL; otherwise `--mesh-url`, the saved `mesh_url`, or the hosted Mesh derived from the server |
-| `CODEWIRE_MESH_AUTH_TOKEN` | Bearer token for a standalone Mesh service |
-| `CODEWIRE_MESH_NETWORK` | The selected Mesh network, over the saved selection |
+| `CODEWIRE_MESH_URL` | One exact Mesh endpoint for network commands without `--cloud` or `--local`, like `--mesh-url` |
+| `CODEWIRE_MESH_AUTH_TOKEN` | Bearer token for an explicit Mesh endpoint (`--mesh-url` or `CODEWIRE_MESH_URL`) |
+| `CODEWIRE_MESH_NETWORK` | The Mesh network to use, over the saved selection |
 | `XDG_DATA_HOME`, `XDG_BIN_HOME` | Managed install store and entry directories |
 | `SHELL` | Used by `cw completion --install` and `cw doctor` |
 

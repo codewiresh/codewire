@@ -1157,7 +1157,11 @@ pub(crate) struct EnvCreateArgs {
         help = "Include the current platform organization's application secrets"
     )]
     org_secrets: bool,
-    #[arg(long, help = "Join a specific mesh network on boot")]
+    #[arg(
+        long,
+        value_name = "NETWORK",
+        help = "Join a Mesh network: cloud:NAME, local:NAME, or NAME on the selected Mesh"
+    )]
     network: Option<String>,
     #[arg(long, help = "Do not join the selected private mesh network")]
     no_network: bool,
@@ -1886,6 +1890,10 @@ pub(crate) enum ConfigCommand {
     },
 }
 
+/// Network commands choose their Mesh with the global `--cloud` (the
+/// platform's hosted Mesh) or `--local` (the local Mesh service), or with
+/// `--mesh-url`; otherwise the selected network's Mesh, else the one Mesh
+/// available.
 #[derive(Debug, Subcommand)]
 pub(crate) enum NetworkCommand {
     #[command(
@@ -1898,9 +1906,12 @@ pub(crate) enum NetworkCommand {
     Create(NetworkCreateArgs),
     #[command(about = "Delete an empty Mesh network and permanently retire its name")]
     Delete(NetworkDeleteArgs),
-    #[command(about = "Show the selected Mesh network")]
-    Current,
-    #[command(about = "Select the default Mesh network")]
+    #[command(about = "Show the network selected for new environments")]
+    Current(NetworkCurrentArgs),
+    #[command(
+        about = "Select the network new environments join",
+        long_about = "Select the network new environments join, on the Mesh --cloud or --local names:\n  cw --cloud network use work\n  cw --local network use dev\n\nThe selection records the Mesh endpoint, the organization that owns new environments there, and the network. It attaches nothing: existing environments keep their attachments."
+    )]
     Use(NetworkUseArgs),
     #[command(about = "Clear the selected Mesh network")]
     Clear,
@@ -2032,9 +2043,17 @@ pub(crate) struct NetworkDeleteArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct NetworkCurrentArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct NetworkUseArgs {
     #[arg(help = "Network name to select")]
     name: String,
+    #[arg(long = "mesh-url", help = "Mesh base URL override")]
+    mesh_url: Option<String>,
     #[arg(
         long = "auto-connect",
         help = "Automatically attach new environments to this network without prompting"
@@ -2341,10 +2360,26 @@ pub(crate) struct WaitArgs {
     pub(crate) output: OutputFormat,
 }
 
+/// `cw msg` and `cw steer`: `[ENV|--in ENV] --session SESSION TEXT`.
 #[derive(Debug, Args)]
 pub(crate) struct AgentMessageArgs {
-    #[arg(value_name = "TARGET_AND_TEXT", help = "SESSION TEXT, or ENV SESSION TEXT", num_args = 2..=3)]
-    pub(crate) target_and_text: Vec<String>,
+    /// `[ENV] TEXT`. A third positional once named the session; it is
+    /// refused with the `--session` spelling before any lookup.
+    #[arg(
+        value_name = "ENV_AND_TEXT",
+        help = "[ENV] TEXT: the environment (default: the selected one), then the text",
+        num_args = 1..=3,
+        required = true
+    )]
+    pub(crate) positionals: Vec<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
+    #[arg(long, value_name = "SESSION", help = "The session to send to")]
+    pub(crate) session: Option<String>,
     #[arg(long, help = "Reply to a prior message ID")]
     pub(crate) reply_to: Option<String>,
     #[arg(long, help = "Expected active turn ID for steering")]
@@ -2352,6 +2387,56 @@ pub(crate) struct AgentMessageArgs {
     #[arg(long, help = "Saved request UUID for a member-managed message")]
     pub(crate) request_id: Option<String>,
     #[arg(long, help = "Expected member session launch generation")]
+    pub(crate) expected_launch_generation: Option<u64>,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+impl AgentMessageArgs {
+    /// The environment, session and text, checked before any lookup.
+    pub(crate) fn target(&self, command: &str) -> anyhow::Result<(Option<&str>, &str, &str)> {
+        let usage = format!("`cw {command} [ENV] --session SESSION TEXT`");
+        let Some(session) = self.session.as_deref().and_then(trimmed_str) else {
+            anyhow::bail!(
+                "name the session with --session: {usage}; a positional no longer selects a session"
+            );
+        };
+        match self.positionals.as_slice() {
+            [text] => Ok((self.in_environment.as_deref(), session, text)),
+            [environment, text] => {
+                anyhow::ensure!(
+                    self.in_environment.is_none(),
+                    "name the environment once: `cw {command} ENV` or `cw {command} --in ENV`, not both"
+                );
+                Ok((Some(environment), session, text))
+            }
+            _ => anyhow::bail!(
+                "`cw {command} ENV SESSION TEXT` no longer selects a session; use {usage}"
+            ),
+        }
+    }
+}
+
+/// `cw inbox [ENV|--in ENV] --session SESSION`.
+#[derive(Debug, Args)]
+pub(crate) struct InboxArgs {
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
+    pub(crate) environment: Option<String>,
+    /// A second positional, refused with the `--session` spelling.
+    #[arg(hide = true, value_name = "SESSION")]
+    pub(crate) retired_session: Vec<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
+    #[arg(long, value_name = "SESSION", help = "The session whose inbox to show")]
+    pub(crate) session: Option<String>,
+    #[arg(long, help = "Exact positive member session generation")]
     pub(crate) expected_launch_generation: Option<u64>,
     #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) output: OutputFormat,

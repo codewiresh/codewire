@@ -20,7 +20,6 @@ pub(crate) async fn handle_logout_command(globals: &Globals) -> anyhow::Result<(
         }
     }
     let _ = config::delete_platform_config(&paths.platform_config_dir);
-    remove_hosted_mesh_owner_context(&paths.mesh_data_dir)?;
     eprintln!("Logged out.");
     Ok(())
 }

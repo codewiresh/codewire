@@ -605,6 +605,7 @@ fn record_from_view(mut value: Value) -> anyhow::Result<MessageRecord> {
     serde_json::from_value(value).map_err(Into::into)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn message(
     target: EnvironmentSessionTarget,
     session: &str,
@@ -613,6 +614,7 @@ pub(super) async fn message(
     turn_id: Option<String>,
     steer: bool,
     output: OutputFormat,
+    label: &str,
 ) -> anyhow::Result<()> {
     let (guest, view, driver_id) = resolve(target, session).await?;
     if !session_running(&view) {
@@ -627,7 +629,7 @@ pub(super) async fn message(
         "action":if steer { "steer" } else { "message" }, "text":text, "reply_to":reply_to, "turn_id":turn_id})).await
         .with_context(|| format!("message {id} queue result is unknown; inspect that same ID before retrying"))?;
     let record = deliver(&guest, &view, &driver_id, &id, queued).await?;
-    print_message_summary(&record, output)?;
+    dispatch::print_message_delivery(&record, output, steer, label)?;
     if let Some(error) = message_failure(&record) {
         return Err(error);
     }
@@ -750,6 +752,7 @@ pub(super) async fn inbox(
             save_location(&guest, &driver_id, &record.id, Some(&view.session_id))?;
         }
     }
+    status["delivery"] = json!("managed");
     status["environment_id"] = json!(guest.id);
     status["session_id"] = json!(view.session_id);
     status["session_state"] = json!(view.state);

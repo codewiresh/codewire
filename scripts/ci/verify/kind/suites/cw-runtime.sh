@@ -145,7 +145,7 @@ cw_runtime_managed_after_restart() {
     return 1
   }
   generation="$(jq -er '.launch_generation' <<<"$earlier")"
-  sent="$(kind_credential_cli msg "$environment" "$(jq -er .session_id <<<"$earlier")" \
+  sent="$(kind_credential_cli msg "$environment" --session "$(jq -er .session_id <<<"$earlier")" \
     'Return the synthetic reply after Stop/Start.' --output json)" || {
     echo '::error::a message to a conversation from the first Pod did not resume it' >&2
     return 1
@@ -331,7 +331,7 @@ cw_runtime_managed_resume_denied_before_run() {
   fi
 
   # Only the refusal on standard error is kept.
-  if output="$(kind_credential_cli msg "$environment" "$session" \
+  if output="$(kind_credential_cli msg "$environment" --session "$session" \
       'Return the synthetic reply while the credential service is down.' \
       --output json 2>&1 >/dev/null)"; then
     cw_runtime_outage_failed 'a message was delivered while the credential service was down'
@@ -362,7 +362,7 @@ cw_runtime_managed_resume_denied_before_run() {
   # The refusal says to send the message again. Each attempt the returning
   # service is not yet ready for is refused the same way, never unknown.
   for ((attempt = 1; ; attempt++)); do
-    if sent="$(kind_credential_cli msg "$environment" "$session" \
+    if sent="$(kind_credential_cli msg "$environment" --session "$session" \
         'Return the synthetic reply after the credential service returned.' \
         --output json 2>"$refused")"; then
       break
@@ -446,7 +446,7 @@ cw_runtime_managed_resume_continues() {
   # Start reads running before its setup finishes, and a message is refused
   # until then ("environment runtime or setup is not ready").
   wait_kind_credential_setup_complete "$environment"
-  sent="$(kind_credential_cli msg "$environment" "$session" \
+  sent="$(kind_credential_cli msg "$environment" --session "$session" \
     'Return the synthetic reply after Stop/Start.' --output json)" || {
     echo '::error::a message after Stop/Start did not resume the conversation and complete' >&2
     return 1
@@ -479,7 +479,7 @@ cw_runtime_managed_resume_continues() {
   }
   # `cw msg` fails unless its request completed, so an unknown one stops here.
   for ((round = 1; round <= back_to_back; round++)); do
-    sent="$(kind_credential_cli msg "$environment" "$session" \
+    sent="$(kind_credential_cli msg "$environment" --session "$session" \
       "Return the synthetic reply, message ${round} of ${back_to_back} after Resume." \
       --output json)" || {
       echo "::error::back-to-back message ${round} of ${back_to_back} after Resume did not complete" >&2

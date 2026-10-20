@@ -2,8 +2,74 @@ use std::path::Path;
 
 use super::*;
 
+pub(crate) mod network_output;
 #[cfg(target_os = "linux")]
 pub(crate) mod retained;
+pub(crate) mod selection;
+
+use crate::commands::progress::terminal_text;
+use network_output::{
+    CreateSelection, MeshContext, SelectionCleanup, format_delete_prompt, format_invite,
+    format_network_created, format_network_current, format_network_deleted, format_network_joined,
+    format_network_list, format_network_selected, format_node_enrolled, format_node_enrollment,
+    format_node_revoked, format_nodes, stdout_style,
+};
+pub(crate) use selection::{
+    MeshKind, NetworkMesh, NetworkReference, NetworkSelection, load_network_selection, network_for,
+    print_legacy_selection_notice, remove_network_selection, resolve_network_mesh,
+    running_local_mesh, save_network_selection,
+};
+
+/// Runs one Mesh request with a live progress row on an interactive stderr.
+/// Redirected and JSON runs draw nothing: the result itself is the output.
+async fn with_progress<T>(
+    output: OutputFormat,
+    label: &str,
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let caps = crate::output::Capabilities::from_process(match output {
+        OutputFormat::Json => crate::output::OutputMode::Machine,
+        OutputFormat::Text => crate::output::OutputMode::Text,
+    });
+    if !caps.live {
+        return work.await;
+    }
+    let mut progress = crate::output::StatusLine::new(std::io::stderr(), &caps);
+    let _ = progress.begin(label);
+    tokio::pin!(work);
+    let result = loop {
+        let tick = progress
+            .tick_interval()
+            .unwrap_or(Duration::from_secs(3600));
+        tokio::select! {
+            result = &mut work => break result,
+            () = tokio::time::sleep(tick) => {
+                let _ = progress.tick();
+            }
+        }
+    };
+    let _ = progress.clear();
+    result
+}
+
+fn print_json(value: &impl serde::Serialize) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+/// Why `network use` cannot name an owner organization on this Mesh.
+fn missing_owner(mesh: &NetworkMesh) -> anyhow::Error {
+    match mesh.kind {
+        Some(MeshKind::Cloud) => anyhow::anyhow!(
+            "no default organization is saved for this platform, so new environments have no owner on {}; run `cw org set ORG`",
+            mesh.label()
+        ),
+        _ => anyhow::anyhow!(
+            "only a network on Codewire Cloud Mesh or the local Mesh service can be selected; {} is neither",
+            terminal_text(mesh.url())
+        ),
+    }
+}
 
 pub(crate) async fn handle_network_command(
     globals: &Globals,
@@ -11,94 +77,180 @@ pub(crate) async fn handle_network_command(
 ) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
+    let style = stdout_style();
 
     match command {
         NetworkCommand::List(args) => {
             let org_id = trimmed_required(&args.org, "organization ID")?;
-            let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, None)?;
-            let networks = MeshClient::new(&mesh)?.list_networks(org_id).await?;
-            print_networks(&networks, mesh.selected_network.as_deref(), args.output)?;
+            let mesh = resolve_network_mesh(globals, &paths, &env, args.mesh_url)?;
+            let networks = with_progress(
+                args.output,
+                "Listing networks",
+                MeshClient::new(&mesh.resolved)?.list_networks(org_id),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "could not list networks of organization {} on {} ({})",
+                    terminal_text(org_id),
+                    mesh.label(),
+                    terminal_text(mesh.url())
+                )
+            })?;
+            match args.output {
+                OutputFormat::Json => print_json(&networks)?,
+                OutputFormat::Text => {
+                    let selected = load_network_selection(&paths.mesh_data_dir)?
+                        .filter(|selection| selection.is_for(mesh.url(), org_id))
+                        .map(|selection| selection.network_id);
+                    print!(
+                        "{}",
+                        format_network_list(
+                            style,
+                            &mesh,
+                            &MeshContext::new(&mesh, Some(org_id)),
+                            &networks,
+                            selected.as_deref(),
+                        )
+                    );
+                }
+            }
         }
         NetworkCommand::Create(args) => {
             let network_id = trimmed_required(&args.name, "network name")?;
             let org_id = trimmed_required(&args.org, "organization ID")?;
-            let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, None)?;
-            MeshClient::new(&mesh)?
-                .create_network(org_id, network_id)
-                .await?;
-            if args.no_use {
-                eprintln!("Network {network_id:?} created");
+            let mesh = resolve_network_mesh(globals, &paths, &env, args.mesh_url)?;
+            let context = MeshContext::new(&mesh, Some(org_id));
+            with_progress(
+                OutputFormat::Text,
+                "Creating Mesh network",
+                MeshClient::new(&mesh.resolved)?.create_network(org_id, network_id),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "network creation on {} ({}) could not be confirmed; inspect with `{}` before retrying",
+                    mesh.label(),
+                    terminal_text(mesh.url()),
+                    mesh.command(&format!("list --org {}", terminal_text(org_id)))
+                )
+            })?;
+            let (selection, save_error) = if args.no_use {
+                (CreateSelection::Skipped, None)
             } else {
-                config::save_selected_mesh_network(&paths.mesh_data_dir, network_id)?;
-                update_local_mesh_owner_selection(
-                    &paths.mesh_data_dir,
-                    Some(&mesh.mesh_url),
-                    Some(network_id),
-                    false,
-                )?;
-                eprintln!("Network {network_id:?} created and selected");
+                match (mesh.kind, mesh.owner_organization.as_deref()) {
+                    (Some(kind), Some(owner)) if owner == org_id => {
+                        let selection =
+                            NetworkSelection::new(kind, mesh.url(), org_id, network_id, false);
+                        match save_network_selection(&paths.mesh_data_dir, &selection) {
+                            Ok(()) => (CreateSelection::Selected, None),
+                            Err(error) => (
+                                CreateSelection::NotSelected(format!(
+                                    "The selection could not be saved: {error:#}"
+                                )),
+                                Some(error),
+                            ),
+                        }
+                    }
+                    (Some(_), Some(owner)) => (
+                        CreateSelection::NotSelected(format!(
+                            "New environments on this Mesh are owned by organization {}.",
+                            terminal_text(owner)
+                        )),
+                        None,
+                    ),
+                    _ => (
+                        CreateSelection::NotSelected(missing_owner(&mesh).to_string()),
+                        None,
+                    ),
+                }
+            };
+            print!(
+                "{}",
+                format_network_created(style, &context, network_id, &selection)
+            );
+            if let Some(error) = save_error {
+                return Err(error.context(format!(
+                    "network {} was created, but selecting it failed",
+                    terminal_text(network_id)
+                )));
             }
         }
         NetworkCommand::Delete(args) => {
             let network_id = trimmed_required(&args.name, "network name")?;
             let org_id = trimmed_required(&args.org, "organization ID")?;
-            let default_mesh_url = match config::resolve_mesh_base_url(
-                config::MeshResolveOptions {
-                    platform_server_url: globals.server.clone(),
-                    ..Default::default()
-                },
-                &paths,
-                &env,
-            ) {
-                Ok(url) => Some(url),
-                Err(config::ConfigError::NoMeshUrl) => None,
-                Err(error) => return Err(error.into()),
-            };
-            let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, None)?;
-            confirm_network_delete(network_id, org_id, args.yes)?;
-            MeshClient::new(&mesh)?
-                .delete_network(org_id, network_id)
-                .await?;
-            eprintln!("Network {network_id:?} deleted; its name cannot be reused.");
-            clear_deleted_network_selection(
+            let mesh = resolve_network_mesh(globals, &paths, &env, args.mesh_url)?;
+            let context = MeshContext::new(&mesh, Some(org_id));
+            confirm_network_delete(&context, network_id, args.yes)?;
+            with_progress(
+                OutputFormat::Text,
+                "Deleting Mesh network",
+                MeshClient::new(&mesh.resolved)?.delete_network(org_id, network_id),
+            )
+            .await?;
+            let cleanup = clear_deleted_network_selection(
                 &paths.mesh_data_dir,
-                default_mesh_url.as_deref(),
-                &mesh.mesh_url,
+                mesh.url(),
                 org_id,
                 network_id,
-            )
-            .context("network was deleted, but clearing its local selection failed")?;
+            );
+            print!(
+                "{}",
+                format_network_deleted(style, &mesh, &context, network_id, &cleanup)
+            );
+            if let SelectionCleanup::Failed(error) = cleanup {
+                anyhow::bail!(
+                    "network {} was deleted, but clearing its saved selection failed: {error}",
+                    terminal_text(network_id)
+                );
+            }
         }
-        NetworkCommand::Current => match config::selected_mesh_network(&paths, &env) {
-            Some(network_id) => println!("{network_id}"),
-            None => println!("none"),
-        },
+        NetworkCommand::Current(args) => {
+            let selection = load_network_selection(&paths.mesh_data_dir)?;
+            if selection.is_none() {
+                print_legacy_selection_notice(&paths.mesh_data_dir);
+            }
+            match args.output {
+                OutputFormat::Json => print_json(&selection)?,
+                OutputFormat::Text => print!("{}", format_network_current(selection.as_ref())),
+            }
+        }
         NetworkCommand::Use(args) => {
             let network_id = trimmed_required(&args.name, "network name")?;
-            config::save_selected_mesh_network_preference(
-                &paths.mesh_data_dir,
-                network_id,
-                args.auto_connect,
-            )?;
-            update_local_mesh_owner_selection(
-                &paths.mesh_data_dir,
-                None,
-                Some(network_id),
-                args.auto_connect,
-            )?;
-            eprintln!(
-                "Selected network {network_id:?} ({})",
-                if args.auto_connect {
-                    "new environments connect automatically"
-                } else {
-                    "new environments ask before connecting"
-                }
+            let mesh = resolve_network_mesh(globals, &paths, &env, args.mesh_url)?;
+            let (Some(kind), Some(org_id)) = (mesh.kind, mesh.owner_organization.as_deref()) else {
+                return Err(missing_owner(&mesh));
+            };
+            let networks = with_progress(
+                OutputFormat::Text,
+                "Checking network",
+                MeshClient::new(&mesh.resolved)?.list_networks(org_id),
+            )
+            .await?;
+            anyhow::ensure!(
+                networks.iter().any(|network| network.id == network_id),
+                "network {} was not found in organization {} on {} ({}); nothing was selected",
+                terminal_text(network_id),
+                terminal_text(org_id),
+                mesh.label(),
+                terminal_text(mesh.url())
             );
+            let selection =
+                NetworkSelection::new(kind, mesh.url(), org_id, network_id, args.auto_connect);
+            save_network_selection(&paths.mesh_data_dir, &selection).context(
+                "the network selection could not be saved; the previous one is unchanged",
+            )?;
+            print!("{}", format_network_selected(style, &selection));
         }
         NetworkCommand::Clear => {
-            config::clear_selected_mesh_network(&paths.mesh_data_dir)?;
-            update_local_mesh_owner_selection(&paths.mesh_data_dir, None, None, false)?;
-            eprintln!("Cleared selected network");
+            if remove_network_selection(&paths.mesh_data_dir)? {
+                println!(
+                    "{} Cleared the network selection",
+                    style.status(crate::output::Status::Done)
+                );
+            } else {
+                println!("No network was selected.");
+            }
         }
         NetworkCommand::Nodes(args) => {
             let org_id = trimmed_required(&args.org, "organization ID")?;
@@ -110,92 +262,158 @@ pub(crate) async fn handle_network_command(
             {
                 anyhow::bail!("--all and --network cannot be used together");
             }
-            let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, args.network)?;
+            let mesh = resolve_network_mesh(globals, &paths, &env, args.mesh_url)?;
             let network_id = if args.all {
                 None
             } else {
-                Some(
-                    mesh.selected_network
-                        .as_deref()
-                        .and_then(|network| {
-                            let network = network.trim();
-                            (!network.is_empty()).then_some(network)
-                        })
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "network not selected (run 'cw network use <name>' or pass --network)"
-                            )
-                        })?,
-                )
+                Some(network_for(&mesh, &paths, &env, org_id, args.network)?)
             };
-            let nodes = MeshClient::new(&mesh)?
-                .list_nodes(org_id, network_id)
-                .await?;
-            print_nodes(&nodes, args.all, args.output)?;
+            let nodes = with_progress(
+                args.output,
+                "Listing nodes",
+                MeshClient::new(&mesh.resolved)?.list_nodes(org_id, network_id.as_deref()),
+            )
+            .await?;
+            match args.output {
+                OutputFormat::Json => print_json(&nodes)?,
+                OutputFormat::Text => print!(
+                    "{}",
+                    format_nodes(
+                        style,
+                        &mesh,
+                        &MeshContext::new(&mesh, Some(org_id)),
+                        network_id.as_deref(),
+                        &nodes
+                    )
+                ),
+            }
         }
         NetworkCommand::Invite(args) => {
             let org_id = trimmed_required(&args.org, "organization ID")?;
-            let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, args.network)?;
-            let network_id = selected_network_or_error(&mesh)?;
+            let mesh = resolve_network_mesh(globals, &paths, &env, args.mesh_url)?;
+            let network_id = network_for(&mesh, &paths, &env, org_id, args.network)?;
             let ttl = trimmed_required(&args.ttl, "ttl")?;
-            let invite = MeshClient::new(&mesh)?
-                .create_invite(org_id, network_id, ttl)
-                .await?;
-            print_invite(&invite, &mesh.mesh_url, args.output)?;
+            let invite = with_progress(
+                args.output,
+                "Creating invitation",
+                MeshClient::new(&mesh.resolved)?.create_invite(org_id, &network_id, ttl),
+            )
+            .await?;
+            match args.output {
+                OutputFormat::Json => print_json(&invite)?,
+                OutputFormat::Text => print!(
+                    "{}",
+                    format_invite(
+                        style,
+                        &mesh,
+                        &MeshContext::new(&mesh, Some(org_id)),
+                        &invite
+                    )
+                ),
+            }
         }
         NetworkCommand::Join(args) => {
             let invite_code = trimmed_required(&args.invite_code, "invitation code")?;
-            let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, None)?;
-            let joined = MeshClient::new(&mesh)?.join_network(invite_code).await?;
-            config::save_joined_network(&paths.mesh_data_dir, &mesh.mesh_url, &joined.network_id)?;
-            update_local_mesh_owner_selection(
-                &paths.mesh_data_dir,
-                Some(&mesh.mesh_url),
-                Some(&joined.network_id),
-                false,
-            )?;
-            eprintln!("Joined network {:?}", joined.network_id);
-            eprintln!("Selected network is ready for Mesh commands.");
+            let mesh = resolve_network_mesh(globals, &paths, &env, args.mesh_url)?;
+            let joined = with_progress(
+                OutputFormat::Text,
+                "Joining network",
+                MeshClient::new(&mesh.resolved)?.join_network(invite_code),
+            )
+            .await?;
+            let select_with = (mesh.kind.is_some()
+                && mesh.owner_organization.as_deref() == Some(joined.org_id.as_str()))
+            .then(|| mesh.command(&format!("use {}", terminal_text(&joined.network_id))));
+            print!(
+                "{}",
+                format_network_joined(
+                    style,
+                    &MeshContext::new(&mesh, trimmed_str(&joined.org_id)),
+                    &joined.network_id,
+                    select_with.as_deref(),
+                )
+            );
         }
         NetworkCommand::Revoke(args) => {
             let node_name = trimmed_required(&args.node_name, "node name")?;
             let org_id = trimmed_required(&args.org, "organization ID")?;
-            let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, args.network)?;
-            let network_id = selected_network_or_error(&mesh)?;
-            MeshClient::new(&mesh)?
-                .revoke_node(org_id, network_id, node_name)
-                .await?;
-            eprintln!("Node {node_name:?} revoked");
+            let mesh = resolve_network_mesh(globals, &paths, &env, args.mesh_url)?;
+            let network_id = network_for(&mesh, &paths, &env, org_id, args.network)?;
+            with_progress(
+                OutputFormat::Text,
+                "Revoking node",
+                MeshClient::new(&mesh.resolved)?.revoke_node(org_id, &network_id, node_name),
+            )
+            .await?;
+            print!(
+                "{}",
+                format_node_revoked(
+                    style,
+                    &MeshContext::new(&mesh, Some(org_id)),
+                    node_name,
+                    &network_id
+                )
+            );
         }
         NetworkCommand::Enroll { command } => match command {
             NetworkEnrollCommand::Create(args) => {
                 let org_id = trimmed_required(&args.org, "organization ID")?;
-                let mesh = resolve_mesh(globals, &paths, &env, args.mesh_url, args.network)?;
-                let network_id = selected_network_or_error(&mesh)?;
+                let mesh = resolve_network_mesh(globals, &paths, &env, args.mesh_url)?;
+                let network_id = network_for(&mesh, &paths, &env, org_id, args.network)?;
                 let node_name = args.node_name.as_deref().map(str::trim).unwrap_or("");
                 let ttl = trimmed_required(&args.ttl, "ttl")?;
-                let enrollment = MeshClient::new(&mesh)?
-                    .create_node_enrollment(org_id, network_id, node_name, ttl)
-                    .await?;
-                print_node_enrollment(&enrollment, args.output)?;
+                let enrollment = with_progress(
+                    args.output,
+                    "Creating node enrollment",
+                    MeshClient::new(&mesh.resolved)?.create_node_enrollment(
+                        org_id,
+                        &network_id,
+                        node_name,
+                        ttl,
+                    ),
+                )
+                .await?;
+                match args.output {
+                    OutputFormat::Json => print_json(&enrollment)?,
+                    OutputFormat::Text => print!(
+                        "{}",
+                        format_node_enrollment(
+                            style,
+                            &mesh,
+                            &MeshContext::new(&mesh, Some(org_id)),
+                            &enrollment
+                        )
+                    ),
+                }
             }
             NetworkEnrollCommand::Redeem(args) => {
                 let code = trimmed_required(&args.enrollment_code, "enrollment code")?;
                 let node_name = args.node_name.as_deref().map(str::trim).unwrap_or("");
-                let mesh_url = config::resolve_mesh_base_url(
-                    config::MeshResolveOptions {
-                        mesh_url: args.mesh_url,
-                        platform_server_url: globals.server.clone(),
-                        ..config::MeshResolveOptions::default()
-                    },
-                    &paths,
-                    &env,
-                )?;
-                let redeemed = MeshClient::unauthenticated(&mesh_url)?
-                    .redeem_node_enrollment(code, node_name)
-                    .await?;
-                save_redeemed_node_enrollment(&paths.mesh_data_dir, &mesh_url, &redeemed)?;
-                eprintln!("Node {:?} enrolled", redeemed.node_name);
+                let (kind, mesh_url) = redeem_endpoint(globals, &paths, &env, args.mesh_url)?;
+                let redeemed = with_progress(
+                    OutputFormat::Text,
+                    "Enrolling node",
+                    MeshClient::unauthenticated(&mesh_url)?.redeem_node_enrollment(code, node_name),
+                )
+                .await?;
+                save_redeemed_node_enrollment(&paths.mesh_data_dir, &redeemed)?;
+                let context = MeshContext {
+                    label: kind
+                        .map(MeshKind::label)
+                        .unwrap_or("Mesh service")
+                        .to_owned(),
+                    endpoint: mesh_url,
+                    organization: trimmed_str(&redeemed.org_id).map(str::to_owned),
+                };
+                print!(
+                    "{}",
+                    format_node_enrolled(
+                        style,
+                        &context,
+                        &redeemed.node_name,
+                        &redeemed.network_id
+                    )
+                );
             }
         },
     }
@@ -203,46 +421,94 @@ pub(crate) async fn handle_network_command(
     Ok(())
 }
 
-fn confirm_network_delete(network_id: &str, org_id: &str, yes: bool) -> anyhow::Result<()> {
+/// Where an enrollment code is redeemed. Redemption needs no credential, so
+/// a hosted Mesh is reachable without a sign-in.
+fn redeem_endpoint(
+    globals: &Globals,
+    paths: &ResolvePaths,
+    env: &impl config::Env,
+    mesh_url: Option<String>,
+) -> anyhow::Result<(Option<MeshKind>, String)> {
+    let mesh_url = trimmed_optional(mesh_url);
+    match globals.placement {
+        Some(placement) => {
+            anyhow::ensure!(
+                mesh_url.is_none(),
+                "--mesh-url names the Mesh endpoint itself; pass it without {}",
+                MeshKind::from_placement(placement).flag()
+            );
+            match MeshKind::from_placement(placement) {
+                MeshKind::Local => Ok((
+                    Some(MeshKind::Local),
+                    running_local_mesh(&paths.mesh_data_dir)?
+                        .context("the local Mesh service is not running; run `cw mesh up`")?
+                        .base_url,
+                )),
+                MeshKind::Cloud => {
+                    let server =
+                        config::resolve_platform_server_url(globals.server.clone(), paths, env)
+                            .context(
+                                "no platform server is selected; pass --server or run `cw login`",
+                            )?;
+                    let hosted =
+                        config::derive_hosted_mesh_url_for_server(&server).with_context(|| {
+                            format!(
+                                "platform server {} has no hosted Mesh endpoint",
+                                terminal_text(&server)
+                            )
+                        })?;
+                    Ok((Some(MeshKind::Cloud), hosted))
+                }
+            }
+        }
+        None => {
+            let url = mesh_url
+                .or_else(|| trimmed_optional(env.var(config::CODEWIRE_MESH_URL_ENV)))
+                .context("pass --mesh-url URL, the endpoint the enrollment command printed")?;
+            let (kind, _) = selection::classify_endpoint(globals, paths, env, &url);
+            Ok((kind, url))
+        }
+    }
+}
+
+fn confirm_network_delete(
+    context: &MeshContext,
+    network_id: &str,
+    yes: bool,
+) -> anyhow::Result<()> {
     if !yes {
         anyhow::ensure!(
             std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
             "network deletion requires --yes when noninteractive"
         );
-        eprintln!(
-            "Delete network {network_id:?} in organization {org_id:?}? All invitations, enrollments, groups, policies, stored values, grants and task history will be removed. The name cannot be reused. Registered nodes must be revoked first."
-        );
+        eprint!("{}", format_delete_prompt(context, network_id));
         confirm_delete("network", network_id)?;
     }
     Ok(())
 }
 
-/// Clear only the deleted selection, never a same-named network on another
-/// Mesh origin or an unrelated owner projection.
+/// After a confirmed deletion, clear the saved selection only when it is
+/// exactly this network on this Mesh endpoint and organization.
 pub(crate) fn clear_deleted_network_selection(
     data_dir: &Path,
-    default_mesh_url: Option<&str>,
     deleted_mesh_url: &str,
     org_id: &str,
     network_id: &str,
-) -> anyhow::Result<()> {
-    let saved = config::load_mesh_config(data_dir)?;
-    let saved_mesh_url = saved.mesh_url.as_deref().or(default_mesh_url);
-    if saved_mesh_url.is_some_and(|url| config::same_mesh_url(url, deleted_mesh_url))
-        && saved.mesh_selected_network.as_deref() == Some(network_id)
-    {
-        config::clear_selected_mesh_network(data_dir)?;
+) -> SelectionCleanup {
+    let outcome = (|| -> anyhow::Result<bool> {
+        let Some(selection) = load_network_selection(data_dir)? else {
+            return Ok(false);
+        };
+        if !selection.is_for(deleted_mesh_url, org_id) || selection.network_id != network_id {
+            return Ok(false);
+        }
+        remove_network_selection(data_dir)
+    })();
+    match outcome {
+        Ok(true) => SelectionCleanup::Cleared,
+        Ok(false) => SelectionCleanup::Untouched,
+        Err(error) => SelectionCleanup::Failed(format!("{error:#}")),
     }
-    if let Some(mut context) = load_local_mesh_owner_context(data_dir)?
-        && config::same_mesh_url(&context.mesh_url, deleted_mesh_url)
-        && context.organization_id == org_id
-        && context.selected_network.as_deref() == Some(network_id)
-    {
-        context.selected_network = None;
-        context.auto_connect = false;
-        save_local_mesh_owner_context(data_dir, &context)?;
-    }
-    Ok(())
 }
 
 pub(crate) async fn handle_mesh_command(
@@ -259,7 +525,7 @@ pub(crate) async fn handle_mesh_command(
         }
         MeshCommand::Status(args) => {
             let report = mesh_status_report(globals, &paths, &env);
-            print_mesh_status_report(&report, args.output)
+            print_mesh_status_report(&report, args.output, &paths.mesh_data_dir)
         }
         MeshCommand::Down(args) => {
             let report = handle_mesh_down(&paths).await?;
@@ -278,12 +544,25 @@ pub(crate) struct MeshStatusReport {
     pub(crate) auth_configured: bool,
     pub(crate) auth_source: Option<config::MeshAuthSource>,
     pub(crate) local: LocalMeshStatus,
+    /// The Mesh a network command uses without `--cloud`, `--local` or
+    /// `--mesh-url`, and the organization that owns new environments there.
+    pub(crate) mesh: Option<MeshKind>,
+    pub(crate) organization_id: Option<String>,
+    /// Why no default Mesh resolves, when none does.
+    pub(crate) default_mesh_error: Option<String>,
+    /// The saved network selection, with its Mesh and organization.
+    pub(crate) selection: Option<NetworkSelection>,
+    /// Status reports configuration and process state only; no route to any
+    /// node was probed.
+    pub(crate) connectivity: &'static str,
 }
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub(crate) struct LocalMeshStatus {
     pub(crate) state: String,
     pub(crate) pid: Option<u32>,
+    /// The local service's own organization.
+    pub(crate) organization_id: Option<String>,
     pub(crate) base_url: Option<String>,
     pub(crate) listen_addr: Option<String>,
     pub(crate) binary: Option<String>,
@@ -327,9 +606,12 @@ pub(crate) struct LocalMeshOwnerContext {
     pub(crate) auth_source: LocalMeshOwnerAuthSource,
     pub(crate) mesh_url: String,
     pub(crate) organization_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Parse-only: an older cw kept the network selection here. It now
+    /// lives in `network_selection.json`; the next write drops it.
+    #[serde(default, skip_serializing)]
     pub(crate) selected_network: Option<String>,
-    #[serde(default)]
+    /// Parse-only, with [`LocalMeshOwnerContext::selected_network`].
+    #[serde(default, skip_serializing)]
     pub(crate) auto_connect: bool,
 }
 
@@ -409,126 +691,163 @@ pub(crate) fn mesh_status_report(
     paths: &ResolvePaths,
     env: &impl config::Env,
 ) -> MeshStatusReport {
-    let opts = config::MeshResolveOptions {
-        mesh_url: None,
-        auth_token: None,
-        network_id: None,
-        platform_server_url: globals.server.clone(),
-    };
-    let mesh_url = config::resolve_mesh_base_url(opts.clone(), paths, env).ok();
-    let resolved = config::resolve_mesh(opts, paths, env).ok();
-    let selected_network = resolved
-        .as_ref()
-        .and_then(|mesh| mesh.selected_network.clone())
-        .or_else(|| config::selected_mesh_network(paths, env));
-    let auth_configured = resolved
-        .as_ref()
-        .map(config::ResolvedMeshConfig::auth_configured)
-        .unwrap_or(false);
-    let auth_source = resolved.as_ref().map(|mesh| mesh.auth_source);
-    let auto_connect = config::load_mesh_config(&paths.mesh_data_dir)
-        .ok()
-        .is_some_and(|mesh| {
-            mesh.mesh_auto_connect.unwrap_or(false)
-                && mesh.mesh_selected_network.as_deref().and_then(trimmed_str)
-                    == selected_network.as_deref().and_then(trimmed_str)
+    let selection = load_network_selection(&paths.mesh_data_dir).ok().flatten();
+    let default = resolve_network_mesh(globals, paths, env, None);
+    let selected_network =
+        trimmed_optional(env.var(config::CODEWIRE_MESH_NETWORK_ENV)).or_else(|| {
+            selection
+                .as_ref()
+                .map(|selection| selection.network_id.clone())
         });
-
+    let auto_connect = selection
+        .as_ref()
+        .is_some_and(|selection| selection.auto_connect);
+    let mut local = local_mesh_status(&paths.mesh_data_dir);
+    local.organization_id = load_local_mesh_owner_context(&paths.mesh_data_dir)
+        .ok()
+        .flatten()
+        .filter(|owner| {
+            owner.auth_source == LocalMeshOwnerAuthSource::StandaloneLocal
+                && local
+                    .base_url
+                    .as_deref()
+                    .is_some_and(|url| config::same_mesh_url(url, &owner.mesh_url))
+        })
+        .map(|owner| owner.organization_id);
+    let (mesh, error) = match default {
+        Ok(mesh) => (Some(mesh), None),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    };
     MeshStatusReport {
         mesh_data_dir: paths.mesh_data_dir.display().to_string(),
-        configured: mesh_url.is_some(),
-        mesh_url,
+        configured: mesh.is_some(),
+        mesh_url: mesh.as_ref().map(|mesh| mesh.url().to_owned()),
         selected_network,
         auto_connect,
-        auth_configured,
-        auth_source,
-        local: local_mesh_status(&paths.mesh_data_dir),
+        auth_configured: mesh
+            .as_ref()
+            .is_some_and(|mesh| mesh.resolved.auth_configured()),
+        auth_source: mesh.as_ref().map(|mesh| mesh.resolved.auth_source),
+        local,
+        mesh: mesh.as_ref().and_then(|mesh| mesh.kind),
+        organization_id: mesh.and_then(|mesh| mesh.owner_organization),
+        default_mesh_error: error,
+        selection,
+        connectivity: "not_checked",
     }
 }
 
 pub(crate) fn print_mesh_status_report(
     report: &MeshStatusReport,
     output: OutputFormat,
+    data_dir: &Path,
 ) -> anyhow::Result<()> {
     match output {
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(report)?);
         }
         OutputFormat::Text => {
+            if report.selection.is_none() {
+                print_legacy_selection_notice(data_dir);
+            }
             print!("{}", format_mesh_status_report(report));
         }
     }
     Ok(())
 }
 
+/// Service state, selection and the default Mesh, kept apart from
+/// connectivity, which status never checks.
 pub(crate) fn format_mesh_status_report(report: &MeshStatusReport) -> String {
     let mut out = String::new();
+    let local = &report.local;
     out.push_str(&format!(
-        "Mesh:        {}\n",
-        if report.configured {
-            "configured"
-        } else {
-            "unconfigured"
-        }
-    ));
-    out.push_str(&format!(
-        "URL:         {}\n",
-        report.mesh_url.as_deref().unwrap_or("-")
-    ));
-    out.push_str(&format!(
-        "Network:     {}\n",
-        report.selected_network.as_deref().unwrap_or("-")
-    ));
-    out.push_str(&format!(
-        "Auto-connect: {}\n",
-        if report.auto_connect { "yes" } else { "no" }
-    ));
-    out.push_str(&format!(
-        "Auth:        {}\n",
-        if report.auth_configured {
-            "configured"
-        } else {
-            "unconfigured"
-        }
-    ));
-    out.push_str(&format!(
-        "Auth source: {}\n",
-        report
-            .auth_source
-            .map(mesh_auth_source_label)
-            .unwrap_or("-")
-    ));
-    out.push_str(&format!(
-        "Local:       {}{}\n",
-        report.local.state,
-        report
-            .local
+        "Local Mesh service  {}{}\n",
+        local.state.replace('_', " "),
+        local
             .pid
             .map(|pid| format!(" (pid {pid})"))
             .unwrap_or_default()
     ));
-    if let Some(base_url) = report.local.base_url.as_deref() {
-        out.push_str(&format!("Local URL:   {base_url}\n"));
+    if let Some(base_url) = local.base_url.as_deref() {
+        out.push_str(&format!("  Endpoint      {}\n", terminal_text(base_url)));
     }
-    if let Some(listen_addr) = report.local.listen_addr.as_deref() {
-        out.push_str(&format!("Listen:      {listen_addr}\n"));
-    }
-    if let Some(log_path) = report.local.log_path.as_deref() {
-        out.push_str(&format!("Log:         {log_path}\n"));
-    }
-    if let Some(derp) = report.local.derp.as_ref() {
+    if let Some(organization) = local.organization_id.as_deref() {
         out.push_str(&format!(
-            "DERP:        {}{}\n",
-            derp.state,
+            "  Organization  {}\n",
+            terminal_text(organization)
+        ));
+    }
+    if let Some(listen_addr) = local.listen_addr.as_deref() {
+        out.push_str(&format!("  Listen        {}\n", terminal_text(listen_addr)));
+    }
+    if let Some(derp) = local.derp.as_ref() {
+        out.push_str(&format!(
+            "  DERP          {}{} at {}, listening on {}\n",
+            derp.state.replace('_', " "),
             derp.pid
                 .map(|pid| format!(" (pid {pid})"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            terminal_text(&derp.url),
+            terminal_text(&derp.listen_addr)
         ));
-        out.push_str(&format!("DERP URL:    {}\n", derp.url));
-        out.push_str(&format!("DERP listen: {}\n", derp.listen_addr));
-        out.push_str(&format!("DERP log:    {}\n", derp.log_path));
+        out.push_str(&format!(
+            "  DERP log      {}\n",
+            terminal_text(&derp.log_path)
+        ));
     }
-    out.push_str(&format!("Data dir:    {}\n", report.mesh_data_dir));
+    if let Some(log_path) = local.log_path.as_deref() {
+        out.push_str(&format!("  Log           {}\n", terminal_text(log_path)));
+    }
+    match report.selection.as_ref() {
+        Some(selection) => {
+            out.push_str(&format!(
+                "Selected network    {}\n",
+                terminal_text(&selection.network_id)
+            ));
+            out.push_str(&MeshContext::of_selection(selection).render());
+            out.push_str(&format!(
+                "  New VMs       {}\n",
+                if selection.auto_connect {
+                    "connect automatically"
+                } else {
+                    "ask before connecting"
+                }
+            ));
+        }
+        None => out.push_str("Selected network    none\n"),
+    }
+    match (report.mesh, report.mesh_url.as_deref()) {
+        (kind, Some(url)) => {
+            out.push_str(&format!(
+                "Default Mesh        {}\n",
+                kind.map(MeshKind::label).unwrap_or("Mesh service")
+            ));
+            out.push_str(&format!("  Endpoint      {}\n", terminal_text(url)));
+            if let Some(organization) = report.organization_id.as_deref() {
+                out.push_str(&format!(
+                    "  Organization  {}\n",
+                    terminal_text(organization)
+                ));
+            }
+            out.push_str(&format!(
+                "  Auth          {}\n",
+                report
+                    .auth_source
+                    .map(mesh_auth_source_label)
+                    .unwrap_or("not configured")
+            ));
+        }
+        (_, None) => out.push_str(&format!(
+            "Default Mesh        none: {}\n",
+            terminal_text(report.default_mesh_error.as_deref().unwrap_or("unknown"))
+        )),
+    }
+    out.push_str("Connectivity        not checked\n");
+    out.push_str(&format!(
+        "Data dir            {}\n",
+        terminal_text(&report.mesh_data_dir)
+    ));
     out
 }
 
@@ -567,11 +886,11 @@ pub(crate) async fn handle_mesh_up(
 ) -> anyhow::Result<MeshUpReport> {
     let local_identity = config::ensure_local_mesh_identity(&paths.mesh_data_dir)
         .context("initialize standalone Mesh identity")?;
-    let mesh_config = config::load_mesh_config(&paths.mesh_data_dir)?;
-    let selected_network = mesh_config
-        .mesh_selected_network
-        .and_then(|network| trimmed_str(&network).map(str::to_owned));
-    let auto_connect = selected_network.is_some() && mesh_config.mesh_auto_connect.unwrap_or(false);
+    let selected_network = selection::local_selection_for(
+        &paths.mesh_data_dir,
+        &args.base_url,
+        &local_identity.organization_id,
+    );
     if let Some(runtime) = load_local_mesh_runtime(&paths.mesh_data_dir)?
         && local_process_is_running(runtime.pid)
     {
@@ -583,8 +902,8 @@ pub(crate) async fn handle_mesh_up(
                     auth_source: LocalMeshOwnerAuthSource::StandaloneLocal,
                     mesh_url: runtime.base_url.clone(),
                     organization_id: local_identity.organization_id,
-                    selected_network,
-                    auto_connect,
+                    selected_network: None,
+                    auto_connect: false,
                 },
             )?;
             return Ok(mesh_up_report(false, &runtime));
@@ -652,8 +971,8 @@ pub(crate) async fn handle_mesh_up(
                 auth_source: LocalMeshOwnerAuthSource::StandaloneLocal,
                 mesh_url: runtime.base_url.clone(),
                 organization_id,
-                selected_network,
-                auto_connect,
+                selected_network: None,
+                auto_connect: false,
             },
         )
     })();
@@ -798,6 +1117,7 @@ pub(crate) async fn handle_mesh_down(paths: &ResolvePaths) -> anyhow::Result<Mes
         &paths.mesh_data_dir,
         LocalMeshOwnerAuthSource::StandaloneLocal,
     )?;
+    config::clear_local_mesh_connection(&paths.mesh_data_dir, &runtime.base_url)?;
     Ok(MeshDownReport {
         stopped,
         pid: Some(runtime.pid),
@@ -1156,6 +1476,7 @@ pub(crate) fn local_mesh_status(data_dir: &Path) -> LocalMeshStatus {
                 }
                 .to_owned(),
                 pid: None,
+                organization_id: None,
                 base_url: None,
                 listen_addr: None,
                 binary: None,
@@ -1168,6 +1489,7 @@ pub(crate) fn local_mesh_status(data_dir: &Path) -> LocalMeshStatus {
     LocalMeshStatus {
         state: if known { "running" } else { "unknown" }.to_owned(),
         pid: Some(runtime.pid),
+        organization_id: None,
         base_url: Some(runtime.base_url),
         listen_addr: Some(runtime.listen_addr),
         binary: Some(runtime.binary),
@@ -1190,6 +1512,7 @@ pub(crate) fn local_mesh_status(data_dir: &Path) -> LocalMeshStatus {
         return LocalMeshStatus {
             state: "not_running".to_string(),
             pid: None,
+            organization_id: None,
             base_url: None,
             listen_addr: None,
             binary: None,
@@ -1213,6 +1536,7 @@ pub(crate) fn local_mesh_status(data_dir: &Path) -> LocalMeshStatus {
     LocalMeshStatus {
         state: if running { "running" } else { "stale" }.to_string(),
         pid: Some(runtime.pid),
+        organization_id: None,
         base_url: Some(runtime.base_url),
         listen_addr: Some(runtime.listen_addr),
         binary: Some(runtime.binary),
@@ -1252,75 +1576,6 @@ pub(crate) fn save_local_mesh_runtime(
     let path = local_mesh_runtime_path(data_dir);
     let data = serde_json::to_vec_pretty(runtime)?;
     write_owner_only_mesh_file(data_dir, &path, &data)
-}
-
-/// Keep the credential-free owner projection aligned with network selection.
-/// An expected URL prevents a hosted join from rewriting a different active
-/// standalone runtime in the same user data directory.
-pub(crate) fn update_local_mesh_owner_selection(
-    data_dir: &Path,
-    expected_mesh_url: Option<&str>,
-    selected_network: Option<&str>,
-    auto_connect: bool,
-) -> anyhow::Result<()> {
-    let Some(mut context) = load_local_mesh_owner_context(data_dir)? else {
-        return Ok(());
-    };
-    if expected_mesh_url.is_some_and(|expected| !config::same_mesh_url(expected, &context.mesh_url))
-    {
-        return Ok(());
-    }
-    context.selected_network = selected_network.and_then(trimmed_str).map(str::to_owned);
-    context.auto_connect = context.selected_network.is_some() && auto_connect;
-    save_local_mesh_owner_context(data_dir, &context)
-}
-
-pub(crate) fn refresh_hosted_mesh_owner_context(
-    paths: &ResolvePaths,
-    platform_server_url: &str,
-    organization_id: Option<&str>,
-) -> anyhow::Result<()> {
-    let organization_id = organization_id.and_then(trimmed_str);
-    let mesh_url = config::derive_hosted_mesh_url_for_server(platform_server_url);
-    let existing = load_local_mesh_owner_context(&paths.mesh_data_dir)?;
-    if existing
-        .as_ref()
-        .is_some_and(|context| context.auth_source == LocalMeshOwnerAuthSource::StandaloneLocal)
-    {
-        return Ok(());
-    }
-    let (Some(mesh_url), Some(organization_id)) = (mesh_url, organization_id) else {
-        if existing
-            .as_ref()
-            .is_some_and(|context| context.auth_source == LocalMeshOwnerAuthSource::HostedCurrent)
-        {
-            remove_local_mesh_owner_context(&paths.mesh_data_dir)?;
-        }
-        return Ok(());
-    };
-    let (selected_network, auto_connect) = existing
-        .filter(|context| {
-            context.auth_source == LocalMeshOwnerAuthSource::HostedCurrent
-                && config::same_mesh_url(&context.mesh_url, &mesh_url)
-                && context.organization_id == organization_id
-        })
-        .map(|context| (context.selected_network, context.auto_connect))
-        .unwrap_or((None, false));
-    save_local_mesh_owner_context(
-        &paths.mesh_data_dir,
-        &LocalMeshOwnerContext {
-            schema_version: 1,
-            auth_source: LocalMeshOwnerAuthSource::HostedCurrent,
-            mesh_url,
-            organization_id: organization_id.to_owned(),
-            selected_network,
-            auto_connect,
-        },
-    )
-}
-
-pub(crate) fn remove_hosted_mesh_owner_context(data_dir: &Path) -> anyhow::Result<()> {
-    remove_mesh_owner_context_for_auth_source(data_dir, LocalMeshOwnerAuthSource::HostedCurrent)
 }
 
 fn remove_mesh_owner_context_for_auth_source(

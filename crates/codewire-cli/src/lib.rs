@@ -45,7 +45,7 @@ use codewire_client::{
 use config::{OsEnv, ResolvePaths};
 use console_client::{BillingOverview, ConsoleClient};
 use environment_client::{CreateEnvironmentPortRequest, EnvironmentClient, EnvironmentPort};
-use mesh::{Invite, MeshClient, Network, Node, NodeEnrollment, RedeemedNodeEnrollment};
+use mesh::{MeshClient, Node, RedeemedNodeEnrollment};
 use organization_client::{
     CreateInvitationRequest, CreateOrgRequest, CreatePresetRequest, OrgWithRole,
     OrganizationClient, OrganizationDeletionOutcome, OrganizationDeletionStart, Preset,
@@ -387,7 +387,10 @@ enum Command {
     )]
     Restart(SessionScopeArgs),
     #[cfg(unix)]
-    #[command(about = "Send a task or follow-up to a managed agent conversation")]
+    #[command(
+        about = "Send text to a session: typed into its terminal, or a managed message",
+        long_about = "Send text to a session:\n  cw msg ENV --session SESSION TEXT\n  cw msg --session SESSION TEXT      (in the selected environment)\n\nA terminal session receives the text and Enter through its terminal input, and cw reports the write, not what the program did with it. A managed agent conversation (started with `cw run --agent`) receives a durable message; cw prints its ID and state, and `cw wait --message ID` waits for its result."
+    )]
     Msg(AgentMessageArgs),
     #[cfg(unix)]
     #[command(about = "Steer the current turn of a managed agent")]
@@ -399,8 +402,11 @@ enum Command {
     )]
     Interrupt(SessionSelectorArgs),
     #[cfg(unix)]
-    #[command(about = "Show managed messages and their results")]
-    Inbox(SessionTargetArgs),
+    #[command(
+        about = "Show a managed conversation's messages and results",
+        long_about = "Show a managed agent conversation's messages and results:\n  cw inbox ENV --session SESSION\n\nA terminal session has no structured inbox; read it with `cw logs ENV --session SESSION` or `cw attach ENV --session SESSION`."
+    )]
+    Inbox(InboxArgs),
     #[cfg(unix)]
     #[command(name = "_agent-driver", hide = true)]
     AgentDriver(AgentDriverArgs),
@@ -437,7 +443,8 @@ enum Command {
     Credentials(CredentialsArgs),
     #[command(
         alias = "networks",
-        about = "Manage Mesh networks for environments and nodes"
+        about = "Manage Mesh networks for environments and nodes",
+        long_about = "Manage Mesh networks for environments and nodes.\n\nChoose the Mesh with the global --cloud (Codewire Cloud Mesh, your platform's hosted Mesh) or --local (the local Mesh service from `cw mesh up`), or one endpoint with --mesh-url. Without them, the selected network's Mesh is used, else the one Mesh available. Every result names the Mesh, its endpoint and the organization."
     )]
     Network {
         #[command(subcommand)]
@@ -761,12 +768,12 @@ fn validate_member_mutation_flags(cli: &Cli) -> anyhow::Result<()> {
                     "member mutation flags require --member"
                 )
             }
-            Command::Inbox(args) => anyhow::ensure!(
+            Command::Interrupt(args) => anyhow::ensure!(
                 args.request_id.is_none() && args.expected_launch_generation.is_none(),
                 "member mutation flags require --member"
             ),
-            Command::Interrupt(args) => anyhow::ensure!(
-                args.request_id.is_none() && args.expected_launch_generation.is_none(),
+            Command::Inbox(args) => anyhow::ensure!(
+                args.expected_launch_generation.is_none(),
                 "member mutation flags require --member"
             ),
             Command::Msg(args) | Command::Steer(args) => anyhow::ensure!(
@@ -854,13 +861,13 @@ where
         Command::Stop(args) => flat::handle_stop(&globals, args).await,
         Command::Restart(args) => flat::handle_restart(&globals, args).await,
         #[cfg(unix)]
-        Command::Msg(args) => handle_agent_message_command(&globals, args, false).await,
+        Command::Msg(args) => handle_message_command(&globals, args, false).await,
         #[cfg(unix)]
-        Command::Steer(args) => handle_agent_message_command(&globals, args, true).await,
+        Command::Steer(args) => handle_message_command(&globals, args, true).await,
         #[cfg(unix)]
         Command::Interrupt(args) => handle_agent_interrupt_command(&globals, args).await,
         #[cfg(unix)]
-        Command::Inbox(args) => handle_agent_inbox_command(&globals, args).await,
+        Command::Inbox(args) => handle_inbox_command(&globals, args).await,
         #[cfg(unix)]
         Command::AgentDriver(args) => run_agent_driver(args).await,
         #[cfg(target_os = "linux")]
@@ -1019,10 +1026,17 @@ fn validate_placement_scope(
             | Command::Prune(_)
             | Command::Nuke(_)
             | Command::RefreshSkills(_)
+            // --cloud: the platform's hosted Mesh; --local: the local Mesh service.
+            | Command::Network { .. }
     );
-    // The managed session controls exist only on Unix.
+    // The managed session controls and the environment a message or inbox
+    // addresses exist only on Unix.
     #[cfg(unix)]
-    let reads = reads || matches!(command, Command::Interrupt(_) | Command::Steer(_));
+    let reads = reads
+        || matches!(
+            command,
+            Command::Interrupt(_) | Command::Steer(_) | Command::Msg(_) | Command::Inbox(_)
+        );
     anyhow::ensure!(reads, "{flag} does not apply to `cw {name}`");
     Ok(())
 }
