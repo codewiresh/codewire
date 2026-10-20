@@ -857,4 +857,61 @@ grep -qF "::error::the %s support build exceeded its %s-minute budget in the %s 
   fail 'platform build does not explain an exhausted budget'
 "$ROOT/scripts/ci/tests/test-fetch-openbao-arm64-buildkit-client.sh" >/dev/null
 
+# A failed half of the support pair cancels the run instead of leaving the
+# other half building on a protected slot (#2987). Each half ends with ci.yaml's
+# own fail-fast step, gated on its own failure.
+pair_fail_fast_violation() {
+  python3 - "$1" "$ROOT/.gitea/workflows/ci.yaml" <<'PY'
+import sys
+
+import yaml
+
+NAME = "Cancel the run after this failure"
+try:
+    jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
+    ci_jobs = yaml.safe_load(open(sys.argv[2]))["jobs"]
+except Exception as error:  # A mutation may break the document itself.
+    sys.exit(f"the workflow does not parse: {error}")
+reference = [step for job in ci_jobs.values() for step in job.get("steps") or []
+             if step.get("name") == NAME]
+if not reference:
+    sys.exit("ci.yaml has no fail-fast step to match")
+for job in ("build-support-amd64", "build-support-arm64"):
+    steps = (jobs.get(job) or {}).get("steps") or []
+    cancels = [step for step in steps if step.get("name") == NAME]
+    if len(cancels) != 1 or steps[-1] is not cancels[0]:
+        sys.exit(f"{job} does not end with exactly one fail-fast step")
+    step = cancels[0]
+    if step.get("if") != "${{ failure() }}":
+        sys.exit(f"{job} cancels the run on something other than its own failure")
+    if step.get("run") != reference[0]["run"] or step.get("env") != reference[0]["env"]:
+        sys.exit(f"{job} fail-fast step differs from ci.yaml's")
+PY
+}
+violation="$(pair_fail_fast_violation "$WORKFLOW" 2>&1)" && [[ -z "$violation" ]] || fail "$violation"
+pair_tree="$(mktemp -d)"
+for mutation in drop-step always run; do
+  python3 - "$WORKFLOW" "$pair_tree/workflow.yaml" "$mutation" <<'PY'
+import sys
+
+import yaml
+
+source, target, mutation = sys.argv[1:]
+document = yaml.safe_load(open(source))
+steps = document["jobs"]["build-support-arm64"]["steps"]
+if mutation == "drop-step":
+    steps.pop()
+elif mutation == "always":
+    steps[-1]["if"] = "${{ always() }}"
+else:
+    steps[-1]["run"] = "true\n"
+yaml.safe_dump(document, open(target, "w"), sort_keys=False)
+PY
+  if [[ -z "$(pair_fail_fast_violation "$pair_tree/workflow.yaml" 2>&1)" ]]; then
+    rm -rf -- "$pair_tree"
+    fail "a support pair half without its fail-fast step was accepted ($mutation)"
+  fi
+done
+rm -rf -- "$pair_tree"
+
 echo 'support-image workflow contract: OK'

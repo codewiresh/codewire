@@ -293,6 +293,36 @@ jobs:
             "registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST" "$release_source_sha" \
             .release-source/scripts/ci/verify/workspace-agent-contract.sh
 
+      - name: Cancel the run after this failure
+        # Fail fast: the pair publishes only together, so a failed half
+        # cancels the run instead of leaving the other half building on a
+        # protected slot (#2987). Best effort; the job has already failed
+        # and this step never changes that result.
+        if: ${{ failure() }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
+
   build-support-arm64:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Build the release support pair (linux/arm64)
@@ -322,6 +352,36 @@ jobs:
           # Set only when a base index for this source is already published.
           SUPPORT_PLATFORM_BASE_DIGEST: ${{ needs.support-pair-selection.outputs.base_arm64_digest }}
         run: scripts/ci/images/build-support-platform.sh linux/arm64
+
+      - name: Cancel the run after this failure
+        # Fail fast: the pair publishes only together, so a failed half
+        # cancels the run instead of leaving the other half building on a
+        # protected slot (#2987). Best effort; the job has already failed
+        # and this step never changes that result.
+        if: ${{ failure() }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
+            exit 0
+          fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
+          umask 077
+          auth="$(mktemp)"
+          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
+          unset GITEA_TOKEN
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 --config "$auth" --request POST \
+            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
+          rm -f "$auth"
+          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   publish-support-release-images:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
