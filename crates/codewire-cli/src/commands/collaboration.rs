@@ -4,6 +4,9 @@ use super::*;
 /// environments pull anonymously and the platform resolves to Harbor.
 pub(crate) const CANONICAL_WORKSPACE_IMAGE: &str = codewire_workspace_image::PUBLIC_IMAGE;
 
+/// The Mesh a member control connects through; the member controls are
+/// Linux-only, so this is too.
+#[cfg(target_os = "linux")]
 pub(crate) fn resolve_mesh(
     globals: &Globals,
     paths: &ResolvePaths,

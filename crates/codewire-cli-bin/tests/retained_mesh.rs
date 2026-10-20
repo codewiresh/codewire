@@ -413,12 +413,12 @@ async fn embedded_roles_without_helper_path_reuse_live_a_from_b_then_launch_sele
         assert_eq!(fixture.up(binary, &[]).await["started"], false);
         assert_eq!(fixture.runtime(), original);
         assert!(!terminal(&mesh) && !terminal(&derp));
-        let current = fixture.run(binary, &["network", "current"]).await;
-        assert!(current.status.success());
-        assert_eq!(
-            String::from_utf8(current.stdout).unwrap().trim(),
-            "retained-proof"
+        let current = success_json(
+            fixture
+                .run(binary, &["network", "current", "--output", "json"])
+                .await,
         );
+        assert_eq!(current["network_id"], "retained-proof");
         let status = success_json(
             fixture
                 .run(binary, &["mesh", "status", "--output", "json"])

@@ -28,7 +28,10 @@ mod native;
 mod native_host;
 mod noel;
 mod pause;
-pub(crate) use dispatch::{handle_inbox_command, handle_message_command, terminal_message_bytes};
+/// Used by the Linux-only member controls.
+#[cfg(target_os = "linux")]
+pub(crate) use dispatch::terminal_message_bytes;
+pub(crate) use dispatch::{handle_inbox_command, handle_message_command};
 #[cfg(target_os = "linux")]
 mod platform_control;
 pub(crate) mod platform_host;
