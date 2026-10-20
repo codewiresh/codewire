@@ -9,6 +9,7 @@
 
 use std::io::{Read as _, Write as _};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,8 @@ const CHILD_ENV: &str = "CW_OUTPUT_PTY_CHILD";
 const CHILD_TEST: &str = "output::pty_tests::interactive_child_process";
 const RESULT: &str = "WIDGET-RESULT ";
 const DEADLINE: Duration = Duration::from_secs(60);
+/// How long a finished child's output may take to reach end of file.
+const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 const PICKER_TITLE: &str = "Choose an environment";
 const CHECKLIST_TITLE: &str = "Upgrade Codewire";
 
@@ -85,6 +88,9 @@ fn interactive_child_process() {
 struct Session {
     title: &'static str,
     output: Arc<Mutex<Vec<u8>>>,
+    /// Set once the reader has seen end of file: every byte the child wrote
+    /// is in `output`.
+    drained: Arc<AtomicBool>,
     writer: Box<dyn std::io::Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     _master: Box<dyn portable_pty::MasterPty + Send>,
@@ -120,15 +126,19 @@ impl Session {
         let writer = pty.master.take_writer().unwrap();
         let output = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&output);
+        let drained = Arc::new(AtomicBool::new(false));
+        let eof = Arc::clone(&drained);
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             while let Ok(read @ 1..) = reader.read(&mut buf) {
                 sink.lock().unwrap().extend_from_slice(&buf[..read]);
             }
+            eof.store(true, Ordering::Release);
         });
         Self {
             title,
             output,
+            drained,
             writer,
             child,
             _master: pty.master,
@@ -161,12 +171,28 @@ impl Session {
         let started = Instant::now();
         while !done(&self.text()) {
             if let Ok(Some(status)) = self.child.try_wait() {
+                // The child may write its last bytes and exit between the
+                // check above and this one; read to end of file before
+                // deciding it exited early.
+                self.wait_drained();
+                if done(&self.text()) {
+                    return;
+                }
                 panic!("child exited ({status:?}) before {what}: {:?}", self.text());
             }
             if started.elapsed() > DEADLINE {
                 let _ = self.child.kill();
                 panic!("timed out waiting for {what}: {:?}", self.text());
             }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Waits, bounded, for the reader to reach end of file after the child
+    /// exited.
+    fn wait_drained(&self) {
+        let started = Instant::now();
+        while !self.drained.load(Ordering::Acquire) && started.elapsed() < DRAIN_DEADLINE {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
