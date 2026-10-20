@@ -11,6 +11,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -38,6 +39,9 @@ const DNS_MESSAGE_LIMIT: usize = 1_232;
 /// bound is answered SERVFAIL at once.
 pub(crate) const MAX_DNS_IN_FLIGHT: usize = 32;
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// A destination listener that served no connection and saw no SYN for this
+/// long may be released for a new destination; its handshakes are long done.
+const LISTENER_RELEASE_GRACE: Duration = Duration::from_secs(2);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 const WORKER_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
@@ -223,7 +227,15 @@ where
     let (guest_packet_tx, guest_packets) = mpsc::channel(PACKET_QUEUE);
     let reader = read_authenticated_frames(stream_read, Arc::clone(&session), guest_packet_tx);
     let writer = write_authenticated_frames(stream_write, session, outbound_packets);
-    let dispatcher = dispatch_packets(guest_packets, stack, to_stack, from_stack, broker, inbound);
+    let dispatcher = dispatch_packets(
+        guest_packets,
+        stack,
+        to_stack,
+        from_stack,
+        broker,
+        inbound,
+        limits.max_listeners,
+    );
     tokio::pin!(reader, writer, dispatcher);
     tokio::select! {
         result = &mut reader => result,
@@ -308,6 +320,51 @@ where
     Err(NetworkSessionError::Engine)
 }
 
+/// One AnyIP listener for a guest TCP destination, the bridges it serves, and
+/// when the guest last opened a connection to it.
+struct DestinationListener {
+    task: tokio::task::JoinHandle<()>,
+    active: Arc<AtomicUsize>,
+    last_syn: tokio::time::Instant,
+}
+
+impl DestinationListener {
+    fn releasable(&self, now: tokio::time::Instant) -> bool {
+        self.task.is_finished()
+            || (self.active.load(Ordering::Acquire) == 0
+                && now.duration_since(self.last_syn) >= LISTENER_RELEASE_GRACE)
+    }
+}
+
+/// The netstack holds at most `limit` listeners. At the limit, release the
+/// least recently used one that serves no connection and saw no recent SYN,
+/// so a VM can reach any number of destinations over its life (#2976). A
+/// listener with a live connection, or a handshake that may still be in the
+/// stack, is kept; the new destination then waits for the guest's SYN retry.
+async fn release_idle_listener(
+    listeners: &mut HashMap<SocketAddr, DestinationListener>,
+    limit: usize,
+) {
+    if listeners.len() < limit {
+        return;
+    }
+    let now = tokio::time::Instant::now();
+    let Some(address) = listeners
+        .iter()
+        .filter(|(_, listener)| listener.releasable(now))
+        .min_by_key(|(_, listener)| listener.last_syn)
+        .map(|(address, _)| *address)
+    else {
+        return;
+    };
+    if let Some(listener) = listeners.remove(&address) {
+        // The netstack frees the slot once the listener is dropped, which
+        // the aborted task does before this returns.
+        listener.task.abort();
+        let _ = listener.task.await;
+    }
+}
+
 async fn dispatch_packets<B: EgressBroker>(
     mut packets: mpsc::Receiver<Vec<u8>>,
     stack: Netstack,
@@ -315,8 +372,9 @@ async fn dispatch_packets<B: EgressBroker>(
     outbound: mpsc::Sender<Vec<u8>>,
     broker: Arc<B>,
     mut inbound: Option<mpsc::Receiver<InboundGuestStream>>,
+    listener_limit: usize,
 ) -> Result<(), NetworkSessionError> {
-    let mut listeners = HashMap::<SocketAddr, tokio::task::JoinHandle<()>>::new();
+    let mut listeners = HashMap::<SocketAddr, DestinationListener>::new();
     let mut inbound_bridges = JoinSet::new();
     let mut dns_questions = JoinSet::new();
     loop {
@@ -409,7 +467,10 @@ async fn dispatch_packets<B: EgressBroker>(
                 .map_err(|_| NetworkSessionError::Engine)?;
             continue;
         }
-        if listeners.contains_key(&tcp.destination) {
+        if let Some(listener) = listeners.get_mut(&tcp.destination) {
+            if tcp.initial_syn {
+                listener.last_syn = tokio::time::Instant::now();
+            }
             to_stack
                 .send(packet)
                 .await
@@ -426,16 +487,23 @@ async fn dispatch_packets<B: EgressBroker>(
         if broker.authorize_tcp(flow).await.is_err() {
             continue;
         }
+        release_idle_listener(&mut listeners, listener_limit).await;
         let listener = match stack.bind_endpoint(tcp.destination).await {
             Ok(listener) => listener,
             Err(_) => continue,
         };
         let listener_broker = Arc::clone(&broker);
+        let active = Arc::new(AtomicUsize::new(0));
+        let served = Arc::clone(&active);
         listeners.insert(
             tcp.destination,
-            tokio::spawn(async move {
-                serve_listener(listener, listener_broker).await;
-            }),
+            DestinationListener {
+                task: tokio::spawn(async move {
+                    serve_listener(listener, listener_broker, served).await;
+                }),
+                active,
+                last_syn: tokio::time::Instant::now(),
+            },
         );
         to_stack
             .send(packet)
@@ -482,23 +550,34 @@ async fn next_inbound_guest_stream(
     }
 }
 
-async fn serve_listener<B: EgressBroker>(mut listener: TcpListener, broker: Arc<B>) {
+/// Bridge each accepted guest connection to the broker. `active` counts the
+/// connections from accept until their bridge ends, so the dispatcher never
+/// releases a listener that still serves one.
+async fn serve_listener<B: EgressBroker>(
+    mut listener: TcpListener,
+    broker: Arc<B>,
+    active: Arc<AtomicUsize>,
+) {
     let mut bridges = JoinSet::new();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let Some(mut guest) = accepted else { return; };
+                active.fetch_add(1, Ordering::AcqRel);
                 let flow = TcpFlow {
                     source: guest.peer_addr(),
                     destination: guest.local_addr(),
                 };
                 let Ok(mut connected) = broker.connect_tcp(flow).await else {
+                    active.fetch_sub(1, Ordering::AcqRel);
                     continue;
                 };
+                let finished = Arc::clone(&active);
                 bridges.spawn(async move {
                     let _ = tokio::io::copy_bidirectional(&mut guest, &mut connected).await;
                     let _ = guest.shutdown().await;
                     let _ = connected.shutdown().await;
+                    finished.fetch_sub(1, Ordering::AcqRel);
                 });
             }
             completed = bridges.join_next(), if !bridges.is_empty() => {
@@ -924,6 +1003,79 @@ mod tests {
             packets.push(packet.unwrap());
         }
         packets
+    }
+
+    /// #2976: once the guest has opened more distinct destinations than the
+    /// netstack has listeners, a new destination still answers, because idle
+    /// destination listeners are released.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_destination_answers_after_more_than_the_listener_limit() {
+        let limit = NetstackLimits::default().max_listeners;
+        let broker = Arc::new(BurstBroker {
+            dial: Duration::ZERO,
+            dialled: AtomicUsize::new(0),
+        });
+        let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
+        let destination = |index: usize| {
+            SocketAddrV4::new(
+                Ipv4Addr::new(203, 0, 113, 1 + u8::try_from(index / 100).unwrap()),
+                1_000 + u16::try_from(index).unwrap(),
+            )
+        };
+        let source_port = |index: usize| 40_000 + u16::try_from(index).unwrap();
+        // Every guest source port the worker answered with a SYN-ACK, across
+        // all drains, so a reply that arrives late under load still counts.
+        fn note(answered: &mut std::collections::BTreeSet<u16>, packets: Vec<Vec<u8>>) {
+            for packet in packets {
+                if packet[9] == 6 && tcp_flags(&packet) == 0x12 {
+                    answered.insert(u16::from_be_bytes([packet[22], packet[23]]));
+                }
+            }
+        }
+        let mut answered = std::collections::BTreeSet::new();
+        for index in 0..limit {
+            let syn = tcp_packet(source_port(index), destination(index), 1, 0, 0x02);
+            write_guest_packet(&mut guest, &mut session, &syn)
+                .await
+                .unwrap();
+            note(
+                &mut answered,
+                drain(&mut guest, &mut session, Duration::from_millis(20)).await,
+            );
+        }
+        note(
+            &mut answered,
+            drain(&mut guest, &mut session, Duration::from_millis(500)).await,
+        );
+        for index in 0..limit {
+            assert!(
+                answered.contains(&source_port(index)),
+                "destination {index} was not answered"
+            );
+        }
+        // Every listener is now idle; past the grace, new destinations reuse
+        // their slots.
+        tokio::time::sleep(LISTENER_RELEASE_GRACE + Duration::from_millis(200)).await;
+        for index in limit..limit + 8 {
+            let syn = tcp_packet(source_port(index), destination(index), 1, 0, 0x02);
+            write_guest_packet(&mut guest, &mut session, &syn)
+                .await
+                .unwrap();
+            note(
+                &mut answered,
+                drain(&mut guest, &mut session, Duration::from_millis(20)).await,
+            );
+        }
+        note(
+            &mut answered,
+            drain(&mut guest, &mut session, Duration::from_millis(500)).await,
+        );
+        for index in limit..limit + 8 {
+            assert!(
+                answered.contains(&source_port(index)),
+                "destination {index} past the listener limit was not answered"
+            );
+        }
     }
 
     /// #2714: the guest completes many handshakes to one destination and
