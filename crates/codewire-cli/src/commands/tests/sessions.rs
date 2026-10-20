@@ -424,10 +424,6 @@ async fn session_commands_refuse_missing_contradictory_or_retired_selectors_befo
             "name the environment once: `cw shell ENV` or `cw shell --in ENV`, not both",
         ),
         (
-            vec!["cw", "--local", "shell", "--stdio", "cw-app"],
-            "`cw shell --stdio` is the OpenSSH ProxyCommand for cloud environments; for a local VM run `cw shell ENV`",
-        ),
-        (
             vec!["cw", "vscode", "app", "--in", "app"],
             "name the environment once: `cw vscode ENV` or `cw vscode --in ENV`, not both",
         ),

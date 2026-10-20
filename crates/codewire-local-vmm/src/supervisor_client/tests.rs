@@ -204,6 +204,16 @@ impl LocalSupervisorService for ProtocolPeer {
         Err(Status::unimplemented("unused synthetic method"))
     }
 
+    type OpenEnvironmentSshStreamStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<v1::SshStreamFrame, Status>>>;
+
+    async fn open_environment_ssh_stream(
+        &self,
+        _: Request<tonic::Streaming<v1::SshStreamFrame>>,
+    ) -> Result<Response<Self::OpenEnvironmentSshStreamStream>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
     async fn get_managed_runtime(
         &self,
         _: Request<v1::EnvironmentSelector>,

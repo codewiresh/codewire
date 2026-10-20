@@ -1873,10 +1873,9 @@ pub(crate) async fn handle_environment_shell_command(
     let environment =
         super::flat::select_environment("shell", args.environment, args.in_environment, &[])?;
     if args.stdio {
-        anyhow::ensure!(
-            globals.placement != Some(EnvironmentPlacement::Local),
-            "`cw shell --stdio` is the OpenSSH ProxyCommand for cloud environments; for a local VM run `cw shell ENV`"
-        );
+        if globals.placement == Some(EnvironmentPlacement::Local) {
+            return super::native::native_shell_stdio(environment.as_deref()).await;
+        }
         return handle_shell_stdio(globals, environment.as_deref()).await;
     }
     launch_run(

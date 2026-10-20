@@ -1209,6 +1209,42 @@ pub(crate) async fn get_native_environment(name: &str) -> anyhow::Result<v1::Env
     get_native_environment_with_authority_recovery(&mut client, name).await
 }
 
+/// `cw --local shell --stdio [ENV]`, the OpenSSH ProxyCommand for a local VM
+/// (#3025): this process's stdin and stdout carry the SSH connection, which
+/// the supervisor serves with the environment's own host key.
+pub(crate) async fn native_shell_stdio(name: Option<&str>) -> anyhow::Result<()> {
+    let environment = match name {
+        Some(name) => native_environment(name).await?,
+        None => native_selected_environment().await?,
+    }
+    .ok_or_else(|| match name {
+        Some(name) => anyhow::anyhow!("local environment {name} was not found"),
+        None => anyhow::anyhow!("no local environment is selected; name one"),
+    })?;
+    let environment_id = Uuid::parse_str(&environment.id).context("local environment UUID")?;
+    let mut client = native_client().await?;
+    anyhow::ensure!(
+        client.supports(codewire_local_vmm::supervisor_config::SupervisorFeature::Ssh),
+        "your local VMs run on an older cw's supervisor, which has no SSH; `cw upgrade --vms` moves them to this cw once they are idle"
+    );
+    client
+        .pipe_ssh(environment_id, tokio::io::stdin(), tokio::io::stdout())
+        .await
+        .map_err(|status| {
+            let name = &environment.name;
+            match status.code() {
+                tonic::Code::NotFound => anyhow::anyhow!("local environment {name} was not found"),
+                tonic::Code::FailedPrecondition => anyhow::anyhow!(
+                    "local environment {name} is not running; start it with `cw start {name}`"
+                ),
+                tonic::Code::Unavailable => anyhow::anyhow!(
+                    "local environment {name} is not reachable yet; try again shortly"
+                ),
+                _ => anyhow::anyhow!("SSH to local environment {name}: {}", status.message()),
+            }
+        })
+}
+
 pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     let mut client = native_client().await?;
     let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;

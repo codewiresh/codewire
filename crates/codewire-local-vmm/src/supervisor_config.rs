@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 14;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 15;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -41,6 +41,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         14,
         "workspace.vm_only entries are .dockerignore-style patterns: a copy skips every matching folder and the guest expands them at every boot; an older supervisor would treat them as plain paths",
     ),
+    (
+        15,
+        "SSH (#3025): OpenEnvironmentSshStream, and GetEnvironmentHostKey answers with the environment's host key",
+    ),
 ];
 
 /// A supervisor capability newer than the minimum protocol.
@@ -48,15 +52,18 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
 pub enum SupervisorFeature {
     /// `RetireSupervisor`: an idle supervisor hands its root to a newer one.
     Retire,
+    /// `OpenEnvironmentSshStream` and the local `GetEnvironmentHostKey`.
+    Ssh,
 }
 
 impl SupervisorFeature {
-    pub const ALL: [Self; 1] = [Self::Retire];
+    pub const ALL: [Self; 2] = [Self::Retire, Self::Ssh];
 
     /// The protocol that introduced it.
     pub const fn since(self) -> u32 {
         match self {
             Self::Retire => 12,
+            Self::Ssh => 15,
         }
     }
 }
@@ -347,7 +354,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 14);
+        assert_eq!(info.protocol_version, 15);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

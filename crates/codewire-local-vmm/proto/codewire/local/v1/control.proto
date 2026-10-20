@@ -29,6 +29,13 @@ service LocalSupervisorService {
   // environment generation. The response and request are material-free.
   rpc EnsureCredentialBroker(EnvironmentSelector) returns (CredentialBrokerRuntime);
   rpc GetDaemonAccess(EnvironmentSelector) returns (DaemonAccess);
+  // Serves SSH for one running environment over this owner-only socket
+  // (#3025, protocol 15). The client's first frame opens the stream; every
+  // other frame in either direction carries SSH protocol bytes. The supervisor
+  // terminates SSH itself and runs its sessions through the environment's
+  // daemon, so nothing listens for SSH anywhere. The host key the client must
+  // expect is the public GetEnvironmentHostKey answer on this socket.
+  rpc OpenEnvironmentSshStream(stream SshStreamFrame) returns (stream SshStreamFrame);
   // Public runtime identity from this immutable UUID's retained native binding.
   // Never consults the current global artifact source or a guest manifest.
   rpc GetManagedRuntime(EnvironmentSelector) returns (ManagedRuntime);
@@ -38,6 +45,20 @@ service LocalSupervisorService {
   // supervisor refuses every later request and exits. Every protocol from 12
   // on keeps this RPC unchanged.
   rpc RetireSupervisor(RetireSupervisorRequest) returns (RetireSupervisorResponse);
+}
+
+message SshStreamFrame {
+  oneof frame {
+    // The client's first frame, and only that one.
+    SshStreamOpen open = 1;
+    // SSH protocol bytes, in order.
+    bytes data = 2;
+  }
+}
+
+message SshStreamOpen {
+  // The environment's UUID, as the public API names it.
+  string environment_id = 1;
 }
 
 message RetireSupervisorRequest {

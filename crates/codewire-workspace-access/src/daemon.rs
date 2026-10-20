@@ -197,11 +197,17 @@ impl DaemonSessionClient {
                 endpoint: LOCAL_ENDPOINT.to_owned(),
                 source,
             })?;
-        Ok(Self {
+        Ok(Self::from_channel(channel, credential))
+    }
+
+    /// A client over an already connected daemon channel: a local VM's
+    /// supervisor reaches its guest daemon over hybrid vsock (#3025).
+    pub fn from_channel(channel: Channel, credential: DaemonAuthToken) -> Self {
+        Self {
             inner: v1::daemon_service_client::DaemonServiceClient::new(channel.clone()),
             channel,
             credential,
-        })
+        }
     }
 
     /// A credential-bridge client presenting this client's credential.

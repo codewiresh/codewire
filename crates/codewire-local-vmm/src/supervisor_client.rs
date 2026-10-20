@@ -336,6 +336,78 @@ impl NativeSupervisorClient {
         }
     }
 
+    /// SSH to a running environment over this owner-only socket (#3025):
+    /// `input`'s bytes go to the supervisor's SSH server for the environment
+    /// with this UUID, and its replies to `output`, until either side ends
+    /// the connection. Supervisors before protocol 15 lack it; check
+    /// [`Self::supports`] with [`SupervisorFeature::Ssh`] first. Errors:
+    /// NotFound (no such environment), FailedPrecondition (not running),
+    /// Unavailable (its daemon is not reachable yet), ResourceExhausted (too
+    /// many SSH connections open).
+    pub async fn pipe_ssh<R, W>(
+        &mut self,
+        environment_id: Uuid,
+        mut input: R,
+        mut output: W,
+    ) -> Result<(), Status>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use v1::ssh_stream_frame::Frame;
+
+        const FRAME_BYTES: usize = 32 * 1024;
+        let (frames, outbound) = tokio::sync::mpsc::channel(8);
+        frames
+            .send(v1::SshStreamFrame {
+                frame: Some(Frame::Open(v1::SshStreamOpen {
+                    environment_id: environment_id.to_string(),
+                })),
+            })
+            .await
+            .map_err(|_| Status::internal("local SSH stream closed"))?;
+        let sender = tokio::spawn(async move {
+            let mut buffer = vec![0; FRAME_BYTES];
+            loop {
+                match input.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        let frame = v1::SshStreamFrame {
+                            frame: Some(Frame::Data(buffer[..read].to_vec())),
+                        };
+                        if frames.send(frame).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let mut replies = self
+            .inner
+            .open_environment_ssh_stream(tokio_stream::wrappers::ReceiverStream::new(outbound))
+            .await?
+            .into_inner();
+        let result = async {
+            while let Some(frame) = replies.message().await? {
+                if let Some(Frame::Data(bytes)) = frame.frame {
+                    output
+                        .write_all(&bytes)
+                        .await
+                        .map_err(|_| Status::cancelled("SSH output closed"))?;
+                    output
+                        .flush()
+                        .await
+                        .map_err(|_| Status::cancelled("SSH output closed"))?;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        sender.abort();
+        result
+    }
+
     pub async fn daemon_access(&mut self, name: &str) -> Result<v1::DaemonAccess, Status> {
         Ok(self
             .inner

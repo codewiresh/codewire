@@ -8,6 +8,7 @@ mod bootstrap;
 mod metadata;
 mod runtime;
 mod sources;
+mod ssh;
 #[cfg(test)]
 pub(crate) use crate::supervisor_metadata::SUPERVISOR_STATE_SCHEMA;
 pub(crate) use crate::supervisor_metadata::{
@@ -515,6 +516,8 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         operation_events,
         operation_progress,
         worker_running: Arc::new(AtomicBool::new(false)),
+        host_keys: Arc::new(ssh::HostKeys::new(&config.root)),
+        ssh_streams: Arc::default(),
     };
     let socket = config.supervisor_socket();
     let (listener, socket_identity) = bind_owner_only_listener(&socket)?;
@@ -2331,6 +2334,7 @@ impl SupervisorCore {
                 &self.root,
                 &diagnostic_log::runner_log_name(environment_id),
             );
+            ssh::remove_host_key(&self.config.root, environment_id);
         }
         Ok(())
     }
@@ -4655,6 +4659,8 @@ struct SupervisorRpc {
     operation_events: broadcast::Sender<OperationRecord>,
     operation_progress: broadcast::Sender<OperationProgress>,
     worker_running: Arc<AtomicBool>,
+    host_keys: Arc<ssh::HostKeys>,
+    ssh_streams: Arc<ssh::SshStreams>,
 }
 
 impl SupervisorRpc {
@@ -5617,6 +5623,34 @@ impl LocalSupervisorService for SupervisorRpc {
             .map(credential_broker_runtime_proto)
             .map(Response::new)
             .map_err(Status::from)
+    }
+
+    type OpenEnvironmentSshStreamStream = ssh::SshFrames;
+
+    async fn open_environment_ssh_stream(
+        &self,
+        request: Request<tonic::Streaming<v1::SshStreamFrame>>,
+    ) -> Result<Response<Self::OpenEnvironmentSshStreamStream>, Status> {
+        let mut inbound = request.into_inner();
+        let environment_id = ssh::opened_environment(&mut inbound).await?;
+        let permit = self.ssh_streams.admit(environment_id)?;
+        // Subscribed before access is taken, so no stop between the two is
+        // missed.
+        let operations = self.operation_events.subscribe();
+        let access = self.environment_daemon_access(environment_id).await?;
+        let host_key = self
+            .host_keys
+            .private(environment_id)
+            .map_err(|_| Status::internal("local environment SSH host key is unavailable"))?;
+        let daemon = ssh::daemon_client(access).await?;
+        Ok(Response::new(ssh::serve(
+            daemon,
+            host_key,
+            inbound,
+            operations,
+            environment_id,
+            permit,
+        )))
     }
 
     async fn get_managed_runtime(
@@ -9336,6 +9370,7 @@ mod tests {
         let operation_progress = core.operation_progress.clone();
         let info = supervisor_info(&core.config);
         let (shutdown, _shutdown_rx) = watch::channel(false);
+        let host_keys = Arc::new(ssh::HostKeys::new(&core.config.root));
         SupervisorRpc {
             info,
             core: Arc::new(Mutex::new(core)),
@@ -9344,6 +9379,8 @@ mod tests {
             operation_events,
             operation_progress,
             worker_running: Arc::new(AtomicBool::new(false)),
+            host_keys,
+            ssh_streams: Arc::default(),
         }
     }
 

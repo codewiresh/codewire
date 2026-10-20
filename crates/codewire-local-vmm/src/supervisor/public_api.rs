@@ -427,6 +427,18 @@ const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[
         ],
     },
     MessageSemantics {
+        full_name: "codewire.v1.GetEnvironmentHostKeyRequest",
+        fields: &[field(1, "org_id", LOCAL), field(2, "environment_id", LOCAL)],
+    },
+    // One host key for every boot of a local environment (#3025).
+    MessageSemantics {
+        full_name: "codewire.v1.GetEnvironmentHostKeyResponse",
+        fields: &[
+            field(1, "generation", FIXED),
+            field(2, "public_key_openssh", LOCAL),
+        ],
+    },
+    MessageSemantics {
         full_name: "codewire.v1.GetEnvironmentDaemonStatusRequest",
         fields: &[field(1, "org_id", LOCAL), field(2, "environment_id", LOCAL)],
     },
@@ -560,11 +572,9 @@ const ENVIRONMENT_RPC_SEMANTICS: &[RpcSemantics] = &[
         proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_TRUST_REPORT_SPEC,
         RpcBehavior::UnimplementedPlatformOnly,
     ),
-    // A local environment's SSH trust is the local runtime's, not a
-    // platform-recorded host key.
     rpc(
         proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_HOST_KEY_SPEC,
-        RpcBehavior::UnimplementedPlatformOnly,
+        RpcBehavior::Local,
     ),
     rpc(
         proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_DAEMON_STATUS_SPEC,
@@ -654,43 +664,38 @@ impl SupervisorRpc {
         environment_id: &str,
     ) -> Result<v1::DaemonAccess, connectrpc::ConnectError> {
         let environment_id = parse_coordinate(environment_id, "environment_id")?;
+        let namespace = self.public_namespace_id().await?;
+        require_namespace(namespace, org_id, false)?;
+        self.environment_daemon_access(environment_id)
+            .await
+            .map_err(local_status)
+    }
+
+    /// Daemon access for one environment, named by its UUID, after any
+    /// pending operation runs; its credential broker is started alongside.
+    pub(super) async fn environment_daemon_access(
+        &self,
+        environment_id: Uuid,
+    ) -> Result<v1::DaemonAccess, Status> {
         let (access, broker_request) = {
             let mut core = self.core.lock().await;
-            let namespace = core.store.namespace_id().map_err(|_| local_internal())?;
-            require_namespace(namespace, org_id, false)?;
             let name = core
                 .state
                 .environments
                 .values()
                 .find(|environment| environment.id == environment_id)
                 .map(|environment| environment.name.clone())
-                .ok_or_else(|| {
-                    connectrpc::ConnectError::not_found("local environment was not found")
-                })?;
+                .ok_or_else(|| Status::not_found("local environment was not found"))?;
             core.replay_pending_operations()
                 .await
-                .map_err(Status::from)
-                .map_err(local_status)?;
-            if core
-                .environment(&name)
-                .map_err(Status::from)
-                .map_err(local_status)?
-                .id
-                != environment_id
-            {
-                return Err(connectrpc::ConnectError::not_found(
-                    "local environment was not found",
-                ));
+                .map_err(Status::from)?;
+            if core.environment(&name).map_err(Status::from)?.id != environment_id {
+                return Err(Status::not_found("local environment was not found"));
             }
-            let access = core
-                .daemon_access(&name)
-                .await
-                .map_err(Status::from)
-                .map_err(local_status)?;
+            let access = core.daemon_access(&name).await.map_err(Status::from)?;
             let broker_request = core
                 .credential_broker_ensure_request(&name)
-                .map_err(Status::from)
-                .map_err(local_status)?;
+                .map_err(Status::from)?;
             (access, broker_request)
         };
         // Credential brokerage is auxiliary to daemon/session transport.
@@ -713,7 +718,7 @@ impl SupervisorRpc {
             }
         }));
         if access.generation_capability.is_empty() {
-            return Err(local_internal());
+            return Err(Status::internal("local supervisor request failed"));
         }
         Ok(access)
     }
@@ -2534,11 +2539,26 @@ impl proto::EnvironmentService for SupervisorRpc {
     async fn get_environment_host_key(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, proto::GetEnvironmentHostKeyRequest>,
+        request: ServiceRequest<'_, proto::GetEnvironmentHostKeyRequest>,
     ) -> ServiceResult<proto::GetEnvironmentHostKeyResponse> {
-        // A local environment's SSH trust is the local runtime's, not a
-        // platform-recorded host key.
-        unsupported()
+        // The supervisor terminates a local environment's SSH, with this
+        // environment's own key kept on the host (#3025): the guest supplies
+        // no trust material.
+        let request = request.view();
+        let (_, environment) = self
+            .public_environment(request.org_id, request.environment_id)
+            .await?;
+        let environment_id = parse_coordinate(&environment.id, "environment_id")?;
+        let public_key_openssh = self
+            .host_keys
+            .public_line(environment_id)
+            .map_err(|_| local_internal())?;
+        connectrpc::Response::ok(proto::GetEnvironmentHostKeyResponse {
+            // One key for every boot of this environment.
+            generation: 1,
+            public_key_openssh,
+            ..Default::default()
+        })
     }
 
     async fn get_environment_daemon_status(
@@ -2688,7 +2708,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.behavior == RpcBehavior::Local)
                 .count(),
-            12
+            13
         );
     }
 
