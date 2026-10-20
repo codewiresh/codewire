@@ -36,9 +36,9 @@ case "$mode" in
       exit 2
     }
     case "${CODEWIRE_SCCACHE_PREFIX:-}" in
-      untrusted/codewire/*) ;;
+      untrusted/codewire/*|main/codewire/*) ;;
       *)
-        printf 'host Rust cache prefix must remain below untrusted/codewire/\n' >&2
+        printf 'host Rust cache prefix must remain below untrusted/codewire/ or main/codewire/\n' >&2
         exit 2
         ;;
     esac

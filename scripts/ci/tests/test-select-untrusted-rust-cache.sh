@@ -42,6 +42,7 @@ SH
 cat >"$work/bin/fetch-success" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "${CODEWIRE_R2_CACHE_TRUST:-unset}" >>"${FETCH_TRUST:?}"
 printf '%s\n' '[default]' 'aws_access_key_id = synthetic-access' \
   'aws_secret_access_key = synthetic-secret' >"$1"
 chmod 0600 "$1"
@@ -60,6 +61,9 @@ run_selector() {
     GITHUB_WORKSPACE="$ROOT" \
     GITHUB_ENV="$env_file" \
     SCCACHE_CALLS="$work/sccache.calls" \
+    FETCH_TRUST="$work/fetch.trust" \
+    GITHUB_EVENT_NAME="${SELECT_EVENT:-pull_request}" \
+    GITHUB_REF="${SELECT_REF:-refs/pull/1748/head}" \
     CODEWIRE_SCCACHE_REQUEST="$request" \
     OPENBAO_SCCACHE_FETCHER="$fetcher" \
     "$SELECTOR" "$credentials"
@@ -74,19 +78,24 @@ grep -Fxq 'CODEWIRE_SCCACHE_MODE=r2' "$r2_env" || fail 'R2 mode was not selected
 grep -Fxq 'RUSTC_WRAPPER=/usr/local/bin/sccache' "$r2_env" || fail 'host rustc wrapper is missing'
 grep -Fxq "SCCACHE_BASEDIRS=$ROOT" "$r2_env" || fail 'checkout path is not normalized'
 grep -Fxq 'SCCACHE_IGNORE_SERVER_IO_ERROR=1' "$r2_env" || fail 'cache failure is not best effort'
-grep -Fxq 'SCCACHE_BUCKET=example-ci-cache-untrusted' "$r2_env" || fail 'R2 bucket is not exact'
-grep -Fxq 'SCCACHE_S3_KEY_PREFIX=untrusted/codewire/v1' "$r2_env" || fail 'untrusted prefix is not exact'
+# A pull request reads main's caches read-only and writes nothing remote.
+grep -Fxq 'SCCACHE_BUCKET=example-ci-cache-main' "$r2_env" || fail 'R2 bucket is not exact'
+grep -Fxq 'SCCACHE_S3_KEY_PREFIX=main/codewire/v1' "$r2_env" || fail 'main prefix is not exact'
+grep -Fxq 'SCCACHE_S3_RW_MODE=READ_ONLY' "$r2_env" || fail 'a pull request may write the main cache'
+grep -Fxq 'CODEWIRE_R2_CACHE_TRUST=main-read' "$r2_env" || fail 'pull-request trust is not main-read'
+[[ "$(tail -n 1 "$work/fetch.trust")" == main-read ]] || fail 'fetcher was not asked for the main-read token'
+if grep -Fq untrusted "$r2_env"; then fail 'a pull request selected the untrusted cache'; fi
 grep -Fxq "AWS_SHARED_CREDENTIALS_FILE=$r2_credentials" "$r2_env" || fail 'private credential path is not selected'
 # The server starts during selection, with the minute-long startup wait and an
 # idle timeout longer than any job, on the R2 mode's own socket.
-grep -Fxq "start bucket=example-ci-cache-untrusted uds=$work/runner/codewire-sccache-r2.sock conf=$work/runner/codewire-sccache.conf idle=3600" \
+grep -Fxq "start bucket=example-ci-cache-main uds=$work/runner/codewire-sccache-r2.sock conf=$work/runner/codewire-sccache.conf idle=3600" \
   "$work/sccache.calls" || fail 'R2 server was not started during selection'
 grep -Fxq "SCCACHE_SERVER_UDS=$work/runner/codewire-sccache-r2.sock" "$r2_env" || fail 'R2 socket is not selected'
 grep -Fxq "SCCACHE_CONF=$work/runner/codewire-sccache.conf" "$r2_env" || fail 'startup timeout config is not selected'
 grep -Fxq 'SCCACHE_IDLE_TIMEOUT=3600' "$r2_env" || fail 'server may idle out within a job'
 [[ "$(cat "$work/runner/codewire-sccache.conf")" == 'server_startup_timeout_ms = 60000' ]] ||
   fail 'startup timeout config is not exact'
-grep -Fxq 'CODEWIRE_CI_CACHE state=remote-selected backend=r2 trust=untrusted' "$work/r2.out" ||
+grep -Fxq 'CODEWIRE_CI_CACHE state=remote-selected backend=r2 trust=main-read' "$work/r2.out" ||
   fail 'R2 selection did not report its state'
 [[ "$(stat -c '%a' "$r2_credentials")" == 600 ]] || fail 'R2 credential is not private'
 if rg -n 'synthetic-(access|secret)' "$r2_env" "$work/r2.out"; then
@@ -95,6 +104,22 @@ fi
 
 PATH="$work/bin:$PATH" RUNNER_TEMP="$work/runner" SCCACHE_CALLS="$work/sccache.calls" \
   CODEWIRE_SCCACHE_MODE=r2 "$FINISHER" "$r2_credentials" >"$work/finish.out"
+
+# A canonical-main push selects only the main bucket and prefix.
+main_env="$work/main.env"
+main_credentials="$work/runner/main.aws"
+SELECT_EVENT=push SELECT_REF=refs/heads/main \
+  run_selector auto "$work/bin/fetch-success" "$main_env" "$main_credentials" >"$work/main.out"
+grep -Fxq 'SCCACHE_BUCKET=example-ci-cache-main' "$main_env" || fail 'main bucket is not exact'
+grep -Fxq 'SCCACHE_S3_KEY_PREFIX=main/codewire/v1' "$main_env" || fail 'main prefix is not exact'
+if grep -Eq 'untrusted|READ_ONLY' "$main_env"; then
+  fail 'canonical main selected an untrusted or read-only cache'
+fi
+[[ "$(tail -n 1 "$work/fetch.trust")" == main ]] || fail 'fetcher was not asked for the main token'
+grep -Fxq 'CODEWIRE_CI_CACHE state=remote-selected backend=r2 trust=main' "$work/main.out" ||
+  fail 'main selection did not report its trust'
+PATH="$work/bin:$PATH" RUNNER_TEMP="$work/runner" SCCACHE_CALLS="$work/sccache.calls" \
+  CODEWIRE_SCCACHE_MODE=r2 "$FINISHER" "$main_credentials" >/dev/null
 [[ ! -e "$r2_credentials" ]] || fail 'cleanup retained the private R2 credential'
 grep -Fxq -- '--show-stats' "$work/sccache.calls" || fail 'cleanup omitted cache statistics'
 grep -Fxq -- '--stop-server' "$work/sccache.calls" || fail 'cleanup omitted daemon shutdown'

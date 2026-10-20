@@ -211,6 +211,41 @@ for compiler in disabled local r2; do
     ! grep -q 'codewire-apt-mirror' "$FAKE_LOG" || exit 1
   done
 done
+# A canonical-main selection reads and writes only the main bucket and its
+# prefixes; a mixed main bucket and untrusted prefix is refused.
+: >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
+CODEWIRE_R2_CACHE_TRUST=main SCCACHE_BUCKET=example-ci-cache-main CODEWIRE_SCCACHE_PREFIX=main/codewire/v1 \
+  CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 exercise >"$work/out" 2>&1 || {
+  cat "$work/out" >&2; exit 1;
+}
+grep -q 'bucket=example-ci-cache-main,.*prefix=main/codewire/buildkit/v1/' "$work/layer-args"
+grep -q -- '--cache-to' "$work/layer-args"
+grep -Fxq -- 'SCCACHE_BUCKET=example-ci-cache-main' "$work/compiler-args"
+grep -Fxq -- 'CODEWIRE_SCCACHE_PREFIX=main/codewire/v1' "$work/compiler-args"
+! grep -q untrusted "$work/layer-args" "$work/compiler-args" || exit 1
+if CODEWIRE_R2_CACHE_TRUST=main SCCACHE_BUCKET=example-ci-cache-main CODEWIRE_SCCACHE_MODE=r2 \
+    CODEWIRE_BUILDKIT_CACHE_MODE=r2 exercise >"$work/out" 2>&1; then
+  exit 1
+fi
+grep -Fq 'workspace cache requires the reviewed main R2 configuration' "$work/out"
+# A pull request imports main's layers read-only and exports nothing remote,
+# and never runs a cache measurement against the main bucket.
+: >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
+CODEWIRE_R2_CACHE_TRUST=main-read SCCACHE_BUCKET=example-ci-cache-main CODEWIRE_SCCACHE_PREFIX=main/codewire/v1 \
+  GITHUB_REF=refs/pull/2047/head CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 exercise >"$work/out" 2>&1 || {
+  cat "$work/out" >&2; exit 1;
+}
+grep -q -- '--cache-from' "$work/layer-args"
+grep -q 'bucket=example-ci-cache-main,.*name=amd64/workspace/main$' "$work/layer-args"
+! grep -q -- '--cache-to' "$work/layer-args" || exit 1
+! grep -q -- '--cache-to' "$FAKE_BUILDS" "$FAKE_CW_BUILDS" || exit 1
+! grep -q 'pr-2047' "$work/layer-args" || exit 1
+if CODEWIRE_R2_CACHE_TRUST=main-read SCCACHE_BUCKET=example-ci-cache-main CODEWIRE_SCCACHE_PREFIX=main/codewire/v1 \
+    CODEWIRE_WORKSPACE_CACHE_CASE=seed CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 \
+    exercise >"$work/out" 2>&1; then
+  exit 1
+fi
+grep -Fq 'workspace cache measurements use only the untrusted bucket' "$work/out"
 # The CI apt snapshot cache reaches only base and workspace builds, as an
 # optional secret named by environment, and never as an argument value.
 readonly apt_mirror_secret=' --secret id=codewire-apt-mirror\,env=CODEWIRE_APT_SNAPSHOT_MIRROR '

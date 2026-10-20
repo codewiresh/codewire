@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Exchange this exact Codewire CI job's Forgejo OIDC token for the disposable
-# untrusted R2 cache credential and write it as a private AWS credentials file.
+# Exchange this exact Codewire CI job's Forgejo OIDC token for its R2 cache
+# credential and write it as a private AWS credentials file. A canonical-main
+# push receives the main bucket's read-write token. A pull request receives the
+# main bucket's read-only token, or, for the labelled cache experiments only
+# (CODEWIRE_R2_CACHE_TRUST=untrusted), the untrusted bucket's token. Pull
+# requests can read main's caches and never write them.
 set -euo pipefail
 
 fail() {
@@ -23,19 +27,26 @@ case "$GITHUB_EVENT_NAME|$GITHUB_REF" in
   pull_request\|refs/pull/*/head)
     readonly openbao_role='codewire-source-ci-sccache-r2-pr'
     readonly openbao_audience='openbao-codewire-source-ci-sccache-r2-pr'
+    case "${CODEWIRE_R2_CACHE_TRUST:-main-read}" in
+      main-read|untrusted) readonly trust="${CODEWIRE_R2_CACHE_TRUST:-main-read}" ;;
+      *) fail 'a pull request may use only the main-read or untrusted cache' ;;
+    esac
     ;;
   push\|refs/heads/main)
     readonly openbao_role='codewire-source-ci-sccache-r2-main'
     readonly openbao_audience='openbao-codewire-source-ci-sccache-r2-main'
+    [[ "${CODEWIRE_R2_CACHE_TRUST:-main}" == main ]] ||
+      fail 'canonical main uses only the main cache'
+    readonly trust=main
     ;;
-  *) fail 'event and ref are not approved for the shared untrusted cache' ;;
+  *) fail 'event and ref are not approved for a CI R2 cache' ;;
 esac
 
 [[ -d "$(dirname "$credentials_file")" && ! -e "$credentials_file" && ! -L "$credentials_file" ]] ||
   fail 'credential output must be a new nonsymlink path in an existing directory'
 
 readonly openbao_addr="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
-readonly secret_path='platform/data/ci/codewire/sccache-r2/untrusted'
+readonly secret_path="platform/data/ci/codewire/sccache-r2/$trust"
 readonly -a curl_bounds=(--connect-timeout 10 --max-time 30)
 oidc_request_token="$ACTIONS_ID_TOKEN_REQUEST_TOKEN"
 unset ACTIONS_ID_TOKEN_REQUEST_TOKEN
@@ -101,4 +112,4 @@ jq -er '.data.data.secretAccessKey | strings | select(test("^[A-Za-z0-9_+/-]{32,
 } >"$work/aws-credentials"
 chmod 0600 "$work/aws-credentials"
 mv "$work/aws-credentials" "$credentials_file"
-printf '[fetch-openbao-sccache-r2-credentials] wrote one private untrusted-cache credential file\n'
+printf '[fetch-openbao-sccache-r2-credentials] wrote one private %s-cache credential file\n' "$trust"

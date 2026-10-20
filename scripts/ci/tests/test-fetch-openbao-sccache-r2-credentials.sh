@@ -49,7 +49,9 @@ case "$url" in
     jq -e --arg role "${FAKE_EXPECTED_ROLE:?}" '.role == $role' "$data_file" >/dev/null
     jq -n --arg token "${FAKE_OPENBAO_TOKEN:?}" '{auth:{client_token:$token}}' >"$output"
     ;;
-  https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/untrusted)
+  https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/untrusted|\
+  https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/main-read|\
+  https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/main)
     [[ "${FAKE_R2_FAIL:-0}" != 1 ]] || exit 92
     jq -n --arg accessKeyId "${FAKE_ACCESS_KEY_ID:?}" \
       --arg secretAccessKey "${FAKE_SECRET_ACCESS_KEY:?}" \
@@ -93,14 +95,46 @@ done
 [[ "$(grep -Fc -- '--connect-timeout 10 --max-time 30' "$FAKE_CURL_CALLS")" -eq 3 ]] ||
   fail 'OIDC or OpenBao request lacks the reviewed network deadline'
 
+# A pull request reads main's caches through the read-only document by default.
+grep -Fq 'sccache-r2/main-read' "$FAKE_CURL_CALLS" && ! grep -Eq 'sccache-r2/(untrusted|main )' "$FAKE_CURL_CALLS" ||
+  fail 'a pull request must read only the main-read cache document by default'
+[[ "$(grep -c 'sccache-r2/' "$FAKE_CURL_CALLS")" == 1 ]] || fail 'a pull request read more than one cache document'
+
+# The labelled experiments alone select the disposable untrusted document.
+export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
+: >"$FAKE_CURL_CALLS"
+CODEWIRE_R2_CACHE_TRUST=untrusted "$FETCHER" "$work/output/experiment-aws-credentials" >/dev/null
+grep -Fq 'sccache-r2/untrusted' "$FAKE_CURL_CALLS" && ! grep -Fq 'sccache-r2/main' "$FAKE_CURL_CALLS" ||
+  fail 'a labelled experiment must read only the untrusted cache document'
+for refused in main other; do
+  export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
+  : >"$FAKE_CURL_CALLS"
+  if CODEWIRE_R2_CACHE_TRUST="$refused" "$FETCHER" "$work/output/refused-$refused" >/dev/null 2>&1; then
+    fail "a pull request obtained the $refused cache"
+  fi
+  [[ ! -s "$FAKE_CURL_CALLS" && ! -e "$work/output/refused-$refused" ]] ||
+    fail "a refused pull-request cache request reached an external request"
+done
+
+# A canonical-main push reads only the main bucket's document, never the
+# untrusted one a pull request can write through.
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
 export GITHUB_EVENT_NAME=push
 export GITHUB_REF=refs/heads/main
 export FAKE_EXPECTED_ROLE=codewire-source-ci-sccache-r2-main
 main_credentials_file="$work/output/main-aws-credentials"
-"$FETCHER" "$main_credentials_file" >/dev/null
+: >"$FAKE_CURL_CALLS"
+"$FETCHER" "$main_credentials_file" >"$work/main.out"
 grep -Fxq "aws_access_key_id = $FAKE_ACCESS_KEY_ID" "$main_credentials_file" ||
   fail 'protected-main role wrote a different AWS credential'
+grep -Fq 'sccache-r2/main ' "$FAKE_CURL_CALLS" && ! grep -Eq 'sccache-r2/(untrusted|main-read)' "$FAKE_CURL_CALLS" ||
+  fail 'canonical main must read only the main cache document'
+grep -Fq 'wrote one private main-cache credential file' "$work/main.out" ||
+  fail 'canonical main did not report its main cache credential'
+export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
+if CODEWIRE_R2_CACHE_TRUST=main-read "$FETCHER" "$work/output/main-read-on-main" >/dev/null 2>&1; then
+  fail 'canonical main accepted a cache other than main'
+fi
 
 calls_before="$(wc -l <"$FAKE_CURL_CALLS")"
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'

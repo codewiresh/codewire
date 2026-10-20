@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Select the disposable host-Rust compiler cache for one untrusted CI job.
+# Select the disposable host-Rust compiler cache for one source CI job.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -12,9 +12,15 @@ readonly ROOT
 readonly credentials_file="$1"
 readonly request="${CODEWIRE_SCCACHE_REQUEST:-auto}"
 readonly fetcher="${OPENBAO_SCCACHE_FETCHER:-$ROOT/scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh}"
-readonly bucket='example-ci-cache-untrusted'
+# Canonical-main pushes read and write the main bucket; pull requests read it
+# with a read-only token and write nothing remote. Each token covers exactly
+# one bucket, so main never reads an object a pull request wrote.
+trust=main-read
+[[ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" != 'push|refs/heads/main' ]] || trust=main
+readonly trust
+readonly bucket='example-ci-cache-main'
 readonly endpoint='https://00000000000000000000000000000000.r2.cloudflarestorage.com'
-readonly prefix='untrusted/codewire/v1'
+readonly prefix='main/codewire/v1'
 
 : "${GITHUB_ENV:?Forgejo job environment file is required}"
 : "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
@@ -89,8 +95,10 @@ sccache_env() {
       'SCCACHE_REGION=auto' \
       'SCCACHE_S3_USE_SSL=true' \
       "SCCACHE_S3_KEY_PREFIX=$prefix" \
+      "CODEWIRE_R2_CACHE_TRUST=$trust" \
       'SCCACHE_MULTILEVEL_CHAIN=disk,s3' \
       'SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=ignore'
+    [[ "$trust" != main-read ]] || printf '%s\n' 'SCCACHE_S3_RW_MODE=READ_ONLY'
   fi
 }
 
@@ -144,10 +152,10 @@ case "$request" in
       if select_local_or_disabled; then
         printf 'CODEWIRE_CI_CACHE state=explicit backend=local\n'
       fi
-    elif "$fetcher" "$credentials_file"; then
+    elif CODEWIRE_R2_CACHE_TRUST="$trust" "$fetcher" "$credentials_file"; then
       if sccache_starts r2; then
         select_sccache r2
-        printf 'CODEWIRE_CI_CACHE state=remote-selected backend=r2 trust=untrusted\n'
+        printf 'CODEWIRE_CI_CACHE state=remote-selected backend=r2 trust=%s\n' "$trust"
       else
         remove_credential
         echo '::warning::The R2 sccache server did not start; continuing with the job-local cache'

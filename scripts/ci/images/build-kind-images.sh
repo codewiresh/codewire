@@ -72,9 +72,9 @@ case "$sccache_mode" in
         ;;
     esac
     case "$CODEWIRE_SCCACHE_PREFIX" in
-      untrusted/codewire/*) ;;
+      untrusted/codewire/*|main/codewire/*) ;;
       *)
-        echo 'Kind sccache prefix must remain below untrusted/codewire/' >&2
+        echo 'Kind sccache prefix must remain below untrusted/codewire/ or main/codewire/' >&2
         exit 2
         ;;
     esac

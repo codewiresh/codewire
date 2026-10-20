@@ -10,6 +10,11 @@ rust_request="${CODEWIRE_SCCACHE_REQUEST:-auto}"
 # Remote layer reuse remains opt-in until the pinned-daemon R2 canary passes.
 layer_request="${CODEWIRE_BUILDKIT_CACHE_REQUEST:-local}"
 fetcher="${OPENBAO_SCCACHE_FETCHER:-$ROOT/scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh}"
+# Canonical-main pushes read and write the main bucket. Pull requests read it
+# with a read-only token and write nothing remote, except the labelled cache
+# experiments, which keep the disposable untrusted bucket.
+trust=main-read
+[[ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" != 'push|refs/heads/main' ]] || trust=main
 : "${GITHUB_ENV:?Forgejo job environment file is required}"
 : "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
 : "${RUNNER_TEMP:?Forgejo runner temporary directory is required}"
@@ -25,7 +30,10 @@ if [[ "${GITHUB_EVENT_NAME:-}" == pull_request && -n "${GITHUB_EVENT_PATH:-}" ]]
     layer_request=auto
     canary=true
   fi
+  [[ "$experiment" != true ]] || trust=untrusted
 fi
+bucket=example-ci-cache-main prefix=main/codewire/v1
+[[ "$trust" != untrusted ]] || bucket=example-ci-cache-untrusted prefix=untrusted/codewire/v1
 
 for request in "$rust_request" "$layer_request"; do
   case "$request" in
@@ -74,7 +82,7 @@ if [[ "$rust_request" != disabled ]] \
   echo '::warning::Pinned host sccache is unavailable; compiling without a compiler cache'
 fi
 if [[ ( "$rust_request" == auto && "$rust_mode" != disabled ) || "$layer_request" == auto ]]; then
-  if "$fetcher" "$credentials_file"; then
+  if CODEWIRE_R2_CACHE_TRUST="$trust" "$fetcher" "$credentials_file"; then
     # Validate the fetcher's output before exporting any job configuration.
     [[ -f "$credentials_file" && ! -L "$credentials_file" && -s "$credentials_file" \
         && -r "$credentials_file" && "$(stat -c %a -- "$credentials_file")" == 600 ]] || {
@@ -84,16 +92,17 @@ if [[ ( "$rust_request" == auto && "$rust_mode" != disabled ) || "$layer_request
     [[ "$rust_request" != auto || "$rust_mode" == disabled ]] || rust_mode=r2
     [[ "$layer_request" != auto ]] || layer_mode=r2
     emit_env CODEWIRE_SCCACHE_CREDENTIALS_FILE "$credentials_file"
-    emit_env SCCACHE_BUCKET example-ci-cache-untrusted
+    emit_env CODEWIRE_R2_CACHE_TRUST "$trust"
+    emit_env SCCACHE_BUCKET "$bucket"
     emit_env SCCACHE_ENDPOINT https://00000000000000000000000000000000.r2.cloudflarestorage.com
-    emit_env CODEWIRE_SCCACHE_PREFIX untrusted/codewire/v1
+    emit_env CODEWIRE_SCCACHE_PREFIX "$prefix"
   else
     if [[ -f "$credentials_file" && ! -L "$credentials_file" ]]; then
       shred -u -- "$credentials_file"
     else
       rm -f -- "$credentials_file"
     fi
-    echo '::warning::Untrusted R2 cache identity is unavailable; auto modes fall back to local'
+    echo "::warning::The $trust R2 cache identity is unavailable; auto modes fall back to local"
   fi
 fi
 emit_env CODEWIRE_SCCACHE_MODE "$rust_mode"
@@ -116,10 +125,11 @@ if [[ "$rust_mode" != disabled ]]; then
     emit_env AWS_PROFILE default
     emit_env SCCACHE_REGION auto
     emit_env SCCACHE_S3_USE_SSL true
-    emit_env SCCACHE_S3_KEY_PREFIX untrusted/codewire/v1
+    emit_env SCCACHE_S3_KEY_PREFIX "$prefix"
+    [[ "$trust" != main-read ]] || emit_env SCCACHE_S3_RW_MODE READ_ONLY
     emit_env SCCACHE_MULTILEVEL_CHAIN disk,s3
     emit_env SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY ignore
     emit_env SCCACHE_IGNORE_SERVER_IO_ERROR 1
   fi
 fi
-printf 'CODEWIRE_CI_CACHE scope=workspace compiler=%s layers=%s trust=untrusted\n' "$rust_mode" "$layer_mode"
+printf 'CODEWIRE_CI_CACHE scope=workspace compiler=%s layers=%s trust=%s\n' "$rust_mode" "$layer_mode" "$trust"

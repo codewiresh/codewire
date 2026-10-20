@@ -22,7 +22,7 @@ printf '{}\n' >"$work/event.json"
 cat >"$work/fetch" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'fetch\n' >>"$FETCH_CALLS"
+printf 'fetch %s\n' "${CODEWIRE_R2_CACHE_TRUST:-unset}" >>"$FETCH_CALLS"
 umask 077
 printf '%s\n' '[default]' 'aws_access_key_id = synthetic-cache-access' \
   'aws_secret_access_key = synthetic-cache-secret' >"$1"
@@ -37,7 +37,7 @@ select_cache() {
   local rust="$1" layer="$2" file="$3"
   PATH="${TEST_PATH:-$work/bin:$PATH}" RUNNER_TEMP="$credential_work/runner" GITHUB_WORKSPACE="$ROOT" GITHUB_ENV="$work/env" \
     GITHUB_EVENT_NAME="${TEST_EVENT_NAME:-push}" GITHUB_EVENT_PATH="$work/event.json" \
-    GITHUB_SHA="$test_source" GITHUB_REF=refs/pull/2047/head \
+    GITHUB_SHA="$test_source" GITHUB_REF="${TEST_REF:-refs/pull/2047/head}" \
     GITHUB_REPOSITORY=codewire/codewire \
     CODEWIRE_EXPECTED_SOURCE_SHA="$test_source" CODEWIRE_EXPECTED_SOURCE_TREE="$test_tree" \
     FETCH_CALLS="$work/fetch-calls" OPENBAO_SCCACHE_FETCHER="$work/fetch" \
@@ -65,6 +65,22 @@ for rust in disabled local auto; do
     ! grep -Eq 'synthetic-cache-(access|secret)' "$work/env" "$work/output" || exit 1
   done
 done
+# Pull requests read main's caches read-only; canonical main reads and writes them.
+grep -Fxq SCCACHE_BUCKET=example-ci-cache-main "$work/env"
+grep -Fxq CODEWIRE_SCCACHE_PREFIX=main/codewire/v1 "$work/env"
+grep -Fxq CODEWIRE_R2_CACHE_TRUST=main-read "$work/env"
+grep -Fxq SCCACHE_S3_RW_MODE=READ_ONLY "$work/env"
+grep -Fxq 'fetch main-read' "$work/fetch-calls"
+! grep -Fq untrusted "$work/env" || exit 1
+: >"$work/env"; : >"$work/fetch-calls"
+TEST_REF=refs/heads/main select_cache auto auto "$credential_work/runner/main.aws" >"$work/output"
+grep -Fxq SCCACHE_BUCKET=example-ci-cache-main "$work/env"
+grep -Fxq CODEWIRE_SCCACHE_PREFIX=main/codewire/v1 "$work/env"
+grep -Fxq SCCACHE_S3_KEY_PREFIX=main/codewire/v1 "$work/env"
+grep -Fxq CODEWIRE_R2_CACHE_TRUST=main "$work/env"
+grep -Fxq 'fetch main' "$work/fetch-calls"
+! grep -Eq 'untrusted|READ_ONLY' "$work/env" || exit 1
+grep -Fq 'trust=main' "$work/output"
 : >"$work/env"; : >"$work/fetch-calls"
 FETCH_RESULT=unavailable select_cache auto auto "$credential_work/runner/fallback.aws" >"$work/output"
 grep -Fxq CODEWIRE_SCCACHE_MODE=local "$work/env"
@@ -120,6 +136,13 @@ for event in unlabeled null_labels omitted_labels exact other manual; do
     fi
     grep -Fxq "CODEWIRE_WORKSPACE_CACHE_CANARY=$expected_canary" "$work/env"
     grep -Fxq "CODEWIRE_BUILDKIT_CACHE_MODE=$expected_layers" "$work/env"
+    # Only a labelled pull-request experiment uses the disposable untrusted bucket.
+    if [[ "$expected_layers" == r2 ]]; then
+      expected_trust=main-read
+      [[ "$event" != exact ]] || expected_trust=untrusted
+      grep -Fxq "CODEWIRE_R2_CACHE_TRUST=$expected_trust" "$work/env"
+      grep -Fxq "fetch $expected_trust" "$work/fetch-calls"
+    fi
   done
 done
 printf '{"pull_request":{"labels":[{"name":"ci/r2-cache-canary"}]}}\n' >"$work/event.json"

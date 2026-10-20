@@ -2,9 +2,19 @@
 # Sourced by non-publishing workspace verification and the bounded R2 canary.
 # This is the owner's explicitly accepted provider-key projection, not a broker.
 readonly WORKSPACE_BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
-readonly WORKSPACE_CACHE_BUCKET='example-ci-cache-untrusted'
+# The cache selector names the trust. Canonical-main pushes read and write the
+# main bucket (main); pull requests only read it (main-read) with a read-only
+# token; the labelled experiments, canary and local probes use the disposable
+# untrusted bucket. Each token covers exactly one bucket, so main never imports
+# a layer or compiler object a pull request wrote.
+case "${CODEWIRE_R2_CACHE_TRUST:-untrusted}" in
+  main|main-read) readonly WORKSPACE_CACHE_TRUST="$CODEWIRE_R2_CACHE_TRUST" WORKSPACE_CACHE_SCOPE=main ;;
+  *) readonly WORKSPACE_CACHE_TRUST=untrusted WORKSPACE_CACHE_SCOPE=untrusted ;;
+esac
+readonly WORKSPACE_CACHE_BUCKET="example-ci-cache-$WORKSPACE_CACHE_SCOPE"
 readonly WORKSPACE_CACHE_ENDPOINT='https://00000000000000000000000000000000.r2.cloudflarestorage.com'
-readonly WORKSPACE_CACHE_PREFIX='untrusted/codewire/buildkit/v1/'
+readonly WORKSPACE_CACHE_PREFIX="$WORKSPACE_CACHE_SCOPE/codewire/buildkit/v1/"
+readonly WORKSPACE_SCCACHE_PREFIX="$WORKSPACE_CACHE_SCOPE/codewire/v1"
 readonly WORKSPACE_DAEMON_CREDENTIALS='/run/codewire-cache/aws-credentials'
 # Verification builds the amd64 cw producer with the runtime Cargo profile,
 # the one profile publication (build-push-image.sh) and every other image
@@ -24,6 +34,9 @@ workspace_cache_validate() {
     :*|seed:r2:r2|cold:disabled:disabled|compiler:r2:disabled|warm-1:r2:r2|warm-2:r2:r2) ;;
     *) echo 'workspace measurement cache modes differ from its case' >&2; return 2 ;;
   esac
+  [[ -z "$workspace_measurement_case" || "$WORKSPACE_CACHE_TRUST" == untrusted ]] || {
+    echo 'workspace cache measurements use only the untrusted bucket' >&2; return 2;
+  }
   for mode in "$sccache_mode" "$layer_cache_mode"; do
     case "$mode" in
       disabled|local|r2) ;;
@@ -49,8 +62,8 @@ workspace_cache_validate() {
     esac
     [[ "${SCCACHE_BUCKET:-}" == "$WORKSPACE_CACHE_BUCKET" \
         && "${SCCACHE_ENDPOINT:-}" == "$WORKSPACE_CACHE_ENDPOINT" \
-        && "${CODEWIRE_SCCACHE_PREFIX:-}" == untrusted/codewire/v1 ]] || {
-      echo 'workspace cache requires the reviewed untrusted R2 configuration' >&2; return 2;
+        && "${CODEWIRE_SCCACHE_PREFIX:-}" == "$WORKSPACE_SCCACHE_PREFIX" ]] || {
+      echo "workspace cache requires the reviewed $WORKSPACE_CACHE_TRUST R2 configuration" >&2; return 2;
     }
   fi
   builder='' builder_container='' builder_created=false daemon_credentials=false
@@ -210,8 +223,15 @@ workspace_cache_layer_args() {
     fi
     name="$architecture/$target/tree-$source_tree"
     layer_args+=(--cache-from "$common,name=$name")
-    # Every producer here is untrusted source CI, including main. These aliases
-    # are performance hints only and must never be imported by publication.
+    if [[ "$WORKSPACE_CACHE_TRUST" == main-read ]]; then
+      # Pull requests import main's layers and export nothing remote.
+      [[ "$target" == canary-* ]] || layer_args+=(--cache-from "$common,name=$architecture/$target/main")
+      return
+    fi
+    # Each bucket has one producer class: canonical-main pushes write the main
+    # bucket, and only the labelled pull-request experiments write the
+    # untrusted one. These aliases are performance hints only and must never be
+    # imported by publication.
     alias=''
     case "${GITHUB_REF:-}" in
       refs/pull/*/head)
@@ -239,7 +259,7 @@ workspace_cache_compiler_args() {
     compiler_args+=(--secret "id=aws_shared_credentials,src=$credentials_file"
       --build-arg "SCCACHE_BUCKET=$WORKSPACE_CACHE_BUCKET"
       --build-arg "SCCACHE_ENDPOINT=$WORKSPACE_CACHE_ENDPOINT"
-      --build-arg CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/v1)
+      --build-arg "CODEWIRE_SCCACHE_PREFIX=$WORKSPACE_SCCACHE_PREFIX")
   fi
 }
 
