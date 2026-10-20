@@ -994,9 +994,7 @@ fn platform_create_rejects_local_origins_and_local_yaml_intent() {
         panic!("create");
     };
     assert!(
-        prepare_platform_env_create_request(&args)
-            .unwrap_err()
-            .to_string()
+        format!("{:#}", prepare_platform_env_create_request(&args).unwrap_err())
             .contains("maximum")
     );
 }

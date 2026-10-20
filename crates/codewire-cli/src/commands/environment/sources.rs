@@ -21,7 +21,8 @@ pub(super) fn load_platform_document(path: &Path) -> anyhow::Result<codewire_pro
     file.take((codewire_project::MAX_PROJECT_DOCUMENT_BYTES + 1) as u64)
         .read_to_string(&mut content)
         .with_context(|| format!("read {}", path.display()))?;
-    let document = codewire_project::parse_project_yaml(&content)?;
+    let document = codewire_project::parse_project_yaml(&content)
+        .with_context(|| format!("parse {}", path.display()))?;
     document.ensure_platform_compatible()?;
     Ok(document.spec)
 }
@@ -338,6 +339,21 @@ mod tests {
             }),
             profile_revision: Some(9_007_199_254_740_993),
         }
+    }
+
+    #[test]
+    fn a_project_file_error_names_the_file_and_prints_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("codewire.yaml");
+        std::fs::write(&path, "# Resources.\nversion: 1\ncpu: 8\n").unwrap();
+        let error = load_platform_document(&path).unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "parse {}: cpu: invalid type: integer `8`, expected a quoted quantity such as \"8\" at line 3 column 6",
+                path.display()
+            )
+        );
     }
 
     #[test]

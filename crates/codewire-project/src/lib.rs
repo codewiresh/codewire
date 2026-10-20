@@ -81,8 +81,12 @@ const MAX_ENVIRONMENT_VALUE_BYTES: usize = 64 * 1024;
 pub enum ProjectError {
     #[error("codewire project document is {actual} bytes; maximum is {maximum}")]
     DocumentTooLarge { actual: usize, maximum: usize },
-    #[error("parse codewire project document: {0}")]
-    Yaml(#[from] serde_yaml::Error),
+    /// Not YAML, or not this schema. The parser's message is the whole text:
+    /// the key path, what it expected, and that value's line and column.
+    /// It is not also the error's source, so a caller that prints the error
+    /// chain (`{:#}`) prints it once.
+    #[error("{0}")]
+    Yaml(serde_yaml::Error),
     #[error("unsupported codewire project schema version {0}")]
     UnsupportedSchema(u32),
     #[error("{field} exceeds the maximum of {maximum} entries")]
@@ -92,7 +96,7 @@ pub enum ProjectError {
     #[error("{field} is local-only and is not supported by platform placement")]
     PlatformUnsupported { field: &'static str },
     #[error("serialize canonical codewire project: {0}")]
-    CanonicalJson(#[from] serde_json::Error),
+    CanonicalJson(serde_json::Error),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -213,7 +217,7 @@ impl ProjectSpec {
 
     pub fn canonical_json(&self) -> Result<Vec<u8>, ProjectError> {
         self.validate()?;
-        Ok(serde_json::to_vec(self)?)
+        serde_json::to_vec(self).map_err(ProjectError::CanonicalJson)
     }
 }
 
@@ -409,11 +413,11 @@ struct RawProject {
     skills: Vec<RawSkillBlock>,
     #[serde(default)]
     ports: Vec<RawPortBlock>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "raw_cpu")]
     cpu: Option<RawQuantity>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "raw_memory")]
     memory: Option<RawQuantity>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "raw_disk")]
     disk: Option<RawQuantity>,
     #[serde(default)]
     secrets: Option<RawSecretsBlock>,
@@ -483,21 +487,60 @@ struct RawPortBlock {
     access: String,
 }
 
+/// A resource quantity as written: a YAML string such as `"8"` or `"16Gi"`.
 #[derive(Debug, Clone)]
 struct RawQuantity(String);
 
-impl<'de> Deserialize<'de> for RawQuantity {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        match serde_yaml::Value::deserialize(deserializer)? {
-            serde_yaml::Value::String(value) => Ok(Self(value)),
-            _ => Err(serde::de::Error::custom(
-                "resource quantity must be a unit-bearing string",
-            )),
-        }
+/// Accepts only a string, and refuses anything else inside the value's own
+/// deserializer, so the parser reports that key's path and position (not the
+/// document's) with the quoted form expected. `null` leaves it unset.
+struct QuantityVisitor {
+    example: &'static str,
+}
+
+impl serde::de::Visitor<'_> for QuantityVisitor {
+    type Value = Option<RawQuantity>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "a quoted quantity such as {}", self.example)
     }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(Some(RawQuantity(value.to_owned())))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+}
+
+fn raw_quantity<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    example: &'static str,
+) -> Result<Option<RawQuantity>, D::Error> {
+    deserializer.deserialize_any(QuantityVisitor { example })
+}
+
+fn raw_cpu<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<RawQuantity>, D::Error> {
+    raw_quantity(deserializer, "\"8\"")
+}
+
+fn raw_memory<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<RawQuantity>, D::Error> {
+    raw_quantity(deserializer, "\"16Gi\"")
+}
+
+fn raw_disk<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<RawQuantity>, D::Error> {
+    raw_quantity(deserializer, "\"100Gi\"")
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -531,7 +574,7 @@ pub fn parse_project_yaml(content: &str) -> Result<ProjectDocument, ProjectError
             maximum: MAX_PROJECT_DOCUMENT_BYTES,
         });
     }
-    let raw: RawProject = serde_yaml::from_str(content)?;
+    let raw: RawProject = serde_yaml::from_str(content).map_err(ProjectError::Yaml)?;
     normalize::normalize_raw_project(raw)
 }
 

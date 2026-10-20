@@ -7,6 +7,137 @@ fn repository_codewire_yaml_parses() {
     parse_project_yaml(&content).expect("the repository codewire.yaml parses");
 }
 
+/// Leading comments, as in the repository's codewire.yaml, so a position at
+/// the document's start (line 4, `version:`) cannot pass for a key's own.
+const COMMENTED_HEADER: &str =
+    "# A Codewire environment.\n#\n# Resources suit a full build.\nversion: 1\nimage: workspace\n";
+
+/// A document error's whole printed text and its line and column. The text is
+/// not also the error's source, so printing the chain shows it once.
+fn document_error(yaml: &str) -> (String, usize, usize) {
+    let error = parse_project_yaml(yaml).unwrap_err();
+    let ProjectError::Yaml(parser) = &error else {
+        panic!("not a document error: {error}");
+    };
+    assert!(
+        std::error::Error::source(&error).is_none(),
+        "printing the chain would repeat {error}"
+    );
+    let location = parser.location().expect("the parser reports a position");
+    (error.to_string(), location.line(), location.column())
+}
+
+#[test]
+fn a_bare_number_quantity_names_its_key_position_and_quoted_form() {
+    for (field, value, example, column) in [
+        ("cpu", "8", "\"8\"", 6),
+        ("memory", "16", "\"16Gi\"", 9),
+        ("disk", "100", "\"100Gi\"", 7),
+    ] {
+        let yaml = format!("{COMMENTED_HEADER}{field}: {value}\n");
+        assert_eq!(
+            document_error(&yaml),
+            (
+                format!(
+                    "{field}: invalid type: integer `{value}`, expected a quoted quantity such as {example} at line 6 column {column}"
+                ),
+                6,
+                column
+            )
+        );
+    }
+    let (message, ..) = document_error("cpu: 0.5\n");
+    assert_eq!(
+        message,
+        "cpu: invalid type: floating point `0.5`, expected a quoted quantity such as \"8\" at line 1 column 6"
+    );
+}
+
+#[test]
+fn quoted_and_null_quantities_still_parse() {
+    let document = parse_project_yaml("cpu: \"500m\"\nmemory: '1Gi'\ndisk: \"20\"\n").unwrap();
+    assert_eq!(document.spec.resources.cpu_millicores, Some(500));
+    assert_eq!(document.spec.resources.memory_mib, Some(1024));
+    assert_eq!(document.spec.resources.disk_gib, Some(20));
+    for yaml in ["cpu: ~\n", "cpu: null\n", "cpu:\nmemory:\ndisk:\n"] {
+        let document = parse_project_yaml(yaml).unwrap();
+        assert!(document.spec.resources.is_empty(), "{yaml:?}");
+    }
+}
+
+#[test]
+fn an_unknown_key_is_named_at_its_own_position() {
+    let (message, line, column) = document_error(&format!("{COMMENTED_HEADER}gpu: \"1\"\n"));
+    assert!(
+        message.starts_with("unknown field `gpu`, expected one of `version`, `preset`"),
+        "{message}"
+    );
+    assert!(
+        message.ends_with("`workspace` at line 6 column 1"),
+        "{message}"
+    );
+    assert_eq!((line, column), (6, 1));
+
+    assert_eq!(
+        document_error(&format!(
+            "{COMMENTED_HEADER}agents:\n  tools: [codex]\n  toolz: [codex]\n"
+        )),
+        (
+            "agents: unknown field `toolz`, expected `install` or `tools` at line 8 column 3"
+                .to_owned(),
+            8,
+            3
+        )
+    );
+}
+
+#[test]
+fn a_wrong_type_inside_a_list_names_the_item_path() {
+    assert_eq!(
+        document_error(&format!(
+            "{COMMENTED_HEADER}agents:\n  tools:\n    - claude-code\n    - {{name: codex}}\n"
+        )),
+        (
+            "agents.tools[1]: invalid type: map, expected a string at line 9 column 7".to_owned(),
+            9,
+            7
+        )
+    );
+    assert_eq!(
+        document_error(&format!(
+            "{COMMENTED_HEADER}skills:\n  - source: repository\n    path: a\n  - source: repo\n    path: b\n"
+        )),
+        (
+            "skills[1].source: unknown variant `repo`, expected `repository` or `user` at line 9 column 13"
+                .to_owned(),
+            9,
+            13
+        )
+    );
+}
+
+#[test]
+fn an_environment_type_error_names_the_key_not_the_value() {
+    let (message, ..) = document_error("environment:\n  TOKEN: [synthetic-secret-value]\n");
+    assert_eq!(
+        message,
+        "environment.TOKEN: invalid type: sequence, expected a string at line 2 column 10"
+    );
+}
+
+#[test]
+fn invalid_yaml_syntax_is_reported_once_with_its_position() {
+    assert_eq!(
+        document_error(&format!("{COMMENTED_HEADER}memory \"16Gi\"\ndisk: \"100Gi\"\n")),
+        (
+            "could not find expected ':' at line 7 column 1, while scanning a simple key at line 6 column 1"
+                .to_owned(),
+            7,
+            1
+        )
+    );
+}
+
 #[test]
 fn canonical_mapping_grammar_normalizes_to_one_spec() {
     let canonical = parse_project_yaml(
