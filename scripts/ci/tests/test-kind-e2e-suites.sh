@@ -2633,11 +2633,11 @@ for shard_contract in \
     'timeout-minutes: 45' \
     'fail-fast: true' \
     'slug: environment' \
-    'suites: runtime-acceptance' \
+    'suites: workspace-services final-fencing runtime-acceptance' \
     'slug: dashboard' \
     'suites: dashboard-browser' \
     'slug: workspace' \
-    'suites: workspace-services final-fencing credentials' \
+    'suites: credentials' \
     'slug: edge' \
     'suites: edge-contract integrated' \
     'KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}' \
@@ -2648,6 +2648,12 @@ for shard_contract in \
   grep -Fq "$shard_contract" <<<"$edge_kind_block" ||
     fail "Kind shard matrix is missing: $shard_contract"
 done
+# The credentials suite is the gate's longest, so it shares its leg with no
+# other suite (#2970): the gate's wall time is its longest shard.
+grep -Fxq '            suites: credentials' <<<"$edge_kind_block" ||
+  fail 'the credentials suite no longer runs alone in its Kind shard'
+[ "$(grep -Ec '^ +suites: .*credentials' <<<"$edge_kind_block")" -eq 1 ] ||
+  fail 'more than one Kind shard runs the credentials suite'
 # Edge static verification needs no cluster: it runs once, in tooling, so an
 # edge-only selection starts no Kind leg. The browser host dependencies belong
 # only to the dashboard leg.
@@ -2668,7 +2674,7 @@ fi
 # workspace-service fixture self-cleans, so no shard may invoke it standalone.
 # It runs only nested inside the TTL acceptance (pinned above against
 # reconciler-ttl-smoke.rs).
-if grep -Fq 'suites: workspace-services final-fencing sandbox-supply-chain' <<<"$edge_kind_block"; then
+if grep -Eq '^ +suites: .*sandbox-supply-chain' <<<"$edge_kind_block"; then
   fail 'a shard invokes sandbox-supply-chain standalone; it needs a live product workspace'
 fi
 grep -Fq '.args(["suite", "sandbox-supply-chain"])' \

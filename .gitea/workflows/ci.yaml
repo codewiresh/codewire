@@ -2060,24 +2060,26 @@ jobs:
       fail-fast: true
       matrix:
         shard:
-          # environment: product-runtime acceptance, including the reconciler
-          # TTL gate with its nested sandbox supply-chain observation.
+          # environment: service/exec/FileService/resize, Temporal workflow and
+          # final fencing, then product-runtime acceptance, including the
+          # reconciler TTL gate with its nested sandbox supply-chain
+          # observation. This is the serial gate's order. Sandbox supply-chain
+          # provenance is observed only while the TTL acceptance's
+          # product-created workspace is alive; a standalone invocation would
+          # see only self-cleaned workspace-service fixtures and fail by design.
           - slug: environment
-            suites: runtime-acceptance
+            suites: workspace-services final-fencing runtime-acceptance
           # dashboard: the full Rust dashboard Playwright suite. Its per-worker
           # identities (#2381) let the suite run four workers in this leg;
           # the config default stays 1 for local runs.
           - slug: dashboard
             suites: dashboard-browser
             playwright_workers: 4
-          # workspace: service/exec/FileService/resize, Temporal workflow and
-          # final fencing, and the synthetic credential journey (bootstrap
-          # plus native acceptance). Sandbox supply-chain provenance is
-          # observed by the environment shard's TTL acceptance while its
-          # product-created workspace is alive; a standalone invocation here
-          # would see only self-cleaned fixtures and fail by design.
+          # workspace: the synthetic credential journey (bootstrap, native
+          # acceptance and the Claude stages) alone. It is the longest suite,
+          # so it shares its leg with nothing (#2970).
           - slug: workspace
-            suites: workspace-services final-fencing credentials
+            suites: credentials
           # edge: host-key/edge/Connect contract plus the coordinator runtime
           # and billing Connect contract (the integrated gate's remainder).
           - slug: edge

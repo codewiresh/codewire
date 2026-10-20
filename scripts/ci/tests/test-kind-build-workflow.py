@@ -400,16 +400,18 @@ class WorkflowContractTests(unittest.TestCase):
             edge["name"], "Edge / Kind verification (${{ matrix.shard.slug }})",
         )
         expected_shards = [
-            {"slug": "environment", "suites": "runtime-acceptance"},
+            {
+                "slug": "environment",
+                "suites": "workspace-services final-fencing runtime-acceptance",
+            },
             {
                 "slug": "dashboard",
                 "suites": "dashboard-browser",
                 "playwright_workers": 4,
             },
-            {
-                "slug": "workspace",
-                "suites": "workspace-services final-fencing credentials",
-            },
+            # The credentials suite is the gate's longest; it runs alone so
+            # the gate's wall time is not its sum with the workspace suites.
+            {"slug": "workspace", "suites": "credentials"},
             {"slug": "edge", "suites": "edge-contract integrated"},
         ]
         self.assertEqual(
