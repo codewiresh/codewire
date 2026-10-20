@@ -1013,7 +1013,7 @@ impl Driver {
                 .drain()
                 .filter_map(|(_, pending)| match pending {
                     Pending::Steer(id) => Some(id),
-                    Pending::TurnStart(_) | Pending::Interrupt(_) => None,
+                    Pending::TurnStart(_) | Pending::Interrupt(_) | Pending::Refusal => None,
                 }),
         );
         for id in steers {
@@ -1330,6 +1330,8 @@ impl Driver {
                     })?;
                 }
             }
+            // Only a Codex turn is interrupted for a provider refusal.
+            Pending::Refusal => {}
         }
         Ok(())
     }

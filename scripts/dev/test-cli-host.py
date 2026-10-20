@@ -259,7 +259,7 @@ class Journey:
         print(f"cli-host: {label} PASS", flush=True)
 
     def launch(self, name, command=None, agent=None, parent=None, prompt=None, model=None, ok=True, detach=True,
-               env=()):
+               env=(), effort=None):
         args = ["run", "--in", self.environment, "--name", name]
         if detach:
             args += ["--detach"]
@@ -276,6 +276,8 @@ class Journey:
             args += ["--prompt", prompt]
         if model:
             args += ["--model", model]
+        if effort:
+            args += ["--effort", effort]
         for value in env:
             args += ["--env", value]
         if command:
@@ -357,6 +359,9 @@ class Journey:
         if not self.native:
             self.knows_itself("codex", "lead")
         self.check("managed-task/completion/raw-input-rejection")
+
+        if not self.native:
+            self.prove_provider_refusals()
 
         worker_text = "Reply with exactly WORKER_READY. Do not use tools." if self.native else "WORKER"
         worker = self.launch("worker", agent="claude", parent="lead", prompt=worker_text)
@@ -475,6 +480,63 @@ class Journey:
         refused = self.call("restart", self.environment, "--session", "projection", ok=False)
         assert "launch a new session" in refused.stderr, refused.stderr
         self.check("launch-projection/not-persisted/reload-refuses-stale-replay")
+
+    def prove_provider_refusals(self):
+        """#2982: Codex's default effort is medium and never max; a turn the
+        provider refuses fails at once with a credential-free reason and its
+        repair, in `cw wait --message`, `cw inbox` and `cw info`; a later
+        turn that completes clears it."""
+        lead = self.inbox("lead")
+        assert (lead["model"], lead["effort"]) == ("gpt-6.1-sol", "medium"), lead
+        trace = self.workspace / ("peer-" + lead["driver"]["native_thread_id"] + ".jsonl")
+        efforts = [json.loads(line).get("effort") for line in trace.read_text().splitlines()
+                   if json.loads(line)["method"] == "turn/start"]
+        assert efforts and set(efforts) == {"medium"}, efforts
+
+        model_reason = ("this credential cannot use gpt-6.1-sol (the provider refused the model, HTTP 403); "
+                        "pass --model (and --effort)")
+        # `run --detach` itself fails when the refusal is already final, so
+        # its exit status is whichever came first.
+        refused = self.launch("refused", agent="codex", prompt="REFUSE_MODEL", ok=None)
+        failed = self.wait_message(refused["message"]["id"], ok=False)
+        assert failed["state"] == "error" and failed["error"] == model_reason, failed
+        text = self.call("wait", "--message", refused["message"]["id"], "--timeout", "10s", ok=False)
+        assert model_reason in text.stderr, text.stderr
+        inbox = self.inbox("refused")
+        assert inbox["driver"]["phase"] == "idle", inbox["driver"]
+        assert inbox["driver"]["last_error"] == model_reason, inbox["driver"]
+        assert [m["state"] for m in inbox["messages"]] == ["error"], inbox["messages"]
+        inbox_text = self.call("inbox", self.environment, "--session", "refused").stdout
+        assert f"last error: {model_reason}" in inbox_text, inbox_text
+        info = self.call("info", self.environment, "--output", "json", data=True)
+        attention = info["agents_attention"]
+        assert [(a["session"], a["agent"], a["state"], a["reason"]) for a in attention] == [
+            ("refused", "codex", "turn_failed", model_reason)], attention
+        info_text = self.call("info", self.environment).stdout
+        assert (f"Attention:   refused (codex) last turn failed: {model_reason}. "
+                f"See `cw inbox {info['name']} --session refused`") in info_text, info_text
+        for leaked in ("proj_", "SYNTHETIC0000", "127.0.0.1", "req_synthetic", "cf-ray"):
+            for surface in (json.dumps(failed), json.dumps(inbox), info_text, inbox_text):
+                assert leaked not in surface, (leaked, surface)
+        trace = self.workspace / ("peer-" + inbox["driver"]["native_thread_id"] + ".jsonl")
+        assert trace.read_text().count('"turn/start"') == 1, "the refused task was retried"
+
+        again = self.call("msg", self.environment, "--session", "refused", "AGAIN", "--output", "json", data=True)
+        assert self.wait_message(again["id"])["state"] == "completed"
+        assert self.inbox("refused")["driver"]["last_error"] is None
+        assert "agents_attention" not in self.call("info", self.environment, "--output", "json", data=True)
+
+        effort_reason = ("gpt-5.3-codex does not support effort max "
+                         "(supported: none, low, medium, high, xhigh); pass --effort")
+        effort = self.launch("effort", agent="codex", model="gpt-5.3-codex", effort="max",
+                             prompt="REFUSE_EFFORT", ok=None)
+        failed = self.wait_message(effort["message"]["id"], ok=False)
+        assert failed["state"] == "error" and failed["error"] == effort_reason, failed
+        assert self.inbox("effort")["driver"]["last_error"] == effort_reason
+        for name in ("refused", "effort"):
+            self.call("stop", self.environment, "--session", name)
+        assert "agents_attention" not in self.call("info", self.environment, "--output", "json", data=True)
+        self.check("provider-refusal/medium-default/failed-turn/inbox/wait/info/recovery")
 
     def knows_itself(self, agent, name):
         """The synthetic AGENT of conversation NAME was given its own

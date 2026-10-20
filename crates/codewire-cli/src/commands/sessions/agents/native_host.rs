@@ -771,6 +771,9 @@ pub(super) async fn inbox(
                 config.agent.name(),
                 view.state
             );
+            if let Some(error) = status.pointer("/driver/last_error").and_then(Value::as_str) {
+                println!("last error: {error}");
+            }
             if let Some(messages) = status.get("messages").and_then(Value::as_array) {
                 for message in messages {
                     let record = record_from_view(message.clone())?;
@@ -785,6 +788,21 @@ pub(super) async fn inbox(
         }
     }
     Ok(())
+}
+
+/// One local VM conversation's driver state, for `cw info` (#2982): a
+/// read-only status of one message, which keeps no message location.
+pub(super) async fn driver_state(
+    target: EnvironmentSessionTarget,
+    session: &str,
+) -> anyhow::Result<Value> {
+    let (guest, view, driver_id) = resolve(target, session).await?;
+    let status = guest
+        .control(
+            json!({"op":"status", "driver_id":driver_id, "session_id":view.session_id, "limit":1}),
+        )
+        .await?;
+    Ok(status.get("driver").cloned().unwrap_or(Value::Null))
 }
 
 async fn wait_record(

@@ -430,20 +430,44 @@ pub(crate) fn print_host_environment(
     environment: &HostEnvironment,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
+    print_host_environment_info(environment, output, None)
+}
+
+/// `cw info` for a trusted host and, while it runs, its managed
+/// conversations that need attention (#2982). The JSON gains
+/// `agents_attention` only when one does.
+fn print_host_environment_info(
+    environment: &HostEnvironment,
+    output: OutputFormat,
+    attention: Option<&super::sessions::agents::ManagedAttentionReport>,
+) -> anyhow::Result<()> {
     match output {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+        OutputFormat::Json => {
+            let mut value = serde_json::json!({
                 "id":environment.id,"name":environment.name,"type":"host","placement":"local",
                 "state":environment.state,"path":environment.path,"created_at":environment.created_at
-            }))?
-        ),
-        OutputFormat::Text => println!(
-            "{}\thost\t{}\t{}",
-            environment.name,
-            environment.state,
-            environment.path.display()
-        ),
+            });
+            if let Some(entries) =
+                attention.and_then(super::sessions::agents::managed_attention_json)
+            {
+                value["agents_attention"] = entries;
+            }
+            println!("{}", serde_json::to_string_pretty(&value)?)
+        }
+        OutputFormat::Text => {
+            println!(
+                "{}\thost\t{}\t{}",
+                environment.name,
+                environment.state,
+                environment.path.display()
+            );
+            for row in attention
+                .map(super::sessions::agents::managed_attention_rows)
+                .unwrap_or_default()
+            {
+                println!("Attention:   {row}");
+            }
+        }
     }
     Ok(())
 }
@@ -874,7 +898,21 @@ pub(crate) async fn handle_host_environment_command(
         return Ok(false);
     };
     match command {
-        EnvCommand::Info(a) => print_host_environment(&environment, a.output)?,
+        EnvCommand::Info(a) => {
+            // Managed conversations are read only while it runs (#2982).
+            let attention = if environment.state == "running" {
+                Some(
+                    super::sessions::agents::managed_attention(
+                        globals,
+                        super::sessions::agents::AttentionEnvironment::Host(environment.clone()),
+                    )
+                    .await,
+                )
+            } else {
+                None
+            };
+            print_host_environment_info(&environment, a.output, attention.as_ref())?
+        }
         EnvCommand::Report(a) => {
             let report = serde_json::json!({"id":environment.id,"name":environment.name,
                 "type":"host","placement":"local","isolation":"trusted user execution",

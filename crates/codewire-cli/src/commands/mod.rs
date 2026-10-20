@@ -804,7 +804,7 @@ pub(crate) struct EnvironmentRunArgs {
         long,
         requires = "agent",
         value_parser = ["low", "medium", "high", "xhigh", "max", "ultra"],
-        help = "Managed agent reasoning effort"
+        help = "Managed agent reasoning effort; default: medium (Codex)"
     )]
     pub(crate) effort: Option<String>,
     #[arg(

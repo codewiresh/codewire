@@ -5,6 +5,11 @@ No provider calls, login files, or repository mutations. Protocol ordering and
 failures are deliberately independent of the Rust adapter implementation.
 Every start appends the conversation identity and the arguments the peer was
 given to agent-identity.jsonl in its working directory.
+
+The Codex peer traces each turn's effort, and answers two prompts as Codex
+0.160.0 reports a provider refusal (#2982): REFUSE_MODEL as a project without
+access to the model, retrying until the turn is interrupted, and REFUSE_EFFORT
+as a model that does not support the effort.
 """
 import json
 import os
@@ -400,10 +405,39 @@ model = next((sys.argv[i + 1] for i, value in enumerate(sys.argv[:-1])
 trace_identity("claude" if claude else "codex")
 
 
-def trace(method):
+def trace(method, **fields):
     identity = session if claude else thread
     with Path(f"peer-{identity}.jsonl").open("a") as file:
-        file.write(json.dumps({"method": method}) + "\n")
+        file.write(json.dumps({"method": method, **fields}) + "\n")
+
+
+def refuse_model():
+    """Codex 0.160.0's first retry of a request the provider refused for the
+    model: the retries go on until the turn is interrupted, as a project
+    without access to the model makes them."""
+    details = (f"unexpected status 403 Forbidden: Project `proj_SYNTHETIC0000` does not have access to "
+               f"model `{model}`, url: http://127.0.0.1:38081/v1/responses, cf-ray: synthetic0000-AMS, "
+               "request id: req_synthetic0000")
+    emit({"method": "error", "params": {"error": {"message": "Reconnecting... 1/5",
+          "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 403}},
+          "additionalDetails": details, "misalignment": None},
+          "willRetry": True, "threadId": thread, "turnId": active}})
+
+
+def refuse_effort(effort):
+    """Codex 0.160.0's refusal of an effort the model does not support:
+    no retry, and the turn fails."""
+    global active
+    body = json.dumps({"error": {"message": f"Unsupported value: '{effort}' is not supported with the "
+                       f"'{model}' model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.",
+                       "type": "invalid_request_error", "param": "reasoning.effort",
+                       "code": "unsupported_value"}}, indent=2)
+    error = {"message": body, "codexErrorInfo": "other", "additionalDetails": None, "misalignment": None}
+    emit({"method": "error", "params": {"error": error, "willRetry": False,
+          "threadId": thread, "turnId": active}})
+    emit({"method": "turn/completed", "params": {"threadId": thread,
+          "turn": {"id": active, "status": "failed", "error": error}}})
+    active = None
 
 
 def complete(text, status="completed"):
@@ -447,16 +481,22 @@ for line in sys.stdin:
             continue
         if method == "thread/resume":
             thread = params["threadId"]
+        if method in ("thread/start", "thread/resume") and params.get("model"):
+            model = params["model"]
         trace(method)
         emit({"id": value["id"], "result": {"thread": {"id": thread}}})
     elif method == "turn/start":
-        trace(method)
+        trace(method, effort=params.get("effort"))
         active = str(uuid.uuid4())
         emit({"id": value["id"], "result": {"turn": {"id": active, "status": "inProgress"}}})
         emit({"method": "turn/started", "params": {"threadId": thread,
               "turn": {"id": active, "status": "inProgress"}}})
         text = params["input"][0]["text"]
-        if text != "HOLD":
+        if text == "REFUSE_MODEL":
+            refuse_model()
+        elif text == "REFUSE_EFFORT":
+            refuse_effort(params.get("effort"))
+        elif text != "HOLD":
             complete("PARENT_RECEIVED" if "[Codewire] Managed worker" in text else "RESULT:" + text)
     elif method == "turn/steer":
         if params["expectedTurnId"] != active:

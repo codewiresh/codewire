@@ -862,6 +862,9 @@ pub(super) async fn inbox(
                 "{}\tgeneration {}",
                 conversation.session.session_id, conversation.session.launch_generation
             );
+            if let Some(error) = value.pointer("/driver/last_error").and_then(Value::as_str) {
+                println!("last error: {error}");
+            }
             if let Some(messages) = value.get("messages").and_then(Value::as_array) {
                 for message in messages {
                     println!(
@@ -877,6 +880,19 @@ pub(super) async fn inbox(
         }
     }
     Ok(())
+}
+
+/// One hosted conversation's driver state, for `cw info` (#2982): the
+/// current record, read without resuming anything.
+pub(super) async fn driver_state(
+    target: &EnvironmentSessionTarget,
+    reference: &str,
+) -> anyhow::Result<Value> {
+    let conversation = conversation(target, reference).await?;
+    let value = conversation
+        .read(None, conversation.session.launch_generation)
+        .await?;
+    Ok(value.get("driver").cloned().unwrap_or(Value::Null))
 }
 
 pub(in crate::commands::sessions) async fn control_session(

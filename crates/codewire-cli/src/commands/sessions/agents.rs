@@ -35,6 +35,7 @@ pub(crate) use dispatch::{handle_inbox_command, handle_message_command};
 #[cfg(target_os = "linux")]
 mod platform_control;
 pub(crate) mod platform_host;
+mod turn_failure;
 #[cfg(target_os = "linux")]
 pub(crate) use guest_peer::{AgentPeerArgs, run_agent_peer};
 #[cfg(target_os = "linux")]
@@ -139,9 +140,16 @@ const ADOPT_SCAN_INTERVAL: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_GRACE: Duration = Duration::from_secs(5);
-const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
-const CODEX_DEFAULT_EFFORT: &str = "max";
-const CLAUDE_DEFAULT_MODEL: &str = "claude-opus-5-5";
+/// Codex's own default: what Codex 0.160 and 0.163 choose when no model is
+/// named, and their catalog marks it available through the API, so a ChatGPT
+/// sign-in and an API key get the same model. A project that restricts its
+/// models can still refuse it; that turn fails with a repair (#2982).
+pub(crate) const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
+/// Every managed Codex launch sends an effort, `medium` unless `--effort`
+/// names another: the level every reasoning model Codex runs accepts. It is
+/// never `max` unless asked (#2982).
+pub(crate) const CODEX_DEFAULT_EFFORT: &str = "medium";
+pub(crate) const CLAUDE_DEFAULT_MODEL: &str = "claude-opus-5-5";
 const CODEX_POLICY: &str = "trusted host execution: Codex app-server danger-full-access and approvalPolicy never; native approval requests are declined";
 const CLAUDE_POLICY: &str = "trusted host execution: installed Claude CLI with the user's ordinary settings, MCP configuration and permission rules; no permission mode is passed, so the user's own default mode decides which tools run";
 const CODEX_SANDBOX_POLICY: &str = "Sandbox execution: Codex app-server danger-full-access and approvalPolicy never, through the environment's selected typed provider projection; provider material remains outside the Sandbox";
@@ -784,14 +792,45 @@ fn claude_activity(value: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Why a Claude turn failed. Claude reports a provider error, such as
-/// `API Error: 400 ...`, as an error result whose subtype is still `success`;
-/// that subtype names no failure, so it is left out.
-fn claude_turn_error(subtype: &str, detail: &str) -> String {
-    if subtype == "success" {
-        format!("Claude's turn failed: {detail}")
-    } else {
-        format!("Claude ended the turn with {subtype}: {detail}")
+/// How Codex's `turn/completed` ends the active message (#2982). A refusal
+/// the driver interrupted the turn for, or a final error Codex reported, fails
+/// a turn that then ends interrupted (with no interrupt a message asked for)
+/// or completed with no reply: the provider answered nothing. Every error is
+/// a reason [`turn_failure`] made free of credential material.
+fn codex_turn_outcome(
+    params: &Value,
+    active: &ActiveTurn,
+    model: &str,
+    effort: Option<&str>,
+) -> (TurnStatus, Option<String>) {
+    let native_error = params
+        .pointer("/turn/error")
+        .filter(|error| !error.is_null())
+        .map(|error| turn_failure::codex_failure(error, model, effort));
+    let failure = active.failure.clone();
+    match params.pointer("/turn/status").and_then(Value::as_str) {
+        Some("completed") if active.texts.is_empty() && failure.is_some() => {
+            (TurnStatus::Failed, failure)
+        }
+        Some("completed") => (TurnStatus::Completed, None),
+        Some("interrupted") if active.interrupts.is_empty() && failure.is_some() => {
+            (TurnStatus::Failed, failure)
+        }
+        Some("interrupted") => (TurnStatus::Interrupted, native_error),
+        Some("failed") => (
+            TurnStatus::Failed,
+            Some(
+                native_error
+                    .or(failure)
+                    .unwrap_or_else(|| "Codex reported that the turn failed".into()),
+            ),
+        ),
+        other => (
+            TurnStatus::Failed,
+            Some(format!(
+                "Codex ended the turn with unrecognized status {other:?}"
+            )),
+        ),
     }
 }
 
@@ -1760,6 +1799,242 @@ pub(crate) async fn handle_agent_interrupt_command(
         Some(failure) => Err(failure),
         None => Ok(()),
     }
+}
+
+/// How long `cw info` waits for any one read of an environment's managed
+/// conversations, and for all of them together. A slower read makes them
+/// unavailable; it never fails or stalls `info` (#2982).
+const ATTENTION_READ_TIMEOUT: Duration = Duration::from_secs(3);
+const ATTENTION_TOTAL_TIMEOUT: Duration = Duration::from_secs(6);
+/// At most this many running managed conversations are read for one `info`.
+const ATTENTION_MAX_SESSIONS: usize = 16;
+
+/// One running managed conversation that needs attention: its latest turn
+/// failed, or its driver did. The reason is the driver's `last_error`, free
+/// of credential material; never a message body.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ManagedAttention {
+    pub(crate) session: String,
+    pub(crate) session_id: String,
+    pub(crate) agent: String,
+    /// `turn_failed` while the driver is still serving the conversation,
+    /// `driver_failed` once the driver itself stopped on the error.
+    pub(crate) state: &'static str,
+    pub(crate) reason: String,
+    /// The command that shows the conversation's messages.
+    pub(crate) inbox_command: String,
+}
+
+/// The environment `cw info` shows, as its placement already found it, so
+/// reading its conversations resolves nothing by name again.
+pub(crate) enum AttentionEnvironment {
+    #[cfg(unix)]
+    Host(HostEnvironment),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Native(Box<codewire_local_vmm::control::v1::Environment>),
+    Platform {
+        id: String,
+        name: Option<String>,
+    },
+}
+
+/// What `cw info` shows of an environment's managed conversations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ManagedAttentionReport {
+    /// Every running conversation that needs attention; empty when none does.
+    Sessions(Vec<ManagedAttention>),
+    /// They could not be read in time, and why.
+    Unavailable(String),
+}
+
+/// The running managed conversations of `environment` that need attention,
+/// for `cw info` (#2982). Only call it for a running environment. Each read
+/// is bounded by [`ATTENTION_READ_TIMEOUT`] and all of them together by
+/// [`ATTENTION_TOTAL_TIMEOUT`]; a failure or timeout is reported as
+/// unavailable, never returned as an error.
+pub(crate) async fn managed_attention(
+    globals: &Globals,
+    environment: AttentionEnvironment,
+) -> ManagedAttentionReport {
+    match tokio::time::timeout(
+        ATTENTION_TOTAL_TIMEOUT,
+        read_managed_attention(globals, environment),
+    )
+    .await
+    {
+        Ok(Ok(sessions)) => ManagedAttentionReport::Sessions(sessions),
+        Ok(Err(error)) => {
+            ManagedAttentionReport::Unavailable(turn_failure::sanitize(&format!("{error:#}")))
+        }
+        Err(_) => ManagedAttentionReport::Unavailable(format!(
+            "reading them took longer than {} s",
+            ATTENTION_TOTAL_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+async fn bounded_read<T>(
+    what: &str,
+    read: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    tokio::time::timeout(ATTENTION_READ_TIMEOUT, read)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{what} took longer than {} s",
+                ATTENTION_READ_TIMEOUT.as_secs()
+            )
+        })?
+}
+
+async fn read_managed_attention(
+    globals: &Globals,
+    environment: AttentionEnvironment,
+) -> anyhow::Result<Vec<ManagedAttention>> {
+    let (target, environment) = match environment {
+        #[cfg(unix)]
+        AttentionEnvironment::Host(environment) => {
+            let name = environment.name.clone();
+            let target = EnvironmentSessionTarget::Host {
+                target: environment.current_target(),
+                environment,
+            };
+            (target, name)
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        AttentionEnvironment::Native(environment) => {
+            let name = environment.name.clone();
+            (native_session_target(*environment), name)
+        }
+        AttentionEnvironment::Platform { id, name } => {
+            let label = name.clone().unwrap_or_else(|| id.clone());
+            let env = OsEnv;
+            let paths = ResolvePaths::from_env(&env)?;
+            let current = config::CurrentTargetConfig {
+                kind: "env".to_owned(),
+                target_ref: id,
+                name: label.clone(),
+            };
+            let target = bounded_read(
+                "finding the environment",
+                environment_session_target_from_current(globals, &paths, &env, current),
+            )
+            .await?;
+            (target, label)
+        }
+    };
+    let environment = environment.as_str();
+    let sessions = bounded_read("listing its sessions", target.list()).await?;
+    let mut attention = Vec::new();
+    for view in sessions
+        .into_iter()
+        .filter(|view| is_managed_session(view) && session_running(view))
+        .take(ATTENTION_MAX_SESSIONS)
+    {
+        let state = bounded_read("reading a managed session", driver_state(&target, &view)).await?;
+        if let Some(entry) = attention_entry(environment, &view, &state) {
+            attention.push(entry);
+        }
+    }
+    Ok(attention)
+}
+
+/// The driver state of one managed conversation, as its placement reports it.
+async fn driver_state(
+    target: &EnvironmentSessionTarget,
+    view: &EnvironmentSessionView,
+) -> anyhow::Result<Value> {
+    match target {
+        EnvironmentSessionTarget::Platform { .. } => {
+            platform_host::driver_state(target, &view.session_id).await
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        EnvironmentSessionTarget::NativeLocal { .. } => {
+            native_host::driver_state(target.clone(), &view.session_id).await
+        }
+        #[cfg(unix)]
+        EnvironmentSessionTarget::Host { environment, .. } => {
+            let managed = managed_conversation(environment, view.clone())?;
+            let state = read_optional::<DriverState>(&managed.dir.join("state.json"))?;
+            Ok(serde_json::to_value(state)?)
+        }
+    }
+}
+
+fn attention_entry(
+    environment: &str,
+    view: &EnvironmentSessionView,
+    state: &Value,
+) -> Option<ManagedAttention> {
+    let reason = state
+        .get("last_error")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())?;
+    let failed = state.get("phase").and_then(Value::as_str) == Some("failed");
+    let session = if view.name.is_empty() {
+        view.session_id.clone()
+    } else {
+        view.name.clone()
+    };
+    Some(ManagedAttention {
+        inbox_command: format!("cw inbox {environment} --session {session}"),
+        session,
+        session_id: view.session_id.clone(),
+        agent: state
+            .get("agent")
+            .and_then(Value::as_str)
+            .unwrap_or("agent")
+            .to_owned(),
+        state: if failed {
+            "driver_failed"
+        } else {
+            "turn_failed"
+        },
+        // Earlier drivers kept a provider's text as it came; show only what
+        // the sanitizer keeps.
+        reason: turn_failure::sanitize(reason),
+    })
+}
+
+/// `cw info`'s attention rows (#2982), one value per row for the caller to
+/// label: one per conversation that needs attention, or one saying they could
+/// not be read. Nothing when every running conversation is well.
+pub(crate) fn managed_attention_rows(report: &ManagedAttentionReport) -> Vec<String> {
+    match report {
+        ManagedAttentionReport::Sessions(sessions) => {
+            sessions.iter().map(format_managed_attention).collect()
+        }
+        ManagedAttentionReport::Unavailable(reason) => {
+            vec![format!("agents: unavailable ({reason})")]
+        }
+    }
+}
+
+/// `cw info`'s additive JSON (#2982): the conversations that need attention,
+/// only when there are any, so an environment without them keeps its shape.
+pub(crate) fn managed_attention_json(report: &ManagedAttentionReport) -> Option<Value> {
+    match report {
+        ManagedAttentionReport::Sessions(sessions) if !sessions.is_empty() => {
+            serde_json::to_value(sessions).ok()
+        }
+        _ => None,
+    }
+}
+
+/// One neutral row: the conversation, why it needs attention with its
+/// repair, and where its messages are.
+fn format_managed_attention(entry: &ManagedAttention) -> String {
+    let what = match entry.state {
+        "driver_failed" => "driver failed",
+        _ => "last turn failed",
+    };
+    format!(
+        "{} ({}) {what}: {}. See `{}`",
+        entry.session,
+        entry.agent,
+        entry.reason.trim_end_matches('.'),
+        entry.inbox_command
+    )
 }
 
 /// Waits for a managed message's terminal result. Timeout is never success.
@@ -2860,6 +3135,9 @@ enum Pending {
     TurnStart(String),
     Steer(String),
     Interrupt(String),
+    /// The driver's own interrupt of a turn the provider refused
+    /// ([`turn_failure::codex_retry_refusal`]): no message asked for it.
+    Refusal,
 }
 
 #[derive(Clone, Copy)]
@@ -2888,7 +3166,10 @@ struct ActiveTurn {
     interrupts: Vec<String>,
     usage: Option<Value>,
     acknowledged: bool,
-    /// noel only: why the run's latest assistant message failed.
+    /// Why the turn failed before it ended, already free of credential
+    /// material: noel's latest failed assistant message, or the refusal or
+    /// final error Codex reported. A Codex turn with a failure the driver
+    /// interrupted for ends failed, not interrupted.
     failure: Option<String>,
 }
 
@@ -3854,7 +4135,7 @@ impl Driver {
             (Some(method), Some(id)) => peer.send(&codex_request_response(&method, id)).await,
             (Some(method), None) => {
                 let params = value.get("params").cloned().unwrap_or(Value::Null);
-                self.on_codex_notification(&method, params).await
+                self.on_codex_notification(peer, &method, params).await
             }
             (None, Some(id)) => self.on_codex_response(id, &value).await,
             (None, None) => {
@@ -3871,9 +4152,18 @@ impl Driver {
             ));
             return Ok(());
         };
-        let error = value.get("error").map(rpc_error_text);
+        let error = value
+            .get("error")
+            .map(|error| turn_failure::sanitize(&rpc_error_text(error)));
         let result = value.get("result").cloned().unwrap_or(Value::Null);
         match pending {
+            Pending::Refusal => {
+                // The refused turn still ends: Codex fails it after its own
+                // retries, and `turn/completed` records the refusal either way.
+                if let Some(error) = error {
+                    log(format!("Codex did not interrupt the refused turn: {error}"));
+                }
+            }
             Pending::TurnStart(message_id) => {
                 let is_active = self
                     .active
@@ -3976,7 +4266,12 @@ impl Driver {
         Ok(())
     }
 
-    async fn on_codex_notification(&mut self, method: &str, params: Value) -> anyhow::Result<()> {
+    async fn on_codex_notification(
+        &mut self,
+        peer: &mut Peer,
+        method: &str,
+        params: Value,
+    ) -> anyhow::Result<()> {
         if matches!(
             method,
             "turn/started"
@@ -4070,38 +4365,76 @@ impl Driver {
                 }
                 let result = active.texts.last().cloned();
                 let usage = active.usage.clone();
-                let native_error = params
-                    .pointer("/turn/error/message")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                let (status, error) = match params.pointer("/turn/status").and_then(Value::as_str) {
-                    Some("completed") => (TurnStatus::Completed, None),
-                    Some("interrupted") => (TurnStatus::Interrupted, native_error),
-                    Some("failed") => (
-                        TurnStatus::Failed,
-                        Some(
-                            native_error
-                                .unwrap_or_else(|| "Codex reported that the turn failed".into()),
-                        ),
-                    ),
-                    other => (
-                        TurnStatus::Failed,
-                        Some(format!(
-                            "Codex ended the turn with unrecognized status {other:?}"
-                        )),
-                    ),
-                };
+                let (status, error) = codex_turn_outcome(
+                    &params,
+                    active,
+                    &self.config.model,
+                    self.config.effort.as_deref(),
+                );
                 self.finish_turn(status, result, error, usage).await?;
             }
-            "error" => log(format!(
-                "Codex reported: {}",
-                params
-                    .pointer("/error/message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unspecified error")
-            )),
+            "error" => self.on_codex_error(peer, &params).await?,
             _ => {}
         }
+        Ok(())
+    }
+
+    /// Codex's `error` notification. Its reason, free of credential
+    /// material, goes to the session log. A refusal Codex will retry ends the
+    /// turn at once: the driver interrupts it, and the turn ends failed with
+    /// that refusal ([`codex_turn_outcome`]). A final error is kept for a
+    /// turn that then ends with no reply. Nothing is ever retried by the
+    /// driver.
+    async fn on_codex_error(&mut self, peer: &mut Peer, params: &Value) -> anyhow::Result<()> {
+        if params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .is_some_and(|thread| Some(thread) != self.state.native_thread_id.as_deref())
+        {
+            log("ignored an error for another native thread");
+            return Ok(());
+        }
+        let model = self.config.model.as_str();
+        let effort = self.config.effort.as_deref();
+        let error = params.get("error").cloned().unwrap_or(Value::Null);
+        let reason = turn_failure::codex_failure(&error, model, effort);
+        let will_retry = params.get("willRetry").and_then(Value::as_bool) == Some(true);
+        let refusal = turn_failure::codex_retry_refusal(params, model, effort);
+        log(match (&refusal, will_retry) {
+            (Some(refusal), _) => format!("Codex reported a refusal; ending the turn: {refusal}"),
+            (None, true) => format!("Codex is retrying after: {reason}"),
+            (None, false) => format!("Codex reported: {reason}"),
+        });
+        let Some(active) = self.active.as_mut() else {
+            return Ok(());
+        };
+        let turn = params.get("turnId").and_then(Value::as_str);
+        if turn.is_some_and(|turn| active.turn_id.as_deref().is_some_and(|id| id != turn)) {
+            return Ok(());
+        }
+        if !will_retry {
+            active.failure.get_or_insert(reason);
+            return Ok(());
+        }
+        let Some(refusal) = refusal else {
+            return Ok(());
+        };
+        if active.failure.is_some() {
+            return Ok(());
+        }
+        active.failure = Some(refusal);
+        let Some(turn) = active.turn_id.clone().or_else(|| turn.map(str::to_owned)) else {
+            return Ok(());
+        };
+        let thread = self.thread_id()?;
+        self.pending.insert(peer.next_id, Pending::Refusal);
+        let request = peer
+            .request(
+                "turn/interrupt",
+                json!({"threadId": thread, "turnId": turn}),
+            )
+            .await?;
+        debug_assert!(self.pending.contains_key(&request));
         Ok(())
     }
 
@@ -4197,7 +4530,11 @@ impl Driver {
                     let detail = errors.or_else(|| text.clone()).unwrap_or_default();
                     (
                         TurnStatus::Failed,
-                        Some(claude_turn_error(subtype, &detail)),
+                        Some(turn_failure::claude_failure(
+                            subtype,
+                            &detail,
+                            &self.config.model,
+                        )),
                     )
                 };
                 self.finish_turn(status, text, error, Some(usage)).await?;
@@ -4316,6 +4653,13 @@ impl Driver {
         self.state.phase = DriverPhase::Idle;
         self.state.active_message_id = None;
         self.state.current_turn_id = None;
+        // The conversation's latest outcome: a failed turn names its reason
+        // until a later turn completes (#2982).
+        match state {
+            MessageState::Error => self.state.last_error = error.clone(),
+            MessageState::Completed => self.state.last_error = None,
+            _ => {}
+        }
         self.persist_state()?;
         log(format!("message {} {}", main.id, main.state.name()));
         if let Some(reply) = main
@@ -4349,7 +4693,7 @@ impl Driver {
             .drain()
             .filter_map(|(_, pending)| match pending {
                 Pending::Steer(id) | Pending::Interrupt(id) => Some(id),
-                Pending::TurnStart(_) => None,
+                Pending::TurnStart(_) | Pending::Refusal => None,
             })
             .collect();
         issued.extend(self.control_pending.drain().map(|(_, id)| id));
@@ -5024,21 +5368,37 @@ mod tests {
         // Claude Code 2.1.288 ends a turn the provider refused with
         // `"subtype":"success","is_error":true`.
         assert_eq!(
-            claude_turn_error("success", "API Error: 400 model not supported"),
+            turn_failure::claude_failure(
+                "success",
+                "API Error: 400 model not supported",
+                "claude-opus-5-5"
+            ),
             "Claude's turn failed: API Error: 400 model not supported"
         );
         assert_eq!(
-            claude_turn_error("error_max_turns", "reached the turn limit"),
+            turn_failure::claude_failure(
+                "error_max_turns",
+                "reached the turn limit",
+                "claude-opus-5-5"
+            ),
             "Claude ended the turn with error_max_turns: reached the turn limit"
         );
     }
 
     #[test]
     fn effort_uses_native_provider_levels_and_preserves_configured_claude_default() {
+        // Codex always gets an effort, `medium` unless one is named; never
+        // `max` unless asked (#2982).
         assert_eq!(
             agent_effort(AgentKind::Codex, None).unwrap(),
-            Some("max".into())
+            Some("medium".into())
         );
+        for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+            assert_eq!(
+                agent_effort(AgentKind::Codex, Some(effort)).unwrap(),
+                Some(effort.into())
+            );
+        }
         assert_eq!(agent_effort(AgentKind::Claude, None).unwrap(), None);
         assert_eq!(
             agent_effort(AgentKind::Claude, Some("xhigh")).unwrap(),

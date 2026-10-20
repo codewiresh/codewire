@@ -277,15 +277,20 @@ pub(crate) async fn run(globals: &Globals, args: EnvironmentRunArgs) -> anyhow::
         Some("claude") => v1::HostManagedAgent::Claude,
         _ => anyhow::bail!("member managed agents support only codex and claude"),
     };
+    // The same defaults as every other placement: Codex always gets an
+    // effort, `medium` unless one is named (#2982).
+    use crate::commands::sessions::agents::{
+        CLAUDE_DEFAULT_MODEL, CODEX_DEFAULT_EFFORT, CODEX_DEFAULT_MODEL,
+    };
     let model = args.model.unwrap_or_else(|| {
         if agent == v1::HostManagedAgent::Codex {
-            "gpt-6.1-sol".into()
+            CODEX_DEFAULT_MODEL.into()
         } else {
-            "claude-opus-5-5".into()
+            CLAUDE_DEFAULT_MODEL.into()
         }
     });
     let effort = if agent == v1::HostManagedAgent::Codex {
-        Some(args.effort.unwrap_or_else(|| "max".into()))
+        Some(args.effort.unwrap_or_else(|| CODEX_DEFAULT_EFFORT.into()))
     } else {
         args.effort
     };

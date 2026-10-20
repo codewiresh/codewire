@@ -484,7 +484,7 @@ impl Driver {
             .drain()
             .filter_map(|(_, pending)| match pending {
                 Pending::Steer(id) => Some(id),
-                Pending::TurnStart(_) | Pending::Interrupt(_) => None,
+                Pending::TurnStart(_) | Pending::Interrupt(_) | Pending::Refusal => None,
             })
             .collect();
         steers.extend(self.control_pending.drain().map(|(_, id)| id));

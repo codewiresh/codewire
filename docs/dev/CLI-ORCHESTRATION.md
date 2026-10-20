@@ -176,7 +176,22 @@ Codex's `[projects."<dir>"] trust_level = "trusted"` entry, so the project's
 own `.codex` configuration, hooks and exec policies load without a trust
 warning, and no `config.toml` is written. Neither adapter copies login
 material. Claude supports `low`, `medium`, `high`, `xhigh`, and `max`; omitting
-effort preserves its configured default.
+effort preserves its configured default. Managed Codex defaults to model
+`gpt-6.1-sol`, Codex's own default, and always sends an effort: `medium`
+unless `--effort` names another, and never `max` unless asked.
+
+A turn the provider refuses is a failed message, never a silent idle one. The
+message ends in state `error`, and the driver's `last_error` names why, with
+the refused model or effort, the HTTP status and the repair: "this credential
+cannot use MODEL; pass --model (and --effort)" when the credential's project
+may not use the model, or "MODEL does not support effort E (supported: ...);
+pass --effort". The reason keeps no project or organization ID, URL, request
+or trace ID, or anything shaped like a key or token. Codex retries a model
+refusal on its own; the driver ends that turn at the first refusal, and
+nothing retries the task. `cw wait --message` and `cw inbox` show the reason,
+and `cw info` lists each running conversation whose last turn failed, with
+the `cw inbox ENV --session S` that shows it. A later turn that completes
+clears `last_error`.
 
 Managed Claude keeps the installed CLI's settings, MCP configuration and
 permission rules on every placement; Codewire adds no option that hides them

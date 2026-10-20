@@ -599,7 +599,22 @@ pub(crate) async fn handle_platform_env_command(
                 .get_environment(&org_id, &environment_id)
                 .await
                 .context("get environment")?;
-            print_env_info(&environment, args.output)?;
+            // Managed conversations are read only while it runs (#2982).
+            let attention = if environment.state == "running" {
+                Some(
+                    super::sessions::agents::managed_attention(
+                        globals,
+                        super::sessions::agents::AttentionEnvironment::Platform {
+                            id: environment_id.clone(),
+                            name: environment.name.clone(),
+                        },
+                    )
+                    .await,
+                )
+            } else {
+                None
+            };
+            print_env_info(&environment, args.output, attention.as_ref())?;
         }
         EnvCommand::Report(args) => {
             let environment_id =
@@ -1600,7 +1615,27 @@ async fn handle_unified_environment_info(
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         UnifiedEnvironmentTarget::NativeLocal(name) => {
             let environment = get_native_environment(&name).await?;
-            print_native_environment(&environment, args.output)
+            // Managed conversations are read only while the VM runs (#2982).
+            let attention = if environment.state
+                == codewire_local_vmm::control::v1::EnvironmentState::Running as i32
+            {
+                Some(
+                    super::sessions::agents::managed_attention(
+                        globals,
+                        super::sessions::agents::AttentionEnvironment::Native(Box::new(
+                            environment.clone(),
+                        )),
+                    )
+                    .await,
+                )
+            } else {
+                None
+            };
+            super::native::print_native_environment_info(
+                &environment,
+                args.output,
+                attention.as_ref(),
+            )
         }
         UnifiedEnvironmentTarget::Platform(id) => {
             handle_platform_env_command(
@@ -3342,13 +3377,34 @@ pub(crate) fn filter_environments(
         .collect()
 }
 
+/// `cw info` for a cloud environment and, while it runs, its managed
+/// conversations that need attention (#2982). The JSON gains
+/// `agents_attention` only when one does.
 pub(crate) fn print_env_info(
     environment: &Environment,
     output: OutputFormat,
+    attention: Option<&super::sessions::agents::ManagedAttentionReport>,
 ) -> anyhow::Result<()> {
     match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(environment)?),
-        OutputFormat::Text => print!("{}", format_env_info_text(environment)),
+        OutputFormat::Json => {
+            let mut value = serde_json::to_value(environment)?;
+            if let Some(entries) =
+                attention.and_then(super::sessions::agents::managed_attention_json)
+            {
+                value["agents_attention"] = entries;
+            }
+            println!("{}", serde_json::to_string_pretty(&value)?)
+        }
+        OutputFormat::Text => {
+            let mut text = format_env_info_text(environment);
+            for row in attention
+                .map(super::sessions::agents::managed_attention_rows)
+                .unwrap_or_default()
+            {
+                text.push_str(&format!("{:<14} {row}\n", "Attention:"));
+            }
+            print!("{text}")
+        }
     }
     Ok(())
 }

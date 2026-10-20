@@ -1732,16 +1732,38 @@ pub(crate) fn print_native_environment(
     environment: &v1::Environment,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
+    print_native_environment_info(environment, output, None)
+}
+
+/// `cw info` for a local VM: the environment and, while it runs, the managed
+/// conversations that need attention (#2982). The JSON gains
+/// `agents_attention` only when one does.
+pub(crate) fn print_native_environment_info(
+    environment: &v1::Environment,
+    output: OutputFormat,
+    attention: Option<&super::sessions::agents::ManagedAttentionReport>,
+) -> anyhow::Result<()> {
     let view = NativeEnvironmentView::try_from(environment)?;
     match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&view)?),
+        OutputFormat::Json => {
+            let mut value = serde_json::to_value(&view)?;
+            if let Some(entries) =
+                attention.and_then(super::sessions::agents::managed_attention_json)
+            {
+                value["agents_attention"] = entries;
+            }
+            println!("{}", serde_json::to_string_pretty(&value)?)
+        }
         OutputFormat::Text => {
             let configuration = (!environment.project_spec_json.is_empty())
                 .then(|| sources::project_from_environment(environment).ok())
                 .flatten();
+            let rows = attention
+                .map(super::sessions::agents::managed_attention_rows)
+                .unwrap_or_default();
             print!(
                 "{}",
-                format_native_environment(&view, configuration.as_ref())
+                format_native_environment(&view, configuration.as_ref(), &rows)
             )
         }
     }
@@ -1837,6 +1859,7 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
 fn format_native_environment(
     view: &NativeEnvironmentView,
     configuration: Option<&codewire_project::ProjectSpec>,
+    attention: &[String],
 ) -> String {
     let access = match (&view.access_profile, view.access_profile_revision) {
         (profile, Some(revision)) if !profile.is_empty() => {
@@ -1881,6 +1904,9 @@ fn format_native_environment(
     }
     if let Some(error_code) = &view.error_code {
         output.push_str(&format!("Error:       {error_code}\n"));
+    }
+    for row in attention {
+        output.push_str(&format!("Attention:   {row}\n"));
     }
     output.push_str(&format!("Generation:  {}\n", view.generation));
     output.push_str(&sources::format_source_view(view.source_selection.as_ref()));
@@ -4800,7 +4826,7 @@ working_directory: /workspace/github
             source_selection: None,
         };
 
-        let output = format_native_environment(&view, None);
+        let output = format_native_environment(&view, None, &[]);
         assert!(output.contains("Port:        127.0.0.1:18080 -> 8080\n"));
         assert!(output.contains("Network:     mesh-dev\n"));
         assert!(output.contains("Access:      user/work (revision 2)\n"));
@@ -4818,14 +4844,14 @@ working_directory: /workspace/github
         spec.environment
             .insert("API_URL".to_owned(), "https://synthetic.invalid".to_owned());
         spec.agents.tools = vec!["claude".to_owned(), "codex".to_owned()];
-        let output = format_native_environment(&view, Some(&spec));
+        let output = format_native_environment(&view, Some(&spec), &[]);
         assert!(output.contains(
             "Working dir: /workspace\nAccess:      user/work (revision 2)\nInstall:     npm ci npm run build\nEnv vars:    API_URL, NODE_ENV\nAgents:      claude, codex\nDocker:      8Gi\n"
         ), "{output}");
         assert!(!output.contains("synthetic-value-never-shown"));
         assert!(!output.contains("synthetic.invalid"));
         let empty =
-            format_native_environment(&view, Some(&codewire_project::ProjectSpec::default()));
+            format_native_environment(&view, Some(&codewire_project::ProjectSpec::default()), &[]);
         assert!(empty.contains("Install:     none\nEnv vars:    none\nAgents:      none\n"));
     }
 
