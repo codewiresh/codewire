@@ -5,7 +5,7 @@
 //! DTOs derive `JsonSchema`; the same generated schema feeds Rust OpenAPI
 //! previews and runtime validation, so the documented contract and enforced
 //! shape stay aligned. Rejected input returns the stable Rust-native 422
-//! envelope documented in `docs/dev/API-CONTRACT-SOURCE.md`.
+//! envelope.
 
 use std::borrow::Cow;
 

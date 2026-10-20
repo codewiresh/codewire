@@ -14,10 +14,6 @@
 //! (doc 01 D1: `BadRequest`, `ErrorInfo`, `RetryInfo`) compile to
 //! [`google::rpc`] for the Connect error renderer's wire encoding
 //! (doc 03 WI-2).
-//!
-//! Program docs: `connect-rpc/00-MASTER.md` (master plan) and
-//! `connect-rpc/02-proto-authoring-guide.md` (this crate's
-//! workstream).
 
 connectrpc::include_generated!();
 
