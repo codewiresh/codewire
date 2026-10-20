@@ -47,10 +47,14 @@ if [ $# -gt 1 ]; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+# The tree this selector came from. A pull request runs the trusted base's
+# selector against the candidate checkout, so the two can differ.
+selector_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 
 tmp="$(mktemp)"
 tokens_tmp="$(mktemp)"
-trap 'rm -f "$tmp" "$tokens_tmp"' EXIT
+graph_tmp="$(mktemp -d)"
+trap 'rm -f "$tmp" "$tokens_tmp"; rm -rf "$graph_tmp"' EXIT
 
 event="${GITHUB_EVENT_NAME:-}"
 explicit_paths=false
@@ -124,6 +128,7 @@ if [ $# -gt 0 ]; then
 fi
 
 declare -A selected=()
+declare -A changed_crates=()
 
 select_token() {
   selected["$1"]=1
@@ -200,6 +205,119 @@ select_all_transport() {
 select_all_contracts() {
   select_token contracts
   select_token contracts_proto
+}
+
+# The whole Rust workspace graph: what a root manifest, lockfile or toolchain
+# change selects. Workspace graph, resolution, and toolchain changes can alter
+# both the host VMM and the statically packaged guest probe, so their
+# cross-target and reproducible-initramfs checks come too.
+select_rust_workspace() {
+  select_token rust
+  select_token rust_workspace
+  select_token rust_curated_locks
+  select_token transport
+  select_token transport_pkg_codewire_local_vmm
+  select_token transport_pkg_codewire_vmm_guest_probe
+}
+
+# One workspace crate's own tests, in the family that owns its feature graph.
+select_crate_tests() {
+  case "$1" in
+    codewire-netstack|codewire-tailnet|codewire-daemon|codewire-local-vmm|\
+    codewire-mesh|codewire-derp|codewire-udp-relay|codewire-coordinator|\
+    codewire-vmm-guest-probe)
+      select_token transport
+      select_token "transport_pkg_${1//-/_}"
+      ;;
+    *)
+      select_token rust
+      select_token "rust_pkg_${1//-/_}"
+      ;;
+  esac
+}
+
+# Prints the workspace crates under crates/ whose tests can break when the
+# named crates change: every crate that reaches one of them through normal or
+# build dependencies, transitively, plus each crate that takes one of those as
+# a dev-dependency. A dev-dependency compiles only into its dependent's tests,
+# so it selects that crate without reaching the crates that depend on it.
+# Optional and platform-specific dependencies count.
+#
+# Cargo reads the classified tree's manifests offline, with --no-deps, which
+# resolves nothing and runs no build script. It runs from an empty directory
+# on the toolchain this selector's own tree names, so a candidate's toolchain
+# file or Cargo configuration cannot choose what runs. A crate the workspace
+# does not list (a deleted, detached or new crate) has no dependents. Any
+# failure returns non-zero, and the caller selects the whole workspace.
+crate_graph_dependents() {
+  local channel metadata="$graph_tmp/metadata.json" cargo_env=()
+  [ -f "$repo_root/Cargo.toml" ] || return 0
+  channel="$(sed -nE 's/^channel[[:space:]]*=[[:space:]]*"([^"]+)".*$/\1/p' \
+    "$selector_root/rust-toolchain.toml" 2>/dev/null | head -n 1)"
+  if [ -n "$channel" ]; then
+    cargo_env+=("RUSTUP_TOOLCHAIN=$channel")
+  fi
+  (
+    cd "$graph_tmp" &&
+      env "${cargo_env[@]}" RUSTUP_AUTO_INSTALL=0 CARGO_NET_OFFLINE=true \
+        cargo metadata --offline --no-deps --format-version 1 \
+        --manifest-path "$repo_root/Cargo.toml"
+  ) > "$metadata" 2> "$graph_tmp/cargo.stderr" || {
+    sed 's/^/  /' "$graph_tmp/cargo.stderr" | head -n 20 >&2
+    return 1
+  }
+  python3 - "$metadata" "$repo_root" "$@" <<'PY'
+import json
+import os
+import sys
+
+metadata_path, repo_root, *changed = sys.argv[1:]
+try:
+    with open(metadata_path, encoding="utf-8") as handle:
+        packages = json.load(handle)["packages"]
+except (OSError, ValueError, KeyError, TypeError) as error:
+    sys.exit(f"  cargo metadata is unreadable: {error!r}")
+crates_root = os.path.join(os.path.realpath(repo_root), "crates")
+
+
+def crate_name(directory):
+    directory = os.path.realpath(directory)
+    if os.path.dirname(directory) != crates_root:
+        return None
+    return os.path.basename(directory)
+
+
+members = {}
+for package in packages:
+    name = crate_name(os.path.dirname(package["manifest_path"]))
+    if name is not None:
+        members[name] = package
+
+builds_into = {name: set() for name in members}
+tests_against = {name: set() for name in members}
+for name, package in members.items():
+    for dependency in package["dependencies"]:
+        target = crate_name(dependency["path"]) if dependency.get("path") else None
+        if target not in members or target == name:
+            continue
+        if dependency.get("kind") == "dev":
+            tests_against[target].add(name)
+        else:
+            builds_into[target].add(name)
+
+built = {name for name in changed if name in members}
+pending = list(built)
+while pending:
+    for dependent in builds_into[pending.pop()]:
+        if dependent not in built:
+            built.add(dependent)
+            pending.append(dependent)
+tested = set(built)
+for name in built:
+    tested |= tests_against[name]
+for name in sorted(tested):
+    print(name)
+PY
 }
 
 select_all_product() {
@@ -636,16 +754,7 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       Cargo.toml|Cargo.lock|rust-toolchain.toml|.config/hakari.toml)
-        select_token rust
-        select_token rust_workspace
-        select_token rust_curated_locks
-        # Workspace graph, resolution, and toolchain changes can alter both
-        # the host VMM and the statically packaged guest probe. Keep their
-        # cross-target and reproducible-initramfs checks attached to every
-        # root Rust build input.
-        select_token transport
-        select_token transport_pkg_codewire_local_vmm
-        select_token transport_pkg_codewire_vmm_guest_probe
+        select_rust_workspace
         recognized=true
         ;;
       go.mod|go.sum|go.work|go.work.sum)
@@ -1069,7 +1178,6 @@ if [ "$event_selected" = false ]; then
         && [[ "$path" != crates/codewire-core/* ]]; then
       crate="${path#crates/}"
       crate="${crate%%/*}"
-      crate_token="${crate//-/_}"
       case "$crate" in
         codewire-desktop|codewire-ui)
           select_token policy
@@ -1087,12 +1195,7 @@ if [ "$event_selected" = false ]; then
         codewire-workspace-hack)
           # cargo-hakari's feature unification is a dependency of every other
           # member: a change rebuilds the whole graph like the root manifest.
-          select_token rust
-          select_token rust_workspace
-          select_token rust_curated_locks
-          select_token transport
-          select_token transport_pkg_codewire_local_vmm
-          select_token transport_pkg_codewire_vmm_guest_probe
+          select_rust_workspace
           ;;
         codewire-workspace-image)
           # The published workspace pin: every consumer compiles its constants,
@@ -1111,17 +1214,15 @@ if [ "$event_selected" = false ]; then
           select_token rust
           select_token rust_pkg_codewire_desktop
           ;;
-        codewire-netstack|codewire-tailnet|codewire-daemon|codewire-local-vmm|\
-        codewire-mesh|codewire-derp|codewire-udp-relay|codewire-coordinator|\
-        codewire-vmm-guest-probe)
-          select_token transport
-          select_token "transport_pkg_${crate_token}"
-          ;;
         *)
-          select_token rust
-          select_token "rust_pkg_${crate_token}"
+          select_crate_tests "$crate"
           ;;
       esac
+      # Its workspace reverse dependents join after every path is read. The
+      # workspace-hack already selects the whole workspace.
+      if [ "$crate" != codewire-workspace-hack ]; then
+        changed_crates["$crate"]=1
+      fi
       if [ "$crate" = codewire-dashboard-web ]; then
         select_token deploy
         select_token edge_kind
@@ -1987,6 +2088,21 @@ if [ "$event_selected" = false ]; then
       classification=unclassified
     fi
   done < "$tmp"
+
+  # A changed crate's reverse dependents run their tests too; see
+  # crate_graph_dependents. Runtime families (services, Kind, web) stay with
+  # the paths that select them.
+  if [ "${#changed_crates[@]}" -gt 0 ]; then
+    if dependents="$(crate_graph_dependents "${!changed_crates[@]}")"; then
+      while IFS= read -r dependent; do
+        [ -n "$dependent" ] || continue
+        select_crate_tests "$dependent"
+      done <<<"$dependents"
+    else
+      echo "warning: the crate graph is unavailable; selecting the whole Rust workspace" >&2
+      select_rust_workspace
+    fi
+  fi
 
   if [ "$saw_path" = false ]; then
     classification=unchanged

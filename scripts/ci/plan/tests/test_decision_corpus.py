@@ -19,6 +19,13 @@ EXPECTED_CASE_KEYS = {"id", "event", "ref", "kind_e2e_opt_in", "paths", "expecte
 EXPECTED_RESULT_KEYS = {"classification", "selection_tokens", "required_local_mode"}
 VALID_CLASSIFICATIONS = {"changed", "unchanged", "unclassified", "requested", "release"}
 VALID_LOCAL_MODES = {"default", "integration", "kind", "full"}
+# The corpus records path decisions. Its crate cases classify against a Cargo
+# workspace without crate edges, so a new dependency in the repository changes
+# no case; scripts/ci/tests/test-select-verification.sh proves the crate graph.
+EDGELESS_CARGO = """#!/usr/bin/env bash
+[ "${1:-}" = metadata ] || { echo "edgeless cargo stub: unexpected cargo $*" >&2; exit 2; }
+printf '{"packages":[]}\\n'
+"""
 
 
 def load_corpus() -> dict[str, object]:
@@ -80,7 +87,12 @@ def selector_result(case: dict[str, object]) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="codewire-decision-corpus-") as temporary_directory:
         changed_paths = Path(temporary_directory) / "changed-paths"
         changed_paths.write_text("\n".join(case["paths"]) + "\n", encoding="utf-8")
+        cargo = Path(temporary_directory) / "bin" / "cargo"
+        cargo.parent.mkdir()
+        cargo.write_text(EDGELESS_CARGO, encoding="utf-8")
+        cargo.chmod(0o755)
         environment = os.environ.copy()
+        environment["PATH"] = f"{cargo.parent}{os.pathsep}{environment.get('PATH', '')}"
         environment.pop("GITHUB_OUTPUT", None)
         environment.pop("GITHUB_EVENT_PATH", None)
         environment["GITHUB_EVENT_NAME"] = str(case["event"])

@@ -101,6 +101,8 @@ trusted-selector decisions. It records only event/path inputs and the selector
 contract they currently produce: classification, capability tokens, and the
 required local mode. It deliberately does not select artifact jobs, describe
 runtime facts, validate receipts, or authorize a reduction in verification.
+Its crate cases classify against a workspace without crate edges, so they
+record path rules alone; the selector fixture suite proves the crate graph.
 
 Run its standard-library-only check directly with:
 

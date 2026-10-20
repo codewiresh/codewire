@@ -380,6 +380,11 @@ mkdir -p "$TMP/bin"
 cat > "$TMP/bin/tool-stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# The selector reads the crate graph; the fixture workspace has no edges.
+if [ "$(basename "$0")" = cargo ] && [ "${1:-}" = metadata ]; then
+  printf '{"packages":[]}\n'
+  exit 0
+fi
 printf '%s %s\n' "$(basename "$0")" "$*" >> "${PREFLIGHT_TEST_TOOL_LOG:?}"
 if [ "$(basename "$0")" = cargo ] && [ "${1:-}" = "${PREFLIGHT_TEST_CARGO_FAIL:-}" ]; then
   echo "synthetic cargo $1 failure" >&2

@@ -24,6 +24,18 @@ trap cleanup EXIT
 # Only hosted pull-request CI sets the quick scope; every fixture below that
 # needs it names it explicitly.
 unset VERIFICATION_PR_SCOPE
+# The path-rule cases classify against a Cargo workspace without crate edges,
+# so each pins its path rules alone and no case changes when a manifest
+# gains a dependency. The crate-graph cases run real Cargo on a fixture
+# workspace with edges, and on this repository's.
+EDGELESS_CARGO="$TMP/edgeless-cargo"
+mkdir -p "$EDGELESS_CARGO"
+cat > "$EDGELESS_CARGO/cargo" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = metadata ] || { echo "edgeless cargo stub: unexpected cargo $*" >&2; exit 2; }
+printf '{"packages":[]}\n'
+EOF
+chmod +x "$EDGELESS_CARGO/cargo"
 
 selection_value() {
   sed -n 's/^selection=//p' <<<"$1"
@@ -93,7 +105,7 @@ run_paths_case() {
   printf '%s\n' "$@" > "$paths"
   # SELECTOR_CASE_ROOT runs the selector where the case's paths exist.
   output="$(cd "${SELECTOR_CASE_ROOT:-$PWD}" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
-    GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
+    PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
     KIND_E2E_OPT_IN="$opt_in" "$SELECTOR" "$paths")"
   assert_tokens "$name" "$expected" "$output"
 }
@@ -109,7 +121,7 @@ run_present_paths_case() {
   done
   printf '%s\n' "$@" > "$paths"
   output="$(cd "$fixture_root" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
-    GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
+    PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
     KIND_E2E_OPT_IN="$opt_in" "$SELECTOR" "$paths")"
   assert_tokens "$name" "$expected" "$output"
 }
@@ -122,6 +134,177 @@ assert_contract_field() {
     exit 1
   fi
 }
+
+# --- Crate graph ------------------------------------------------------------
+# A changed crate selects its workspace reverse dependents' tests. Real Cargo
+# reads this fixture workspace, whose edges cover each dependency kind:
+#
+#   graph-api       -> graph-core   normal, inherited from the workspace table
+#   graph-app       -> graph-api    normal; nothing depends on graph-app
+#   udp-relay       -> graph-core   build (a transport crate)
+#   graph-optional  -> graph-core   optional, renamed and platform-specific
+#   graph-tests     -> graph-api    dev only
+#   graph-downstream-> graph-tests  normal
+#   graph-detached  -> graph-core   excluded from the workspace
+#
+# Every member takes codewire-workspace-hack as a dev-dependency, as the
+# repository's do. The fixture's own toolchain file and Cargo configuration
+# name things that do not exist: the selector must use neither.
+graph_repo="$TMP/crate-graph.repo"
+write_graph_crate() {
+  local name="$1" dependencies="${2:-}" dev_dependencies="${3:-}"
+  if [ "$name" != codewire-workspace-hack ]; then
+    dev_dependencies="codewire-workspace-hack = { path = \"../codewire-workspace-hack\" }
+${dev_dependencies}"
+  fi
+  mkdir -p "$graph_repo/crates/$name/src"
+  printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n\n%s\n\n[dev-dependencies]\n%s\n' \
+    "$name" "$dependencies" "$dev_dependencies" > "$graph_repo/crates/$name/Cargo.toml"
+  : > "$graph_repo/crates/$name/src/lib.rs"
+}
+mkdir -p "$graph_repo/.cargo"
+cat > "$graph_repo/Cargo.toml" <<'EOF'
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+exclude = ["crates/codewire-graph-detached"]
+
+[workspace.dependencies]
+codewire-graph-core = { path = "crates/codewire-graph-core" }
+EOF
+printf '[toolchain]\nchannel = "0.0.0-untrusted-candidate"\n' > "$graph_repo/rust-toolchain.toml"
+printf '[build]\nrustc = "/nonexistent/untrusted-rustc"\n' > "$graph_repo/.cargo/config.toml"
+write_graph_crate codewire-workspace-hack
+write_graph_crate codewire-graph-core
+write_graph_crate codewire-graph-api '[dependencies]
+codewire-graph-core = { workspace = true }'
+write_graph_crate codewire-graph-app '[dependencies]
+codewire-graph-api = { path = "../codewire-graph-api" }'
+write_graph_crate codewire-udp-relay '[build-dependencies]
+codewire-graph-core = { path = "../codewire-graph-core" }'
+write_graph_crate codewire-graph-optional "[target.'cfg(unix)'.dependencies]
+core-renamed = { package = \"codewire-graph-core\", path = \"../codewire-graph-core\", optional = true }"
+write_graph_crate codewire-graph-tests '' \
+  'codewire-graph-api = { path = "../codewire-graph-api" }'
+write_graph_crate codewire-graph-downstream '[dependencies]
+codewire-graph-tests = { path = "../codewire-graph-tests" }'
+write_graph_crate codewire-graph-detached '[dependencies]
+codewire-graph-core = { path = "../codewire-graph-core" }'
+git -C "$graph_repo" init -q
+
+run_graph_case() {
+  local name="$1" expected="$2" cargo_path="$3" output stderr="$TMP/$1.stderr"
+  shift 3
+  printf '%s\n' "$@" > "$TMP/${name}.paths"
+  output="$(cd "$graph_repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+    PATH="${cargo_path:+$cargo_path:}$PATH" GITHUB_EVENT_NAME=pull_request \
+    GITHUB_REF=refs/pull/1/head KIND_E2E_OPT_IN=false \
+    "$SELECTOR" "$TMP/${name}.paths" 2>"$stderr")"
+  assert_tokens "$name" "$expected" "$output"
+}
+
+graph_core='policy rust rust_pkg_codewire_graph_api rust_pkg_codewire_graph_app rust_pkg_codewire_graph_core rust_pkg_codewire_graph_optional rust_pkg_codewire_graph_tests transport transport_pkg_codewire_udp_relay'
+graph_workspace='rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe'
+# A leaf selects only itself.
+run_graph_case graph_leaf 'policy rust rust_pkg_codewire_graph_app' '' \
+  crates/codewire-graph-app/src/lib.rs
+# A core crate selects every reverse dependent through normal, build, optional
+# and platform-specific edges, transitively, in the family each one belongs
+# to, and the dev-dependents of those. Not graph-downstream, which reaches the
+# core only through graph-tests' dev-dependency, and not the detached crate.
+run_graph_case graph_core "$graph_core" '' crates/codewire-graph-core/src/lib.rs
+run_graph_case graph_core_manifest "$graph_core" '' crates/codewire-graph-core/Cargo.toml
+# Another crate may compile a crate's test support (orchestration and the
+# credential crates include codewire-platform-credentials/tests/support), so
+# a test-only path still selects the reverse dependents.
+run_graph_case graph_core_test_support "$graph_core" '' \
+  crates/codewire-graph-core/tests/support/mod.rs
+# A dev-dependency selects its dependent's tests and stops there.
+run_graph_case graph_dev_dependent \
+  'policy rust rust_pkg_codewire_graph_api rust_pkg_codewire_graph_app rust_pkg_codewire_graph_tests' '' \
+  crates/codewire-graph-api/src/lib.rs
+run_graph_case graph_dev_dependent_itself \
+  'policy rust rust_pkg_codewire_graph_downstream rust_pkg_codewire_graph_tests' '' \
+  crates/codewire-graph-tests/src/lib.rs
+# Several changed crates select the union of their reverse dependents.
+run_graph_case graph_union \
+  "$graph_core rust_pkg_codewire_graph_downstream" '' \
+  crates/codewire-graph-core/src/lib.rs crates/codewire-graph-tests/src/lib.rs
+# The workspace-hack keeps its whole-workspace mapping, although every member
+# dev-depends on it.
+run_graph_case graph_workspace_hack "policy $graph_workspace" '' \
+  crates/codewire-workspace-hack/Cargo.toml
+# A crate the workspace does not list has no workspace dependents.
+run_graph_case graph_detached 'policy rust rust_pkg_codewire_graph_detached' '' \
+  crates/codewire-graph-detached/src/lib.rs
+run_graph_case graph_deleted_crate 'policy rust rust_pkg_codewire_graph_gone' '' \
+  crates/codewire-graph-gone/src/lib.rs
+
+# Non-Rust paths, the root manifest and the lockfile keep their rules and
+# never read the graph: a Cargo that cannot run changes nothing for them.
+failing_cargo="$TMP/failing-cargo"
+mkdir -p "$failing_cargo"
+printf '#!/usr/bin/env bash\necho "synthetic cargo failure" >&2\nexit 101\n' \
+  > "$failing_cargo/cargo"
+chmod +x "$failing_cargo/cargo"
+run_graph_case graph_ignores_docs policy "$failing_cargo" docs/guide.md
+run_graph_case graph_ignores_root_manifest "policy $graph_workspace" "$failing_cargo" \
+  Cargo.toml Cargo.lock
+run_graph_case graph_ignores_proto \
+  'contracts contracts_proto go_consumer_interop go_support policy' "$failing_cargo" \
+  proto/codewire/v1/api_key.proto
+for name in graph_ignores_docs graph_ignores_root_manifest graph_ignores_proto; do
+  if [ -s "$TMP/${name}.stderr" ]; then
+    echo "${name}: a path outside crates/ read the crate graph" >&2
+    cat "$TMP/${name}.stderr" >&2
+    exit 1
+  fi
+done
+# Without a graph a crate change fails closed to the whole workspace, whether
+# Cargo fails or prints something that is not metadata, and says why.
+assert_graph_warning() {
+  local name="$1" expected
+  for expected in "${@:2}" \
+      'warning: the crate graph is unavailable; selecting the whole Rust workspace'; do
+    grep -qF "$expected" "$TMP/${name}.stderr" || {
+      echo "${name}: stderr lacks '${expected}'" >&2
+      cat "$TMP/${name}.stderr" >&2
+      exit 1
+    }
+  done
+}
+run_graph_case graph_cargo_fails "policy $graph_workspace rust_pkg_codewire_graph_app" \
+  "$failing_cargo" crates/codewire-graph-app/src/lib.rs
+assert_graph_warning graph_cargo_fails 'synthetic cargo failure'
+garbled_cargo="$TMP/garbled-cargo"
+mkdir -p "$garbled_cargo"
+printf '#!/usr/bin/env bash\necho "not metadata"\n' > "$garbled_cargo/cargo"
+chmod +x "$garbled_cargo/cargo"
+run_graph_case graph_cargo_garbled "policy $graph_workspace rust_pkg_codewire_graph_app" \
+  "$garbled_cargo" crates/codewire-graph-app/src/lib.rs
+assert_graph_warning graph_cargo_garbled
+
+# This repository's own graph, through the same real Cargo. The binary crate
+# is a leaf; the platform-credentials test support reaches the crates that
+# compile it.
+live_paths="$TMP/live-graph.paths"
+printf '%s\n' crates/codewire-cli-bin/src/main.rs > "$live_paths"
+live_output="$(cd "$ROOT" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/head KIND_E2E_OPT_IN=false \
+  "$SELECTOR" "$live_paths")"
+assert_tokens live_graph_leaf 'policy rust rust_pkg_codewire_cli_bin' "$live_output"
+printf '%s\n' crates/codewire-platform-credentials/tests/support/mod.rs > "$live_paths"
+live_output="$(cd "$ROOT" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/head KIND_E2E_OPT_IN=false \
+  "$SELECTOR" "$live_paths")"
+for token in rust_pkg_codewire_orchestration rust_pkg_codewire_credential_broker \
+    rust_pkg_codewire_credential_service; do
+  if [[ "$(selection_value "$live_output")" != *"|${token}|"* ]]; then
+    echo "live_graph_test_support: ${token} missing from $(selection_value "$live_output")" >&2
+    exit 1
+  fi
+done
+# --- End crate graph ----------------------------------------------------------
 
 policy=policy
 run_paths_case shared_provider_enrollment pull_request refs/pull/1/head false \
