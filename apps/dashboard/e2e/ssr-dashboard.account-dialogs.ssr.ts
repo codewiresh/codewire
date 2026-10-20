@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./helpers/fixture-test";
 
 // Editable Account fixture with production dialog behavior. Synthetic POSTs
 // are intercepted externally; no instrumentation enters the product assets.

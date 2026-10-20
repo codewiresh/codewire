@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./helpers/fixture-test";
 
 // Inventory controller proof on the checked-in design server. Synthetic list
 // refreshes stand in for the Sandboxes fragment; nothing is deleted.

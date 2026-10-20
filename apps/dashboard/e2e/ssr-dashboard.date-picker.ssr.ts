@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./helpers/fixture-test";
 
 // The expiry calendar is ours; the native datetime-local input stays the
 // submitted UTC value and the no-script fallback.

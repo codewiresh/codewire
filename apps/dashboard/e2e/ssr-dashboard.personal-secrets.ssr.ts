@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "./helpers/fixture-test";
 
 // Production dialog controller against editable synthetic fixtures only.
 // Authenticated ownership, BFF keyset paging and 422 rendering belong to BFF tests.

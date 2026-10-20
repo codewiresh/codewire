@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./helpers/fixture-test";
 
 // Native form/disclosure proof only; not real auth or managed-Sandbox proof.
 test.use({ storageState: { cookies: [], origins: [] }, screenshot: "off", trace: "off" });

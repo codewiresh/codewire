@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "./helpers/fixture-test";
 
 // Synthetic private-controller proof, not managed auth/daemon qualification.
 test.use({ storageState: { cookies: [], origins: [] }, screenshot: "off", trace: "off" });

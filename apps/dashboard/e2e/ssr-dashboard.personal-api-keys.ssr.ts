@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "./helpers/fixture-test";
 
 // Editable synthetic fixtures exercise the production controllers. Actor,
 // membership, bounded aggregation and service acknowledgements belong to BFF tests.

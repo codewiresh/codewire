@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Page, type Route } from "./helpers/fixture-test";
 
 // Setup-progress browser proof on the checked-in design fixture. The event
 // stream is synthetic; it does not qualify orchestration or authentication.

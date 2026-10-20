@@ -32,6 +32,13 @@ test("the fixture pattern selects exactly the listed specs", () => {
   assert.ok(!designFixtureSpecPattern.test("/repo/apps/dashboard/e2e/xssr-dashboard.resize.ssr.ts"));
 });
 
+test("every fixture spec fails at once when its page loses a script (#3043)", () => {
+  for (const name of designFixtureSpecs) {
+    assert.match(source(name), /^import \{[^}]*\btest\b[^}]*\} from "\.\/helpers\/fixture-test";$/m, `${name} takes test from helpers/fixture-test`);
+    assert.doesNotMatch(source(name), /from "@playwright\/test"/, `${name} bypasses helpers/fixture-test`);
+  }
+});
+
 test("the verification selector keeps exactly the fixture specs out of Kind", () => {
   const selector = readFileSync(new URL("../../../../scripts/ci/select/select-verification.sh", import.meta.url), "utf8");
   const named = [...selector.matchAll(/apps\/dashboard\/e2e\/(ssr-dashboard\.[\w.-]+\.ssr\.ts)/g)].map((match) => match[1]);

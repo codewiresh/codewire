@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./helpers/fixture-test";
 
 // Presentation and interaction proof on the editable fixture using production
 // scripts. No mocked provider or backend success: account discovery and checkout

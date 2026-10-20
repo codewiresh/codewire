@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./helpers/fixture-test";
 
 // Focused rendered-fixture proof using the existing Playwright runner and
 // checked-in `make design-system` topology. The real sandbox lifecycle test

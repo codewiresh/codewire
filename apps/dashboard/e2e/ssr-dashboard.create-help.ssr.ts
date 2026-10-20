@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./helpers/fixture-test";
 
 // The Create sheet slides in; with motion a help trigger can move out from under
 // the pointer, hover-hide its popover, and let Escape close the sheet instead.

@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
+import { expect, test, type Locator, type Page, type WebSocketRoute } from "./helpers/fixture-test";
 
 // Browser controller proof on the checked-in design server. These explicitly
 // synthetic BFF/WS responses do not qualify real daemon or authentication flows.

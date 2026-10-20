@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./helpers/fixture-test";
 
 // Native successful-controls proof; authorization and pre-dispatch validation
 // are covered by owning Rust route tests, not by this design fixture.

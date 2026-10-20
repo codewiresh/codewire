@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "./helpers/fixture-test";
 
 // Editable fixture + production scripts. Provider authorization/publication and
 // authenticated error rendering remain separate managed browser proof.

@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, readlinkSync } from "node:fs";
 
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "./helpers/fixture-test";
 
 test.use({ storageState: { cookies: [], origins: [] }, contextOptions: { reducedMotion: "reduce" } });
 
