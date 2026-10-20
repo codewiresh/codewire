@@ -3604,6 +3604,7 @@ fi
 grep -qF '    runs-on: ci-lite' "$START_LATENCY_WORKFLOW"
 grep -qF 'run: sha256sum --check --strict forgejo-ci-start-latency.sha256' \
   "$START_LATENCY_WORKFLOW"
+grep -qF 'echo "::group::rows.jsonl"' "$START_LATENCY_WORKFLOW"
 
 required_block="$TMP/required-verification.yaml"
 awk '

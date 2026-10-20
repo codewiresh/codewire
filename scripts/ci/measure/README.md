@@ -6,7 +6,9 @@ from becoming eligible to its first command. It is read-only: GET requests to
 fixed API paths, and it prints no token, response body or log line. The
 dispatch-only `CI start latency` workflow
 (`.gitea/workflows/ci-start-latency.yaml`) runs its `collect` and `summary`
-commands with the job's own token and uploads the rows and summary.
+commands with the job's own token and uploads the rows and summary. It also
+prints the rows in a `rows.jsonl` log group, so `fj actions runs logs` can read
+them for the placement join without a token for the artifact API.
 
 The collector is vendored from the infrastructure repository (`infra`), which
 keeps its tests, its placement join and its runbook:

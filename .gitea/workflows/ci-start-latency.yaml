@@ -101,6 +101,13 @@ jobs:
               printf '```\n'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+          # The rows, one JSON object per line, in the log too, so that
+          # `fj actions runs logs` can read them for the placement join
+          # without the artifact API's token. They hold job IDs, names,
+          # timings and runner identities, never a credential.
+          echo "::group::rows.jsonl"
+          cat "$output/rows.jsonl"
+          echo "::endgroup::"
 
       - name: Upload rows and summary
         uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
