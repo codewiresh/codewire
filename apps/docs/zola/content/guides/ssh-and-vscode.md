@@ -39,6 +39,21 @@ block; `--dry-run` prints the result). `cw doctor` checks the block.
 `cw shell --stdio` is for hosted sandboxes. For a local VM or a trusted host,
 use `cw shell ENV` and the session commands.
 
+## Port forwarding
+
+Local forwards reach servers listening inside a hosted sandbox:
+
+```sh
+ssh -N -L 8080:localhost:3000 cw-my-app     # http://localhost:8080 on your machine
+ssh -W localhost:5432 cw-my-app             # stdio, for ProxyCommand chains
+ssh -N -D 1080 cw-my-app                    # SOCKS, as VS Code uses it
+```
+
+A forward reaches only the sandbox's own loopback: `localhost`, `127.0.0.1`
+or `::1`. Any other target, such as another host, the node or a metadata
+address, is refused with that reason, and so is a port nothing listens on.
+Reverse forwards (`ssh -R`) and agent and X11 forwarding are not available.
+
 ## VS Code
 
 ```sh

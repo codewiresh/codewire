@@ -33,6 +33,7 @@ use codewire_workspace_access::daemon_tailnet::{
     self, AccessGrants, DaemonTailnetConfig, PublicCoordinator, TailnetSsh,
     record_host_key_per_generation,
 };
+use codewire_workspace_access::ssh::WorkloadLoopbackDialer;
 use connectrpc::ErrorCode;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -119,7 +120,10 @@ pub(crate) async fn serve(
     // before that they are refused at once instead of waiting out a launch
     // the platform cannot admit yet.
     let (access_ready, access_ready_rx) = watch::channel(false);
-    let runners = DaemonSshRunners::new(daemon, access_ready_rx, bound.exec_shell.clone());
+    // The daemon runs in the workload's Pod, so its loopback is the
+    // workload's: local port forwards dial it directly (#3045).
+    let runners = DaemonSshRunners::new(daemon, access_ready_rx, bound.exec_shell.clone())
+        .with_port_forwarding(Arc::new(WorkloadLoopbackDialer));
     let listener = tokio::net::TcpListener::bind(SocketAddr::from((
         Ipv4Addr::UNSPECIFIED,
         WORKSPACE_SSH_PORT,

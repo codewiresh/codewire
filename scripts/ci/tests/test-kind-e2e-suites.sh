@@ -688,7 +688,10 @@ user_ssh="$(sed -n '/^workspace_user_ssh_smoke() (/,/^)$/p' "$COMMON")"
 grep -Fq '  workspace_user_ssh_smoke' "$COMMON" || fail 'workspace services do not run the user SSH journey'
 for binding in 'kind_credential_cli setup ssh --ssh-config-file "$config"' \
     'timeout 60 "$tool" -F "$ssh_config"' "'printf a && printf b | tr b B; echo \" \$((1+2)) \$HOME\"; exit 7'" \
-    'scp -O' 'sftp -b' '[ "$status" -eq 255 ]' 'wait_kind_credential_environment "$environment" destroyed'; do
+    'scp -O' 'sftp -b' '[ "$status" -eq 255 ]' 'wait_kind_credential_environment "$environment" destroyed' \
+    '-W "127.0.0.1:$forward_port"' '-L "127.0.0.1:$local_port:127.0.0.1:$forward_port"' \
+    '-D "127.0.0.1:$local_port"' '--socks5-hostname' '-W 169.254.169.254:80' \
+    "port forwarding reaches only this environment's own loopback"; do
   grep -Fq -- "$binding" <<<"$user_ssh" || fail "user SSH journey is missing: $binding"
 done
 if grep -Fq 'KnownHostsCommand=' <<<"$user_ssh"; then

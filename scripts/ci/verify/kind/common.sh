@@ -3691,23 +3691,42 @@ KIND_USER_SSH_READY_SECONDS=180
 # the block `cw setup ssh` writes, and real OpenSSH through it (its
 # ProxyCommand and its only host-key trust, `cw ssh known-hosts`). A new
 # Sandbox must answer its first command within the bound; then a command line
-# the workspace shell parses keeps its exit status, scp round-trips in SFTP
-# and legacy mode, sftp and rsync work, and a key other than the recorded one
-# is refused.
+# the workspace shell parses keeps its exit status, a server listening only on
+# the Sandbox's loopback answers through `ssh -W`, `ssh -L` and the dynamic
+# forward VS Code Remote-SSH uses (`ssh -D`) while a target outside the
+# Sandbox is refused with its reason (#3045), scp round-trips in SFTP and
+# legacy mode, sftp and rsync work, and a key other than the recorded one is
+# refused.
 workspace_user_ssh_smoke() (
   log "running the user SSH journey through the block cw setup ssh writes"
   require_tool ssh
   require_tool scp
   require_tool sftp
+  require_tool curl
+  require_tool python3
+  require_tool pkill
   umask 077
   local name="kind-ssh-${RANDOM}${RANDOM}" environment="" image config host started first
-  local output status up
+  local output status up background=() token request reply forward_port=18765 local_port
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-ssh.XXXXXX)" || return 1
+  # Stop OpenSSH clients started in the background: the subshell running
+  # each, and its timeout, which passes the signal on to ssh.
+  stop_kind_user_ssh_background() {
+    local pid
+    for pid in "${background[@]}"; do
+      pkill -TERM -P "$pid" 2>/dev/null
+      kill -TERM "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+    done
+    background=()
+    return 0
+  }
   # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
   cleanup_workspace_user_ssh_smoke() {
     local status=$?
     trap - EXIT
     set +e
+    stop_kind_user_ssh_background
     if [ -n "$environment" ]; then
       kind_credential_cli --cloud rm "$environment" --yes --output json >/dev/null ||
         status=1
@@ -3723,7 +3742,8 @@ workspace_user_ssh_smoke() (
   kind_credential_cli setup ssh --ssh-config-file "$config" >/dev/null
   # OpenSSH's TOOL with the ssh config CONFIG. The block names the cw that
   # wrote it by absolute path, and its commands find the server and login
-  # as that cw does, from this environment.
+  # as that cw does, from this environment. Its input is KIND_USER_SSH_STDIN,
+  # or nothing; it logs errors only, or at KIND_USER_SSH_LOG_LEVEL.
   kind_user_ssh_tool() {
     local ssh_config="$1" tool="$2"
     shift 2
@@ -3731,7 +3751,13 @@ workspace_user_ssh_smoke() (
       XDG_CONFIG_HOME="$KIND_CREDENTIAL_CLI_HOME/config" \
       CW_CONFIG_DIR="$KIND_CREDENTIAL_CLI_HOME/cw" \
       CODEWIRE_SERVER_URL="$KIND_INGRESS_URL" \
-      timeout 60 "$tool" -F "$ssh_config" -o BatchMode=yes -o LogLevel=ERROR "$@" </dev/null
+      timeout 60 "$tool" -F "$ssh_config" -o BatchMode=yes \
+      -o "LogLevel=${KIND_USER_SSH_LOG_LEVEL:-ERROR}" "$@" \
+      <"${KIND_USER_SSH_STDIN:-/dev/null}"
+  }
+  # A free loopback port on this host.
+  kind_user_free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
   }
   image="$(kind_workspace_runtime_image)"
   host="cw-$name"
@@ -3760,6 +3786,71 @@ workspace_user_ssh_smoke() (
     echo "::error::ssh did not run a shell command line: output '$output', exit $status"
     return 1
   }
+
+  # Local port forwarding into the Sandbox (#3045). A server that listens
+  # only on the Sandbox's loopback, held by its own SSH session.
+  token="kind-forward-${RANDOM}${RANDOM}"
+  kind_user_ssh_tool "$config" ssh "$host" \
+    "cd && printf %s $token >forward.txt && exec python3 -m http.server $forward_port --bind 127.0.0.1" \
+    >/dev/null 2>&1 &
+  background+=("$!")
+  request="$KIND_CREDENTIAL_CLI_HOME/forward-request"
+  printf 'GET /forward.txt HTTP/1.0\r\nHost: localhost\r\n\r\n' >"$request"
+  # ssh -W: the stdio forward ProxyJump and ProxyCommand chains use.
+  reply=""
+  for _ in $(seq 1 30); do
+    if reply="$(KIND_USER_SSH_STDIN="$request" kind_user_ssh_tool "$config" ssh \
+      -W "127.0.0.1:$forward_port" "$host" 2>/dev/null)" && [ "${reply##*$'\n'}" = "$token" ]; then
+      break
+    fi
+    sleep 1
+  done
+  [ "${reply##*$'\n'}" = "$token" ] || {
+    echo "::error::ssh -W did not reach a server on the Sandbox's loopback: '${reply:0:200}'"
+    return 1
+  }
+  # ssh -L, as a user forwards an application port.
+  local_port="$(kind_user_free_port)"
+  kind_user_ssh_tool "$config" ssh -N -o ExitOnForwardFailure=yes \
+    -L "127.0.0.1:$local_port:127.0.0.1:$forward_port" "$host" >/dev/null 2>&1 &
+  background+=("$!")
+  reply=""
+  for _ in $(seq 1 30); do
+    reply="$(curl -fsS --max-time 10 "http://127.0.0.1:$local_port/forward.txt" 2>/dev/null)" &&
+      [ "$reply" = "$token" ] && break
+    sleep 1
+  done
+  [ "$reply" = "$token" ] || {
+    echo "::error::ssh -L did not reach a server on the Sandbox's loopback: '${reply:0:200}'"
+    return 1
+  }
+  # ssh -D, the dynamic forward VS Code Remote-SSH reaches its server through,
+  # naming the target as localhost.
+  local_port="$(kind_user_free_port)"
+  kind_user_ssh_tool "$config" ssh -N -o ExitOnForwardFailure=yes \
+    -D "127.0.0.1:$local_port" "$host" >/dev/null 2>&1 &
+  background+=("$!")
+  reply=""
+  for _ in $(seq 1 30); do
+    reply="$(curl -fsS --max-time 10 --socks5-hostname "127.0.0.1:$local_port" \
+      "http://localhost:$forward_port/forward.txt" 2>/dev/null)" && [ "$reply" = "$token" ] && break
+    sleep 1
+  done
+  [ "$reply" = "$token" ] || {
+    echo "::error::ssh -D did not reach a server on the Sandbox's loopback: '${reply:0:200}'"
+    return 1
+  }
+  # A target outside the Sandbox, the metadata service: refused at once, with
+  # the reason OpenSSH logs at its default level.
+  status=0
+  output="$(KIND_USER_SSH_LOG_LEVEL=INFO kind_user_ssh_tool "$config" ssh \
+    -W 169.254.169.254:80 "$host" 2>&1)" || status=$?
+  [ "$status" -eq 255 ] &&
+    grep -Fq "port forwarding reaches only this environment's own loopback" <<<"$output" || {
+    echo "::error::ssh -W to the metadata address was not refused with its reason (exit $status): ${output:0:400}"
+    return 1
+  }
+  stop_kind_user_ssh_background
 
   up="$KIND_CREDENTIAL_CLI_HOME/up.txt"
   printf 'kind-ssh-%s\n' "$RANDOM" >"$up"
@@ -3803,7 +3894,7 @@ workspace_user_ssh_smoke() (
     echo "::error::ssh trusted a host key the platform did not record (exit $status)"
     return 1
   }
-  log "user SSH journey: shell syntax and exit status, scp in both modes, sftp, a forged key refused"
+  log "user SSH journey: shell syntax and exit status, forwards through -W, -L and -D with an outside target refused, scp in both modes, sftp, a forged key refused"
 )
 
 environment_resize_smoke() (

@@ -24,9 +24,9 @@ use crate::host_key::generate_ed25519_key;
 use crate::scp::DaemonScpRunner;
 use crate::sftp::DaemonSftpRunner;
 use crate::ssh::{
-    DaemonBackedSshRunner, DaemonSessionStart, SshChannelOutput, SshSession, SshSessionInput,
-    SshSessionKey, SshSessionOutput, SshSessionRunner, SshSessionRunnerError, WorkspaceSshHandler,
-    workspace_ssh_server_config,
+    DaemonBackedSshRunner, DaemonSessionStart, ForwardDialer, SshChannelOutput, SshSession,
+    SshSessionInput, SshSessionKey, SshSessionOutput, SshSessionRunner, SshSessionRunnerError,
+    WorkspaceSshHandler, workspace_ssh_server_config,
 };
 
 const HOST_KEY_PREFIX: &str = "ssh_host_ed25519_g";
@@ -173,8 +173,10 @@ pub async fn record_host_key_until_accepted(
 }
 
 /// The daemon's SSH server configuration: the gateway's policy (transport-
-/// authenticated `none` auth; agent, X11 and reverse forwarding refused) with
-/// this generation's host key.
+/// authenticated `none` auth; agent, X11 and reverse forwarding refused;
+/// local forwarding only where a dialer is set, see
+/// [`DaemonSshRunners::with_port_forwarding`]) with this generation's host
+/// key.
 pub fn daemon_ssh_server_config(host_key: PrivateKey) -> server::Config {
     let mut config = workspace_ssh_server_config();
     config.keys.push(host_key);
@@ -243,6 +245,9 @@ pub struct DaemonSshRunners {
     /// The workspace's default shell, which runs every exec request's
     /// command line (`<shell> -c <command>`), as sshd does.
     pub exec_shell: String,
+    /// Dials local port forwards inside the workload's network namespace;
+    /// without one, every forward is refused with a reason.
+    pub forward: Option<Arc<dyn ForwardDialer>>,
 }
 
 impl DaemonSshRunners {
@@ -261,7 +266,16 @@ impl DaemonSshRunners {
             sftp: Arc::new(DaemonSftpRunner::new(daemon.clone())),
             scp: Arc::new(DaemonScpRunner::new(daemon)),
             exec_shell,
+            forward: None,
         }
+    }
+
+    /// Serve local port forwards (`ssh -L`, `ssh -W`, VS Code Remote-SSH)
+    /// through `dialer`, which must reach the workload's own network
+    /// namespace.
+    pub fn with_port_forwarding(mut self, dialer: Arc<dyn ForwardDialer>) -> Self {
+        self.forward = Some(dialer);
+        self
     }
 
     /// Serve one SSH connection to completion.
@@ -275,6 +289,10 @@ impl DaemonSshRunners {
             Some(self.scp.clone()),
         )
         .with_exec_shell(self.exec_shell.clone());
+        let handler = match &self.forward {
+            Some(dialer) => handler.with_port_forwarding(dialer.clone()),
+            None => handler,
+        };
         let connection = handler.connection_id();
         tracing::info!(connection, peer, "workspace SSH connection opened");
         match server::run_stream(config, stream, handler).await {

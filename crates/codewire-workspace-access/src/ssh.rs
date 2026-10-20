@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,9 +17,16 @@ use crate::daemon::{
 use crate::scp::{ScpProtocolRunner, is_scp_command};
 use crate::sftp::DaemonSftpRunner;
 
+mod forward;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "ssh/stock_credentials.rs"]
 mod stock_credentials;
+
+use forward::Forwarding;
+pub use forward::{
+    FORWARD_CLOSE_GRACE, FORWARD_DIAL_TIMEOUT, ForwardDialError, ForwardDialer, ForwardIo,
+    ForwardRefusal, ForwardTarget, MAX_FORWARDS_PER_CONNECTION, WorkloadLoopbackDialer,
+};
 
 /// How often the server asks a silent client whether it is still there, and
 /// how many unanswered asks end the connection. A client that vanished
@@ -781,9 +787,12 @@ pub struct WorkspaceSshHandler<R> {
     sftp: Option<Arc<dyn SftpSubsystemRunner>>,
     scp: Option<Arc<dyn ScpProtocolRunnerBridge>>,
     exec_shell: Option<String>,
+    /// Local port forwarding; without it every `direct-tcpip` channel is
+    /// refused.
+    forwarding: Option<Forwarding>,
     connection: u64,
-    /// Cancelled when the connection ends; each process channel holds a
-    /// child token.
+    /// Cancelled when the connection ends; each process channel and forward
+    /// holds a child token.
     ended: CancellationToken,
     channels: HashMap<ChannelId, SshChannelState>,
 }
@@ -810,6 +819,7 @@ where
             sftp,
             scp,
             exec_shell: None,
+            forwarding: None,
             connection: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
             ended: CancellationToken::new(),
             channels: HashMap::new(),
@@ -822,6 +832,20 @@ where
     /// run directly. SCP requests are recognized before either.
     pub fn with_exec_shell(mut self, shell: impl Into<String>) -> Self {
         self.exec_shell = Some(shell.into());
+        self
+    }
+
+    /// Serve `direct-tcpip` channels (`ssh -L`, `ssh -W`, `ssh -D`, VS Code
+    /// Remote-SSH) through `dialer`, which must reach the workload's own
+    /// network namespace. Without a dialer they are refused with a reason.
+    pub fn with_port_forwarding(mut self, dialer: Arc<dyn ForwardDialer>) -> Self {
+        self.forwarding = Some(Forwarding::new(dialer));
+        self
+    }
+
+    #[cfg(test)]
+    fn with_forwarding(mut self, forwarding: Forwarding) -> Self {
+        self.forwarding = Some(forwarding);
         self
     }
 
@@ -916,6 +940,9 @@ enum SshChannelState {
     Process { ended: CancellationToken },
     /// Served by SFTP or SCP, which read the channel themselves.
     FileProtocol { sftp: bool },
+    /// A forward, dialing or open. Its task owns the channel; `stop` ends it
+    /// when the client closes the channel, and is cancelled once it ends.
+    Forward { stop: CancellationToken },
 }
 
 struct PendingChannel {
@@ -965,24 +992,14 @@ pub fn parse_exec_command(command: &[u8]) -> Result<Vec<String>, WorkspaceSshErr
         .map_err(|err| WorkspaceSshError::InvalidExecCommand(err.to_string()))
 }
 
+/// Whether a `direct-tcpip` channel may reach `host:port`: only a loopback
+/// address inside the workload; see [`ForwardTarget::local`].
 pub fn allow_local_port_forward(host: &str, port: u32) -> bool {
-    port != 0 && is_pod_local_forward_host(host)
+    ForwardTarget::local(host, port).is_ok()
 }
 
 pub fn allow_reverse_port_forward(_host: &str, _port: u32) -> bool {
     false
-}
-
-pub fn is_pod_local_forward_host(host: &str) -> bool {
-    let host = host.trim().to_ascii_lowercase();
-    match host.as_str() {
-        "" | "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "::" => return true,
-        _ => {}
-    }
-
-    host.parse::<IpAddr>()
-        .map(|addr| addr.is_loopback() || addr.is_unspecified())
-        .unwrap_or(false)
 }
 
 fn without_term_env(env: Vec<String>) -> Vec<String> {
@@ -1025,7 +1042,7 @@ where
 
     async fn channel_open_direct_tcpip(
         &mut self,
-        _channel: Channel<server::Msg>,
+        channel: Channel<server::Msg>,
         host_to_connect: &str,
         port_to_connect: u32,
         _originator_address: &str,
@@ -1033,12 +1050,31 @@ where
         reply: server::ChannelOpenHandle,
         _session: &mut server::Session,
     ) -> Result<(), Self::Error> {
-        if allow_local_port_forward(host_to_connect, port_to_connect) {
-            reply.accept().await;
-        } else {
-            reply
-                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
-                .await;
+        let key = SshSessionKey {
+            connection: self.connection,
+            channel: channel.id(),
+        };
+        let Some(forwarding) = &self.forwarding else {
+            forward::refuse_unavailable(key, reply).await;
+            return Ok(());
+        };
+        // Forget forwards that ended without the client closing them.
+        self.channels.retain(
+            |_, state| !matches!(state, SshChannelState::Forward { stop } if stop.is_cancelled()),
+        );
+        if let Some(stop) = forwarding
+            .open(
+                key,
+                channel,
+                host_to_connect,
+                port_to_connect,
+                reply,
+                &self.ended,
+            )
+            .await
+        {
+            self.channels
+                .insert(key.channel, SshChannelState::Forward { stop });
         }
         Ok(())
     }
@@ -1188,9 +1224,11 @@ where
         channel: ChannelId,
         _session: &mut server::Session,
     ) -> Result<(), Self::Error> {
-        if let Some(SshChannelState::Process { ended }) = self.channels.remove(&channel) {
-            // The pump also reads the close in order; this ends a session
-            // whose pump is waiting on a process that is not reading.
+        // The pump or forward also reads the close in order; this ends one
+        // that is waiting on a process or target that is not reading.
+        if let Some(SshChannelState::Process { ended } | SshChannelState::Forward { stop: ended }) =
+            self.channels.remove(&channel)
+        {
             ended.cancel();
         }
         Ok(())
@@ -1216,7 +1254,7 @@ where
             // Started: the resize reaches the pump in order, after earlier
             // input.
             Some(SshChannelState::Process { .. }) => {}
-            Some(SshChannelState::FileProtocol { .. }) | None => {
+            Some(SshChannelState::FileProtocol { .. } | SshChannelState::Forward { .. }) | None => {
                 session.channel_failure(channel)?;
                 return Err(WorkspaceSshError::UnknownChannel(channel));
             }
