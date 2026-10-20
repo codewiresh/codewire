@@ -16,8 +16,13 @@
 set -euo pipefail
 
 readonly SLICE=cwvmtest.slice
-# Merge checks and local-VM runs started with `run`.
-readonly SLICE_WEIGHT=200 SLICE_CEILING=400%
+# Merge checks and local-VM runs started with `run`. The ceiling is the one
+# limit on how much CPU they take together (12 of 16 cores); any number of jobs
+# may share it, and the desktop weight still wins when the cores are contended.
+readonly SLICE_WEIGHT=200 SLICE_CEILING=1200%
+# Their memory together: above this the kernel reclaims inside the slice, so
+# compiles peaking at link time slow down instead of swapping the whole box.
+readonly SLICE_MEMORY_HIGH=88G
 # Docker image builders (buildx_buildkit_* containers, one scope each).
 readonly BUILDER_CEILING=400%
 # Remote login sessions, such as the tmux server background agents run in.
@@ -80,7 +85,8 @@ builders() {
 
 apply() {
   local uid=$1 unit kind
-  systemctl set-property --runtime "$SLICE" CPUWeight="$SLICE_WEIGHT" CPUQuota="$SLICE_CEILING"
+  systemctl set-property --runtime "$SLICE" CPUWeight="$SLICE_WEIGHT" CPUQuota="$SLICE_CEILING" \
+    MemoryHigh="$SLICE_MEMORY_HIGH"
   systemctl set-property --runtime user.slice CPUWeight="$USER_WEIGHT"
   systemctl set-property --runtime "user@$uid.service" CPUWeight="$DESKTOP_WEIGHT"
   for unit in $DESKTOP_USER_UNITS; do
@@ -97,7 +103,7 @@ apply() {
   done < <(builders)
 }
 
-# clear_cpu DIR SYSTEMCTL... clears the CPUWeight and CPUQuota that
+# clear_cpu DIR SYSTEMCTL... clears the CPUWeight, CPUQuota and MemoryHigh that
 # `set-property --runtime` stored in the drop-in directory DIR. Transient units
 # (sessions, containers) keep their other drop-ins and drop these with the unit.
 clear_cpu() {
@@ -106,6 +112,7 @@ clear_cpu() {
   unit="$(basename "$dir" .d)"
   [ -f "$dir/50-CPUWeight.conf" ] && props+=(CPUWeight=)
   [ -f "$dir/50-CPUQuota.conf" ] && props+=(CPUQuota=)
+  [ -f "$dir/50-MemoryHigh.conf" ] && props+=(MemoryHigh=)
   [ "${#props[@]}" -gt 0 ] || return 0
   if [ "$("$@" show -p LoadState --value "$unit")" = loaded ]; then
     "$@" set-property --runtime "$unit" "${props[@]}"
@@ -113,7 +120,7 @@ clear_cpu() {
   case "$dir" in
     */transient/*) ;;
     *)
-      for file in 50-CPUWeight.conf 50-CPUQuota.conf; do rm -f "$dir/$file"; done
+      for file in 50-CPUWeight.conf 50-CPUQuota.conf 50-MemoryHigh.conf; do rm -f "$dir/$file"; done
       rmdir "$dir" 2>/dev/null || true
       ;;
   esac
@@ -149,7 +156,7 @@ run() {
       PIDs au 1 "$pid" Slice s "$SLICE" 0 >/dev/null
   done
   apply "$uid"
-  echo "moved $* into $SLICE (weight $SLICE_WEIGHT, ceiling $SLICE_CEILING)"
+  echo "moved $* into $SLICE (weight $SLICE_WEIGHT, ceiling $SLICE_CEILING, memory high $SLICE_MEMORY_HIGH)"
 }
 
 # ceiling prints a cgroup's cpu.max as a share of one core, or "none".
