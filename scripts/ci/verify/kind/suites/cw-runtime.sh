@@ -524,7 +524,7 @@ run_retained_managed_agents_journey() {
   trap retained_suite_cleanup EXIT
   validate_retained_cluster
   cw_runtime_require_synthetic_provider
-  build_retained_kind_smokes
+  build_retained_kind_smokes cw-managed-agents
   if [ ! -x "$CARGO_CI_DIR/examples/environment-cw-runtime-smoke" ]; then
     echo '::error::the Kind smoke set lacks environment-cw-runtime-smoke; rebuild it before this suite' >&2
     return 1
@@ -605,7 +605,7 @@ run_admitted_cw_runtime_journey() {
   trap retained_suite_cleanup EXIT
   validate_retained_cluster
   cw_runtime_require_synthetic_provider
-  build_retained_kind_smokes
+  build_retained_kind_smokes cw-runtime
   if [ ! -x "$CARGO_CI_DIR/examples/environment-cw-runtime-smoke" ]; then
     echo '::error::the immutable Kind smoke set lacks environment-cw-runtime-smoke; rebuild that set before this suite' >&2
     return 1

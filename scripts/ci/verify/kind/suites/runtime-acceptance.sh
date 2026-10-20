@@ -16,7 +16,7 @@ run_retained_runtime_acceptance_suite() {
   trap retained_suite_cleanup EXIT
   acquire_kind_host_lock
   validate_retained_cluster
-  build_retained_kind_smokes
+  build_retained_kind_smokes runtime-acceptance
   rust_reconciler_ttl_e2e
   log "retained runtime-acceptance suite green"
 }

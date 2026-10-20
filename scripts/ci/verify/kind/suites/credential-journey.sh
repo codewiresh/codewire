@@ -146,7 +146,7 @@ run_retained_credentials_suite() {
     echo "::error::the credentials suite needs the synthetic fixture; run kind-e2e.sh credentials fake first"
     return 1
   fi
-  build_retained_kind_smokes
+  build_retained_kind_smokes credentials
   apply_kind_codex_login_check_period
   log "restarting the synthetic credential-service for a fresh provider event log"
   restart_credential_service

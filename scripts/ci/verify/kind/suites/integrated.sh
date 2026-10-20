@@ -80,7 +80,7 @@ run_retained_integrated_suite() {
 
   trap retained_suite_cleanup EXIT
   validate_retained_cluster
-  build_retained_kind_smokes
+  build_retained_kind_smokes integrated
   # The internal binding fixture owns a synthetic SandboxClaim whose status a
   # live agent-sandbox controller immediately rewrites, after which the
   # orchestration reconciler churns the fixture's runtime identity. The serial

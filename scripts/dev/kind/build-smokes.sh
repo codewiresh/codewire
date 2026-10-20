@@ -7,7 +7,14 @@
 # already built there. The target keeps its content-hash freshness guard (see
 # kind-dev-binary.Dockerfile), so a binary is never reused across source.
 #
-# Usage: build-smokes.sh SMOKE_DIR BILLING_TEST_ARTIFACT_JSONL
+# Usage: build-smokes.sh SMOKE_DIR BILLING_TEST_ARTIFACT_JSONL [GROUP...]
+#
+# Each GROUP is one build: orchestration (the orchestration smokes), client
+# (the client examples), client-kind-e2e (the coordinator ingress example),
+# cli (the host cw) and billing (the billing wire contract). No GROUP builds
+# them all. `make kind-test` sets KIND_SMOKE_RUN once per run, and each suite
+# names the groups it runs (common.sh kind_suite_smoke_groups): a group that
+# run already built is not built again (#2973).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -18,9 +25,16 @@ source "$ROOT/scripts/dev/kind/dev-builder.sh"
 log() { printf '[kind-smokes] %s\n' "$*" >&2; }
 die() { printf '[kind-smokes] error: %s\n' "$*" >&2; exit 1; }
 
-[[ $# -eq 2 && "$1" == /* && "$2" == /* ]] ||
-  die 'usage: build-smokes.sh SMOKE_DIR BILLING_TEST_ARTIFACT_JSONL (absolute paths)'
+[[ $# -ge 2 && "$1" == /* && "$2" == /* ]] ||
+  die 'usage: build-smokes.sh SMOKE_DIR BILLING_TEST_ARTIFACT_JSONL [GROUP...] (absolute paths)'
 readonly SMOKE_DIR="$1" BILLING_JSONL="$2"
+readonly SMOKE_GROUPS=(orchestration client client-kind-e2e cli billing)
+requested=("${@:3}")
+[ "${#requested[@]}" -gt 0 ] || requested=("${SMOKE_GROUPS[@]}")
+for group in "${requested[@]}"; do
+  [[ " ${SMOKE_GROUPS[*]} " == *" ${group} "* ]] ||
+    die "unknown smoke group: ${group} (the groups are: ${SMOKE_GROUPS[*]})"
+done
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 STATE="$ROOT/.tmp/kind-dev/${KIND_CLUSTER_NAME}"
 umask 077
@@ -59,22 +73,51 @@ smoke() {
   fi
 }
 
-smoke codewire-orchestration kind-e2e \
-  'crd-smoke environment-setup-smoke exec-smoke exec-stream-smoke file-service-smoke prepare-stream-smoke log-stream-smoke temporal-smoke temporal-fencing-smoke reconciler-ttl-smoke sidecar-smoke' \
-  '' ''
-smoke codewire-client '' '' \
-  'platform-run-smoke environment-session-smoke environment-cw-runtime-smoke' ''
-smoke codewire-client kind-e2e '' 'coordinator-ingress-smoke' ''
-# The same build the daemon deploy layers into the sandbox image.
-smoke codewire-cli-bin '' 'cw' '' ''
-smoke codewire-billing '' '' '' wire_contract
+build_group() {
+  case "$1" in
+    orchestration)
+      smoke codewire-orchestration kind-e2e \
+        'crd-smoke environment-setup-smoke exec-smoke exec-stream-smoke file-service-smoke prepare-stream-smoke log-stream-smoke temporal-smoke temporal-fencing-smoke reconciler-ttl-smoke sidecar-smoke' \
+        '' '' ;;
+    client)
+      smoke codewire-client '' '' \
+        'platform-run-smoke environment-session-smoke environment-cw-runtime-smoke' '' ;;
+    client-kind-e2e) smoke codewire-client kind-e2e '' 'coordinator-ingress-smoke' '' ;;
+    # The same build the daemon deploy layers into the sandbox image.
+    cli) smoke codewire-cli-bin '' 'cw' '' '' ;;
+    billing) smoke codewire-billing '' '' '' wire_contract ;;
+  esac
+}
 
-# The suite reads the billing contract the way Cargo reports it.
-jq -cn --arg executable "$SMOKE_DIR/kind-smoke-tests/wire_contract" '{
-  reason: "compiler-artifact",
-  profile: {test: true},
-  target: {name: "wire_contract"},
-  executable: $executable
-}' >"$BILLING_JSONL"
+# The groups this make kind-test run already built into SMOKE_DIR. Another
+# run, another directory, or a caller that names no run starts the record again
+# and builds every group it asks for.
+record="$STATE/smoke-run"
+built=()
+if [ -n "${KIND_SMOKE_RUN:-}" ] && [ -f "$record" ] \
+    && [ "$(head -n 1 "$record")" = "run ${KIND_SMOKE_RUN} ${SMOKE_DIR}" ]; then
+  mapfile -t built < <(tail -n +2 "$record")
+else
+  printf 'run %s %s\n' "${KIND_SMOKE_RUN:-}" "$SMOKE_DIR" >"$record"
+fi
+for group in "${SMOKE_GROUPS[@]}"; do
+  [[ " ${requested[*]} " == *" ${group} "* ]] || continue
+  if [ -n "${KIND_SMOKE_RUN:-}" ] && [[ " ${built[*]} " == *" ${group} "* ]]; then
+    log "${group} smokes already built in this run"
+    continue
+  fi
+  build_group "$group"
+  printf '%s\n' "$group" >>"$record"
+done
+
+if [[ " ${requested[*]} " == *' billing '* ]]; then
+  # The suite reads the billing contract the way Cargo reports it.
+  jq -cn --arg executable "$SMOKE_DIR/kind-smoke-tests/wire_contract" '{
+    reason: "compiler-artifact",
+    profile: {test: true},
+    target: {name: "wire_contract"},
+    executable: $executable
+  }' >"$BILLING_JSONL"
+fi
 printf 'CODEWIRE_CI_PHASE name=kind-smoke-binary-build seconds=%s\n' \
   "$(( $(date +%s) - started_at ))"

@@ -189,6 +189,7 @@ with (pathlib.Path(os.environ["FAKE_STATE"]) / "calls").open("a") as log:
         "credential_stages":os.environ.get("KIND_CREDENTIAL_STAGES"),
         "dashboard_selection":os.environ.get("KIND_DASHBOARD_SELECTION"),
         "dashboard_workers":os.environ.get("CODEWIRE_KIND_DASHBOARD_WORKERS"),
+        "smoke_run":os.environ.get("KIND_SMOKE_RUN"),
         "postgres_port":os.environ.get("KIND_POSTGRES_HOST_PORT")}) + "\n")
 sys.exit(int(os.environ.get("FAKE_SUITE_STATUS", "0")))
 '''
@@ -859,9 +860,10 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         ("codewire-billing", "", "", "", "wire_contract"),
     ]
 
-    def run_smokes(self, **environment: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    def run_smokes(self, *groups: str, **environment: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
         smokes, receipt = self.directory / "smokes", self.directory / "run" / "billing-contract-build.jsonl"
-        result = subprocess.run(["bash", str(self.tree / "scripts/dev/kind/build-smokes.sh"), str(smokes), str(receipt)],
+        result = subprocess.run(["bash", str(self.tree / "scripts/dev/kind/build-smokes.sh"), str(smokes), str(receipt),
+                                 *groups],
                                 env=self.env | {"CLUSTER": "", "KIND_CLUSTER_NAME": "codewire-ux-2099"} | environment,
                                 text=True, capture_output=True, timeout=30, cwd=self.directory)
         return result, smokes, receipt
@@ -922,6 +924,60 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
                 self.assertNotIn("CODEWIRE_CI_PHASE", result.stdout)
         crates = [call["crate"] for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
         self.assertEqual(crates, [build[0] for build in self.SMOKE_BUILDS])
+
+    def baked_crates(self) -> list[tuple[str, str]]:
+        return [(call["crate"], call["features"]) for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
+
+    def test_smokes_build_only_the_named_groups_once_per_run(self) -> None:
+        # #2973: a suite builds only its groups, and none twice in one make kind-test run.
+        result, smokes, receipt = self.run_smokes("cli", KIND_SMOKE_RUN="run-a")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.baked_crates(), [("codewire-cli-bin", "")])
+        self.assertTrue((smokes / "cw").exists())
+        self.assertFalse(receipt.exists())
+        self.calls_path.write_text("")
+        result, _, receipt = self.run_smokes("orchestration", "client-kind-e2e", "cli", "billing", KIND_SMOKE_RUN="run-a")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cli smokes already built in this run", result.stderr)
+        self.assertEqual(self.baked_crates(), [("codewire-orchestration", "kind-e2e"), ("codewire-client", "kind-e2e"),
+                                               ("codewire-billing", "")])
+        self.assertTrue(receipt.exists())
+        self.calls_path.write_text("")
+        result, _, _ = self.run_smokes("cli", "orchestration", KIND_SMOKE_RUN="run-a")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.baked_crates(), [])
+        # Another run, or a caller that names no run, builds again.
+        for environment in ({"KIND_SMOKE_RUN": "run-b"}, {}, {}):
+            self.calls_path.write_text("")
+            result, _, _ = self.run_smokes("cli", **environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.baked_crates(), [("codewire-cli-bin", "")])
+
+    def test_smokes_record_only_a_group_that_built(self) -> None:
+        result, _, _ = self.run_smokes("orchestration", "client", KIND_SMOKE_RUN="run-a", FAKE_BAKE_FAIL="codewire-client")
+        self.assertNotEqual(result.returncode, 0)
+        self.calls_path.write_text("")
+        result, _, _ = self.run_smokes("orchestration", "client", KIND_SMOKE_RUN="run-a")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.baked_crates(), [("codewire-client", "")])
+
+    def test_smokes_refuse_an_unknown_group(self) -> None:
+        result, _, _ = self.run_smokes("cli", "smokes")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown smoke group: smokes", result.stderr)
+        self.assertFalse(self.calls("docker"))
+
+    def test_one_selected_run_shares_one_smoke_run(self) -> None:
+        for _ in range(2):
+            result = self.run_script("test-selected.sh", KIND_TEST_SUITES="workspace-services credentials", CLUSTER="",
+                                     KIND_CLUSTER_NAME="codewire-ux-2099")
+            self.assertEqual(result.returncode, 0, result.stderr)
+        runs = [call["smoke_run"] for call in self.calls("suite")]
+        self.assertEqual(len(runs), 4)
+        self.assertTrue(all(runs))
+        self.assertEqual(runs[0], runs[1])
+        self.assertEqual(runs[2], runs[3])
+        self.assertNotEqual(runs[0], runs[2])
 
     def test_smokes_refuse_relative_destinations(self) -> None:
         result = subprocess.run(["bash", str(self.tree / "scripts/dev/kind/build-smokes.sh"), "smokes", "receipt.jsonl"],
@@ -1423,6 +1479,77 @@ class DashboardSpecTests(unittest.TestCase):
             merge_base, changed = self.module.changed_paths(root, "main")
             self.assertEqual(merge_base, base)
             self.assertEqual(changed, ["base.txt", "committed.txt", "untracked.txt"])
+
+
+def shell_functions(*paths: Path) -> dict[str, str]:
+    """Every top-level shell function's body, up to the next definition,
+    without its comment lines."""
+    functions: dict[str, str] = {}
+    for path in paths:
+        lines = [line for line in path.read_text().split("\n") if not line.lstrip().startswith("#")]
+        starts = [(index, match.group(1)) for index, line in enumerate(lines)
+                  if (match := re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*[{(]", line))]
+        for position, (index, name) in enumerate(starts):
+            end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
+            functions[name] = "\n".join(lines[index + 1:end])
+    return functions
+
+
+class SmokeGroupTests(unittest.TestCase):
+    # The builders themselves; every suite calls them.
+    BUILDERS = {"build_retained_kind_smokes", "build_images_and_smokes", "use_kind_profile_smokes",
+                "prepare_kind_profile_runtime_inputs"}
+
+    def test_each_suite_builds_every_smoke_it_runs(self) -> None:
+        # #2973: a suite builds only its groups, so its groups hold every
+        # smoke binary its functions run, through any helper they call.
+        kind = ROOT / "scripts/ci/verify/kind"
+        functions = shell_functions(kind / "common.sh", *sorted(kind.glob("*.sh")), *sorted((kind / "suites").glob("*.sh")))
+        runs = {name: set(re.findall(r'\$\{?CARGO_CI_DIR\}?/((?:examples/)?[a-z][a-z0-9-]*)', body))
+                | ({"kind-smoke-tests/wire_contract"} if name not in self.BUILDERS
+                   and "billing-contract-build.jsonl" in body else set())
+                for name, body in functions.items()}
+        calls = {name: {other for other in functions if other != name and other not in self.BUILDERS
+                        and re.search(rf"(?<![\w-]){re.escape(other)}(?![\w-])", body)}
+                 for name, body in functions.items()}
+
+        def closure(name: str, seen: set[str]) -> set[str]:
+            if name in seen:
+                return set()
+            seen.add(name)
+            return runs[name].union(*(closure(other, seen) for other in calls[name]))
+
+        builder = (ROOT / "scripts/dev/kind/build-smokes.sh").read_text()
+        group_table = builder[builder.index("build_group() {"):builder.index("esac", builder.index("build_group() {"))]
+        outputs: dict[str, set[str]] = {}
+        for group, build in re.findall(r"^\s+([a-z0-9-]+)\)\s*(?:#[^\n]*\n\s*)?(smoke .*?);;", group_table, re.M | re.S):
+            parts = re.findall(r"'([^']*)'|(\S+)", build.replace("\\\n", " "))
+            words = [quoted or bare for quoted, bare in parts][1:]
+            _, _, bins, examples, test = words
+            outputs[group] = set(bins.split()) | {f"examples/{name}" for name in examples.split()} \
+                | ({f"kind-smoke-tests/{test}"} if test else set())
+        self.assertEqual(set(outputs), {"orchestration", "client", "client-kind-e2e", "cli", "billing"})
+        common = (kind / "common.sh").read_text()
+        table = common[common.index("kind_suite_smoke_groups() {"):common.index("esac", common.index("kind_suite_smoke_groups() {"))]
+        mapped = {}
+        for suites, groups in re.findall(r"^\s+([a-z0-9| -]+)\)\s*printf '%s\\n' ([a-z0-9 -]+);;", table, re.M):
+            for suite in suites.replace("|", " ").split():
+                mapped[suite] = groups.split()
+        entries = {
+            "edge-contract": "run_retained_edge_contract_suite", "credentials": "run_retained_credentials_suite",
+            "workspace-services": "run_retained_workspace_services_suite",
+            "final-fencing": "run_retained_final_fencing_suite", "integrated": "run_retained_integrated_suite",
+            "runtime-acceptance": "run_retained_runtime_acceptance_suite",
+            "cw-runtime": "run_admitted_cw_runtime_journey", "cw-managed-agents": "run_retained_managed_agents_journey",
+        }
+        self.assertEqual(set(mapped), set(entries))
+        for suite, entry in entries.items():
+            with self.subTest(suite=suite):
+                self.assertIn(f"build_retained_kind_smokes {suite}\n", functions[entry] + "\n")
+                built = set().union(*(outputs[group] for group in mapped[suite]))
+                needed = closure(entry, set())
+                self.assertTrue(needed, f"{suite} runs no smoke binary")
+                self.assertLessEqual(needed, built, f"{suite} runs smokes outside its groups")
 
 
 class SelectionTableTests(unittest.TestCase):

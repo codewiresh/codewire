@@ -1675,7 +1675,7 @@ done
   RUN_DIR="$FIXTURE/consumed-run"
   CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-ci
   log() { :; }
-  build_retained_kind_smokes
+  build_retained_kind_smokes workspace-services
 )
 (
   CARGO_CI_DIR="$FIXTURE/consumed-ci"
@@ -1684,7 +1684,7 @@ done
   log() { :; }
   for missing_consumed in temporal-fencing-smoke examples/environment-cw-runtime-smoke; do
     rm -f "$FIXTURE/consumed-ci/$missing_consumed"
-    expect_failure missing-consumed-smoke build_retained_kind_smokes
+    expect_failure missing-consumed-smoke build_retained_kind_smokes workspace-services
     grep -Fq "consumed Kind smoke binary is missing: $CARGO_CI_DIR/$missing_consumed" \
       "$FIXTURE/missing-consumed-smoke.out" ||
       fail "missing consumed smoke binary was not decisive: $missing_consumed"
@@ -1692,14 +1692,16 @@ done
     chmod +x "$FIXTURE/consumed-ci/$missing_consumed"
   done
   rm -f "$FIXTURE/consumed-run/billing-contract-build.jsonl"
-  expect_failure missing-consumed-receipt build_retained_kind_smokes
+  expect_failure missing-consumed-receipt build_retained_kind_smokes integrated
   grep -Fq 'consumed Kind smoke build receipt is missing' \
     "$FIXTURE/missing-consumed-receipt.out" ||
     fail 'missing consumed smoke build receipt was not decisive'
 )
 # `make kind-test` (test-selected.sh) builds the retained smokes in the
-# kind-dev target its deploys compile in; every other retained caller keeps
-# the host Cargo build. A failed kind-dev build fails the suite.
+# kind-dev target its deploys compile in, only the groups the calling suite
+# runs (#2973); every other retained caller keeps the host Cargo build. A
+# failed kind-dev build fails the suite, and a suite with no mapped groups or
+# no name builds nothing.
 mkdir -p "$FIXTURE/smoke-root/scripts/dev/kind" "$FIXTURE/smoke-root/scripts/ci/images"
 for smoke_builder in scripts/dev/kind/build-smokes.sh scripts/ci/images/build-kind-smokes.sh; do
   printf '#!/usr/bin/env bash\nprintf "%%s %%s %%s\\n" %s "${KIND_CLUSTER_NAME:-}" "$*" >>"%s"\nexit "${FAKE_SMOKE_STATUS:-0}"\n' \
@@ -1714,12 +1716,19 @@ done
   CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
   KIND_RETAINED_USE_CLUSTER_WORKSPACE=1
   log() { :; }
-  build_retained_kind_smokes
+  build_retained_kind_smokes final-fencing
   [ "$CARGO_CI_DIR" = "$ROOT/.tmp/kind-dev/codewire-ux-2099/smokes" ] ||
     fail "kind-dev smokes are read from ${CARGO_CI_DIR}"
+  build_retained_kind_smokes integrated
+  expect_failure unmapped-smoke-suite build_retained_kind_smokes dashboard-browser
+  grep -Fq 'no smoke build groups are mapped for the Kind suite dashboard-browser' \
+    "$FIXTURE/unmapped-smoke-suite.out" || fail 'an unmapped suite did not refuse its smoke build'
+  expect_failure unnamed-smoke-suite build_retained_kind_smokes
+  grep -Fq 'build_retained_kind_smokes needs the calling suite' \
+    "$FIXTURE/unnamed-smoke-suite.out" || fail 'an unnamed suite did not refuse its smoke build'
   FAKE_SMOKE_STATUS=7
   export FAKE_SMOKE_STATUS
-  expect_failure failed-kind-dev-smokes build_retained_kind_smokes
+  expect_failure failed-kind-dev-smokes build_retained_kind_smokes final-fencing
 )
 (
   ROOT="$FIXTURE/smoke-root"
@@ -1729,13 +1738,14 @@ done
   CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
   unset KIND_RETAINED_USE_CLUSTER_WORKSPACE
   log() { :; }
-  build_retained_kind_smokes
+  build_retained_kind_smokes final-fencing
   [ "$CARGO_CI_DIR" = "$FIXTURE/host-ci" ] ||
     fail "host-built smokes are read from ${CARGO_CI_DIR}"
 )
 printf '%s\n' \
-  "scripts/dev/kind/build-smokes.sh codewire-ux-2099 $FIXTURE/smoke-root/.tmp/kind-dev/codewire-ux-2099/smokes $FIXTURE/smoke-run/billing-contract-build.jsonl" \
-  "scripts/dev/kind/build-smokes.sh codewire-ux-2099 $FIXTURE/smoke-root/.tmp/kind-dev/codewire-ux-2099/smokes $FIXTURE/smoke-run/billing-contract-build.jsonl" \
+  "scripts/dev/kind/build-smokes.sh codewire-ux-2099 $FIXTURE/smoke-root/.tmp/kind-dev/codewire-ux-2099/smokes $FIXTURE/smoke-run/billing-contract-build.jsonl orchestration" \
+  "scripts/dev/kind/build-smokes.sh codewire-ux-2099 $FIXTURE/smoke-root/.tmp/kind-dev/codewire-ux-2099/smokes $FIXTURE/smoke-run/billing-contract-build.jsonl client-kind-e2e billing" \
+  "scripts/dev/kind/build-smokes.sh codewire-ux-2099 $FIXTURE/smoke-root/.tmp/kind-dev/codewire-ux-2099/smokes $FIXTURE/smoke-run/billing-contract-build.jsonl orchestration" \
   "scripts/ci/images/build-kind-smokes.sh codewire-ux-2099 $FIXTURE/smoke-run/billing-contract-build.jsonl" |
   cmp -s - "$FIXTURE/smoke-builds" || {
     cat "$FIXTURE/smoke-builds" >&2

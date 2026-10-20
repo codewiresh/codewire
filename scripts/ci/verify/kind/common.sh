@@ -1183,12 +1183,35 @@ build_images_and_smokes() {
   release_kind_build_publication_lock
 }
 
+# The smoke build groups (scripts/dev/kind/build-smokes.sh) whose binaries each
+# retained suite runs. test-kind-dev-profile.py checks every smoke a suite's
+# functions run is in one of its groups.
+kind_suite_smoke_groups() {
+  case "$1" in
+    edge-contract | final-fencing | runtime-acceptance) printf '%s\n' orchestration ;;
+    credentials) printf '%s\n' cli ;;
+    workspace-services) printf '%s\n' orchestration client cli ;;
+    integrated) printf '%s\n' client-kind-e2e billing ;;
+    cw-runtime | cw-managed-agents) printf '%s\n' client cli ;;
+    *)
+      echo "::error::no smoke build groups are mapped for the Kind suite ${1:-missing}" >&2
+      return 2
+      ;;
+  esac
+}
+
 # Retained suites rerun gate steps on a kept cluster. `up` builds no smoke
 # binaries, so build them here; cargo makes repeated builds incremental. The CI
 # shard legs instead consumed the exact same-run smoke artifact during `up`
 # (kind-build-artifacts.py SMOKE_FILES/TEST_FILES), so rebuilding there would
 # redo the producer's work on an empty cache; verify the consumed set instead.
+# The argument names the calling suite.
 build_retained_kind_smokes() {
+  local suite="${1:-}" groups
+  if [ -z "$suite" ]; then
+    echo "::error::build_retained_kind_smokes needs the calling suite"
+    return 2
+  fi
   if [ "${KIND_PROFILE:-0}" = 1 ]; then
     if [ "$KIND_PROFILE_ARTIFACTS_VERIFIED" != 1 ]; then
       kind_profile_verify_artifacts "$ROOT" || return $?
@@ -1223,11 +1246,14 @@ build_retained_kind_smokes() {
     # `make kind-test` deploys changed services from this worktree's kind-dev
     # BuildKit target (scripts/dev/kind/deploy-service.sh). Building the smokes
     # and the host cw in that target links what the deploy already compiled
-    # instead of compiling the product a second time on the host.
+    # instead of compiling the product a second time on the host. Only this
+    # suite's groups build, each once per make kind-test run (#2973).
+    groups="$(kind_suite_smoke_groups "$suite")" || return $?
     CARGO_CI_DIR="$ROOT/.tmp/kind-dev/${KIND_CLUSTER_NAME}/smokes"
-    log "building Rust kind smoke binaries for the retained suite in the kind-dev target"
+    log "building the ${suite} suite's Rust kind smoke binaries (${groups//$'\n'/ }) in the kind-dev target"
+    # shellcheck disable=SC2086 # One word per group.
     KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" "$ROOT/scripts/dev/kind/build-smokes.sh" \
-      "$CARGO_CI_DIR" "$RUN_DIR/billing-contract-build.jsonl"
+      "$CARGO_CI_DIR" "$RUN_DIR/billing-contract-build.jsonl" $groups
     return $?
   fi
   log "building Rust kind smoke binaries for the retained suite"

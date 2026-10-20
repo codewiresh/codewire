@@ -16,7 +16,7 @@ run_retained_final_fencing_suite() {
   trap retained_suite_cleanup EXIT
   validate_retained_cluster
   # Rebuild the smoke from this tree; a stale binary proves an older one.
-  build_retained_kind_smokes
+  build_retained_kind_smokes final-fencing
   temporal_fencing_smoke
   log "retained final-fencing suite green"
 }

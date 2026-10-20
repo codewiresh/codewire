@@ -18,7 +18,7 @@ run_retained_workspace_services_suite() {
 
   trap retained_suite_cleanup EXIT
   validate_retained_cluster
-  build_retained_kind_smokes
+  build_retained_kind_smokes workspace-services
   workspace_service_smokes
   temporal_workflow_smoke
   log "retained workspace-services suite green"

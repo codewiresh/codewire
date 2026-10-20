@@ -362,6 +362,10 @@ done
 # it here too, for a run that deploys nothing.
 "$ROOT/scripts/dev/kind/trust-roots.sh" || die 'republishing the synthetic trust roots failed'
 timings=("deploy $((SECONDS - started))s")
+# Each suite builds only the smoke groups it runs, and none twice in this run
+# (scripts/dev/kind/build-smokes.sh, #2973).
+KIND_SMOKE_RUN="$$-${EPOCHREALTIME/[.,]/}"
+export KIND_SMOKE_RUN
 for suite in "${selected[@]}"; do
   started=$SECONDS
   suite_stages="" suite_tests=""

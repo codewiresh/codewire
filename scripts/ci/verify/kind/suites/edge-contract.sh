@@ -19,7 +19,7 @@ run_retained_edge_contract_suite() {
 
   trap retained_suite_cleanup EXIT
   validate_retained_cluster
-  build_retained_kind_smokes
+  build_retained_kind_smokes edge-contract
   orchestration_authorization_smoke
   edge_routing_probes
   connect_edge_probes
