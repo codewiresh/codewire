@@ -884,11 +884,11 @@ def check_dry_run(text, release):
                        ("build-linux-musl", 60), ("build-linux-gnu", 60), ("assemble", 30)):
         found = re.findall(r"^    timeout-minutes: ([0-9]+)$", blocks.get(job, ""), re.M)
         need(found == [str(limit)], f"dry-run job {job} lacks its {limit}-minute limit")
-    # Forgejo cancels the older push run of a workflow with no `concurrency`
-    # block. With a group and `cancel-in-progress: false`, runs queue in push
-    # order and each one finishes.
-    need("\nconcurrency:\n  group: cw-release-dry-run-${{ github.ref }}\n  cancel-in-progress: false\n\n" in text,
-         "a newer main push can cancel a running dry run")
+    # A newer main push cancels a superseded dry run, queued or building
+    # (#2893); a manual dispatch never cancels another run.
+    need("\nconcurrency:\n  group: cw-release-dry-run-${{ github.ref }}\n"
+         "  cancel-in-progress: ${{ github.event_name == 'push' }}\n\n" in text,
+         "a newer main push does not cancel a superseded dry run, or a dispatch cancels one")
     guard, runtime = blocks.get("protected-main", ""), blocks.get("build-runtime-linux", "")
     superseded = blocks.get("superseded", "")
     darwin, assemble = blocks.get("build-darwin", ""), blocks.get("assemble", "")
@@ -1080,7 +1080,10 @@ DRY_RUN_MUTATIONS = {
     "dry run with an unbounded protoc download": lambda t: t.replace(
         "          scripts/ci/release/fetch-pinned.sh \"https://github.com/protocolbuffers",
         "          curl -fsSL -o \"$HOME/protoc.zip\" \"https://github.com/protocolbuffers", 1),
-    "cancellable dry run": lambda t: t.replace("  cancel-in-progress: false\n", "  cancel-in-progress: true\n", 1),
+    "dry run a dispatch can cancel": lambda t: t.replace(
+        "  cancel-in-progress: ${{ github.event_name == 'push' }}\n", "  cancel-in-progress: true\n", 1),
+    "dry run a newer push never cancels": lambda t: t.replace(
+        "  cancel-in-progress: ${{ github.event_name == 'push' }}\n", "  cancel-in-progress: false\n", 1),
     "dry run without a concurrency group": lambda t: t.replace(
         "  group: cw-release-dry-run-${{ github.ref }}\n", "", 1),
     "pull requests": lambda t: t.replace("on:\n  push:", "on:\n  pull_request:\n  push:", 1),

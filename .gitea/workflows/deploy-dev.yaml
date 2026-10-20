@@ -5,15 +5,12 @@ on:
   push:
     branches: [main]
 
-# A newer main push must never cancel a running delivery. Without this block
-# Forgejo cancels the older push run of the same workflow and ref. With a group
-# and `cancel-in-progress: false` it queues: one run at a time, in push order,
-# and each one finishes and delivers. Forgejo keeps every queued run (it has no
-# "newest pending only" mode), so a queued run that starts after main moved on
-# builds nothing; see "Skip a superseded commit" below.
+# A newer main push cancels this run, queued or building (#2893): only the
+# newest commit is delivered, and Dev never moves backwards. A run that starts
+# after main moved on still builds nothing; see "Skip a superseded commit".
 concurrency:
   group: deploy-dev-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy-selection:

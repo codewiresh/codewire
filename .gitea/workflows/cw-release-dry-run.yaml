@@ -84,15 +84,13 @@ on:
       - '.gitea/workflows/cw-release-dry-run.yaml'
   workflow_dispatch:
 
-# A newer main push must never cancel a running dry run. Without this block
-# Forgejo cancels the older push run of the same workflow and ref. With a group
-# and `cancel-in-progress: false` it queues: one run at a time, in push order,
-# and each one finishes. Forgejo keeps every queued run, so a queued run that
-# starts after main moved on builds nothing when a newer queued run covers it
-# (see "Skip a superseded commit").
+# A newer main push cancels this run, queued or building (#2893); a manual
+# dispatch never cancels another run. A run that starts after main moved on
+# still builds nothing when a newer run covers it (see "Skip a superseded
+# commit"). Tagged releases run cli-release.yaml, which this never touches.
 concurrency:
   group: cw-release-dry-run-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
   CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}

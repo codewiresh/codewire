@@ -215,8 +215,10 @@ only what overlaps.
 
 Hosted CI confirms after merge; it is not a merge gate. The exception is a
 hosted-only claim (such as scheduling, credentials, permissions, cache, or
-timing) that lacks equivalent accepted exact local/read-only evidence. Every
-`main` run finishes: never cancel one by hand, and fix forward when it fails.
+timing) that lacks equivalent accepted exact local/read-only evidence. Never
+cancel a `main` run by hand, and fix forward when one fails. `main` CI and
+release publication always finish; a newer `main` push cancels the superseded
+Dev delivery, support-image and release dry-run runs itself.
 Pull-request CI runs only the quick checks (selection, policy, compiling every
 Rust target); `main` runs the full verification after merge. Label the pull
 request `ci-full` to run that full verification, Kind included, on the pull

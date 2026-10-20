@@ -24,13 +24,12 @@ bash -n "$0"
 if grep -q '^  workflow_dispatch:' "$WORKFLOW"; then
   fail "dev image publication must be canonical-main push-only"
 fi
-# A newer main push must never cancel a running delivery. Forgejo cancels the
-# older push run of a workflow with no `concurrency` block; with a group and
-# `cancel-in-progress: false` runs queue in push order and each one finishes.
+# A newer main push cancels a superseded delivery, queued or building (#2893),
+# within this one group; Dev never moves backwards.
 concurrency_block="$(sed -n '/^concurrency:$/,/^$/p' "$WORKFLOW")"
 # shellcheck disable=SC2016 # Match the literal workflow expression.
-[[ "$concurrency_block" == $'concurrency:\n  group: deploy-dev-${{ github.ref }}\n  cancel-in-progress: false' ]] ||
-  fail "a newer main push can cancel a running Dev delivery"
+[[ "$concurrency_block" == $'concurrency:\n  group: deploy-dev-${{ github.ref }}\n  cancel-in-progress: true' ]] ||
+  fail "a newer main push does not cancel a superseded Dev delivery"
 if grep -qE '^permissions:|^enable-openid-connect:' "$WORKFLOW"; then
   fail "Dev delivery retains ignored permissions or workflow-wide OIDC"
 fi
