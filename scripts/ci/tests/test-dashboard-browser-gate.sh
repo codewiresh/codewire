@@ -228,6 +228,13 @@ grep -Fq '/login/_actions/sign-in' "$AUTH_SETUP" ||
   fail 'authentication setup does not observe the real Rust sign-in action'
 grep -Fq -- '--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1' "$PLAYWRIGHT_CONFIG" ||
   fail 'dashboard browser is not isolated from public DNS'
+# A runner without a GPU passes the runtime check either way, so the launch
+# arguments themselves keep the browser off the host GPU (#3019).
+grep -Fq 'const hostGpuIsolation = ["--disable-accelerated-video-decode", "--disable-accelerated-video-encode"];' \
+  "$PLAYWRIGHT_CONFIG" && grep -Fq 'args: [localOnlyResolverRule, ...hostGpuIsolation],' "$PLAYWRIGHT_CONFIG" ||
+  fail 'dashboard browser can load a host GPU driver'
+grep -Fq 'test("the browser draws without a host GPU driver"' "$ROOT/apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts" ||
+  fail 'the host GPU isolation runtime check is missing'
 grep -Fq 'name: "Dashboard", exact: true' "$AUTH_SETUP" ||
   fail 'authentication setup does not prove the authenticated dashboard'
 grep -Fq 'codewire.session_token' "$AUTH_SETUP" ||

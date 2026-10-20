@@ -20,6 +20,16 @@ const useDevShm = process.env.CODEWIRE_PLAYWRIGHT_USE_DEV_SHM === "1";
 const snapshotEnvironment = process.env.CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV || "{platform}";
 const skipSharedSetup = process.env.PLAYWRIGHT_SKIP_SHARED_SETUP === "1";
 const localOnlyResolverRule = "--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1";
+// Keep the browser off the host GPU. Hardware video acceleration is the only
+// path from its GPU process to a host GPU driver: on a workstation with an
+// NVIDIA card it loads the VA-API driver, which opens /dev/nvidia* and a CUDA
+// context. When that driver blocks, the GPU process stops producing frames,
+// and every click waits out its timeout for a stable element while the page
+// itself still answers (#3019). No spec plays video, and CI runners have no
+// GPU, so every browser renders the same way. The browser runtime spec in
+// e2e/ssr-dashboard.design-system.ssr.ts checks the GPU process holds no
+// host GPU device.
+const hostGpuIsolation = ["--disable-accelerated-video-decode", "--disable-accelerated-video-encode"];
 const designFixtureProjects = [
   {
     name: "design-fixtures-desktop",
@@ -63,7 +73,7 @@ export default defineConfig({
   },
   use: {
     launchOptions: {
-      args: [localOnlyResolverRule],
+      args: [localOnlyResolverRule, ...hostGpuIsolation],
       executablePath: chromiumExecutable,
       ignoreDefaultArgs: useDevShm ? ["--disable-dev-shm-usage"] : undefined,
     },

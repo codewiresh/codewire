@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, readlinkSync } from "node:fs";
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
@@ -268,4 +268,77 @@ test("buttons with an icon centre their label's capitals", async ({ page }) => {
     await page.evaluate(() => document.fonts.ready);
     expect.soft(Math.abs(await capitalsOffset(control)), name).toBeLessThanOrEqual(0.75);
   }
+});
+
+// What draws every fixture: the browser's GPU process. A host GPU driver in it
+// can block, and then no frame arrives and every click waits out its timeout
+// for a stable element (#3019). playwright.config.ts keeps the browser off the
+// host GPU; this checks the running browser. On a runner without a GPU it
+// holds nothing either way; the workstation is where it matters.
+const hostGpuDevice = /^\/dev\/(?:nvidia|dri\/)/;
+
+function processIds() {
+  return readdirSync("/proc").filter((name) => /^\d+$/.test(name)).map(Number);
+}
+
+// The parent from /proc/<pid>/stat; the command name before it may hold spaces.
+function parentOf(pid: number) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+  } catch {
+    return undefined;
+  }
+}
+
+function descendantsOf(root: number) {
+  const children = new Map<number, number[]>();
+  for (const pid of processIds()) {
+    const parent = parentOf(pid);
+    if (parent !== undefined) children.set(parent, [...(children.get(parent) ?? []), pid]);
+  }
+  const found: number[] = [];
+  const queue = [root];
+  while (queue.length) {
+    for (const child of children.get(queue.shift()!) ?? []) {
+      found.push(child);
+      queue.push(child);
+    }
+  }
+  return found;
+}
+
+function commandLine(pid: number) {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function openDevices(pid: number) {
+  try {
+    return readdirSync(`/proc/${pid}/fd`).flatMap((fd) => {
+      try {
+        return [readlinkSync(`/proc/${pid}/fd/${fd}`)];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+test("the browser draws without a host GPU driver", async ({ browser }) => {
+  test.skip(process.platform !== "linux", "Reads the browser's GPU process from /proc");
+  const page = await browser.newPage();
+  await page.setContent("<p>frame</p>");
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  // This worker launched the browser, so its GPU process descends from it.
+  const gpuProcesses = descendantsOf(process.pid).filter((pid) => commandLine(pid).includes("--type=gpu-process"));
+  expect(gpuProcesses.length, "the browser's GPU process").toBeGreaterThan(0);
+  const held = gpuProcesses.flatMap((pid) => openDevices(pid).filter((target) => hostGpuDevice.test(target)));
+  expect([...new Set(held)].sort(), "host GPU devices the GPU process holds").toEqual([]);
+  await page.close();
 });
