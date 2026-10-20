@@ -212,12 +212,17 @@ fn a_missing_model_is_a_model_refusal() {
 
 #[test]
 fn sanitizing_drops_identifiers_urls_and_secret_shapes() {
-    let text = "unexpected status 401 Unauthorized: Incorrect API key provided: sk-proj-SYNTHETIC0123456789abcdef \
+    // The key is assembled at run time so the source holds no key-shaped
+    // literal for secret scanners; the sanitizer still sees the full shape.
+    let key = ["sk", "proj", "SYNTHETIC0123456789abcdef"].join("-");
+    let text = format!(
+        "unexpected status 401 Unauthorized: Incorrect API key provided: {key} \
                 for organization org-SYNTHETIC0000 user user-SYNTHETIC0000 via https://api.example.invalid/v1 \
                 Authorization: Bearer synthetic.token.value eyJhbGciOiJIUzI1NiJ9.e30.SYNTHETIC \
                 ghp_SYNTHETIC0000000000 opaque A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8 \
-                model gpt-5.3-codex claude-3-5-sonnet-20241022, url: http://127.0.0.1:38081/v1/responses, cf-ray: abc-AMS, request id: req_1";
-    let clean = sanitize(text);
+                model gpt-5.3-codex claude-3-5-sonnet-20241022, url: http://127.0.0.1:38081/v1/responses, cf-ray: abc-AMS, request id: req_1"
+    );
+    let clean = sanitize(&text);
     for leaked in [
         "sk-proj",
         "SYNTHETIC",

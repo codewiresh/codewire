@@ -29,6 +29,14 @@ regexTarget = "match"
 regexes = ['''key:[[:space:]]*"cw_[0-9a-fA-F]{16}"''']
 
 [[allowlists]]
+description = "Codewire managed-agent sanitizer test feeds a synthetic OpenAI-shaped key marked SYNTHETIC"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)crates/codewire-cli/src/commands/sessions/agents/turn_failure_tests\.rs$''']
+regexTarget = "match"
+regexes = ['''sk-proj-SYNTHETIC[[:alnum:]]*''']
+
+[[allowlists]]
 description = "The exact xterm 6.0.0 npm member is verified byte-for-byte from its signed registry tarball"
 targetRules = ["generic-api-key"]
 paths = ['''(^|/)crates/codewire-dashboard-web/assets/xterm/xterm-6\.0\.0\.js$''']
