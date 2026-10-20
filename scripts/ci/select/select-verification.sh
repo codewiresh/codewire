@@ -1814,6 +1814,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/build-push-image.sh|scripts/ci/images/build-push-runtime-images.sh|\
       scripts/ci/images/pipeline-identity.sh|\
       scripts/ci/images/build-support-platform.sh|\
+      scripts/ci/images/run-workspace-contract-on-image.sh|\
+      scripts/ci/tests/test-run-workspace-contract-on-image.sh|\
       scripts/ci/images/release-support-pair-state.sh|scripts/ci/images/join-release-support-image.sh|\
       scripts/ci/images/compute-image-tags.sh|\
       scripts/ci/images/copy-image-to-ghcr.sh|\

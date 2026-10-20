@@ -120,7 +120,8 @@ jobs:
     if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}
     outputs:
       base_digest: ${{ steps.build.outputs.base_digest }}
-      workspace_digest: ${{ steps.build.outputs.workspace_digest }}
+      # Only a passing workspace contract reports the digest the joins consume.
+      workspace_digest: ${{ steps.contract.outputs.workspace_digest }}
     env:
       OPENBAO_ROLE: codewire-source-support-publisher
       OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
@@ -157,6 +158,18 @@ jobs:
         run: |
           shred -u -- "$RUNNER_TEMP/codewire-sccache-r2-protected-workspace.aws" 2>/dev/null ||
             rm -f -- "$RUNNER_TEMP/codewire-sccache-r2-protected-workspace.aws"
+
+      # The agent contract runs on the exact image the build pushed, before
+      # anything publishes it, with no compiler credential left on disk. The
+      # pull robot's Docker configuration is gone before the image runs.
+      - name: Run the workspace contract on the exact image
+        id: contract
+        env:
+          WORKSPACE_DIGEST: ${{ steps.build.outputs.workspace_digest }}
+        run: |
+          scripts/ci/images/run-workspace-contract-on-image.sh \
+            "registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST" "$GITHUB_SHA" \
+            scripts/ci/verify/workspace-agent-contract.sh
 
   build-support-arm64:
     # zizmor: ignore[excessive-permissions] This exact protected job receives the scoped publisher identity for its platform of the pair.

@@ -40,6 +40,7 @@ IMAGE_BUILD_DRIVERS = {
     "scripts/ci/images/build-push-image.sh": ("daemon_image", "workspace_image"),
     "scripts/ci/images/build-push-runtime-images.sh": ("daemon_image", "workspace_image"),
     "scripts/ci/images/build-support-platform.sh": ("workspace_image",),
+    "scripts/ci/images/run-workspace-contract-on-image.sh": ("workspace_image",),
 }
 CREDENTIAL_ACCEPTANCE_PATHS = (
     "scripts/runtime/dev/provider-anthropic-output.py",
@@ -1853,6 +1854,12 @@ class PlannerFixtureTests(unittest.TestCase):
             },
             "scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh": {"workspace_image"},
             "scripts/ci/images/build-support-platform.sh": {"workspace_image"},
+            # The contract gates publication of the exact image it runs on.
+            "scripts/ci/images/run-workspace-contract-on-image.sh": {"workspace_image"},
+            "scripts/ci/verify/workspace-agent-contract.sh": {
+                "workspace_image",
+                "workspace_image_verification",
+            },
             "scripts/ci/images/run-rust-build.sh": runtime_cw,
             "scripts/dev/build-cw.py": runtime_cw,
             "scripts/ci/verify/verify-workspace-image.sh": {"workspace_image_verification"},

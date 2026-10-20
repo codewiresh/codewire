@@ -600,8 +600,9 @@ superseded_case() {
 for platform in amd64 arm64; do
   case "$platform" in
     # amd64 compiles cw on a 32-CPU metal slot; arm64 drives the remote builder.
-    amd64) timeout_minutes=120 budget=110 next_job=build-support-arm64 runs_on=ci-protected-metal ;;
-    arm64) timeout_minutes=120 budget=110 next_job=publish-support-images runs_on=ci-protected ;;
+    # The amd64 workspace digest leaves its job only through the contract.
+    amd64) timeout_minutes=120 budget=110 next_job=build-support-arm64 runs_on=ci-protected-metal digest_step=contract ;;
+    arm64) timeout_minutes=120 budget=110 next_job=publish-support-images runs_on=ci-protected digest_step=build ;;
   esac
   platform_job="$(sed -n "/^  build-support-$platform:/,/^  $next_job:/p" "$WORKFLOW")"
   for expected in "    runs-on: $runs_on" '    enable-openid-connect: true' \
@@ -609,7 +610,7 @@ for platform in amd64 arm64; do
       "          SUPPORT_PLATFORM_BUDGET_MINUTES: '$budget'" \
       "        run: scripts/ci/images/build-support-platform.sh linux/$platform" \
       '      base_digest: ${{ steps.build.outputs.base_digest }}' \
-      '      workspace_digest: ${{ steps.build.outputs.workspace_digest }}' \
+      "      workspace_digest: \${{ steps.$digest_step.outputs.workspace_digest }}" \
       '      OPENBAO_ROLE: codewire-source-support-publisher'; do
     grep -qxF -- "$expected" <<<"$platform_job" || fail "linux/$platform support build omits: $expected"
   done
@@ -619,6 +620,98 @@ for platform in amd64 arm64; do
     fail "linux/$platform support build crosses the publication boundary"
   fi
 done
+
+# The workspace agent contract runs on the exact amd64 image the build pushed,
+# after the compiler-cache credential is gone, and the job reports the digest
+# only from that step: the joins consume nothing that skipped the contract.
+# contract_step_violation FILE prints the first broken rule, if any.
+contract_step_violation() {
+  python3 - "$1" <<'PY'
+import sys
+
+import yaml
+
+try:
+    job = yaml.safe_load(open(sys.argv[1]))["jobs"]["build-support-amd64"]
+except Exception as error:  # A mutation may break the document itself.
+    sys.exit(f"the workflow does not parse: {error}")
+steps = job.get("steps") or []
+names = [step.get("name") for step in steps]
+contract = [index for index, step in enumerate(steps) if step.get("id") == "contract"]
+if len(contract) != 1:
+    sys.exit("the amd64 build job has no single workspace contract step")
+expected = {
+    "name": "Run the workspace contract on the exact image",
+    "id": "contract",
+    "env": {"WORKSPACE_DIGEST": "${{ steps.build.outputs.workspace_digest }}"},
+    "run": "scripts/ci/images/run-workspace-contract-on-image.sh \\\n"
+           '  "registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST" "$GITHUB_SHA" \\\n'
+           "  scripts/ci/verify/workspace-agent-contract.sh\n",
+}
+if steps[contract[0]] != expected:
+    sys.exit("the workspace contract step differs from the reviewed exact-image step")
+build = [index for index, step in enumerate(steps) if step.get("id") == "build"]
+removal = [index for index, name in enumerate(names)
+           if name == "Remove the protected-workspace R2 compiler-cache credential"]
+if len(build) != 1 or len(removal) != 1 or not build[0] < removal[0] < contract[0]:
+    sys.exit("the workspace contract does not follow the build and the credential removal")
+if (job.get("outputs") or {}).get("workspace_digest") != "${{ steps.contract.outputs.workspace_digest }}":
+    sys.exit("the amd64 workspace digest leaves the job without the contract")
+if "continue-on-error" in job:
+    sys.exit("the amd64 build job continues on error")
+if any("artifact" in str(step.get("uses", "")) for step in steps):
+    sys.exit("the amd64 build job takes an artifact input")
+PY
+}
+violation="$(contract_step_violation "$WORKFLOW" 2>&1)" && [[ -z "$violation" ]] || fail "$violation"
+# Each rule refuses its own regression of the reviewed job.
+contract_tree="$(mktemp -d)"
+trap 'rm -rf -- "$superseded_step" "$superseded_bin" "$contract_tree"' EXIT
+move_contract_before() {
+  awk -v anchor="$1" '
+    /^  [A-Za-z0-9_-]+:$/ { job = $0 }
+    job == "  build-support-amd64:" && $0 == "      - name: Run the workspace contract on the exact image" { grab = 1 }
+    grab { if ($0 == "") { grab = 0 } else { block = block $0 "\n" }; next }
+    { line[++count] = $0; owner[count] = job }
+    END {
+      for (index_ = 1; index_ <= count; index_++) {
+        if (owner[index_] == "  build-support-amd64:" && line[index_] == anchor) printf "%s\n", block
+        print line[index_]
+      }
+    }
+  ' "$WORKFLOW"
+}
+amd64_range='/^  build-support-amd64:/,/^  build-support-arm64:/'
+# shellcheck disable=SC2016 # The mutations insert literal workflow expressions.
+contract_mutations=(
+  "contract step removed::$amd64_range{/- name: Run the workspace contract on the exact image/,/^\$/d}"
+  "digest from the build step::s/workspace_digest: \${{ steps.contract.outputs.workspace_digest }}/workspace_digest: \${{ steps.build.outputs.workspace_digest }}/"
+  "continue-on-error::/        id: contract/a\\        continue-on-error: true"
+  "job continue-on-error::$amd64_range{/    timeout-minutes: 120/a\\    continue-on-error: true
+}"
+  "skippable contract::/        id: contract/a\\        if: \${{ always() }}"
+  'needs. input::/          WORKSPACE_DIGEST: /a\          SOURCE_SHA: ${{ needs.support-selection.outputs.head_sha }}'
+  'needs. digest::s/WORKSPACE_DIGEST: ${{ steps.build.outputs.workspace_digest }}/WORKSPACE_DIGEST: ${{ needs.support-selection.outputs.baseline_sha }}/'
+  'artifact contract::s|            scripts/ci/verify/workspace-agent-contract.sh|            "$RUNNER_TEMP/artifact/workspace-agent-contract.sh"|'
+  "artifact step::$amd64_range{/      - name: Run the workspace contract on the exact image/i\\      - uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+}"
+  'tagged image::s|"registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST"|"registry.example.invalid/codewire/workspace:$GITHUB_SHA"|'
+  'public mirror source::s|run-workspace-contract-on-image.sh \\$|run-workspace-contract-on-image.sh --source ghcr \\|'
+)
+for mutation in "${contract_mutations[@]}"; do
+  label="${mutation%%::*}"
+  sed -e "${mutation#*::}" "$WORKFLOW" >"$contract_tree/workflow.yaml"
+  ! cmp -s "$WORKFLOW" "$contract_tree/workflow.yaml" || fail "contract mutation did not apply: $label"
+  [[ -n "$(contract_step_violation "$contract_tree/workflow.yaml" 2>&1)" ]] ||
+    fail "contract mutation was accepted: $label"
+done
+move_contract_before '      - name: Remove the protected-workspace R2 compiler-cache credential' >"$contract_tree/removal.yaml"
+move_contract_before '      - name: Build the linux/amd64 base and workspace by digest' >"$contract_tree/build.yaml"
+for moved in removal build; do
+  ! cmp -s "$WORKFLOW" "$contract_tree/$moved.yaml" || fail "contract move did not apply: $moved"
+  [[ -n "$(contract_step_violation "$contract_tree/$moved.yaml" 2>&1)" ]] ||
+    fail "a workspace contract moved before the $moved step was accepted"
+done
 grep -qxF '    timeout-minutes: 30' <<<"$publish_job" || fail 'support join has no explicit time budget'
 if grep -qF 'build-support-platform.sh' <<<"$publish_job"; then
   fail 'support join rebuilds a platform'
@@ -627,7 +720,7 @@ fi
 # The platform script, run in a copy of its tree against a recording builder,
 # a recording Docker and a stub for the arm64 node's client certificate.
 platform_tree="$(mktemp -d)"
-trap 'rm -rf -- "$superseded_step" "$superseded_bin" "$platform_tree"' EXIT
+trap 'rm -rf -- "$superseded_step" "$superseded_bin" "$contract_tree" "$platform_tree"' EXIT
 mkdir -p "$platform_tree/scripts/ci/images" "$platform_tree/scripts/ci/setup" "$platform_tree/bin" "$platform_tree/runner"
 cp "$PLATFORM_BUILDER" "$platform_tree/scripts/ci/images/"
 cat >"$platform_tree/scripts/ci/images/build-push-image.sh" <<'STUB'

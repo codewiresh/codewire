@@ -377,8 +377,10 @@
         "scripts/ci/images/image-bundle.py",
         "scripts/ci/images/pipeline-identity.sh",
         "scripts/ci/images/build-support-platform.sh",
+        "scripts/ci/images/run-workspace-contract-on-image.sh",
         "scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh",
-        "scripts/ci/setup/fetch-openbao-harbor-credentials.sh"
+        "scripts/ci/setup/fetch-openbao-harbor-credentials.sh",
+        "scripts/ci/verify/workspace-agent-contract.sh"
       ]
     }
   }

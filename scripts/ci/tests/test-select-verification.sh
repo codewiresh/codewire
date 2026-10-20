@@ -1289,6 +1289,10 @@ run_paths_case support_pair_platform_build pull_request refs/pull/2255/head fals
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/images/build-support-platform.sh scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh \
   scripts/ci/tests/test-fetch-openbao-arm64-buildkit-client.sh
+# The exact-image contract runner gates support publication like the build.
+run_paths_case workspace_contract_on_image pull_request refs/pull/2892/head false \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
+  scripts/ci/images/run-workspace-contract-on-image.sh scripts/ci/tests/test-run-workspace-contract-on-image.sh
 run_paths_case cw_runtime_image_tool pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/cw-runtime-image.py scripts/dev/test-cw-runtime-image.py

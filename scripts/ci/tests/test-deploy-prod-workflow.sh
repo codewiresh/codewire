@@ -135,6 +135,96 @@ for platform in amd64 arm64; do
     fail "linux/$platform release support build crosses the publication boundary"
   fi
 done
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -qxF '      workspace_digest: ${{ steps.build.outputs.workspace_digest }}' \
+  <<<"$(sed -n '/^  build-support-arm64:/,/^  publish-support-release-images:/p' "$WORKFLOW")" ||
+  fail 'the linux/arm64 release support build does not report its workspace digest'
+
+# The release tag's own workspace agent contract runs inside the exact amd64
+# image the build pushed, and the job reports the digest only from that step:
+# the join consumes nothing that skipped the contract.
+# contract_step_violation FILE prints the first broken rule, if any.
+contract_step_violation() {
+  python3 - "$1" <<'PY'
+import sys
+
+import yaml
+
+try:
+    job = yaml.safe_load(open(sys.argv[1]))["jobs"]["build-support-amd64"]
+except Exception as error:  # A mutation may break the document itself.
+    sys.exit(f"the workflow does not parse: {error}")
+steps = job.get("steps") or []
+contract = [index for index, step in enumerate(steps) if step.get("id") == "contract"]
+if len(contract) != 1:
+    sys.exit("the amd64 release build job has no single workspace contract step")
+expected = {
+    "name": "Run the workspace contract on the exact image",
+    "id": "contract",
+    "env": {"WORKSPACE_DIGEST": "${{ steps.build.outputs.workspace_digest }}"},
+    "run": "set -euo pipefail\n"
+           'release_source_sha="$(git -C .release-source rev-parse HEAD)"\n'
+           "scripts/ci/images/run-workspace-contract-on-image.sh \\\n"
+           '  "registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST" "$release_source_sha" \\\n'
+           "  .release-source/scripts/ci/verify/workspace-agent-contract.sh\n",
+}
+if steps[contract[0]] != expected:
+    sys.exit("the workspace contract step differs from the reviewed exact-image step")
+build = [index for index, step in enumerate(steps) if step.get("id") == "build"]
+if len(build) != 1 or not build[0] < contract[0]:
+    sys.exit("the workspace contract does not follow the build")
+if (job.get("outputs") or {}).get("workspace_digest") != "${{ steps.contract.outputs.workspace_digest }}":
+    sys.exit("the amd64 workspace digest leaves the job without the contract")
+if "continue-on-error" in job:
+    sys.exit("the amd64 release build job continues on error")
+if any("artifact" in str(step.get("uses", "")) for step in steps):
+    sys.exit("the amd64 release build job takes an artifact input")
+PY
+}
+violation="$(contract_step_violation "$WORKFLOW" 2>&1)" && [[ -z "$violation" ]] || fail "$violation"
+# Each rule refuses its own regression of the reviewed job.
+contract_tree="$(mktemp -d)"
+trap 'rm -rf -- "$contract_tree"' EXIT
+amd64_range='/^  build-support-amd64:/,/^  build-support-arm64:/'
+# shellcheck disable=SC2016 # The mutations insert literal workflow expressions.
+contract_mutations=(
+  "contract step removed::$amd64_range{/- name: Run the workspace contract on the exact image/,/^\$/d}"
+  "digest from the build step::s/workspace_digest: \${{ steps.contract.outputs.workspace_digest }}/workspace_digest: \${{ steps.build.outputs.workspace_digest }}/"
+  "continue-on-error::/        id: contract/a\\        continue-on-error: true"
+  "job continue-on-error::$amd64_range{/    timeout-minutes: 120/a\\    continue-on-error: true
+}"
+  "skippable contract::/        id: contract/a\\        if: \${{ always() }}"
+  'needs. input::/          WORKSPACE_DIGEST: /a\          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}'
+  'needs. revision::s/"$release_source_sha" \\$/"${{ needs.release-selection.outputs.source_sha }}" \\/'
+  'contract outside the release source::s|            .release-source/scripts/ci/verify/workspace-agent-contract.sh|            scripts/ci/verify/workspace-agent-contract.sh|'
+  'artifact contract::s|            .release-source/scripts/ci/verify/workspace-agent-contract.sh|            "$RUNNER_TEMP/artifact/workspace-agent-contract.sh"|'
+  "artifact step::$amd64_range{/      - name: Run the workspace contract on the exact image/i\\      - uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+}"
+  'tagged image::s|"registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST"|"registry.example.invalid/codewire/workspace:$release_source_sha"|'
+  'public mirror source::s|run-workspace-contract-on-image.sh \\$|run-workspace-contract-on-image.sh --source ghcr \\|'
+)
+for mutation in "${contract_mutations[@]}"; do
+  label="${mutation%%::*}"
+  sed -e "${mutation#*::}" "$WORKFLOW" >"$contract_tree/workflow.yaml"
+  ! cmp -s "$WORKFLOW" "$contract_tree/workflow.yaml" || fail "contract mutation did not apply: $label"
+  [[ -n "$(contract_step_violation "$contract_tree/workflow.yaml" 2>&1)" ]] ||
+    fail "contract mutation was accepted: $label"
+done
+awk '
+  /^  [A-Za-z0-9_-]+:$/ { job = $0 }
+  job == "  build-support-amd64:" && $0 == "      - name: Run the workspace contract on the exact image" { grab = 1 }
+  grab { if ($0 == "") { grab = 0 } else { block = block $0 "\n" }; next }
+  { line[++count] = $0; owner[count] = job }
+  END {
+    for (index_ = 1; index_ <= count; index_++) {
+      if (owner[index_] == "  build-support-amd64:" && line[index_] == "      - name: Build the linux/amd64 base and workspace by digest") printf "%s\n", block
+      print line[index_]
+    }
+  }
+' "$WORKFLOW" >"$contract_tree/moved.yaml"
+! cmp -s "$WORKFLOW" "$contract_tree/moved.yaml" || fail 'contract move did not apply'
+[[ -n "$(contract_step_violation "$contract_tree/moved.yaml" 2>&1)" ]] ||
+  fail 'a workspace contract moved before the build was accepted'
 
 # No deploy-prod job builds linux/arm64 under emulation: every support image
 # is built only by build-support-platform.sh (arm64 on the protected remote
@@ -197,7 +287,7 @@ fi
 # The join script never builds: a built pair is joined from both exact
 # platform digests, a reused pair must already exist.
 stub_tree="$(mktemp -d)"
-trap 'rm -rf -- "$stub_tree"' EXIT
+trap 'rm -rf -- "$contract_tree" "$stub_tree"' EXIT
 cat >"$stub_tree/builder" <<'STUB'
 #!/usr/bin/env bash
 printf 'join=%s require=%s platform=%s args=%s\n' "${CODEWIRE_IMAGE_JOIN:-}" "${REQUIRE_EXISTING_SOURCE_IMAGE:-}" \

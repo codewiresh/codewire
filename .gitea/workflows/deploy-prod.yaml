@@ -253,7 +253,8 @@ jobs:
     if: ${{ needs.support-pair-selection.outputs.build == 'true' }}
     outputs:
       base_digest: ${{ steps.build.outputs.base_digest }}
-      workspace_digest: ${{ steps.build.outputs.workspace_digest }}
+      # Only a passing workspace contract reports the digest the join consumes.
+      workspace_digest: ${{ steps.contract.outputs.workspace_digest }}
     env:
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a
       # secret. The arm64 leg builds on the remote node and keeps the
@@ -277,6 +278,20 @@ jobs:
           # Set only when a base index for this source is already published.
           SUPPORT_PLATFORM_BASE_DIGEST: ${{ needs.support-pair-selection.outputs.base_amd64_digest }}
         run: scripts/ci/images/build-support-platform.sh linux/amd64
+
+      # The release tag's own contract, version-locked to its agent pins, runs
+      # inside the exact image the build pushed, never on the host, before the
+      # join can publish it (scripts/ci/images/run-workspace-contract-on-image.sh).
+      - name: Run the workspace contract on the exact image
+        id: contract
+        env:
+          WORKSPACE_DIGEST: ${{ steps.build.outputs.workspace_digest }}
+        run: |
+          set -euo pipefail
+          release_source_sha="$(git -C .release-source rev-parse HEAD)"
+          scripts/ci/images/run-workspace-contract-on-image.sh \
+            "registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST" "$release_source_sha" \
+            .release-source/scripts/ci/verify/workspace-agent-contract.sh
 
   build-support-arm64:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
