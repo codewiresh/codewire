@@ -1,0 +1,111 @@
+# zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this read-only measurement has no secret, OIDC or write-capable integration.
+name: CI start latency
+
+# Dispatch only. Measures how long main-push jobs waited from eligible to their
+# first command over one bounded window of this repository's retained Actions
+# records, for the bare-metal CI baseline (infra#1534). It only reads, with the
+# job's own token; scripts/ci/measure/README.md describes the vendored
+# collector. The Lite pool stops a task after 20 minutes: if a window does not
+# fit, dispatch shorter windows one after another.
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: Window start, UTC, e.g. 2026-10-20T00:00:00Z
+        required: true
+        type: string
+      until:
+        description: Window end, UTC, after since and at most 31 days later
+        required: true
+        type: string
+
+jobs:
+  collect:
+    # zizmor: ignore[excessive-permissions] This job has no OIDC or secret; its job token only reads this repository's Actions records.
+    name: Collect main-push start latency
+    # The pool the main-push planner uses for its Actions API reads.
+    runs-on: ci-lite
+    timeout-minutes: 20
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Validate the window
+        env:
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+        run: |
+          set -euo pipefail
+          python3 -I -B - "$SINCE" "$UNTIL" <<'PY'
+          import re
+          import sys
+          from datetime import datetime, timedelta, timezone
+
+
+          def parse(name, value):
+              if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value):
+                  print(f"::error::{name} must be a UTC time like 2026-10-20T00:00:00Z")
+                  sys.exit(1)
+              try:
+                  return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+              except ValueError:
+                  print(f"::error::{name} is not a valid UTC time")
+                  sys.exit(1)
+
+
+          since, until = parse("since", sys.argv[1]), parse("until", sys.argv[2])
+          if not since < until:
+              print("::error::until must be after since")
+              sys.exit(1)
+          if until - since > timedelta(days=31):
+              print("::error::the window must be at most 31 days")
+              sys.exit(1)
+          print(f"window: {sys.argv[1]} to {sys.argv[2]}")
+          PY
+
+      - name: Verify the vendored collector
+        working-directory: scripts/ci/measure
+        run: sha256sum --check --strict forgejo-ci-start-latency.sha256
+
+      - name: Collect main-push job timings
+        env:
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+          # Read only by the collector, which never prints it.
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/ci-start-latency"
+          mkdir -p "$output"
+          python3 -I -B scripts/ci/measure/forgejo-ci-start-latency collect \
+            --repo codewire/codewire --since "$SINCE" --until "$UNTIL" \
+            > "$output/rows.jsonl"
+          echo "rows: $(wc -l < "$output/rows.jsonl")"
+
+      - name: Summarize start latency
+        env:
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/ci-start-latency"
+          python3 -I -B scripts/ci/measure/forgejo-ci-start-latency summary \
+            < "$output/rows.jsonl" > "$output/summary.json"
+          echo "window: $SINCE to $UNTIL"
+          python3 -I -B -m json.tool --sort-keys "$output/summary.json"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              printf '## Main-push start latency, %s to %s\n\n```json\n' "$SINCE" "$UNTIL"
+              python3 -I -B -m json.tool --sort-keys "$output/summary.json"
+              printf '```\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload rows and summary
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: ci-start-latency-${{ github.run_id }}
+          path: ${{ runner.temp }}/ci-start-latency/
+          if-no-files-found: error
+          retention-days: 30

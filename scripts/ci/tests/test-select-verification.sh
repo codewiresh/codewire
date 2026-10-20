@@ -711,6 +711,12 @@ run_paths_case dev_smoke_receipt pull_request refs/pull/302/head false \
   'policy security security_js' \
   .gitea/workflows/dev-deployment-smoke-receipt.yaml \
   scripts/ci/tests/test-dev-deployment-smoke-receipt.sh
+run_paths_case ci_start_latency pull_request refs/pull/3030/head false \
+  'policy security security_js' \
+  .gitea/workflows/ci-start-latency.yaml \
+  scripts/ci/measure/README.md \
+  scripts/ci/measure/forgejo-ci-start-latency \
+  scripts/ci/measure/forgejo-ci-start-latency.sha256
 run_paths_case retired_prod_readonly_smoke pull_request refs/pull/3021/head false \
   'policy security security_js' \
   .gitea/workflows/prod-readonly-smoke.yaml \
@@ -3579,6 +3585,25 @@ if rg -n 'cr-golden|diagnostic_cr_golden|go_cr_golden|TestGolden.*-update' \
 fi
 grep -qF 'name: Verify sealed Rust toolchain' \
   "$DIAGNOSTICS_WORKFLOW"
+
+# The start-latency measurement is dispatch-only, reads with its own job token
+# on the Lite pool, and runs only the vendored collector its checksum names.
+START_LATENCY_WORKFLOW="$ROOT/.gitea/workflows/ci-start-latency.yaml"
+(cd "$ROOT/scripts/ci/measure" &&
+  sha256sum --check --strict --quiet forgejo-ci-start-latency.sha256) || {
+  echo 'vendored start-latency collector does not match its recorded sha256' >&2
+  exit 1
+}
+grep -qF '  workflow_dispatch:' "$START_LATENCY_WORKFLOW"
+if grep -Eq '^  (push|pull_request|pull_request_target|schedule|workflow_run):' \
+    "$START_LATENCY_WORKFLOW" \
+  || grep -Eq '^permissions:|enable-openid-connect|secrets\.' "$START_LATENCY_WORKFLOW"; then
+  echo 'start-latency measurement must stay dispatch-only and credential-free' >&2
+  exit 1
+fi
+grep -qF '    runs-on: ci-lite' "$START_LATENCY_WORKFLOW"
+grep -qF 'run: sha256sum --check --strict forgejo-ci-start-latency.sha256' \
+  "$START_LATENCY_WORKFLOW"
 
 required_block="$TMP/required-verification.yaml"
 awk '

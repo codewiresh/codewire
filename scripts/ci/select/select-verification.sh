@@ -618,6 +618,7 @@ if [ "$event_selected" = false ]; then
     # files in the same PR still add their own families below.
     case "$path" in
       .gitea/workflows/ci.yaml|.gitea/workflows/manual-diagnostics.yaml|\
+      .gitea/workflows/ci-start-latency.yaml|\
       .gitea/workflows/rust-latest-canary.yaml|\
       .gitea/workflows/rust-cache-refresh.yaml|\
       .gitea/workflows/connect-apikey-smoke.yaml|\
@@ -651,7 +652,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/cache/prepare-rust-dependency-cache.sh|\
       scripts/ci/cache/select-rust-cache-key.sh|\
       scripts/ci/images/resolve-published-support-pair.sh|\
-      scripts/ci/plan/*|\
+      scripts/ci/plan/*|scripts/ci/measure/*|\
       scripts/ci/tests/test-select-verification.sh|\
       scripts/ci/tests/test-source-approval-workflow.sh|\
       scripts/ci/tests/test-resolve-published-support-pair.sh|\
