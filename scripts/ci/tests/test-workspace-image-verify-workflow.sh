@@ -237,13 +237,12 @@ grep -qF -- '--tmpfs /home/codewire:rw,exec,uid=1000,gid=1000,mode=0700,size=256
 grep -qF "!contains(needs.verification-selection.outputs.selection, '|kind|')" <<<"$workspace_job" ||
   fail 'standalone workspace verification duplicates selected Kind ownership'
 # The companion suites are independent programs with private scratch
-# directories. The experiment suite asserts a real one-second timeout, so it
-# runs first and alone, as before. The others run in two lanes beside the
-# verifier fixture below and are joined, in this order, before the contract
-# is reported: every suite still runs every case, and any failure fails this
-# test.
+# directories. They run in two lanes beside the verifier fixture below and
+# are joined, in this order, before the contract is reported: every suite
+# still runs every case, and any failure fails this test. The cache
+# experiment suite is its own step beside this one wherever this test is a
+# step (run-product-verification.sh).
 mkdir -p "$ROOT/.tmp"
-PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/ci/tests/test-workspace-cache-experiment.py"
 work=''
 companions="$(mktemp -d "$ROOT/.tmp/workspace-image-companions.XXXXXX")"
 companion_names=()

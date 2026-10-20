@@ -311,6 +311,7 @@ run_policy_core_two() {
   isolate_kind_fixture_environment
   run_side_by_side <<'STEPS'
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
+  python3 -B scripts/ci/tests/test-workspace-cache-experiment.py
   python3 scripts/ci/tests/test-repo-checks-modules.py
 STEPS
   )
@@ -919,6 +920,7 @@ run_release() {
   scripts/ci/tests/test-propose-workspace-image-pin.sh
   scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
+  python3 -B scripts/ci/tests/test-workspace-cache-experiment.py
   python3 scripts/ci/tests/test-image-bundle.py
   scripts/ci/tests/test-deploy-prod-workflow.sh
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test
