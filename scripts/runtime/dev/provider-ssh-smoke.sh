@@ -127,20 +127,20 @@ run_provider_ssh_smoke() {
     die 'SSH environment did not acknowledge the exact selected profile and revision'
   # Host trust comes from the authenticated managed execution channel, never
   # from an unauthenticated first SSH connection or ssh-keyscan.
-  cw_with_timeout 30 run --no-tty "$ENV_ID" -- /bin/bash "$PROVIDER_SSH_SCRIPT" public-host-key \
+  cw_with_timeout 30 run --no-tty --in "$ENV_ID" -- /bin/bash "$PROVIDER_SSH_SCRIPT" public-host-key \
     >"$TMPDIR_SMOKE/provider-ssh-host-key" 2>"$TMPDIR_SMOKE/provider-ssh-host-key.err" ||
     die 'cannot obtain fixture host trust through authenticated execution'
   local host_key
   host_key="$(cat "$TMPDIR_SMOKE/provider-ssh-host-key")"
   [[ "$host_key" =~ ^\[127\.0\.0\.1\]:22222\ ssh-ed25519\ [A-Za-z0-9+/]+={0,2}$ ]] ||
     die 'SSH fixture returned invalid exact loopback host trust'
-  if ! cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty "$ENV_ID" -- \
+  if ! cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty --in "$ENV_ID" -- \
       /bin/bash "$PROVIDER_SSH_SCRIPT" prove "$host_key" \
       >"$TMPDIR_SMOKE/provider-ssh-proof.out" 2>"$TMPDIR_SMOKE/provider-ssh-proof.err"; then
     # Preserve the synthetic loopback server's private evidence before normal
     # cleanup removes the environment. It contains public fixture metadata and
     # server diagnostics only, never provider private key material.
-    cw_with_timeout 30 run --no-tty "$ENV_ID" -- \
+    cw_with_timeout 30 run --no-tty --in "$ENV_ID" -- \
       /bin/cat /workspace/.cw-ssh-smoke/sshd.log \
       >"$TMPDIR_SMOKE/provider-ssh-sshd.log" 2>"$TMPDIR_SMOKE/provider-ssh-sshd-collect.err" || true
     chmod 0600 "$TMPDIR_SMOKE/provider-ssh-sshd.log" 2>/dev/null || true
@@ -151,7 +151,7 @@ run_provider_ssh_smoke() {
   # Admit this workload while the selected key is active. After revocation,
   # ordinary file upload triggers a fresh SSH connection from that same
   # workload. A new managed launch must be denied, not used as the signer test.
-  cw_with_timeout 30 run --no-tty --detach --output json "$ENV_ID" -- \
+  cw_with_timeout 30 run --no-tty --detach --output json --in "$ENV_ID" -- \
     /bin/bash "$PROVIDER_SSH_SCRIPT" wait-revoked "$host_key" \
     >"$TMPDIR_SMOKE/provider-ssh-waiter.json" || die 'cannot admit the revocation probe workload'
   local session_id
@@ -176,7 +176,7 @@ run_provider_ssh_smoke() {
     >"$TMPDIR_SMOKE/provider-ssh-denied.out" || die 'cannot inspect exact revocation probe output'
   grep -qx stock-ssh-workload-revoked "$TMPDIR_SMOKE/provider-ssh-denied.out" ||
     die 'fresh SSH denial omitted its completion marker'
-  cw_with_timeout 30 run --no-tty --detach --output json "$ENV_ID" -- /bin/true \
+  cw_with_timeout 30 run --no-tty --detach --output json --in "$ENV_ID" -- /bin/true \
     >"$TMPDIR_SMOKE/provider-ssh-new-launch.json" || die 'new-launch denial omitted its session acknowledgement'
   jq -e '.state == "Failed" and .exit_code == null and
     .status_message == "environment launch denied or expired"' \

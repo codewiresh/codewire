@@ -104,22 +104,22 @@
           </div>
         </li>
 
-        <li class="cw-workflow-step" id="workflow-step-6" data-title="06 / tell Codex" data-command="cw run --detach auth -- codex \&#10;    &quot;Build a Node.js web app that uses DATABASE_URL and runs on port 3000.&quot;" data-result="Codex session launched in auth.&#10;Building the Node.js app…">
+        <li class="cw-workflow-step" id="workflow-step-6" data-title="06 / tell Codex" data-command="cw run codex --in auth --detach -- \&#10;    &quot;Build a Node.js web app that uses DATABASE_URL and runs on port 3000.&quot;" data-result="Started Codex in auth/codex.&#10;Building the Node.js app…">
           <span class="cw-workflow-number" aria-hidden="true">06</span>
           <div>
             <h3>Tell Codex what to build</h3>
             <p>Give the agent the outcome. It works inside the configured environment with the repository, tools, and app secrets already in place.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw run --detach auth -- codex \
+            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw run codex --in auth --detach -- \
     "Build a Node.js web app that uses DATABASE_URL and runs on port 3000."</code></pre>
           </div>
         </li>
 
-        <li class="cw-workflow-step" id="workflow-step-7" data-title="07 / start the server" data-command="cw run --detach auth -- npm run dev -- --host 0.0.0.0 --port 3000" data-result="Server listening on 0.0.0.0:3000">
+        <li class="cw-workflow-step" id="workflow-step-7" data-title="07 / start the server" data-command="cw run --in auth --detach -- npm run dev -- --host 0.0.0.0 --port 3000" data-result="Server listening on 0.0.0.0:3000">
           <span class="cw-workflow-number" aria-hidden="true">07</span>
           <div>
             <h3>Start the server</h3>
             <p>Run the app as another persistent session. It stays live alongside the agent, even after you disconnect.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw run --detach auth -- npm run dev \
+            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw run --in auth --detach -- npm run dev \
     -- --host 0.0.0.0 --port 3000</code></pre>
           </div>
         </li>
@@ -134,12 +134,12 @@
           </div>
         </li>
 
-        <li class="cw-workflow-step" id="workflow-step-9" data-title="09 / come back" data-command="cw attach auth" data-result="Attached to the latest session.">
+        <li class="cw-workflow-step" id="workflow-step-9" data-title="09 / come back" data-command="cw attach auth --session codex" data-result="Attached to auth/codex.">
           <span class="cw-workflow-number" aria-hidden="true">09</span>
           <div>
             <h3>Come back when it’s ready</h3>
             <p>Reconnect to the same live session. Its files, process, and complete output are still there.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw attach auth</code></pre>
+            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw attach auth --session codex</code></pre>
           </div>
         </li>
             </ol>

@@ -430,7 +430,7 @@ class Journey(host.Journey):
         assert unchanged == original, "update changed a conversation or replayed a turn"
         self.observations.append({"default": "B", "conversations": unchanged})
         assert marker.read_text() == "workspace belongs to this journey\n"
-        self.call("send", self.environment, "terminal", "from-B")
+        self.call("send", self.environment, "--session", "terminal", "from-B")
         self.until(lambda: self.call("logs", self.environment, "--session", "terminal").stdout,
                    lambda value: value == "TERMINAL_READY\nTERMINAL:from-B\n")
         message = self.call("msg", self.environment, "lead", "FROM_B", "--output", "json", data=True)
@@ -468,7 +468,7 @@ class Journey(host.Journey):
         assert marker.read_text() == "workspace belongs to this journey\n"
         for identity in (self.a[1], self.b[1]):
             assert digest(self.store / "versions" / identity["sha256"] / "cw") == identity["sha256"]
-        self.call("send", self.environment, "terminal", "from-A")
+        self.call("send", self.environment, "--session", "terminal", "from-A")
         self.until(lambda: self.call("logs", self.environment, "--session", "terminal").stdout,
                    lambda value: value == "TERMINAL_READY\nTERMINAL:from-B\nTERMINAL:from-A\n")
         steered = self.call("steer", self.environment, "active", "finish", "--output", "json", data=True)

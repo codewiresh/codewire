@@ -132,7 +132,7 @@ skills:
 """)
 
     def login_shell(self, command, ok=True, timeout=120):
-        return self.call("run", NAME, "--no-tty", "--", "sh", "-lc", command, ok=ok, timeout=timeout)
+        return self.call("run", "--in", NAME, "--no-tty", "--", "sh", "-lc", command, ok=ok, timeout=timeout)
 
     def run(self):
         self.fixtures()
@@ -249,7 +249,7 @@ skills:
         (source / "data.txt").write_text("host changed after copy creation\n")
         (source / "host-only.txt").write_text("host-only after copy\n")
         result = self.call(
-            "run", COPY_NAME, "--no-tty", "--", "sh", "-c",
+            "run", "--in", COPY_NAME, "--no-tty", "--", "sh", "-c",
             "set -eu; cd /workspace; test ! -e .git; test ! -e host-only.txt; "
             "grep -qx 'copy source before creation' data.txt; grep -qx 'hidden copy content' .hidden; "
             "test \"$(readlink link.txt)\" = data.txt; test \"$(stat -c %h data.txt)\" = 1; "

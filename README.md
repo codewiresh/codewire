@@ -51,6 +51,7 @@ Apple Silicon Mac it uses Virtualization.framework.
 cw setup --local                       # install the pinned VM runtime
 cw create --local --name my-app --path .
 cw shell                               # creation selected my-app
+cw run claude                          # Claude Code in my-app; Ctrl-B, then D detaches
 cw run -- cargo test                   # a durable session; cw ls, cw attach
 cw stop --local my-app
 ```
@@ -64,7 +65,7 @@ A hosted sandbox:
 cw setup                               # sign in, pick an organization
 cw create --name my-app --image workspace
 cw shell my-app
-cw run my-app --name lead --agent codex --detach --prompt 'Review this repo'
+cw run --in my-app --name lead --agent codex --detach --prompt 'Review this repo'
 cw inbox my-app lead
 ```
 

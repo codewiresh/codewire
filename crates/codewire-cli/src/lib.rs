@@ -348,21 +348,33 @@ enum Command {
         long_about = "Open VS Code connected to a running environment via Remote-SSH. Ensures your SSH config is up to date before launching VS Code with the vscode:// URI scheme."
     )]
     Vscode(VscodeArgs),
-    #[command(about = "Open a shell session in the selected or named environment")]
+    #[command(
+        about = "Open a shell session in the selected or named environment",
+        long_about = "Open a login shell in a new session:\n  cw shell ENV\n  cw shell --in ENV\n  cw shell                         (in the selected environment)\n\nDetach with Ctrl-B, then D; the shell keeps running. Reconnect with `cw attach ENV --session SESSION`."
+    )]
     Shell(EnvironmentShellArgs),
     #[command(name = "ssh", hide = true, about = "OpenSSH integration helpers")]
     Ssh {
         #[command(subcommand)]
         command: SshCommand,
     },
-    #[command(about = "Run a durable session in the selected or named environment")]
+    #[command(
+        about = "Open claude or codex in an environment, or run a command",
+        long_about = "Open an agent's own terminal UI in a new session:\n  cw run claude --in ENV [--name SESSION] [-- AGENT_ARGS]\n  cw run codex                     (in the selected environment)\n  cw run                           (asks which agent)\n\nRun a command in a new session:\n  cw run --in ENV [--env KEY=VALUE] -- npm test\n\nStart a managed conversation (queued messages and recorded results):\n  cw run --in ENV --agent claude --name review --detach [--prompt TEXT]\n\nAGENT is only claude or codex; an environment is named with --in, so one called claude is `--in claude`. --name names the new session and never reuses one. Detach with Ctrl-B, then D; reconnect with `cw attach ENV --session SESSION`."
+    )]
     Run(EnvironmentRunArgs),
     #[cfg(unix)]
     #[command(name = "_host-daemon", hide = true)]
     HostDaemon(HostDaemonArgs),
-    #[command(about = "Write acknowledged input to a terminal or command session")]
+    #[command(
+        about = "Write acknowledged input to a terminal or command session",
+        long_about = "Write text, then a newline, to a session's terminal:\n  cw send ENV --session SESSION TEXT [--no-newline]\n  cw send --session SESSION TEXT   (in the selected environment)\n\nSend one key instead of text:\n  cw send ENV --session SESSION --key ctrl-c"
+    )]
     Send(SendArgs),
-    #[command(about = "Wait for a session or managed message to finish")]
+    #[command(
+        about = "Wait for a session or managed message to finish",
+        long_about = "Wait for a session to finish, printing its output:\n  cw wait ENV --session SESSION\n  cw wait --session SESSION        (in the selected environment)\n\nWait for a managed message's result; its ID names its session:\n  cw wait --message MESSAGE_ID"
+    )]
     Wait(WaitArgs),
     #[command(
         about = "Stop an environment; --session stops one session",
@@ -381,8 +393,11 @@ enum Command {
     #[command(about = "Steer the current turn of a managed agent")]
     Steer(AgentMessageArgs),
     #[cfg(unix)]
-    #[command(about = "Interrupt the current managed agent turn")]
-    Interrupt(SessionTargetArgs),
+    #[command(
+        about = "Interrupt the current managed agent turn",
+        long_about = "Interrupt a managed conversation's running task:\n  cw interrupt ENV --session SESSION\n  cw interrupt --session SESSION   (in the selected environment)"
+    )]
+    Interrupt(SessionSelectorArgs),
     #[cfg(unix)]
     #[command(about = "Show managed messages and their results")]
     Inbox(SessionTargetArgs),
@@ -496,8 +511,8 @@ enum Command {
     )]
     Ls(ListArgs),
     #[command(
-        about = "Attach to a session in the selected or explicit environment",
-        long_about = "Attach to a durable environment session. A single positional is always an environment. Detach without stopping the session with Ctrl+B d."
+        about = "Attach to a session in an environment",
+        long_about = "Attach to a running session's terminal:\n  cw attach ENV --session SESSION\n  cw attach --session SESSION      (in the selected environment)\n  cw attach ENV                    (its only session, or a choice; scripts name --session)\n\nDetach with Ctrl-B, then D; the session keeps running."
     )]
     Attach(AttachArgs),
     #[command(
@@ -746,7 +761,11 @@ fn validate_member_mutation_flags(cli: &Cli) -> anyhow::Result<()> {
                     "member mutation flags require --member"
                 )
             }
-            Command::Interrupt(args) | Command::Inbox(args) => anyhow::ensure!(
+            Command::Inbox(args) => anyhow::ensure!(
+                args.request_id.is_none() && args.expected_launch_generation.is_none(),
+                "member mutation flags require --member"
+            ),
+            Command::Interrupt(args) => anyhow::ensure!(
                 args.request_id.is_none() && args.expected_launch_generation.is_none(),
                 "member mutation flags require --member"
             ),
@@ -969,6 +988,12 @@ fn validate_placement_scope(
             | Command::Credentials(_)
             | Command::Secrets(_)
             | Command::Env(_)
+            | Command::Run(_)
+            | Command::Attach(_)
+            | Command::Send(_)
+            | Command::Wait(_)
+            | Command::Shell(_)
+            | Command::Vscode(_)
             | Command::Ls(_)
             | Command::Logs(_)
             | Command::Stop(_)
@@ -995,6 +1020,9 @@ fn validate_placement_scope(
             | Command::Nuke(_)
             | Command::RefreshSkills(_)
     );
+    // The managed session controls exist only on Unix.
+    #[cfg(unix)]
+    let reads = reads || matches!(command, Command::Interrupt(_) | Command::Steer(_));
     anyhow::ensure!(reads, "{flag} does not apply to `cw {name}`");
     Ok(())
 }

@@ -68,10 +68,10 @@ turn stays unknown and is never replayed automatically.
 Use the same session commands with `host-team`, `vm-team`, or `cloud-team`:
 
 ```sh
-cw run host-team --name tests --detach --no-tty -- make test
+cw run --in host-team --name tests --detach --no-tty -- make test
 cw ls host-team
 cw ls
-cw wait host-team tests --timeout 10m
+cw wait host-team --session tests --timeout 10m
 cw logs host-team --session tests
 cw stop host-team --session tests
 cw restart host-team --session tests
@@ -86,12 +86,12 @@ gap is reported rather than silently treated as complete output.
 For an interactive shell:
 
 ```sh
-cw run host-team --name shell --tty --detach -- sh
-cw send host-team shell 'pwd'
-cw send host-team shell 'partial text' --no-newline
-cw send host-team shell --key enter
-cw send host-team shell --key ctrl-c
-cw attach host-team shell
+cw run --in host-team --name shell --tty --detach -- sh
+cw send host-team --session shell 'pwd'
+cw send host-team --session shell 'partial text' --no-newline
+cw send host-team --session shell --key enter
+cw send host-team --session shell --key ctrl-c
+cw attach host-team --session shell
 ```
 
 `send` acknowledges a bounded write to stdin. It does not prove that a shell
@@ -107,12 +107,12 @@ existing source and delivery contracts.
 ## Orchestrator and workers on a host
 
 ```sh
-cw run host-team --name lead --agent codex --model gpt-6.1-sol \
+cw run --in host-team --name lead --agent codex --model gpt-6.1-sol \
   --effort max --detach --prompt 'Coordinate the assigned work.'
-cw run host-team --name runtime --parent lead --agent claude \
+cw run --in host-team --name runtime --parent lead --agent claude \
   --model claude-opus-5-5 --effort xhigh --detach \
   --prompt 'Implement the assigned runtime slice and report the result.'
-cw run host-team --name review --parent lead --agent codex \
+cw run --in host-team --name review --parent lead --agent codex \
   --model gpt-6.1-sol --effort max --detach \
   --prompt 'Review the runtime change without editing it.'
 
@@ -120,7 +120,7 @@ cw msg host-team runtime 'Cover the failed-start recovery case too.'
 cw inbox host-team lead
 cw wait --message MESSAGE_ID --timeout 10m
 cw steer host-team review 'Focus on ownership and cleanup.' --turn-id TURN_ID
-cw interrupt host-team runtime
+cw interrupt host-team --session runtime
 cw stop host-team --session runtime
 cw restart host-team --session runtime
 ```
@@ -141,7 +141,7 @@ asking. Without a terminal, children keep running and `cw stop` names them.
 A host conversation's native agent gets its own identity: `CW_ENVIRONMENT`
 and `CW_SESSION_ID` hold its host environment and session IDs, so a lead
 launches a worker under itself with
-`cw run "$CW_ENVIRONMENT" --parent "$CW_SESSION_ID" --agent ...`. Only a
+`cw run --in "$CW_ENVIRONMENT" --parent "$CW_SESSION_ID" --agent ...`. Only a
 conversation the host user launched gets them. A member conversation on a
 host loses any copy it would inherit, and no host session inherits one from
 whatever started the host daemon. VMs and platform sandboxes are given none,

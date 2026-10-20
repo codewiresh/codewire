@@ -518,7 +518,8 @@ class Interruption(unittest.TestCase):
                     records[message] = record
                     return record.copy()
                 self.assertEqual(operation, "interrupt")
-                session = argv[2]
+                self.assertEqual(argv[2], "--session")
+                session = argv[3]
                 original = records[active[session]]
                 interrupt_times.append((session, clock.now - held_at[session]))
                 control = self.record(session, session + "-interrupt", action="interrupt", result="interrupted",

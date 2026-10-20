@@ -75,7 +75,7 @@ fn the_embedded_text_is_a_skill_whose_every_command_names_the_running_cw() {
     for (launch, agent) in commands.iter().zip(["codex", "claude", "noel"]) {
         assert!(
             launch.starts_with(&format!(
-                "{{{{cw}}}} run \"$CW_ENVIRONMENT\" --agent {agent} "
+                "{{{{cw}}}} run --in \"$CW_ENVIRONMENT\" --agent {agent} "
             )),
             "{launch}"
         );
@@ -86,6 +86,22 @@ fn the_embedded_text_is_a_skill_whose_every_command_names_the_running_cw() {
         assert_eq!(launch.contains(" --model "), agent == "noel", "{launch}");
     }
     assert!(commands[3..].iter().all(|other| !other.contains(" run ")));
+    // A worker is named with --session, never by a second positional.
+    for control in ["interrupt", "stop"] {
+        let lines: Vec<_> = commands
+            .iter()
+            .filter(|command| command.starts_with(&format!("{{{{cw}}}} {control} ")))
+            .collect();
+        assert!(!lines.is_empty(), "{control}");
+        for line in lines {
+            assert!(
+                line.starts_with(&format!(
+                    "{{{{cw}}}} {control} \"$CW_ENVIRONMENT\" --session NAME"
+                )),
+                "{line}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -165,7 +181,7 @@ fn the_written_skill_names_cw_by_its_absolute_path_quoted_for_a_shell() {
             assert!(command.starts_with(&format!("{word} ")), "{command}");
         }
         assert!(written.contains(&format!(
-            "{word} run \"$CW_ENVIRONMENT\" --agent noel --model PROVIDER/ID --parent \"$CW_SESSION_ID\" --name NAME --detach --prompt 'TASK'\n"
+            "{word} run --in \"$CW_ENVIRONMENT\" --agent noel --model PROVIDER/ID --parent \"$CW_SESSION_ID\" --name NAME --detach --prompt 'TASK'\n"
         )));
     }
     // A path that is not text cannot be written into the skill.

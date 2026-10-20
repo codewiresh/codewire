@@ -695,11 +695,17 @@ pub(crate) struct VscodeArgs {
         value_name = "ENV",
         help = "Environment name or ID; defaults to the selected environment"
     )]
-    environment: Option<String>,
+    pub(crate) environment: Option<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
     #[arg(long, default_value = "/workspace", help = "Remote folder to open")]
-    folder: String,
+    pub(crate) folder: String,
     #[arg(long, help = "Organization ID or slug")]
-    org: Option<String>,
+    pub(crate) org: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -709,36 +715,96 @@ pub(crate) struct EnvironmentShellArgs {
         help = "Environment name or ID; defaults to the selected environment"
     )]
     pub(crate) environment: Option<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
     #[arg(long, help = "Pipe stdin/stdout for OpenSSH ProxyCommand")]
-    stdio: bool,
+    pub(crate) stdio: bool,
+}
+
+/// The agent `cw run AGENT` opens in its own terminal UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeAgent {
+    Claude,
+    Codex,
+}
+
+impl NativeAgent {
+    pub(crate) const ALL: [NativeAgent; 2] = [NativeAgent::Claude, NativeAgent::Codex];
+
+    /// The agent's command, which is also its default session name.
+    pub(crate) fn command(self) -> &'static str {
+        match self {
+            NativeAgent::Claude => "claude",
+            NativeAgent::Codex => "codex",
+        }
+    }
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            NativeAgent::Claude => "Claude Code",
+            NativeAgent::Codex => "Codex",
+        }
+    }
+}
+
+/// `cw run`'s positional names an agent and never an environment, so an
+/// environment that happens to be called `claude` cannot change its meaning.
+pub(crate) fn parse_native_agent(value: &str) -> Result<NativeAgent, String> {
+    match value {
+        "claude" => Ok(NativeAgent::Claude),
+        "codex" => Ok(NativeAgent::Codex),
+        other => Err(format!(
+            "`cw run` opens claude or codex; to run in an environment named {other}, use `cw run --in {other} -- COMMAND` or `cw run claude --in {other}`"
+        )),
+    }
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvironmentRunArgs {
     #[arg(long, help = "Durable request UUID for a member launch")]
     pub(crate) request_id: Option<String>,
-    #[arg(long, help = "Unique session name within this environment")]
+    #[arg(
+        value_name = "AGENT",
+        value_parser = parse_native_agent,
+        help = "claude or codex: open that agent's own terminal UI in a new session"
+    )]
+    pub(crate) native_agent: Option<NativeAgent>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
+    pub(crate) environment: Option<String>,
+    #[arg(
+        long,
+        value_name = "SESSION",
+        help = "Name the new session (unique in its environment); defaults to the agent or command name"
+    )]
     pub(crate) name: Option<String>,
     #[arg(long, help = "Parent session name or ID within this environment")]
     pub(crate) parent: Option<String>,
     #[arg(
         long,
         value_parser = ["codex", "claude", "kimi", "noel"],
-        conflicts_with = "command",
-        help = "Launch a managed agent conversation instead of a command"
+        conflicts_with_all = ["native_agent", "command", "tty"],
+        help = "Start a managed agent conversation (queued messages, recorded results) instead of a terminal UI"
     )]
     pub(crate) agent: Option<String>,
     #[arg(
         long,
         requires = "agent",
-        help = "Agent model; Codex and Claude default to their own, noel requires PROVIDER/ID"
+        help = "Managed agent model; Codex and Claude default to their own, noel requires PROVIDER/ID"
     )]
     pub(crate) model: Option<String>,
     #[arg(
         long,
         requires = "agent",
         value_parser = ["low", "medium", "high", "xhigh", "max", "ultra"],
-        help = "Agent reasoning effort"
+        help = "Managed agent reasoning effort"
     )]
     pub(crate) effort: Option<String>,
     #[arg(
@@ -747,11 +813,6 @@ pub(crate) struct EnvironmentRunArgs {
         help = "Initial task for the managed conversation"
     )]
     pub(crate) prompt: Option<String>,
-    #[arg(
-        value_name = "ENV",
-        help = "Environment name or ID; defaults to the selected environment"
-    )]
-    pub(crate) environment: Option<String>,
     #[arg(
         short = 'w',
         long = "workdir",
@@ -782,9 +843,8 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) output: OutputFormat,
     #[arg(
         last = true,
-        required_unless_present = "agent",
-        value_name = "COMMAND",
-        help = "Command and arguments to run, after --"
+        value_name = "ARGS",
+        help = "After --: the command to run, or the agent's own arguments with AGENT"
     )]
     pub(crate) command: Vec<String>,
 }
@@ -2178,28 +2238,94 @@ pub(crate) struct SessionTargetArgs {
     pub(crate) output: OutputFormat,
 }
 
+/// One existing session, named by flags: `[ENV | --in ENV] --session S`.
+/// Without ENV, the session is in the selected environment. Used by
+/// `cw interrupt`; built into [`SessionTargetArgs`] for its handler.
+#[derive(Debug, Args)]
+pub(crate) struct SessionSelectorArgs {
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
+    pub(crate) environment: Option<String>,
+    /// A second positional, refused with the `--session` spelling.
+    #[arg(hide = true, value_name = "SESSION")]
+    pub(crate) retired_session: Vec<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
+    #[arg(
+        long,
+        value_name = "SESSION",
+        help = "Session name or ID; without ENV, in the selected environment"
+    )]
+    pub(crate) session: Option<String>,
+    #[arg(long, help = "Durable request UUID for a member mutation")]
+    pub(crate) request_id: Option<String>,
+    #[arg(long, help = "Exact positive member session generation")]
+    pub(crate) expected_launch_generation: Option<u64>,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct SendArgs {
     #[arg(long, help = "Durable request UUID for member input")]
     pub(crate) request_id: Option<String>,
     #[arg(long, help = "Exact positive member session generation")]
     pub(crate) expected_launch_generation: Option<u64>,
-    #[arg(value_name = "TARGET_AND_TEXT", help = "SESSION TEXT, or ENV SESSION TEXT; --key omits TEXT", num_args = 1..=3)]
-    pub(crate) target_and_text: Vec<String>,
+    /// `[ENV] TEXT`, or `[ENV]` with `--key`: the count alone decides each
+    /// value's role, never a lookup. A third value is the retired
+    /// `ENV SESSION TEXT` form, refused with its replacement.
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; omit to use the selected environment"
+    )]
+    pub(crate) first: Option<String>,
+    #[arg(
+        value_name = "TEXT",
+        help = "Text to write; a newline follows unless --no-newline"
+    )]
+    pub(crate) second: Option<String>,
+    #[arg(hide = true, value_name = "RETIRED")]
+    pub(crate) retired: Vec<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
+    #[arg(long, value_name = "SESSION", help = "Session name or ID to write to")]
+    pub(crate) session: Option<String>,
     #[arg(
         long,
         conflicts_with = "key",
         help = "Write text without a trailing newline"
     )]
     pub(crate) no_newline: bool,
-    #[arg(long, value_parser = ["ctrl-c", "ctrl-d", "enter", "escape", "tab"])]
+    #[arg(long, value_parser = ["ctrl-c", "ctrl-d", "enter", "escape", "tab"], help = "Send one terminal key instead of TEXT")]
     pub(crate) key: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct WaitArgs {
-    #[arg(value_name = "TARGET", help = "SESSION, or ENV SESSION", num_args = 1..=2, required_unless_present = "message")]
-    pub(crate) target: Vec<String>,
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
+    pub(crate) environment: Option<String>,
+    /// A second positional, refused with the `--session` spelling.
+    #[arg(hide = true, value_name = "SESSION")]
+    pub(crate) retired_session: Vec<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
+    #[arg(
+        long,
+        value_name = "SESSION",
+        help = "Wait for this session to finish; without ENV, in the selected environment"
+    )]
+    pub(crate) session: Option<String>,
     #[arg(
         long,
         help = "Wait for a managed message's terminal result; the ID alone names its session"
@@ -2233,15 +2359,23 @@ pub(crate) struct AgentMessageArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct AttachArgs {
-    #[arg(
-        value_name = "ENV_OR_SESSION",
-        help = "Environment, or session in the selected environment"
-    )]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     pub(crate) environment: Option<String>,
-    #[arg(value_name = "SESSION")]
+    /// A second positional, refused with the `--session` spelling.
+    #[arg(hide = true, value_name = "SESSION")]
+    pub(crate) retired_session: Vec<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
+    #[arg(
+        long,
+        value_name = "SESSION",
+        help = "Session name or ID; without ENV, in the selected environment"
+    )]
     pub(crate) session: Option<String>,
-    #[arg(long = "session", conflicts_with = "session", value_name = "SESSION")]
-    pub(crate) selected_session: Option<String>,
 }
 
 #[derive(Debug, Args)]

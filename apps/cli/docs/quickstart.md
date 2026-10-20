@@ -81,9 +81,9 @@ with the same name to reconnect.
 Pass the environment first and the command after `--`:
 
 ```bash
-cw run my-app -- cargo test
-cw run --no-tty my-app -- sh -lc 'printf ready'
-cw run --detach my-app -- codex
+cw run --in my-app -- cargo test
+cw run --no-tty --in my-app -- sh -lc 'printf ready'
+cw run codex --in my-app --detach
 ```
 
 Select an environment once when convenient:
@@ -99,7 +99,7 @@ Inspect and resume its sessions:
 ```bash
 cw ls my-app
 cw attach my-app
-cw attach my-app <session-id>
+cw attach my-app --session <session-id>
 cw logs my-app --session <session-id>
 cw logs my-app --session <session-id> --follow
 cw shell my-app
@@ -113,9 +113,9 @@ the other documented `Ctrl+B` actions.
 Create or select an environment, then launch an orchestrator and its workers:
 
 ```bash
-cw run host-work --name orchestrator --agent codex \
+cw run --in host-work --name orchestrator --agent codex \
   --prompt 'Coordinate the backlog review and collect worker results.'
-cw run host-work --name review --parent orchestrator --agent claude \
+cw run --in host-work --name review --parent orchestrator --agent claude \
   --prompt 'Review the assigned issues and report dependencies and acceptance criteria.'
 cw ls host-work
 cw ls
@@ -134,8 +134,8 @@ message results available after reconnecting.
 Run a normal shell command as another named session in the same environment:
 
 ```bash
-cw run host-work --name checks --parent orchestrator -- cargo test
-cw attach host-work checks
+cw run --in host-work --name checks --parent orchestrator -- cargo test
+cw attach host-work --session checks
 ```
 
 For a local sandbox, create it with `--local --type sandbox`; for a platform

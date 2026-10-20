@@ -21,11 +21,11 @@ host. Set `ENV` to your environment's name.
 ## Launch a lead and two workers
 
 ```sh
-cw run "$ENV" --name lead --agent codex --detach --output json \
+cw run --in "$ENV" --name lead --agent codex --detach --output json \
   --prompt 'Coordinate the assigned change and review worker results.'
-cw run "$ENV" --name implement --parent lead --agent codex --detach --output json \
+cw run --in "$ENV" --name implement --parent lead --agent codex --detach --output json \
   --prompt 'Implement the assigned change and report the result.'
-cw run "$ENV" --name review --parent lead --agent claude --detach --output json \
+cw run --in "$ENV" --name review --parent lead --agent claude --detach --output json \
   --prompt 'Review the assigned change without editing files.'
 cw ls "$ENV"
 ```
@@ -56,7 +56,7 @@ what to do next; Codewire never replays a completed or ambiguous task.
 ```sh
 cw inbox "$ENV" implement --output json      # .driver.current_turn_id, capabilities
 cw steer "$ENV" implement 'Focus on ownership and cleanup.' --turn-id "$TURN_ID"
-cw interrupt "$ENV" implement
+cw interrupt "$ENV" --session implement
 ```
 
 Codex accepts steering during a turn (`--turn-id` pins the turn you mean;
@@ -68,12 +68,12 @@ applied.
 ## Run commands alongside
 
 ```sh
-cw run "$ENV" --name check --detach --no-tty -- make test
-cw wait "$ENV" check --timeout 10m
+cw run --in "$ENV" --name check --detach --no-tty -- make test
+cw wait "$ENV" --session check --timeout 10m
 cw logs "$ENV" --session check
-cw run "$ENV" --name shell --tty --detach -- sh
-cw send "$ENV" shell 'pwd'
-cw attach "$ENV" shell          # Ctrl+B d detaches
+cw run --in "$ENV" --name shell --tty --detach -- sh
+cw send "$ENV" --session shell 'pwd'
+cw attach "$ENV" --session shell   # Ctrl-B, then D detaches
 ```
 
 `wait` succeeds only after a zero exit, confirmed cleanup and drained output.
@@ -134,7 +134,7 @@ cw stop "$ENV"
 
 A conversation launched on a host by its user sees `CW_ENVIRONMENT` and
 `CW_SESSION_ID`, so a lead can launch its own workers with
-`cw run "$CW_ENVIRONMENT" --parent "$CW_SESSION_ID" --agent codex ...`.
+`cw run --in "$CW_ENVIRONMENT" --parent "$CW_SESSION_ID" --agent codex ...`.
 A host also runs `--agent noel --model PROVIDER/ID`.
 
 A host enrolled in Codewire Mesh can be driven from another Linux machine

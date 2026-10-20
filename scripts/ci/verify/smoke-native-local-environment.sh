@@ -887,7 +887,7 @@ run_named_reader_smoke() {
   run_cw run --detach --no-tty --name "$parent_name" --output json -- /bin/true
   parent_id="$(jq -er '.session_id | select(type == "string" and length > 0)' "$LAST_STDOUT")" ||
     die 'named reader parent did not return a canonical identity'
-  run_cw wait "$parent_name" --timeout 30s --output json
+  run_cw wait --session "$parent_name" --timeout 30s --output json
   jq -e --arg id "$parent_id" --arg name "$parent_name" '
     .session.session_id == $id and .session.name == $name and
     .session.parent_session_id == "" and .session.pty == false and
@@ -907,10 +907,10 @@ run_named_reader_smoke() {
     .parent_session_id == $parent and .pty == false and .state == "Running"
   ' "$LAST_STDOUT" >/dev/null || die 'named reader launch or canonical parent drifted'
 
-  run_cw send "$reader_name" "$input"
+  run_cw send --session "$reader_name" "$input"
   rg -qxF "Input written to $reader_id" "$LAST_STDOUT" ||
     die 'named reader input ACK did not resolve to its canonical identity'
-  run_cw wait "$reader_name" --timeout 30s --output json
+  run_cw wait --session "$reader_name" --timeout 30s --output json
   jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" \
     --arg output "native-reader:$input"$'\n' '
     .session.session_id == $id and .session.name == $name and

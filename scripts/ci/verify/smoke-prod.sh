@@ -346,11 +346,11 @@ run_authenticated_checks() {
 
   wait_environment_running
 
-  cw_prod run --no-tty "$SMOKE_ENV_ID" -- pwd
+  cw_prod run --no-tty --in "$SMOKE_ENV_ID" -- pwd
   printf 'prod-smoke\n' >"$tmp_local"
   cw_prod cp "$tmp_local" "$SMOKE_ENV_ID:$remote_path"
   rm -f "$tmp_local"
-  cw_prod run --no-tty "$SMOKE_ENV_ID" -- sh -lc "test \"\$(cat '$remote_path')\" = prod-smoke"
+  cw_prod run --no-tty --in "$SMOKE_ENV_ID" -- sh -lc "test \"\$(cat '$remote_path')\" = prod-smoke"
   cw_prod doctor tailnet "$SMOKE_ENV_ID" --output json --expect any
 }
 

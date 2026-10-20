@@ -85,13 +85,13 @@ Environment AI-tool selection is `--coding-agent`.
 ## Durable sessions
 
 ```bash
-cw run my-app -- cargo test
-cw run --no-tty my-app -- sh -lc 'printf ready'
-cw run --detach my-app -- codex
+cw run --in my-app -- cargo test
+cw run --no-tty --in my-app -- sh -lc 'printf ready'
+cw run codex --in my-app --detach
 
 cw ls my-app
 cw attach my-app
-cw attach my-app <session-id>
+cw attach my-app --session <session-id>
 cw logs my-app --session <session-id>
 cw logs my-app --session <session-id> --follow
 cw shell my-app
@@ -108,9 +108,9 @@ launch.
 For a persistent shell, launch a named terminal and send ordinary commands:
 
 ```bash
-cw run my-app --name shell --tty --detach -- bash
-cw send my-app shell 'git status'
-cw send my-app shell --key ctrl-c
+cw run --in my-app --name shell --tty --detach -- bash
+cw send my-app --session shell 'git status'
+cw send my-app --session shell --key ctrl-c
 cw stop my-app --session shell
 ```
 
@@ -127,9 +127,9 @@ Use managed agents for conversation-aware messages and parent completion:
 
 ```bash
 cw create --local --type host --name dev --path .
-cw run dev --name lead --agent codex --model gpt-6.1-sol --effort max \
+cw run --in dev --name lead --agent codex --model gpt-6.1-sol --effort max \
   --detach --prompt 'Coordinate this repository task and review worker results.'
-cw run dev --name review --agent claude --parent lead --detach \
+cw run --in dev --name review --agent claude --parent lead --detach \
   --prompt 'Review the proposed changes and report concrete findings.'
 
 cw ls dev
@@ -138,7 +138,7 @@ cw msg dev review 'Also check cancellation and cleanup.'
 cw inbox dev lead
 cw wait --message <message-id> --timeout 10m
 cw steer dev lead --turn-id <active-turn-id> 'Prioritize the Linux acceptance.'
-cw interrupt dev review
+cw interrupt dev --session review
 cw stop dev --session review
 ```
 

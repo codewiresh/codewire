@@ -164,7 +164,7 @@ pub(crate) async fn handle_init_command(globals: &Globals, args: InitArgs) -> an
     }
     eprintln!("Next:");
     eprintln!("  cw create --local --name <environment>");
-    eprintln!("  cw run <environment> -- <command>");
+    eprintln!("  cw run claude --in <environment>");
     eprintln!("  cw create");
     Ok(())
 }
@@ -189,6 +189,12 @@ pub(crate) async fn handle_vscode_command(
     globals: &Globals,
     args: VscodeArgs,
 ) -> anyhow::Result<()> {
+    let environment =
+        super::flat::select_environment("vscode", args.environment, args.in_environment, &[])?;
+    anyhow::ensure!(
+        globals.placement != Some(EnvironmentPlacement::Local),
+        "`cw vscode` opens cloud environments; for a local VM use `cw shell ENV`"
+    );
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
@@ -198,7 +204,7 @@ pub(crate) async fn handle_vscode_command(
         .await
         .context("list orgs")?;
     let org_id = resolve_org_id(&platform, &orgs, args.org.as_deref())?;
-    let environment = args.environment.as_deref().and_then(vscode_environment_ref);
+    let environment = environment.as_deref().and_then(vscode_environment_ref);
     let environment_id = resolve_port_environment_id(
         &environment_client,
         &org_id,

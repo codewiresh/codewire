@@ -271,7 +271,7 @@ impl EnvironmentSessionTarget {
         name: String,
         parent_session_id: String,
     ) -> anyhow::Result<EnvironmentSessionView> {
-        let (columns, rows) = session_terminal_size(pty)?;
+        let (columns, rows) = session_terminal_size(pty);
         let term = env::var("TERM").unwrap_or_default();
         match self {
             #[cfg(unix)]
@@ -474,11 +474,11 @@ async fn resolve_environment_session_target(
     let cloud = matches!(target, EnvironmentSessionTarget::Platform { .. });
     match placement {
         EnvironmentPlacement::Platform if !cloud => anyhow::bail!(
-            "the selected environment {} is local; pass a cloud ENV or drop --cloud",
+            "the selected environment {} is not a cloud environment; name one with ENV or `--in ENV`, or drop --cloud",
             target.current_target().name
         ),
         EnvironmentPlacement::Local if cloud => anyhow::bail!(
-            "the selected environment {} is a cloud environment; pass a local ENV or drop --local",
+            "the selected environment {} is a cloud environment; name a local one with ENV or `--in ENV`, or drop --local",
             target.current_target().name
         ),
         _ => Ok(target),
@@ -601,9 +601,14 @@ async fn environment_session_target_from_current(
             let environment = native_environment(&target.target_ref)
                 .await?
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no local environment selected; use `cw use --local ENV` or pass ENV"
-                    )
+                    if target.target_ref == "local" {
+                        no_environment_selected()
+                    } else {
+                        anyhow::anyhow!(
+                            "the selected local VM {} no longer exists: select another with `cw use ENV`, or name one with `--in ENV`",
+                            target.name
+                        )
+                    }
                 })?;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             return Ok(native_session_target(environment));
@@ -621,10 +626,15 @@ async fn environment_session_target_from_current(
                 client: Box::new(codewire_client(&platform)?),
             })
         }
-        _ => anyhow::bail!(
-            "no environment selected; use `cw use ENV` or pass ENV to the session command"
-        ),
+        _ => Err(no_environment_selected()),
     }
+}
+
+/// The repair for a session command with no environment named or selected.
+fn no_environment_selected() -> anyhow::Error {
+    anyhow::anyhow!(
+        "no environment selected: select one with `cw use ENV`, or name it with `--in ENV`"
+    )
 }
 
 fn platform_environment_session_view(
@@ -722,6 +732,163 @@ async fn resolve_selected_session(
     Ok((target, session))
 }
 
+/// An existing session named by flags: the environment (positional ENV or
+/// `--in ENV`, else the selected one) and `--session`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionSelector {
+    pub(crate) environment: Option<String>,
+    pub(crate) session: String,
+}
+
+impl SessionSelector {
+    /// `[ENV] SESSION`, the form the session handlers and member control
+    /// resolve. Built from explicit flags, so no value is reinterpreted.
+    pub(crate) fn values(&self) -> Vec<String> {
+        self.environment
+            .iter()
+            .cloned()
+            .chain([self.session.clone()])
+            .collect()
+    }
+}
+
+/// The session a command names with `[ENV | --in ENV] --session S`. Both
+/// environment forms, a retired second positional or a missing `--session`
+/// fail here, before any lookup.
+pub(crate) fn select_session(
+    command: &str,
+    positional: Option<String>,
+    flag: Option<String>,
+    retired_session: &[String],
+    session: Option<String>,
+) -> anyhow::Result<SessionSelector> {
+    let environment = super::flat::select_environment(command, positional, flag, retired_session)?;
+    let session = session
+        .and_then(|session| trimmed_str(&session).map(str::to_owned))
+        .ok_or_else(|| missing_session(command, environment.as_deref()))?;
+    Ok(SessionSelector {
+        environment,
+        session,
+    })
+}
+
+fn missing_session(command: &str, environment: Option<&str>) -> anyhow::Error {
+    match environment {
+        Some(environment) => anyhow::anyhow!(
+            "missing session: `cw {command} {environment} --session SESSION` (`cw ls {environment}` lists its sessions)"
+        ),
+        None => anyhow::anyhow!(
+            "missing session: `cw {command} ENV --session SESSION`, or `cw {command} --session SESSION` in the selected environment"
+        ),
+    }
+}
+
+/// `cw interrupt`'s selectors as the session handler's target.
+pub(crate) fn selector_target(
+    command: &str,
+    args: SessionSelectorArgs,
+) -> anyhow::Result<SessionTargetArgs> {
+    let selection = select_session(
+        command,
+        args.environment,
+        args.in_environment,
+        &args.retired_session,
+        args.session,
+    )?;
+    Ok(SessionTargetArgs {
+        request_id: args.request_id,
+        expected_launch_generation: args.expected_launch_generation,
+        cleanup_request_id: None,
+        target: selection.values(),
+        output: args.output,
+    })
+}
+
+/// What `cw send` writes, and to which session.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SendRequest {
+    pub(crate) selection: SessionSelector,
+    pub(crate) data: Vec<u8>,
+}
+
+/// `cw send [ENV] TEXT` or `cw send [ENV] --key KEY`: the number of values
+/// alone decides whether the first names the environment.
+pub(crate) fn send_request(args: &SendArgs) -> anyhow::Result<SendRequest> {
+    if !args.retired.is_empty() {
+        let environment = args.first.as_deref().unwrap_or("ENV");
+        let session = args.second.as_deref().unwrap_or("SESSION");
+        anyhow::bail!(
+            "`cw send ENV SESSION TEXT` no longer selects a session; use `cw send {environment} --session {session} TEXT`"
+        );
+    }
+    let values: Vec<String> = args.first.iter().chain(&args.second).cloned().collect();
+    let (environment, text) = match (args.key.is_some(), values.as_slice()) {
+        (false, []) => anyhow::bail!(
+            "missing TEXT: `cw send ENV --session SESSION TEXT`, or `--key KEY` for one key"
+        ),
+        (false, [text]) => (None, Some(text.clone())),
+        (false, [environment, text]) => (Some(environment.clone()), Some(text.clone())),
+        (true, []) => (None, None),
+        (true, [environment]) => (Some(environment.clone()), None),
+        (true, _) => anyhow::bail!(
+            "--key sends one key and no TEXT: `cw send ENV --session SESSION --key KEY`"
+        ),
+        (false, _) => unreachable!("at most two values parse"),
+    };
+    let selection = select_session(
+        "send",
+        environment,
+        args.in_environment.clone(),
+        &[],
+        args.session.clone(),
+    )?;
+    let data = match (args.key.as_deref(), text) {
+        (Some(key), _) => match key {
+            "ctrl-c" => vec![3],
+            "ctrl-d" => vec![4],
+            "enter" => vec![b'\r'],
+            "escape" => vec![27],
+            "tab" => vec![b'\t'],
+            _ => anyhow::bail!("unsupported terminal key"),
+        },
+        (None, Some(text)) => {
+            let mut data = text.into_bytes();
+            if !args.no_newline {
+                data.push(b'\n');
+            }
+            data
+        }
+        (None, None) => unreachable!("text is required without --key"),
+    };
+    anyhow::ensure!(
+        !data.is_empty() && data.len() <= 64 * 1024,
+        "session input must contain 1–65536 bytes"
+    );
+    Ok(SendRequest { selection, data })
+}
+
+/// The session `cw wait` follows; `--message` alone names its own.
+pub(crate) fn wait_selection(args: &WaitArgs) -> anyhow::Result<Option<SessionSelector>> {
+    if let Some(message) = &args.message {
+        anyhow::ensure!(
+            args.environment.is_none()
+                && args.in_environment.is_none()
+                && args.session.is_none()
+                && args.retired_session.is_empty(),
+            "a message ID already names its session; run `cw wait --message {message}` without ENV or SESSION"
+        );
+        return Ok(None);
+    }
+    select_session(
+        "wait",
+        args.environment.clone(),
+        args.in_environment.clone(),
+        &args.retired_session,
+        args.session.clone(),
+    )
+    .map(Some)
+}
+
 fn managed_session(session: &EnvironmentSessionView) -> bool {
     #[cfg(unix)]
     return agents::is_managed_session(session);
@@ -738,31 +905,8 @@ pub(crate) async fn handle_send_command(globals: &Globals, args: SendArgs) -> an
         args.request_id.is_none() && args.expected_launch_generation.is_none(),
         "member mutation flags require --member"
     );
-    let (values, data) = if let Some(key) = args.key.as_deref() {
-        let data = match key {
-            "ctrl-c" => vec![3],
-            "ctrl-d" => vec![4],
-            "enter" => vec![b'\r'],
-            "escape" => vec![27],
-            "tab" => vec![b'\t'],
-            _ => anyhow::bail!("unsupported terminal key"),
-        };
-        (args.target_and_text, data)
-    } else {
-        let mut values = args.target_and_text;
-        if !(2..=3).contains(&values.len()) {
-            anyhow::bail!("expected SESSION TEXT, or ENV SESSION TEXT");
-        }
-        let mut data = values.pop().expect("validated text argument").into_bytes();
-        if !args.no_newline {
-            data.push(b'\n');
-        }
-        (values, data)
-    };
-    if data.is_empty() || data.len() > 64 * 1024 {
-        anyhow::bail!("session input must contain 1–65536 bytes");
-    }
-    let (target, session) = resolve_selected_session(globals, &values).await?;
+    let SendRequest { selection, data } = send_request(&args)?;
+    let (target, session) = resolve_selected_session(globals, &selection.values()).await?;
     if managed_session(&session) {
         anyhow::bail!("managed agents receive tasks through cw msg or cw steer");
     }
@@ -1000,11 +1144,12 @@ pub(crate) async fn handle_restart_command(
 }
 
 pub(crate) async fn handle_wait_command(globals: &Globals, args: WaitArgs) -> anyhow::Result<()> {
+    let selection = wait_selection(&args)?;
     if let Some(message) = &args.message
-        && !args.target.is_empty()
+        && globals.placement.is_some()
     {
         anyhow::bail!(
-            "a message ID already names its session; run `cw wait --message {message}` without ENV or SESSION"
+            "a message ID already names its session and environment; run `cw wait --message {message}` without --local or --cloud"
         );
     }
     #[cfg(target_os = "linux")]
@@ -1025,7 +1170,8 @@ pub(crate) async fn handle_wait_command(globals: &Globals, args: WaitArgs) -> an
         #[cfg(not(unix))]
         anyhow::bail!("managed message waiting currently requires Linux or macOS");
     }
-    let (target, initial) = resolve_selected_session(globals, &args.target).await?;
+    let selection = selection.context("wait needs --session or --message")?;
+    let (target, initial) = resolve_selected_session(globals, &selection.values()).await?;
     let future = async {
         let mut offset = 0;
         let mut history_gap = false;
@@ -1114,8 +1260,19 @@ async fn attach_host_environment_session(
     let mut buf = [0u8; 4096];
     let mut cursor = offset;
     let mut stdin_open = interactive;
+    // The session's PTY follows this terminal's size, from the start. A lost
+    // resize is cosmetic, and the next input reports a closed stream.
+    let mut window = crate::terminal_attach::WindowSizeWatch::new(interactive && session.pty);
+    if let Some((columns, rows)) = window.current() {
+        let _ = input.resize(i32::from(columns), i32::from(rows)).await;
+    }
     loop {
         tokio::select! {
+            size = window.changed() => {
+                if let Some((columns, rows)) = size {
+                    let _ = input.resize(i32::from(columns), i32::from(rows)).await;
+                }
+            }
             event=attachment.next_event()=>{
                 let Some(event)=event? else{return Ok(AttachExit::StreamEnded{output_offset:cursor});};
                 match event.payload {
@@ -1179,13 +1336,26 @@ async fn select_environment_session(
         return requested_environment_session(&sessions, requested)
             .cloned()
             .map(|session| SessionSelection::Select(Box::new(session)))
-            .ok_or_else(|| anyhow::anyhow!("session {requested:?} not found"));
+            .ok_or_else(|| {
+                let environment = &target.current_target().name;
+                anyhow::anyhow!(
+                    "session {requested:?} not found in {environment} (`cw ls {environment}` lists its sessions)"
+                )
+            });
     }
     match sessions.as_slice() {
         [] => Ok(SessionSelection::Create),
         [session] => Ok(SessionSelection::Select(Box::new(session.clone()))),
-        _ => select_session_from_picker(&sessions)
-            .map(|session| SessionSelection::Select(Box::new(session))),
+        _ => {
+            let environment = target.current_target().name.clone();
+            let repair = format!(
+                "{environment} has {} sessions; name one: `cw attach {environment} --session SESSION` (`cw ls {environment}` lists them)",
+                sessions.len()
+            );
+            select_session_from_picker(&environment, &sessions, "to attach to", repair)
+                .await
+                .map(|session| SessionSelection::Select(Box::new(session)))
+        }
     }
 }
 
@@ -1204,42 +1374,61 @@ pub(crate) fn requested_environment_session<'a>(
     }
 }
 
-fn select_session_from_picker(
+/// The searchable session picker on an interactive terminal. `verb` says
+/// what the choice is for, as in "Choose a session to attach to".
+async fn select_session_from_picker(
+    environment: &str,
     sessions: &[EnvironmentSessionView],
+    verb: &str,
+    script_repair: String,
 ) -> anyhow::Result<EnvironmentSessionView> {
-    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-        anyhow::bail!(
-            "multiple sessions in the selected environment; use `cw attach ENV SESSION` or `cw attach --session SESSION`"
-        );
+    use crate::output::{Capabilities, OutputMode, Picker, PickerOutcome, PickerRow, run_picker};
+    let rows = sessions
+        .iter()
+        .map(|session| {
+            let name = if session.name.is_empty() {
+                "-".to_owned()
+            } else {
+                session.name.clone()
+            };
+            let command = session_command_label(session);
+            let search = format!("{name} {} {command}", session.session_id);
+            PickerRow::new(
+                vec![
+                    name,
+                    session.state.to_lowercase(),
+                    session_mode(session).to_owned(),
+                    command,
+                    session.session_id.clone(),
+                ],
+                search,
+            )
+        })
+        .collect();
+    let picker = Picker::new(
+        format!("Choose a session {verb} in {environment}"),
+        ["NAME", "STATE", "MODE", "COMMAND", "SESSION"]
+            .map(str::to_owned)
+            .to_vec(),
+        rows,
+    )
+    .with_no_match("No matching sessions. Backspace to clear the filter.");
+    let caps = Capabilities::from_process(OutputMode::Text);
+    let outcome = tokio::task::spawn_blocking(move || run_picker(picker, &caps))
+        .await
+        .context("ask which session")??;
+    match outcome {
+        PickerOutcome::Chosen(index) => Ok(sessions[index].clone()),
+        PickerOutcome::Canceled => anyhow::bail!("canceled; no session chosen"),
+        PickerOutcome::Unavailable => Err(anyhow::anyhow!(script_repair)),
     }
-    eprintln!("Select a session:");
-    for (index, session) in sessions.iter().enumerate() {
-        eprintln!(
-            "  {}) {} {}",
-            index + 1,
-            session.session_id,
-            session_command_label(session)
-        );
-    }
-    eprint!("Session number: ");
-    std::io::stderr().flush()?;
-    let mut selected = String::new();
-    std::io::stdin().read_line(&mut selected)?;
-    let selected = selected
-        .trim()
-        .parse::<usize>()
-        .context("parse selected session number")?;
-    sessions
-        .get(selected.saturating_sub(1))
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("session selection is out of range"))
 }
 
-fn should_create_session() -> anyhow::Result<bool> {
+fn should_create_session(environment: &str) -> anyhow::Result<bool> {
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Ok(false);
     }
-    eprint!("No sessions in the selected environment. Create a shell session? [y/N] ");
+    eprint!("{environment} has no sessions. Start a shell in it? [y/N] ");
     std::io::stderr().flush()?;
     let mut response = String::new();
     std::io::stdin().read_line(&mut response)?;
@@ -1249,13 +1438,21 @@ fn should_create_session() -> anyhow::Result<bool> {
     ))
 }
 
-fn session_terminal_size(pty: bool) -> anyhow::Result<(u16, u16)> {
-    if pty {
-        terminal_attach::terminal_size()
-    } else {
-        Ok((0, 0))
+/// A PTY session's first size: this terminal's, or a conventional 80x24 when
+/// this command has none (a script that starts an agent to attach to later;
+/// each attach sends its own terminal's size).
+fn session_terminal_size(pty: bool) -> (u16, u16) {
+    if !pty {
+        return (0, 0);
     }
+    terminal_attach::terminal_size()
+        .ok()
+        .filter(|(columns, rows)| *columns > 0 && *rows > 0)
+        .unwrap_or(DEFAULT_PTY_SIZE)
 }
+
+/// Columns and rows of a PTY session started without a terminal.
+const DEFAULT_PTY_SIZE: (u16, u16) = (80, 24);
 
 fn environment_run_allocates_tty(args: &EnvironmentRunArgs) -> bool {
     environment_run_allocates_tty_for_streams(
@@ -1377,14 +1574,30 @@ pub(crate) async fn handle_environment_run_command(
     globals: &Globals,
     args: EnvironmentRunArgs,
 ) -> anyhow::Result<()> {
+    launch_run(globals, args, None).await
+}
+
+/// `cw run` and `cw shell`. `name_base` names a session that has no
+/// `--name` when the command's own name would not (`shell`, not `sh`).
+async fn launch_run(
+    globals: &Globals,
+    mut args: EnvironmentRunArgs,
+    name_base: Option<&str>,
+) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     if globals.member.is_some() {
+        anyhow::ensure!(
+            args.native_agent.is_none(),
+            "member run starts commands only; claude and codex open a terminal UI, which member control does not admit"
+        );
         if args.agent.is_some() {
             return super::member_control::managed::run(globals, args).await;
         }
         return super::member_control::terminal::run(globals, args).await;
     }
     anyhow::ensure!(args.request_id.is_none(), "--request-id requires --member");
+    let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
+    let bare = check_run_request(&args, caps.interactive && caps.live)?;
     let target = resolve_environment_session_target(globals, args.environment.as_deref()).await?;
     if args.agent.is_some() {
         #[cfg(unix)]
@@ -1392,28 +1605,76 @@ pub(crate) async fn handle_environment_run_command(
         #[cfg(not(unix))]
         anyhow::bail!("managed conversations currently require a trusted Linux or macOS host");
     }
+    let place = SessionPlace::of(&target);
+    let agent = match args.native_agent {
+        Some(agent) => Some(agent),
+        None if bare => Some(choose_native_agent(&place.environment, &caps).await?),
+        None => None,
+    };
+    let pty = match agent {
+        // An agent's terminal UI needs a terminal even when this command's
+        // own streams are not one, or when it prints JSON and detaches.
+        Some(_) => !args.no_tty,
+        None => environment_run_allocates_tty(&args),
+    };
+    let command = match agent {
+        Some(agent) => std::iter::once(agent.command().to_owned())
+            .chain(std::mem::take(&mut args.command))
+            .collect(),
+        None => std::mem::take(&mut args.command),
+    };
+    let sessions = match target.list().await {
+        Ok(sessions) => sessions,
+        Err(error) => return Err(stopped_environment_sessions(&target).await.unwrap_or(error)),
+    };
+    let name = match args.name.take() {
+        Some(name) => {
+            if let Some(existing) = sessions.iter().find(|session| session.name == name) {
+                return Err(duplicate_session_name(&place, existing));
+            }
+            name
+        }
+        None => unique_session_name(
+            name_base
+                .map(str::to_owned)
+                .unwrap_or_else(|| session_name_base(&command)),
+            &sessions,
+        ),
+    };
     let parent_session_id = resolve_parent_session(&target, args.parent.as_deref()).await?;
-    let pty = environment_run_allocates_tty(&args);
     let working_dir = args.workdir.unwrap_or_else(|| target.default_working_dir());
     target.ensure_ready_for_run()?;
     let session = target
         .launch(
-            args.command,
+            command,
             working_dir,
             parse_env_overrides(&args.env)?,
             pty,
-            args.name.unwrap_or_default(),
+            name,
             parent_session_id,
         )
         .await?;
     if matches!(args.output, OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&session)?);
         return Ok(());
-    } else {
-        eprintln!("Launched session {}", session.session_id);
     }
+    let started = place.started(&session, agent);
     if args.detach {
+        let style = caps.stdout_style();
+        println!("{} {started}", style.status(crate::output::Status::Done));
+        println!(
+            "{} {}",
+            style.status(crate::output::Status::Next),
+            place.reconnect(&session)
+        );
         return Ok(());
+    }
+    let interactive =
+        session.pty && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let style = caps.stderr_style();
+    eprintln!("{} {started}", style.status(crate::output::Status::Done));
+    if interactive {
+        eprintln!("  {}", place.detach_hint(&session, style));
     }
     if let Some(session) = attach_environment_session(globals, target, session).await? {
         ensure_environment_session_succeeded(&session)?;
@@ -1421,24 +1682,205 @@ pub(crate) async fn handle_environment_run_command(
     Ok(())
 }
 
+/// What `cw run` can refuse before any lookup: a bare `cw run` where it
+/// cannot ask which agent (`can_ask`), and a `--name` that is not a
+/// session name. Returns whether the run is bare.
+pub(crate) fn check_run_request(args: &EnvironmentRunArgs, can_ask: bool) -> anyhow::Result<bool> {
+    let bare = args.native_agent.is_none() && args.agent.is_none() && args.command.is_empty();
+    anyhow::ensure!(
+        !bare || can_ask,
+        "`cw run` needs an agent or a command: `cw run claude --in ENV`, `cw run codex --in ENV`, or `cw run --in ENV -- COMMAND`"
+    );
+    if let Some(name) = &args.name {
+        anyhow::ensure!(
+            codewire_daemon_proto::valid_session_name(name),
+            "--name {name:?} is not a session name: 1 to 64 letters, digits, dots, underscores or hyphens, starting with a letter or digit"
+        );
+    }
+    Ok(bare)
+}
+
+/// Where a session runs, for what `run` and `attach` print: the
+/// environment's name, its location, and the placement flag that finds it
+/// again.
+struct SessionPlace {
+    environment: String,
+    location: &'static str,
+    placement: &'static str,
+}
+
+impl SessionPlace {
+    fn of(target: &EnvironmentSessionTarget) -> Self {
+        let (location, placement) = match target {
+            #[cfg(unix)]
+            EnvironmentSessionTarget::Host { .. } => ("host", ""),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            EnvironmentSessionTarget::NativeLocal { .. } => ("local VM", "--local "),
+            EnvironmentSessionTarget::Platform { .. } => ("cloud", "--cloud "),
+        };
+        Self {
+            environment: crate::commands::progress::terminal_text(&target.current_target().name),
+            location,
+            placement,
+        }
+    }
+
+    /// `cw --local attach app --session coding`.
+    fn reconnect(&self, session: &EnvironmentSessionView) -> String {
+        format!(
+            "cw {}attach {} --session {}",
+            self.placement,
+            self.environment,
+            session_reference(session)
+        )
+    }
+
+    /// `Started Claude Code in app/coding · local VM`.
+    fn started(&self, session: &EnvironmentSessionView, agent: Option<NativeAgent>) -> String {
+        let what = match agent {
+            Some(agent) => format!("{} in", agent.title()),
+            None => "session".to_owned(),
+        };
+        format!(
+            "Started {what} {}/{} · {}",
+            self.environment,
+            session_reference(session),
+            self.location
+        )
+    }
+
+    fn detach_hint(&self, session: &EnvironmentSessionView, style: crate::output::Style) -> String {
+        style.paint(
+            crate::output::Role::Dim,
+            &format!(
+                "Detach: Ctrl-B, then D · Reconnect: {}",
+                self.reconnect(session)
+            ),
+        )
+    }
+}
+
+/// A session's name when it has one, else its canonical ID.
+fn session_reference(session: &EnvironmentSessionView) -> String {
+    crate::commands::progress::terminal_text(if session.name.is_empty() {
+        &session.session_id
+    } else {
+        &session.name
+    })
+}
+
+fn duplicate_session_name(
+    place: &SessionPlace,
+    existing: &EnvironmentSessionView,
+) -> anyhow::Error {
+    let name = &existing.name;
+    let environment = &place.environment;
+    let placement = place.placement;
+    if session_is_terminal(existing) {
+        anyhow::anyhow!(
+            "{environment} already has a session named {name} ({}); `--name` never reuses one: restart it with `cw {placement}restart {environment} --session {name}`, or choose another --name",
+            existing.state.to_lowercase()
+        )
+    } else {
+        anyhow::anyhow!(
+            "{environment} already has a session named {name} ({}); `--name` never reuses one: attach with `cw {placement}attach {environment} --session {name}`, or choose another --name",
+            existing.state.to_lowercase()
+        )
+    }
+}
+
+/// A session name from the command's file name: `npm` for `npm test`,
+/// `session` when nothing usable remains.
+pub(crate) fn session_name_base(command: &[String]) -> String {
+    let program = command
+        .first()
+        .map(|program| program.rsplit('/').next().unwrap_or(program))
+        .unwrap_or_default();
+    let base: String = program
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .skip_while(|c| !c.is_ascii_alphanumeric())
+        .take(48)
+        .collect();
+    if base.is_empty() {
+        "session".to_owned()
+    } else {
+        base
+    }
+}
+
+/// `base`, or `base-2`, `base-3`, ... : the first name no retained session
+/// in the environment has.
+pub(crate) fn unique_session_name(base: String, sessions: &[EnvironmentSessionView]) -> String {
+    let taken = |name: &str| sessions.iter().any(|session| session.name == name);
+    if !taken(&base) {
+        return base;
+    }
+    (2..)
+        .map(|index| format!("{base}-{index}"))
+        .find(|name| !taken(name))
+        .expect("an unused suffix exists")
+}
+
+/// Bare `cw run` on a terminal: which agent to open.
+async fn choose_native_agent(
+    environment: &str,
+    caps: &crate::output::Capabilities,
+) -> anyhow::Result<NativeAgent> {
+    use crate::output::{Picker, PickerOutcome, PickerRow, run_picker};
+    let rows = NativeAgent::ALL
+        .iter()
+        .map(|agent| {
+            PickerRow::new(
+                vec![agent.command().to_owned(), agent.title().to_owned()],
+                format!("{} {}", agent.command(), agent.title()),
+            )
+        })
+        .collect();
+    let picker = Picker::new(
+        format!("Open an agent in {environment}"),
+        vec!["AGENT".to_owned(), "OPENS".to_owned()],
+        rows,
+    )
+    .with_no_match("No matching agents. Backspace to clear the filter.");
+    let caps = *caps;
+    match tokio::task::spawn_blocking(move || run_picker(picker, &caps))
+        .await
+        .context("ask which agent to open")??
+    {
+        PickerOutcome::Chosen(index) => Ok(NativeAgent::ALL[index]),
+        PickerOutcome::Canceled => anyhow::bail!("canceled; nothing started"),
+        PickerOutcome::Unavailable => anyhow::bail!(
+            "`cw run` needs an agent or a command: `cw run claude --in ENV`, `cw run codex --in ENV`, or `cw run --in ENV -- COMMAND`"
+        ),
+    }
+}
+
 pub(crate) async fn handle_environment_shell_command(
     globals: &Globals,
     args: EnvironmentShellArgs,
 ) -> anyhow::Result<()> {
+    let environment =
+        super::flat::select_environment("shell", args.environment, args.in_environment, &[])?;
     if args.stdio {
-        return handle_shell_stdio(globals, args.environment.as_deref()).await;
+        anyhow::ensure!(
+            globals.placement != Some(EnvironmentPlacement::Local),
+            "`cw shell --stdio` is the OpenSSH ProxyCommand for cloud environments; for a local VM run `cw shell ENV`"
+        );
+        return handle_shell_stdio(globals, environment.as_deref()).await;
     }
-    handle_environment_run_command(
+    launch_run(
         globals,
         EnvironmentRunArgs {
             request_id: None,
+            native_agent: None,
+            environment,
             name: None,
             parent: None,
             agent: None,
             model: None,
             effort: None,
             prompt: None,
-            environment: args.environment,
             workdir: None,
             env: Vec::new(),
             tty: true,
@@ -1447,6 +1889,7 @@ pub(crate) async fn handle_environment_shell_command(
             output: OutputFormat::Text,
             command: login_shell_command(),
         },
+        Some("shell"),
     )
     .await
 }
@@ -1600,7 +2043,18 @@ async fn attach_environment_session(
             }
         };
         match exit {
-            AttachExit::Detached => return Ok(None),
+            AttachExit::Detached => {
+                // The terminal is out of raw mode again: say where the
+                // session went and how to come back.
+                let place = SessionPlace::of(&target);
+                eprintln!(
+                    "Detached from {}/{}; it keeps running. Reconnect: {}",
+                    place.environment,
+                    session_reference(&session),
+                    place.reconnect(&session)
+                );
+                return Ok(None);
+            }
             AttachExit::Terminal => return target.get(&session.session_id).await.map(Some),
             AttachExit::StreamEnded {
                 output_offset: next_offset,
@@ -1678,6 +2132,22 @@ async fn attach_platform_environment_session(
     let mut stdin_closed = !interactive;
     let mut output_open = true;
     let mut terminal = false;
+    // `interactive` is set only for a PTY session on a terminal. Its PTY
+    // follows this terminal's size; a lost resize is cosmetic.
+    let mut window = crate::terminal_attach::WindowSizeWatch::new(interactive);
+    let resize = |(columns, rows): (u16, u16)| codewire_client::AttachSessionRequest {
+        input: Some(codewire_client::attach_session_request::Input::Resize(
+            Box::new(codewire_client::AttachSessionResize {
+                columns: u32::from(columns),
+                rows: u32::from(rows),
+                ..Default::default()
+            }),
+        )),
+        ..Default::default()
+    };
+    if let Some(size) = window.current() {
+        let _ = input.send(resize(size)).await;
+    }
     loop {
         if !output_open && stdin_closed {
             return Ok(if terminal {
@@ -1687,6 +2157,11 @@ async fn attach_platform_environment_session(
             });
         }
         tokio::select! {
+            size = window.changed(), if output_open => {
+                if let Some(size) = size {
+                    let _ = input.send(resize(size)).await;
+                }
+            }
             event = attachment.next_output(), if output_open => {
                 let event = match event {
                     Ok(Some(event)) => event,
@@ -1829,21 +2304,29 @@ async fn select_or_create_environment_session(
 ) -> anyhow::Result<EnvironmentSessionView> {
     match select_environment_session(target, None).await? {
         SessionSelection::Select(session) => Ok(*session),
-        SessionSelection::Create if should_create_session()? => {
+        SessionSelection::Create
+            if should_create_session(&crate::commands::progress::terminal_text(
+                &target.current_target().name,
+            ))? =>
+        {
             target
                 .launch(
                     login_shell_command(),
                     target.default_working_dir(),
                     BTreeMap::new(),
                     true,
-                    String::new(),
+                    // Only an environment without sessions gets here.
+                    "shell".to_owned(),
                     String::new(),
                 )
                 .await
         }
-        SessionSelection::Create => anyhow::bail!(
-            "no sessions in the selected environment; use `cw shell ENV` or `cw run ENV -- COMMAND`"
-        ),
+        SessionSelection::Create => {
+            let environment = &target.current_target().name;
+            anyhow::bail!(
+                "{environment} has no sessions; start one with `cw shell {environment}`, `cw run claude --in {environment}` or `cw run --in {environment} -- COMMAND`"
+            )
+        }
     }
 }
 
@@ -2192,18 +2675,82 @@ pub(crate) async fn handle_attach_command(
     globals: &Globals,
     args: AttachArgs,
 ) -> anyhow::Result<()> {
-    let (target, requested) = resolve_attach_or_logs_target(
-        globals,
+    let environment = super::flat::select_environment(
+        "attach",
         args.environment,
-        args.selected_session.or(args.session),
-    )
-    .await?;
-    let session = match select_environment_session(&target, requested.as_deref()).await? {
-        SessionSelection::Select(session) => *session,
-        SessionSelection::Create => select_or_create_environment_session(&target).await?,
+        args.in_environment,
+        &args.retired_session,
+    )?;
+    let requested = args
+        .session
+        .and_then(|session| trimmed_str(&session).map(str::to_owned));
+    anyhow::ensure!(
+        environment.is_some() || requested.is_some(),
+        "missing environment: `cw attach ENV` attaches to its session; `cw attach --session SESSION` attaches in the selected environment"
+    );
+    let target = resolve_environment_session_target(globals, environment.as_deref())
+        .await
+        .map_err(|error| match (&environment, &requested) {
+            // A positional is always an environment; say how to name a
+            // session instead, without looking one up.
+            (Some(environment), None) => error.context(format!(
+                "`cw attach {environment}` names an environment; for a session in the selected environment use `cw attach --session {environment}`"
+            )),
+            _ => error,
+        })?;
+    let place = SessionPlace::of(&target);
+    let session = match requested.as_deref() {
+        Some(requested) => match select_environment_session(&target, Some(requested)).await? {
+            SessionSelection::Select(session) => *session,
+            SessionSelection::Create => anyhow::bail!("session {requested:?} not found"),
+        },
+        None => select_attach_session(&target, &place).await?,
     };
+    let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
+    let style = caps.stderr_style();
+    eprintln!(
+        "{} Attaching to {}/{} · {}",
+        style.status(crate::output::Status::Next),
+        place.environment,
+        session_reference(&session),
+        place.location
+    );
+    if session.pty && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        eprintln!("  {}", place.detach_hint(&session, style));
+    }
     let _ = attach_environment_session(globals, target, session).await?;
     Ok(())
+}
+
+/// `cw attach ENV` without `--session`: its only session, named on screen;
+/// a choice among several on a terminal; for a script, the `--session`
+/// repair. With none, a terminal may start a shell.
+async fn select_attach_session(
+    target: &EnvironmentSessionTarget,
+    place: &SessionPlace,
+) -> anyhow::Result<EnvironmentSessionView> {
+    let environment = &place.environment;
+    let sessions = match target.list().await {
+        Ok(sessions) => sessions,
+        Err(error) => return Err(stopped_environment_sessions(target).await.unwrap_or(error)),
+    };
+    match sessions.as_slice() {
+        [] => select_or_create_environment_session(target).await,
+        [session] => {
+            eprintln!(
+                "{environment} has one session, {}.",
+                session_reference(session)
+            );
+            Ok(session.clone())
+        }
+        _ => {
+            let repair = format!(
+                "{environment} has {} sessions; name one: `cw attach {environment} --session SESSION` (`cw ls {environment}` lists them)",
+                sessions.len()
+            );
+            select_session_from_picker(environment, &sessions, "to attach to", repair).await
+        }
+    }
 }
 
 /// `cw logs [ENV] [--session S]` after its selectors were checked.
@@ -2331,7 +2878,12 @@ async fn select_logs_session(
             );
             Ok(session.clone())
         }
-        _ => select_session_from_picker(&sessions),
+        _ => {
+            let repair = format!(
+                "name the log source: `cw logs {environment} --session SESSION`, or `--setup` for setup logs"
+            );
+            select_session_from_picker(&environment, &sessions, "to show", repair).await
+        }
     }
 }
 
@@ -2360,33 +2912,6 @@ impl LogsAnsiFilter {
         }
         output
     }
-}
-
-/// A single positional value may name a session in the selected environment.
-/// The two-value ENV SESSION form and attach --session remain explicit.
-async fn resolve_attach_or_logs_target(
-    globals: &Globals,
-    environment: Option<String>,
-    session: Option<String>,
-) -> anyhow::Result<(EnvironmentSessionTarget, Option<String>)> {
-    if session.is_none()
-        && let Some(requested) = environment.as_deref()
-        && let Ok(current) = resolve_environment_session_target(globals, None).await
-        && let Ok(sessions) = current.list().await
-        && requested_environment_session(&sessions, requested).is_some()
-    {
-        if resolve_environment_session_target(globals, Some(requested))
-            .await
-            .is_ok()
-        {
-            anyhow::bail!(
-                "{requested:?} names both an environment and a session; use ENV SESSION explicitly"
-            );
-        }
-        return Ok((current, environment));
-    }
-    let target = resolve_environment_session_target(globals, environment.as_deref()).await?;
-    Ok((target, session))
 }
 
 pub(crate) fn tail_session_output(data: &[u8], tail: Option<u32>) -> Vec<u8> {
@@ -2492,6 +3017,95 @@ async fn follow_session_output(
             }
             _ => unreachable!("non-interactive attachment produced navigation"),
         }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod run_output_tests {
+    use super::*;
+
+    fn local_vm(name: &str) -> EnvironmentSessionTarget {
+        EnvironmentSessionTarget::NativeLocal {
+            target: config::CurrentTargetConfig {
+                kind: "local".into(),
+                target_ref: name.into(),
+                name: name.into(),
+            },
+            environment_id: format!("{name}-id"),
+            working_dir: "/workspace".into(),
+        }
+    }
+
+    fn session(name: &str, state: &str) -> EnvironmentSessionView {
+        EnvironmentSessionView {
+            session_id: "session-11111111-1111-4111-8111-111111111111".into(),
+            name: name.into(),
+            parent_session_id: String::new(),
+            cleanup_unknown: false,
+            started_at: String::new(),
+            launch_generation: 1,
+            state: state.into(),
+            command: vec!["claude".into()],
+            working_dir: "/workspace".into(),
+            pty: true,
+            exit_code: None,
+            output_end_offset: 0,
+            output_start_offset: 0,
+            status_message: String::new(),
+        }
+    }
+
+    #[test]
+    fn run_and_attach_name_the_session_and_the_way_back() {
+        let place = SessionPlace::of(&local_vm("app"));
+        let coding = session("coding", "Running");
+        assert_eq!(
+            place.reconnect(&coding),
+            "cw --local attach app --session coding"
+        );
+        assert_eq!(
+            place.started(&coding, Some(NativeAgent::Claude)),
+            "Started Claude Code in app/coding · local VM"
+        );
+        assert_eq!(
+            place.started(&coding, None),
+            "Started session app/coding · local VM"
+        );
+        let plain = crate::output::Style::new(false, crate::output::Charset::Unicode);
+        assert_eq!(
+            place.detach_hint(&coding, plain),
+            "Detach: Ctrl-B, then D · Reconnect: cw --local attach app --session coding"
+        );
+        // An unnamed session is named by its ID.
+        assert_eq!(
+            place.reconnect(&session("", "Running")),
+            "cw --local attach app --session session-11111111-1111-4111-8111-111111111111"
+        );
+        // Names reach the terminal without control characters.
+        let hostile = SessionPlace::of(&local_vm("a\x1b[2Jb"));
+        assert!(!hostile.reconnect(&coding).contains('\x1b'));
+    }
+
+    #[test]
+    fn a_pty_session_always_starts_with_a_size() {
+        assert_eq!(session_terminal_size(false), (0, 0));
+        // This terminal's size, or 80x24 when the command has none.
+        let (columns, rows) = session_terminal_size(true);
+        assert!(columns > 0 && rows > 0);
+        assert_eq!(DEFAULT_PTY_SIZE, (80, 24));
+    }
+
+    #[test]
+    fn a_taken_name_is_refused_with_the_way_to_reach_that_session() {
+        let place = SessionPlace::of(&local_vm("app"));
+        assert_eq!(
+            duplicate_session_name(&place, &session("coding", "Running")).to_string(),
+            "app already has a session named coding (running); `--name` never reuses one: attach with `cw --local attach app --session coding`, or choose another --name"
+        );
+        assert_eq!(
+            duplicate_session_name(&place, &session("coding", "Exited")).to_string(),
+            "app already has a session named coding (exited); `--name` never reuses one: restart it with `cw --local restart app --session coding`, or choose another --name"
+        );
     }
 }
 

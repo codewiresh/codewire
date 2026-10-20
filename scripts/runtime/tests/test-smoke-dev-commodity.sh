@@ -134,7 +134,7 @@ assert_static_contract() {
   rg -F 'wait_for_application_restart_witness_termination "$phase"' <<<"$application_secret_smoke" >/dev/null ||
     fail "all-scope application smoke no longer requires exact old session termination"
   restart_witness="$(awk '/^application_restart_witness_guest\(\)/,/^run_application_secret_pty\(\)/' "$SMOKE")"
-  rg -F 'cw_with_timeout 30 run --no-tty --output json "$ENV_ID"' <<<"$restart_witness" >/dev/null ||
+  rg -F 'cw_with_timeout 30 run --no-tty --output json --in "$ENV_ID"' <<<"$restart_witness" >/dev/null ||
     fail "restart witness no longer captures the durable session identity from public JSON launch output"
   rg -F 'cw_with_timeout 30 logs "$ENV_ID" --session "$session_id" --raw' <<<"$restart_witness" >/dev/null ||
     fail "restart witness no longer binds its ready receipt to exact-session public logs"

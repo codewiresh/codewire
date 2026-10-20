@@ -68,13 +68,22 @@ legacy_sdk_hits="$(
 # does a placement flag on either side of a command (`cw --local ls`).
 readonly RETIRED_CLI_GRAMMAR='cw local\b|cw exec\b|cw node\b|cw run --node|node:session|cw (--(local|cloud) )?env\b|cw config-ssh\b|cw update( (status|rollback)\b| --(version|channel|from|sha256|restart-vms|to|expect-generation|store)\b|`|$)'
 
+# Retired positional selection: the positional of `cw run` is only claude
+# or codex (an environment is `--in ENV`), and attach, send, wait and
+# interrupt name a session with `--session`, never by a positional.
+readonly RUN_SWITCHES='( (--no-tty|--tty|-t|--detach|-d))*'
+readonly RETIRED_RUN_POSITIONAL="cw (--(local|cloud) )?run$RUN_SWITCHES [A-Za-z0-9_\$<\"]"
+readonly CURRENT_RUN_AGENT="cw (--(local|cloud) )?run$RUN_SWITCHES (claude|codex)\\b"
+readonly RETIRED_ATTACH_SESSION='cw (--(local|cloud) )?attach ("[^"]*"|[^-\s`"'"'"'][^\s`"'"'"']*) [^-\s`"'"'"']'
+readonly SESSION_POSITIONAL='cw (--(local|cloud) )?(send|wait|interrupt) [^-\s`]'
+
 # Print every retired spelling in the given paths.
 retired_grammar_hits() {
-  rg -n \
-    --glob '!*evidence*' \
-    --glob '!archive/**' \
-    "$RETIRED_CLI_GRAMMAR" \
-    "$@" || true
+  local search=(rg -n --glob '!*evidence*' --glob '!archive/**')
+  "${search[@]}" "$RETIRED_CLI_GRAMMAR" "$@" || true
+  { "${search[@]}" "$RETIRED_RUN_POSITIONAL" "$@" || true; } | { rg -v "$CURRENT_RUN_AGENT" || true; }
+  "${search[@]}" "$RETIRED_ATTACH_SESSION" "$@" || true
+  { "${search[@]}" "$SESSION_POSITIONAL" "$@" || true; } | { rg -v -e '--session|--message' || true; }
 }
 
 # The guard itself: retired spellings fail, their replacements pass.
@@ -97,7 +106,18 @@ self_test() {
     'cw update --restart-vms' \
     'see `cw update`' \
     'cw exec ls' \
-    'cw run --node build'; do
+    'cw run --node build' \
+    'cw run app -- cargo test' \
+    'cw --local run app --tty -- claude' \
+    'cw run --no-tty my-app -- true' \
+    'cw run --detach my-app -- codex' \
+    'cw run <environment> -- <command>' \
+    'cw attach app coding' \
+    'cw attach "$ENV" shell' \
+    'cw send app coding "Add tests"' \
+    'cw send coding "Add tests"' \
+    'cw wait build' \
+    'cw interrupt app review'; do
     printf '```sh\n%s\n```\n' "$retired" >"$fixture/retired.md"
     [[ -n "$(retired_grammar_hits "$fixture")" ]] ||
       fail "self-test: retired spelling passed the guard: $retired"
@@ -115,7 +135,24 @@ self_test() {
     'cw upgrade' \
     'cw upgrade rollback --to v0.3.390' \
     'cw upgrade --vms' \
-    'cw run app -- cargo test' \
+    'cw run' \
+    'cw run claude --in app --name coding' \
+    'cw --cloud run codex' \
+    'cw run --detach codex --in app' \
+    'cw run --no-tty --in app -- true' \
+    'cw run --in app -- cargo test' \
+    'cw run -- npm test' \
+    'cw attach app' \
+    '<li data-command="cw attach auth" data-result="Attached.">' \
+    'cw attach app --session coding' \
+    'cw attach --session coding' \
+    'cw send app --session coding "Add tests"' \
+    'cw send --session coding --key ctrl-c' \
+    'cw wait --message MESSAGE_ID' \
+    'cw wait app --session build' \
+    'cw interrupt --session review' \
+    'the waiting `cw wait` returns' \
+    'CLI[cw run / msg] --> Daemon' \
     'environment variables such as cw environment names'; do
     printf '```sh\n%s\n```\n' "$current" >"$fixture/current.md"
     [[ -z "$(retired_grammar_hits "$fixture")" ]] ||

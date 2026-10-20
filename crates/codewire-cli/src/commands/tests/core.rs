@@ -875,14 +875,14 @@ fn setup_parser_requires_create_org_for_org_slug() {
 
 #[test]
 fn attach_command_parser_accepts_environment_and_session() {
-    let cli = Cli::try_parse_from(["cw", "attach", "builder", "worker"]).unwrap();
+    let cli = Cli::try_parse_from(["cw", "attach", "builder", "--session", "worker"]).unwrap();
 
     let Command::Attach(args) = cli.command else {
         panic!("expected attach command");
     };
     assert_eq!(args.environment.as_deref(), Some("builder"));
     assert_eq!(args.session.as_deref(), Some("worker"));
-    assert_eq!(args.selected_session, None);
+    assert!(args.retired_session.is_empty());
 }
 
 #[test]
@@ -893,8 +893,8 @@ fn attach_command_parser_accepts_selected_environment_session_flag() {
         panic!("expected attach command");
     };
     assert_eq!(args.environment, None);
-    assert_eq!(args.session, None);
-    assert_eq!(args.selected_session.as_deref(), Some("worker"));
+    assert_eq!(args.in_environment, None);
+    assert_eq!(args.session.as_deref(), Some("worker"));
 }
 
 #[test]

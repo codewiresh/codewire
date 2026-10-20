@@ -35,7 +35,7 @@ fn target<'a>(values: &'a [String], env: &str) -> anyhow::Result<&'a str> {
             );
             id
         }
-        _ => anyhow::bail!("expected SESSION, or exact ENV_UUID SESSION"),
+        _ => anyhow::bail!("expected --session SESSION, with ENV the exact saved UUID"),
     };
     let uuid = id
         .strip_prefix("session-")
@@ -144,19 +144,8 @@ pub(crate) async fn send(globals: &Globals, args: SendArgs) -> anyhow::Result<()
         args.key.is_none(),
         "member terminal control keys require a PTY and are not admitted"
     );
-    let mut values = args.target_and_text;
-    ensure!(
-        (2..=3).contains(&values.len()),
-        "expected SESSION TEXT, or exact ENV_UUID SESSION TEXT"
-    );
-    let mut data = values.pop().expect("checked text").into_bytes();
-    if !args.no_newline {
-        data.push(b'\n');
-    }
-    ensure!(
-        !data.is_empty() && data.len() <= 65536,
-        "member input must contain 1–65536 bytes"
-    );
+    let SendRequest { selection, data } = send_request(&args)?;
+    let values = selection.values();
     let id = request_id(args.request_id)?;
     let (dir, mut remote) = open(globals, None).await?;
     let sid = target(&values, &remote.alias.binding.environment_id)?;
@@ -232,8 +221,10 @@ pub(crate) async fn wait(globals: &Globals, args: WaitArgs) -> anyhow::Result<()
     let timeout = tailnet_ssh::parse_duration(&args.timeout)
         .map_err(|e| anyhow::anyhow!("invalid wait timeout: {e}"))?;
     ensure!(!timeout.is_zero(), "wait timeout must be positive");
+    let selection = wait_selection(&args)?.context("member wait needs --session")?;
+    let values = selection.values();
     let (_, mut remote) = open(globals, None).await?;
-    let sid = target(&args.target, &remote.alias.binding.environment_id)?;
+    let sid = target(&values, &remote.alias.binding.environment_id)?;
     let session = remote.get(sid).await?;
     wait_loop(&mut remote, &session, timeout, args.output).await
 }

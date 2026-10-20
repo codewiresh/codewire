@@ -48,14 +48,14 @@ cw() {
         '{id:$id,source_selection:{credentials:{profile:$profile},profile_revision:$revision}}' ;;
     'run --no-tty '*" public-host-key") printf '%s\n' "$HOST_KEY" ;;
     'run --no-tty '*" prove "*)
-      [[ "$8" == "$HOST_KEY" ]] || fail 'changed host trust'
+      [[ "$9" == "$HOST_KEY" ]] || fail 'changed host trust'
       [[ "$FAILURE" != proof ]] || return 1
       [[ "$FAILURE" == empty-proof ]] || printf 'stock-ssh-workload-proved\n' ;;
     'run --no-tty '*" /bin/cat /workspace/.cw-ssh-smoke/sshd.log")
       printf 'synthetic public-only sshd evidence\n' ;;
     'run --no-tty --detach --output json '*" wait-revoked "*)
       [[ ! -e "$TMPDIR_SMOKE/revoked" ]] || fail 'probe admitted after revocation'
-      [[ "${11}" == "$HOST_KEY" ]] || fail 'waiter lost host trust'
+      [[ "${12}" == "$HOST_KEY" ]] || fail 'waiter lost host trust'
       touch "$TMPDIR_SMOKE/admitted"
       printf '{"session_id":"owned-session","state":"Running"}\n' ;;
     'credentials --cloud revoke '*" --output json")

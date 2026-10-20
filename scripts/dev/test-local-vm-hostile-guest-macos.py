@@ -122,7 +122,7 @@ class HostileGuestBattery(journey_module.LocalVmJourney):
                          "verdict": verdict, "reason": reason})
 
         def docker_vm(command, timeout=300):
-            return self.call("run", DOCKER_NAME, "--no-tty", "--", "sh", "-c", command, ok=False, timeout=timeout)
+            return self.call("run", "--in", DOCKER_NAME, "--no-tty", "--", "sh", "-c", command, ok=False, timeout=timeout)
 
         published = free_port()
         docker_vm(f"docker run -d --rm --name hostile-publish -p {published}:80 "

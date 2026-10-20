@@ -6,26 +6,49 @@ weight: 2
 
 Every session belongs to one environment. `ENV` is a name or ID and defaults
 to the environment selected with `cw use`; `SESSION` is a name or ID within
-it. `stop`, `restart` and `logs` name the environment as a positional or with
-`--in ENV` (not both) and the session with `--session`. For `run`, `ls` and
-`attach` a single positional is an environment (`attach` also accepts a
-session of the selected environment); for `send`, `wait`, `msg`, `steer`,
-`interrupt` and `inbox` a single positional is a session.
+it. `attach`, `send`, `wait`, `stop`, `restart` and `logs` name the
+environment as a positional or with `--in ENV` (not both) and an existing
+session with `--session`; a positional is always an environment, never a
+session. `run` names its environment only with `--in ENV`, because its
+positional is the agent. `--name` names a new session and never selects an
+existing one. With no environment named or selected, a command says how to
+choose one: `cw use ENV`, or `--in ENV`.
 
 ## cw run
 
 ```sh
-cw run [ENV] [OPTIONS] -- COMMAND [ARG]...
-cw run [ENV] --agent codex|claude [--prompt TEXT] [--name NAME] [--parent SESSION] [--model M] [--effort E] --detach
+cw run claude|codex [--in ENV] [--name NAME] [--env KEY=VALUE]... [-- AGENT_ARG...]
+cw run [--in ENV] [OPTIONS] -- COMMAND [ARG]...
+cw run --in ENV --agent codex|claude [--prompt TEXT] [--name NAME] [--parent SESSION] [--model M] [--effort E] --detach
+cw run
 ```
+
+`cw run claude` and `cw run codex` open that agent's own terminal UI in a new
+session, with arguments after `--` passed to the agent (for example
+`-- --resume ID`). Before the agent takes the terminal, `cw` names the
+environment and session and the way back: detach with Ctrl-B, then D, and
+reconnect with `cw attach ENV --session SESSION`. The positional is only
+`claude` or `codex`; anything else is refused with the `--in` spelling, so an
+environment named `claude` is `cw run claude --in claude`. Bare `cw run` asks
+which agent to open on a terminal and is refused in a script. With `--agent`
+the run starts a managed conversation instead (see [Agents](@/cli/agents.md));
+it cannot be combined with an agent positional, a command after `--`, or
+`--tty`.
+
+Without `--name`, a session is named after its agent or command (`claude`,
+then `claude-2`; `npm` for `npm test`). A name already used in the
+environment is refused before anything starts, with the command that reaches
+that session. `--local` or `--cloud` limits where `ENV`, or the selected
+environment, may be.
 
 | Flag | Meaning |
 | --- | --- |
-| `--name NAME` | Unique session name within this environment |
+| `--in ENV` | Environment name or ID; defaults to the selected environment |
+| `--name NAME` | Unique name for the new session; never reuses one |
 | `--parent SESSION` | Parent session name or ID within this environment |
 | `-w, --workdir DIR` | Working directory inside the environment |
 | `-e, --env KEY=VALUE` | Set a variable for this session; repeatable. Not kept across a daemon restart |
-| `-t, --tty`, `--no-tty` | Allocate a terminal, or not; the default is a terminal when stdin and stdout are terminals |
+| `-t, --tty`, `--no-tty` | Allocate a terminal, or not; the default is a terminal when stdin and stdout are terminals, and always for `claude` and `codex` |
 | `-d, --detach` | Launch without attaching |
 | `--agent codex\|claude\|noel` | Launch a managed agent conversation instead of a command; `noel` on a trusted Linux host only |
 | `--prompt TEXT` | Initial task for the conversation |
@@ -51,13 +74,16 @@ parent and command.
 ## cw attach
 
 ```sh
-cw attach [ENV] [SESSION]
-cw attach --session SESSION
+cw attach ENV --session SESSION
+cw attach --session SESSION       # in the selected environment
+cw attach ENV                     # its only session, or a choice
 ```
 
-With no session, one is selected automatically; with several and a terminal,
-a picker opens; with none, `cw` offers to create a shell. Attaching to a
-managed agent is refused: use `cw msg`, `cw steer` and `cw logs`.
+Without `--session`, an environment with one session attaches to it and says
+which; with several, a terminal gets a searchable picker and a script must
+name `--session`; with none, a terminal is offered a new shell. The terminal's
+size follows into the session as it changes. Attaching to a managed agent is
+refused: use `cw msg`, `cw steer` and `cw logs`.
 
 | Keys | Action |
 | --- | --- |
@@ -85,9 +111,12 @@ offers a choice; a script must name the source.
 ## cw send
 
 ```sh
-cw send [ENV] SESSION TEXT [--no-newline]
-cw send [ENV] SESSION --key ctrl-c|ctrl-d|enter|escape|tab
+cw send [ENV] --session SESSION TEXT [--no-newline]
+cw send [ENV] --session SESSION --key ctrl-c|ctrl-d|enter|escape|tab
 ```
+
+With `TEXT`, a single positional is the text and two are `ENV TEXT`; with
+`--key`, a single positional is `ENV`.
 
 Writes to a terminal or command session's stdin and acknowledges the write;
 it does not report that a command finished. Input is 1 to 65536 bytes.
@@ -96,7 +125,7 @@ Managed agents refuse raw input.
 ## cw wait
 
 ```sh
-cw wait [ENV] SESSION [--timeout 30m] [-o json]
+cw wait [ENV] --session SESSION [--timeout 30m] [-o json]
 cw wait --message MESSAGE_ID [--timeout 30m]
 ```
 

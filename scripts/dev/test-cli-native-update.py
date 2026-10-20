@@ -779,7 +779,7 @@ class Journey(managed.Journey):
             request = {"op":op, "stage":stage}
             if peer is not None:
                 request["peer"] = {key:value for key,value in peer.items() if key != "logical_member"}
-            self.call("send", self.environment, self.observer, json.dumps(request, separators=(",",":")))
+            self.call("send", self.environment, "--session", self.observer, json.dumps(request, separators=(",",":")))
         prefix = "CWNU_" + self.observer_nonce + " "
         def probe():
             output = self.call("logs", self.environment, "--session", self.observer, "--tail", "50")[1]
@@ -802,7 +802,7 @@ class Journey(managed.Journey):
     def shell(self, asset, stage):
         marker = "CWNU_" + self.observer_nonce + "_" + stage.upper()
         # The existing shell and its PATH/cache stay intact; command avoids functions.
-        self.call("send", self.environment, self.sentinel,
+        self.call("send", self.environment, "--session", self.sentinel,
                   f"printf '\\n{marker}_PATH:%s\\n' \"$(command -v cw)\"; "
                   f"printf '{marker}_VERSION:'; command cw --version; printf '{marker}_END\\n'")
         output = self.until(lambda:self.call("logs", self.environment, "--session", self.sentinel, "--tail", "50")[1],
@@ -923,7 +923,7 @@ print(json.dumps({"operation":op,"identity":identity(before)}))
         turn = self.inbox(self.lead)["driver"]["current_turn_id"]
         original = self.snapshot()
         sentinel_marker = "CWNU_" + self.observer_nonce + "_PID:"
-        self.call("send", self.environment, self.sentinel, f"printf '\\n{sentinel_marker}%s\\n' \"$$\"")
+        self.call("send", self.environment, "--session", self.sentinel, f"printf '\\n{sentinel_marker}%s\\n' \"$$\"")
         output = self.until(lambda:self.call("logs", self.environment, "--session", self.sentinel, "--tail", "50")[1],
                             lambda text:re.search(re.escape(sentinel_marker)+r"[0-9]+", text), 30, "original shell PID")
         pid = int(re.search(re.escape(sentinel_marker)+r"([0-9]+)", output)[1])
@@ -992,7 +992,7 @@ print(json.dumps({"operation":op,"identity":identity(before)}))
         closed = self.observe("closed", op="close")
         require(closed["continuous_samples"] > before["continuous_samples"] + 2,
                 "kernel observer did not span the supervision interval")
-        _, waited = self.data("wait", self.environment, self.observer, "--timeout","30s","--output","json",timeout=45)
+        _, waited = self.data("wait", self.environment, "--session", self.observer, "--timeout","30s","--output","json",timeout=45)
         require(waited["eof"] and waited["session"]["exit_code"] == 0, "continuous observer did not end known-clean")
         self.sentinel_live()
         self.host.verify()

@@ -1070,7 +1070,7 @@ calls="$RUN_DIR/calls"
 : > "$calls"
 sleep() { :; }
 kind_credential_cli() {
-  [ "$1 $2 $3" = "run %s --detach" ] || return 97
+  [ "$1 $2 $3 $4" = "run --in %s --detach" ] || return 97
   echo call >> "$calls"
   local count
   count="$(wc -l < "$calls")"
@@ -3094,7 +3094,7 @@ KIND_CLAUDE_SESSION_ATTEMPTS=3
 sleep() {{ :; }}
 kind_credential_cli() {{
   case "$*" in
-    "run env-1 --no-tty --detach --output json -- python3 -B -u {driver} {form} {outcome}")
+    "run --in env-1 --no-tty --detach --output json -- python3 -B -u {driver} {form} {outcome}")
       printf '{{"session_id":"session-1","state":"Starting"}}\n' ;;
     "list env-1 --output json") cat "$RUN_DIR/listing.json" ;;
     "logs env-1 --session session-1 --raw") cat "$RUN_DIR/output.txt" ;;

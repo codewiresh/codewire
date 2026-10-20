@@ -731,7 +731,7 @@ class Journey:
     def launch_command(self, label, argv, tty=False):
         name = f"{self.prefix}-{label}"
         try:
-            _, view = self.data("run", self.environment, "--name", name, "--detach", "--output", "json",
+            _, view = self.data("run", "--in", self.environment, "--name", name, "--detach", "--output", "json",
                                 "--tty" if tty else "--no-tty", "--", *argv, timeout=60)
         except Failure:
             self.adopt_name(name)
@@ -742,7 +742,7 @@ class Journey:
 
     def launch_agent(self, label, agent, parent=None, prompt=None, model=None, expect="ok"):
         name = f"{self.prefix}-{label}"
-        args = ["run", self.environment, "--name", name, "--agent", agent, "--detach", "--output", "json"]
+        args = ["run", "--in", self.environment, "--name", name, "--agent", agent, "--detach", "--output", "json"]
         args += ["--model", model] if model else []
         args += ["--parent", parent] if parent else []
         args += ["--prompt", prompt] if prompt else []
@@ -766,7 +766,7 @@ class Journey:
     def guest(self, label, script, *argv):
         sid = self.launch_command(label, ["sh", "-c", script, "sh", *argv])
         seconds = self.wait_seconds(60)
-        code, waited = self.data("wait", self.environment, sid, "--timeout", f"{seconds}s", "--output", "json",
+        code, waited = self.data("wait", self.environment, "--session", sid, "--timeout", f"{seconds}s", "--output", "json",
                                  expect="any", timeout=seconds + 15)
         require(isinstance(waited, dict) and waited.get("eof") is True,
                 f"guest {label} command did not reach a confirmed end")
@@ -779,7 +779,7 @@ class Journey:
             "python3", "-I", "-c", CUSTODY_PROBE, operation, self.environment, self.drivers[case["sid"]],
             case["sid"], case["nonce"], json.dumps(case["peer"], separators=(",", ":")), digest])
         seconds = self.wait_seconds(35)
-        code, waited = self.data("wait", self.environment, sid, "--timeout", f"{seconds}s", "--output", "json",
+        code, waited = self.data("wait", self.environment, "--session", sid, "--timeout", f"{seconds}s", "--output", "json",
                                  expect="any", timeout=seconds + 15)
         require(code == 0 and isinstance(waited, dict) and waited.get("eof") is True and
                 (waited.get("session") or {}).get("exit_code") == 0,
@@ -855,7 +855,10 @@ class Journey:
         return self.until(lambda: self.inbox(sid), active, 30, f"held turn {message_id}")["driver"]
 
     def deliver(self, verb, sid, *values):
-        code, record = self.data(verb, self.environment, sid, *values, "--output", "json",
+        # interrupt names its session with --session; msg and steer keep
+        # their own grammar.
+        target = ("--session", sid) if verb == "interrupt" else (sid,)
+        code, record = self.data(verb, self.environment, *target, *values, "--output", "json",
                                  expect="any", timeout=60)
         if record is not None:
             require(isinstance(record, dict) and is_uuid(record.get("id")),
@@ -980,7 +983,7 @@ class Journey:
         bootstrap = (runtime.get("selection") or {}).get("bootstrap_catalog_sha256")
         require(isinstance(bootstrap, str) and re.fullmatch("[0-9a-f]{64}", bootstrap), "runtime info omitted its bound bootstrap")
         sid = self.launch_command("boot-cw", ["/usr/bin/python3", "-I", "-B", "-c", BOOT_ASSET_PROBE, *pins, self.environment, bootstrap])
-        _, waited = self.data("wait", self.environment, sid, "--timeout", "30s", "--output", "json", timeout=45)
+        _, waited = self.data("wait", self.environment, "--session", sid, "--timeout", "30s", "--output", "json", timeout=45)
         require(waited.get("eof") and (waited.get("session") or {}).get("exit_code") == 0,
                 "startup cw asset is not the root-owned read-only image payload")
         proof = json.loads(waited.get("output", ""))
@@ -1072,8 +1075,8 @@ class Journey:
                 "the lead conversation identity changed between turns")
         self.lead_turns = [first["id"], second["id"]]
         self.check("codex-lead/two-turns/native-ack/same-conversation")
-        self.call("send", self.environment, self.lead, "raw", expect="fail")
-        self.call("send", self.environment, self.lead, "--key", "enter", expect="fail")
+        self.call("send", self.environment, "--session", self.lead, "raw", expect="fail")
+        self.call("send", self.environment, "--session", self.lead, "--key", "enter", expect="fail")
         self.check("managed/raw-send-and-key-rejected")
 
     def prove_tool_marker(self):
@@ -1156,7 +1159,7 @@ class Journey:
                                                    originals["codex"], originals["claude"]])
         self.updates_staged = originals
         seconds = self.wait_seconds(20)
-        code, waited = self.data("wait", self.environment, sid, "--timeout", f"{seconds}s", "--output", "json",
+        code, waited = self.data("wait", self.environment, "--session", sid, "--timeout", f"{seconds}s", "--output", "json",
                                  expect="any", timeout=seconds + 15)
         require(code == 0 and waited.get("eof") and waited["session"]["exit_code"] == 0,
                 "the user's npm prefix already holds codex or claude, or the updates could not be staged")
@@ -1173,7 +1176,7 @@ class Journey:
         self.stage = "shell-clients"
         sid = self.launch_command("update-probe", ["python3", "-I", "-c", UPDATE_PROBE, self.prefix])
         seconds = self.wait_seconds(20)
-        code, waited = self.data("wait", self.environment, sid, "--timeout", f"{seconds}s", "--output", "json",
+        code, waited = self.data("wait", self.environment, "--session", sid, "--timeout", f"{seconds}s", "--output", "json",
                                  expect="any", timeout=seconds + 15)
         require(code == 0 and waited.get("eof") and waited["session"]["exit_code"] == 0,
                 "the shell client probe did not finish successfully")
@@ -1205,9 +1208,9 @@ class Journey:
         if not self.synthetic:
             before = {sid: self.inbox(sid)["messages_total"] for sid in (self.lead, self.worker)}
             self.call("steer", self.environment, self.lead, "nothing active", expect="fail")
-            self.call("interrupt", self.environment, self.lead, expect="fail")
+            self.call("interrupt", self.environment, "--session", self.lead, expect="fail")
             self.call("steer", self.environment, self.worker, "unsupported", expect="fail")
-            self.call("interrupt", self.environment, self.worker, expect="fail")
+            self.call("interrupt", self.environment, "--session", self.worker, expect="fail")
             require(all(self.inbox(sid)["messages_total"] == count for sid, count in before.items()),
                     "a refused control created a message record")
             self.check("controls/actual-detected-capabilities/idle-and-unsupported-refused-without-record")
@@ -1569,7 +1572,7 @@ class Journey:
 
     def sentinel_live(self):
         nonce = secrets.token_hex(4)
-        self.call("send", self.environment, self.sentinel, f"echo SENTINEL_$((6*7))_{nonce}")
+        self.call("send", self.environment, "--session", self.sentinel, f"echo SENTINEL_$((6*7))_{nonce}")
         self.until(lambda: self.call("logs", self.environment, "--session", self.sentinel, "--tail", "50")[1],
                    lambda output: f"SENTINEL_42_{nonce}" in output, 30, "sentinel terminal reply")
         require(self.sessions()[self.sentinel]["state"] == "Running", "unrelated sentinel stopped during custody cleanup")
@@ -1682,7 +1685,7 @@ with os.fdopen(fd, "rb") as stream:
     os.unlink(name)
 ''', self.tool_file, self.tool_token])
                 seconds = self.wait_seconds(20)
-                code, waited = self.data("wait", self.environment, sid, "--timeout", f"{seconds}s",
+                code, waited = self.data("wait", self.environment, "--session", sid, "--timeout", f"{seconds}s",
                                          "--output", "json", expect="any", timeout=seconds + 15)
                 require(code == 0 and waited.get("eof") and waited["session"]["exit_code"] == 0,
                         "cleanup did not remove the exact owned tool marker")
@@ -1695,7 +1698,7 @@ with os.fdopen(fd, "rb") as stream:
                 sid = self.launch_command("update-cleanup", ["python3", "-I", "-c", UPDATE_REMOVE, self.prefix,
                                                              originals["codex"], originals["claude"]])
                 seconds = self.wait_seconds(20)
-                code, waited = self.data("wait", self.environment, sid, "--timeout", f"{seconds}s",
+                code, waited = self.data("wait", self.environment, "--session", sid, "--timeout", f"{seconds}s",
                                          "--output", "json", expect="any", timeout=seconds + 15)
                 require(code == 0 and waited.get("eof") and waited["session"]["exit_code"] == 0,
                         "cleanup did not remove the exact staged updates")
@@ -1797,7 +1800,7 @@ def contract_tests():
                     process = mock.Mock(returncode=code)
                     process.communicate.return_value = stdout, stderr
                     with mock.patch.object(subprocess, "Popen", return_value=process) as launch:
-                        result = journey.call("wait", environment, session, "--output", "json", expect=expect)
+                        result = journey.call("wait", environment, "--session", session, "--output", "json", expect=expect)
                     self.assertEqual(result, (code, stdout, stderr))
                     launch.assert_called_once()
 
@@ -1860,7 +1863,7 @@ def contract_tests():
             calls = []
             journey.launch_command = lambda label, argv: calls.append((label, argv)) or session
             def waited(*args, **kwargs):
-                self.assertEqual(args[:3], ("wait", environment, session))
+                self.assertEqual(args[:4], ("wait", environment, "--session", session))
                 return 0, {"eof": True, "session": {"exit_code": 0}, "output": "{}"}
             journey.data = waited
             case = {"sid": session, "nonce": "0a1b2c3d", "peer": identity}

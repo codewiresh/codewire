@@ -101,7 +101,7 @@ class LocalVmJourney:
         return result
 
     def guest(self, command, ok=True, timeout=120):
-        return self.call("run", NAME, "--no-tty", "--", "sh", "-c", command, ok=ok, timeout=timeout)
+        return self.call("run", "--in", NAME, "--no-tty", "--", "sh", "-c", command, ok=ok, timeout=timeout)
 
     def info(self):
         return json.loads(self.call("--local", "info", NAME, "--output", "json").stdout)
@@ -180,7 +180,7 @@ class LocalVmJourney:
         samples = []
         for _ in range(5):
             started = time.monotonic()
-            self.call("run", NAME, "--no-tty", "--", "true")
+            self.call("run", "--in", NAME, "--no-tty", "--", "true")
             samples.append(time.monotonic() - started)
         median = statistics.median(samples)
         print(f"local-vm: cw run -- true median {median:.3f} s ({', '.join(f'{s:.3f}' for s in samples)})")
@@ -198,7 +198,7 @@ class LocalVmJourney:
 
     def prove_fail_closed(self, role, error_code):
         log = f"probe-{error_code}.log"
-        self.call("run", NAME, "--detach", "--no-tty", "--", "sh", "-c", probe_loop(log))
+        self.call("run", "--in", NAME, "--detach", "--no-tty", "--", "sh", "-c", probe_loop(log))
         self.until(lambda: self.probe_rows(log), lambda rows: any(code == "200" for _, code in rows),
                    30, "the guest probe reaching HTTP")
         pid = self.role_pid(role)
@@ -224,9 +224,9 @@ class LocalVmJourney:
 
     def prove_stall(self):
         clock = ('while :; do printf "%s\\n" "$(date +%s)" >> /workspace/project/clock.log; sleep 1; done')
-        self.call("run", NAME, "--detach", "--no-tty", "--", "sh", "-c", clock)
+        self.call("run", "--in", NAME, "--detach", "--no-tty", "--", "sh", "-c", clock)
         stream = subprocess.Popen(
-            [self.cw, "run", NAME, "--no-tty", "--", "sh", "-c",
+            [self.cw, "run", "--in", NAME, "--no-tty", "--", "sh", "-c",
              'for i in $(seq 1 40); do echo "tick $i"; sleep 1; done; echo done'],
             env=self.env, cwd=self.project, stdin=subprocess.DEVNULL, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

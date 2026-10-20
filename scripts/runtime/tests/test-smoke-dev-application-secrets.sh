@@ -198,7 +198,7 @@ cw() {
       [[ "$(sha256sum "$TMPDIR_SMOKE/workspace-marker" | cut -d ' ' -f 1)" == "$APP_WORKSPACE_MARKER_SHA256" ]] || return 1
       session_count="$(jq length "$TMPDIR_SMOKE/sessions.db")"
       printf -v session_id 'fixture-witness-%d' "$((session_count + 1))"
-      guest_command="${9-}"
+      guest_command="${10-}"
       jq --arg id "$session_id" --arg command "$guest_command" '. + [{
         session_id:$id,state:"Running",command:["/bin/sh","-c",$command],
         working_dir:"/workspace",pty:false,exit_code:null,output_end_offset:36,status_message:""

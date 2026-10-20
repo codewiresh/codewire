@@ -1687,7 +1687,7 @@ create_application_workspace_marker() {
   # their digest so later public cw run calls can prove workspace continuity.
   # shellcheck disable=SC2016 # Expanded only by the managed guest shell.
   marker_script='set -eu; marker=/workspace/.cw-app-smoke/preservation-marker; test ! -e "$marker"; umask 077; head -c 32 /dev/urandom > "$marker"; sha256sum "$marker" | cut -d " " -f 1'
-  cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty "$ENV_ID" -- /bin/sh -c "$marker_script" \
+  cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty --in "$ENV_ID" -- /bin/sh -c "$marker_script" \
     >"$output" 2>"$TMPDIR_SMOKE/app-workspace-marker.err" ||
     die 'managed workspace marker creation failed; output suppressed'
   APP_WORKSPACE_MARKER_SHA256="$(cat "$output")"
@@ -1745,7 +1745,7 @@ start_application_restart_witness() {
   local error="$TMPDIR_SMOKE/app-restart-witness-$phase-launch.err"
   [[ -z "$APP_RESTART_WITNESS_SESSION_ID" ]] || die 'application restart witness is already running'
   guest_script="$(application_restart_witness_guest "$hashes_name" "$APP_WORKSPACE_MARKER_SHA256")"
-  cw_with_timeout 30 run --no-tty --output json "$ENV_ID" -- /bin/sh -c "$guest_script" \
+  cw_with_timeout 30 run --no-tty --output json --in "$ENV_ID" -- /bin/sh -c "$guest_script" \
     >"$launch" 2>"$error" || die 'managed application restart witness launch failed; output suppressed'
   jq -e '
     type == "object" and
@@ -1799,10 +1799,10 @@ run_application_secret_pty() {
   # exit status, rather than waiting for the interactive detach chord.
   if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
     printf -v command '%q ' env -i "${SMOKE_OAUTH_ENV[@]}" \
-      "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --tty "$ENV_ID" -- \
+      "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --tty --in "$ENV_ID" -- \
       /bin/sh -c "set -eu; test -t 0; test -t 1; $guest_script"
   else
-    printf -v command '%q ' "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --tty "$ENV_ID" -- \
+    printf -v command '%q ' "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --tty --in "$ENV_ID" -- \
       /bin/sh -c "set -eu; test -t 0; test -t 1; $guest_script"
   fi
   printf -v receipt '%q' "$TMPDIR_SMOKE/app-pty-$phase.log"
@@ -1845,7 +1845,7 @@ run_application_secret_exec() {
     ((remaining > 0)) || die 'timed out waiting for managed application startup projection; output suppressed'
     timeout_seconds="$SMOKE_EXEC_TIMEOUT"
     ((timeout_seconds <= remaining)) || timeout_seconds="$remaining"
-    if cw_with_timeout "$timeout_seconds" run --no-tty "$ENV_ID" -- /bin/sh -c "$guest_script" \
+    if cw_with_timeout "$timeout_seconds" run --no-tty --in "$ENV_ID" -- /bin/sh -c "$guest_script" \
         >"$output" 2>"$error"; then
       grep -qx application-secret-check-ok "$output" || die 'managed exec omitted application receipt'
       return 0
@@ -2858,7 +2858,7 @@ discover_runtime_objects() {
 run_cw_session_script() {
   local script="$1"
   cw_with_timeout "$SMOKE_EXEC_TIMEOUT" \
-    run --no-tty "$ENV_ID" -- sh -lc "$script"
+    run --no-tty --in "$ENV_ID" -- sh -lc "$script"
 }
 
 classify_coco_rest_isolation_result() {
@@ -2953,7 +2953,7 @@ wait_for_cw_run() {
 
   log "waiting for cw run readiness"
   while (( "$(seconds_now)" < deadline )); do
-    if cw_with_timeout 30 run --no-tty "$ENV_ID" -- true >"$out" 2>&1; then
+    if cw_with_timeout 30 run --no-tty --in "$ENV_ID" -- true >"$out" 2>&1; then
       return
     fi
     last="$(sed 's/[[:cntrl:]]//g' "$out" | tail -n 1)"
@@ -2979,7 +2979,7 @@ run_environment_session_smoke() {
 
   log "checking generated platform session run/list/logs and failure propagation"
   cw_with_timeout "$SMOKE_EXEC_TIMEOUT" \
-    run --no-tty "$ENV_ID" -- printf platform-session-smoke \
+    run --no-tty --in "$ENV_ID" -- printf platform-session-smoke \
     >"$success_out" 2>"$success_err"
   grep -qF 'platform-session-smoke' "$success_out" ||
     die "platform session output was not returned"
@@ -2988,7 +2988,7 @@ run_environment_session_smoke() {
   fi
 
   if cw_with_timeout "$SMOKE_EXEC_TIMEOUT" \
-      run --no-tty "$ENV_ID" -- sh -lc \
+      run --no-tty --in "$ENV_ID" -- sh -lc \
         'printf platform-session-failure; exit 42' \
       >"$failure_out" 2>"$failure_err"; then
     die "failed platform session unexpectedly returned success"

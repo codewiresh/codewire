@@ -276,7 +276,7 @@ checkout_main() {
   wait_until 'hosted checkout setup completion' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" checkout_environment_ready
   checkout_fixture_inspect
   [[ "$CHECKOUT_AUTHENTICATED" -gt 0 ]] || die 'hosted checkout did not authenticate with the selected key'
-  cw_with_timeout 60 run --no-tty "$ENV_ID" -- /bin/sh -c \
+  cw_with_timeout 60 run --no-tty --in "$ENV_ID" -- /bin/sh -c \
     "set -eu; cd /workspace/private-checkout; test \"\$(git rev-parse HEAD)\" = '$revision'; test \"\$(cat proof.txt)\" = initial-private-checkout-synthetic-v1; test \"\$(cat .install-proved)\" = initial-private-checkout-before-install; printf '%s\\n' hosted-private-checkout-proved" \
     >"$TMPDIR_SMOKE/checkout-proof.out" 2>"$TMPDIR_SMOKE/checkout-proof.err" || die 'hosted initial checkout managed execution failed'
   grep -qx hosted-private-checkout-proved "$TMPDIR_SMOKE/checkout-proof.out" || die 'hosted checkout completion receipt is missing'

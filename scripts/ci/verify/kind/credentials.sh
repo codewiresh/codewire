@@ -1516,7 +1516,7 @@ kind_credential_launch() {
   stderr="$(mktemp "$RUN_DIR/credential-launch.XXXXXX")" || return $?
   while :; do
     status=0
-    output="$(kind_credential_cli run "$environment" "$@" 2>"$stderr")" || status=$?
+    output="$(kind_credential_cli run --in "$environment" "$@" 2>"$stderr")" || status=$?
     if [ "$status" -eq 0 ] || ! grep -Fq -- "$KIND_SETUP_NOT_READY" "$stderr" ||
       [ "$SECONDS" -ge "$deadline" ]; then
       cat -- "$stderr" >&2

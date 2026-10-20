@@ -332,7 +332,7 @@ remove_env() {
 
 in_workspace() {
   local id="$1" script="$2"
-  timeout 180 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --no-tty "$id" -- bash -c "$script"
+  timeout 180 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --no-tty --in "$id" -- bash -c "$script"
 }
 
 daemon_reachable() { in_workspace "$1" 'true' >/dev/null 2>&1; }

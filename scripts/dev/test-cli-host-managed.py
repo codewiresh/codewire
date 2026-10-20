@@ -777,7 +777,7 @@ class Journey:
     def interrupt_held(self, session, thread, parent=None):
         held = self.send(session, "CW_FIXTURE_HOLD " + uuid.uuid4().hex[:8] + "\nWait.")
         inbox = self.held(session, held["id"], thread)
-        interrupted = self.call("interrupt", self.environment, session, "--output", "json", data=True)
+        interrupted = self.call("interrupt", self.environment, "--session", session, "--output", "json", data=True)
         control = self.message(interrupted["id"])
         require(control.get("action") == "interrupt" and control.get("target_session_id") == session and
                 control.get("driver_id") == self.conversations[session]["driver"] and
@@ -808,7 +808,7 @@ class Journey:
         return self.call(*argv, data=True)
 
     def launch(self, name, agent, parent=None, prompt=None):
-        argv = ["run", self.environment, "--name", name, "--detach", "--output", "json", "--agent", agent,
+        argv = ["run", "--in", self.environment, "--name", name, "--detach", "--output", "json", "--agent", agent,
                 "--model", "codewire-synthetic" if agent == "codex" else "claude-sonnet-4-6"]
         if parent:
             argv += ["--parent", parent]
@@ -1048,7 +1048,7 @@ class Journey:
         require(lead_thread and first["turn_id"] and second["turn_id"] and first["turn_id"] != second["turn_id"] and
                 self.inbox(lead)["driver"]["native_thread_id"] == lead_thread,
                 "Codex did not retain one actual conversation")
-        require(self.call("send", self.environment, lead, "raw", expected=None).returncode != 0, "managed peer accepted raw terminal input")
+        require(self.call("send", self.environment, "--session", lead, "raw", expected=None).returncode != 0, "managed peer accepted raw terminal input")
         self.check("codex/two-native-acknowledged-turns/same-thread/raw-refused")
 
         nonce, token = uuid.uuid4().hex[:8], "CW_TOOL_MARKER_" + uuid.uuid4().hex[:16].upper()
@@ -1076,7 +1076,7 @@ class Journey:
         for session in (lead, worker):
             capabilities = self.inbox(session)["driver"]["capabilities"]
             if session == worker and not capabilities.get("interrupt"):
-                require(self.call("interrupt", self.environment, session, "--output", "json", expected=None).returncode != 0,
+                require(self.call("interrupt", self.environment, "--session", session, "--output", "json", expected=None).returncode != 0,
                         "undetected Claude interrupt was silently accepted")
                 continue
             self.interrupt_held(session, lead_thread if session == lead else worker_thread,

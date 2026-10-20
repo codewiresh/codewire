@@ -115,7 +115,7 @@ fn selected_native_session_target_refuses_a_replacement_named_as_the_deleted_uui
 
 #[test]
 fn environment_run_tty_selection_preserves_interactive_and_machine_modes() {
-    let Command::Run(interactive) = Cli::try_parse_from(["cw", "run", "builder", "--", "codex"])
+    let Command::Run(interactive) = Cli::try_parse_from(["cw", "run", "--in", "builder", "--", "codex"])
         .unwrap()
         .command
     else {
@@ -133,7 +133,7 @@ fn environment_run_tty_selection_preserves_interactive_and_machine_modes() {
     ));
 
     let Command::Run(no_tty) =
-        Cli::try_parse_from(["cw", "run", "--no-tty", "builder", "--", "codex"])
+        Cli::try_parse_from(["cw", "run", "--no-tty", "--in", "builder", "--", "codex"])
             .unwrap()
             .command
     else {
@@ -144,7 +144,7 @@ fn environment_run_tty_selection_preserves_interactive_and_machine_modes() {
     ));
 
     let Command::Run(json) =
-        Cli::try_parse_from(["cw", "run", "--output", "json", "builder", "--", "codex"])
+        Cli::try_parse_from(["cw", "run", "--output", "json", "--in", "builder", "--", "codex"])
             .unwrap()
             .command
     else {
@@ -321,12 +321,200 @@ fn session_grammar_uses_environment_as_first_positional() {
     assert_eq!(args.environment.as_deref(), Some("builder"));
     assert_eq!(args.session.as_deref(), Some("session-1"));
 
+    // A lone positional is always the environment, whatever it is called.
     let attach = Cli::try_parse_from(["cw", "attach", "session-1"]).unwrap();
     let Command::Attach(args) = attach.command else {
         panic!("expected attach command");
     };
     assert_eq!(args.environment.as_deref(), Some("session-1"));
     assert_eq!(args.session, None);
+    let attach = Cli::try_parse_from(["cw", "attach", "--in", "app", "--session", "coding"]).unwrap();
+    let Command::Attach(args) = attach.command else {
+        panic!("expected attach command");
+    };
+    assert_eq!(args.in_environment.as_deref(), Some("app"));
+    assert_eq!(args.session.as_deref(), Some("coding"));
+}
+
+fn no_placement() -> Globals {
+    Globals {
+        server: None,
+        member: None,
+        placement: None,
+    }
+}
+
+/// The error a session command gives for its argv. Each case fails on its
+/// selectors alone: no environment or session is looked up.
+async fn selector_error(argv: &[&str]) -> String {
+    let cli = Cli::try_parse_from(argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+    let globals = Globals {
+        server: None,
+        member: cli.member.clone(),
+        placement: cli.placement().unwrap(),
+    };
+    let result = match cli.command {
+        Command::Attach(args) => handle_attach_command(&globals, args).await,
+        Command::Send(args) => send_request(&args).map(|_| ()),
+        Command::Wait(args) => handle_wait_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::Interrupt(args) => selector_target("interrupt", args).map(|_| ()),
+        Command::Shell(args) => handle_environment_shell_command(&globals, args).await,
+        Command::Vscode(args) => handle_vscode_command(&globals, args).await,
+        // Without a terminal to ask on, as for any script.
+        Command::Run(args) => check_run_request(&args, false).map(|_| ()),
+        other => panic!("unexpected {other:?}"),
+    };
+    result.unwrap_err().to_string()
+}
+
+#[tokio::test]
+async fn session_commands_refuse_missing_contradictory_or_retired_selectors_before_effects() {
+    for (argv, message) in [
+        (
+            vec!["cw", "attach"],
+            "missing environment: `cw attach ENV` attaches to its session; `cw attach --session SESSION` attaches in the selected environment",
+        ),
+        (
+            vec!["cw", "attach", "app", "coding"],
+            "`cw attach ENV SESSION` no longer selects a session; use `cw attach app --session coding`",
+        ),
+        (
+            vec!["cw", "attach", "app", "--in", "app"],
+            "name the environment once: `cw attach ENV` or `cw attach --in ENV`, not both",
+        ),
+        (
+            vec!["cw", "send", "app", "coding", "text"],
+            "`cw send ENV SESSION TEXT` no longer selects a session; use `cw send app --session coding TEXT`",
+        ),
+        (
+            vec!["cw", "send", "coding", "text"],
+            "missing session: `cw send coding --session SESSION` (`cw ls coding` lists its sessions)",
+        ),
+        (
+            vec!["cw", "send", "--session", "coding"],
+            "missing TEXT: `cw send ENV --session SESSION TEXT`, or `--key KEY` for one key",
+        ),
+        (
+            vec!["cw", "send", "app", "--in", "app", "--session", "coding", "text"],
+            "name the environment once: `cw send ENV` or `cw send --in ENV`, not both",
+        ),
+        (
+            vec!["cw", "send", "app", "text", "--session", "coding", "--key", "enter"],
+            "--key sends one key and no TEXT: `cw send ENV --session SESSION --key KEY`",
+        ),
+        (
+            vec!["cw", "wait", "app", "coding"],
+            "`cw wait ENV SESSION` no longer selects a session; use `cw wait app --session coding`",
+        ),
+        (
+            vec!["cw", "wait", "coding"],
+            "missing session: `cw wait coding --session SESSION` (`cw ls coding` lists its sessions)",
+        ),
+        (
+            vec!["cw", "wait", "--in", "app", "--session", "coding", "--message", "task-id"],
+            "a message ID already names its session; run `cw wait --message task-id` without ENV or SESSION",
+        ),
+        (
+            vec!["cw", "--cloud", "wait", "--message", "task-id"],
+            "a message ID already names its session and environment; run `cw wait --message task-id` without --local or --cloud",
+        ),
+        (
+            vec!["cw", "shell", "app", "--in", "app"],
+            "name the environment once: `cw shell ENV` or `cw shell --in ENV`, not both",
+        ),
+        (
+            vec!["cw", "--local", "shell", "--stdio", "cw-app"],
+            "`cw shell --stdio` is the OpenSSH ProxyCommand for cloud environments; for a local VM run `cw shell ENV`",
+        ),
+        (
+            vec!["cw", "vscode", "app", "--in", "app"],
+            "name the environment once: `cw vscode ENV` or `cw vscode --in ENV`, not both",
+        ),
+        (
+            vec!["cw", "vscode", "--local", "app"],
+            "`cw vscode` opens cloud environments; for a local VM use `cw shell ENV`",
+        ),
+        (
+            vec!["cw", "run"],
+            "`cw run` needs an agent or a command: `cw run claude --in ENV`, `cw run codex --in ENV`, or `cw run --in ENV -- COMMAND`",
+        ),
+        (
+            vec!["cw", "run", "claude", "--in", "app", "--name", "a/b"],
+            "--name \"a/b\" is not a session name: 1 to 64 letters, digits, dots, underscores or hyphens, starting with a letter or digit",
+        ),
+    ] {
+        assert_eq!(selector_error(&argv).await, message, "{argv:?}");
+    }
+    #[cfg(unix)]
+    for (argv, message) in [
+        (
+            vec!["cw", "interrupt", "app", "review"],
+            "`cw interrupt ENV SESSION` no longer selects a session; use `cw interrupt app --session review`",
+        ),
+        (
+            vec!["cw", "interrupt"],
+            "missing session: `cw interrupt ENV --session SESSION`, or `cw interrupt --session SESSION` in the selected environment",
+        ),
+    ] {
+        assert_eq!(selector_error(&argv).await, message, "{argv:?}");
+    }
+}
+
+#[test]
+fn session_selectors_build_the_handler_target_from_flags() {
+    let parse = |argv: &[&str]| Cli::try_parse_from(argv).unwrap().command;
+    let Command::Send(args) = parse(&["cw", "send", "--session", "coding", "hello"]) else {
+        panic!("send expected");
+    };
+    let request = send_request(&args).unwrap();
+    assert_eq!(request.selection.values(), ["coding"]);
+    assert_eq!(request.data, b"hello\n");
+    let Command::Send(args) =
+        parse(&["cw", "send", "app", "--session", "coding", "partial", "--no-newline"])
+    else {
+        panic!("send expected");
+    };
+    let request = send_request(&args).unwrap();
+    assert_eq!(request.selection.values(), ["app", "coding"]);
+    assert_eq!(request.data, b"partial");
+    let Command::Send(args) = parse(&["cw", "send", "--in", "app", "--session", "coding", "--key", "ctrl-c"])
+    else {
+        panic!("send expected");
+    };
+    let request = send_request(&args).unwrap();
+    assert_eq!(request.selection.values(), ["app", "coding"]);
+    assert_eq!(request.data, [3]);
+    let Command::Send(args) = parse(&["cw", "send", "app", "--session", "coding", "--key", "enter"]) else {
+        panic!("send expected");
+    };
+    assert_eq!(send_request(&args).unwrap().selection.values(), ["app", "coding"]);
+
+    let Command::Wait(args) = parse(&["cw", "wait", "--in", "app", "--session", "build"]) else {
+        panic!("wait expected");
+    };
+    assert_eq!(wait_selection(&args).unwrap().unwrap().values(), ["app", "build"]);
+    let Command::Wait(args) = parse(&["cw", "wait", "--message", "task-id"]) else {
+        panic!("wait expected");
+    };
+    assert_eq!(wait_selection(&args).unwrap(), None);
+
+    #[cfg(unix)]
+    {
+        let Command::Interrupt(args) =
+            parse(&["cw", "interrupt", "--session", "review", "-o", "json"])
+        else {
+            panic!("interrupt expected");
+        };
+        let target = selector_target("interrupt", args).unwrap();
+        assert_eq!(target.target, ["review"]);
+        assert!(matches!(target.output, OutputFormat::Json));
+        let Command::Interrupt(args) = parse(&["cw", "interrupt", "app", "--session", "review"])
+        else {
+            panic!("interrupt expected");
+        };
+        assert_eq!(selector_target("interrupt", args).unwrap().target, ["app", "review"]);
+    }
 }
 
 /// The scope errors `stop`, `restart` and `logs` give before any lookup.
@@ -453,9 +641,7 @@ fn update_takes_environment_names_that_once_were_updater_subcommands() {
 fn placement_is_refused_by_commands_that_do_not_read_it() {
     for (argv, name) in [
         (vec!["cw", "--local", "login"], "login"),
-        (vec!["cw", "run", "--cloud", "app", "--", "true"], "run"),
-        (vec!["cw", "--local", "attach", "app"], "attach"),
-        (vec!["cw", "--cloud", "shell", "app"], "shell"),
+        (vec!["cw", "--cloud", "whoami"], "whoami"),
         (vec!["cw", "--local", "upgrade", "status"], "upgrade"),
         (vec!["cw", "--cloud", "help"], "help"),
     ] {
@@ -472,12 +658,36 @@ fn placement_is_refused_by_commands_that_do_not_read_it() {
         assert_eq!(error.to_string(), format!("{flag} does not apply to `cw {name}`"));
     }
     for argv in [
+        vec!["cw", "run", "--cloud", "claude", "--in", "app"],
+        vec!["cw", "--local", "run", "--in", "app", "--", "true"],
+        vec!["cw", "--local", "attach", "app"],
+        vec!["cw", "attach", "--session", "coding", "--cloud"],
+        vec!["cw", "--cloud", "shell", "app"],
+        vec!["cw", "--local", "send", "--session", "coding", "text"],
+        vec!["cw", "--local", "wait", "--session", "coding"],
+        vec!["cw", "--cloud", "vscode", "app"],
         vec!["cw", "--local", "stop", "app"],
         vec!["cw", "stop", "app", "--cloud"],
         vec!["cw", "--cloud", "credentials", "list"],
         vec!["cw", "secrets", "--local", "--user", "list"],
         vec!["cw", "--local", "use", "app"],
         vec!["cw", "--cloud", "prune"],
+    ] {
+        let matches = crate::cli_command().try_get_matches_from(argv.clone()).unwrap();
+        let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();
+        crate::validate_placement_scope(
+            &cli.command,
+            matches.subcommand_name().unwrap(),
+            cli.placement().unwrap(),
+            false,
+        )
+        .unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+    }
+    // The managed session controls, which exist only on Unix, read it too.
+    #[cfg(unix)]
+    for argv in [
+        vec!["cw", "--cloud", "interrupt", "--session", "review"],
+        vec!["cw", "--local", "steer", "app", "review", "text"],
     ] {
         let matches = crate::cli_command().try_get_matches_from(argv.clone()).unwrap();
         let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();
@@ -582,6 +792,7 @@ fn orchestration_arguments_preserve_terminal_and_semantic_boundaries() {
         "cw",
         "send",
         "host-team",
+        "--session",
         "shell",
         "partial",
         "--no-newline",
@@ -591,10 +802,13 @@ fn orchestration_arguments_preserve_terminal_and_semantic_boundaries() {
     else {
         panic!("send expected");
     };
-    assert_eq!(args.target_and_text, ["host-team", "shell", "partial"]);
+    assert_eq!(args.first.as_deref(), Some("host-team"));
+    assert_eq!(args.second.as_deref(), Some("partial"));
+    assert_eq!(args.session.as_deref(), Some("shell"));
     assert!(args.no_newline);
     assert!(
-        Cli::try_parse_from(["cw", "send", "shell", "--no-newline", "--key", "ctrl-c"]).is_err()
+        Cli::try_parse_from(["cw", "send", "--session", "shell", "--no-newline", "--key", "ctrl-c"])
+            .is_err()
     );
     // The inventory filters parse beside ENV and are refused before any lookup.
     assert!(Cli::try_parse_from(["cw", "ls", "--all", "host-team"]).is_ok());
@@ -603,18 +817,13 @@ fn orchestration_arguments_preserve_terminal_and_semantic_boundaries() {
 #[tokio::test]
 async fn wait_for_a_message_explains_that_its_id_names_the_session() {
     let Command::Wait(args) =
-        Cli::try_parse_from(["cw", "wait", "builder", "shell", "--message", "task-id"])
+        Cli::try_parse_from(["cw", "wait", "builder", "--session", "shell", "--message", "task-id"])
             .unwrap()
             .command
     else {
         panic!("wait expected");
     };
-    let globals = Globals {
-        server: None,
-        member: None,
-        placement: None,
-    };
-    let error = handle_wait_command(&globals, args).await.unwrap_err();
+    let error = handle_wait_command(&no_placement(), args).await.unwrap_err();
     assert_eq!(
         error.to_string(),
         "a message ID already names its session; run `cw wait --message task-id` without ENV or SESSION"

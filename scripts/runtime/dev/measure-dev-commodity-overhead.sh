@@ -241,7 +241,7 @@ wait_for_cw_run() {
   out="$OUT_DIR/cw-run-ready.err"
   deadline=$(( "$(date +%s)" + MEASURE_TIMEOUT_SECONDS ))
   while (( "$(date +%s)" < deadline )); do
-    if cw_with_timeout 30 run --no-tty "$MEASURE_ENV_ID" -- true > /dev/null 2>"$out"; then
+    if cw_with_timeout 30 run --no-tty --in "$MEASURE_ENV_ID" -- true > /dev/null 2>"$out"; then
       return
     fi
     last="$(sed 's/[[:cntrl:]]//g' "$out" | tail -n 1)"
@@ -313,7 +313,7 @@ printf "=== docker system df ===\n"
 docker system df || true
 '
   cw_with_timeout "$MEASURE_TIMEOUT_SECONDS" \
-    run --no-tty "$MEASURE_ENV_ID" -- sh -lc "$workspace_script" \
+    run --no-tty --in "$MEASURE_ENV_ID" -- sh -lc "$workspace_script" \
     >"$OUT_DIR/workspace-idle.txt" 2>"$OUT_DIR/workspace-idle.err"
 
   dind_script='
@@ -408,7 +408,7 @@ SCRIPT
 )"
 
   cw_with_timeout "$MEASURE_TIMEOUT_SECONDS" \
-    run --no-tty "$MEASURE_ENV_ID" -- sh -lc "$load_script" \
+    run --no-tty --in "$MEASURE_ENV_ID" -- sh -lc "$load_script" \
     >"$OUT_DIR/docker-load.txt" 2>"$OUT_DIR/docker-load.err"
 }
 

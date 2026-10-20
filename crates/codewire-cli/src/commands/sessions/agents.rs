@@ -1760,8 +1760,9 @@ fn host_message_record(
 
 pub(crate) async fn handle_agent_interrupt_command(
     globals: &Globals,
-    args: SessionTargetArgs,
+    args: SessionSelectorArgs,
 ) -> anyhow::Result<()> {
+    let args = selector_target("interrupt", args)?;
     #[cfg(target_os = "linux")]
     if globals.member.is_some() {
         return super::super::member_control::managed::action(
@@ -2809,7 +2810,7 @@ impl Peer {
         let member_custody = guest.is_some();
         #[cfg(not(target_os = "linux"))]
         let member_custody = false;
-        // `cw run "$CW_ENVIRONMENT" --parent "$CW_SESSION_ID"` launches a
+        // `cw run --in "$CW_ENVIRONMENT" --parent "$CW_SESSION_ID"` launches a
         // worker under this conversation.
         match conversation_identity(
             &driver.environment,

@@ -260,7 +260,7 @@ class Journey:
 
     def launch(self, name, command=None, agent=None, parent=None, prompt=None, model=None, ok=True, detach=True,
                env=()):
-        args = ["run", self.environment, "--name", name]
+        args = ["run", "--in", self.environment, "--name", name]
         if detach:
             args += ["--detach"]
         args += ["--output", "json"]
@@ -317,17 +317,17 @@ class Journey:
         self.check("create/empty")
 
         self.launch("identity", ["sh", "-c", 'printf "%s|%s" "${CW_ENVIRONMENT-unset}" "${CW_SESSION_ID-unset}"'])
-        assert self.call("wait", self.environment, "identity", "--timeout", "10s").stdout == "unset|unset"
+        assert self.call("wait", self.environment, "--session", "identity", "--timeout", "10s").stdout == "unset|unset"
         self.check("ordinary-session-inherits-no-conversation-identity")
 
         self.launch("reader", ["sh", "-c", 'read -r value; printf "RECEIVED:%s" "$value"'])
-        self.call("send", self.environment, "reader", "part", "--no-newline")
-        self.call("wait", self.environment, "reader", "--timeout", "1s", ok=False)
-        self.call("send", self.environment, "reader", "--", "-rest")
-        waited = self.call("wait", self.environment, "reader", "--timeout", "10s", "--output", "json", data=True)
+        self.call("send", self.environment, "--session", "reader", "part", "--no-newline")
+        self.call("wait", self.environment, "--session", "reader", "--timeout", "1s", ok=False)
+        self.call("send", self.environment, "--session", "reader", "--", "-rest")
+        waited = self.call("wait", self.environment, "--session", "reader", "--timeout", "10s", "--output", "json", data=True)
         assert waited["output"] == "RECEIVED:part-rest" and waited["eof"], waited
         assert self.call("logs", self.environment, "--session", "reader").stdout == waited["output"]
-        self.call("run", self.environment, "--name", "reader", "--detach", "--", "true", ok=False)
+        self.call("run", "--in", self.environment, "--name", "reader", "--detach", "--", "true", ok=False)
         self.check("acknowledged-send/partial/wait/logs/unique-name")
 
         if not self.native:
@@ -353,7 +353,7 @@ class Journey:
         message = self.call("msg", self.environment, "lead", text, "--output", "json", data=True)
         complete = self.wait_message(message["id"])
         assert complete["state"] == "completed" and complete["native_acknowledged"], complete
-        self.call("send", self.environment, "lead", "raw", ok=False)
+        self.call("send", self.environment, "--session", "lead", "raw", ok=False)
         if not self.native:
             self.knows_itself("codex", "lead")
         self.check("managed-task/completion/raw-input-rejection")
@@ -378,14 +378,14 @@ class Journey:
             self.call("stop", self.environment, "--session", "lead")
             restarted = self.call("restart", self.environment, "--session", "lead", "--output", "json", data=True)[0]
             assert restarted["session_id"] == parent["session_id"], restarted
-            command = [self.cw, "run", self.environment, "--name", "lead-command", "--detach", "--no-tty", "--", "printf", "LEAD_COMMAND"]
+            command = [self.cw, "run", "--in", self.environment, "--name", "lead-command", "--detach", "--no-tty", "--", "printf", "LEAD_COMMAND"]
             text = ("Run this exact command once, using your command tool: " +
                     " ".join(__import__("shlex").quote(a) for a in command) +
                     ". Do not run any other command or edit files. Then reply LEAD_COMMAND_STARTED.")
             message = self.call("msg", self.environment, "lead", text, "--output", "json", data=True)
             result = self.wait_message(message["id"])
             assert result["state"] == "completed", result
-            output = self.call("wait", self.environment, "lead-command", "--timeout", "10s").stdout
+            output = self.call("wait", self.environment, "--session", "lead-command", "--timeout", "10s").stdout
             assert output == "LEAD_COMMAND", output
             assert self.inbox("lead")["driver"]["native_thread_id"] == saved_thread
             self.check("codex-resume/lead-initiated-cw-command/actual-host-policy")
@@ -411,7 +411,7 @@ class Journey:
             holding = self.call("msg", self.environment, "worker", "HOLD", "--output", "json", data=True)
             # Acceptance precedes the driver's active-turn publication.
             self.until(lambda: self.inbox("worker"), lambda v: v["driver"]["active_message_id"] == holding["id"])
-            interrupted = self.call("interrupt", self.environment, "worker", "--output", "json", data=True)
+            interrupted = self.call("interrupt", self.environment, "--session", "worker", "--output", "json", data=True)
             assert self.wait_message(interrupted["id"])["state"] == "completed"
             assert self.wait_message(holding["id"], ok=False)["state"] == "interrupted"
             self.check("expected-turn-steer/claude-interrupt")
@@ -419,7 +419,7 @@ class Journey:
             if LINUX:
                 self.prove_noel()
             else:
-                refused = self.call("run", self.environment, "--name", "noel", "--agent", "noel",
+                refused = self.call("run", "--in", self.environment, "--name", "noel", "--agent", "noel",
                                     "--model", "faux/echo", "--detach", ok=False)
                 assert "only on trusted Linux hosts" in refused.stderr, refused.stderr
                 self.check("noel-refused-on-macos")
@@ -464,10 +464,10 @@ class Journey:
         self.check("graceful-shutdown/reload/workspace-preserved")
 
         # A new process owner must not recover inline launch values from disk.
-        projected = self.call("run", self.environment, "--name", "projection", "--detach", "--no-tty",
+        projected = self.call("run", "--in", self.environment, "--name", "projection", "--detach", "--no-tty",
                               "--env", "CW_FIXTURE_VALUE=synthetic-only", "--output", "json", "--",
                               "sh", "-c", 'printf %s "$CW_FIXTURE_VALUE"', data=True)
-        assert self.call("wait", self.environment, "projection", "--timeout", "10s").stdout == "synthetic-only"
+        assert self.call("wait", self.environment, "--session", "projection", "--timeout", "10s").stdout == "synthetic-only"
         metadata = self.root / "hosts" / self.environment / "sessions" / projected["session_id"] / "session.json"
         assert "synthetic-only" not in metadata.read_text() and '"env"' not in metadata.read_text()
         self.call("stop", "--local", self.environment)
@@ -883,7 +883,7 @@ class Journey:
             for command, piece in (("color", b"\x1b["),
                                    ("text", b"32mCLI_LOGS_FOLLOW_END\x1b"),
                                    ("reset", b"[0m\n")):
-                self.call("send", self.environment, "history", command)
+                self.call("send", self.environment, "--session", "history", command)
                 live_end += len(piece)
                 self.until(lambda: self.call("ls", self.environment, "--output", "json", data=True),
                            lambda views: any(v["name"] == "history" and
@@ -899,7 +899,7 @@ class Journey:
                 if follower.poll() is None:
                     follower.terminate()
                     follower.wait(timeout=5)
-        self.call("wait", self.environment, "history", "--timeout", "10s")
+        self.call("wait", self.environment, "--session", "history", "--timeout", "10s")
         self.check("logs/paginated-history/final-tail/raw-ansi/bounded-read/follow-cursor")
 
     def prove_outbox_recovery(self):
@@ -1082,9 +1082,9 @@ class Journey:
     def prove_noel(self):
         """noel over its RPC protocol, against the synthetic noel peer."""
         env = self.environment
-        refused = self.call("run", env, "--name", "noel-bare", "--agent", "noel", "--detach", ok=False)
+        refused = self.call("run", "--in", env, "--name", "noel-bare", "--agent", "noel", "--detach", ok=False)
         assert "needs --model PROVIDER/ID" in refused.stderr, refused.stderr
-        refused = self.call("run", env, "--name", "noel-ultra", "--agent", "noel", "--model", "faux/echo",
+        refused = self.call("run", "--in", env, "--name", "noel-ultra", "--agent", "noel", "--model", "faux/echo",
                             "--effort", "ultra", "--detach", ok=False)
         assert "noel --effort supports" in refused.stderr, refused.stderr
         # A pi build from before its RPC protocol answers JSON-RPC: startup
@@ -1157,7 +1157,7 @@ class Journey:
         holding, run = self.held("noel-lead", "HOLD")
         waiting = self.call("steer", env, "noel-lead", "WAIT", "--output", "json", data=True)
         assert waiting["native_acknowledged"], waiting
-        interrupted, abort_time = self.timed("interrupt", env, "noel-lead", "--output", "json")
+        interrupted, abort_time = self.timed("interrupt", env, "--session", "noel-lead", "--output", "json")
         interrupted = json.loads(interrupted.stdout)
         assert self.wait_message(interrupted["id"])["state"] == "completed"
         assert self.wait_message(holding["id"], ok=False)["state"] == "interrupted"
@@ -1554,7 +1554,7 @@ class Journey:
                                          "--output", "json")
         steered = json.loads(steered.stdout)
         assert steered["native_acknowledged"] and steered["turn_id"] == run, steered
-        interrupted, abort_time = self.timed("interrupt", env, "noel-slow", "--output", "json")
+        interrupted, abort_time = self.timed("interrupt", env, "--session", "noel-slow", "--output", "json")
         interrupted = json.loads(interrupted.stdout)
         assert self.wait_message(interrupted["id"])["state"] == "completed"
         story = self.wait_message(story["id"], ok=False)
@@ -1976,9 +1976,9 @@ class Journey:
             # The lead reads its skill, launches a worker of each agent and
             # then the first again, with the launch commands as written.
             said, task = [{"text": "Noted."}], "Count the lighthouses."
-            launch = skill('run "$CW_ENVIRONMENT" --agent noel',
+            launch = skill('run --in "$CW_ENVIRONMENT" --agent noel',
                            {"PROVIDER/ID": "faux/echo", "NAME": worker, "TASK": task})
-            reviews = {agent: skill(f'run "$CW_ENVIRONMENT" --agent {agent}',
+            reviews = {agent: skill(f'run --in "$CW_ENVIRONMENT" --agent {agent}',
                                     {"NAME": f"review-{agent}", "TASK": f"Review the count as {agent}."})
                        for agent in ("codex", "claude")}
             read, launched, codex, claude, again, *_ = respond(

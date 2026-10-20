@@ -22,9 +22,9 @@ unset, delegation is unavailable here: say so instead of guessing values.
 ## Launch a worker
 
 ```sh
-{{cw}} run "$CW_ENVIRONMENT" --agent codex --parent "$CW_SESSION_ID" --name NAME --detach --prompt 'TASK'
-{{cw}} run "$CW_ENVIRONMENT" --agent claude --parent "$CW_SESSION_ID" --name NAME --detach --prompt 'TASK'
-{{cw}} run "$CW_ENVIRONMENT" --agent noel --model PROVIDER/ID --parent "$CW_SESSION_ID" --name NAME --detach --prompt 'TASK'
+{{cw}} run --in "$CW_ENVIRONMENT" --agent codex --parent "$CW_SESSION_ID" --name NAME --detach --prompt 'TASK'
+{{cw}} run --in "$CW_ENVIRONMENT" --agent claude --parent "$CW_SESSION_ID" --name NAME --detach --prompt 'TASK'
+{{cw}} run --in "$CW_ENVIRONMENT" --agent noel --model PROVIDER/ID --parent "$CW_SESSION_ID" --name NAME --detach --prompt 'TASK'
 ```
 
 - `TASK` is all the worker needs to know: it does not see this conversation.
@@ -51,7 +51,7 @@ go on with your own part or end your turn. Do not poll and do not sleep.
 {{cw}} inbox "$CW_ENVIRONMENT" NAME
 {{cw}} msg "$CW_ENVIRONMENT" NAME 'TEXT'
 {{cw}} steer "$CW_ENVIRONMENT" NAME 'TEXT'
-{{cw}} interrupt "$CW_ENVIRONMENT" NAME
+{{cw}} interrupt "$CW_ENVIRONMENT" --session NAME
 {{cw}} stop "$CW_ENVIRONMENT" --session NAME
 {{cw}} stop "$CW_ENVIRONMENT" --session NAME --all
 ```

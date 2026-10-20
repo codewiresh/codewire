@@ -185,7 +185,7 @@ cw_runtime_managed_after_restart() {
     echo "::error::an ordinary command after Stop/Start ended ${state:-unknown}" >&2
     return 1
   }
-  launched="$(kind_credential_cli run "$environment" --agent codex --output json)"
+  launched="$(kind_credential_cli run --in "$environment" --agent codex --output json)"
   session="$(jq -er '(.sessionId // .session_id)
     | select(type == "string" and test("^session-[0-9a-f-]{36}$"))' <<<"$launched")"
   kind_credential_cli stop "$environment" --session "$session" --output json >/dev/null
@@ -424,7 +424,7 @@ cw_runtime_managed_resume_continues() {
   wait_kind_credential_environment "$environment" running
   wait_kind_credential_restarted_workspace "$environment" "$operation" >/dev/null
   wait_kind_credential_setup_complete "$environment"
-  launched="$(kind_credential_cli run "$environment" --name resume-check --agent codex \
+  launched="$(kind_credential_cli run --in "$environment" --name resume-check --agent codex \
     --detach --output json --prompt 'Return the synthetic reply before Stop/Start.')"
   session="$(jq -er '(.sessionId // .session_id)
     | select(type == "string" and test("^session-[0-9a-f-]{36}$"))' <<<"$launched")"

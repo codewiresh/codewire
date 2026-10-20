@@ -946,6 +946,7 @@ async fn journey(
         .json(
             &[
                 "run",
+                "--in",
                 env,
                 "--name",
                 "local-sentinel",
@@ -1071,6 +1072,7 @@ async fn journey(
                 &input,
                 "--expected-launch-generation",
                 "1",
+                "--session",
                 sid,
                 "real-member-input",
             ],
@@ -1088,6 +1090,7 @@ async fn journey(
                 "--member",
                 "target",
                 "wait",
+                "--session",
                 sid,
                 "--timeout",
                 "20s",
@@ -1171,6 +1174,7 @@ async fn journey(
                 "--member",
                 "target",
                 "wait",
+                "--session",
                 large_sid,
                 "--timeout",
                 "45s",
@@ -1251,6 +1255,7 @@ async fn journey(
                     "send",
                     "--expected-launch-generation",
                     "1",
+                    "--session",
                     held_sid,
                     "must-not-reach-replacement"
                 ],

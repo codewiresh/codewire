@@ -76,11 +76,12 @@ boot). A failed create leaves nothing behind.
 
 ```sh
 cw shell my-app                       # an interactive shell in the VM
-cw run my-app -- cargo test           # a durable session that streams output
-cw run my-app --name dev --detach -- npm run dev
-cw ls my-app                        # sessions in this environment
-cw logs my-app --session dev                    # saved output
-cw attach my-app dev                  # reattach; Ctrl+B d detaches
+cw run claude --in my-app             # Claude Code in the VM (or codex)
+cw run --in my-app -- cargo test      # a durable session that streams output
+cw run --in my-app --name dev --detach -- npm run dev
+cw ls my-app                          # sessions in this environment
+cw logs my-app --session dev          # saved output
+cw attach my-app --session dev        # reattach; Ctrl-B, then D detaches
 ```
 
 `cw use my-app` selects the environment so the session commands can omit it.

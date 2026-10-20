@@ -35,7 +35,7 @@ curl -fsSL https://get.codewire.sh | sh    # install cw
 cw setup --local                           # install the local VM runtime
 cw create --local --name my-app --path .
 cw shell my-app                            # a shell in the VM
-cw run my-app -- cargo test                # a durable session; cw ls, cw attach
+cw run claude --in my-app                  # Claude Code in the VM; Ctrl-B, then D detaches
 ```
 
 {{ card_grid(

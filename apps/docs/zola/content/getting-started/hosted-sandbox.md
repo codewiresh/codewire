@@ -61,8 +61,8 @@ The same form is in the dashboard: open your organization and choose
 
 ```sh
 cw shell my-app
-cw run my-app --name tests --no-tty -- make test
-cw wait my-app tests
+cw run --in my-app --name tests --no-tty -- make test
+cw wait my-app --session tests
 cw logs my-app --session tests
 ```
 
@@ -84,7 +84,7 @@ for Claude Code. Create one once, then create the sandbox with
 `cw update my-app --profile platform:NAME`.
 
 ```sh
-cw run my-app --name lead --agent codex --detach --prompt 'Review this repository and list the three riskiest files.'
+cw run --in my-app --name lead --agent codex --detach --prompt 'Review this repository and list the three riskiest files.'
 cw inbox my-app lead                       # the conversation so far
 cw wait --message MESSAGE_ID --timeout 10m # the reply to one message
 cw msg my-app lead 'Now propose tests for the first one.'

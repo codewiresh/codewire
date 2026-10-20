@@ -109,7 +109,7 @@ class DockerJourney(local_vm.LocalVmJourney):
         self.next_runtime = str(Path(next_runtime).resolve())
 
     def sh(self, script, timeout=600, ok=True):
-        return self.call("run", local_vm.NAME, "--no-tty", "--", "sh", "-c", script, ok=ok, timeout=timeout)
+        return self.call("run", "--in", local_vm.NAME, "--no-tty", "--", "sh", "-c", script, ok=ok, timeout=timeout)
 
     def docker_disk(self):
         disks = list((self.home / ".codewire/native-v1/engine/vms" / self.environment_id).rglob("docker.raw"))

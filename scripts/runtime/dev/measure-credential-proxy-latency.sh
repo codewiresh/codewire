@@ -154,7 +154,7 @@ done
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 log "environment=$ENV_ID requests=$REQUESTS warmup=$WARMUP out=$OUT_DIR"
 set +e
-timeout "$RUN_TIMEOUT_SECONDS" "${cw_command[@]}" run --no-tty "$ENV_ID" -- sh -c "$SANDBOX_SCRIPT" \
+timeout "$RUN_TIMEOUT_SECONDS" "${cw_command[@]}" run --no-tty --in "$ENV_ID" -- sh -c "$SANDBOX_SCRIPT" \
   codewire-proxy-latency "$REQUESTS" "$WARMUP" >"$OUT_DIR/samples.txt" 2>"$OUT_DIR/cw-run.err"
 status=$?
 set -e

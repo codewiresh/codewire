@@ -4,9 +4,9 @@ description: msg, steer, interrupt and inbox for managed Codex and Claude Code c
 weight: 3
 ---
 
-A managed conversation is started with `cw run --agent`; see
-[Sessions](@/cli/sessions.md#cw-run). These commands address it by `ENV` and
-`SESSION` (a single positional is the session in the selected environment).
+A managed conversation is started with `cw run --in ENV --agent codex|claude`;
+see [Sessions](@/cli/sessions.md#cw-run). These commands address it by `ENV`
+and `SESSION`; `interrupt` names the session with `--session`.
 
 ## cw msg
 
@@ -33,7 +33,7 @@ returns only after the agent accepts or refuses.
 ## cw interrupt
 
 ```sh
-cw interrupt [ENV] SESSION [-o json]
+cw interrupt [ENV] --session SESSION [-o json]
 ```
 
 Interrupts the current turn. Codex supports it natively; Claude Code when its
