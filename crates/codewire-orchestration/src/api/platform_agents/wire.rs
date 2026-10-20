@@ -131,7 +131,7 @@ pub(super) fn public_scope(
 }
 
 /// The platform does not run noel yet; trusted hosts do.
-pub(super) const NOEL_REFUSAL: &str = "noel managed conversations are qualified only on trusted Linux hosts (`cw env create --local --type host`); the platform does not run noel yet";
+pub(super) const NOEL_REFUSAL: &str = "noel managed conversations are qualified only on trusted Linux hosts (`cw --local create --type host`); the platform does not run noel yet";
 
 pub(super) fn agent(
     value: proto::EnvironmentAgentKind,

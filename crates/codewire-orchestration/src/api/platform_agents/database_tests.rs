@@ -1984,8 +1984,8 @@ database_case!(
                     .await,
                 &[
                     &format!("message {id}'s outcome is unknown"),
-                    &format!("run `cw stop {ENV} {}`", m.session_id),
-                    &format!("then `cw restart {ENV} {}`", m.session_id),
+                    &format!("run `cw stop {ENV} --session {}`", m.session_id),
+                    &format!("then `cw restart {ENV} --session {}`", m.session_id),
                 ],
             )?;
         }

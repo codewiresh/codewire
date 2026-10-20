@@ -18,7 +18,7 @@ use tokio::sync::broadcast;
 
 pub(crate) const ENVIRONMENT_LOGS_CHANNEL: &str = "environment_logs";
 /// Live follows one account may hold at once across this process: CLI
-/// starts, `cw env logs --follow` and dashboard setup views together.
+/// starts, `cw logs ENV --setup --follow` and dashboard setup views together.
 pub const MAX_LIVE_FOLLOWS_PER_ACCOUNT: usize = 8;
 /// Signals buffered for the slowest follower. A follower that falls further
 /// behind re-reads its environment instead.

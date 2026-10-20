@@ -165,7 +165,7 @@ fn a_refused_session_store_is_a_known_precondition_not_an_unknown_outcome() {
     assert!(matches!(
         &error,
         AppError::Precondition(message) if message.as_ref()
-            == "environment session store is refused; run `cw env daemon status` for the reason"
+            == "environment session store is refused; run `cw daemon status` for the reason"
     ));
 }
 

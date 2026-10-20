@@ -228,23 +228,21 @@ pub fn hint_for_code(code: &str) -> Option<&'static str> {
         "unsupported_agent" => "Valid agents: claude-code, codex, gemini-cli, aider",
         "secret_project_not_found" => "List secrets with 'cw secrets list'",
         "missing_input" => "Provide a repo URL, --image, or --preset",
-        "env_not_found" => "Check environment ID with 'cw env list'",
-        "invalid_state" => "Check environment state with 'cw env info'",
+        "env_not_found" => "Check environment ID with 'cw ls'",
+        "invalid_state" => "Check environment state with 'cw info'",
         "forbidden" => "Only org owners/admins can perform this action",
         "insufficient_scope" => "Request the codewire.api scope and re-authorize",
         "api_key_scope_violation" => {
             "Use a user credential for account-level or global admin operations"
         }
         "preset_in_use" => "Delete all environments using this preset first",
-        "quota_exceeded" => {
-            "Destroy unused environments with 'cw env destroy' or upgrade your plan"
-        }
+        "quota_exceeded" => "Destroy unused environments with 'cw rm' or upgrade your plan",
         // Go's CodeResourceLimit constant carries this wire value.
         "resource_limit_exceeded" => {
             "Reduce CPU/memory on active environments or upgrade your plan"
         }
         "rate_limited" => "Wait a moment before creating more environments",
-        "environment_protected" => "Unprotect with 'cw env unprotect <name>' first",
+        "environment_protected" => "Unprotect with 'cw unprotect <name>' first",
         "organization_write_blocked" => {
             "Wait for organization deletion to finish or retry the failed deletion"
         }
@@ -388,5 +386,23 @@ mod tests {
         assert_eq!(parsed["detail"], "GitHub not connected");
         assert!(parsed.get("code").is_none());
         assert!(parsed.get("hint").is_none());
+    }
+
+    #[test]
+    fn environment_hints_name_the_flat_cli_grammar() {
+        for (code, hint) in [
+            ("env_not_found", "Check environment ID with 'cw ls'"),
+            ("invalid_state", "Check environment state with 'cw info'"),
+            (
+                "quota_exceeded",
+                "Destroy unused environments with 'cw rm' or upgrade your plan",
+            ),
+            (
+                "environment_protected",
+                "Unprotect with 'cw unprotect <name>' first",
+            ),
+        ] {
+            assert_eq!(hint_for_code(code), Some(hint), "{code}");
+        }
     }
 }

@@ -925,7 +925,7 @@ fn daemon_repair_setup_is_idle(setup_complete: bool, setup_owner_status: Option<
     setup_complete && setup_owner_status.is_none()
 }
 
-/// `cw env daemon repair` upgrades the daemon: the replacement is built from
+/// `cw daemon repair` upgrades the daemon: the replacement is built from
 /// the Sandbox re-pinned to `support_image`, not from the one it was created
 /// with.
 async fn delete_workspace_pod_while_setup_idle(
@@ -1240,11 +1240,11 @@ async fn require_ready_daemon(
         )),
         v1::DaemonState::Unsupported | v1::DaemonState::UpgradeRequired => {
             Err(AppError::Precondition(
-                "environment daemon upgrade is required; run `cw env daemon repair`".into(),
+                "environment daemon upgrade is required; run `cw daemon repair`".into(),
             ))
         }
         v1::DaemonState::Unhealthy | v1::DaemonState::Unspecified => Err(AppError::Precondition(
-            "environment daemon is not ready; run `cw env daemon status`".into(),
+            "environment daemon is not ready; run `cw daemon status`".into(),
         )),
     }
 }
@@ -1333,7 +1333,7 @@ fn daemon_run_error(error: tonic::Status) -> AppError {
     tracing::warn!(code = ?error.code(), message = %error.message(), "environment daemon command RPC failed");
     match error.code() {
         tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => AppError::Precondition(
-            "environment daemon upgrade is required; run `cw env daemon repair`".into(),
+            "environment daemon upgrade is required; run `cw daemon repair`".into(),
         ),
         tonic::Code::InvalidArgument => {
             AppError::InternalMsg("environment daemon rejected the command stream".into())
@@ -1346,9 +1346,9 @@ fn daemon_run_error(error: tonic::Status) -> AppError {
 }
 
 /// The daemon's session store did not open, so the request ran nothing. Its
-/// reason (paths, modes, record checks) stays in `cw env daemon status`.
+/// reason (paths, modes, record checks) stays in `cw daemon status`.
 const SESSION_STORE_REFUSED: &str =
-    "environment session store is refused; run `cw env daemon status` for the reason";
+    "environment session store is refused; run `cw daemon status` for the reason";
 
 fn daemon_session_error(error: tonic::Status) -> AppError {
     tracing::warn!(code = ?error.code(), message = %error.message(), "environment daemon session RPC failed");
@@ -1356,7 +1356,7 @@ fn daemon_session_error(error: tonic::Status) -> AppError {
         tonic::Code::NotFound => AppError::NotFound("environment session not found".into()),
         tonic::Code::DataLoss => AppError::Precondition(SESSION_STORE_REFUSED.into()),
         tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => AppError::Precondition(
-            "environment daemon upgrade is required; run `cw env daemon repair`".into(),
+            "environment daemon upgrade is required; run `cw daemon repair`".into(),
         ),
         tonic::Code::InvalidArgument => {
             AppError::BadRequest("environment session request is invalid".into())
@@ -1423,7 +1423,7 @@ mod tests {
         assert!(matches!(
             daemon_session_error(tonic::Status::failed_precondition(private)),
             AppError::Precondition(message) if message.as_ref()
-                == "environment daemon upgrade is required; run `cw env daemon repair`"
+                == "environment daemon upgrade is required; run `cw daemon repair`"
         ));
         assert!(matches!(
             daemon_session_error(tonic::Status::internal(private)),

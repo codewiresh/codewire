@@ -96,7 +96,7 @@ fn file_client_error(error: DaemonClientError) -> AppError {
             },
             tonic::Code::AlreadyExists => AppError::Conflict("file already exists".into()),
             tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => AppError::Precondition(
-                "environment daemon upgrade is required; run `cw env daemon repair`".into(),
+                "environment daemon upgrade is required; run `cw daemon repair`".into(),
             ),
             tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled => {
                 AppError::Upstream("environment file transport was lost".into())
@@ -106,7 +106,7 @@ fn file_client_error(error: DaemonClientError) -> AppError {
         DaemonClientError::NotReady { state, .. } => daemon_readiness_error(state),
         DaemonClientError::MissingCapability { .. }
         | DaemonClientError::IncompatibleProtocol { .. } => AppError::Precondition(
-            "environment daemon upgrade is required; run `cw env daemon repair`".into(),
+            "environment daemon upgrade is required; run `cw daemon repair`".into(),
         ),
         DaemonClientError::Connect | DaemonClientError::RequestClosed => {
             AppError::Upstream("environment file transport was lost".into())
@@ -130,12 +130,10 @@ fn daemon_readiness_error(state: codewire_daemon_proto::daemon::v1::DaemonState)
             AppError::Precondition("environment daemon is still starting".into())
         }
         DaemonState::Unsupported | DaemonState::UpgradeRequired => AppError::Precondition(
-            "environment daemon upgrade is required; run `cw env daemon repair`".into(),
+            "environment daemon upgrade is required; run `cw daemon repair`".into(),
         ),
         DaemonState::Ready | DaemonState::Unhealthy | DaemonState::Unspecified => {
-            AppError::Precondition(
-                "environment daemon is not ready; run `cw env daemon status`".into(),
-            )
+            AppError::Precondition("environment daemon is not ready; run `cw daemon status`".into())
         }
     }
 }

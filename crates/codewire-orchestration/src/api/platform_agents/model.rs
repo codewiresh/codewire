@@ -578,8 +578,8 @@ pub(super) fn request_blocked(
              start a new conversation"
         ),
         (true, _) => format!(
-            "{name} {request_id}'s outcome is unknown; run `cw stop {environment} {session_id}`, \
-             then `cw restart {environment} {session_id}`"
+            "{name} {request_id}'s outcome is unknown; run `cw stop {environment} --session {session_id}`, \
+             then `cw restart {environment} --session {session_id}`"
         ),
     };
     AppError::Coded {
@@ -680,6 +680,31 @@ mod upgrade_tests {
         assert_eq!(
             fingerprint("fixture-actor", false, None, &mutation, &binding).unwrap(),
             FINGERPRINT
+        );
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    /// The way out of an unknown request names its one session with
+    /// `--session`; a second positional no longer selects a session.
+    #[test]
+    fn an_unknown_request_names_the_session_stop_and_restart() {
+        let request_id = Uuid::nil();
+        let AppError::Coded { code, detail, .. } =
+            request_blocked(ManagedAction::Message, request_id, true, "app", "coding")
+        else {
+            panic!("expected a coded refusal");
+        };
+        assert_eq!(code, "platform_agent_request_refused");
+        assert_eq!(
+            &*detail,
+            format!(
+                "message {request_id}'s outcome is unknown; \
+                 run `cw stop app --session coding`, then `cw restart app --session coding`"
+            )
         );
     }
 }
