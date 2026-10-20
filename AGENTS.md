@@ -154,12 +154,19 @@ changing it, and reconcile `origin/main` immediately before landing.
 
 ## Plans
 
-Plans, proposals, handoffs, goals and design history live in the sibling
-`codewire/private-docs` repository, checked out at `../private-docs`
-(`/home/user/src/codewire/private-docs` on the owner workstation), not in
-this repository. Write new plans there as `YYYY-MM-DD-<slug>.md`, commit and
-push them to its `main`, and link them from issues by path. Stable,
-shipped-behavior documentation stays under `docs/`.
+Designs, plans, proposals, handoffs, research and design history live in
+the sibling `codewire/private-docs` repository, checked out at
+`../private-docs` (`/home/user/src/codewire/private-docs` on the owner
+workstation), never in this repository. Its `AGENTS.md` says where each
+kind goes: `designs/` for living designs and specifications, `plans/` for
+dated plans and handoffs (`YYYY-MM-DD-<slug>.md`), `research/` for dated
+findings. Commit and push to its `main` from your own worktree. Link from
+issues by file name (`private-docs: designs/<name>`): file names there are
+stable, folders are not. It holds no control and no decisions: where a
+workstream stands is its Program's Forgejo body; standing rules are this
+file; a Program-scoped decision is that Program's `Boundaries`. Check both
+before asking the owner a question. Stable, shipped-behavior documentation
+stays under `docs/`.
 
 ## Worktree and artifact lifecycle
 
@@ -208,6 +215,25 @@ up to date with `main`, which branch protection requires, and merge on:
 - its product journey;
 - for a change to credential, broker, bridge or relay code, a green
   `make kind-test SUITES=credentials` on the retained cluster.
+
+Kind gates only platform, dashboard, and credential, broker, bridge or relay
+code. A CLI-only change merges on its unit tests, lints and host journey with
+a built `cw`, with no local Kind run; Kind confirms it after merge, and a
+failure there is fixed forward. A change that only rewrites `cw` callers in
+Kind suite scripts is covered by the offline script tests (owner, 2026-10-20,
+cited on #2940; the classifier follows in #2966).
+
+Prefer the faster build or CI option. State a binary-size or cost trade-off in
+one line; do not gate on it or add measurement rounds before a speed change,
+and measure afterwards on the real pipeline (owner, 2026-10-15, cited on
+#3013).
+
+Never build arm64 under emulation when the native arm64 builder exists; an
+emulated cross-architecture build in a pipeline is a defect. A release reuses
+its commit's published support images or builds them natively, and a release
+tag never points at a commit without them. When a protected build fails for an
+infrastructure reason, rerun it for that commit before the commit can become a
+release (owner, 2026-10-15, cited on #2892).
 
 When `main` moves after a check passed, bring the branch up to date again and
 reuse the result if the new commits touch none of the change's inputs. Rerun
@@ -350,13 +376,24 @@ weakening of the required local hardware gate.
   migrations; a migration is never a reason to skip a local or Kind run. To
   reset one, recreate it and rerun every migration (plus the checked-in
   fixtures). A backup before upgrading a retained cluster is a convenience, not
-  a gate. Hosted Dev and Production data are not disposable: they move only
-  forward through the reviewed migration path.
+  a gate. Only a downgrade, where a cluster's database is newer than the tree,
+  is refused (owner, 2026-10-15, cited on #3013). Hosted Dev and Production
+  data are not disposable: they move only forward through the reviewed
+  migration path.
 - Public/generated contracts ship generated clients, wrappers, and tests
   together.
 - Search existing users before adding global identifiers; send new packages and
   build inputs to every consumer.
 - Never add PAT or SSH deploy-key credentials for the GitHub mirror.
+- The cargo-hakari workspace-hack is a dev-dependency only, so shipped
+  binaries keep exactly their own dependency graph. Never move it to
+  `[dependencies]` without the owner (owner, 2026-10-12, cited on #3013;
+  landed in #2588).
+- A managed agent in a local VM qualifies and routes credentials exactly as in
+  a hosted Sandbox, from a platform profile or a local one, with the same
+  in-VM setup for every slot. When a VM lacks a placement's setup, port and
+  share the hosted code; never narrow what the VM accepts below the platform
+  (owner, 2026-10-15, cited on #2880).
 - In product language and public APIs, use `snapshot` only for saved state that
   can be reused or restored. Call child-visible values assembled for one
   process launch an `environment projection`. Call saved running-VM execution
