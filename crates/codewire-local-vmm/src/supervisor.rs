@@ -496,6 +496,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         live_runners: HashMap::new(),
         runtime_operations: BTreeSet::new(),
         incompatible_runners: BTreeSet::new(),
+        download_cache: BTreeMap::new(),
         retiring: false,
         operation_progress: operation_progress.clone(),
         log,
@@ -684,6 +685,12 @@ struct SupervisorCore {
     // pending-operation run is refused while this supervisor exits.
     retiring: bool,
     operation_progress: broadcast::Sender<OperationProgress>,
+    // The image blobs the latest registry pull verified. Content collection
+    // keeps them while no environment references them, so a failed create's
+    // retry resumes its downloads (#2952). Only image blobs, never a
+    // repository bundle; a later pull replaces them, a delete frees them, and
+    // a new supervisor starts without them.
+    download_cache: BTreeMap<Sha256Digest, u64>,
     // The bounded owner-only log its spawner gave this supervisor, if any.
     log: Option<DiagnosticLog>,
     _lock: SupervisorLock,
@@ -693,6 +700,7 @@ async fn resolve_workspace_image(
     reference: &RegistryReference,
     content: &ContentStore,
     pinned: Option<ResolvedImage>,
+    download_cache: &mut BTreeMap<Sha256Digest, u64>,
 ) -> Result<ResolvedImage, SupervisorError> {
     if let Some(image) = pinned {
         if image.source_reference != reference.original() {
@@ -701,9 +709,10 @@ async fn resolve_workspace_image(
         image.verify_cached(content)?;
         return Ok(image);
     }
-    Ok(RegistryResolver::new(content)?
-        .resolve_anonymous(reference)
-        .await?)
+    let resolver = RegistryResolver::new(content)?;
+    let resolved = resolver.resolve_anonymous(reference).await;
+    *download_cache = resolver.verified_blobs();
+    Ok(resolved?)
 }
 
 impl SupervisorCore {
@@ -1367,7 +1376,8 @@ impl SupervisorCore {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let content = ContentStore::create(&engine)?;
         let pinned = self.matching_synthetic_workspace_image(&reference)?;
-        let image = resolve_workspace_image(&reference, &content, pinned).await?;
+        let image =
+            resolve_workspace_image(&reference, &content, pinned, &mut self.download_cache).await?;
         let skill_snapshot = self
             .spawn_skill_snapshot_resolution(name, &project, &project_sha256, 1, None)?
             .await
@@ -1444,7 +1454,9 @@ impl SupervisorCore {
             let engine = PrivateRoot::open(&self.config.engine_root())?;
             let content = ContentStore::create(&engine)?;
             let pinned = self.matching_synthetic_workspace_image(&reference)?;
-            let image = resolve_workspace_image(&reference, &content, pinned).await?;
+            let image =
+                resolve_workspace_image(&reference, &content, pinned, &mut self.download_cache)
+                    .await?;
             (artifact_generation, image, DEFAULT_OCI_ROOT_DISK_BYTES)
         };
         let plan_generation = match self
@@ -1585,6 +1597,9 @@ impl SupervisorCore {
             }
             let (_, workspace_plan) = create_request_from_operation(&operation)?;
             retain_workspace_plan_content(&mut retained, &workspace_plan)?;
+        }
+        for (digest, size) in &self.download_cache {
+            retained.entry(digest.clone()).or_insert(*size);
         }
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let content = ContentStore::create(&engine)?;
@@ -5384,7 +5399,8 @@ impl LocalSupervisorService for SupervisorRpc {
                     "revoke_access": environment_uses_access_profile(environment)
                         .map_err(Status::from)?,
                 });
-                core.store
+                let operation = core
+                    .store
                     .begin_operation(
                         request_id,
                         Some(environment_id),
@@ -5392,7 +5408,12 @@ impl LocalSupervisorService for SupervisorRpc {
                         &payload,
                     )
                     .map_err(SupervisorError::from)
-                    .map_err(Status::from)?
+                    .map_err(Status::from)?;
+                // A delete someone asked for frees every downloaded layer no
+                // environment uses, the download cache included; a failed
+                // create's own rollback keeps the cache (#2952).
+                core.download_cache.clear();
+                operation
             }
         };
         let response = operation_proto(&operation)?;
@@ -9089,6 +9110,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            download_cache: BTreeMap::new(),
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
@@ -9776,6 +9798,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            download_cache: BTreeMap::new(),
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
@@ -13388,6 +13411,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            download_cache: BTreeMap::new(),
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
@@ -16709,6 +16733,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            download_cache: BTreeMap::new(),
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
@@ -16779,6 +16804,7 @@ mod tests {
             live_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
+            download_cache: BTreeMap::new(),
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
@@ -17376,5 +17402,111 @@ mod platform_github_tests {
     fn a_start_does_not_ask_an_authority_older_than_the_github_question() {
         assert_eq!(platform_github_askable(15), Err("authority_older"));
         assert_eq!(platform_github_askable(16), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod download_cache_tests {
+    use super::tests::{project_environment, test_supervisor_core, test_supervisor_service};
+    use super::*;
+
+    fn cached_layer() -> (Sha256Digest, &'static [u8]) {
+        let bytes: &'static [u8] = b"a layer the failed create downloaded";
+        let digest = Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(bytes))).unwrap();
+        (digest, bytes)
+    }
+
+    #[tokio::test]
+    async fn a_failed_creates_rollback_delete_keeps_the_download_cache() {
+        // Left in `error` and never provisioned, as a failed create leaves it;
+        // its rollback is a delete that runs every cleanup effect.
+        let mut failed = project_environment();
+        failed.state = StoredEnvironmentState::Error;
+        failed.generation = 0;
+        let (_parent, mut core) = test_supervisor_core(failed);
+        let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+        let content = ContentStore::create(&engine).unwrap();
+        let (layer, bytes) = cached_layer();
+        content
+            .admit_bytes(&layer, bytes::Bytes::from_static(bytes))
+            .await
+            .unwrap();
+        core.download_cache = BTreeMap::from([(layer.clone(), bytes.len() as u64)]);
+
+        core.begin_rollback_of_failed_creates().unwrap();
+        core.run_pending_operations(true).await.unwrap();
+        assert!(matches!(
+            core.environment("dev"),
+            Err(SupervisorError::NotFound(_))
+        ));
+        assert_eq!(core.download_cache.len(), 1);
+        assert!(
+            content
+                .contains_verified(&layer, bytes.len() as u64)
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_requested_delete_clears_the_download_cache() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let environment_id = core.environment("dev").unwrap().id;
+        let (layer, bytes) = cached_layer();
+        core.download_cache = BTreeMap::from([(layer, bytes.len() as u64)]);
+        let service = test_supervisor_service(core);
+
+        service
+            .delete_environment(Request::new(v1::EnvironmentSelector {
+                name: "dev".to_owned(),
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: environment_id.to_string(),
+            }))
+            .await
+            .unwrap();
+        assert!(service.core.lock().await.download_cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn collection_keeps_the_latest_pull_until_a_delete_frees_it() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+        let content = ContentStore::create(&engine).unwrap();
+        let admit = |bytes: &'static [u8]| {
+            let digest =
+                Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(bytes))).unwrap();
+            (digest, bytes)
+        };
+        let (layer, layer_bytes) = admit(b"a layer the failed create downloaded");
+        let (bundle, bundle_bytes) = admit(b"a repository bundle no environment owns");
+        for (digest, bytes) in [(&layer, layer_bytes), (&bundle, bundle_bytes)] {
+            content
+                .admit_bytes(digest, bytes::Bytes::from_static(bytes))
+                .await
+                .unwrap();
+        }
+        core.download_cache = BTreeMap::from([(layer.clone(), layer_bytes.len() as u64)]);
+
+        // A failed create's retry finds its layer; nothing else unreferenced
+        // is kept.
+        core.collect_unreferenced_content().unwrap();
+        assert!(
+            content
+                .contains_verified(&layer, layer_bytes.len() as u64)
+                .unwrap()
+        );
+        assert!(
+            !content
+                .contains_verified(&bundle, bundle_bytes.len() as u64)
+                .unwrap()
+        );
+
+        // A delete clears the cache before it collects.
+        core.download_cache.clear();
+        core.collect_unreferenced_content().unwrap();
+        assert!(
+            !content
+                .contains_verified(&layer, layer_bytes.len() as u64)
+                .unwrap()
+        );
     }
 }

@@ -143,13 +143,14 @@ impl NativeSupervisorClient {
         }
     }
 
-    /// A failed create removes what it recorded (#2491). Reading the
-    /// environment waits for that rollback, so the message says only what
-    /// is known: removed, kept, or unknown.
+    /// A failed create removes what it recorded (#2491); the image layers it
+    /// downloaded stay as download cache (#2952). Reading the environment
+    /// waits for that rollback, so the message says only what is known:
+    /// removed, kept, or unknown.
     async fn with_create_cleanup_outcome(&mut self, failure: Status, name: &str) -> Status {
         let outcome = match self.get(name).await {
             Err(status) if status.code() == tonic::Code::NotFound => {
-                " Nothing was kept.".to_owned()
+                " No environment was kept; the image layers it downloaded stay cached, so a retry resumes.".to_owned()
             }
             Ok(_) => format!(
                 " The failed environment could not be removed; run `cw env --local rm {name}`."

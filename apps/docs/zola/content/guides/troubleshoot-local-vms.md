@@ -58,9 +58,14 @@ A stop gives every process SIGTERM and up to 5 seconds, kills what remains,
 then unmounts the disks; a process that ignores SIGTERM makes the stop take
 about 5 seconds.
 
-A failed create leaves nothing behind: `cw` reports the cause and
-"Nothing was kept." once the environment is confirmed gone, or names
-`cw env --local rm NAME` when removal could not finish.
+A failed create leaves no environment, VM, disk or record behind. `cw`
+reports the cause and "No environment was kept" once the environment is
+confirmed gone, or names `cw env --local rm NAME` when removal could not
+finish. The image layers it already downloaded and verified stay cached, so
+a retry resumes the download instead of starting over. The cache holds only
+the latest pull's image layers, never a repository, and lasts until you
+delete a VM or the supervisor restarts; until then `cw doctor local` lists
+those layers as unreferenced content.
 
 ```sh
 cw doctor local                    # VM files and processes no environment owns; changes nothing

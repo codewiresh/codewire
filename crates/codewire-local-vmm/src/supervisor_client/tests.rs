@@ -548,7 +548,10 @@ async fn observe_sees_the_initial_and_each_non_terminal_update() {
 #[tokio::test]
 async fn a_failed_create_says_whether_its_rollback_removed_it() {
     for (present, expected) in [
-        (false, " Nothing was kept."),
+        (
+            false,
+            " No environment was kept; the image layers it downloaded stay cached, so a retry resumes.",
+        ),
         (
             true,
             " The failed environment could not be removed; run `cw env --local rm dev`.",

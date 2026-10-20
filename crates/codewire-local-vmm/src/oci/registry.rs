@@ -155,6 +155,9 @@ pub struct RegistryResolver<'a> {
     client: Client,
     document_timeout: Duration,
     store: &'a ContentStore,
+    // Every blob this resolver found verified in the store or admitted to it,
+    // so a caller can keep a failed pull's downloads as cache (#2952).
+    verified: std::sync::Mutex<BTreeMap<Sha256Digest, u64>>,
     architecture: OciArchitecture,
     base_override: Option<Url>,
     allow_plain_http: bool,
@@ -177,6 +180,7 @@ impl<'a> RegistryResolver<'a> {
             client: registry_client(true, READ_TIMEOUT)?,
             document_timeout: DOCUMENT_TIMEOUT,
             store,
+            verified: Default::default(),
             architecture: OciArchitecture::native()?,
             base_override: None,
             allow_plain_http: false,
@@ -204,10 +208,26 @@ impl<'a> RegistryResolver<'a> {
             client: registry_client(false, read_timeout)?,
             document_timeout,
             store,
+            verified: Default::default(),
             architecture,
             base_override: Some(base),
             allow_plain_http: true,
         })
+    }
+
+    /// The blobs this resolver found verified or admitted, whether or not its
+    /// resolution succeeded.
+    pub fn verified_blobs(&self) -> BTreeMap<Sha256Digest, u64> {
+        self.verified
+            .lock()
+            .map(|verified| verified.clone())
+            .unwrap_or_default()
+    }
+
+    fn record_verified(&self, digest: &Sha256Digest, size: u64) {
+        if let Ok(mut verified) = self.verified.lock() {
+            verified.insert(digest.clone(), size);
+        }
     }
 
     pub async fn resolve_anonymous(
@@ -351,6 +371,7 @@ impl<'a> RegistryResolver<'a> {
         self.store
             .admit_bytes(&digest, Bytes::copy_from_slice(&bytes))
             .await?;
+        self.record_verified(&digest, size);
         Ok(FetchedDocument {
             descriptor: ResolvedDescriptor {
                 media_type,
@@ -372,6 +393,7 @@ impl<'a> RegistryResolver<'a> {
             .store
             .contains_verified(&descriptor.digest, descriptor.size)?
         {
+            self.record_verified(&descriptor.digest, descriptor.size);
             return Ok(());
         }
         let mut attempt = 1;
@@ -384,6 +406,10 @@ impl<'a> RegistryResolver<'a> {
                     RegistryResolverError::Transport
                     | RegistryResolverError::Content(ContentStoreError::Stream),
                 ) if attempt < BLOB_ATTEMPTS => attempt += 1,
+                Ok(()) => {
+                    self.record_verified(&descriptor.digest, descriptor.size);
+                    return Ok(());
+                }
                 result => return result,
             }
         }
@@ -1132,6 +1158,18 @@ mod tests {
                 .contains_verified(&fixture.layer_digest, fixture.layer.len() as u64)
                 .unwrap()
         );
+        // The failed pull still reports what it verified, for the download
+        // cache (#2952), and never the layer it refused.
+        let verified = resolver.verified_blobs();
+        assert_eq!(
+            verified.get(&fixture.manifest_digest),
+            Some(&(fixture.manifest.len() as u64))
+        );
+        assert_eq!(
+            verified.get(&fixture.config_digest),
+            Some(&(fixture.config.len() as u64))
+        );
+        assert!(!verified.contains_key(&fixture.layer_digest));
     }
 
     #[tokio::test]
