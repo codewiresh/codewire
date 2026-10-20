@@ -5,6 +5,7 @@ The copy cases use private synthetic Git and a fake Docker API. No compiler,
 Docker daemon, incoming CW, provider network or host login is used.
 """
 
+import contextlib
 import copy
 import hashlib
 import importlib.util
@@ -450,6 +451,15 @@ class ReceiptTests(SyntheticSource):
                     artifact.reuse(self.root, self.receipt)
         with self.assertRaisesRegex(ValueError, "receipt file"):
             artifact.reuse(self.root, self.root)
+
+    def test_cli_reports_a_reuse_miss_with_its_reason(self):
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            self.assertEqual(artifact.cli(["reuse", str(self.root), str(self.receipt)]), 1)
+            self.assertEqual(artifact.cli(["seal", str(self.root)]), 1)
+        self.assertEqual(error.getvalue().splitlines(), [
+            "workspace image artifact: no matching verified image: invalid receipt file",
+            "workspace image artifact: seal failed: arguments"])
 
     def test_unknown_or_missing_receipt_fields_are_rejected(self):
         self.seal()
@@ -1011,12 +1021,52 @@ class CwCopyTests(unittest.TestCase):
             self.assertNotIn("CW_SYNTHETIC_SECRET_MUST_NOT_RENDER", str(error.exception))
             self.assert_closed()
 
-    def test_deadline_kills_only_owned_command_and_proves_cleanup(self):
+    def test_stall_bound_kills_only_owned_command_and_proves_cleanup(self):
         self.configure(mode="stall")
         started = time.monotonic()
-        with mock.patch.object(artifact, "CW_COPY_SECONDS", 0.5), self.assertRaises(ValueError):
+        with mock.patch.object(artifact, "CW_STALL_SECONDS", 0.5), \
+                self.assertRaisesRegex(ValueError, "docker run made no progress for 0.5 s"):
             self.verify()
         self.assertLess(time.monotonic() - started, 5)
+        self.assert_closed()
+
+    def test_slow_but_progressing_copy_is_not_a_stall(self):
+        # #2990: a fixed copy deadline failed finished builds under load. The
+        # copy now fails only when Docker stops making progress.
+        self.configure(mode="trickle")
+        started = time.monotonic()
+        with mock.patch.object(artifact, "CW_STALL_SECONDS", 2.0):
+            self.assertEqual(self.verify()["status"], "workspace-cw-verified")
+        self.assertGreater(time.monotonic() - started, 2.0)
+        self.assert_closed()
+
+    def test_slow_producer_admission_does_not_spend_the_copy_bound(self):
+        # #2990: reopening the producer took 80-128 s under load inside the
+        # copy's 180 s deadline. Admission is local work outside the bound.
+        real = artifact.cw_consumer
+
+        def slow_consumer(root):
+            consumer = real(root)
+            reopen = consumer.producer.reopen
+
+            def slow_reopen(*args, **kwargs):
+                time.sleep(1.0)
+                return reopen(*args, **kwargs)
+            consumer.producer.reopen = slow_reopen
+            return consumer
+        with mock.patch.object(artifact, "cw_consumer", slow_consumer), \
+                mock.patch.object(artifact, "CW_STALL_SECONDS", 0.5):
+            self.assertEqual(self.verify()["status"], "workspace-cw-verified")
+        self.assert_closed()
+
+    def test_failed_copy_names_its_cause_not_a_missing_image(self):
+        self.configure(mode="stall")
+        error = io.StringIO()
+        with mock.patch.object(artifact, "CW_STALL_SECONDS", 0.5), contextlib.redirect_stderr(error):
+            status = artifact.cli(["verify-cw", str(self.root), IMAGE_ID, str(self.reference)])
+        self.assertEqual(status, 1)
+        self.assertEqual(error.getvalue(), "workspace image artifact: verify-cw failed: "
+                         "workspace CW docker run made no progress for 0.5 s\n")
         self.assert_closed()
 
     def test_cancelled_copy_cannot_publish_positive_outcome(self):
@@ -1110,6 +1160,12 @@ elif arguments[:1]==['run']:
     if mode=='stderr-oversize':
         sys.stderr.buffer.write(b'e'*(64*1024+1));sys.stderr.buffer.flush()
     if mode=='stall': time.sleep(60)
+    if mode=='trickle':
+        step=len(data)//6+1
+        for offset in range(0,len(data),step):
+            if offset: time.sleep(0.5)
+            sys.stdout.buffer.write(data[offset:offset+step]);sys.stdout.buffer.flush()
+        data=b''
     if mode=='detach':
         child=os.fork()
         if child==0:

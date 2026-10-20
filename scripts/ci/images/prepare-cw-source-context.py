@@ -47,6 +47,9 @@ MAX_FILES = 16384
 MAX_OBJECTS = 65536
 MAX_DOCUMENT = 16 * 1024 * 1024
 MAX_GIT_REPLY = 16 * 1024 * 1024
+# A Git call that neither reads its input nor writes output for this long is
+# hung. Progress restarts the bound, so a large bounded read is never cut short.
+GIT_STALL_SECONDS = 60
 PREREQUISITES = (
     ".gitignore", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
     "images/cw-runtime/Dockerfile", "images/workspace/debian.sources",
@@ -123,7 +126,7 @@ def git(root, arguments, input_bytes=None, maximum=MAX_GIT_REPLY, git_dir=None):
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     output, error = bytearray(), bytearray()
     pending = memoryview(input_bytes or b"")
-    end = time.monotonic() + 60
+    end = time.monotonic() + GIT_STALL_SECONDS
     selector = selectors.DefaultSelector()
     try:
         for pipe, kind in ((process.stdout, "out"), (process.stderr, "err")):
@@ -136,8 +139,9 @@ def git(root, arguments, input_bytes=None, maximum=MAX_GIT_REPLY, git_dir=None):
             process.stdin.close()
         while selector.get_map():
             active()
-            require(time.monotonic() < end, "Git capture exceeded its deadline")
+            require(time.monotonic() < end, f"Git {arguments[0]} made no progress for {GIT_STALL_SECONDS} s")
             for key, _ in selector.select(0.1):
+                end = time.monotonic() + GIT_STALL_SECONDS
                 if key.data == "in":
                     count = os.write(key.fd, pending[:65536])
                     pending = pending[count:]
@@ -215,11 +219,37 @@ def head_objects(root, revision, entries, git_dir=None):
     return tree, objects
 
 
-def object_bytes(root, oid, kind):
-    data = git(root, ["cat-file", kind, oid], maximum=MAX_FILE)
-    framed = kind.encode() + b" " + str(len(data)).encode() + b"\0" + data
-    require(hashlib.sha1(framed).hexdigest() == oid, "Git object differs from its identity")
-    return zlib.compress(framed, 9), len(data)
+def object_closure(root, objects):
+    """Yield (oid, kind, compressed object, size) for each object, in oid order.
+
+    One bounded `git cat-file --batch` reads the whole closure. Each object must
+    have its expected type, fit MAX_FILE and hash to its identity, as a separate
+    `cat-file <kind> <oid>` read requires; one process per object made a large
+    tree spend most of its time starting Git.
+    """
+    names = sorted(objects)
+    if not names:
+        return
+    raw = git(root, ["cat-file", "--batch"], "".join(oid + "\n" for oid in names).encode(),
+              maximum=MAX_TOTAL + 128 * len(names))
+    offset = 0
+    for oid in names:
+        active()
+        kind = objects[oid]
+        end = raw.find(b"\n", offset, offset + 128)
+        require(end >= 0, "Git object batch header refused")
+        header = raw[offset:end].split(b" ")
+        require(len(header) == 3 and header[0] == oid.encode() and header[1] == kind.encode()
+                and header[2].isdigit() and len(header[2]) <= 12, "Git object batch header refused")
+        size = int(header[2])
+        start = end + 1
+        require(size <= MAX_FILE and len(raw) >= start + size + 1 and raw[start + size] == 0x0A,
+                "Git object batch framing refused")
+        framed = kind.encode() + b" " + str(size).encode() + b"\0" + raw[start:start + size]
+        require(hashlib.sha1(framed).hexdigest() == oid, "Git object differs from its identity")
+        offset = start + size + 1
+        yield oid, kind, zlib.compress(framed, 9), size
+    require(offset == len(raw), "Git object batch has unrequested output")
 
 
 def write_relative(root_fd, name, data, mode):
@@ -358,9 +388,7 @@ class CurrentSource:
             self.index = normalized_index(index_entries(git(self.source, ["ls-files", "--stage", "-z"])))
             tree, objects = head_objects(self.source, revision, index_entries(self.index))
             total = sum(binding["size"] for binding in model_value["files"].values())
-            for oid, kind in sorted(objects.items()):
-                active()
-                raw, size = object_bytes(self.source, oid, kind)
+            for _, _, raw, size in object_closure(self.source, objects):
                 total += len(raw) + size
                 require(total <= MAX_TOTAL, "current Git closure exceeds its byte bound")
             current = {"revision": revision, "git_tree": tree,
@@ -465,9 +493,7 @@ def prepare(source_root, revision, profile, version, output):
                          "prerequisites": list(PREREQUISITES)}
         # Finish capture and object admission before creating the output.
         copied_objects = {}
-        for oid, kind in sorted(objects.items()):
-            active()
-            raw, size = object_bytes(context.source, oid, kind)
+        for oid, kind, raw, size in object_closure(context.source, objects):
             total += size + len(raw)
             require(total <= MAX_TOTAL, "source and Git closure exceed their byte bound")
             copied_objects[oid] = raw

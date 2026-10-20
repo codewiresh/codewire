@@ -275,6 +275,37 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
             with self.assertRaises(FAILURES):
                 self.admits(capsule)
 
+    def test_capture_and_current_source_read_the_git_closure_in_one_batch(self):
+        # #2990: one Git process per object made a reopen of the repository
+        # spend 66 of 101 s starting Git under load.
+        reads = []
+        real = subprocess.Popen
+
+        def counted(command, *args, **kwargs):
+            if command[:2] == ["/usr/bin/git", "--no-optional-locks"] and command[2] == "cat-file":
+                reads.append(command[3])
+            return real(command, *args, **kwargs)
+        with mock.patch.object(source.subprocess, "Popen", side_effect=counted):
+            with self.prepare() as capsule:
+                objects = capsule.model["objects"]
+                self.assertEqual(reads.count("--batch"), 1)
+                current = source.CurrentSource(self.repo, capsule.model, self.revision)
+                current.close()
+        self.assertGreater(len(objects), 8)
+        self.assertEqual(reads.count("--batch"), 2)
+        self.assertEqual(set(reads), {"--batch", "commit"})
+
+    def test_git_closure_batch_refuses_missing_and_mistyped_objects(self):
+        index = source.index_entries(self.git("ls-files", "--stage", "-z"))
+        _, objects = source.head_objects(self.repo, self.revision, index)
+        read = {oid: (kind, size) for oid, kind, _, size in source.object_closure(self.repo, objects)}
+        self.assertEqual({oid: kind for oid, (kind, _) in read.items()}, objects)
+        blob = next(oid for oid, kind in sorted(objects.items()) if kind == "blob")
+        self.assertEqual(read[blob][1], len(self.git("cat-file", "blob", blob)))
+        for changed in ({**objects, blob: "tree"}, {**objects, "0" * 40: "blob"}):
+            with self.subTest(changed=len(changed)), self.assertRaises(source.Refused):
+                list(source.object_closure(self.repo, changed))
+
     def test_git_overrides_and_ambient_credentials_do_not_reach_cargo(self):
         projection = source.git_environment()
         self.assertEqual((projection["GIT_CONFIG_KEY_3"], projection["GIT_CONFIG_VALUE_3"]), ("maintenance.auto", "false"))

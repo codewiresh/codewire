@@ -51,7 +51,10 @@ INPUTS = (
 )
 MAXIMUM_ARCHIVE_BYTES = 80 * 1024 * 1024 * 1024
 MAXIMUM_DOCUMENT_BYTES = 4 * 1024 * 1024
-CW_COPY_SECONDS = 180
+# A Docker command that neither writes output nor exits for this long is hung.
+# Output restarts the bound, so a slow but progressing copy is never cut short,
+# and the producer's local admission before the copy never spends it.
+CW_STALL_SECONDS = 120
 CW_CLEANUP_SECONDS = 30
 CW_STDERR_BYTES = 64 * 1024
 CW_COPY_LABEL = "dev.codewire.workspace-cw-verification"
@@ -165,9 +168,9 @@ class CwCopyOwner:
     not grant name-prefix cleanup authority or imply that the container died.
     """
 
-    def __init__(self, consumer, directory, image_id, deadline):
+    def __init__(self, consumer, directory, image_id):
         self.consumer, self.owner, self.asset = consumer, consumer.owner, consumer.asset
-        self.directory, self.image_id, self.deadline = directory, image_id, deadline
+        self.directory, self.image_id = directory, image_id
         self.token = uuid.uuid4().hex
         self.name = "codewire-workspace-cw-" + self.token
         self.cidfile = directory / "cid"
@@ -206,11 +209,19 @@ class CwCopyOwner:
             if name == "docker" and os.listdir(held.fd):
                 raise ValueError("workspace CW Docker configuration is not empty")
 
+    def check(self, deadline, cleanup, action):
+        if not cleanup and self.owner.STOP is not None:
+            raise ValueError("workspace CW copy was cancelled")
+        if time.monotonic() >= deadline:
+            raise ValueError(f"workspace CW container cleanup exceeded its {CW_CLEANUP_SECONDS} s bound"
+                             if cleanup else f"workspace CW {action} made no progress for {CW_STALL_SECONDS} s")
+
     def run(self, arguments, maximum, consume=None, *, cleanup_deadline=None):
         self.revalidate()
-        deadline = cleanup_deadline if cleanup_deadline is not None else self.deadline
-        if time.monotonic() >= deadline or cleanup_deadline is None and self.owner.STOP is not None:
-            raise ValueError("workspace CW copy was cancelled or timed out")
+        cleanup = cleanup_deadline is not None
+        action = "docker " + arguments[0]
+        deadline = cleanup_deadline if cleanup else time.monotonic() + CW_STALL_SECONDS
+        self.check(deadline, cleanup, action)
         command = [self.docker, *arguments]
         output, count, error_count = bytearray(), 0, 0
         output_sha, error_sha = hashlib.sha256(), hashlib.sha256()
@@ -228,9 +239,10 @@ class CwCopyOwner:
                 terminal = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
                 if terminal and not selector.get_map():
                     break
-                if time.monotonic() >= deadline or cleanup_deadline is None and self.owner.STOP is not None:
-                    raise ValueError("workspace CW command was cancelled or timed out")
+                self.check(deadline, cleanup, action)
                 for event, _ in selector.select(min(0.05, max(0, deadline - time.monotonic()))):
+                    if not cleanup:
+                        deadline = time.monotonic() + CW_STALL_SECONDS
                     block = os.read(event.fileobj.fileno(), 64 * 1024)
                     if not block:
                         selector.unregister(event.fileobj)
@@ -390,15 +402,14 @@ def verify_cw(root, image_id, result_path):
         consumer = cw_consumer(root)
         try:
             return verify_cw_admitted(consumer, root, image_id, result_path)
-        except consumer.release.ReleaseError:
-            raise ValueError("workspace CW producer admission failed") from None
+        except consumer.release.ReleaseError as error:
+            raise ValueError(f"workspace CW producer admission failed: {error}") from None
     finally:
         sys.dont_write_bytecode = previous_bytecode
 
 
 def verify_cw_admitted(consumer, root, image_id, result_path):
     producer, asset = consumer.producer, consumer.asset
-    deadline = time.monotonic() + CW_COPY_SECONDS
     result_path = asset.path_arg(str(result_path))
     if result_path.name != "cw-producer-result.json" or result_path.parent.name != "cw-image-work":
         raise ValueError("workspace CW producer reference path is invalid")
@@ -419,8 +430,6 @@ def verify_cw_admitted(consumer, root, image_id, result_path):
         if identity["architecture"] != "amd64":
             raise ValueError("workspace static CW verification requires AMD64")
         selected_image = digest(image_id)
-        old_deadline = producer.source.DEADLINE
-        producer.source.DEADLINE = deadline
         saved_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
         old_stop = consumer.owner.STOP
         for sig in saved_handlers:
@@ -428,6 +437,8 @@ def verify_cw_admitted(consumer, root, image_id, result_path):
         owner = None
         accepted = False
         try:
+            # Admission reads only local files and bounded Git calls, as every
+            # reopen does. Only the Docker commands below have a stall bound.
             with producer.reopen(value["receipt"]["path"], value["receipt"]["sha256"], root,
                                  identity["source_sha"], WORKSPACE_CW_PROFILE, version) as admitted:
                 summary = admitted.summary
@@ -438,7 +449,7 @@ def verify_cw_admitted(consumer, root, image_id, result_path):
                 admitted.revalidate()
                 consumer.owner.arm_custody()
                 directory = Path(tempfile.mkdtemp(prefix=".workspace-cw-copy-", dir=result_path.parent))
-                owner = CwCopyOwner(consumer, directory, selected_image, deadline)
+                owner = CwCopyOwner(consumer, directory, selected_image)
                 try:
                     validate_image_value(identity, selected_image, owner.image())
                     actual_sha = owner.copy(summary["payload"]["size"])
@@ -449,14 +460,14 @@ def verify_cw_admitted(consumer, root, image_id, result_path):
                     with producer.source.git_scope():
                         if source_identity(root) != identity:
                             raise ValueError("workspace source changed during CW verification")
-                    if consumer.owner.STOP is not None or time.monotonic() >= deadline:
-                        raise ValueError("workspace CW copy was cancelled or timed out")
+                    if consumer.owner.STOP is not None:
+                        raise ValueError("workspace CW copy was cancelled")
                 finally:
                     owner.cleanup_container()
                 admitted.revalidate()
                 held.revalidate(content=True)
-                if consumer.owner.STOP is not None or time.monotonic() >= deadline:
-                    raise ValueError("workspace CW copy was cancelled or timed out")
+                if consumer.owner.STOP is not None:
+                    raise ValueError("workspace CW copy was cancelled")
                 accepted = True
                 return {"status": "workspace-cw-verified", "workspace_image_id": selected_image,
                         "payload": summary["payload"], "source": summary["source"],
@@ -471,7 +482,6 @@ def verify_cw_admitted(consumer, root, image_id, result_path):
                     finally:
                         owner.close()
             finally:
-                producer.source.DEADLINE = old_deadline
                 consumer.owner.STOP = old_stop
                 for sig, handler in saved_handlers.items():
                     signal.signal(sig, handler)
@@ -878,10 +888,27 @@ def main(argv):
         raise ValueError("arguments")
 
 
-if __name__ == "__main__":
+REUSE_MODES = ("reuse", "native-input", "reuse-for-build")
+
+
+def failure(mode, error):
+    """Name the step's own cause: a hung copy must not read as a mismatch."""
+    reason = str(error) if isinstance(error, ValueError) else f"{type(error).__name__}: {error}"
+    reason = " ".join(reason.split())[:400]
+    if mode in REUSE_MODES:
+        return "no matching verified image: " + reason
+    return (mode if mode in ("identity", "verify-cw", "seal") else "command") + " failed: " + reason
+
+
+def cli(argv):
     try:
-        main(sys.argv[1:])
+        main(argv)
     except (ValueError, OSError, KeyError, TypeError, AttributeError, tarfile.TarError,
-            subprocess.CalledProcessError):
-        print("workspace image artifact: no matching verified image", file=sys.stderr)
-        sys.exit(1)
+            subprocess.CalledProcessError) as error:
+        print("workspace image artifact: " + failure(argv[0] if argv else "", error), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))
