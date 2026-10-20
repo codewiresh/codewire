@@ -260,7 +260,8 @@ jobs:
       # The sandbox daemon `cw` comes from the exact-source daemon image, so the
       # workspace's own `cw` is not under test. When Kind takes the pin, the
       # selected exact-source workspace verification runs in Container contract
-      # verification instead, so no check is dropped.
+      # verification instead (in support-images on a push to main), so no check
+      # is dropped.
       - name: Choose the Kind workspace image source
         id: kind-workspace
         env:
@@ -286,6 +287,10 @@ jobs:
           DESKTOP_PACKAGE_SELECTED: ${{ steps.select.outputs.desktop_package_selected }}
           WORKSPACE_IMAGE_SELECTED: ${{ steps.select.outputs.workspace_image_selected }}
           KIND_WORKSPACE_SOURCE: ${{ steps.kind-workspace.outputs.kind_workspace_source }}
+          # A push to main leaves the exact-source workspace image to
+          # support-images, which runs the workspace contract on the exact
+          # image it publishes (#2892). Same value as the container scope below.
+          WORKSPACE_IMAGE_OWNER: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'support-images' || 'ci' }}
         run: |
           set -euo pipefail
           dispatch_selector='scripts/ci/select/emit-verification-matrices.sh'
@@ -450,6 +455,9 @@ jobs:
     # took 35 minutes cold (run 14199) and 22 warm (run 14254), most of it the
     # CW producer and the arm64 cw cross-compile; the apt steps fell from 52
     # minutes to seconds. The ceiling leaves the runner its cleanup margin.
+    # A push to main builds no workspace image here: support-images runs the
+    # contract on the exact image it publishes (#2892), so on main this job
+    # runs only the standalone dashboard image and the iOS tests.
     timeout-minutes: 55
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.workspace_image_expected == 'true' }}
@@ -472,43 +480,57 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
           WORKSPACE_IMAGE_SELECTED: ${{ needs.verification-selection.outputs.workspace_image_selected }}
           KIND_WORKSPACE_SOURCE: ${{ needs.verification-selection.outputs.kind_workspace_source }}
+          # Same value as the dispatch decision's owner.
+          WORKSPACE_IMAGE_OWNER: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'support-images' || 'ci' }}
         run: |
           set -euo pipefail
-          # Selected Kind owns the exact-source workspace build unless it runs
-          # the published pin; then this job keeps that verification.
-          if { [ "$WORKSPACE_IMAGE_SELECTED" = true ] \
-                && { [[ "$VERIFICATION_SELECTION" != *'|kind|'* ]] || [ "${KIND_WORKSPACE_SOURCE:-}" = pinned ]; }; } \
+          owner="${WORKSPACE_IMAGE_OWNER:-ci}"
+          case "$owner" in
+            ci|support-images) ;;
+            *) echo "::error::workspace image owner is invalid: $owner" >&2; exit 1 ;;
+          esac
+          # This job builds and verifies the exact-source workspace only when
+          # CI owns it: a push to main leaves it to support-images, which runs
+          # the contract on the exact image it publishes. Selected Kind owns it
+          # unless it runs the published pin; then this job keeps it.
+          workspace=false
+          if [ "$owner" = ci ] && [ "$WORKSPACE_IMAGE_SELECTED" = true ] \
+              && { [[ "$VERIFICATION_SELECTION" != *'|kind|'* ]] || [ "${KIND_WORKSPACE_SOURCE:-}" = pinned ]; }; then
+            workspace=true
+          fi
+          # The standalone dashboard image and the iOS tests run on every event.
+          selected=false
+          if [ "$workspace" = true ] \
               || [[ "$VERIFICATION_SELECTION" == *'|ios|'* ]] \
               || { [[ "$VERIFICATION_SELECTION" == *'|web|'* ]] \
                 && [[ "$VERIFICATION_SELECTION" != *'|kind|'* ]]; }; then
-            echo 'selected=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'selected=false' >> "$GITHUB_OUTPUT"
+            selected=true
           fi
+          printf 'workspace=%s\nselected=%s\n' "$workspace" "$selected" >> "$GITHUB_OUTPUT"
 
       - name: Container contracts not selected
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.selected != 'true' }}
-        run: echo 'standalone container work is unaffected or owned by selected Kind; no checkout, download, installation, or build required'
+        run: echo 'standalone container work is unaffected, owned by selected Kind, or on main owned by support-images; no checkout, download, installation, or build required'
 
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.selected == 'true' }}
 
       - name: Prove isolated Buildx load contract
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && (!contains(needs.verification-selection.outputs.selection, '|kind|') || needs.verification-selection.outputs.kind_workspace_source == 'pinned') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.workspace == 'true' }}
         run: |
           scripts/ci/tests/test-build-local-image.sh
           scripts/ci/tests/test-workspace-agent-contract.sh
           scripts/ci/verify/rehearse-build-local-image.sh
 
       - name: Select independent workspace caches
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && (!contains(needs.verification-selection.outputs.selection, '|kind|') || needs.verification-selection.outputs.kind_workspace_source == 'pinned') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.workspace == 'true' }}
         env:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
           CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ github.event.inputs.layer_cache }}
         run: scripts/ci/setup/select-untrusted-workspace-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Prove labeled R2 backend compatibility
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && (!contains(needs.verification-selection.outputs.selection, '|kind|') || needs.verification-selection.outputs.kind_workspace_source == 'pinned') && env.CODEWIRE_WORKSPACE_CACHE_CANARY == 'true' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.workspace == 'true' && env.CODEWIRE_WORKSPACE_CACHE_CANARY == 'true' }}
         run: |
           set -euo pipefail
           [[ "$CODEWIRE_BUILDKIT_CACHE_MODE" == r2 ]] || { echo 'Labeled R2 canary could not obtain its existing cache identity' >&2; exit 1; }
@@ -516,20 +538,20 @@ jobs:
             "$CODEWIRE_SCCACHE_CREDENTIALS_FILE" "$RUNNER_TEMP/workspace-r2-cache-canary"
 
       - name: Prepare selected workspace cache seed
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' && needs.verification-selection.outputs.workspace_image_selected == 'true' && (!contains(needs.verification-selection.outputs.selection, '|kind|') || needs.verification-selection.outputs.kind_workspace_source == 'pinned') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' && steps.container-scope.outputs.workspace == 'true' }}
         run: scripts/ci/setup/prepare-workspace-cache-measurement.sh seed
 
       - name: Build and inspect without publication
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && (!contains(needs.verification-selection.outputs.selection, '|kind|') || needs.verification-selection.outputs.kind_workspace_source == 'pinned') }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.workspace == 'true' }}
         run: scripts/ci/verify/verify-workspace-image.sh
 
       - name: Clean workspace cache credentials
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && (!contains(needs.verification-selection.outputs.selection, '|kind|') || needs.verification-selection.outputs.kind_workspace_source == 'pinned') }}
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.workspace == 'true' }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Finalize selected workspace cache seed
         id: cache-seed-report
-        if: ${{ success() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' && needs.verification-selection.outputs.workspace_image_selected == 'true' && (!contains(needs.verification-selection.outputs.selection, '|kind|') || needs.verification-selection.outputs.kind_workspace_source == 'pinned') }}
+        if: ${{ success() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' && steps.container-scope.outputs.workspace == 'true' }}
         run: python3 scripts/ci/verify/workspace-cache-report.py finalize "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR" "$GITHUB_WORKSPACE/.tmp/codewire-workspace-image-verification.json"
 
       - name: Build and inspect the standalone dashboard image

@@ -125,8 +125,8 @@ grep -qF "steps.container-scope.outputs.selected != 'true'" <<<"$workspace_job" 
   fail 'container no-op does not use its resolved scope'
 grep -qF "steps.container-scope.outputs.selected == 'true'" <<<"$workspace_job" ||
   fail 'container checkout does not use its resolved scope'
-grep -qF "workspace_image_selected == 'true'" <<<"$workspace_job" ||
-  fail 'workspace positive path does not use canonical planner selection'
+grep -qF "steps.container-scope.outputs.workspace == 'true'" <<<"$workspace_job" ||
+  fail 'workspace positive path does not use its resolved workspace scope'
 grep -qF "trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'" \
   "$WORKFLOW" || fail 'artifact facts do not come from the trusted adapter'
 # shellcheck disable=SC2016 # Match the workflow's literal shell variables.
@@ -234,8 +234,8 @@ grep -qF 'npm install --global --dry-run --ignore-scripts --no-audit --no-fund @
   fail 'verification does not prove the explicit user-scoped Codex install plan'
 grep -qF -- '--tmpfs /home/codewire:rw,exec,uid=1000,gid=1000,mode=0700,size=256m' "$VERIFY" ||
   fail 'verification omits the fresh persistent-home boundary'
-grep -qF "!contains(needs.verification-selection.outputs.selection, '|kind|')" <<<"$workspace_job" ||
-  fail 'standalone workspace verification duplicates selected Kind ownership'
+grep -qF "[[ \"\$VERIFICATION_SELECTION\" != *'|kind|'* ]] || [ \"\${KIND_WORKSPACE_SOURCE:-}\" = pinned ]" \
+  <<<"$workspace_job" || fail 'standalone workspace verification duplicates selected Kind ownership'
 # The companion suites are independent programs with private scratch
 # directories. They run in two lanes beside the verifier fixture below and
 # are joined, in this order, before the contract is reported: every suite
@@ -311,25 +311,216 @@ awk '
   run { exit }
 ' "$WORKFLOW" >"$work/container-scope.sh"
 [[ -s "$work/container-scope.sh" ]] || fail 'container scope script was not extracted'
-# Selected Kind owns the exact-source workspace only when it builds it; when
-# it runs the published pin, this job keeps the selected workspace build.
-for fixture in \
-  'true|kind||false' 'true|kind|source|false' 'true|kind|pinned|true' \
-  'false|kind|pinned|false' 'false|kind||false' 'true|policy||true' 'true|policy|pinned|true' \
-  'false|policy||false' 'false|web||true' 'false|kind,web||false' 'false|kind,web|pinned|false' \
-  'true|kind,web||false' 'true|kind,web|pinned|true' 'false|ios||true' 'true|kind,ios||true'; do
-  IFS='|' read -r workspace_selected selection kind_source expected <<<"$fixture"
+# Ownership of the exact-source workspace build (workspace=) and of the job's
+# checkout (selected=). CI owns the workspace on pull requests, dispatches and
+# when the owner is unset; a push to main leaves it to support-images, which
+# runs the contract on the exact image it publishes (#2892). Selected Kind
+# owns it only when it builds it; when it runs the published pin, this job
+# keeps the selected workspace build. Dashboard and iOS work keep the job
+# under either owner.
+# OWNER|WORKSPACE SELECTED|SELECTION|KIND SOURCE|WORKSPACE|SELECTED
+while IFS='|' read -r owner workspace_selected selection kind_source expected_workspace expected; do
   selection="|${selection//,/|}|"
   : >"$work/scope-output"
-  env WORKSPACE_IMAGE_SELECTED="$workspace_selected" VERIFICATION_SELECTION="$selection" \
+  env ${owner:+"WORKSPACE_IMAGE_OWNER=$owner"} \
+    WORKSPACE_IMAGE_SELECTED="$workspace_selected" VERIFICATION_SELECTION="$selection" \
     KIND_WORKSPACE_SOURCE="$kind_source" \
     GITHUB_OUTPUT="$work/scope-output" bash "$work/container-scope.sh"
+  grep -Fxq "workspace=$expected_workspace" "$work/scope-output" ||
+    fail "workspace ownership differs for owner=${owner:-unset} workspace=$workspace_selected selection=$selection kind=$kind_source"
   grep -Fxq "selected=$expected" "$work/scope-output" ||
-    fail "container ownership differs for workspace=$workspace_selected selection=$selection kind=$kind_source"
-done
+    fail "container ownership differs for owner=${owner:-unset} workspace=$workspace_selected selection=$selection kind=$kind_source"
+done <<'EOF'
+ci|true|kind||false|false
+ci|true|kind|source|false|false
+ci|true|kind|pinned|true|true
+ci|false|kind|pinned|false|false
+ci|false|kind||false|false
+ci|true|policy||true|true
+ci|true|policy|pinned|true|true
+ci|false|policy||false|false
+ci|false|web||false|true
+ci|false|kind,web||false|false
+ci|false|kind,web|pinned|false|false
+ci|true|kind,web||false|false
+ci|true|kind,web|pinned|true|true
+ci|false|ios||false|true
+ci|true|kind,ios||false|true
+|true|policy||true|true
+|true|kind|pinned|true|true
+|false|policy||false|false
+support-images|true|policy||false|false
+support-images|true|policy|pinned|false|false
+support-images|true|kind|pinned|false|false
+support-images|true|kind,web|pinned|false|false
+support-images|true|kind||false|false
+support-images|false|policy||false|false
+support-images|true|web||false|true
+support-images|false|web||false|true
+support-images|true|ios||false|true
+support-images|true|kind,ios||false|true
+EOF
 # shellcheck disable=SC2016 # Match the literal workflow expression.
-grep -qF "needs.verification-selection.outputs.kind_workspace_source == 'pinned'" <<<"$workspace_job" ||
+grep -qF 'KIND_WORKSPACE_SOURCE: ${{ needs.verification-selection.outputs.kind_workspace_source }}' <<<"$workspace_job" ||
   fail 'container workspace build does not take over from a pinned Kind workspace'
+
+# A push to main can never run the workspace build, and a pull request or a
+# dispatch always runs it when its exact-source workspace is selected and
+# Kind does not build it. owner_violation FILE [--mutations] prints the first
+# broken rule; with --mutations it also proves each rule refuses its own
+# regression of the reviewed workflow.
+owner_violation() {
+  python3 -B - "$@" <<'OWNER_PY'
+import itertools
+import os
+import subprocess
+import sys
+import tempfile
+
+import yaml
+
+OWNER = ("${{ github.event_name == 'push' && github.ref == 'refs/heads/main' "
+         "&& 'support-images' || 'ci' }}")
+RECEIPT = "needs.verification-selection.outputs.tested_tree_receipt != 'accepted'"
+WORKSPACE = "steps.container-scope.outputs.workspace == 'true'"
+EXPERIMENT = "needs.verification-selection.outputs.workspace_cache_experiment == 'true'"
+GUARDED = {
+    "Prove isolated Buildx load contract": f"${{{{ {RECEIPT} && {WORKSPACE} }}}}",
+    "Select independent workspace caches": f"${{{{ {RECEIPT} && {WORKSPACE} }}}}",
+    "Prove labeled R2 backend compatibility":
+        f"${{{{ {RECEIPT} && {WORKSPACE} && env.CODEWIRE_WORKSPACE_CACHE_CANARY == 'true' }}}}",
+    "Prepare selected workspace cache seed": f"${{{{ {RECEIPT} && {EXPERIMENT} && {WORKSPACE} }}}}",
+    "Build and inspect without publication": f"${{{{ {RECEIPT} && {WORKSPACE} }}}}",
+    "Clean workspace cache credentials": f"${{{{ always() && {RECEIPT} && {WORKSPACE} }}}}",
+    "Finalize selected workspace cache seed":
+        f"${{{{ success() && {RECEIPT} && {EXPERIMENT} && {WORKSPACE} }}}}",
+}
+# Commands that build, verify or cache the exact-source workspace.
+WORKSPACE_WORK = (
+    "verify-workspace-image.sh", "select-untrusted-workspace-cache.sh",
+    "canary-workspace-r2-cache.sh", "prepare-workspace-cache-measurement.sh",
+    "workspace-cache-report.py", "finish-untrusted-rust-cache.sh",
+    "test-build-local-image.sh", "test-workspace-agent-contract.sh",
+    "rehearse-build-local-image.sh",
+)
+
+
+def scope_outputs(script, owner, workspace_selected, selection, kind_source):
+    with tempfile.NamedTemporaryFile("r") as output:
+        environment = {
+            "PATH": os.environ["PATH"], "GITHUB_OUTPUT": output.name,
+            "WORKSPACE_IMAGE_SELECTED": workspace_selected,
+            "VERIFICATION_SELECTION": selection, "KIND_WORKSPACE_SOURCE": kind_source,
+        }
+        if owner is not None:
+            environment["WORKSPACE_IMAGE_OWNER"] = owner
+        status = subprocess.run(["bash", "-c", script], env=environment, check=False,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        return status, dict(line.split("=", 1) for line in output.read().splitlines() if "=" in line)
+
+
+def violation(text):
+    try:
+        jobs = yaml.safe_load(text)["jobs"]
+        dispatch = [step for step in jobs["verification-selection"]["steps"] if step.get("id") == "dispatch"]
+        steps = jobs["workspace-image"]["steps"]
+    except Exception as error:  # A mutation may break the document itself.
+        return f"the workflow does not parse: {error}"
+    if len(dispatch) != 1 or (dispatch[0].get("env") or {}).get("WORKSPACE_IMAGE_OWNER") != OWNER:
+        return "the dispatch decision does not receive the main-push workspace owner"
+    scope = [step for step in steps if step.get("id") == "container-scope"]
+    if len(scope) != 1 or (scope[0].get("env") or {}).get("WORKSPACE_IMAGE_OWNER") != OWNER:
+        return "the container scope does not receive the main-push workspace owner"
+    if "continue-on-error" in scope[0]:
+        return "the container scope continues on error"
+    scope_index = steps.index(scope[0])
+    seen = set()
+    for index, step in enumerate(steps):
+        name = step.get("name") or step.get("uses", "")
+        if name in GUARDED:
+            seen.add(name)
+            if step.get("if") != GUARDED[name]:
+                return f"{name} is not guarded by the resolved workspace scope"
+            if index < scope_index:
+                return f"{name} runs before the container scope resolves"
+        elif any(command in str(step.get("run", "")) for command in WORKSPACE_WORK):
+            return f"{name} runs workspace work outside the guarded steps"
+    if seen != set(GUARDED):
+        return f"guarded workspace steps are missing: {sorted(set(GUARDED) - seen)}"
+    # The executed decision: support-images never builds; CI builds exactly a
+    # selected workspace that Kind does not build; dashboard and iOS keep the
+    # job's checkout under either owner.
+    script = scope[0].get("run", "")
+    for owner, workspace_selected, kind, web, ios, kind_source in itertools.product(
+            (None, "", "ci", "support-images"), ("true", "false"),
+            (False, True), (False, True), (False, True), ("", "source", "pinned")):
+        tokens = ["policy"] + [token for token, on in (("kind", kind), ("web", web), ("ios", ios)) if on]
+        selection = "|valid:v3|" + "|".join(tokens) + "|complete|"
+        status, outputs = scope_outputs(script, owner, workspace_selected, selection, kind_source)
+        workspace = (owner != "support-images" and workspace_selected == "true"
+                     and (not kind or kind_source == "pinned"))
+        expected = {"workspace": str(workspace).lower(),
+                    "selected": str(workspace or ios or (web and not kind)).lower()}
+        if status != 0 or outputs != expected:
+            return (f"the container scope decided {outputs} (status {status}) for owner={owner!r} "
+                    f"workspace={workspace_selected} selection={selection} kind={kind_source!r}; "
+                    f"expected {expected}")
+    for owner in ("support_images", "CI", "main", "publish", " ci", "ci "):
+        status, outputs = scope_outputs(script, owner, "true", "|valid:v3|policy|complete|", "")
+        if status == 0 or outputs:
+            return f"the container scope accepted the workspace owner {owner!r}"
+    return None
+
+
+text = open(sys.argv[1], encoding="utf-8").read()
+problem = violation(text)
+if problem:
+    sys.exit(problem)
+if sys.argv[2:] == ["--mutations"]:
+    old_guard = ("needs.verification-selection.outputs.workspace_image_selected == 'true' && "
+                 "(!contains(needs.verification-selection.outputs.selection, '|kind|') || "
+                 "needs.verification-selection.outputs.kind_workspace_source == 'pinned')")
+    build = "      - name: Build and inspect without publication\n        if: "
+    build_if = GUARDED["Build and inspect without publication"]
+    rehearsal = "      - name: Prove isolated Buildx load contract\n        if: "
+    rehearsal_if = GUARDED["Prove isolated Buildx load contract"]
+    scope_owner = "          # Same value as the dispatch decision's owner.\n          WORKSPACE_IMAGE_OWNER: "
+    dispatch_owner = "Same value as the container scope below.\n          WORKSPACE_IMAGE_OWNER: "
+    checkout = f"        if: ${{{{ {RECEIPT} && steps.container-scope.outputs.selected == 'true' }}}}\n"
+    mutations = {
+        "build guarded by the artifact fact": (build + build_if, build + build_if.replace(WORKSPACE, old_guard)),
+        "build bypassed on a push":
+            (build + build_if, build + build_if.replace(" }}", " || github.event_name == 'push' }}")),
+        "build guarded by the receipt alone": (build + build_if, build + f"${{{{ {RECEIPT} }}}}"),
+        "rehearsal guarded by the artifact fact":
+            (rehearsal + rehearsal_if, rehearsal + rehearsal_if.replace(WORKSPACE, old_guard)),
+        "scope owner forced to ci": (scope_owner + OWNER, scope_owner + "ci"),
+        "dispatch owner forced to ci": (dispatch_owner + OWNER, dispatch_owner + "ci"),
+        "scope owner forced to support-images": (scope_owner + OWNER, scope_owner + "support-images"),
+        "scope owner removed": (scope_owner + OWNER + "\n", "\n"),
+        "scope ignores the owner":
+            ('if [ "$owner" = ci ] && [ "$WORKSPACE_IMAGE_SELECTED" = true ]',
+             'if [ "$WORKSPACE_IMAGE_SELECTED" = true ]'),
+        "scope never builds": ("            workspace=true\n", "            workspace=false\n"),
+        "scope accepts any owner": ("            ci|support-images) ;;\n", "            *) ;;\n"),
+        "scope continues on error":
+            ("        id: container-scope\n", "        id: container-scope\n        continue-on-error: true\n"),
+        "unguarded workspace build":
+            (checkout, checkout + "\n      - name: Build the workspace\n"
+                                  f"        if: ${{{{ {RECEIPT} }}}}\n"
+                                  "        run: scripts/ci/verify/verify-workspace-image.sh\n"),
+    }
+    for label, (old, new) in mutations.items():
+        if text.count(old) != 1:
+            sys.exit(f"owner mutation did not apply: {label}")
+        if violation(text.replace(old, new)) is None:
+            sys.exit(f"owner mutation was accepted: {label}")
+    print(f"workspace owner: {len(mutations)} mutations refused")
+OWNER_PY
+}
+owner_report="$(owner_violation "$WORKFLOW" --mutations 2>&1)" ||
+  fail "${owner_report:-workspace owner check failed}"
+printf '%s\n' "$owner_report"
 # Both workflow owners execute the same fail-closed canary entrypoint. Execute
 # that checked-in shell in an isolated mock tree; unavailable identity must fail
 # before the harness, and a failed harness must stop the selected job.

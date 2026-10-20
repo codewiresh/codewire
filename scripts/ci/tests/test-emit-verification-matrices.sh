@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CHECK="$ROOT/scripts/ci/select/emit-verification-matrices.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# The owner is CI job configuration; an ambient value must not change what
+# this contract observes.
+unset WORKSPACE_IMAGE_OWNER
 
 emit() {
   local selection="$1" receipt="$2" cw="$3" desktop="$4" workspace="$5"
@@ -108,6 +111,81 @@ if KIND_WORKSPACE_SOURCE=cached VERIFICATION_SELECTION='|valid:v3|kind|complete|
   echo 'an unknown Kind workspace source was accepted' >&2
   exit 1
 fi
+
+# Who owns the exact-source workspace image. CI (pull requests, dispatches,
+# and callers that predate the choice) dispatches the container contract for a
+# selected workspace; on a push to main support-images verifies the image it
+# publishes, so the workspace alone dispatches nothing. Dashboard and iOS work
+# dispatch the job under either owner, and Kind ownership is unchanged.
+# OWNER|SELECTION|WORKSPACE|KIND SOURCE|WORKSPACE_IMAGE EXPECTED
+while IFS='|' read -r owner tokens workspace kind_source expected_workspace; do
+  owner_selection="|valid:v3|${tokens//,/|}|complete|"
+  # An empty owner column means the variable is unset; empty means the same.
+  if [ -n "$owner" ]; then
+    owner_output="$(WORKSPACE_IMAGE_OWNER="$owner" KIND_WORKSPACE_SOURCE="$kind_source" \
+      emit "$owner_selection" fallback false false "$workspace")"
+  else
+    owner_output="$(KIND_WORKSPACE_SOURCE="$kind_source" \
+      emit "$owner_selection" fallback false false "$workspace")"
+    [[ "$owner_output" == "$(WORKSPACE_IMAGE_OWNER='' KIND_WORKSPACE_SOURCE="$kind_source" \
+        emit "$owner_selection" fallback false false "$workspace")" ]] || {
+      echo 'an empty workspace image owner differs from an unset one' >&2
+      exit 1
+    }
+  fi
+  # Checked here, not through assert_output: errexit is off inside a function
+  # called as the left side of ||.
+  grep -Fxq "workspace_image_expected=${expected_workspace}" <<<"$owner_output" || {
+    echo "owner=${owner:-unset} selection=${owner_selection} workspace=${workspace} kind=${kind_source}: workspace_image_expected is not ${expected_workspace}" >&2
+    exit 1
+  }
+done <<'EOF'
+|policy|true|source|true
+ci|policy|true|source|true
+ci|policy|false|source|false
+ci|kind|true|source|false
+ci|kind|true|pinned|true
+support-images|policy|true|source|false
+support-images|policy|true|pinned|false
+support-images|kind|true|pinned|false
+support-images|policy,rust|true|source|false
+support-images|web|true|source|true
+support-images|web,kind|true|pinned|false
+support-images|ios|true|source|true
+support-images|ios,kind|false|source|true
+ci|web|false|source|true
+ci|ios|false|source|true
+EOF
+# The owner moves only the workspace decision: every other group is identical.
+for owner_tokens in 'policy,rust,database' 'kind,web' 'policy,ios'; do
+  owner_selection="|valid:v3|${owner_tokens//,/|}|complete|"
+  ci_groups="$(WORKSPACE_IMAGE_OWNER=ci emit "$owner_selection" fallback true true true | grep -v '^workspace_image_')"
+  support_groups="$(WORKSPACE_IMAGE_OWNER=support-images emit "$owner_selection" fallback true true true | grep -v '^workspace_image_')"
+  [[ "$ci_groups" == "$support_groups" ]] || {
+    echo "the workspace owner changed another group for ${owner_selection}" >&2
+    exit 1
+  }
+done
+# A pull request's quick selection dispatches no workspace work for either owner.
+for owner in ci support-images; do
+  quick_owner_output="$(WORKSPACE_IMAGE_OWNER="$owner" emit \
+    '|valid:v3|policy|policy_shell_omittable|pr_quick|rust_compile|complete|' fallback true true true)"
+  assert_output "$quick_owner_output" workspace_image false
+done
+# Anything but the two owners fails closed: no decision is emitted.
+for invalid_owner in support_images CI main ' ci' 'ci ' publish; do
+  : > "$TMP/invalid-owner"
+  if WORKSPACE_IMAGE_OWNER="$invalid_owner" VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
+      VERIFICATION_TESTED_TREE_RECEIPT=fallback CW_PACKAGE_SELECTED=false DESKTOP_PACKAGE_SELECTED=false \
+      WORKSPACE_IMAGE_SELECTED=true GITHUB_OUTPUT="$TMP/invalid-owner" "$CHECK" >/dev/null 2>&1; then
+    echo "an invalid workspace image owner was accepted: '${invalid_owner}'" >&2
+    exit 1
+  fi
+  [[ ! -s "$TMP/invalid-owner" ]] || {
+    echo "an invalid workspace image owner emitted decisions: '${invalid_owner}'" >&2
+    exit 1
+  }
+done
 
 # A hosted pull request's quick selection dispatches only what it names: the
 # policy core, ShellCheck in tooling, compiling every Rust target, and Kind

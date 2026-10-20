@@ -38,7 +38,7 @@ SPEC.loader.exec_module(main_push)
 MAIN_PUSH = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
 EVERYTHING = ("true", "true", "true")
 NOTHING = ("false", "false", "false")
-HEAVY_ARTIFACT_GROUPS = ("cw_release_assets", "rust_compile", "rust_transport", "workspace_image")
+HEAVY_ARTIFACT_GROUPS = ("cw_release_assets", "rust_compile", "rust_transport")
 
 
 def run_record(sha: str, *, run_id: int = 41, status: str = "success", **fields: Any) -> dict:
@@ -108,7 +108,8 @@ def capability_selection(paths: list[str]) -> str:
 
 
 def dispatched(selection: str, outputs: dict[str, str]) -> dict[str, bool]:
-    """Which capability groups the real dispatch emitter starts for these facts."""
+    """Which capability groups the real dispatch emitter starts for these facts on a
+    push to main, which leaves the workspace image to support-images (#2892)."""
     env = {key: value for key, value in os.environ.items() if key != "GITHUB_OUTPUT"}
     env.update({
         "VERIFICATION_SELECTION": selection,
@@ -118,6 +119,7 @@ def dispatched(selection: str, outputs: dict[str, str]) -> dict[str, bool]:
         "DESKTOP_PACKAGE_SELECTED": outputs["desktop_package_selected"],
         "WORKSPACE_IMAGE_SELECTED": outputs["workspace_image_selected"],
         "KIND_WORKSPACE_SOURCE": "pinned",
+        "WORKSPACE_IMAGE_OWNER": "support-images",
     })
     completed = subprocess.run(
         [str(REPOSITORY_ROOT / "scripts/ci/select/emit-verification-matrices.sh")],
@@ -177,6 +179,8 @@ class MainPushPlanTests(unittest.TestCase):
 
         previous = dispatched(selection, self.previous_outputs(head))
         self.assertTrue(all(previous[group] for group in HEAVY_ARTIFACT_GROUPS), previous)
+        # Even every artifact selected starts no Container contract job on main.
+        self.assertFalse(previous["workspace_image"], previous)
 
         outputs, log = self.choose(head, before, verified(before))
         self.assertEqual(self.selected(outputs), NOTHING)
@@ -196,6 +200,8 @@ class MainPushPlanTests(unittest.TestCase):
         self.assertEqual(outputs["cw_package_state"], "affected")
         groups = dispatched(capability_selection(["crates/codewire-cli/src/main.rs"]), outputs)
         self.assertTrue(all(groups[group] for group in HEAVY_ARTIFACT_GROUPS), groups)
+        # The selected workspace image is support-images' to build and verify.
+        self.assertFalse(groups["workspace_image"], groups)
 
     def test_pin_only_push_selects_what_compiles_the_pin(self) -> None:
         before = self.repo.add_workspace_pin_crate()

@@ -232,14 +232,22 @@ class WorkflowContractTests(unittest.TestCase):
 
         # When Kind takes the pin, Container contract verification keeps the
         # selected exact-source workspace build; it defers only to a Kind
-        # source build.
+        # source build (and, on a push to main, to support-images). The
+        # container scope makes that decision; the build follows it.
         container = self.jobs["workspace-image"]
-        verify = named_step(container, "Build and inspect without publication")
+        scope = named_step(container, "Resolve container contract scope")
+        self.assertEqual(scope["env"]["KIND_WORKSPACE_SOURCE"],
+                         "${{ needs.verification-selection.outputs.kind_workspace_source }}")
         self.assertIn(
-            "needs.verification-selection.outputs.workspace_image_selected == 'true' && "
-            "(!contains(needs.verification-selection.outputs.selection, '|kind|') || "
-            "needs.verification-selection.outputs.kind_workspace_source == 'pinned')",
+            "{ [[ \"$VERIFICATION_SELECTION\" != *'|kind|'* ]] || "
+            "[ \"${KIND_WORKSPACE_SOURCE:-}\" = pinned ]; }",
+            scope["run"],
+        )
+        verify = named_step(container, "Build and inspect without publication")
+        self.assertEqual(
             verify["if"],
+            "${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && "
+            "steps.container-scope.outputs.workspace == 'true' }}",
         )
 
     def test_smoke_producer_installs_pinned_protoc_before_build(self) -> None:

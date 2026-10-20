@@ -12,6 +12,11 @@ superseded="${VERIFICATION_SUPERSEDED:-false}"
 # Whether Kind builds the exact-source workspace (source) or runs the
 # published pin (pinned). Callers that predate the choice mean source.
 kind_workspace_source="${KIND_WORKSPACE_SOURCE:-source}"
+# Which workflow builds and verifies the exact-source workspace image. A push to
+# main leaves it to support-images, which runs the workspace contract on the
+# exact image it publishes (#2892); pull requests, dispatches and callers that
+# predate the choice keep CI's own build.
+workspace_image_owner="${WORKSPACE_IMAGE_OWNER:-ci}"
 
 fail() {
   echo "::error::$*" >&2
@@ -35,6 +40,10 @@ done
 case "$kind_workspace_source" in
   source|pinned) ;;
   *) fail "Kind workspace source is invalid: $kind_workspace_source" ;;
+esac
+case "$workspace_image_owner" in
+  ci|support-images) ;;
+  *) fail "workspace image owner is invalid: $workspace_image_owner" ;;
 esac
 
 selected() {
@@ -122,8 +131,10 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   fi
   # Selected Kind builds and proves the workspace and dashboard images itself,
   # unless it runs the published workspace pin; then the selected exact-source
-  # workspace still needs Container contract verification.
-  if { [ "$artifact_groups" = true ] && [ "$workspace_image_selected" = true ] \
+  # workspace still needs Container contract verification, when CI owns it.
+  # Dashboard and iOS work keep the job on every event.
+  if { [ "$artifact_groups" = true ] && [ "$workspace_image_owner" = ci ] \
+        && [ "$workspace_image_selected" = true ] \
         && { ! selected kind || [ "$kind_workspace_source" = pinned ]; }; } \
       || selected ios \
       || { selected web && ! selected kind; }; then

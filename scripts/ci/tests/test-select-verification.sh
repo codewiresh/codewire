@@ -2716,8 +2716,16 @@ grep -qF 'WORKSPACE_IMAGE_SELECTED: ${{ needs.verification-selection.outputs.wor
   "$workspace_block"
 grep -qF "steps.container-scope.outputs.selected != 'true'" "$workspace_block"
 grep -qF "steps.container-scope.outputs.selected == 'true'" "$workspace_block"
-grep -qF "needs.verification-selection.outputs.workspace_image_selected == 'true'" \
-  "$workspace_block"
+grep -qF "steps.container-scope.outputs.workspace == 'true'" "$workspace_block"
+# A push to main leaves the exact-source workspace to support-images (#2892);
+# the dispatch decision and the container scope read the same owner.
+workspace_owner_line="WORKSPACE_IMAGE_OWNER: \${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'support-images' || 'ci' }}"
+grep -qxF "          ${workspace_owner_line}" "$workspace_block"
+grep -qxF "          ${workspace_owner_line}" "$selection_block"
+[ "$(grep -cE '^ +WORKSPACE_IMAGE_OWNER: ' "$WORKFLOW")" -eq 2 ] || {
+  echo 'the workspace image owner is set somewhere other than dispatch and the container scope' >&2
+  exit 1
+}
 for command in \
     scripts/ci/tests/test-build-local-image.sh \
     scripts/ci/tests/test-workspace-agent-contract.sh \
@@ -4204,6 +4212,60 @@ for scope_case in rust_cli dashboard_kind release_shell selector_policy mixed; d
     exit 1
   fi
 done
+# A push to main leaves a selected workspace image to support-images (#2892):
+# with no dashboard or iOS work it dispatches no Container contract job, and
+# Required verification passes with that job skipped, and fails if it ran.
+main_dispatch_and_require() {
+  local selection="$1" workspace_result="$2" output="$TMP/main-dispatch.out" group value job
+  local -a results=() jobs=()
+  : > "$output"
+  VERIFICATION_SELECTION="$selection" VERIFICATION_TESTED_TREE_RECEIPT=fallback \
+    CW_PACKAGE_SELECTED=true DESKTOP_PACKAGE_SELECTED=false WORKSPACE_IMAGE_SELECTED=true \
+    KIND_WORKSPACE_SOURCE=pinned WORKSPACE_IMAGE_OWNER=support-images \
+    GITHUB_OUTPUT="$output" "$ROOT/scripts/ci/select/emit-verification-matrices.sh"
+  grep -Fxq 'workspace_image_expected=false' "$output" || return 2
+  while IFS='=' read -r group value; do
+    group="${group%_expected}"
+    results+=("VERIFICATION_${group^^}_EXPECTED=$value")
+    jobs=("${group^^}")
+    if [ "$group" = rust_shards ]; then
+      jobs=(RUST_PACKAGES RUST_FEATURES)
+    fi
+    for job in "${jobs[@]}"; do
+      if [ "$job" = WORKSPACE_IMAGE ]; then
+        results+=("VERIFICATION_${job}_RESULT=$workspace_result")
+      elif [ "$value" = true ]; then
+        results+=("VERIFICATION_${job}_RESULT=success")
+      else
+        results+=("VERIFICATION_${job}_RESULT=skipped")
+      fi
+    done
+  done < "$output"
+  env VERIFICATION_SELECTION="$selection" VERIFICATION_SELECTION_RESULT=success \
+    VERIFICATION_TESTED_TREE_RECEIPT=fallback "${results[@]}" \
+    "$ROOT/scripts/ci/select/require-verification-results.sh" >/dev/null 2>&1
+}
+for scope_case in docs rust_cli broker_database transport release_shell selector_policy; do
+  main_selection="$(selection_value "$(scope_select push '' '' "$TMP/scope-${scope_case}.paths")")"
+  if grep -Eq '\|(web|ios)\|' <<<"$main_selection"; then
+    echo "${scope_case}: the main fixture selects dashboard or iOS work" >&2
+    exit 1
+  fi
+  main_dispatch_and_require "$main_selection" skipped || {
+    echo "${scope_case}: a main push dispatched the workspace or Required verification rejected it skipped" >&2
+    exit 1
+  }
+  if main_dispatch_and_require "$main_selection" success; then
+    echo "${scope_case}: Required verification accepted a Container contract run main did not dispatch" >&2
+    exit 1
+  fi
+  # Policy always runs on main, so the release-tag receipt still finds a green
+  # capability group when the Container contract job is skipped.
+  grep -Fq '|policy|' <<<"$main_selection" || {
+    echo "${scope_case}: a main push selects no policy group" >&2
+    exit 1
+  }
+done
 # The quick run carries no receipt for main to reuse; the complete one does.
 receipt_env=(GITHUB_EVENT_NAME=pull_request GITHUB_REPOSITORY=codewire/codewire
   GITHUB_RUN_ID=501 GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb CODEWIRE_PR_NUMBER=7
@@ -4368,7 +4430,7 @@ def tokenize(text):
     return tokens
 
 
-def evaluate(expression, context):
+def expression_value(expression, context):
     text = expression.strip()
     if text.startswith("${{") and text.endswith("}}"):
         text = text[3:-2]
@@ -4424,12 +4486,13 @@ def evaluate(expression, context):
             left = (str(left) == str(right)) if operator == "==" else (str(left) != str(right))
         return left
 
+    # Like Actions, && and || yield an operand, so `a && 'x' || 'y'` is a value.
     def conjunction():
         value = comparison()
         while peek() == "&&":
             take()
             right = comparison()
-            value = truthy(value) and truthy(right)
+            value = right if truthy(value) else value
         return value
 
     def disjunction():
@@ -4437,22 +4500,36 @@ def evaluate(expression, context):
         while peek() == "||":
             take()
             right = conjunction()
-            value = truthy(value) or truthy(right)
+            value = value if truthy(value) else right
         return value
 
     result = disjunction()
     if position != len(tokens):
         raise SystemExit(f"trailing tokens in {expression!r}")
-    return truthy(result)
+    return result
 
 
-def dispatch(selection, cw, desktop, workspace, kind_workspace="source"):
+def evaluate(expression, context):
+    return expression_value(expression, context) not in ("", False, None)
+
+
+def env_value(expression, context):
+    """An env entry as the runner passes it: a string."""
+    if "${{" not in str(expression):
+        return str(expression)
+    result = expression_value(expression, context)
+    if isinstance(result, bool):
+        return "true" if result else "false"
+    return str(result)
+
+
+def dispatch(selection, cw, desktop, workspace, kind_workspace, owner):
     with tempfile.NamedTemporaryFile("r") as output:
         environment = dict(
             os.environ, VERIFICATION_SELECTION=selection, VERIFICATION_TESTED_TREE_RECEIPT="fallback",
             CW_PACKAGE_SELECTED=cw, DESKTOP_PACKAGE_SELECTED=desktop,
             WORKSPACE_IMAGE_SELECTED=workspace, VERIFICATION_SUPERSEDED="false",
-            KIND_WORKSPACE_SOURCE=kind_workspace,
+            KIND_WORKSPACE_SOURCE=kind_workspace, WORKSPACE_IMAGE_OWNER=owner,
             GITHUB_OUTPUT=output.name,
         )
         subprocess.run([emitter], env=environment, check=True, stderr=subprocess.DEVNULL)
@@ -4463,8 +4540,7 @@ scope_cache = {}
 
 
 def run_scope_step(step, context):
-    environment = {key: (str(value) if "${{" not in str(value) else context.get(
-        str(value).strip()[3:-2].strip(), "")) for key, value in step.get("env", {}).items()}
+    environment = {key: env_value(entry, context) for key, entry in step.get("env", {}).items()}
     key = (step["run"], tuple(sorted(environment.items())))
     if key not in scope_cache:
         with tempfile.NamedTemporaryFile("r") as output:
@@ -4525,6 +4601,21 @@ capability_jobs = {job_id for job_id, job in jobs.items()
 if capability_jobs - set(WORK):
     raise SystemExit(f"capability jobs without work classification: {sorted(capability_jobs - set(WORK))}")
 
+# The events that reach these jobs, and the workspace owner each gives the
+# dispatch decision, read from the workflow's own expression. A push to main
+# leaves the exact-source workspace to support-images (#2892).
+dispatch_step = next(step for step in jobs["verification-selection"]["steps"] if step.get("id") == "dispatch")
+EVENTS = {
+    "push to main": {"github.event_name": "push", "github.ref": "refs/heads/main"},
+    "pull request": {"github.event_name": "pull_request", "github.ref": "refs/pull/7/head"},
+    "dispatch": {"github.event_name": "workflow_dispatch", "github.ref": "refs/heads/main"},
+}
+OWNERS = {event: env_value(dispatch_step["env"]["WORKSPACE_IMAGE_OWNER"], github)
+          for event, github in EVENTS.items()}
+if OWNERS != {"push to main": "support-images", "pull request": "ci", "dispatch": "ci"}:
+    raise SystemExit(f"the workspace image owner per event is {OWNERS}")
+WORKSPACE_BUILD = "Build and inspect without publication"
+
 realistic = [line.strip() for line in open(realistic_path) if line.strip()]
 universe = sorted({token for selection in realistic for token in selection.strip("|").split("|")}
                   - {"valid:v3", "complete"} | {"ios", "pr_quick", "rust_compile", "rust_pkg_codewire_desktop",
@@ -4536,15 +4627,19 @@ for token in universe:
         synthetic.add("|valid:v3|" + "|".join(sorted({token, *extra})) + "|complete|")
 synthetic.add("|valid:v3|complete|")
 checked = 0
+builds = {event: 0 for event in ("push to main", "pull request")}
 for selection in sorted(set(realistic) | synthetic):
     quick = "|pr_quick|" in selection
-    for cw, desktop, workspace, kind_workspace in itertools.product(
+    # A workflow dispatch has the pull request's owner (checked above).
+    for event, cw, desktop, workspace, kind_workspace in itertools.product(
+            ("push to main", "pull request"),
             ("true", "false"), ("true", "false"), ("true", "false"), ("source", "pinned")):
-        expected = dispatch(selection, cw, desktop, workspace, kind_workspace)
+        expected = dispatch(selection, cw, desktop, workspace, kind_workspace, OWNERS[event])
         # A quick selection deliberately ignores artifact facts; its steps
         # see what dispatch saw.
         facts = ("false", "false", "false") if quick else (cw, desktop, workspace)
         context = {
+            **EVENTS[event],
             "needs.verification-selection.result": "success",
             # A pinned workspace dispatches no Kind workspace job.
             "needs.kind-workspace.result": "skipped" if kind_workspace == "pinned" else "success",
@@ -4573,8 +4668,24 @@ for selection in sorted(set(realistic) | synthetic):
                 raise SystemExit(
                     f"{job_id} has selected work but is not dispatched for {selection} "
                     f"(cw={cw} desktop={desktop} workspace={workspace}): {work}")
+        # A push to main never builds the exact-source workspace; a pull
+        # request builds it whenever it is selected and Kind does not.
+        built = (evaluate(jobs["workspace-image"]["if"], context)
+                 and WORKSPACE_BUILD in job_work("workspace-image", context)[0])
+        owed = (not quick and workspace == "true"
+                and ("|kind|" not in selection or kind_workspace == "pinned"))
+        if event == "push to main" and built:
+            raise SystemExit(f"a push to main builds the workspace image for {selection} "
+                             f"(workspace={workspace} kind={kind_workspace})")
+        if event == "pull request" and built != owed:
+            raise SystemExit(f"a pull request {'builds' if built else 'skips'} the workspace image for "
+                             f"{selection} (workspace={workspace} kind={kind_workspace})")
+        builds[event] += built
         checked += 1
-print(f"dispatched jobs always have work: {checked} selection and artifact combinations")
+if not builds["pull request"] or builds["push to main"]:
+    raise SystemExit(f"workspace builds per event: {builds}")
+print(f"dispatched jobs always have work: {checked} event, selection and artifact combinations; "
+      f"workspace builds: {builds['pull request']} on pull requests, none on main")
 PY
 
 echo 'select-verification fixtures: OK'

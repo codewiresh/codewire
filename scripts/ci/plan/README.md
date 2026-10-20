@@ -71,7 +71,9 @@ Selected Kind runs the published workspace pin unless the change alters the
 image definition (`images/base`, `images/workspace`); then it builds and
 verifies its workspace image and consumes the exact local image receipt. With
 the pin, Container contract verification keeps any selected exact-source
-workspace verification. The receipt retains its contract, architecture and
+workspace verification on pull requests and dispatches. A push to main builds
+no workspace image in CI: support-images runs the workspace contract on the
+exact image it publishes. The receipt retains its contract, architecture and
 immutable image bindings. A local receipt also covers a later tree when this
 planner shows `workspace_image_verification` unchanged from the receipt's
 commit. Only standalone workspace
