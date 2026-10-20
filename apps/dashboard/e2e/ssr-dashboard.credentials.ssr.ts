@@ -1,3 +1,9 @@
+// covers: src/credentials_connect.rs src/environment_source_forms.rs src/environment_sources.rs
+// covers: src/routes/credentials.rs src/routes/environment_drafts.rs src/routes/environments.rs
+// covers: src/routes/github_repositories.rs templates/environment-create-form.html
+// covers: templates/environment-source-fields.html templates/github-repositories.html
+// covers: templates/organization-environments-content.html
+// covers: templates/organization-environments.html templates/settings-credentials.html
 import { randomUUID } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
 import { bypassTwoFactor, cleanupUser, createAuthenticatedSession, getUserId, seedSyntheticUser } from "./helpers/db";
@@ -168,7 +174,7 @@ test.describe("managed provider credential browser journey", () => {
   );
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("connects the account's one GitHub, browses and checks out without choosing it, then deletes and reconnects it", async ({ page, isMobile }) => {
+  test("connects the account's one GitHub, browses and checks out without choosing it, then deletes and reconnects it", { tag: "@kind-heavy" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop credential lifecycle contract");
     test.setTimeout(600_000);
     const name = "synthetic-user";

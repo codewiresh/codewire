@@ -1933,7 +1933,42 @@ dashboard_browser_e2e() (
   prepare_playwright_browser_runtime "$chromium" "$ROOT" || return $?
 
   workers="${CODEWIRE_KIND_DASHBOARD_WORKERS:-1}"
-  log "running full Rust dashboard Playwright suite through Kind ingress (workers: ${workers})"
+  # `make kind-test` may run part of the suite (KIND_DASHBOARD_SELECTION, #2974):
+  # the specs a change affects, the Playwright-changed specs, the @smoke desktop
+  # tests, or all but @kind-heavy. The gate and its shards never set it.
+  local -a selection=()
+  local selected_spec selection_value="${KIND_DASHBOARD_SELECTION:-}"
+  case "$selection_value" in
+    '') ;;
+    smoke) selection=(--grep @smoke --project=dashboard-ssr-desktop) ;;
+    light) selection=(--grep-invert @kind-heavy) ;;
+    'only-changed '*)
+      [[ "${selection_value#only-changed }" =~ ^[0-9a-f]{40}$ ]] || {
+        echo "::error::KIND_DASHBOARD_SELECTION only-changed needs one full commit: ${selection_value}"
+        return 2
+      }
+      selection=(--only-changed="${selection_value#only-changed }")
+      ;;
+    'specs '*)
+      for selected_spec in ${selection_value#specs }; do
+        if [[ ! "$selected_spec" =~ ^ssr-dashboard\.[a-z0-9-]+\.ssr\.ts$ ]] \
+            || [ ! -f "$ROOT/apps/dashboard/e2e/$selected_spec" ]; then
+          echo "::error::KIND_DASHBOARD_SELECTION names no Kind dashboard spec: ${selected_spec}"
+          return 2
+        fi
+        selection+=("apps/dashboard/e2e/${selected_spec}")
+      done
+      ;;
+    *)
+      echo "::error::unknown KIND_DASHBOARD_SELECTION: ${selection_value}"
+      return 2
+      ;;
+  esac
+  if [ "${#selection[@]}" -gt 0 ]; then
+    log "running part of the Rust dashboard Playwright suite (${selection_value}) through Kind ingress (workers: ${workers}); not the whole suite"
+  else
+    log "running full Rust dashboard Playwright suite through Kind ingress (workers: ${workers})"
+  fi
   require_get_code /healthz 204 "dashboard health"
   require_get_code /login 200 "dashboard login page"
   DATABASE_URL="${KIND_DATABASE_URL}?sslmode=disable" \
@@ -1946,7 +1981,8 @@ dashboard_browser_e2e() (
     PLAYWRIGHT_KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
     PLAYWRIGHT_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE="$credential_fixture" \
-    "$playwright" test --config "$ROOT/apps/dashboard/playwright.config.ts" --workers="$workers"
+    "$playwright" test --config "$ROOT/apps/dashboard/playwright.config.ts" --workers="$workers" \
+    "${selection[@]}"
 )
 
 mesh_product_connect_ownership_smoke() {

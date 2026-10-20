@@ -1,3 +1,12 @@
+// covers: src/environment_source_forms.rs src/environment_sources.rs src/routes/environments.rs
+// covers: src/routes/sandbox_resize.rs src/routes/setup_progress.rs
+// covers: src/routes/terminal_readiness.rs src/routes/terminal_sessions.rs
+// covers: templates/environment-create-form.html templates/environment-lifetime.html
+// covers: templates/environment-list.html templates/environment-ports.html
+// covers: templates/environment-resize-fields.html templates/environment-source-fields.html
+// covers: templates/environment-sources-edit.html templates/organization-environments-content.html
+// covers: templates/organization-environments.html templates/sandbox-rail.html
+// covers: templates/terminal.html templates/terminal_resize.html
 import { expect, test } from "./helpers/test";
 import type { Page } from "@playwright/test";
 import { waitForEnvironmentState } from "./helpers/environment";
@@ -157,7 +166,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     await tearDownEnvironmentJourney(journey);
   });
 
-  test("creates, runs, exposes a port, stops, starts, and destroys through real Kind", async ({ page, isMobile, workerStorageState }) => {
+  test("creates, runs, exposes a port, stops, starts, and destroys through real Kind", { tag: "@kind-heavy" }, async ({ page, isMobile, workerStorageState }) => {
     test.skip(!!isMobile, "desktop lifecycle contract");
     test.setTimeout(900_000);
     const disallowedBrowserCalls = watchDisallowedBrowserCalls(page);

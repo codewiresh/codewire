@@ -1,3 +1,6 @@
+// covers: src/account_two_factor.rs src/raw_auth.rs src/routes/authentication.rs
+// covers: src/routes/settings.rs templates/auth-form.html templates/settings.html
+// covers: templates/setup-two-factor.html templates/two-factor-recovery.html
 import { expect, request as playwrightRequest, test, type Page, type Response } from "@playwright/test";
 import * as OTPAuth from "otpauth";
 import {

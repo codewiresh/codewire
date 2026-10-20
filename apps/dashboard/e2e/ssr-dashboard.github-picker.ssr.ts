@@ -1,3 +1,8 @@
+// covers: src/credentials_connect.rs src/environment_sources.rs src/routes/credentials.rs
+// covers: src/routes/environments.rs src/routes/github_repositories.rs
+// covers: templates/environment-create-form.html templates/environment-source-fields.html
+// covers: templates/github-repositories.html templates/organization-environments-content.html
+// covers: templates/organization-environments.html templates/settings-credentials.html
 import { randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
 import {

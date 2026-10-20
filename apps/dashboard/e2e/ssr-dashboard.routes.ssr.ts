@@ -1,3 +1,13 @@
+// covers: src/credentials_connect.rs src/raw_auth.rs src/routes/admin.rs
+// covers: src/routes/authentication.rs src/routes/credentials.rs src/routes/device.rs
+// covers: src/routes/environments.rs src/routes/personal_secrets.rs src/routes/public.rs
+// covers: src/routes/settings.rs src/routes/snapshots.rs src/secrets_presets_connect.rs
+// covers: templates/auth-form.html templates/device.html templates/environment-create-form.html
+// covers: templates/environment-list.html templates/environment-source-fields.html
+// covers: templates/home.html templates/organization-environments-content.html
+// covers: templates/organization-environments.html templates/settings-credentials.html
+// covers: templates/settings-nav.html templates/settings-navigation.html
+// covers: templates/settings-secrets.html templates/settings.html templates/snapshots.html
 import { expect, test } from "./helpers/test";
 import { ensureWorkerIdentity } from "./helpers/worker-identity";
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
@@ -12,7 +22,7 @@ const switchRoutesOrgSlug = `e2e-clean-routes-switch-${Date.now()}-${crypto.rand
 test.describe("homepage", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("story assets and sign-in stay on the Rust origin", async ({ page }) => {
+  test("story assets and sign-in stay on the Rust origin", { tag: "@smoke" }, async ({ page }) => {
     const requests: string[] = [];
     const errors: string[] = [];
     page.on("request", (request) => requests.push(request.url()));
@@ -197,7 +207,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
     expect(await page.locator("body").evaluate((body) => body.scrollWidth <= window.innerWidth)).toBe(true);
   });
 
-  test("settings render the current account surfaces and no-JS forms", async ({ page, isMobile }) => {
+  test("settings render the current account surfaces and no-JS forms", { tag: "@smoke" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop settings contract");
     const response = await page.goto("/settings/");
     expect(response?.status()).toBe(200);
@@ -303,7 +313,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await expect(page.locator(".cw-credential-row").filter({ hasText: "Synthetic Claude plan" })).toHaveCount(0);
   });
 
-  test("clean console routes redirect canonically and legacy paths stay retired", async ({ page, isMobile }) => {
+  test("clean console routes redirect canonically and legacy paths stay retired", { tag: "@smoke" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop clean-route contract");
     await page.goto("/dashboard/");
     const organizationRoot = await page

@@ -1,3 +1,4 @@
+// covers: src/routes/sandbox_resize.rs
 import { randomBytes, randomUUID } from "node:crypto";
 import { expect, test, type APIRequestContext, type APIResponse } from "@playwright/test";
 import {

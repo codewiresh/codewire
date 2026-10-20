@@ -977,6 +977,24 @@ grep -Fq 'the Kind shard command requires at least one suite name' \
 grep -Fq 'cluster ${KIND_CLUSTER_NAME} is up; no test suites ran' "$SCRIPT" ||
   fail 'standalone up no longer reports its suite-free exit'
 
+# #2974: part of the dashboard browser suite runs only on a retained cluster;
+# the gate, `up` and its shards refuse a selection, as do other suites.
+for refused in 'full-gate' 'up:up' 'shard:shard dashboard-browser' 'other-suite:suite final-fencing'; do
+  read -r -a refused_command <<<"${refused#*:}"
+  [ "${refused%%:*}" != full-gate ] || refused_command=()
+  : >"$CALLS"
+  KIND_DASHBOARD_SELECTION=smoke expect_failure "dashboard-selection-${refused%%:*}" \
+    dispatch_kind_e2e "${refused_command[@]}"
+  grep -Fq 'KIND_DASHBOARD_SELECTION selects tests of the retained dashboard-browser suite only' \
+    "$FIXTURE/dashboard-selection-${refused%%:*}.out" || fail "${refused%%:*} accepted a dashboard selection"
+  [ ! -s "$CALLS" ] || fail "${refused%%:*} ran something with a dashboard selection"
+done
+: >"$CALLS"
+# A retained run is its own process, never inside a shard transaction.
+KIND_SHARD_TRANSACTION=0 KIND_DASHBOARD_SELECTION=smoke dispatch_kind_e2e suite dashboard-browser
+printf '%s\n' dashboard-browser-retained | cmp -s - "$CALLS" ||
+  fail 'the retained dashboard-browser suite refused a dashboard selection'
+
 # Restore the production up replaced by the dispatch spies.
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$ROOT/scripts/ci/verify/kind/suites/up.sh"

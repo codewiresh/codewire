@@ -1,3 +1,12 @@
+// covers: src/credentials_connect.rs src/environment_source_forms.rs src/environment_sources.rs
+// covers: src/routes/environment_drafts.rs src/routes/environments.rs
+// covers: src/routes/personal_secrets.rs src/routes/secrets_presets.rs
+// covers: src/secrets_presets_connect.rs templates/environment-create-form.html
+// covers: templates/environment-lifetime.html templates/environment-list.html
+// covers: templates/environment-resize-fields.html templates/environment-source-fields.html
+// covers: templates/organization-environments-content.html
+// covers: templates/organization-environments.html templates/organization-secrets-content.html
+// covers: templates/organization-secrets.html templates/settings-secrets.html
 import { expect, test } from "./helpers/test";
 import type { Page } from "@playwright/test";
 import { waitForEnvironmentState } from "./helpers/environment";
@@ -252,7 +261,7 @@ test.describe.serial("server-rendered environments", () => {
     await tearDownEnvironmentJourney(journey);
   });
 
-  test("keeps manual repository URL, branch, and mount entry always available", async ({ page, isMobile }) => {
+  test("keeps manual repository URL, branch, and mount entry always available", { tag: "@smoke" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop repository-entry contract");
     const response = await page.goto(`/${slug}/new/`);
     expect(response?.status()).toBe(200);
@@ -269,7 +278,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
   });
 
-  test("renders server-owned create options and resources with no browser service caller", async ({ page, isMobile }) => {
+  test("renders server-owned create options and resources with no browser service caller", { tag: "@smoke" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop create-options and visual contract");
     const disallowedBrowserCalls = watchDisallowedBrowserCalls(page);
     const staleAssetRequests: string[] = [];
@@ -572,7 +581,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(stillNotCreated.count).toBe(0);
   });
 
-  test("removing all preview rows suppresses inherited preset routes through real Kind", async ({ page, isMobile }) => {
+  test("removing all preview rows suppresses inherited preset routes through real Kind", { tag: "@kind-heavy" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop backend preview-selection contract");
     test.setTimeout(600_000);
     const name = "ssr-no-preview-workspace";

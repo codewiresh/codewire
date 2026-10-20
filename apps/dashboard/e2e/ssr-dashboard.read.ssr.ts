@@ -1,3 +1,8 @@
+// covers: src/routes/environments.rs templates/dashboard.html
+// covers: templates/environment-create-form.html templates/environment-list.html
+// covers: templates/environment-source-fields.html
+// covers: templates/organization-environments-content.html
+// covers: templates/organization-environments.html
 import { expect, test } from "./helpers/test";
 import {
   bypassTwoFactor,
@@ -24,7 +29,7 @@ test.describe("server-rendered dashboard", () => {
     if (!testInfo.project.use.isMobile) await cleanupTestOrg(dashboardOrgSlug);
   });
 
-  test("opens the organization home in the shared console shell", async ({ page, isMobile }) => {
+  test("opens the organization home in the shared console shell", { tag: "@smoke" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop visual contract");
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(request.url()));
@@ -98,7 +103,7 @@ test.describe("server-rendered dashboard", () => {
     expect(browserRequests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
   });
 
-  test("sends an unauthenticated visitor to the local server-rendered login", async ({ browser, isMobile }) => {
+  test("sends an unauthenticated visitor to the local server-rendered login", { tag: "@smoke" }, async ({ browser, isMobile }) => {
     test.skip(!!isMobile, "covered by the desktop adapter contract");
     const context = await browser.newContext();
     await context.clearCookies();

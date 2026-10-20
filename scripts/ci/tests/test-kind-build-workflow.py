@@ -1218,6 +1218,37 @@ class CommonConsumerContractTests(unittest.TestCase):
                 CODEWIRE_KIND_DASHBOARD_WORKERS=4 dashboard_browser_e2e
                 grep -Fq -- '--workers=4' "$CALLS" ||
                   fail 'dashboard leg does not thread CODEWIRE_KIND_DASHBOARD_WORKERS'
+                # #2974: make kind-test may run part of the suite; each
+                # selection maps to exact Playwright arguments, and anything
+                # else is refused before Playwright starts.
+                mkdir -p "$ROOT/apps/dashboard/e2e"
+                : >"$ROOT/apps/dashboard/e2e/ssr-dashboard.read.ssr.ts"
+                : >"$ROOT/apps/dashboard/e2e/ssr-dashboard.routes.ssr.ts"
+                changed_base="$(printf 'a%.0s' {1..40})"
+                for selection_case in \
+                    "specs ssr-dashboard.read.ssr.ts ssr-dashboard.routes.ssr.ts|apps/dashboard/e2e/ssr-dashboard.read.ssr.ts apps/dashboard/e2e/ssr-dashboard.routes.ssr.ts" \
+                    "smoke|--grep @smoke --project=dashboard-ssr-desktop" \
+                    "light|--grep-invert @kind-heavy" \
+                    "only-changed ${changed_base}|--only-changed=${changed_base}"; do
+                  : >"$CALLS"
+                  KIND_DASHBOARD_SELECTION="${selection_case%%|*}" dashboard_browser_e2e
+                  grep -Fq -- "--workers=1 ${selection_case#*|}" "$CALLS" ||
+                    fail "dashboard selection ${selection_case%%|*} lost its Playwright arguments"
+                  grep -Fq 'not the whole suite' "$CALLS" ||
+                    fail "dashboard selection ${selection_case%%|*} did not say it is part of the suite"
+                done
+                for refused_selection in 'specs ../escape.ssr.ts' 'specs ssr-dashboard.missing.ssr.ts' \
+                    'only-changed main' 'fast'; do
+                  : >"$CALLS"
+                  set +e
+                  (set -e; KIND_DASHBOARD_SELECTION="$refused_selection" dashboard_browser_e2e >/dev/null)
+                  refused_status=$?
+                  set -e
+                  [[ "$refused_status" -eq 2 ]] || fail "dashboard selection ${refused_selection} was not refused"
+                  ! grep -q '^browser-playwright ' "$CALLS" ||
+                    fail "dashboard selection ${refused_selection} started Playwright"
+                done
+                rm -r "$ROOT/apps/dashboard/e2e"
                 : >"$CALLS"
                 CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release dashboard_browser_e2e
                 grep -Fxq 'browser-credential-fixture 0' "$CALLS"

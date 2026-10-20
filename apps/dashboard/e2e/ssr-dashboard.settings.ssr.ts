@@ -1,3 +1,4 @@
+// covers: src/credentials_connect.rs src/routes/credentials.rs templates/settings-credentials.html
 import { expect, test } from "./helpers/test";
 import type { Page } from "@playwright/test";
 import { ensureWorkerIdentity } from "./helpers/worker-identity";
@@ -19,7 +20,7 @@ function watchBrowserServiceCalls(page: Page) {
 }
 
 test.describe.serial("server-rendered settings mutations", () => {
-  test("updates and restores Git identity through the Rust form", async ({ page, isMobile }, testInfo) => {
+  test("updates and restores Git identity through the Rust form", { tag: "@smoke" }, async ({ page, isMobile }, testInfo) => {
     test.skip(!!isMobile, "desktop settings mutation contract");
     const browserServiceCalls = watchBrowserServiceCalls(page);
 

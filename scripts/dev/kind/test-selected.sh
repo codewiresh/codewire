@@ -5,6 +5,7 @@
 #   KIND_CLUSTER_NAME=<cluster> scripts/dev/kind/test-selected.sh
 #   KIND_TEST_SUITES="credentials dashboard-browser" ...   # explicit suites
 #   KIND_CREDENTIAL_STAGES=claude-sign-in ...              # only these credentials stages
+#   KIND_DASHBOARD_TESTS=all|smoke|light ...               # dashboard-browser tests
 #   PREFLIGHT_BASE_SHA=<parent> ...                        # stacked branches
 #
 # The repository's one path classifier (scripts/dev/preflight.sh --explain)
@@ -223,6 +224,29 @@ if [ "${#requested_stages[@]}" -gt 0 ]; then
   # Every stage is the whole suite.
   [ "${stages[*]}" = "${CREDENTIAL_STAGES[*]}" ] || credential_stages="${stages[*]}"
 fi
+# The dashboard browser specs this change affects (dashboard-specs.py), unless
+# suites were named. DASHBOARD_TESTS=all runs every spec, smoke the @smoke
+# desktop tests and light all but @kind-heavy (#2974). Empty is every spec.
+dashboard_tests="" dashboard_reason=""
+if [[ " ${selected[*]} " == *' dashboard-browser '* ]]; then
+  case "${KIND_DASHBOARD_TESTS:-}" in
+    '')
+      if [ -z "${KIND_TEST_SUITES:-}" ]; then
+        dashboard_tests="$(python3 -B "$ROOT/scripts/dev/kind/dashboard-specs.py" select --base "$base")" \
+          || die 'could not choose the dashboard browser specs this change affects'
+      fi
+      ;;
+    all) ;;
+    smoke | light) dashboard_tests="$KIND_DASHBOARD_TESTS" ;;
+    *) die "unknown DASHBOARD_TESTS: ${KIND_DASHBOARD_TESTS} (all, smoke or light)" ;;
+  esac
+  if [[ "$dashboard_tests" == 'all '* ]]; then
+    dashboard_reason="${dashboard_tests#all }"
+    dashboard_tests=""
+  fi
+elif [ -n "${KIND_DASHBOARD_TESTS:-}" ]; then
+  die 'DASHBOARD_TESTS chooses dashboard-browser tests, which this run does not select (SUITES=dashboard-browser)'
+fi
 log "change since ${base}"
 for item in "${unobserved[@]}"; do
   log "  not observable in Kind: ${item}"
@@ -244,6 +268,11 @@ for suite in "${selected[@]}"; do
 done
 if [ -n "$credential_stages" ]; then
   log "  credentials stages ${credential_stages} only: not a green credentials suite"
+fi
+if [ -n "$dashboard_tests" ]; then
+  log "  dashboard-browser ${dashboard_tests} only: not the whole dashboard-browser suite"
+elif [ -n "$dashboard_reason" ]; then
+  log "  dashboard-browser runs every spec: ${dashboard_reason}"
 fi
 log "  services this change feeds: ${changed_services[*]:-none}"
 
@@ -335,16 +364,20 @@ done
 timings=("deploy $((SECONDS - started))s")
 for suite in "${selected[@]}"; do
   started=$SECONDS
-  suite_stages=""
+  suite_stages="" suite_tests=""
   [ "$suite" != credentials ] || suite_stages="$credential_stages"
+  [ "$suite" != dashboard-browser ] || suite_tests="$dashboard_tests"
   # Test the current source against the cluster as deployed, not only an
   # unchanged tree that matches the image receipt.
   KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" KIND_RETAINED_USE_CLUSTER_WORKSPACE=1 \
-    KIND_CREDENTIAL_STAGES="$suite_stages" \
+    KIND_CREDENTIAL_STAGES="$suite_stages" KIND_DASHBOARD_SELECTION="$suite_tests" \
     "$ROOT/scripts/ci/verify/kind-e2e.sh" suite "$suite" || die "suite ${suite} failed after $((SECONDS - started))s"
   if [ -n "$suite_stages" ]; then
     timings+=("${suite} (stages ${suite_stages}) $((SECONDS - started))s")
     log "credentials stages ${suite_stages} green in $((SECONDS - started))s; the other stages did not run"
+  elif [ -n "$suite_tests" ]; then
+    timings+=("${suite} (${suite_tests}) $((SECONDS - started))s")
+    log "dashboard-browser ${suite_tests} green in $((SECONDS - started))s; the other specs did not run"
   else
     timings+=("${suite} $((SECONDS - started))s")
     log "suite ${suite} green in $((SECONDS - started))s"
@@ -352,6 +385,8 @@ for suite in "${selected[@]}"; do
 done
 if [ -n "$credential_stages" ]; then
   log "selected suites green; credentials ran only stages ${credential_stages}, which is not a green credentials suite: ${timings[*]}"
+elif [ -n "$dashboard_tests" ]; then
+  log "selected suites green; dashboard-browser ran only ${dashboard_tests}, which is not the whole dashboard-browser suite: ${timings[*]}"
 else
   log "all selected suites green: ${timings[*]}"
 fi

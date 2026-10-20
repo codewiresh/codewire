@@ -254,7 +254,8 @@ kind-db-restore:
 # only that credentials stage (native, claude-session, claude-sign-in); it is
 # never a green credentials suite.
 kind-test:
-	KIND_TEST_SUITES="$(SUITES)" KIND_CREDENTIAL_STAGES="$(CREDENTIAL_STAGES)" ./scripts/dev/kind/test-selected.sh
+	KIND_TEST_SUITES="$(SUITES)" KIND_CREDENTIAL_STAGES="$(CREDENTIAL_STAGES)" \
+	  KIND_DASHBOARD_TESTS="$(DASHBOARD_TESTS)" ./scripts/dev/kind/test-selected.sh
 
 kind-credentials-real:
 	$(KIND_ORIGIN_ENV) ./scripts/ci/verify/kind-e2e.sh credentials real

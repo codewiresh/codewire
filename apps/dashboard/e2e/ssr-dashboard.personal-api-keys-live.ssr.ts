@@ -1,3 +1,6 @@
+// covers: src/personal_api_keys_connect.rs src/routes/personal_api_keys.rs
+// covers: templates/settings-api-keys.html templates/settings-nav.html
+// covers: templates/settings-navigation.html
 import { expect, test } from "./helpers/test";
 import type { Page } from "@playwright/test";
 import { ensureWorkerIdentity } from "./helpers/worker-identity";
@@ -31,7 +34,7 @@ test.describe.serial("personal Codewire API keys through the managed app", () =>
     if (organizationId) await cleanupTestOrg(slug);
   });
 
-  test("creates once and manages a scoped key using native browser forms", async ({ page, isMobile }) => {
+  test("creates once and manages a scoped key using native browser forms", { tag: "@smoke" }, async ({ page, isMobile }) => {
     const name = `Personal browser key ${isMobile ? "mobile" : "desktop"}`;
     const response = await page.goto("/settings/api-keys/");
     expect(response?.status()).toBe(200);

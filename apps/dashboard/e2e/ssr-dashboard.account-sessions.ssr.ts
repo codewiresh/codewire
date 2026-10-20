@@ -1,3 +1,5 @@
+// covers: src/raw_auth.rs src/routes/authentication.rs src/routes/settings.rs
+// covers: templates/settings.html
 import { expect, test, type Page } from "@playwright/test";
 import {
   bypassTwoFactor, cleanupUser, createAuthenticatedSession, getUserId, seedSyntheticUser,

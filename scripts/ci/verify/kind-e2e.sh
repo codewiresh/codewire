@@ -92,6 +92,12 @@ dispatch_kind_e2e() {
     echo "::error::KIND_CREDENTIAL_STAGES selects stages of the retained credentials suite only (suite credentials); unset it for this command"
     return 2
   fi
+  # Part of the dashboard browser suite, likewise only for a retained run.
+  if [ -n "${KIND_DASHBOARD_SELECTION:-}" ] && { [ "$#" -ne 2 ] || [ "$1" != suite ] \
+      || [ "$2" != dashboard-browser ] || [ "${KIND_SHARD_TRANSACTION:-0}" = 1 ]; }; then
+    echo "::error::KIND_DASHBOARD_SELECTION selects tests of the retained dashboard-browser suite only (suite dashboard-browser); unset it for this command"
+    return 2
+  fi
   if [ "$#" -eq 0 ]; then
     run_integrated_kind_suite
     return

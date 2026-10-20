@@ -1,3 +1,13 @@
+// covers: src/organization_connect.rs src/raw_auth.rs src/routes/authentication.rs
+// covers: src/routes/environments.rs src/routes/invitations.rs templates/auth-form.html
+// covers: templates/auth-status.html templates/environment-create-form.html
+// covers: templates/environment-list.html templates/environment-source-fields.html
+// covers: templates/invitation.html templates/organization-api-keys-content.html
+// covers: templates/organization-api-keys.html templates/organization-environments-content.html
+// covers: templates/organization-environments.html templates/organization-members-content.html
+// covers: templates/organization-members.html templates/organization-settings-nav.html
+// covers: templates/settings-navigation.html templates/setup-two-factor.html
+// covers: templates/two-factor-recovery.html
 import { expect, test } from "./helpers/test";
 import type { Page } from "@playwright/test";
 import * as OTPAuth from "otpauth";
@@ -49,7 +59,7 @@ test.describe.serial("server-rendered organization governance", () => {
     await cleanupUser(outsiderEmail);
   });
 
-  test("manages members and invitations through server-side Connect clients", async ({ page, isMobile }) => {
+  test("manages members and invitations through server-side Connect clients", { tag: "@smoke" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop mutation contract");
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(new URL(request.url()).pathname));

@@ -1,3 +1,7 @@
+// covers: src/raw_auth.rs src/routes/authentication.rs src/routes/device.rs src/routes/settings.rs
+// covers: templates/auth-form.html templates/auth-status.html templates/dashboard.html
+// covers: templates/device.html templates/settings.html templates/setup-two-factor.html
+// covers: templates/two-factor-recovery.html
 import { expect, test, type Page } from "@playwright/test";
 import { createPublicKey, verify } from "node:crypto";
 import * as OTPAuth from "otpauth";
@@ -157,7 +161,7 @@ test.describe.serial("server-rendered identity flows", () => {
     await clearRateLimits();
   });
 
-  test("publishes a usable OIDC discovery document and Ed25519 key", async ({ request, isMobile }) => {
+  test("publishes a usable OIDC discovery document and Ed25519 key", { tag: "@smoke" }, async ({ request, isMobile }) => {
     test.skip(!!isMobile, "desktop identity provider contract");
 
     const discoveryResponse = await request.get(
@@ -533,7 +537,7 @@ test.describe.serial("server-rendered identity flows", () => {
     expect(rejectedRefresh.ok()).toBe(false);
   });
 
-  test("completes browser OIDC PKCE and verifies the issued ID token", async ({ page, request, isMobile }) => {
+  test("completes browser OIDC PKCE and verifies the issued ID token", { tag: "@kind-heavy" }, async ({ page, request, isMobile }) => {
     test.skip(!!isMobile, "desktop browser OIDC contract");
     test.setTimeout(90_000);
 

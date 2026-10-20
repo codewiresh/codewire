@@ -1,3 +1,16 @@
+// covers: src/admin_connect.rs src/billing_connect.rs src/organization_connect.rs src/raw_auth.rs
+// covers: src/routes/admin.rs src/routes/authentication.rs src/routes/billing.rs
+// covers: src/routes/secrets_presets.rs src/routes/settings.rs src/secrets_presets_connect.rs
+// covers: templates/admin-audit.html templates/admin-billing.html
+// covers: templates/admin-plan-fields-new.html templates/admin-plan-fields-row.html
+// covers: templates/admin-price-fields-new.html templates/admin-price-fields-row.html
+// covers: templates/auth-form.html templates/organization-api-keys-content.html
+// covers: templates/organization-api-keys.html templates/organization-billing.html
+// covers: templates/organization-members-content.html templates/organization-members.html
+// covers: templates/organization-presets-content.html templates/organization-presets.html
+// covers: templates/organization-secret-bucket-content.html
+// covers: templates/organization-secret-bucket.html templates/organization-secrets-content.html
+// covers: templates/organization-secrets.html templates/settings.html
 import { expect, test } from "./helpers/test";
 import type { Page } from "@playwright/test";
 import { fillField } from "./helpers/auth-flow";

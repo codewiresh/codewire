@@ -1,3 +1,5 @@
+// covers: src/routes/settings.rs src/routes/terminal_readiness.rs src/routes/terminal_sessions.rs
+// covers: templates/settings.html
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import {
   bypassTwoFactor, cleanupUser, createAuthenticatedSession, getUserId, seedSyntheticUser,
@@ -57,7 +59,7 @@ test.describe.serial("durable terminal browser admission", () => {
     await cleanupUser(email);
   });
 
-  test("both browser routes enforce sign-in and mandatory two-factor before runtime lookup", async ({ request }) => {
+  test("both browser routes enforce sign-in and mandatory two-factor before runtime lookup", { tag: "@smoke" }, async ({ request }) => {
     const anonymous = await request.get(`${base}/_fragments/terminal-sessions`);
     expect(anonymous.status()).toBe(401);
     expect(await anonymous.json()).toEqual({ error: "sign-in-required" });

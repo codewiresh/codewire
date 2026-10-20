@@ -1,3 +1,10 @@
+// covers: src/admin_connect.rs src/billing_connect.rs src/raw_auth.rs src/routes/admin.rs
+// covers: src/routes/authentication.rs src/routes/billing.rs templates/admin-audit.html
+// covers: templates/admin-billing.html templates/admin-overview.html
+// covers: templates/admin-plan-fields-new.html templates/admin-plan-fields-row.html
+// covers: templates/admin-price-fields-new.html templates/admin-price-fields-row.html
+// covers: templates/auth-form.html templates/organization-billing.html
+// covers: templates/organization-settings-nav.html templates/settings-navigation.html
 import { expect, test } from "./helpers/test";
 import type { Page } from "@playwright/test";
 import { fillField } from "./helpers/auth-flow";
@@ -55,7 +62,7 @@ test.describe.serial("server-rendered billing and administration", () => {
     await cleanupUser(adminEmail);
   });
 
-  test("renders organization billing without browser-side service calls", async ({ page, isMobile }) => {
+  test("renders organization billing without browser-side service calls", { tag: "@smoke" }, async ({ page, isMobile }) => {
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(request.url()));
 

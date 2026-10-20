@@ -187,6 +187,7 @@ with (pathlib.Path(os.environ["FAKE_STATE"]) / "calls").open("a") as log:
         "kubeconfig":os.environ.get("KUBECONFIG"), "smokes":os.environ.get("CARGO_CI_DIR"),
         "lock_fd":os.environ.get("KIND_PROFILE_LOCK_FD"),
         "credential_stages":os.environ.get("KIND_CREDENTIAL_STAGES"),
+        "dashboard_selection":os.environ.get("KIND_DASHBOARD_SELECTION"),
         "dashboard_workers":os.environ.get("CODEWIRE_KIND_DASHBOARD_WORKERS"),
         "postgres_port":os.environ.get("KIND_POSTGRES_HOST_PORT")}) + "\n")
 sys.exit(int(os.environ.get("FAKE_SUITE_STATUS", "0")))
@@ -219,6 +220,15 @@ import json, os, pathlib, sys
 with (pathlib.Path(os.environ["FAKE_STATE"]) / "calls").open("a") as log:
     log.write(json.dumps({"tool": "database", "args": sys.argv[1:]}) + "\n")
 sys.exit(int(os.environ.get("FAKE_DATABASE_STATUS", "0")))
+'''
+
+# Stands in for scripts/dev/kind/dashboard-specs.py, which DashboardSpecTests cover.
+FAKE_DASHBOARD_SPECS = r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+with (pathlib.Path(os.environ["FAKE_STATE"]) / "calls").open("a") as log:
+    log.write(json.dumps({"tool": "dashboard-specs", "args": sys.argv[1:]}) + "\n")
+if os.environ.get("FAKE_DASHBOARD_SPECS_FAIL"): sys.exit(1)
+print(os.environ.get("FAKE_DASHBOARD_SPECS", "all nothing mapped"))
 '''
 
 # Stands in for scripts/dev/preflight.sh --explain.
@@ -294,6 +304,7 @@ class DeveloperProfileTests(unittest.TestCase):
         self.write_program(self.tree / "scripts/dev/kind/service-sources.py", FAKE_SOURCES)
         self.write_program(self.tree / "scripts/dev/kind/trust-roots.sh", FAKE_TRUST_ROOTS)
         self.write_program(self.tree / "scripts/dev/kind/database.sh", FAKE_DATABASE)
+        self.write_program(self.tree / "scripts/dev/kind/dashboard-specs.py", FAKE_DASHBOARD_SPECS)
         self.write_program(self.tree / "scripts/dev/preflight.sh", FAKE_PREFLIGHT)
         for tool in ("kind", "docker", "kubectl", "ss", "curl", "cat"):
             self.write_program(self.tools / tool, FAKE_TOOL)
@@ -1167,6 +1178,58 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([call["args"] for call in self.calls("suite")], [["suite", "dashboard-browser"]])
 
+    def run_browser_selection(self, **environment: str) -> subprocess.CompletedProcess[str]:
+        playwright = self.tree / "apps/dashboard/node_modules/.bin/playwright"
+        if not playwright.exists():
+            playwright.parent.mkdir(parents=True)
+            self.write_program(playwright, "#!/bin/sh\n")
+        self.calls_path.write_text("")
+        return self.run_script("test-selected.sh", FAKE_FRONTEND_URL="http://127.0.0.1:31100", **environment)
+
+    def test_a_dashboard_change_runs_only_the_specs_it_affects(self) -> None:
+        # #2974: the affected-spec map chooses the dashboard browser specs.
+        result = self.run_browser_selection(FAKE_SELECTION="rust|rust_pkg_codewire_dashboard_web",
+                                            FAKE_DASHBOARD_SPECS="specs ssr-dashboard.read.ssr.ts")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        choose, = self.calls("dashboard-specs")
+        self.assertEqual(choose["args"], ["select", "--base", "f" * 40])
+        self.assertEqual([(call["args"], call["dashboard_selection"]) for call in self.calls("suite")],
+                         [(["suite", "dashboard-browser"], "specs ssr-dashboard.read.ssr.ts")])
+        self.assertIn("dashboard-browser specs ssr-dashboard.read.ssr.ts only: not the whole dashboard-browser suite",
+                      result.stderr)
+        self.assertIn("which is not the whole dashboard-browser suite", result.stderr)
+        # Unmapped changes, named suites and DASHBOARD_TESTS=all run every spec.
+        result = self.run_browser_selection(FAKE_SELECTION="web", FAKE_DASHBOARD_SPECS="all packages/x is not mapped")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("dashboard-browser runs every spec: packages/x is not mapped", result.stderr)
+        self.assertEqual([call["dashboard_selection"] for call in self.calls("suite")], [""])
+        for environment in ({"KIND_TEST_SUITES": "dashboard-browser"},
+                            {"FAKE_SELECTION": "web", "KIND_DASHBOARD_TESTS": "all"}):
+            with self.subTest(environment=environment):
+                result = self.run_browser_selection(FAKE_DASHBOARD_SPECS="specs ssr-dashboard.read.ssr.ts",
+                                                    **environment)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(self.calls("dashboard-specs"))
+                self.assertEqual([call["dashboard_selection"] for call in self.calls("suite")], [""])
+
+    def test_dashboard_tests_choose_smoke_or_light_runs(self) -> None:
+        for tests in ("smoke", "light"):
+            with self.subTest(tests=tests):
+                result = self.run_browser_selection(KIND_TEST_SUITES="dashboard-browser credentials",
+                                                    KIND_DASHBOARD_TESTS=tests)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([(call["args"][-1], call["dashboard_selection"]) for call in self.calls("suite")],
+                                 [("credentials", ""), ("dashboard-browser", tests)])
+        for environment, message in (
+                ({"KIND_TEST_SUITES": "dashboard-browser", "KIND_DASHBOARD_TESTS": "fast"}, "unknown DASHBOARD_TESTS: fast"),
+                ({"KIND_TEST_SUITES": "credentials", "KIND_DASHBOARD_TESTS": "smoke"}, "which this run does not select"),
+                ({"FAKE_SELECTION": "web", "FAKE_DASHBOARD_SPECS_FAIL": "1"}, "could not choose the dashboard browser specs")):
+            with self.subTest(environment=environment):
+                result = self.run_browser_selection(**environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(self.calls("suite"))
+
     def test_browser_suite_runs_four_workers_unless_told_otherwise(self) -> None:
         # #2974: the per-worker identities let a local run use four workers, as CI does.
         (self.tree / "apps/dashboard/node_modules/.bin").mkdir(parents=True)
@@ -1253,6 +1316,113 @@ def load_service_sources():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_dashboard_specs():
+    spec = importlib.util.spec_from_file_location("dashboard_specs", ROOT / "scripts/dev/kind/dashboard-specs.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class DashboardSpecTests(unittest.TestCase):
+    """#2974: the Kind dashboard specs a change affects."""
+
+    CRATE = "crates/codewire-dashboard-web"
+    E2E = "apps/dashboard/e2e"
+    COVERS = {
+        "ssr-dashboard.read.ssr.ts": {"templates/dashboard.html", "src/routes/environments.rs"},
+        "ssr-dashboard.organization.ssr.ts": {"src/routes/organizations.rs", "src/routes/environments.rs"},
+        "ssr-dashboard.settings.ssr.ts": {"src/routes/credentials.rs"},
+    }
+    FIXTURES = {"ssr-dashboard.resize.ssr.ts"}
+
+    def setUp(self) -> None:
+        self.module = load_dashboard_specs()
+
+    def select(self, *paths: str) -> tuple[str, list[str]]:
+        return self.module.select(list(paths), self.COVERS, self.FIXTURES)
+
+    def test_a_mapped_dashboard_change_selects_the_specs_covering_it(self) -> None:
+        self.assertEqual(self.select(f"{self.CRATE}/templates/dashboard.html"),
+                         ("specs", ["ssr-dashboard.read.ssr.ts"]))
+        self.assertEqual(self.select(f"{self.CRATE}/src/routes/environments.rs", f"{self.CRATE}/src/routes/credentials.rs",
+                                     "docs/TESTING.md"),
+                         ("specs", ["ssr-dashboard.organization.ssr.ts", "ssr-dashboard.read.ssr.ts",
+                                    "ssr-dashboard.settings.ssr.ts"]))
+
+    def test_anything_unmapped_runs_every_spec(self) -> None:
+        for paths in ([f"{self.CRATE}/src/routes/dashboard.rs"], [f"{self.CRATE}/templates/dashboard.html", f"{self.CRATE}/Cargo.toml"],
+                      [f"{self.CRATE}/assets/htmx-2.0.10.min.js"], ["packages/codewire-design/src/tokens.css"],
+                      ["crates/codewire-idp/src/lib.rs"], [f"{self.E2E}/global-setup.ts"], ["apps/dashboard/playwright.config.ts"],
+                      [f"{self.E2E}/seed-users.ts"], []):
+            with self.subTest(paths=paths):
+                kind, _ = self.select(*paths)
+                self.assertEqual(kind, "all")
+
+    def test_a_browser_test_change_runs_what_playwright_finds_changed(self) -> None:
+        for paths in ([f"{self.E2E}/ssr-dashboard.read.ssr.ts"], [f"{self.E2E}/helpers/org.ts"], [f"{self.E2E}/auth.setup.ts"],
+                      [f"{self.E2E}/helpers/org.ts", f"{self.E2E}/helpers/org.test.ts", f"{self.E2E}/ssr-dashboard.resize.ssr.ts"]):
+            with self.subTest(paths=paths):
+                self.assertEqual(self.select(*paths), ("only-changed", []))
+        # Playwright cannot add specs to the ones it finds changed.
+        self.assertEqual(self.select(f"{self.E2E}/helpers/org.ts", f"{self.CRATE}/templates/dashboard.html")[0], "all")
+        # A helper unit test or a design fixture never runs in Kind.
+        self.assertEqual(self.select(f"{self.E2E}/helpers/org.test.ts", f"{self.CRATE}/templates/dashboard.html"),
+                         ("specs", ["ssr-dashboard.read.ssr.ts"]))
+
+    def test_every_kind_spec_is_mapped_to_files_that_exist(self) -> None:
+        self.assertEqual(self.module.check(ROOT), [])
+        covers = self.module.spec_covers(ROOT)
+        fixtures = self.module.design_fixture_specs(ROOT)
+        self.assertIn("ssr-dashboard.environment-lifecycle.ssr.ts", covers)
+        self.assertFalse(set(covers) & fixtures)
+        self.assertEqual(set(covers) | fixtures,
+                         {path.name for path in (ROOT / self.E2E).glob("ssr-dashboard.*.ssr.ts")})
+
+    def test_check_rejects_a_missing_stale_or_shared_mapping(self) -> None:
+        (ROOT / ".tmp").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as temporary:
+            root = Path(temporary)
+            (root / self.E2E / "helpers").mkdir(parents=True)
+            shutil.copy2(ROOT / self.E2E / "helpers/design-fixtures.ts", root / self.E2E / "helpers/design-fixtures.ts")
+            for relative in self.module.SHARED + ("templates/dashboard.html",):
+                (root / self.CRATE / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / self.CRATE / relative).write_text("")
+            specs = {
+                "ssr-dashboard.mapped.ssr.ts": "// covers: templates/dashboard.html\nimport x;\n",
+                "ssr-dashboard.unmapped.ssr.ts": "import x;\n// covers: templates/dashboard.html\n",
+                "ssr-dashboard.stale.ssr.ts": "// covers: templates/gone.html\n",
+                "ssr-dashboard.shared.ssr.ts": "// covers: templates/sidebar.html\n",
+                "ssr-dashboard.resize.ssr.ts": "",
+            }
+            for name, text in specs.items():
+                (root / self.E2E / name).write_text(text)
+            self.assertEqual(sorted(self.module.check(root)), [
+                "ssr-dashboard.shared.ssr.ts covers the shared templates/sidebar.html; a change to it runs every spec",
+                "ssr-dashboard.stale.ssr.ts covers templates/gone.html, which does not exist",
+                "ssr-dashboard.unmapped.ssr.ts has no `// covers:` lines",
+            ])
+
+    def test_select_prints_the_merge_base_for_only_changed(self) -> None:
+        (ROOT / ".tmp").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as temporary:
+            root = Path(temporary)
+            git = ["git", "-C", str(root), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+            subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
+            (root / "base.txt").write_text("base\n")
+            subprocess.run([*git, "add", "."], check=True)
+            subprocess.run([*git, "commit", "-q", "-m", "base"], check=True)
+            base = subprocess.run([*git, "rev-parse", "HEAD"], check=True, text=True, capture_output=True).stdout.strip()
+            subprocess.run([*git, "switch", "-q", "-c", "change"], check=True)
+            (root / "committed.txt").write_text("x\n")
+            subprocess.run([*git, "add", "."], check=True)
+            subprocess.run([*git, "commit", "-q", "-m", "change"], check=True)
+            (root / "base.txt").write_text("edited\n")
+            (root / "untracked.txt").write_text("new\n")
+            merge_base, changed = self.module.changed_paths(root, "main")
+            self.assertEqual(merge_base, base)
+            self.assertEqual(changed, ["base.txt", "committed.txt", "untracked.txt"])
 
 
 class SelectionTableTests(unittest.TestCase):

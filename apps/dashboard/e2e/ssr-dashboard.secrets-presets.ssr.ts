@@ -1,3 +1,9 @@
+// covers: src/routes/personal_secrets.rs src/routes/secrets_presets.rs
+// covers: src/secrets_presets_connect.rs templates/organization-presets-content.html
+// covers: templates/organization-presets.html templates/organization-secret-bucket-content.html
+// covers: templates/organization-secret-bucket.html templates/organization-secrets-content.html
+// covers: templates/organization-secrets.html templates/organization-settings-nav.html
+// covers: templates/settings-navigation.html templates/settings-secrets.html
 import { expect, test } from "./helpers/test";
 import type { APIResponse, Page } from "@playwright/test";
 import postgres from "postgres";
@@ -168,7 +174,7 @@ test.describe.serial("server-rendered secrets and presets", () => {
     await cleanupTestOrg(slug);
   });
 
-  test("manages organization, user, and project secrets without exposing their values", async ({ page, isMobile }) => {
+  test("manages organization, user, and project secrets without exposing their values", { tag: "@smoke" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop mutation and secret-artifact contract");
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(new URL(request.url()).pathname));

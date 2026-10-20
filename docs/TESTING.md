@@ -142,6 +142,26 @@ Isolation rules for new and edited specs:
 - Design-fixture specs keep their empty `storageState` override and never
   touch the seeded stack.
 
+## Affected specs, smoke and heavy tests
+
+`make kind-test` runs only the Kind dashboard specs a change affects. Each
+Kind spec opens with `// covers:` lines naming the
+`crates/codewire-dashboard-web` files (relative to the crate) its tests
+exercise, and `scripts/dev/kind/dashboard-specs.py` selects every spec that
+covers a changed file. The files most pages pass through (the page frame,
+sidebar, session and draft plumbing) are covered by no spec on purpose, so a
+change to one runs every spec, as does any change a header does not map. A
+change only to the browser tests' TypeScript runs what Playwright finds
+changed (`--only-changed`). `e2e/helpers/kind-coverage.test.ts` fails when a
+spec is unmapped or names a file that no longer exists. The whole suite still
+runs at merge and on main.
+
+Two tags make shorter local runs. `@smoke` marks about fifteen fast desktop
+tests across the main surfaces, and `@kind-heavy` the journeys that drive real
+Sandboxes or providers. `make kind-test DASHBOARD_TESTS=smoke` runs the smoke
+tests, `light` all but the heavy ones, and `all` every spec. A run of part of
+the suite says so and is not a green `dashboard-browser` suite.
+
 ## Required behavior coverage
 
 The suite under `apps/dashboard/e2e/` covers:

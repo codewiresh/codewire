@@ -1,3 +1,8 @@
+// covers: src/routes/environments.rs src/routes/organizations.rs
+// covers: templates/environment-create-form.html templates/environment-list.html
+// covers: templates/environment-source-fields.html templates/new-organization.html
+// covers: templates/organization-environments-content.html
+// covers: templates/organization-environments.html templates/organization-form.html
 import { expect, test } from "./helpers/test";
 import { cleanupTestOrg } from "./helpers/org";
 
@@ -9,7 +14,7 @@ test.describe("server-rendered organization creation", () => {
     await cleanupTestOrg(slugPrefix);
   });
 
-  test("renders the desktop organization form and suggests a slug", async ({ page, isMobile }) => {
+  test("renders the desktop organization form and suggests a slug", { tag: "@smoke" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop visual contract");
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(request.url()));
@@ -21,7 +26,7 @@ test.describe("server-rendered organization creation", () => {
     expect(browserRequests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
   });
 
-  test("creates an organization through HTMX and returns to the dashboard", async ({ page, isMobile }) => {
+  test("creates an organization through HTMX and returns to the dashboard", { tag: "@smoke" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "covered by the desktop interaction contract");
     const slug = `${slugPrefix}-htmx`;
     await page.goto("/organizations/new/");
