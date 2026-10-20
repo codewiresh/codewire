@@ -63,9 +63,9 @@ for the exact run it names.
 
 ## Method and risk
 
-Use Noel Method v0.10.0, exact merged commit
-`6d7826aecda20f875bc1f9a29c333d5d5ef4e5e7`, manifest
-`ff68193d531043d0498841fa104cfc1de713307ab80577eabaaae09c05b53151`.
+Use Noel Method v0.11.0, exact merged commit
+`19c516e95a1c610cdd7891605ef6be7b044d5390`, manifest
+`34004264cd7a55dc0bb86a135212bdfba9944329f89680b7d0d5cc77ac26ffa5`.
 Direct mode is normal. Use Program only for persistent dependent work across
 sessions, repositories, or operational gates; Experiment for controlled
 comparisons; Secrets when a local process can access secret material. Protocols
