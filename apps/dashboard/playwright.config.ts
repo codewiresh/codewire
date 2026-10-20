@@ -49,7 +49,10 @@ export default defineConfig({
   globalSetup: skipSharedSetup ? undefined : path.join(dashboardDir, "e2e/global-setup.ts"),
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0,
+  // One retry in CI: a second retry mostly spent minutes rerunning a flaky
+  // test (#2975). A test that needs more goes to the quarantine lane
+  // (e2e/helpers/quarantine.ts) with its issue and last day.
+  retries: process.env.CI ? 1 : 0,
   workers: 1,
   // The JSON report records every test's duration, retries and outcome. CI
   // uploads it from every dashboard run, green or red (#2974).

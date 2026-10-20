@@ -1912,6 +1912,9 @@ require_dashboard_browser_host_dependencies() {
   prepare_playwright_browser_runtime "$chromium" "$ROOT" || return $?
 }
 
+# The tag apps/dashboard/e2e/helpers/quarantine.ts gives a quarantined test.
+DASHBOARD_QUARANTINE_TAG='@quarantine'
+
 dashboard_browser_e2e() (
   local playwright chromium workspace_image credential_fixture workers
   # Playwright's shared auth/report files belong to this checkout. Serialize
@@ -1997,18 +2000,43 @@ dashboard_browser_e2e() (
   fi
   require_get_code /healthz 204 "dashboard health"
   require_get_code /login 200 "dashboard login page"
-  DATABASE_URL="${KIND_DATABASE_URL}?sslmode=disable" \
-    SERVER_URL="$KIND_INGRESS_URL" \
-    PLAYWRIGHT_BASE_URL="$KIND_INGRESS_URL" \
-    PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$workspace_image" \
-    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$chromium" \
-    CODEWIRE_PLAYWRIGHT_USE_DEV_SHM="$CODEWIRE_PLAYWRIGHT_USE_DEV_SHM" \
-    KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
-    PLAYWRIGHT_KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
-    PLAYWRIGHT_SANDBOX_NAMESPACE="$SANDBOX_NS" \
-    PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE="$credential_fixture" \
+  local -a browser_env=(
+    DATABASE_URL="${KIND_DATABASE_URL}?sslmode=disable"
+    SERVER_URL="$KIND_INGRESS_URL"
+    PLAYWRIGHT_BASE_URL="$KIND_INGRESS_URL"
+    PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$workspace_image"
+    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$chromium"
+    CODEWIRE_PLAYWRIGHT_USE_DEV_SHM="$CODEWIRE_PLAYWRIGHT_USE_DEV_SHM"
+    KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}"
+    PLAYWRIGHT_KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}"
+    PLAYWRIGHT_SANDBOX_NAMESPACE="$SANDBOX_NS"
+    PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE="$credential_fixture"
+  )
+  # A test quarantined through apps/dashboard/e2e/helpers/quarantine.ts leaves
+  # the blocking run. On a whole-suite run the quarantined tests run after it,
+  # in the same cluster, and their result is reported but never fails the
+  # suite (#2975).
+  local -a blocking=("${selection[@]}")
+  if [ "$selection_value" = light ]; then
+    blocking=(--grep-invert "@kind-heavy|${DASHBOARD_QUARANTINE_TAG}")
+  else
+    blocking+=(--grep-invert "$DASHBOARD_QUARANTINE_TAG")
+  fi
+  env "${browser_env[@]}" \
     "$playwright" test --config "$ROOT/apps/dashboard/playwright.config.ts" --workers="$workers" \
-    "${selection[@]}"
+    "${blocking[@]}" || return $?
+  if [ -z "$selection_value" ] && grep -lqsF 'quarantine(' "$ROOT"/apps/dashboard/e2e/*.ssr.ts; then
+    log "running the quarantined dashboard tests; they never fail the suite"
+    if env "${browser_env[@]}" \
+        PLAYWRIGHT_JSON_OUTPUT_FILE="$ROOT/apps/dashboard/test-report/quarantine.json" \
+        "$playwright" test --config "$ROOT/apps/dashboard/playwright.config.ts" --workers="$workers" \
+        --grep "$DASHBOARD_QUARANTINE_TAG" --pass-with-no-tests --reporter=line,json \
+        --output="$ROOT/apps/dashboard/test-report/quarantine-results"; then
+      log "the quarantined dashboard tests passed"
+    else
+      echo "::warning::quarantined dashboard tests failed; they do not block (apps/dashboard/test-report/quarantine.json)"
+    fi
+  fi
 )
 
 mesh_product_connect_ownership_smoke() {

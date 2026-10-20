@@ -268,6 +268,27 @@ there are no screenshot goldens. A layout regression that matters gets a
 specific behavioral assertion (for example no page overflow or a visible
 control), not a full-page image comparison.
 
+## Retries and quarantine
+
+CI retries a failed browser test once; a local run does not retry. A test that
+still fails intermittently is fixed, or quarantined while its fix is owned:
+
+```ts
+import { quarantine } from "./helpers/quarantine";
+
+test("title", quarantine(2990, "2026-11-03"), async ({ page }) => { /* … */ });
+```
+
+`quarantine(issue, lastDay)` needs the issue that owns the fix and the last day
+of the quarantine, at most 30 days ahead. Until then the test is tagged
+`@quarantine`: the Kind browser gate (`dashboard_browser_e2e` in
+`scripts/ci/verify/kind/common.sh`) leaves it out of the blocking run, runs the
+quarantined tests afterwards in the same cluster, and reports their result
+without failing. Their JSON report is
+`apps/dashboard/test-report/quarantine.json`. The day after its last day the
+test blocks again by itself. Specs never write the tag directly;
+`e2e/helpers/quarantine.test.ts` enforces that.
+
 ## Helpers
 
 - `helpers/seed.ts` — static user roster and synthetic password

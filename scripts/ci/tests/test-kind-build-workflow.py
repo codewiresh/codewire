@@ -1091,6 +1091,11 @@ class CommonConsumerContractTests(unittest.TestCase):
                     printf 'browser-credential-fixture %s\n' \
                       "$PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE" >>"$CALLS"
                     printf 'browser-playwright %s\n' "$*" >>"$CALLS"
+                    printf 'browser-json %s\n' "${PLAYWRIGHT_JSON_OUTPUT_FILE:-config}" >>"$CALLS"
+                    case " $* " in
+                      *' --grep-invert @quarantine '*) exit "${FAKE_BLOCKING_STATUS:-0}" ;;
+                      *' --grep @quarantine '*) exit "${FAKE_QUARANTINE_STATUS:-0}" ;;
+                    esac
                 """,
                 "bin/chromium": """
                     #!/usr/bin/env bash
@@ -1360,6 +1365,56 @@ class CommonConsumerContractTests(unittest.TestCase):
                 CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release dashboard_browser_e2e
                 grep -Fxq 'browser-credential-fixture 0' "$CALLS"
                 ! grep -q '^dashboard-kubectl ' "$CALLS"
+
+                # #2975: quarantined tests leave the blocking run, then run
+                # after it without failing the suite. Without one quarantined
+                # spec there is no second run.
+                : >"$CALLS"
+                dashboard_browser_e2e
+                [ "$(grep -c '^browser-playwright ' "$CALLS")" -eq 1 ] ||
+                  fail 'a suite with nothing quarantined ran Playwright twice'
+                grep -Fq -- '--workers=1 --grep-invert @quarantine' "$CALLS" ||
+                  fail 'the blocking run does not leave quarantined tests out'
+                grep -Fxq 'browser-json config' "$CALLS" ||
+                  fail 'the blocking run does not write the configured JSON report'
+                mkdir -p "$ROOT/apps/dashboard/e2e"
+                printf '%s\n' 'test("flaky", quarantine(2990, "2026-11-03"), async () => {});' \
+                  >"$ROOT/apps/dashboard/e2e/ssr-dashboard.flaky.ssr.ts"
+                for quarantine_status in 0 1; do
+                  : >"$CALLS"
+                  FAKE_QUARANTINE_STATUS="$quarantine_status" dashboard_browser_e2e >"$FIXTURE_ROOT/quarantine.out"
+                  [ "$(grep -c '^browser-playwright ' "$CALLS")" -eq 2 ] ||
+                    fail 'quarantined tests did not run after the blocking run'
+                  grep -Fq -- "--grep @quarantine --pass-with-no-tests --reporter=line,json --output=$ROOT/apps/dashboard/test-report/quarantine-results" "$CALLS" ||
+                    fail 'the quarantine run does not select only quarantined tests'
+                  grep -Fxq "browser-json $ROOT/apps/dashboard/test-report/quarantine.json" "$CALLS" ||
+                    fail 'the quarantine run does not write its own JSON report'
+                done
+                grep -Fq '::warning::quarantined dashboard tests failed; they do not block' "$FIXTURE_ROOT/quarantine.out" ||
+                  fail 'a failed quarantine run is not reported'
+                # A partial make kind-test run (#2974) leaves quarantined tests
+                # out too, and runs no quarantine pass; `light` folds both
+                # exclusions into its one --grep-invert.
+                : >"$ROOT/apps/dashboard/e2e/ssr-dashboard.read.ssr.ts"
+                for partial_case in "smoke|--grep @smoke --project=dashboard-ssr-desktop --grep-invert @quarantine" \
+                    "light|--grep-invert @kind-heavy|@quarantine" \
+                    "specs ssr-dashboard.read.ssr.ts|apps/dashboard/e2e/ssr-dashboard.read.ssr.ts --grep-invert @quarantine"; do
+                  : >"$CALLS"
+                  KIND_DASHBOARD_SELECTION="${partial_case%%|*}" dashboard_browser_e2e >/dev/null
+                  [ "$(grep -c '^browser-playwright ' "$CALLS")" -eq 1 ] ||
+                    fail "a partial ${partial_case%%|*} run ran the quarantine pass"
+                  grep -Fxq "browser-playwright test --config $ROOT/apps/dashboard/playwright.config.ts --workers=1 ${partial_case#*|}" "$CALLS" ||
+                    fail "a partial ${partial_case%%|*} run lost its arguments or the quarantine exclusion"
+                done
+                : >"$CALLS"
+                set +e
+                (set -e; FAKE_BLOCKING_STATUS=1 dashboard_browser_e2e >/dev/null)
+                blocking_status=$?
+                set -e
+                [[ "$blocking_status" -ne 0 ]] || fail 'a failed blocking run did not fail the suite'
+                [ "$(grep -c '^browser-playwright ' "$CALLS")" -eq 1 ] ||
+                  fail 'quarantined tests ran after a failed blocking run'
+                rm -r "$ROOT/apps/dashboard/e2e"
 
                 jq() {
                   [[ "$*" == *'.target.name == "wire_contract"'* ]]
