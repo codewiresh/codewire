@@ -1358,7 +1358,11 @@ validate_retained_cluster() { record validate; }
 build_retained_kind_smokes() { record smokes; }
 apply_kind_codex_login_check_period() { record period; }
 restart_credential_service() { record restart; }
-kind_credential_native_smoke() { record native; }
+kind_credential_native_smoke() {
+  local stage
+  record native
+  for stage in "$@"; do record "during-native:${stage}"; done
+}
 kind_credential_claude_session() { record claude-session; }
 kind_credential_claude_sign_in() { record claude-sign-in; }
 run_kind_up() { record up; }
@@ -1375,11 +1379,17 @@ run_stage_driver() {
   KIND_CREDENTIAL_STAGES="$stages" CALLS="$CALLS" RUN_DIR="$FIXTURE/stage-run" \
     bash "$stage_driver" "$SCRIPT" "$@" >"$FIXTURE/${label}.out" 2>&1 || driver_status=$?
 }
-for stage_case in ':native claude-session claude-sign-in' 'claude-sign-in native claude-session:native claude-session claude-sign-in'; do
+# #2972: the Claude stages run during the native stage's rotation idle, so the
+# suite hands them to the native stage instead of running them after it.
+stage_calls() {
+  grep -Fx -e validate -e smokes -e period -e restart -e native -e claude-session -e claude-sign-in \
+    -e during-native:claude-session -e during-native:claude-sign-in "$CALLS" | tr '\n' ' '
+}
+for stage_case in ':native during-native:claude-session during-native:claude-sign-in' \
+    'claude-sign-in native claude-session:native during-native:claude-session during-native:claude-sign-in'; do
   run_stage_driver whole-suite "${stage_case%%:*}" suite credentials
   [ "$driver_status" -eq 0 ] || fail "the whole credentials suite failed with ${driver_status}"
-  [ "$(grep -Fx -e validate -e smokes -e period -e restart -e native -e claude-session -e claude-sign-in "$CALLS" | tr '\n' ' ')" \
-    = "validate smokes period restart ${stage_case#*:} " ] ||
+  [ "$(stage_calls)" = "validate smokes period restart ${stage_case#*:} " ] ||
     fail "stages '${stage_case%%:*}' did not run the whole suite in order: $(tr '\n' ' ' <"$CALLS")"
   grep -Fxq 'log:retained credentials suite green' "$CALLS" ||
     fail "stages '${stage_case%%:*}' did not report the whole suite green"
@@ -1390,14 +1400,22 @@ done
 run_stage_driver one-stage claude-sign-in suite credentials
 [ "$driver_status" -eq 0 ] || fail "a single credentials stage failed with ${driver_status}"
 # The whole setup still runs; only the named stage follows it.
-[ "$(grep -Fx -e validate -e smokes -e period -e restart -e native -e claude-session -e claude-sign-in "$CALLS" | tr '\n' ' ')" \
-  = 'validate smokes period restart claude-sign-in ' ] ||
+[ "$(stage_calls)" = 'validate smokes period restart claude-sign-in ' ] ||
   fail "a single stage did not run the suite's setup and then only that stage: $(tr '\n' ' ' <"$CALLS")"
 if grep -Fxq 'log:retained credentials suite green' "$CALLS"; then
   fail 'a single credentials stage reported the credentials suite green'
 fi
 grep -Fxq 'log:credentials stages claude-sign-in green; not a green credentials suite, the other stages did not run' "$CALLS" ||
   fail 'a single credentials stage did not say it is not the credentials suite'
+# Without the native stage the Claude stages run one after another; with it,
+# only the named ones run during its idle.
+for stage_case in 'claude-session claude-sign-in:claude-session claude-sign-in' \
+    'native claude-sign-in:native during-native:claude-sign-in'; do
+  run_stage_driver stage-subset "${stage_case%%:*}" suite credentials
+  [ "$driver_status" -eq 0 ] || fail "credentials stages '${stage_case%%:*}' failed with ${driver_status}"
+  [ "$(stage_calls)" = "validate smokes period restart ${stage_case#*:} " ] ||
+    fail "credentials stages '${stage_case%%:*}' ran: $(tr '\n' ' ' <"$CALLS")"
+done
 run_stage_driver unknown-stage 'claude-sign-in claude' suite credentials
 [ "$driver_status" -eq 2 ] || fail "an unknown credentials stage was not refused: ${driver_status}"
 grep -Fq 'unknown credentials stage claude' "$FIXTURE/unknown-stage.out" ||
@@ -1416,8 +1434,10 @@ done
 # Without a stage list the same commands run as before.
 run_stage_driver gate-unchanged '' shard credentials
 [ "$driver_status" -eq 0 ] || fail "a shard without a stage list failed: ${driver_status}"
-[ "$(grep -Fx -e up -e native -e claude-session -e claude-sign-in "$CALLS" | tr '\n' ' ')" \
-  = 'up native claude-session claude-sign-in ' ] || fail "a shard did not run every credentials stage"
+[ "$(grep -Fx -e up -e native -e claude-session -e claude-sign-in -e during-native:claude-session \
+  -e during-native:claude-sign-in "$CALLS" | tr '\n' ' ')" \
+  = 'up native during-native:claude-session during-native:claude-sign-in ' ] ||
+  fail "a shard did not run every credentials stage"
 
 # Restore the production suite functions replaced by the dispatcher spies.
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
@@ -2925,10 +2945,16 @@ grep -Fq 'did not become ready within 60 seconds after image import' \
   fail 'Kind API failure did not explain the bounded recovery failure'
 
 # A cluster becomes rerunnable only after controller, credential, workspace/
-# file, and ordinary Temporal prerequisites pass, before final fencing.
+# file, and ordinary Temporal prerequisites pass, before final fencing. The
+# native credentials stage runs the Claude stages during its rotation idle
+# (#2972).
 : >"$CALLS"
 deploy_agent_sandbox() { record deploy-agent; }
-kind_credential_native_smoke() { record credential-native; }
+kind_credential_native_smoke() {
+  local stage
+  record credential-native
+  for stage in "$@"; do record "credential-native-runs:${stage}"; done
+}
 kind_credential_claude_session() { record credential-claude; }
 kind_credential_claude_sign_in() { record credential-claude-sign-in; }
 workspace_service_smokes() { record workspace-services; }
@@ -2939,8 +2965,8 @@ deploy_agent_sandbox_and_smoke
 cat >"$FIXTURE/want-prepared-order" <<'EOF'
 deploy-agent
 credential-native
-credential-claude
-credential-claude-sign-in
+credential-native-runs:claude-session
+credential-native-runs:claude-sign-in
 workspace-services
 temporal-workflow
 prepared-marker

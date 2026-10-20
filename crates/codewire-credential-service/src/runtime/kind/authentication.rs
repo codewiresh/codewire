@@ -2,8 +2,12 @@
 //!
 //! The production authenticator remains the sole identity authority. This
 //! wrapper calls it first, then records bounded public fixture coordinates and
-//! whether the exact presented workspace token changed since the last success.
+//! whether the exact presented workspace token changed since that
+//! environment's last success. Each environment is compared only with itself,
+//! so another stage's Sandbox authenticating in between cannot hide a rotation
+//! or invent one (#2972).
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -85,12 +89,12 @@ impl PlatformBridgeAuthenticator for KindBridgeAuthenticator {
 #[derive(Default)]
 struct EvidenceState {
     auth_sequence: u64,
-    previous: Option<PreviousAuthentication>,
+    /// Each environment's last successful authentication.
+    previous: HashMap<String, PreviousAuthentication>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PreviousAuthentication {
-    environment_id: String,
     generation: u64,
     workspace_pod_uid: String,
     relay_pod_uid: String,
@@ -110,21 +114,22 @@ impl EvidenceState {
             .auth_sequence
             .checked_add(1)
             .ok_or(PlatformBridgeAuthenticationError::Unavailable)?;
-        let changed = self.previous.as_ref().is_some_and(|previous| {
-            previous.environment_id == environment_id
-                && previous.generation == generation
+        let changed = self.previous.get(environment_id).is_some_and(|previous| {
+            previous.generation == generation
                 && previous.workspace_pod_uid == workspace_pod_uid
                 && previous.relay_pod_uid == relay_pod_uid
                 && previous.workspace_sha256 != workspace_sha256
         });
         self.auth_sequence = auth_sequence;
-        self.previous = Some(PreviousAuthentication {
-            environment_id: environment_id.to_owned(),
-            generation,
-            workspace_pod_uid: workspace_pod_uid.to_owned(),
-            relay_pod_uid: relay_pod_uid.to_owned(),
-            workspace_sha256,
-        });
+        self.previous.insert(
+            environment_id.to_owned(),
+            PreviousAuthentication {
+                generation,
+                workspace_pod_uid: workspace_pod_uid.to_owned(),
+                relay_pod_uid: relay_pod_uid.to_owned(),
+                workspace_sha256,
+            },
+        );
         Ok((auth_sequence, changed))
     }
 }
@@ -287,8 +292,42 @@ mod tests {
         );
         assert_eq!(state.auth_sequence, 3);
         assert_eq!(
-            state.previous.as_ref().unwrap().workspace_sha256,
+            state.previous["environment-a"].workspace_sha256,
             changed.workspace_sha256
+        );
+    }
+
+    #[test]
+    fn another_environment_in_between_neither_hides_nor_invents_a_change() {
+        // #2972: the Claude stages' Sandboxes authenticate while the native
+        // stage idles for its rotation. Each environment compares only with
+        // its own previous authentication.
+        let old = PresentedTokens::from_metadata(&metadata("old")).unwrap();
+        let changed = PresentedTokens::from_metadata(&metadata("new")).unwrap();
+        let mut state = EvidenceState::default();
+        assert_eq!(
+            record(&mut state, "environment-a", 7, old.workspace_sha256).unwrap(),
+            (1, false)
+        );
+        assert_eq!(
+            record(&mut state, "environment-b", 3, changed.workspace_sha256).unwrap(),
+            (2, false)
+        );
+        assert_eq!(
+            record(&mut state, "environment-a", 7, changed.workspace_sha256).unwrap(),
+            (3, true)
+        );
+        assert_eq!(
+            record(&mut state, "environment-b", 3, changed.workspace_sha256).unwrap(),
+            (4, false)
+        );
+        assert_eq!(
+            record(&mut state, "environment-a", 7, changed.workspace_sha256).unwrap(),
+            (5, false)
+        );
+        assert_eq!(
+            record(&mut state, "environment-b", 3, old.workspace_sha256).unwrap(),
+            (6, true)
         );
     }
 

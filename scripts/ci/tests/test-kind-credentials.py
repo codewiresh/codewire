@@ -3393,13 +3393,18 @@ kind_credential_codex_request_count
         refusal = flow.index("subscription_token refused")
         self.assertIn('assert_kind_credential_claude_token "$token_name" 2',
                       flow[refusal:flow.index('"$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |', refusal)])
+        # #2972: the suite and the full gate hand the Claude stages to the
+        # native stage, which runs them during its rotation idle; without the
+        # native stage the suite runs them one after another.
         suite = (ROOT / "scripts/ci/verify/kind/suites/credential-journey.sh").read_text()
-        self.assertLess(suite.index("\n    kind_credential_native_smoke\n"),
-                        suite.index("\n    kind_credential_claude_session\n"))
+        self.assertIn('    kind_credential_native_smoke "${during[@]}"\n', suite)
+        self.assertLess(suite.index("during+=(claude-session)"), suite.index("during+=(claude-sign-in)"))
+        self.assertLess(suite.index('kind_credential_native_smoke "${during[@]}"'),
+                        suite.index("\n      kind_credential_claude_session\n"))
         gate = (ROOT / "scripts/ci/verify/kind/common.sh").read_text().split(
             "deploy_agent_sandbox_and_smoke() {", 1)[1].split("\n}", 1)[0]
-        self.assertLess(gate.index("kind_credential_native_smoke"),
-                        gate.index("kind_credential_claude_session"))
+        self.assertIn("\n  kind_credential_native_smoke claude-session claude-sign-in\n", gate)
+        self.assertNotIn("kind_credential_claude_session", gate)
 
     def claude_login(self, output, status=0, mode="deliver", extra="3"):
         directory = tempfile.TemporaryDirectory(prefix="kind-claude-login-")
@@ -3593,12 +3598,11 @@ kind_credential_claude_rotation env-1 kind-claude 3
         self.assertNotIn("claude_session.py", flow)
         self.assertIn("prebuilt-release", flow.split("log ", 1)[0])
         suite = (ROOT / "scripts/ci/verify/kind/suites/credential-journey.sh").read_text()
-        self.assertLess(suite.index("\n    kind_credential_claude_session\n"),
-                        suite.index("\n    kind_credential_claude_sign_in\n"))
+        self.assertLess(suite.index("\n      kind_credential_claude_session\n"),
+                        suite.index("\n      kind_credential_claude_sign_in\n"))
         gate = (ROOT / "scripts/ci/verify/kind/common.sh").read_text().split(
             "deploy_agent_sandbox_and_smoke() {", 1)[1].split("\n}", 1)[0]
-        self.assertLess(gate.index("kind_credential_claude_session"),
-                        gate.index("kind_credential_claude_sign_in"))
+        self.assertIn("kind_credential_native_smoke claude-session claude-sign-in", gate)
 
     def test_the_login_probe_is_staged_from_its_checked_in_source(self):
         helpers = HELPERS.read_text()
@@ -3607,6 +3611,202 @@ kind_credential_claude_rotation env-1 kind-claude 3
         self.assertIn('READY = re.compile(r"/tmp/codewire-kind-claude-rotation-[0-9]{1,12}")',
                       source)
         self.assertIn('ready="/tmp/codewire-kind-claude-rotation-${RANDOM}${RANDOM}"', helpers)
+
+
+class RotationIdleStages(unittest.TestCase):
+    """#2972: the Claude stages run during the native stage's rotation idle."""
+
+    def shell(self, body, timeout=30):
+        directory = tempfile.TemporaryDirectory(prefix="kind-rotation-stages-")
+        self.addCleanup(directory.cleanup)
+        self.run_dir = Path(directory.name)
+        return subprocess.run(
+            ["/bin/bash", "-c", 'set -euo pipefail\nsource "$1"\n'
+             'validate_sealed_kind_images() { return 1; }\n'
+             'log() { printf "[kind-e2e] %s\\n" "$*" >&2; }\n' + body,
+             "kind-credential-fixture", str(HELPERS)],
+            env={"PATH": "/usr/bin:/bin", "ROOT": str(ROOT), "RUN_DIR": str(self.run_dir)},
+            capture_output=True, text=True, timeout=timeout,
+        )
+
+    @staticmethod
+    def native_flow():
+        return HELPERS.read_text().split("kind_credential_native_smoke() (", 1)[1].split("\n)\n", 1)[0]
+
+    def test_the_stages_run_through_the_idle_and_end_before_the_fixture_is_read(self):
+        flow = self.native_flow()
+        ordered = [
+            'start_kind_credential_bridge_renewal "$pod" "$renewal_stop"',
+            'start_kind_credential_admission_watch "$environment" "$pod" "$relay_pod" "$admission"',
+            'start_kind_credential_rotation_stages "$@"\n',
+            '< "$ROOT/scripts/ci/verify/kind/codex_session.py"',
+            'stop_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid" || return $?',
+            'finish_kind_credential_rotation_stages\n',
+            'assert_kind_credential_rotation "$environment"',
+            'assert_kind_credential_bridge_renewal',
+            "assert_kind_credential_provider_counts 2",
+            'kind_credential_cli --cloud stop "$environment"',
+            'set_kind_credential_member_role "$environment" admin',
+            'kind_credential_cli --cloud rm "$environment"',
+        ]
+        positions = [flow.index(step) for step in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(flow.count("start_kind_credential_rotation_stages"), 1)
+        self.assertEqual(flow.count("\n  finish_kind_credential_rotation_stages\n"), 1)
+        # Started as a plain statement: Bash ignores errexit in anything a
+        # function called under || starts, and the stages rely on it.
+        self.assertIn("\n  start_kind_credential_rotation_stages \"$@\"\n", flow)
+        # Between the start and the wait nothing reads the fixture, restarts a
+        # service or changes the shared membership.
+        window = flow[flow.index("start_kind_credential_rotation_stages"):
+                      flow.index("\n  finish_kind_credential_rotation_stages\n")]
+        for reader in ("kind_credential_fixture_events", "assert_kind_credential", "set_kind_credential_member_role",
+                       "restart_kind_orchestration", "restart_credential_service"):
+            self.assertNotIn(reader, window)
+        # A failing native stage waits for them first, so each cleans up.
+        exit_traps = [line for line in flow.splitlines()
+                      if line.strip().startswith("trap '") and line.rstrip().endswith("EXIT")]
+        self.assertEqual(len(exit_traps), 1)
+        waits = exit_traps[0].index('[ -z "$KIND_CREDENTIAL_ROTATION_STAGES_PID" ] || '
+                                    "finish_kind_credential_rotation_stages || true;")
+        self.assertLess(waits, exit_traps[0].index("cleanup_kind_credential_stage"))
+
+    def test_stages_run_in_order_with_errexit_and_stop_at_the_first_failure(self):
+        result = self.shell(
+            "kind_credential_claude_session() ( echo session-ran >&2 )\n"
+            "kind_credential_claude_sign_in() ( echo sign-in-ran >&2 )\n"
+            "run_kind_credential_rotation_stages claude-session claude-sign-in\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(result.stderr.index("session-ran"), result.stderr.index("sign-in-ran"))
+        self.assertIn("credentials stage claude-sign-in green during the native rotation idle", result.stderr)
+        result = self.shell(
+            "kind_credential_claude_session() (\n"
+            "  echo session-started >&2\n"
+            "  false\n"
+            "  echo session-continued-after-failure >&2\n"
+            ")\n"
+            "kind_credential_claude_sign_in() ( echo sign-in-ran >&2 )\n"
+            "set +e\n"
+            "(run_kind_credential_rotation_stages claude-session claude-sign-in)\n"
+            "status=$?\n"
+            "set -e\n"
+            'echo "status=$status" >&2\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("session-started", result.stderr)
+        self.assertNotIn("session-continued-after-failure", result.stderr)
+        self.assertNotIn("sign-in-ran", result.stderr)
+        self.assertIn("::error::credentials stage claude-session failed during the native rotation idle (status 1)",
+                      result.stderr)
+        self.assertIn("status=1", result.stderr)
+
+    def test_stages_refuse_to_run_where_bash_ignores_errexit(self):
+        for call in ("run_kind_credential_rotation_stages claude-session || status=$?",
+                     "if run_kind_credential_rotation_stages claude-session; then :; else status=$?; fi",
+                     "starter() { (run_kind_credential_rotation_stages claude-session) & wait $!; }\n"
+                     "starter || status=$?"):
+            with self.subTest(call=call):
+                result = self.shell(
+                    "kind_credential_claude_session() ( echo session-ran >&2; false; echo session-continued >&2 )\n"
+                    "status=0\n"
+                    f"{call}\n"
+                    'echo "status=$status" >&2\n')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("the credentials stages need errexit in force; start them as a plain statement",
+                              result.stderr)
+                self.assertNotIn("session-ran", result.stderr)
+                self.assertRegex(result.stderr, r"status=[1-9]")
+
+    def test_an_unknown_stage_is_refused_before_any_stage_runs(self):
+        for command in ("run_kind_credential_rotation_stages", "start_kind_credential_rotation_stages"):
+            with self.subTest(command=command):
+                result = self.shell(
+                    "kind_credential_claude_session() ( echo session-ran >&2 )\n"
+                    "status=0\n"
+                    f"{command} claude-session native || status=$?\n"
+                    'echo "status=$status pid=${KIND_CREDENTIAL_ROTATION_STAGES_PID:-none}" >&2\n')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("native is not a credentials stage that runs during the native rotation idle",
+                              result.stderr)
+                self.assertIn("status=2 pid=none", result.stderr)
+                self.assertNotIn("session-ran", result.stderr)
+
+    def test_start_returns_at_once_and_finish_waits_reports_and_fails(self):
+        result = self.shell(
+            'release="$RUN_DIR/release"\n'
+            "kind_credential_claude_session() (\n"
+            '  while [ ! -e "$release" ]; do sleep 0.1; done\n'
+            "  echo session-finished >&2\n"
+            ")\n"
+            "kind_credential_claude_sign_in() ( echo sign-in-ran >&2 )\n"
+            "start_kind_credential_rotation_stages claude-session claude-sign-in\n"
+            '[ -n "$KIND_CREDENTIAL_ROTATION_STAGES_PID" ]\n'
+            'kill -0 "$KIND_CREDENTIAL_ROTATION_STAGES_PID"\n'
+            "echo started-while-running >&2\n"
+            'touch "$release"\n'
+            "finish_kind_credential_rotation_stages\n"
+            '[ -z "$KIND_CREDENTIAL_ROTATION_STAGES_PID" ]\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(result.stderr.index("started-while-running"), result.stderr.index("session-finished"))
+        self.assertLess(result.stderr.index("session-finished"), result.stderr.index("sign-in-ran"))
+        self.assertIn("the credentials stages that ran during the native rotation idle passed", result.stderr)
+        logs = list(self.run_dir.glob("credential-rotation-stages.*"))
+        self.assertEqual(len(logs), 1)
+        self.assertIn("sign-in-ran", logs[0].read_text())
+        result = self.shell(
+            "kind_credential_claude_session() ( echo session-failing >&2; return 7 )\n"
+            "kind_credential_claude_sign_in() ( echo sign-in-ran >&2 )\n"
+            "start_kind_credential_rotation_stages claude-session claude-sign-in\n"
+            "status=0\n"
+            "finish_kind_credential_rotation_stages || status=$?\n"
+            'echo "status=$status" >&2\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("session-failing", result.stderr)
+        self.assertNotIn("sign-in-ran", result.stderr)
+        self.assertIn("::error::a credentials stage that ran during the native rotation idle failed (status 7)",
+                      result.stderr)
+        self.assertIn("status=1", result.stderr)
+        # No stages: nothing starts and the wait returns.
+        result = self.shell(
+            "start_kind_credential_rotation_stages\n"
+            '[ -z "$KIND_CREDENTIAL_ROTATION_STAGES_PID" ]\n'
+            "finish_kind_credential_rotation_stages\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(self.run_dir.glob("credential-rotation-stages.*")), [])
+
+    def test_the_native_stages_traps_stay_its_own(self):
+        result = self.shell(
+            "set -E\n"
+            "trap 'echo native-error-trap >&2' ERR\n"
+            "trap 'echo native-exit-trap >&2' EXIT\n"
+            "kind_credential_claude_session() ( echo session-failing >&2; return 3 )\n"
+            "start_kind_credential_rotation_stages claude-session\n"
+            "status=0\n"
+            "finish_kind_credential_rotation_stages || status=$?\n"
+            "trap - ERR EXIT\n"
+            'echo "status=$status" >&2\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("status=1", result.stderr)
+        self.assertNotIn("native-exit-trap", result.stderr)
+        log, = self.run_dir.glob("credential-rotation-stages.*")
+        self.assertIn("session-failing", log.read_text())
+        self.assertNotIn("native-error-trap", log.read_text())
+
+    def test_release_mode_names_the_stages_it_does_not_run(self):
+        result = self.shell(
+            "kubectl() { echo unexpected-kubectl >&2; return 98; }\n"
+            "kind_credential_claude_session() ( echo unexpected-session >&2 )\n"
+            "CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release\n"
+            "kind_credential_native_smoke claude-session claude-sign-in\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("synthetic native credential composition is not selected; "
+                      "neither are claude-session claude-sign-in", result.stderr)
+        self.assertNotIn("unexpected", result.stderr)
+
+    def test_the_fixture_compares_each_environments_authentications_only_with_its_own(self):
+        source = (ROOT / "crates/codewire-credential-service/src/runtime/kind/authentication.rs").read_text()
+        self.assertIn("previous: HashMap<String, PreviousAuthentication>", source)
+        self.assertIn("self.previous.get(environment_id)", source)
+        self.assertIn("fn another_environment_in_between_neither_hides_nor_invents_a_change()", source)
 
 
 if __name__ == "__main__":

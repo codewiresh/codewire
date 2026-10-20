@@ -4338,9 +4338,8 @@ temporal_fencing_smoke() {
 
 deploy_agent_sandbox_and_smoke() {
   deploy_agent_sandbox
-  kind_credential_native_smoke
-  kind_credential_claude_session
-  kind_credential_claude_sign_in
+  # The Claude stages run during the native stage's rotation idle (#2972).
+  kind_credential_native_smoke claude-session claude-sign-in
   workspace_service_smokes
   temporal_workflow_smoke
   mark_retained_cluster_prepared

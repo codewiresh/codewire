@@ -7,7 +7,8 @@
 # gives orchestration the overlay's Codex login check period when a retained
 # cluster's configuration predates it, restarting orchestration once. Its length
 # is set by a real projected-token rotation (kubelet replaces the token about
-# eight minutes in) and the 60-second authority windows. Each authority change
+# eight minutes in), during which the Claude stages run (#2972), and the
+# 60-second authority windows. Each authority change
 # starts only while the serving bridge epoch has three minutes left before its
 # natural end; otherwise the journey first waits for the relay's next epoch,
 # usually under two and a half minutes. The native stage restarts
@@ -151,13 +152,18 @@ run_retained_credentials_suite() {
   log "restarting the synthetic credential-service for a fresh provider event log"
   restart_credential_service
   if [[ " $stages " == *' native '* ]]; then
-    kind_credential_native_smoke
-  fi
-  if [[ " $stages " == *' claude-session '* ]]; then
-    kind_credential_claude_session
-  fi
-  if [[ " $stages " == *' claude-sign-in '* ]]; then
-    kind_credential_claude_sign_in
+    # The Claude stages run during the native stage's rotation idle (#2972).
+    local -a during=()
+    [[ " $stages " != *' claude-session '* ]] || during+=(claude-session)
+    [[ " $stages " != *' claude-sign-in '* ]] || during+=(claude-sign-in)
+    kind_credential_native_smoke "${during[@]}"
+  else
+    if [[ " $stages " == *' claude-session '* ]]; then
+      kind_credential_claude_session
+    fi
+    if [[ " $stages " == *' claude-sign-in '* ]]; then
+      kind_credential_claude_sign_in
+    fi
   fi
   if [ "$stages" = "${KIND_CREDENTIAL_STAGE_ORDER[*]}" ]; then
     log "retained credentials suite green"

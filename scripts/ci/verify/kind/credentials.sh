@@ -1203,9 +1203,95 @@ cleanup_kind_credential_stage() {
   done
 }
 
+# The Claude stages run while the native stage idles for its projected-token
+# rotation (#2972): about eight of its minutes only wait. They run one after
+# another in the background of the native stage, each with its own
+# environment, profiles and credentials, and each checks only its own fixture
+# events: the Claude stages the Anthropic and Claude sign-in events, the
+# native stage the Codex provider events and its own environment's bridge
+# authentications, which the fixture compares only with that environment's
+# (runtime/kind/authentication.rs). The native stage waits for them before it
+# reads the fixture or changes the shared membership, and fails when one
+# failed; the suite is green only when every stage passed. Their output is
+# kept in RUN_DIR and printed when they finish.
+KIND_CREDENTIAL_ROTATION_STAGES=(claude-session claude-sign-in)
+KIND_CREDENTIAL_ROTATION_STAGES_PID=""
+KIND_CREDENTIAL_ROTATION_STAGES_LOG=""
+
+# Run the named stages in order with errexit in force in each, as the suite
+# runs them, and stop at the first failure. Bash ignores errexit inside
+# anything started from a function called under ||, &&, if, while, until or
+# !, even after `set -e`, and the stages rely on it: a stage would run on past
+# a failed step and pass. Refuse to run without it.
+run_kind_credential_rotation_stages() {
+  local stage status probe=0
+  for stage in "$@"; do
+    if [[ " ${KIND_CREDENTIAL_ROTATION_STAGES[*]} " != *" ${stage} "* ]]; then
+      echo "::error::${stage} is not a credentials stage that runs during the native rotation idle" >&2
+      return 2
+    fi
+  done
+  set +e
+  (set -e; false; exit 0)
+  probe=$?
+  set -e
+  if [ "$probe" -eq 0 ]; then
+    echo '::error::the credentials stages need errexit in force; start them as a plain statement' >&2
+    return 70
+  fi
+  for stage in "$@"; do
+    log "credentials stage ${stage} starts during the native rotation idle"
+    set +e
+    (set -e; "kind_credential_${stage//-/_}")
+    status=$?
+    set -e
+    if [ "$status" -ne 0 ]; then
+      echo "::error::credentials stage ${stage} failed during the native rotation idle (status ${status})" >&2
+      return "$status"
+    fi
+    log "credentials stage ${stage} green during the native rotation idle"
+  done
+}
+
+start_kind_credential_rotation_stages() {
+  local stage
+  KIND_CREDENTIAL_ROTATION_STAGES_PID=""
+  [ "$#" -gt 0 ] || return 0
+  for stage in "$@"; do
+    if [[ " ${KIND_CREDENTIAL_ROTATION_STAGES[*]} " != *" ${stage} "* ]]; then
+      echo "::error::${stage} is not a credentials stage that runs during the native rotation idle" >&2
+      return 2
+    fi
+  done
+  KIND_CREDENTIAL_ROTATION_STAGES_LOG="$(mktemp "$RUN_DIR/credential-rotation-stages.XXXXXX")" || return $?
+  log "running the credentials stages $* during the native rotation idle"
+  # The native stage's error and exit traps are its own.
+  (trap - ERR EXIT; set +E; run_kind_credential_rotation_stages "$@") \
+    >"$KIND_CREDENTIAL_ROTATION_STAGES_LOG" 2>&1 &
+  KIND_CREDENTIAL_ROTATION_STAGES_PID=$!
+}
+
+# Wait for the stages, print their output, and fail when one failed. A failed
+# native stage waits for them too, so each removes what it created.
+finish_kind_credential_rotation_stages() {
+  local pid="$KIND_CREDENTIAL_ROTATION_STAGES_PID" status=0
+  [ -n "$pid" ] || return 0
+  wait "$pid" || status=$?
+  KIND_CREDENTIAL_ROTATION_STAGES_PID=""
+  cat -- "$KIND_CREDENTIAL_ROTATION_STAGES_LOG" >&2 || true
+  if [ "$status" -ne 0 ]; then
+    echo "::error::a credentials stage that ran during the native rotation idle failed (status ${status})" >&2
+    return 1
+  fi
+  log "the credentials stages that ran during the native rotation idle passed"
+}
+
+# The other credentials stages, named as arguments (claude-session,
+# claude-sign-in), run while this one idles for its projected-token rotation
+# (start_kind_credential_rotation_stages, #2972).
 kind_credential_native_smoke() (
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
-    log "release-image gate: synthetic native credential composition is not selected"
+    log "release-image gate: synthetic native credential composition is not selected${*:+; neither are $*}"
     return 0
   fi
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
@@ -1225,7 +1311,7 @@ kind_credential_native_smoke() (
   # A failed step must not leave the renewal probe running, here or in the
   # Pod, and a failure while the creator is an admin restores the seeded
   # member role, so a retained cluster can run this suite again.
-  trap '[ -z "$authority_window_from" ] || assert_kind_credential_no_renewal_since "$environment" "$relay_pod" "$authority_window_from" || true; [ -z "$admission_pid" ] || { kill "$admission_pid" 2>/dev/null; wait "$admission_pid" 2>/dev/null; }; [ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"; [ -z "$member_role_changed" ] || set_kind_credential_member_role "$environment" member >/dev/null 2>&1 || true; cleanup_kind_credential_stage "$stage_environment" "$stage_profiles" "$stage_credentials"; rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
+  trap '[ -z "$authority_window_from" ] || assert_kind_credential_no_renewal_since "$environment" "$relay_pod" "$authority_window_from" || true; [ -z "$KIND_CREDENTIAL_ROTATION_STAGES_PID" ] || finish_kind_credential_rotation_stages || true; [ -z "$admission_pid" ] || { kill "$admission_pid" 2>/dev/null; wait "$admission_pid" 2>/dev/null; }; [ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"; [ -z "$member_role_changed" ] || set_kind_credential_member_role "$environment" member >/dev/null 2>&1 || true; cleanup_kind_credential_stage "$stage_environment" "$stage_profiles" "$stage_credentials"; rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
   [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
   credential_name="kind-codex-${RANDOM}-${RANDOM}"
   profile_name="kind-profile-${RANDOM}-${RANDOM}"
@@ -1304,6 +1390,9 @@ kind_credential_native_smoke() (
   admission="/tmp/codewire-kind-fresh-admission-${RANDOM}${RANDOM}"
   start_kind_credential_admission_watch "$environment" "$pod" "$relay_pod" "$admission" || return $?
   admission_pid="$KIND_ADMISSION_WATCH_PID"
+  # The session's rotation idle is most of this stage; the other stages run
+  # through it, and this stage waits for them before reading the fixture.
+  start_kind_credential_rotation_stages "$@"
   kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - "$admission" \
     < "$ROOT/scripts/ci/verify/kind/codex_session.py" | tee "$RUN_DIR/credential-native-session.jsonl"
   kill "$admission_pid" 2>/dev/null || true
@@ -1311,6 +1400,7 @@ kind_credential_native_smoke() (
   admission_pid=""
   stop_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid" || return $?
   renewal_pid=""
+  finish_kind_credential_rotation_stages
   assert_kind_credential_rotation "$environment" "$generation" "$pod_uid" "$relay_uid" \
     "$RUN_DIR/credential-native-session.jsonl"
   assert_kind_credential_bridge_renewal "$RUN_DIR/credential-bridge-renewal.jsonl" \
