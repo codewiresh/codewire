@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { OwnedUxSandbox, uxOrganizationSlug } from "./dev-ux-ownership";
+import { DevUxError, OwnedUxSandbox, failureClassOf, uxOrganizationSlug } from "./dev-ux-ownership";
 
 const USER = "1".repeat(32);
 const ORG = "2".repeat(32);
@@ -241,4 +241,32 @@ test("a live state in the terminal report rereads once, then fails closed", asyn
   expect(calls.filter((args) => args.includes("ls"))).toHaveLength(2);
   expect(calls.filter((args) => args.includes("report"))).toHaveLength(2);
   expect(calls.some((args) => args.includes("rm"))).toBe(false);
+});
+
+// Shapes as Playwright 1.58 raises them: TimeoutError is named so, an expect
+// failure carries matcherResult, an expect.poll failure is a plain Error with
+// the matcher's message, and a navigation error is prefixed with its API name.
+// Only type and fixed patterns decide.
+test("failure classes come from the error's type and fixed patterns, never its values", () => {
+  const canary = "hostile-private-value-canary";
+  const timeout = Object.assign(new Error(canary), { name: "TimeoutError" });
+  const expectation = Object.assign(new Error(canary), { matcherResult: { pass: false } });
+  for (const [error, expected] of [
+    [timeout, "timeout"],
+    [expectation, "assertion"],
+    [new Error(`expect(received).toBe(expected) // Object.is equality\n\nExpected: "${canary}"`), "assertion"],
+    [new Error(`page.goto: net::ERR_CONNECTION_REFUSED at https://${canary}.invalid/`), "navigation"],
+    [new Error(`page.reload: ${canary}`), "navigation"],
+    [new Error(`page.goto: Navigation to "${canary}" is interrupted by another navigation to "x"`), "navigation"],
+    [new DevUxError("terminal-attach"), "assertion"],
+    [new DevUxError("ux-route", "navigation"), "navigation"],
+    [new DevUxError("create-to-terminal-enabled", "timeout"), "timeout"],
+    [new Error("Target page, context or browser has been closed"), "unexpected"],
+    [new Error(`locator.click: ${canary} net error elsewhere`), "unexpected"],
+    [Object.assign(new Error(canary), { failureClass: canary }), "unexpected"],
+    [canary, "unexpected"],
+    [undefined, "unexpected"],
+  ] as const) {
+    expect(failureClassOf(error)).toBe(expected);
+  }
 });

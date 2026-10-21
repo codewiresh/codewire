@@ -1,7 +1,7 @@
 // Runs ONLY inside the existing protected Dev auth helper. No traces, page
 // dumps, screenshots, stored browser sessions, or provider authorizations.
 import { expect, request, type Locator, type Page } from "@playwright/test";
-import { DevUxError, type OwnedUxSandbox } from "./dev-ux-ownership";
+import { DevUxError, failureClassOf, type OwnedUxSandbox } from "./dev-ux-ownership";
 
 const ORIGIN = "https://codewire-dev.sh";
 // Re-attaching a surviving terminal after navigation, reload, reconnect, or
@@ -26,9 +26,11 @@ function passed(name: string, started: number): void {
 // `started` defaults to the call; pass an earlier instant to time from an
 // event that precedes the step, such as the server accepting Create.
 async function stage(name: string, operation: () => Promise<void>, started = Date.now()): Promise<void> {
-  // A step may raise a narrower fixed label; anything else maps to the step.
+  // A step may raise a narrower fixed label; anything else maps to the step,
+  // keeping only the value-blind class of what failed.
   try { await operation(); } catch (error) {
-    throw error instanceof DevUxError && error.stage.startsWith(`${name}-`) ? error : new DevUxError(name);
+    throw error instanceof DevUxError && error.stage.startsWith(`${name}-`) ? error
+      : new DevUxError(name, failureClassOf(error));
   }
   passed(name, started);
 }
@@ -54,7 +56,7 @@ async function shellFailure(page: Page, rows: Locator, echo: string, marker: Reg
 async function visit(page: Page, path: string): Promise<void> {
   await page.goto(`${ORIGIN}${path}`, { waitUntil: "domcontentloaded" });
   const actual = new URL(page.url());
-  if (actual.origin !== ORIGIN || actual.pathname !== path.split("?")[0]) throw new DevUxError("ux-route");
+  if (actual.origin !== ORIGIN || actual.pathname !== path.split("?")[0]) throw new DevUxError("ux-route", "navigation");
 }
 
 // Layout settles after resizes, dialog transitions, and terminal refits; poll

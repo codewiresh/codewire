@@ -56,6 +56,7 @@ fixture() {
   DEV_SMOKE_BROWSER_AUTH_BUN_BIN=''
   DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN=''
   SANDBOX_NAMESPACE=synthetic; APP_FAILURE=''
+  SMOKE_STAGE=setup; SMOKE_LAST_CW_CLASS=''; SMOKE_FAILURE_CLASS=''
   APP_KUBE_RESOURCE=''; APP_KUBE_MUTATION='.'; APP_ANNOTATED_POD=0
   printf '[]\n' >"$TMPDIR_SMOKE/projects.db"
   printf '[]\n' >"$TMPDIR_SMOKE/user.db"
@@ -115,6 +116,9 @@ cw() {
         printf 'synthetic private delete failure\n' >&2; return 24
       fi ;;
     'secrets --cloud projects list --output json')
+      if [[ "$APP_FAILURE" == projects-list-connect ]]; then
+        printf 'send request: error sending request for url (https://synthetic.invalid/private)\n' >&2; return 1
+      fi
       cat "$TMPDIR_SMOKE/projects.db" ;;
     'secrets --cloud projects create '*)
       local count id
@@ -414,6 +418,10 @@ case "$*" in
     printf '{}\n' >"$CW_CONFIG_DIR/credentials.json"
     chmod 0600 "$CW_CONFIG_DIR/config.json" "$CW_CONFIG_DIR/credentials.json" ;;
   *' whoami --output json')
+    if [[ "$(cat "$state/variant" 2>/dev/null || true)" == whoami-connect ]]; then
+      printf 'send request: error sending request for url (https://synthetic.invalid/private)\n' >&2
+      exit 1
+    fi
     user=11111111111111111111111111111111
     [[ "$(cat "$state/variant" 2>/dev/null || true)" != wrong-user ]] || user=33333333333333333333333333333333
     printf '{"id":"%s","email":"owner@example.invalid"}\n' "$user" ;;
@@ -1297,6 +1305,130 @@ grep -Fx '[runtime-smoke] start-scope-not-empty scope=personal' "$APP_TEST_ROOT/
 grep -Fx '[runtime-smoke] ERROR: all-scope acceptance requires initially empty personal and organization scopes' \
   "$APP_TEST_ROOT/failure.err" >/dev/null || fail 'foreign start item was not named'
 [[ "$(jq length "$TMPDIR_SMOKE/organization.db")" == 0 ]] || fail 'refused start wrote organization keys'
+pass
+
+# #3132: every failed run names its stage and a value-blind class in exactly
+# one EXIT-handler line. The deploy relay repeats only this closed stage set.
+SMOKE_SOURCE="$REPO_ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"
+expected_stages='setup principal oauth-login oauth-principal oauth-cleanup app-prepare app-create app-source-a app-source-b app-source-clear app-cleanup provider-ssh-prepare provider-ssh-cleanup create-environment wait-environment kube-assertions cw-run kube exec coco docker doctor ssh tailnet-ssh derp-ssh websocket-ssh host-key app-preview resize-guest application-secrets application-secrets-all-scopes provider-ssh'
+declared_stages="$(awk '/^smoke_stage\(\) \{/,/^}/' "$SMOKE_SOURCE" | sed -n 's/^ *\([a-z][a-z|-]*\))$/\1/p' | tr '|' ' ')"
+[[ "$declared_stages" == "$expected_stages" ]] || fail 'acceptance stage set changed without its relay contract'
+# Every literal stage, every selectable phase and each source phase is declared.
+selectable_phases="$(sed -n '/^    --only)$/,/;;/p' "$SMOKE_SOURCE" | sed -n 's/^ *\([a-z][a-z|-]*\))$/\1/p' | tr '|' ' ')"
+[[ "$(wc -w <<<"$selectable_phases")" == 15 ]] || fail 'selectable smoke phases were not read'
+for stage in $(grep -oE 'smoke_stage [a-z][a-z-]*' "$SMOKE_SOURCE" | cut -d ' ' -f 2 | sort -u) \
+    $selectable_phases app-source-a app-source-b app-source-clear; do
+  [[ " $expected_stages " == *" $stage "* ]] || fail "stage or phase $stage is outside the closed stage set"
+done
+expect_failure unknown-stage smoke_stage not-a-stage
+pass
+
+ACCEPTANCE_OUT="$APP_TEST_ROOT/acceptance.out"
+ACCEPTANCE_ERR="$APP_TEST_ROOT/acceptance.err"
+# Run one journey in a subshell that owns the production EXIT and TERM traps.
+# errexit stays active there because the subshell is not a tested command.
+run_acceptance_case() {
+  set +e
+  (
+    set -euo pipefail
+    trap cleanup EXIT
+    trap 'handle_signal TERM' TERM
+    "$@"
+  ) >"$ACCEPTANCE_OUT" 2>"$ACCEPTANCE_ERR"
+  ACCEPTANCE_STATUS=$?
+  set -e
+}
+assert_acceptance_failure() {
+  local label="$1" status="$2" expected="$3"
+  [[ "$ACCEPTANCE_STATUS" == "$status" ]] || fail "$label exited $ACCEPTANCE_STATUS, not $status"
+  [[ "$(grep -c '^\[runtime-smoke\] acceptance-failure ' "$ACCEPTANCE_ERR")" == 1 ]] ||
+    fail "$label did not print exactly one acceptance failure line"
+  grep -Fx "[runtime-smoke] acceptance-failure $expected" "$ACCEPTANCE_ERR" >/dev/null ||
+    fail "$label did not name $expected"
+  if grep -Eq '^\[runtime-smoke\] ERROR: .*acceptance-failure|acceptance-failure .*(synthetic|fixture|0000)' "$ACCEPTANCE_ERR"; then
+    fail "$label acceptance failure line carried a value or an ERROR prefix"
+  fi
+}
+# The project-only journey through the real main(), with only principal
+# preparation stubbed; the mock CLI above serves every secret command.
+application_main() {
+  fixture
+  SMOKE_ONLY_PHASES=(application-secrets)
+  SMOKE_COLLECT_FAILURE_DIAGNOSTICS=0
+  prepare_cli() { :; }
+  case "$1" in
+    name-collision)
+      printf '[{"id":"00000000-0000-4000-8000-000000000042","name":"fixture-env","state":"running"}]\n' \
+        >"$TMPDIR_SMOKE/environments.db" ;;
+    projects-list-connect) APP_FAILURE=projects-list-connect ;;
+    signal) create_environment() { kill -TERM "$BASHPID"; } ;;
+  esac
+  main
+}
+
+run_acceptance_case application_main name-collision
+assert_acceptance_failure die 1 'stage=app-prepare class=assertion'
+grep -Fx '[runtime-smoke] ERROR: application smoke environment name already exists; choose a fresh --name' \
+  "$ACCEPTANCE_ERR" >/dev/null || fail 'the primary ERROR line changed'
+pass
+
+run_acceptance_case application_main projects-list-connect
+assert_acceptance_failure cw-connect 1 'stage=app-prepare class=connect'
+grep -Fx '[runtime-smoke] cw-failure step=list-projects class=connect' "$ACCEPTANCE_ERR" >/dev/null ||
+  fail 'the cw step failure line changed'
+if grep -Fq 'error sending request' "$ACCEPTANCE_ERR"; then fail 'a cw step failure echoed raw stderr'; fi
+pass
+
+run_acceptance_case application_main signal
+assert_acceptance_failure signal 143 'stage=app-create class=signal'
+grep -Eqx '\[runtime-smoke\] app-prepare:passed duration_ms=[0-9]+' "$ACCEPTANCE_ERR" ||
+  fail 'the signal did not follow the completed app-prepare stage'
+pass
+
+# The stage right after the walkthrough: a cw transport failure while proving
+# the fresh login keeps its class instead of becoming a bare assertion.
+oauth_principal_connect() {
+  fresh_login_fixture
+  mkdir -p "$APP_TEST_ROOT/fresh-login-state"
+  printf 'whoami-connect\n' >"$APP_TEST_ROOT/fresh-login-state/variant"
+  SMOKE_COLLECT_FAILURE_DIAGNOSTICS=0
+  prepare_fresh_oauth_cli
+}
+run_acceptance_case oauth_principal_connect
+assert_acceptance_failure oauth-principal 1 'stage=oauth-principal class=connect'
+grep -Fx logout "$APP_TEST_ROOT/fresh-login-state/logout" >/dev/null || fail 'failed principal check skipped logout'
+pass
+
+expired_wait() {
+  fixture
+  SMOKE_COLLECT_FAILURE_DIAGNOSTICS=0
+  smoke_stage wait-environment
+  wait_until never-ready "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" false
+}
+run_acceptance_case expired_wait
+assert_acceptance_failure wait-timeout 1 'stage=wait-environment class=timeout'
+pass
+
+# A journey that passed but could not clean up fails at the cleanup stage.
+failed_cleanup_only() {
+  fixture
+  SMOKE_COLLECT_FAILURE_DIAGNOSTICS=0
+  smoke_stage app-prepare
+  prepare_application_secrets
+  smoke_stage app-source-clear
+  APP_FAILURE=cleanup
+}
+run_acceptance_case failed_cleanup_only
+assert_acceptance_failure cleanup-only 1 'stage=app-cleanup class=exit_1'
+pass
+
+passed_journey() {
+  fixture
+  smoke_stage docker
+}
+run_acceptance_case passed_journey
+[[ "$ACCEPTANCE_STATUS" == 0 ]] || fail 'a passed journey failed'
+if grep -Fq 'acceptance-failure' "$ACCEPTANCE_ERR"; then fail 'a passed journey printed a failure line'; fi
 pass
 
 printf 'Dev application-source shell fixtures passed: %s\n' "$APP_TEST_COUNT"

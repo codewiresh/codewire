@@ -126,6 +126,13 @@ SMOKE_OAUTH_LOGIN_ATTEMPTED=0
 SMOKE_OAUTH_LOGIN_DIR=""
 SMOKE_OAUTH_RUNTIME_PARENT=""
 SMOKE_OAUTH_RUNTIME_DIR=""
+# Value-blind failure attribution (#3132). The main shell sets the stage at
+# each boundary; die, wait_until and the cw step helpers record the class of
+# the failure that ends it. Both come from closed sets, and the EXIT handler
+# prints them once. Assignments made in a subshell are discarded with it.
+SMOKE_STAGE=setup
+SMOKE_LAST_CW_CLASS=""
+SMOKE_FAILURE_CLASS=""
 
 # shellcheck source=scripts/runtime/dev/provider-ssh-smoke.sh
 source "$ROOT/scripts/runtime/dev/provider-ssh-smoke.sh"
@@ -339,8 +346,33 @@ log() {
 }
 
 die() {
+  # A cw failure recorded just before this die names its cause; otherwise
+  # the failure is this check's own assertion.
+  SMOKE_FAILURE_CLASS="${SMOKE_FAILURE_CLASS:-${SMOKE_LAST_CW_CLASS:-assertion}}"
   printf '[runtime-smoke] ERROR: %s\n' "$*" >&2
   exit 1
+}
+
+# Enter one acceptance stage. The deploy relay repeats only these names, so a
+# new stage needs its closed set there as well.
+smoke_stage() {
+  case "$1" in
+    setup|principal|oauth-login|oauth-principal|oauth-cleanup|app-prepare|app-create|app-source-a|app-source-b|app-source-clear|app-cleanup|provider-ssh-prepare|provider-ssh-cleanup|create-environment|wait-environment|kube-assertions|cw-run|kube|exec|coco|docker|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
+      SMOKE_STAGE="$1" ;;
+    *) die 'unknown acceptance stage' ;;
+  esac
+}
+
+# The one value-blind failure line: the stage and a class from a closed set.
+# It never starts with "ERROR:", which the relay reads as the first failure.
+report_acceptance_failure() {
+  local status="$1" class
+  case "$status" in
+    130|143) class=signal ;;
+    124|137) class=timeout ;;
+    *) class="exit_$status" ;;
+  esac
+  log "acceptance-failure stage=$SMOKE_STAGE class=${SMOKE_FAILURE_CLASS:-$class}"
 }
 
 require_cmd() {
@@ -486,17 +518,22 @@ done
 
 cleanup() {
   local rc=$?
+  local primary_rc="$rc" failed_cleanup=''
+  # Name the failed stage before any cleanup can add output or exit.
+  if [[ "$rc" != "0" ]]; then
+    report_acceptance_failure "$rc"
+  fi
   stop_peer_relay_packet_diagnostics || true
   if [[ "$rc" != "0" ]]; then
     collect_failure_diagnostics "failure" || true
   fi
   if [[ -n "$PROVIDER_SSH_CREDENTIAL_NAME" ]]; then
-    cleanup_provider_ssh || rc=1
+    cleanup_provider_ssh || { rc=1; failed_cleanup="${failed_cleanup:-provider-ssh-cleanup}"; }
   elif ((${#APP_SECRET_PROJECTS[@]} > 0 || ${#APP_SECRET_USER_ATTEMPTS[@]} > 0 || ${#APP_SECRET_ORG_ATTEMPTS[@]} > 0 || APP_SECRET_CREATE_ATTEMPTED == 1)); then
     if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
-      (cleanup_application_secrets) || rc=1
+      (cleanup_application_secrets) || { rc=1; failed_cleanup="${failed_cleanup:-app-cleanup}"; }
     else
-      cleanup_application_secrets || rc=1
+      cleanup_application_secrets || { rc=1; failed_cleanup="${failed_cleanup:-app-cleanup}"; }
     fi
   elif [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" != "1" && -x "${CW_BIN:-}" ]]; then
     log "deleting smoke environment $ENV_ID"
@@ -505,7 +542,13 @@ cleanup() {
     log "kept smoke environment $ENV_ID"
   fi
   if [[ "$SMOKE_OAUTH_LOGIN_ATTEMPTED" == 1 ]]; then
-    cleanup_fresh_oauth_login || rc=1
+    cleanup_fresh_oauth_login || { rc=1; failed_cleanup="${failed_cleanup:-oauth-cleanup}"; }
+  fi
+  # A journey that passed but could not clean up fails at its first failed
+  # cleanup stage.
+  if [[ "$primary_rc" == "0" && "$rc" != "0" ]]; then
+    smoke_stage "$failed_cleanup"
+    report_acceptance_failure "$rc"
   fi
   if [[ "$rc" != "0" && -n "$TMPDIR_SMOKE" && -d "$TMPDIR_SMOKE" ]]; then
     log "kept failed-smoke evidence directory $TMPDIR_SMOKE"
@@ -799,8 +842,9 @@ cw_failure_class() {
 prepare_cw() {
   local step="$1" output="$2" error="$3" status class
   shift 3
-  if cw_with_timeout 30 "$@" >"$output" 2>"$error"; then return 0; else status=$?; fi
+  if cw_with_timeout 30 "$@" >"$output" 2>"$error"; then SMOKE_LAST_CW_CLASS=''; return 0; else status=$?; fi
   class="$(cw_failure_class "$status" "$error")"
+  SMOKE_LAST_CW_CLASS="$class"
   printf '%s\t%s\t%s\n' "$step" "$status" "$class" >>"$TMPDIR_SMOKE/app-prepare-commands.tsv"
   log "cw-failure step=$step class=$class"
   return "$status"
@@ -819,10 +863,12 @@ cleanup_cw() {
     if cw_with_timeout "$duration" "$@" >"$output" 2>"$error"; then status=0; else status=$?; fi
     if [[ "$status" == 0 ]]; then
       printf '%s\t%s\t%s\t0\tok\n' "$step" "$index" "$attempt" >>"$classification"
+      SMOKE_LAST_CW_CLASS=''
       return 0
     fi
     if [[ -n "$not_found" ]] && grep -Fq -- "$not_found" "$error"; then
       printf '%s\t%s\t%s\t%s\tnot_found\n' "$step" "$index" "$attempt" "$status" >>"$classification"
+      SMOKE_LAST_CW_CLASS=''
       return 0
     fi
     class="$(cw_failure_class "$status" "$error")"
@@ -832,6 +878,7 @@ cleanup_cw() {
       sleep "$((SMOKE_CLEANUP_RETRY_DELAY * attempt))"
     fi
   done
+  SMOKE_LAST_CW_CLASS="$class"
   log "cw-failure step=$step class=$class"
   return 1
 }
@@ -871,6 +918,7 @@ wait_until() {
     fi
     sleep 5
   done
+  SMOKE_FAILURE_CLASS=timeout
   if [[ -n "$SMOKE_LAST_WAIT_DETAIL" ]]; then
     die "timed out waiting for $message; last detail: $SMOKE_LAST_WAIT_DETAIL"
   fi
@@ -978,6 +1026,7 @@ prepare_cli() {
     cp "$ROOT/target/ci/cw" "$CW_BIN"
   fi
   [[ -x "$CW_BIN" ]] || die "cw binary is not executable: $CW_BIN"
+  smoke_stage principal
   assert_smoke_principal
 }
 
@@ -1078,10 +1127,11 @@ assert_admin_oauth_principal() {
 
   local whoami_out="$TMPDIR_SMOKE/admin-whoami.json"
   local whoami_err="$TMPDIR_SMOKE/admin-whoami.err"
-  if ! cw whoami --output json >"$whoami_out" 2>"$whoami_err"; then
+  cw whoami --output json >"$whoami_out" 2>"$whoami_err" || {
+    SMOKE_LAST_CW_CLASS="$(cw_failure_class "$?" "$whoami_err")"
     sed 's/[[:cntrl:]]//g' "$whoami_err" >&2 || true
     die "saved admin OIDC login is not usable for the selected server"
-  fi
+  }
   jq -e '
       type == "object"
       and ((.id | type) == "string" and (.id | length) > 0)
@@ -1096,17 +1146,19 @@ assert_admin_oauth_principal() {
 
   local current_org_out="$TMPDIR_SMOKE/admin-current-organization.out"
   local current_org_err="$TMPDIR_SMOKE/admin-current-organization.err"
-  if ! cw org current >"$current_org_out" 2>"$current_org_err"; then
+  cw org current >"$current_org_out" 2>"$current_org_err" || {
+    SMOKE_LAST_CW_CLASS="$(cw_failure_class "$?" "$current_org_err")"
     sed 's/[[:cntrl:]]//g' "$current_org_err" >&2 || true
     die "saved admin OIDC login has no usable current organization"
-  fi
+  }
 
   local environments_out="$TMPDIR_SMOKE/admin-environments.json"
   local environments_err="$TMPDIR_SMOKE/admin-environments.err"
-  if ! cw --cloud ls --output json >"$environments_out" 2>"$environments_err"; then
+  cw --cloud ls --output json >"$environments_out" 2>"$environments_err" || {
+    SMOKE_LAST_CW_CLASS="$(cw_failure_class "$?" "$environments_err")"
     sed 's/[[:cntrl:]]//g' "$environments_err" >&2 || true
     die "saved admin OIDC login cannot list environments for its current organization"
-  fi
+  }
   jq -e 'type == "array"' "$environments_out" >/dev/null || \
     die "admin environment list did not return a JSON array"
 }
@@ -1345,12 +1397,14 @@ prepare_fresh_oauth_cli() {
     "USER=$(id -un)" "LOGNAME=$(id -un)" SHELL=/bin/bash TERM=xterm-256color LC_ALL=C
     "CW_CONFIG_DIR=$SMOKE_OAUTH_LOGIN_DIR" "XDG_RUNTIME_DIR=$SMOKE_OAUTH_RUNTIME_DIR"
     "DBUS_SESSION_BUS_ADDRESS=unix:path=$SMOKE_OAUTH_RUNTIME_DIR/no-owner-bus")
+  smoke_stage oauth-login
   if [[ -n "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" ]]; then
     prepare_dev_smoke_browser_login "$SMOKE_OAUTH_LOGIN_DIR"
   else
     cw_with_timeout 600 login --org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" ||
       die 'fresh owner-operated Dev login failed'
   fi
+  smoke_stage oauth-principal
   validate_admin_oauth_config "$SMOKE_OAUTH_LOGIN_DIR"
   assert_fresh_oauth_principal
 }
@@ -2023,6 +2077,7 @@ run_application_secret_exec() {
 run_application_secrets_smoke() {
   local phase expected project generation=0 previous_uid='' guest_script hashes_name='' phase_deadline phase_started
   for phase in a b clear; do
+    smoke_stage "app-source-$phase"
     phase_started="$(milliseconds_now)"
     phase_deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
     case "$phase" in
@@ -5177,6 +5232,7 @@ run_selected_phases() {
   local phase
 
   for phase in "${SMOKE_ONLY_PHASES[@]}"; do
+    smoke_stage "$phase"
     log "running selected smoke phase: $phase"
     run_selected_phase "$phase"
   done
@@ -5195,6 +5251,7 @@ resize_guest_requested() {
 }
 
 main() {
+  smoke_stage setup
   require_bool01 SMOKE_RESIZE_GUEST "$SMOKE_RESIZE_GUEST"
   if resize_guest_requested && [[ -n "$SMOKE_EXISTING_ENV_ID" ]]; then
     die "resize-guest changes resources and may replace the workspace Pod; run it on a fresh disposable environment"
@@ -5226,11 +5283,18 @@ main() {
   local stage_started
   stage_started="$(milliseconds_now)"
   if application_secrets_selected; then
+    smoke_stage app-prepare
     prepare_application_secrets
     application_stage_passed app-prepare "$stage_started"
   fi
-  if provider_ssh_selected; then prepare_provider_ssh; fi
+  if provider_ssh_selected; then
+    smoke_stage provider-ssh-prepare
+    prepare_provider_ssh
+  fi
   stage_started="$(milliseconds_now)"
+  # The application journey times creation and readiness as one app-create
+  # stage; the others name each step.
+  if application_secrets_selected; then smoke_stage app-create; else smoke_stage create-environment; fi
   if [[ -n "$SMOKE_EXISTING_ENV_ID" ]]; then
     ENV_ID="$SMOKE_EXISTING_ENV_ID"
     SMOKE_KEEP_ENV=1
@@ -5240,6 +5304,7 @@ main() {
   fi
   record_environment_artifact
   if [[ -z "$SMOKE_EXISTING_ENV_ID" ]]; then
+    if ! application_secrets_selected; then smoke_stage wait-environment; fi
     wait_environment
   fi
   if application_secrets_selected; then application_stage_passed app-create "$stage_started"; fi
@@ -5247,15 +5312,22 @@ main() {
   if smoke_only_configured; then
     run_selected_phases
   else
+    smoke_stage kube-assertions
     run_kube_assertions
+    smoke_stage cw-run
     wait_for_cw_run
+    smoke_stage coco
     assert_coco_guest_test_resource
+    smoke_stage docker
     run_docker_smoke
     if [[ "$SMOKE_APP_PREVIEW" == "1" ]]; then
+      smoke_stage app-preview
       run_app_preview_smoke
     fi
+    smoke_stage ssh
     run_ssh_smoke
     if [[ "$SMOKE_RESIZE_GUEST" == "1" ]]; then
+      smoke_stage resize-guest
       run_resize_guest_smoke
     fi
   fi

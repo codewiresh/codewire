@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as fsPromises from "node:fs/promises";
+import { DevUxError } from "./dev-ux-ownership";
 
 const realFsPromises = { ...fsPromises };
 let rejectedRemovalPath = "";
@@ -41,6 +42,7 @@ mock.module("./dev-ux-walkthrough", () => ({
     if (redirectMode === "ux-large-history") await options.owned.createdId(options.deadline);
     if (redirectMode === "ux-signal") process.emit("SIGTERM", "SIGTERM");
     if (redirectMode === "ux-timeout") await new Promise(() => {});
+    if (redirectMode === "ux-stage-timeout") throw new DevUxError("terminal-attach", "timeout");
     if (!["ux-success", "ux-large-history", "ux-cleanup-failure"].includes(redirectMode)) throw new Error("hostile-ux-private-value-canary");
   },
 }));
@@ -374,7 +376,9 @@ test("UX is opt-in and refuses arbitrary argument values", async () => {
 
 test("wrong identity prevents all UX mutation and revokes the owned login", async () => {
   const value = await fixture("wrong-identity");
-  await expect(helper.main([...value.args, "--ux-walkthrough", "enabled"], 5000)).rejects.toThrow("identity-mismatch");
+  const failure = await helper.main([...value.args, "--ux-walkthrough", "enabled"], 5000).catch((error) => error);
+  expect(failure.stage).toBe("identity-mismatch");
+  expect(failure.failureClass).toBe("assertion");
   expect(uxInvocations).toBe(0);
   expect(await readFile(join(value.directory, "audit"), "utf8")).toBe("logout\n");
 });
@@ -387,7 +391,13 @@ const UX_TIMEOUT_DEADLINE_MS = 2_000;
 const UX_DEADLINE_MS = 20_000;
 const UX_TEST_TIMEOUT_MS = 30_000;
 
-for (const mode of ["ux-success", "ux-large-history", "ux-failure", "ux-signal", "ux-timeout", "ux-cleanup-failure"]) {
+// The class each failed journey reports beside its fixed stage (#3132).
+const UX_FAILURE_CLASSES: Record<string, string> = {
+  "ux-failure": "unexpected", "ux-signal": "unexpected", "ux-timeout": "timeout",
+  "ux-stage-timeout": "timeout", "ux-cleanup-failure": "assertion",
+};
+
+for (const mode of ["ux-success", "ux-large-history", "ux-failure", "ux-signal", "ux-timeout", "ux-stage-timeout", "ux-cleanup-failure"]) {
   test(`${mode}: cleanup is independent of browser and precedes OAuth logout`, async () => {
     const value = await fixture(mode);
     const deadline = mode === "ux-timeout" ? UX_TIMEOUT_DEADLINE_MS : UX_DEADLINE_MS;
@@ -409,6 +419,8 @@ for (const mode of ["ux-success", "ux-large-history", "ux-failure", "ux-signal",
       }
       if (mode === "ux-signal") expect(result.stage).toBe("signal-sigterm");
       if (mode === "ux-timeout") expect(result.stage).toBe("total-timeout");
+      if (mode === "ux-stage-timeout") expect(result.stage).toBe("terminal-attach");
+      expect(result.failureClass).toBe(UX_FAILURE_CLASSES[mode]);
     }
   }, UX_TEST_TIMEOUT_MS);
 }
@@ -427,7 +439,9 @@ test("external redirects are rejected before each credential or device action", 
     ["external-device", "browser-device-route", 3],
   ] as const) {
     const value = await fixture(mode);
-    await expect(helper.main(value.args, 5_000)).rejects.toThrow(stage);
+    const failure = await helper.main(value.args, 5_000).catch((error) => error);
+    expect(failure.stage).toBe(stage);
+    expect(failure.failureClass).toBe("navigation");
     expect(credentialFills).toBe(fills);
     expect(await readdir(value.config)).toEqual([]);
   }
@@ -435,7 +449,9 @@ test("external redirects are rejected before each credential or device action", 
 
 test("a rejected browser action is reduced to a fixed stage without an unhandled response", async () => {
   const value = await fixture("action-rejection");
-  await expect(helper.main(value.args, 5_000)).rejects.toThrow("browser-flow");
+  const failure = await helper.main(value.args, 5_000).catch((error) => error);
+  expect(failure.stage).toBe("browser-flow");
+  expect(failure.failureClass).toBe("unexpected");
   expect(await readdir(value.config)).toEqual([]);
 });
 
@@ -483,6 +499,7 @@ for (const stage of ["browser-launch", "browser-page", "browser-close"]) {
     expect(failure).toBeInstanceOf(helper.FixedStageError);
     expect(failure.stage).toBe(stage);
     expect(failure.message).toBe(stage);
+    expect(failure.failureClass).toBe("unexpected");
     expect(JSON.stringify(failure)).not.toContain("hostile-browser-private-payload-canary");
     expect(await readdir(value.config)).toEqual([]);
     expect(JSON.parse(await readFile(value.credential, "utf8"))).toEqual(document());
@@ -521,4 +538,26 @@ test("timeout and signal are bounded and clear the owned login", async () => {
   setTimeout(() => process.emit("SIGTERM", "SIGTERM"), 25);
   await expect(run).rejects.toThrow("signal-sigterm");
   expect(await readdir(signaled.config)).toEqual([]);
+});
+
+// The fixed ERROR line deploy matches stays first and unchanged; one closed
+// class follows it, and no message, payload or value ever does.
+test("failure lines name the fixed stage, then one closed class", () => {
+  const failure = new helper.FixedStageError("browser-flow", "timeout");
+  failure.cleanupFailures = ["browser-sign-out:failed"];
+  expect(helper.failureLines(failure)).toEqual([
+    "[dev-smoke-browser-auth] ERROR: browser-flow",
+    "[dev-smoke-browser-auth] failure-class: timeout",
+    "[dev-smoke-browser-auth] CLEANUP: browser-sign-out:failed",
+  ]);
+  for (const [stage, failureClass] of [["total-timeout", "timeout"], ["browser-login-route", "navigation"],
+    ["signal-sigterm", "unexpected"], ["identity-command", "assertion"], ["cleanup-incomplete", "assertion"]]) {
+    expect(helper.failureLines(new helper.FixedStageError(stage))).toEqual([
+      `[dev-smoke-browser-auth] ERROR: ${stage}`, `[dev-smoke-browser-auth] failure-class: ${failureClass}`,
+    ]);
+  }
+  expect(helper.failureLines(new Error("hostile-private-value-canary"))).toEqual([
+    "[dev-smoke-browser-auth] ERROR: unexpected-failure",
+    "[dev-smoke-browser-auth] failure-class: unexpected",
+  ]);
 });

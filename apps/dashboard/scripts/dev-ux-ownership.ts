@@ -1,7 +1,31 @@
 // Value-blind ownership and cleanup for the protected Dev browser walkthrough.
 // Never accept resource selectors from rendered error text or sweep an account.
+
+// Closed failure classes for the helper's one failure-class line (#3132).
+export type FailureClass = "timeout" | "assertion" | "navigation" | "unexpected";
+const FAILURE_CLASSES: ReadonlySet<string> = new Set(["timeout", "assertion", "navigation", "unexpected"]);
+// Playwright navigation failures: a Chromium net error, or a goto or reload
+// that failed or was interrupted. The message is only tested, never repeated.
+const NAVIGATION_FAILURE = /net::ERR_[A-Z0-9_]+|^(?:page|frame)\.(?:goto|reload|goBack|goForward):|interrupted by another navigation/;
+// An expect.poll failure is a plain Error whose message is the matcher's.
+const POLLED_EXPECTATION = /^expect\(/;
+
+// The class of one failure, from its type and fixed patterns only. A failure
+// that already carries a class keeps it; Playwright's TimeoutError is a
+// timeout; an expect failure (it carries matcherResult) is an assertion.
+export function failureClassOf(error: unknown): FailureClass {
+  if (!(error instanceof Error)) return "unexpected";
+  const carried = (error as { failureClass?: unknown }).failureClass;
+  if (typeof carried === "string" && FAILURE_CLASSES.has(carried)) return carried as FailureClass;
+  if (error.name === "TimeoutError") return "timeout";
+  if ("matcherResult" in error && (error as { matcherResult?: unknown }).matcherResult) return "assertion";
+  if (POLLED_EXPECTATION.test(error.message)) return "assertion";
+  if (NAVIGATION_FAILURE.test(error.message)) return "navigation";
+  return "unexpected";
+}
+
 export class DevUxError extends Error {
-  constructor(readonly stage: string) { super(stage); }
+  constructor(readonly stage: string, readonly failureClass: FailureClass = "assertion") { super(stage); }
 }
 
 type Command = (args: string[], deadline: number) => Promise<unknown>;

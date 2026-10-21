@@ -17,7 +17,9 @@ import { constants as fsConstants } from "node:fs";
 import { accessSync } from "node:fs";
 import { basename, join } from "node:path";
 import { userInfo } from "node:os";
-import { DevUxError, OwnedUxSandbox, uxOrganizationSlug } from "./dev-ux-ownership";
+import {
+  DevUxError, OwnedUxSandbox, failureClassOf, uxOrganizationSlug, type FailureClass,
+} from "./dev-ux-ownership";
 
 const DEV_ORIGIN = "https://codewire-dev.sh";
 const TOTAL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -61,23 +63,47 @@ export type DeviceChallenge = { verificationUrl: string; userCode: string };
 type CleanupOperation = "browser-sign-out" | "browser-context-close" | "browser-profile-remove"
   | "browser-temp-remove" | "runtime-remove" | "home-remove" | "config-clear" | "ux-sandbox-remove";
 
+// A stage this helper raises itself is an assertion, except its deadline,
+// its route checks, and what interrupts it rather than failing a check.
+function stageFailureClass(stage: string): FailureClass {
+  if (stage === "total-timeout") return "timeout";
+  if (stage.endsWith("-route")) return "navigation";
+  if (stage.startsWith("signal-") || stage === "child-process" || stage === "unexpected-failure") return "unexpected";
+  return "assertion";
+}
+
 export class FixedStageError extends Error {
   cleanupFailures: string[] = [];
-  constructor(readonly stage: string) {
+  constructor(readonly stage: string, readonly failureClass: FailureClass = stageFailureClass(stage)) {
     super(stage);
     this.name = "FixedStageError";
   }
 }
 
-function fail(stage: string): never {
-  throw new FixedStageError(stage);
+function fail(stage: string, failureClass?: FailureClass): never {
+  throw new FixedStageError(stage, failureClass);
 }
 
+// An opaque browser failure keeps only its value-blind class.
 function fixedBrowserFailure(stage: string): (error: unknown) => never {
   return (error) => {
     if (error instanceof FixedStageError) throw error;
-    fail(stage);
+    fail(stage, failureClassOf(error));
   };
+}
+
+// The helper's fixed failure lines: the stage, which deploy matches exactly,
+// then its class from a closed set, then any cleanup labels.
+export function failureLines(error: unknown): string[] {
+  const failure = error instanceof FixedStageError ? error : undefined;
+  const lines = [
+    `[dev-smoke-browser-auth] ERROR: ${failure?.stage ?? "unexpected-failure"}`,
+    `[dev-smoke-browser-auth] failure-class: ${failure?.failureClass ?? "unexpected"}`,
+  ];
+  if (failure?.cleanupFailures.length) {
+    lines.push(`[dev-smoke-browser-auth] CLEANUP: ${failure.cleanupFailures.join(",")}`);
+  }
+  return lines;
 }
 
 export function parseOptions(argv: string[]): Options {
@@ -349,7 +375,7 @@ export async function approveInOrdinaryBrowser(
     if (!BROWSER_CONTRACT.approvedStatus.test(status)) fail("browser-device-approval");
   } catch (error) {
     if (error instanceof FixedStageError) throw error;
-    fail("browser-flow");
+    fail("browser-flow", failureClassOf(error));
   }
 }
 
@@ -367,7 +393,7 @@ async function signOut(page: Page): Promise<void> {
     }
   } catch (error) {
     if (error instanceof FixedStageError) throw error;
-    fail("browser-sign-out");
+    fail("browser-sign-out", failureClassOf(error));
   }
 }
 
@@ -562,7 +588,7 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
     success = true;
   } catch (error) {
     originalFailure = error instanceof FixedStageError ? error
-      : new FixedStageError(error instanceof DevUxError ? error.stage : "unexpected-failure");
+      : new FixedStageError(error instanceof DevUxError ? error.stage : "unexpected-failure", failureClassOf(error));
     throw originalFailure;
   } finally {
     const cleanupFailures: string[] = [];
@@ -613,10 +639,7 @@ if ((import.meta as ImportMeta & { main?: boolean }).main) {
   process.umask(0o077);
   main(process.argv.slice(2)).catch((error) => {
     const stage = error instanceof FixedStageError ? error.stage : "unexpected-failure";
-    console.error(`[dev-smoke-browser-auth] ERROR: ${stage}`);
-    if (error instanceof FixedStageError && error.cleanupFailures.length) {
-      console.error(`[dev-smoke-browser-auth] CLEANUP: ${error.cleanupFailures.join(",")}`);
-    }
+    for (const line of failureLines(error)) console.error(line);
     process.exitCode = stage === "signal-sigint" ? 130 : stage === "signal-sigterm" ? 143 : stage === "signal-sighup" ? 129 : 1;
   });
 }
