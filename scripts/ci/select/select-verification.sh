@@ -1845,6 +1845,19 @@ if [ "$event_selected" = false ]; then
         select_token security
         recognized=true
         ;;
+      scripts/ci/images/buildx-builder.sh|\
+      scripts/ci/tests/test-buildx-builder.sh)
+        # The owned BuildKit builder removal is shared by the workspace
+        # verification (workspace-cache.sh: policy, security) and the Kind image
+        # build (build-kind-images.sh: Kind, release, deploy), so it selects both.
+        select_token policy
+        select_token security
+        select_token edge_kind
+        select_token release
+        select_token deploy
+        kind_relevant=true
+        recognized=true
+        ;;
       scripts/ci/setup/select-untrusted-workspace-cache.sh|\
       scripts/ci/images/workspace-cache.sh|\
       scripts/ci/tests/test-select-untrusted-workspace-cache.sh|\

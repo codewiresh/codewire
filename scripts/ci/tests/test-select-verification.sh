@@ -521,6 +521,14 @@ run_paths_case product_image_build_graph_kind pull_request refs/pull/2004/head t
   'deploy edge_kind go_consumer_interop go_support kind policy release runtime_confidential security security_js' \
   docker-bake.hcl scripts/ci/images/build-kind-images.sh \
   scripts/ci/images/run-rust-build.sh
+# The owned BuildKit builder removal is shared by the workspace verification
+# and the Kind image build, so it selects both consumers' families.
+run_paths_case buildx_builder_removal pull_request refs/pull/3072/head false \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
+  scripts/ci/images/buildx-builder.sh scripts/ci/tests/test-buildx-builder.sh
+run_paths_case buildx_builder_removal_kind pull_request refs/pull/3073/head true \
+  'deploy edge_kind go_consumer_interop go_support kind policy release runtime_confidential security security_js' \
+  scripts/ci/images/buildx-builder.sh scripts/ci/tests/test-buildx-builder.sh
 run_paths_case harbor_runtime_pull_contract pull_request refs/pull/2006/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/test-harbor-runtime-pull-contract.sh

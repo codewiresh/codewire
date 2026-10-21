@@ -26,6 +26,7 @@ INPUTS = (
     "scripts/ci/verify/verify-workspace-image.sh",
     "scripts/ci/verify/workspace-image-artifact.py",
     "scripts/ci/images/workspace-cache.sh",
+    "scripts/ci/images/buildx-builder.sh",
     "scripts/ci/images/run-rust-build.sh",
     "scripts/ci/setup/select-untrusted-workspace-cache.sh",
     "scripts/ci/setup/select-workspace-cache-experiment.py",

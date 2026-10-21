@@ -698,9 +698,31 @@ case "${1:-} ${2:-} ${3:-}" in
     ;;
   buildx\ rm\ *)
     [[ "$*" == *' --force '* ]]
-    if [[ "${FAKE_KIND_BUILDER_REMOVE_FAILURE:-0}" = 1 && "${4:-}" == codewire-kind-* ]]; then
+    if [[ "${FAKE_KIND_BUILDER_REMOVE_FAILURE:-0}" != 0 && "${4:-}" == codewire-kind-* ]]; then
+      echo 'ERROR: failed to remove one or more builders' >&2
       exit 73
     fi
+    ;;
+  buildx\ inspect\ codewire-kind-*|container\ inspect\ --format|volume\ inspect\ --format)
+    [[ "$1" == buildx || "${*: -1}" == buildx_buildkit_codewire-kind-* ]] || {
+      echo "unexpected fake docker command: $*" >&2
+      exit 1
+    }
+    # A failed removal is checked object by object. "gone": the client failed
+    # although Docker already removed everything; "1": every object persists.
+    if [[ "${FAKE_KIND_BUILDER_REMOVE_FAILURE:-0}" == 1 ]]; then
+      printf 'present\n'
+    else
+      case "$1" in
+        buildx) echo "ERROR: no builder \"$3\" found" >&2 ;;
+        container) echo "Error response from daemon: No such container: ${*: -1}" >&2 ;;
+        volume) echo "Error response from daemon: get ${*: -1}: no such volume" >&2 ;;
+      esac
+      exit 1
+    fi
+    ;;
+  rm\ --force\ buildx_buildkit_codewire-kind-*|volume\ rm\ buildx_buildkit_codewire-kind-*)
+    [[ "${FAKE_KIND_BUILDER_REMOVE_FAILURE:-0}" != 1 ]] || exit 74
     ;;
   buildx\ bake\ *)
     if [ "${FAKE_BUILD_FATAL:-0}" = 1 ]; then
@@ -1420,6 +1442,7 @@ kind_retention_case() {
       solve) export FAKE_BUILD_FATAL=1 ;;
       image) export FAKE_KIND_IMAGE_INVALID=1 ;;
       cleanup) export FAKE_KIND_BUILDER_REMOVE_FAILURE=1 ;;
+      cleanup-gone) export FAKE_KIND_BUILDER_REMOVE_FAILURE=gone ;;
       none) ;;
       *) exit 99 ;;
     esac
@@ -1450,8 +1473,11 @@ kind_retention_case() {
   owned_work="$(cat "$case_dir/original-work")"
   [[ "$owned_work" == "$case_dir/temp/"codewire-kind-images.* ]] ||
     fail "Kind $name work escaped its private parent"
-  [[ "$(grep -Ec ' buildx rm --force codewire-kind-' "$case_dir/docker-calls" || true)" -eq 1 ]] ||
-    fail "Kind $name did not attempt its one transient builder removal"
+  # One removal, and after a failed one exactly one retry round when objects persist.
+  removals=1
+  [[ "$failure" != cleanup ]] || removals=2
+  [[ "$(grep -Ec ' buildx rm --force codewire-kind-' "$case_dir/docker-calls" || true)" -eq "$removals" ]] ||
+    fail "Kind $name did not attempt exactly its transient builder removals"
   if [[ "$mode" == 1 ]]; then
     [[ -d "$owned_work" && ! -L "$owned_work" && -f "$owned_work/buildkitd.toml" ]] ||
       fail "retained Kind $name lost its original work"
@@ -1520,6 +1546,16 @@ PY
   fi
   if [[ "$failure" == cleanup ]]; then
     grep -qF 'failed to remove transient builder' "$case_dir/output" || fail 'cleanup failure was hidden'
+    grep -Eq '^Kind image build cleanup: phase=builder-removal status=73 elapsed_seconds=[0-9]+ persists: builder codewire-kind-[^,]+, container buildx_buildkit_codewire-kind-[^,]+-node, volume buildx_buildkit_codewire-kind-[^,]+-node_state$' \
+      "$case_dir/output" || fail 'persisting builder objects were not named'
+  fi
+  if [[ "$failure" == cleanup-gone ]]; then
+    # #2990: Buildx's client gave up while Docker finished deleting the state
+    # volume. Docker reporting every builder object missing is the cleanup.
+    grep -Eq '^Kind image build cleanup: phase=builder-removal status=73 confirmed-absent=true elapsed_seconds=[0-9]+$' \
+      "$case_dir/output" || fail 'confirmed-absent builder removal was not reported'
+    ! grep -qF 'failed to remove transient builder' "$case_dir/output" ||
+      fail 'a builder Docker reports gone failed the Kind image build'
   fi
 }
 
@@ -1531,6 +1567,7 @@ kind_retention_case image-check-failure 1 image nonzero
 kind_retention_case invalid 2 none 2
 kind_retention_case retained-cleanup-failure 1 cleanup 73
 kind_retention_case default-cleanup-failure unset cleanup 73
+kind_retention_case default-cleanup-gone unset cleanup-gone 0
 
 base_source_tag="registry.example.invalid/codewire/base:$source_sha"
 awk -F '\t' -v reference="$base_source_tag" \

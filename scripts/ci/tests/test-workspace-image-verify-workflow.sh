@@ -297,7 +297,8 @@ start_companion_lane artifact-and-probes \
   "$ROOT/scripts/ci/tests/test-workspace-cache-probes.py"
 start_companion_lane selector-and-cache \
   "$ROOT/scripts/ci/tests/test-select-untrusted-workspace-cache.sh" \
-  "$ROOT/scripts/ci/tests/test-workspace-cache.sh"
+  "$ROOT/scripts/ci/tests/test-workspace-cache.sh" \
+  "$ROOT/scripts/ci/tests/test-buildx-builder.sh"
 
 # Execute the verifier against a fake Docker client. This catches command-order,
 # digest-handoff, cleanup, and fail-closed regressions without building an image.
@@ -608,6 +609,10 @@ case "${1:-} ${2:-}" in
   'version --format') printf '29.7.1\n' ;;
   'buildx version') printf 'buildx pinned-fixture\n' ;;
   'buildx inspect')
+    if [[ "${FAKE_FAIL:-}" == cleanup-gone && -e "$FAKE_DAEMON_FILE.removed" && "${3:-}" == codewire-workspace-* ]]; then
+      echo "ERROR: no builder \"$3\" found" >&2
+      exit 1
+    fi
     printf 'Name: %s\n' "${FAKE_SELECTED_BUILDER:-selected-verifier}"
     printf 'Driver: %s\n' "${FAKE_SELECTED_DRIVER:-docker-container}"
     ;;
@@ -772,6 +777,21 @@ PY
       printf '%s\n' 'docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
     fi
     ;;
+  'volume inspect')
+    # Only a failed builder removal probes the state volume. It is gone once
+    # the synthetic daemon removed the builder; otherwise it persists.
+    [[ "${*: -1}" == buildx_buildkit_codewire-workspace-*-node_state ]] || exit 99
+    if [[ "${FAKE_FAIL:-}" == cleanup-gone && -e "$FAKE_DAEMON_FILE.removed" ]]; then
+      echo "Error response from daemon: get ${*: -1}: no such volume" >&2
+      exit 1
+    fi
+    printf '%s\n' "${*: -1}"
+    ;;
+  'volume rm')
+    [[ "${*: -1}" == buildx_buildkit_codewire-workspace-*-node_state ]] || exit 99
+    echo 'Error response from daemon: volume is in use' >&2
+    exit 1
+    ;;
   'exec --interactive') cat >"$FAKE_DAEMON_FILE" ;;
   'image inspect')
     if [[ "${4:-}" == --format ]]; then
@@ -794,7 +814,11 @@ PY
       && "$6" =~ ^name=\^/codewire-workspace-cw-[0-9a-f]{32}\$$ ]] || exit 99
     # The synthetic --rm observation never leaves a container behind.
     ;;
-  'rm --force') rm -f "$FAKE_CONTRACT_RUNNING" ;;
+  'rm --force')
+    # A failed builder removal removes its daemon container again; that
+    # container persists in the synthetic daemon. Others are contract runs.
+    [[ "${3:-}" == buildx_buildkit_* ]] || rm -f "$FAKE_CONTRACT_RUNNING"
+    ;;
   'run --rm')
     if [[ " $* " == *' --entrypoint /usr/bin/cat '* ]]; then
       copy_options=()
@@ -1048,8 +1072,8 @@ for failure in full mounted cleanup cancel; do
   [[ ! -e "$fixture_receipt" ]] || fail "$failure failure emitted a receipt"
   ! grep -q '^image tag ' "$work/docker.log" || fail "$failure failure sealed an alias"
 done
-grep -q 'workspace cache cleanup: phase=builder-removal status=43 elapsed_seconds=' \
-  "$work/cleanup.out" || fail 'builder removal failure omitted its bounded diagnostic'
+grep -Eq '^workspace cache cleanup: phase=builder-removal status=43 elapsed_seconds=[0-9]+ persists: builder codewire-workspace-[^,]+, container buildx_buildkit_codewire-workspace-[^,]+-node, volume buildx_buildkit_codewire-workspace-[^,]+-node_state$' \
+  "$work/cleanup.out" || fail 'builder removal failure did not name what persists'
 grep -q 'workspace cache cleanup: builder-removal output: ' "$work/cleanup.out" ||
   fail 'builder removal failure omitted its bounded Buildx output'
 
@@ -1059,7 +1083,7 @@ grep -q 'workspace cache cleanup: builder-removal output: ' "$work/cleanup.out" 
 rm -f "$work/daemon.aws.removed"
 run_mock_verifier cleanup-gone valid docker cleanup-gone >"$work/cleanup-gone.out" 2>&1 ||
   fail 'confirmed-absent builder removal failed the verification'
-grep -q 'workspace cache cleanup: phase=builder-removal status=43 confirmed-absent=true' \
+grep -Eq '^workspace cache cleanup: phase=builder-removal status=43 confirmed-absent=true elapsed_seconds=[0-9]+$' \
   "$work/cleanup-gone.out" || fail 'confirmed-absent builder removal was not reported'
 [[ -e "$fixture_receipt" ]] || fail 'confirmed-absent builder removal emitted no receipt'
 rm -f "$work/daemon.aws.removed"

@@ -376,6 +376,8 @@ class ProbeFixture(unittest.TestCase):
         helper = replay_root / "scripts/ci/images/workspace-cache.sh"
         helper.parent.mkdir(parents=True)
         shutil.copy2(helper_source, helper)
+        # The wrapper sources its shared builder removal from beside itself.
+        shutil.copy2(ROOT / "scripts/ci/images/buildx-builder.sh", helper.with_name("buildx-builder.sh"))
         for index, (text, status, retried) in enumerate((
             ("ERROR: failed to build: failed to solve: failed to load cache: S3 GetObject NoSuchKey", 1, True),
             ("ERROR: failed to build: failed to solve: failed to load cache: S3 GetObject NoSuchKey", 51, False),

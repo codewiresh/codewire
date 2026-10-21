@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Sourced by non-publishing workspace verification and the bounded R2 canary.
 # This is the owner's explicitly accepted provider-key projection, not a broker.
+# shellcheck source=scripts/ci/images/buildx-builder.sh
+source "$(dirname "${BASH_SOURCE[0]}")/buildx-builder.sh"
 readonly WORKSPACE_BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 # The cache selector names the trust. Canonical-main pushes read and write the
 # main bucket (main); pull requests only read it (main-read) with a read-only
@@ -150,28 +152,13 @@ workspace_cache_cleanup_builder() {
     fi
   fi
   if [[ "$builder_created" == true ]]; then
-    # A stopped daemon can leave substantial state to remove. Keep erasure
-    # prompt while allowing bounded filesystem cleanup within the runner reserve.
-    local removal_output=''
-    started=$SECONDS phase_status=0
-    removal_output="$(timeout --signal=TERM --kill-after=3s 60s \
-      "$docker_bin" buildx rm --force "$builder" 2>&1)" || phase_status=$?
-    # The guarantee is that the owned daemon container is gone. A removal that
-    # reports failure after that container no longer exists, such as a retry
-    # or a racing removal, has achieved it; an existing container still fails.
-    if [[ "$phase_status" != 0 ]] && workspace_cache_builder_container_absent; then
-      printf 'workspace cache cleanup: phase=builder-removal status=%s confirmed-absent=true\n' \
-        "$phase_status" >&2
-      phase_status=0
-    fi
-    if [[ "$phase_status" != 0 ]]; then
-      printf 'workspace cache cleanup: phase=builder-removal status=%s elapsed_seconds=%s\n' \
-        "$phase_status" "$((SECONDS - started))" >&2
-      # Buildx reports builder and container names, never credential material.
-      printf '%s\n' "${removal_output:0:600}" | tr -cd '[:print:]\n' |
-        sed 's/^/workspace cache cleanup: builder-removal output: /' >&2
-      status=$phase_status
-    fi
+    # The builder, its daemon container and its state volume must be gone. The
+    # shared helper accepts a failed `buildx rm` once Docker reports all three
+    # missing, and names any that persist.
+    phase_status=0
+    buildx_builder_remove "$docker_bin" "$builder" "${builder}-node" 'workspace cache cleanup' ||
+      phase_status=$?
+    [[ "$phase_status" == 0 ]] || status=$phase_status
   fi
   if [[ "$status" == 0 ]]; then
     daemon_credentials=false builder_created=false
@@ -179,16 +166,6 @@ workspace_cache_cleanup_builder() {
   # The workflow owns the original file through later Kind/host builds. Never
   # remove it here. A failed daemon cleanup prevents receipt emission.
   return "$status"
-}
-
-# True only when Docker names the exact owned BuildKit container as missing.
-# An unknown container identity or any other inspect failure is not proof.
-workspace_cache_builder_container_absent() {
-  local inspect_output='' inspect_status=0
-  [[ "$builder_container" =~ ^[0-9a-f]{64}$ ]] || return 1
-  inspect_output="$(timeout --signal=TERM --kill-after=3s 15s \
-    "$docker_bin" container inspect --format '{{.Id}}' "$builder_container" 2>&1)" || inspect_status=$?
-  [[ "$inspect_status" != 0 && "$inspect_output" == *"No such container"* ]]
 }
 
 workspace_cache_layer_args() {
