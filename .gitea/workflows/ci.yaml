@@ -2482,6 +2482,23 @@ jobs:
           VERIFICATION_WORKSPACE_IMAGE_RESULT: ${{ needs.workspace-image.result }}
         run: scripts/ci/select/require-verification-results.sh
 
+      # Main CI's verdict for its own commit (#2892), printed only after every
+      # selected group succeeded or an exact tested-tree receipt was accepted.
+      # Dev delivers only a commit whose push run printed it; a superseded run
+      # verified nothing and prints none (main-ci-verdict.py).
+      - name: Record main CI's verdict for this commit
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          CODEWIRE_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CODEWIRE_HEAD_COMMIT: ${{ needs.verification-selection.outputs.ci_head_commit }}
+          CODEWIRE_HEAD_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
+          VERIFICATION_SUPERSEDED: ${{ needs.verification-selection.outputs.superseded }}
+          VERIFICATION_SUPERSEDED_BY: ${{ needs.verification-selection.outputs.superseded_by }}
+          VERIFICATION_TESTED_TREE_RECEIPT: ${{ needs.verification-selection.outputs.tested_tree_receipt }}
+          VERIFICATION_TESTED_TREE_PR: ${{ needs.verification-selection.outputs.tested_tree_pr }}
+          VERIFICATION_TESTED_TREE_RUN: ${{ needs.verification-selection.outputs.tested_tree_run }}
+        run: python3 -I -B scripts/ci/plan/main-ci-verdict.py emit
+
       - name: Emit exact-head verification receipt
         if: ${{ github.event_name == 'pull_request' }}
         env:
@@ -2491,3 +2508,23 @@ jobs:
           CODEWIRE_HEAD_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/receipts/emit-verification-receipt.py
+
+  # The final job of a push to main (#2892): after a green verdict for this
+  # exact commit, start Dev delivery. Deploy Dev's publish job for the same
+  # commit signs and dispatches only on that verdict and only while the commit
+  # is main's head; when it already ran while this run was still verifying,
+  # this reruns exactly that job, with the job token. Nothing waits for CI.
+  deliver-to-dev:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token reads runs and reruns one Deploy Dev job.
+    name: Start Dev delivery of the verified commit
+    runs-on: ci-lite
+    timeout-minutes: 15
+    needs: [verification-selection, required-verification]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.required-verification.result == 'success' && needs.verification-selection.outputs.superseded == 'false' }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Rerun this commit's Deploy Dev publish job
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/deploy/rerun-dev-publish.py

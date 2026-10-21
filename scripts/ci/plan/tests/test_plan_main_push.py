@@ -3,8 +3,9 @@
 Before #2897 every main push ran apply-verification-plan.py --unclassified, so
 the CW release assets, Container contract, Compile every Rust target and Rust /
 transport jobs ran on every push. A main push now plans the facts with the
-previous main's policy, against that commit when its own run verified it, and
-keeps every artifact selected otherwise.
+previous main's policy, against that commit when main CI's verdict verified it
+(main-ci-verdict.py, the predicate Dev delivery uses, #2892), and keeps every
+artifact selected otherwise.
 """
 
 from __future__ import annotations
@@ -13,17 +14,16 @@ import contextlib
 import importlib.util
 import io
 import os
-import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 import test_planner as fixtures  # noqa: E402
+import verdict_fixtures as fx  # noqa: E402
 
 PLAN_ROOT = Path(__file__).parents[1]
 REPOSITORY_ROOT = PLAN_ROOT.parents[2]
@@ -41,54 +41,25 @@ NOTHING = ("false", "false", "false")
 HEAVY_ARTIFACT_GROUPS = ("cw_release_assets", "rust_compile", "rust_transport")
 
 
-def run_record(sha: str, *, run_id: int = 41, status: str = "success", **fields: Any) -> dict:
-    record = {
-        "id": run_id,
-        "head_sha": sha,
-        "event": "push",
-        "workflow_id": "ci.yaml",
-        "prettyref": "main",
-        "status": status,
-    }
-    record.update(fields)
-    return record
+def tree_of(repository: Path, sha: str) -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{sha}^{{tree}}"],
+        cwd=repository, text=True, capture_output=True, check=False,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else "0" * 40
 
 
-def job_records(run_id: int, *, policy: str = "success", required: str = "success") -> list[dict]:
-    return [
-        {"id": 1, "run_id": run_id, "name": "Verification selection", "status": "success"},
-        {"id": 2, "run_id": run_id, "name": "Policy verification", "status": policy},
-        {"id": 3, "run_id": run_id, "name": "Required verification", "status": required},
-    ]
-
-
-class FakeForgejo:
-    """The two repository API reads, answered from fixed records."""
-
-    def __init__(self, runs: list[dict] | Exception, jobs: dict[int, Any] | None = None):
-        self.runs = runs
-        self.jobs = jobs or {}
-        self.paths: list[str] = []
-
-    def factory(self, environ: dict[str, str]):
-        return self.fetch
-
-    def fetch(self, path: str) -> Any:
-        self.paths.append(path)
-        if path.startswith("/actions/runs?"):
-            if isinstance(self.runs, Exception):
-                raise self.runs
-            return {"total_count": len(self.runs), "workflow_runs": self.runs}
-        match = re.fullmatch(r"/actions/runs/(\d+)/jobs\?page=1&limit=100", path)
-        assert match, path
-        jobs = self.jobs[int(match.group(1))]
-        if isinstance(jobs, Exception):
-            raise jobs
-        return jobs if isinstance(jobs, list) else {"total_count": len(jobs["jobs"]), **jobs}
-
-
-def verified(sha: str) -> FakeForgejo:
-    return FakeForgejo([run_record(sha)], {41: job_records(41)})
+def recorded(sha: str, tree: str, *, runs: list[dict] | None = None, jobs=None,
+             log: str | None = None) -> fx.FakeForgejo:
+    """main CI's records for the previous main commit; by default a verified run."""
+    return fx.FakeForgejo(
+        {"ci.yaml": runs if runs is not None else [fx.run(sha)]},
+        {41: jobs if jobs is not None else fx.ci_jobs(41)},
+        {fx.required_job_id(41): log if log is not None else fx.log_lines(
+            "required verification: every selected capability group succeeded",
+            fx.marker(sha, tree),
+        )},
+    )
 
 
 def capability_selection(paths: list[str]) -> str:
@@ -144,8 +115,11 @@ class MainPushPlanTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def verified(self, sha: str) -> fx.FakeForgejo:
+        return recorded(sha, tree_of(self.repo.root, sha))
+
     def choose(
-        self, head: str, before: str, forgejo: FakeForgejo, environ: dict[str, str] | None = None
+        self, head: str, before: str, forgejo: fx.FakeForgejo, environ: dict[str, str] | None = None
     ) -> tuple[dict[str, str], str]:
         log = io.StringIO()
         with contextlib.redirect_stdout(log):
@@ -182,7 +156,7 @@ class MainPushPlanTests(unittest.TestCase):
         # Even every artifact selected starts no Container contract job on main.
         self.assertFalse(previous["workspace_image"], previous)
 
-        outputs, log = self.choose(head, before, verified(before))
+        outputs, log = self.choose(head, before, self.verified(before))
         self.assertEqual(self.selected(outputs), NOTHING)
         self.assertEqual(outputs["cw_package_state"], "unaffected")
         self.assertEqual(outputs["ci_head_commit"], head)
@@ -195,7 +169,7 @@ class MainPushPlanTests(unittest.TestCase):
     def test_cw_change_after_a_verified_main_still_starts_the_cw_jobs(self) -> None:
         before = self.repo.base
         head = self.repo.change("cli/src/main.rs", "fn main() { /* changed */ }\n")
-        outputs, _ = self.choose(head, before, verified(before))
+        outputs, _ = self.choose(head, before, self.verified(before))
         self.assertEqual(self.selected(outputs), ("true", "false", "true"))
         self.assertEqual(outputs["cw_package_state"], "affected")
         groups = dispatched(capability_selection(["crates/codewire-cli/src/main.rs"]), outputs)
@@ -208,7 +182,7 @@ class MainPushPlanTests(unittest.TestCase):
         head = self.repo.change(
             fixtures.WORKSPACE_PIN, 'pub const WORKSPACE_IMAGE: &str = "workspace@sha256:two";\n'
         )
-        outputs, _ = self.choose(head, before, verified(before))
+        outputs, _ = self.choose(head, before, self.verified(before))
         # cw compiles the pin; the desktop does not.
         self.assertEqual(self.selected(outputs), ("true", "false", "true"))
         self.assertEqual(outputs["cw_package_state"], "affected")
@@ -216,24 +190,30 @@ class MainPushPlanTests(unittest.TestCase):
         self.assertEqual(outputs["workspace_image_state"], "affected")
         self.assertEqual(self.selected(self.previous_outputs(head)), EVERYTHING)
 
-    def test_superseded_or_failed_predecessor_keeps_every_artifact_selected(self) -> None:
+    def test_unverified_predecessor_keeps_every_artifact_selected(self) -> None:
         # The next run must cover what an unverified predecessor carried.
         before = self.repo.base
+        tree = tree_of(self.repo.root, before)
         head = self.repo.change(".githooks/pre-push", "#!/bin/sh\necho changed\n")
+        superseded_log = fx.log_lines(
+            "required verification: every selected capability group succeeded",
+            f"main CI verdict: not verified; superseded by {'4' * 40}, whose run verifies this commit's changes",
+        )
         cases = (
-            ("superseded", "predecessor-run-dispatched-nothing", FakeForgejo(
-                [run_record(before)], {41: job_records(41, policy="skipped")}
-            )),
-            ("failed run", "predecessor-run-not-successful",
-             FakeForgejo([run_record(before, status="failure")])),
-            ("failed gate", "predecessor-run-not-successful", FakeForgejo(
-                [run_record(before)], {41: job_records(41, required="failure")}
-            )),
-            ("no run", "predecessor-run-not-found", FakeForgejo([])),
+            ("superseded", "predecessor-run-superseded", recorded(
+                before, tree, jobs=fx.ci_jobs(41, policy="skipped"), log=superseded_log)),
+            ("failed run", "predecessor-run-not-successful", recorded(
+                before, tree, runs=[fx.run(before, status="failure")], jobs=fx.ci_jobs(41, required="failure"))),
+            ("failed gate", "predecessor-run-not-successful", recorded(
+                before, tree, jobs=fx.ci_jobs(41, required="failure"))),
+            ("still running", "predecessor-run-pending", recorded(
+                before, tree, runs=[fx.run(before, status="running")], jobs=fx.ci_jobs(41, required="running"))),
+            ("no run", "predecessor-run-not-found", recorded(before, tree, runs=[])),
             ("API down", "forgejo-api-unavailable",
-             FakeForgejo(main_push.Unproven("forgejo-api-unavailable"))),
-            ("API shape", "forgejo-api-malformed",
-             FakeForgejo([run_record(before)], {41: {"jobs": "x"}})),
+             recorded(before, tree, jobs=main_push.Unproven("forgejo-api-unavailable"))),
+            ("API shape", "forgejo-api-malformed", recorded(before, tree, jobs={"jobs": "x"})),
+            ("marker for another tree", "verdict-marker-mismatch", recorded(
+                before, tree, log=fx.log_lines(fx.marker(before, "5" * 40)))),
         )
         for label, reason, forgejo in cases:
             with self.subTest(case=label):
@@ -242,12 +222,38 @@ class MainPushPlanTests(unittest.TestCase):
                 self.assertEqual(outputs["cw_package_state"], "unclassified")
                 self.assertIn(f"every artifact stays selected ({reason})", log)
 
+    def test_old_and_new_predecessor_records(self) -> None:
+        before = self.repo.base
+        tree = tree_of(self.repo.root, before)
+        head = self.repo.change(".githooks/pre-push", "#!/bin/sh\necho changed\n")
+        # Old: before #2892 a green run with a successful Policy verification
+        # job verified its commit. It prints no verdict marker, so the shared
+        # predicate no longer counts it, and every artifact stays selected.
+        old = recorded(before, tree, log=fx.log_lines(
+            "required verification: every selected capability group succeeded"))
+        outputs, log = self.choose(head, before, old)
+        self.assertEqual(self.selected(outputs), EVERYTHING)
+        self.assertIn("(predecessor-run-has-no-verdict)", log)
+
+        # New: a run that reused an exact tested-tree receipt dispatched no
+        # group (its Policy verification was skipped), yet it is verified the
+        # same way Dev delivery counts it.
+        receipt = recorded(before, tree, jobs=fx.ci_jobs(41, policy="skipped"), log=fx.log_lines(
+            "required verification: exact tested tree from PR #7 run 99 accepted",
+            fx.marker(before, tree, basis="tested-tree", tested={"pull_request": 7, "run": 99}),
+        ))
+        outputs, log = self.choose(head, before, receipt)
+        self.assertEqual(self.selected(outputs), NOTHING)
+        self.assertIn(f"{before} was verified by CI run 41", log)
+
     def test_newest_predecessor_run_decides(self) -> None:
         before = self.repo.base
+        tree = tree_of(self.repo.root, before)
         head = self.repo.change(".githooks/pre-push", "#!/bin/sh\necho changed\n")
-        rerun_failed = FakeForgejo(
-            [run_record(before, run_id=41), run_record(before, run_id=42, status="failure")],
-            {41: job_records(41)},
+        rerun_failed = fx.FakeForgejo(
+            {"ci.yaml": [fx.run(before, run_id=41), fx.run(before, run_id=42, status="failure")]},
+            {41: fx.ci_jobs(41), 42: fx.ci_jobs(42, required="failure")},
+            {fx.required_job_id(41): fx.log_lines(fx.marker(before, tree))},
         )
         outputs, log = self.choose(head, before, rerun_failed)
         self.assertEqual(self.selected(outputs), EVERYTHING)
@@ -255,28 +261,31 @@ class MainPushPlanTests(unittest.TestCase):
 
         # A newer scheduled run of the same commit, which Forgejo reports with
         # event push, checked Kind alone; the push run still decides.
-        scheduled_after_push = FakeForgejo(
-            [run_record(before, run_id=41, trigger_event="push"),
-             run_record(before, run_id=44, trigger_event="schedule")],
-            {41: job_records(41), 44: job_records(44, policy="skipped")},
+        scheduled_after_push = fx.FakeForgejo(
+            {"ci.yaml": [fx.run(before, run_id=41), fx.run(before, run_id=44, trigger_event="schedule")]},
+            {41: fx.ci_jobs(41), 44: fx.ci_jobs(44, policy="skipped")},
+            {fx.required_job_id(41): fx.log_lines(fx.marker(before, tree))},
         )
         outputs, log = self.choose(head, before, scheduled_after_push)
         self.assertEqual(self.selected(outputs), NOTHING)
         self.assertIn(f"{before} was verified by CI run 41", log)
 
-        # A pull-request run of the same commit proves nothing about main.
-        pull_request_only = FakeForgejo(
-            [run_record(before, event="pull_request", prettyref="#7")], {41: job_records(41)}
+        # A green pull-request run of the same commit proves nothing about main.
+        pull_request_only = fx.FakeForgejo(
+            {"ci.yaml": [fx.run(before, event="pull_request", trigger_event="pull_request", prettyref="#7")]},
+            {41: fx.ci_jobs(41)},
+            {fx.required_job_id(41): fx.log_lines(fx.marker(before, tree))},
         )
         outputs, log = self.choose(head, before, pull_request_only)
         self.assertEqual(self.selected(outputs), EVERYTHING)
         self.assertIn("predecessor-run-not-found", log)
 
         # Forgejo's other run and job shapes are accepted.
-        other_shapes = FakeForgejo(
-            [{"id": 43, "commit_sha": before, "trigger_event": "push",
-              "path": "ci.yaml@refs/heads/main", "status": "completed", "conclusion": "success"}],
-            {43: [dict(job, status="completed", conclusion="success") for job in job_records(43)]},
+        other_shapes = fx.FakeForgejo(
+            {"ci.yaml": [{"id": 43, "head_sha": before, "trigger_event": "push",
+                          "path": "ci.yaml@refs/heads/main", "status": "completed", "conclusion": "success"}]},
+            {43: [dict(job, status="completed", conclusion="success") for job in fx.ci_jobs(43)]},
+            {fx.required_job_id(43): fx.log_lines(fx.marker(before, tree, run_id=43))},
         )
         outputs, _ = self.choose(head, before, other_shapes)
         self.assertEqual(self.selected(outputs), NOTHING)
@@ -290,7 +299,7 @@ class MainPushPlanTests(unittest.TestCase):
         rewritten = fixtures.run(["git", "commit-tree", tree, "-m", "rewritten main"], self.repo.root)
         for before in ("", "0" * 40, "f" * 40, "not-a-sha", rewritten, head):
             with self.subTest(before=before):
-                forgejo = verified(before)
+                forgejo = self.verified(before)
                 outputs, log = self.choose(head, before, forgejo)
                 self.assertEqual(self.selected(outputs), EVERYTHING)
                 self.assertIn("(push-baseline-unavailable)", log)
@@ -300,7 +309,7 @@ class MainPushPlanTests(unittest.TestCase):
         before = self.repo.base
         self.repo.write(".githooks/pre-push", "#!/bin/sh\necho changed\n")
         head = self.repo.change("scripts/ci/plan/artifact-graph-notes.txt", "a policy edit\n")
-        outputs, log = self.choose(head, before, verified(before))
+        outputs, log = self.choose(head, before, self.verified(before))
         self.assertEqual(self.selected(outputs), EVERYTHING)
         self.assertIn("trusted policy surface changed", log)
 
@@ -312,7 +321,7 @@ class MainPushPlanTests(unittest.TestCase):
             {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/feature"},
         ):
             with self.subTest(environ=environ):
-                forgejo = verified(before)
+                forgejo = self.verified(before)
                 outputs, log = self.choose(head, before, forgejo, environ)
                 self.assertEqual(self.selected(outputs), EVERYTHING)
                 self.assertIn("(not-main-push)", log)
@@ -324,7 +333,7 @@ class MainPushPlanTests(unittest.TestCase):
         with mock.patch.object(
             main_push.planner, "plan", side_effect=main_push.planner.PlannerError("boom")
         ):
-            outputs, log = self.choose(head, before, verified(before))
+            outputs, log = self.choose(head, before, self.verified(before))
         self.assertEqual(self.selected(outputs), EVERYTHING)
         self.assertIn("(planner-failed: boom)", log)
 
@@ -366,7 +375,7 @@ class MainPushPlanTests(unittest.TestCase):
             "GITHUB_REPOSITORY": "codewire/codewire",
             "GITEA_TOKEN": "token",
         }
-        self.assertTrue(callable(main_push.forgejo_fetch(good)))
+        self.assertEqual(main_push.forgejo_api(good).repository, "codewire/codewire")
         for key, value, reason in (
             ("GITHUB_SERVER_URL", "https://forge.example.invalid/path", "invalid-server-url"),
             ("GITHUB_REPOSITORY", "codewire/codewire/extra", "invalid-repository"),
@@ -376,7 +385,7 @@ class MainPushPlanTests(unittest.TestCase):
         ):
             with self.subTest(key=key, value=value):
                 with self.assertRaisesRegex(main_push.Unproven, reason):
-                    main_push.forgejo_fetch({**good, key: value})
+                    main_push.forgejo_api({**good, key: value})
 
 
 if __name__ == "__main__":

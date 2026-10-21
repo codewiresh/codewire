@@ -498,7 +498,8 @@ jobs:
             --candidate mesh "${{ needs.build-mesh-image.outputs.source_sha }}" "${{ needs.build-mesh-image.outputs.candidate_ref }}"
           # Production reuses the images the protected Dev delivery built. A
           # delivery can push and then stop before signing, so every image
-          # must carry its delivery signature for this exact source.
+          # must carry its delivery signature for this exact source, with
+          # main CI's verdict (dev.codewire.verified=main-ci, #2892).
           scripts/ci/images/verify-runtime-image-signatures.sh \
             "$bundle" scripts/ci/trust/codewire-runtime-signing.pub
           scripts/ci/images/publish-image-to-harbor.sh \

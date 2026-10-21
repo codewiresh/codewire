@@ -95,11 +95,18 @@ grep -Fq "if: \${{ always() }}" <<<"$selection_job" ||
   fail "untrusted deployed-source candidate is not cleaned up unconditionally"
 grep -Fq "rm -f -- \"\$RUNNER_TEMP/codewire-deployed-source-candidate.json\"" \
   <<<"$selection_job" || fail "untrusted deployed-source candidate cleanup is missing"
-# shellcheck disable=SC2016 # Match the literal workflow expression.
-grep -Fq 'baseline_committed_at: ${{ steps.deployed-age.outputs.committed_at }}' <<<"$selection_job" ||
-  fail "deploy selection does not expose when Dev's running commit was made"
-grep -Fq "committed_at=\"\$(git show -s --format=%ct \"\$BASELINE_SHA\" 2>/dev/null)\"" <<<"$selection_job" ||
-  fail "Dev's running commit age is not read from the validated baseline"
+# Reruns are no recovery path and red CI is fixed forward (#2892): the
+# superseded-delivery stop, its 45-minute rule and the ancestor delivery are
+# gone, and with them the stale claim that deliveries queue one at a time.
+for retired in 'delivery-superseded' 'baseline_committed_at' 'COMMITTED_AT' 'deployed-age' \
+    'merge-base --is-ancestor' 'moves Dev forward' 'queue one at a time' 'outputs.stopped' \
+    'start-check' 'publish-check'; do
+  if grep -Fq -- "$retired" "$WORKFLOW"; then
+    fail "Deploy Dev retains the retired superseded-delivery path: $retired"
+  fi
+done
+[[ ! -e "$ROOT/scripts/ci/deploy/delivery-superseded.sh" && ! -e "$ROOT/scripts/ci/tests/test-delivery-superseded.sh" ]] ||
+  fail "the retired superseded-delivery stop remains in the repository"
 for output in deploy_dev reason matched_categories \
   dashboard_image_state daemon_image_state derp_image_state services_image_state mesh_image_state \
   baseline_sha head_sha head_tree ci_plan_sha256 ci_policy_sha256 baseline_valid; do
@@ -108,13 +115,11 @@ for output in deploy_dev reason matched_categories \
     fail "deploy selection does not expose $output"
 done
 
-[[ "$(grep -Fc "if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}" \
-  "$WORKFLOW")" -eq 2 ]] ||
-  fail "all-unaffected or superseded selection does not skip both runtime builds"
-# shellcheck disable=SC2016 # Match the literal workflow expression.
-grep -Fxq "    if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' && needs.build-service-images.outputs.stopped != 'true' && needs.build-daemon-image.outputs.stopped != 'true' }}" \
-  "$WORKFLOW" ||
-  fail "publication does not skip an unselected, superseded or stopped delivery"
+# Both build halves and the publisher skip an all-unaffected or superseded
+# selection; a failed or cancelled build skips the publisher too.
+[[ "$(grep -Fxc "    if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}" \
+  "$WORKFLOW")" -eq 3 ]] ||
+  fail "all-unaffected or superseded selection does not skip both runtime builds and publication"
 # shellcheck disable=SC2016 # Match the literal workflow expression.
 grep -Fq '      superseded: ${{ steps.canonical.outputs.superseded }}' <<<"$selection_job" ||
   fail "deploy selection does not expose whether its commit was superseded"
@@ -196,21 +201,11 @@ assert_build_half() {
     fail "$half half exceeds the protected runner lifetime"
   grep -Fxq '    needs: [deploy-selection]' <<<"$job" ||
     fail "$half half does not depend only on the trusted selection"
-  grep -A2 -Fx '        run: |' <<<"$job" | grep -Fxq '          scripts/ci/deploy/delivery-superseded.sh run -- \' ||
-    fail "$half half build does not stop when main moves past it"
-  grep -Fxq "            scripts/ci/images/build-push-runtime-images.sh $half" <<<"$job" ||
+  grep -Fxq "        run: scripts/ci/images/build-push-runtime-images.sh $half" <<<"$job" ||
     fail "$half half does not use the bounded shared-builder entrypoint"
-  # shellcheck disable=SC2016 # Match the literal workflow expression.
-  grep -Fxq "      stopped: \${{ steps.start-check.outputs.stop == 'true' || steps.build.outputs.stop == 'true' }}" \
-    <<<"$job" || fail "$half half does not report a stop to publication"
-  # shellcheck disable=SC2016 # Match the literal workflow expression.
-  [[ "$(grep -Fxc "        if: \${{ steps.start-check.outputs.stop != 'true' }}" <<<"$job")" -eq 2 ]] ||
-    fail "$half half does not skip its cache and build after a stop at its start"
-  # shellcheck disable=SC2016 # Match the literal workflow expression.
-  [[ "$(grep -Fxc '          CODEWIRE_DEPLOYED_SOURCE_COMMITTED_AT: ${{ needs.deploy-selection.outputs.baseline_committed_at }}' <<<"$job")" -eq 2 ]] ||
-    fail "$half half does not bound its stops by Dev's running commit age"
-  if grep -Eq 'OPENBAO_GHCR_|publish-image-to-|sign-runtime-image-set|dispatch-deploy-dev' <<<"$job"; then
-    fail "$half half publishes, signs or dispatches outside the publishing job"
+  # The push path builds and pushes by digest, unsigned (#2892).
+  if grep -Eq 'OPENBAO_GHCR_|publish-image-to-|sign-runtime-image-set|dispatch-deploy-dev|main-ci-verdict|require-main-head|cosign|CODEWIRE_MAIN_CI_RUN' <<<"$job"; then
+    fail "$half half publishes, signs, dispatches or reads main CI outside the publishing job"
   fi
   # The shared protected compiler cache is best effort: the selector's step
   # output admits exactly r2 or the job-local fallback, and nothing else.
@@ -236,14 +231,11 @@ assert_build_half() {
   if grep -Fq 'scripts/ci/setup/fetch-openbao-sccache-r2-protected-credentials.sh' <<<"$job"; then
     fail "$half half fetches its cache credential outside the fail-open selector"
   fi
-  [[ "$(grep -E '^      - name: ' <<<"$job" | sed -n '1,4p')" == "$(printf '%s\n' \
-      '      - name: Stop when main has moved past this delivery' \
+  [[ "$(grep -E '^      - name: ' <<<"$job")" == "$(printf '%s\n' \
       '      - name: Select the protected R2 compiler cache' \
       "      - name: $step" \
       '      - name: Remove the protected R2 compiler-cache credential')" ]] ||
-    fail "$half half does not check supersession first, then select its cache credential before, and remove it right after, the build"
-  grep -Fxq '        run: scripts/ci/deploy/delivery-superseded.sh check' <<<"$job" ||
-    fail "$half half does not check supersession before it builds"
+    fail "$half half does not select its cache credential before, and remove it right after, the build"
   # shellcheck disable=SC2016 # Match the literal workflow expression.
   awk '
     /^      - name: / { capture = ($0 == "      - name: Remove the protected R2 compiler-cache credential") }
@@ -301,22 +293,121 @@ done
 if grep -Eq 'steps\.build\.outputs|imagetools inspect|build-push-runtime-images|build-push-image' <<<"$publish_job"; then
   fail "publication resolves or rebuilds a candidate instead of taking its build job's digest"
 fi
-# The publisher's only stop point precedes all publication and signing, so a
-# stop never leaves a partially signed set.
-[[ "$(grep -Fc 'scripts/ci/deploy/delivery-superseded.sh' <<<"$publish_job")" -eq 1 ]] ||
-  fail "publication checks supersession other than once, before it signs"
-[[ "$(grep -E '^      - name: ' <<<"$publish_job" | sed -n '1p')" == \
-  '      - name: Stop when main has moved past this delivery' ]] ||
-  fail "publication does not check supersession before any publication"
-grep -Fxq '        run: scripts/ci/deploy/delivery-superseded.sh check' <<<"$publish_job" ||
-  fail "publication supersession check is not the plain check"
+# Dev runs only commits whose main CI passed (#2892). The publisher reads main
+# CI's verdict for this exact commit first; only a verified verdict publishes,
+# and only while the commit is main's head does it sign and, checked again,
+# dispatch. Exactly these steps, in this order.
+[[ "$(grep -E '^      - name: ' <<<"$publish_job")" == "$(printf '%s\n' \
+    "      - name: Read main CI's verdict for this commit" \
+    '      - name: Publish the complete runtime set to Harbor without rebuilding' \
+    "      - name: Require this commit to be main's head before signing" \
+    '      - name: Sign the exact runtime set' \
+    "      - name: Require this commit to be main's head before dispatch" \
+    '      - name: Dispatch only the canonical source SHA' \
+    '      - name: Mirror the runtime set to GHCR without gating delivery' \
+    '      - name: Sign the GHCR mirror without gating delivery')" ]] ||
+  fail "publication does not read the verdict, publish, check main's head, sign, check it again and dispatch, in that order"
+step_of_job() {
+  awk -v name="      - name: $2" '
+    /^      - / { capture = ($0 == name) }
+    capture { print }
+  ' <<<"$1"
+}
+verdict_step="$(step_of_job "$publish_job" "Read main CI's verdict for this commit")"
+grep -Fxq '        id: verdict' <<<"$verdict_step" || fail "the verdict step has no id"
 # shellcheck disable=SC2016 # Match the literal workflow expression.
-[[ "$(grep -Fxc "        if: \${{ steps.publish-check.outputs.stop != 'true' }}" <<<"$publish_job")" -eq 5 ]] ||
-  fail "a stopped publication still publishes, signs, dispatches or mirrors"
+grep -Fxq '          GITEA_TOKEN: ${{ github.token }}' <<<"$verdict_step" ||
+  fail "the verdict is not read with the read-only job token"
+grep -Fq 'python3 -I -B scripts/ci/plan/main-ci-verdict.py check' <<<"$verdict_step" ||
+  fail "the verdict is not read through the shared predicate"
+# shellcheck disable=SC2016 # Match the literal workflow command.
+grep -Fq -- '--sha "$GITHUB_SHA" --tree "$(git rev-parse "$GITHUB_SHA^{tree}")" --github-output' <<<"$verdict_step" ||
+  fail "the verdict is not read for this run's exact commit and tree"
+if grep -Eq '^        if:' <<<"$verdict_step"; then
+  fail "the verdict is not read on every publish run"
+fi
+assert_step_if() {
+  local step="$1" condition="$2" block
+  block="$(step_of_job "$publish_job" "$step")"
+  [[ -n "$block" ]] || fail "publication lacks the step: $step"
+  grep -Fxq "        if: \${{ $condition }}" <<<"$block" ||
+    fail "the step '$step' does not run only when $condition"
+}
+assert_step_if 'Publish the complete runtime set to Harbor without rebuilding' "steps.verdict.outputs.verified == 'true'"
+assert_step_if "Require this commit to be main's head before signing" "steps.verdict.outputs.verified == 'true'"
+assert_step_if 'Sign the exact runtime set' "steps.head-before-signing.outputs.head == 'true'"
+assert_step_if "Require this commit to be main's head before dispatch" "steps.head-before-signing.outputs.head == 'true'"
+assert_step_if 'Dispatch only the canonical source SHA' "steps.head-before-dispatch.outputs.head == 'true'"
+assert_step_if 'Mirror the runtime set to GHCR without gating delivery' "steps.dispatch.outcome == 'success'"
+assert_step_if 'Sign the GHCR mirror without gating delivery' "steps.ghcr-mirror.outcome == 'success'"
+grep -Fxq '        run: scripts/ci/deploy/require-main-head.sh signing' \
+  <<<"$(step_of_job "$publish_job" "Require this commit to be main's head before signing")" ||
+  fail "the head check before signing is not the shared head check"
+grep -Fxq '        run: scripts/ci/deploy/require-main-head.sh dispatching' \
+  <<<"$(step_of_job "$publish_job" "Require this commit to be main's head before dispatch")" ||
+  fail "the head check before dispatch is not the shared head check"
+for signer in 'Sign the exact runtime set' 'Sign the GHCR mirror without gating delivery'; do
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  grep -Fxq '          CODEWIRE_MAIN_CI_RUN: ${{ steps.verdict.outputs.ci_run }}' \
+    <<<"$(step_of_job "$publish_job" "$signer")" ||
+    fail "the step '$signer' does not sign with the verifying main CI run"
+done
+# Signing happens only here: no other job of any workflow signs a runtime set.
+[[ "$(grep -Fc 'sign-runtime-image-set.sh' "$WORKFLOW")" -eq 2 ]] ||
+  fail "a runtime set is signed outside the publishing job"
+while IFS= read -r -d '' other_workflow; do
+  [[ "$other_workflow" == "$WORKFLOW" ]] && continue
+  if grep -Fq 'sign-runtime-image-set.sh' "$other_workflow"; then
+    fail "${other_workflow#"$ROOT/"} signs a runtime set; only Deploy Dev's publish job may"
+  fi
+done < <(find "$ROOT/.gitea/workflows" -type f -name '*.yaml' -print0)
+# The only main-CI rerun call targets this job, from CI's final push-on-main job.
+rerun_users="$(grep -rlE '/actions/jobs/[^ ]*/rerun|actions/jobs/\{job_id\}/rerun' \
+  "$ROOT/.gitea/workflows" "$ROOT/scripts" | grep -v '/tests/' | sed "s|^$ROOT/||" | sort)"
+[[ "$rerun_users" == 'scripts/ci/deploy/rerun-dev-publish.py' ]] ||
+  fail "a job rerun is requested outside rerun-dev-publish.py: $rerun_users"
+
+# Execute the shared head check against a stub remote: main's head is
+# delivered; a stale commit (a rerun of a superseded run) signs and dispatches
+# nothing; an unreadable or malformed main fails closed.
+head_check="$ROOT/scripts/ci/deploy/require-main-head.sh"
+bash -n "$head_check"
+[[ -x "$head_check" ]] || fail "the head check is not executable"
+head_case() {
+  local purpose="$1" main="$2" output log
+  output="$(mktemp)"
+  log="$(mktemp)"
+  if env PATH="$superseded_bin:$PATH" FAKE_MAIN_SHA="$main" \
+      GITHUB_SHA=1111111111111111111111111111111111111111 GITHUB_OUTPUT="$output" \
+      "$head_check" "$purpose" >"$log" 2>&1; then
+    printf '%s|%s\n' "$(cat "$output")" "$(cat "$log")"
+  else
+    printf 'failed|%s\n' "$(cat "$log")"
+  fi
+  rm -f -- "$output" "$log"
+}
+for purpose in signing dispatching; do
+  result="$(head_case "$purpose" 1111111111111111111111111111111111111111)"
+  [[ "$result" == "head=true|head check before $purpose: 1111111111111111111111111111111111111111 is main's head" ]] ||
+    fail "main's head was refused before $purpose: $result"
+  result="$(head_case "$purpose" 2222222222222222222222222222222222222222)"
+  [[ "$result" == "head=false|head check before $purpose: main is now 2222222222222222222222222222222222222222, not 1111111111111111111111111111111111111111; $purpose nothing, the newer commit's delivery carries this change" ]] ||
+    fail "a commit main moved past was not refused before $purpose: $result"
+  [[ "$(head_case "$purpose" '')" == failed* ]] ||
+    fail "an unreadable main did not fail closed before $purpose"
+  [[ "$(head_case "$purpose" not-a-commit)" == failed* ]] ||
+    fail "a malformed main did not fail closed before $purpose"
+done
+if "$head_check" publishing >/dev/null 2>&1; then
+  fail "the head check accepted an unknown purpose"
+fi
+
 [[ "$(grep -Fc 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$publish_job")" -eq 2 ]] ||
   fail "runtime workflow does not sign the Harbor set and GHCR mirror exactly once each"
 [[ "$(grep -Fc '          CODEWIRE_DEPLOY_BASELINE_SHA:' <<<"$publish_job")" -eq 2 ]] ||
   fail "certified deployed baseline does not reach both signing steps"
+grep -Fq 'CODEWIRE_MAIN_CI_RUN' "$RUNTIME_SIGNER" ||
+  fail "runtime signer does not require main CI's verifying run"
 
 bash -n "$RUNTIME_BUILDER"
 [[ -x "$RUNTIME_BUILDER" ]] || fail "runtime image-set builder is not executable"
@@ -355,106 +446,8 @@ if grep -Fq 'outputs.source_sha' <<<"$publish_job"; then
 fi
 validation_line="$(grep -n 'scripts/ci/images/image-bundle.py create' <<<"$publish_job" | cut -d: -f1)"
 first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
-last_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$publish_job" | tail -1 | cut -d: -f1)"
-signer_line="$(grep -n 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
-canonical_line="$(grep -n 'canonical_main_sha=' <<<"$publish_job" | head -1 | cut -d: -f1)"
-canonical_last_line="$(grep -n 'merge-base --is-ancestor' <<<"$publish_job" | tail -1 | cut -d: -f1)"
-dispatch_line="$(grep -n 'scripts/ci/deploy/dispatch-deploy-dev.sh' <<<"$publish_job" | cut -d: -f1)"
-ghcr_mirror_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | cut -d: -f1)"
-ghcr_signer_line="$(grep -n 'sign-runtime-image-set.sh --ghcr-mirror' <<<"$publish_job" | cut -d: -f1)"
 [[ -n "$validation_line" && -n "$first_copy_line" && "$validation_line" -lt "$first_copy_line" ]] ||
   fail "complete runtime bundle validation does not precede Harbor copies"
-[[ -n "$last_copy_line" && -n "$signer_line" && "$last_copy_line" -lt "$signer_line" ]] ||
-  fail "runtime signing does not follow every Harbor copy"
-[[ -n "$signer_line" && -n "$canonical_line" && -n "$dispatch_line" \
-  && "$signer_line" -lt "$canonical_line" && "$canonical_line" -lt "$dispatch_line" \
-  && -n "$canonical_last_line" && "$canonical_last_line" -lt "$dispatch_line" ]] ||
-  fail "deploy dispatch does not follow signing and canonical-main verification"
-
-# A delivery main moved past while it built still reaches Dev when its commit
-# lies on canonical main and descends from the source Dev ran when it was
-# planned; deliveries queue one at a time, so Dev moves forward in push order.
-# Execute the checked-in step in real shallow checkouts of a synthetic history:
-#   deployed -- built -- head        (canonical main)
-#          \-- stray                 (never on main)
-# shellcheck disable=SC2016 # Match the literal workflow expressions.
-grep -Fq '          DEPLOYED_SOURCE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}' <<<"$publish_job" ||
-  fail "canonical-main verification is not bound to the planned deployed source"
-# shellcheck disable=SC2016 # Match the literal workflow expressions.
-grep -Fq '          DEPLOYED_SOURCE_VALID: ${{ needs.deploy-selection.outputs.baseline_valid }}' <<<"$publish_job" ||
-  fail "canonical-main verification does not require a valid deployed source"
-forward_step="$(mktemp)"
-forward_root="$(mktemp -d)"
-trap 'rm -rf -- "$superseded_step" "$superseded_bin" "$forward_step" "$forward_root"' EXIT
-awk '
-  /- name: Require a canonical main commit that moves Dev forward/ { scope = 1 }
-  scope && /^        run: \|$/ { run = 1; next }
-  run && /^          / { print substr($0, 11); next }
-  run { exit }
-' "$WORKFLOW" >"$forward_step"
-[[ -s "$forward_step" ]] || fail "canonical-main verification step was not extracted"
-forward_git() {
-  git -c user.name=fixture -c user.email=fixture@example.invalid -c init.defaultBranch=main \
-    -c commit.gpgsign=false "$@"
-}
-forward_git init -q "$forward_root/origin"
-forward_commit() {
-  forward_git -C "$forward_root/origin" commit -q --allow-empty -m "$1"
-  git -C "$forward_root/origin" rev-parse HEAD
-}
-deployed_sha="$(forward_commit deployed)"
-forward_git -C "$forward_root/origin" checkout -q -b stray
-stray_sha="$(forward_commit stray)"
-forward_git -C "$forward_root/origin" checkout -q main
-built_sha="$(forward_commit built)"
-head_sha="$(forward_commit head)"
-forward_case() {
-  local name="$1" sha="$2" deployed="$3" valid="$4" checkout="$forward_root/checkout-$1"
-  # A depth-1 checkout of the built commit, as the hosted job has.
-  forward_git init -q "$checkout"
-  forward_git -C "$checkout" remote add origin "file://$forward_root/origin"
-  forward_git -C "$checkout" -c protocol.file.allow=always fetch -q --depth=1 origin "$sha"
-  forward_git -C "$checkout" checkout -q FETCH_HEAD
-  (
-    cd "$checkout"
-    env GITHUB_SHA="$sha" DEPLOYED_SOURCE_SHA="$deployed" DEPLOYED_SOURCE_VALID="$valid" \
-      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always \
-      bash "$forward_step" >"$forward_root/$name.out" 2>&1
-  )
-}
-git -C "$forward_root/origin" config uploadpack.allowAnySHA1InWant true
-forward_case head "$head_sha" "$deployed_sha" true ||
-  fail "the canonical main commit was refused"
-grep -Fxq 'delivering the canonical main commit' "$forward_root/head.out" ||
-  fail "the canonical main commit did not take the direct path"
-forward_case head-without-baseline "$head_sha" "$head_sha" false ||
-  fail "the canonical main commit needs no deployed-source proof"
-forward_case ancestor "$built_sha" "$deployed_sha" true ||
-  fail "an ancestor of main that descends from the deployed source was refused"
-grep -Fq "delivering its ancestor $built_sha, which descends from deployed $deployed_sha" \
-  "$forward_root/ancestor.out" || fail "the ancestor delivery did not state what it admitted"
-if forward_case stray "$stray_sha" "$deployed_sha" true; then
-  fail "a commit that is not on canonical main was delivered"
-fi
-if forward_case backwards "$deployed_sha" "$built_sha" true; then
-  fail "a delivery that would move Dev backwards was admitted"
-fi
-if forward_case unrelated-baseline "$built_sha" "$stray_sha" true; then
-  fail "a delivery that does not descend from the deployed source was admitted"
-fi
-if forward_case invalid-baseline "$built_sha" "$deployed_sha" false; then
-  fail "a superseded delivery without a valid deployed source was admitted"
-fi
-if forward_case malformed-baseline "$built_sha" not-a-commit true; then
-  fail "a superseded delivery with a malformed deployed source was admitted"
-fi
-git -C "$forward_root/origin" update-ref -d refs/heads/main
-if forward_case unreadable-main "$built_sha" "$deployed_sha" true; then
-  fail "an unreadable canonical main did not fail closed"
-fi
-[[ -n "$ghcr_mirror_line" && -n "$ghcr_signer_line" \
-  && "$dispatch_line" -lt "$ghcr_mirror_line" && "$ghcr_mirror_line" -lt "$ghcr_signer_line" ]] ||
-  fail "the GHCR mirror does not follow the deploy dispatch"
 # The GHCR mirror must never gate delivery: both mirror steps continue on error.
 mirror_steps="$(awk '
   /^      - name: / { capture = ($0 ~ /GHCR/) }

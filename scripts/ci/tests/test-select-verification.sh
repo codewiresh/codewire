@@ -544,10 +544,15 @@ run_paths_case protected_runtime_builder push refs/heads/main false \
   'deploy go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
   scripts/ci/images/build-push-runtime-images.sh \
   scripts/ci/tests/test-build-push-runtime-images.sh
-run_paths_case dev_delivery_supersession push refs/heads/main false \
+# Dev delivery from main CI's verdict (#2892): the head check runs in Deploy,
+# and the trigger CI's final job runs, with its contract, in Deploy and Policy.
+run_paths_case dev_delivery_head_check push refs/heads/main false \
   'deploy policy policy_shell security security_js' \
-  scripts/ci/deploy/delivery-superseded.sh \
-  scripts/ci/tests/test-delivery-superseded.sh
+  scripts/ci/deploy/require-main-head.sh
+run_paths_case dev_delivery_trigger push refs/heads/main false \
+  'deploy policy security security_js' \
+  scripts/ci/deploy/rerun-dev-publish.py \
+  scripts/ci/tests/test-rerun-dev-publish.py
 run_paths_case production_signature_reuse pull_request refs/pull/2007/head false \
   'deploy go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
   scripts/ci/images/verify-runtime-image-signatures.sh \
@@ -2697,6 +2702,8 @@ cancelling = {
 exempt = {
     "verification-selection", "required-verification",
     "workspace-cache-measurement", "workspace-cache-probes",
+    # Runs after Required verification; it never cancels a main run (#2892).
+    "deliver-to-dev",
 }
 if set(jobs) != cancelling | exempt:
     raise SystemExit(f"fail-fast job classification is stale: {sorted(set(jobs) ^ (cancelling | exempt))}")
@@ -2902,8 +2909,9 @@ if grep -Eq '^ *runs-on: ci-heavy(-main)?$' "$WORKFLOW"; then
   echo 'a Codewire CI Heavy job fixes one label: main would wait behind pull requests, or pull requests would take main-only runners' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 2 ]] || {
-  echo 'Codewire CI has not assigned selection and aggregation to ci-lite' >&2
+# Selection, aggregation and the final Dev delivery trigger (#2892).
+[[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 3 ]] || {
+  echo 'Codewire CI has not assigned selection, aggregation and the Dev delivery trigger to ci-lite' >&2
   exit 1
 }
 [[ "$(grep -Fc '    runs-on: ci-light' "$WORKFLOW")" -eq 0 ]] || {
@@ -2963,6 +2971,9 @@ grep -A4 -F 'python3 scripts/ci/plan/apply-verification-plan.py' "$selection_blo
   | grep -qF -- '--unclassified'
 grep -qF "GITEA_TOKEN: \${{ github.event_name == 'push' && github.token || '' }}" "$selection_block"
 python3 "$ROOT/scripts/ci/plan/tests/test_plan_main_push.py"
+# Main CI's verdict, and the final job that starts Dev delivery from it (#2892).
+python3 -B "$ROOT/scripts/ci/plan/tests/test_main_ci_verdict.py"
+python3 -B "$ROOT/scripts/ci/tests/test-rerun-dev-publish.py"
 grep -qF "grep -Fxq 'selector_version=v3'" "$selection_block"
 if grep -qF 'selector_version=v2' "$selection_block" \
     || grep -qF 'One-time contract bridge' "$selection_block"; then
@@ -2997,8 +3008,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 21 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, four Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
+if [ "$top_level_jobs" != 22 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, four Kind producers, aggregate, opted-in measurement matrix, post-measurement probe and the Dev delivery trigger" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \

@@ -1903,9 +1903,12 @@ if [ "$event_selected" = false ]; then
         select_token release
         recognized=true
         ;;
-      # Dev delivery's supersession stop runs only in Deploy Dev.
-      scripts/ci/tests/test-delivery-superseded.sh)
+      # Main CI's final job starts Dev delivery (#2892); its contract, with
+      # the ci.yaml job that runs it, runs in Policy and Deploy.
+      scripts/ci/deploy/rerun-dev-publish.py|\
+      scripts/ci/tests/test-rerun-dev-publish.py)
         select_token deploy
+        select_token policy
         recognized=true
         ;;
       Dockerfile|docker-bake.hcl|apps/*/Dockerfile*|deployments/docker/*|\

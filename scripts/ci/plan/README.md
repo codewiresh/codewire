@@ -18,10 +18,13 @@ consumers schedule both `affected` and `unclassified`.
 A push to `main` runs `plan-main-push.py` from the previous main commit's
 checkout, so it plans with that commit's policy exactly as a pull request
 plans with its base's. It plans against the previous main commit only when
-that commit's own CI push run verified it: the run succeeded and its Policy
-verification job ran. A superseded run dispatches nothing and a failed run
-proved nothing, so after either, and for a dispatch, a force push, an
-unavailable Forgejo API or any planner failure, every artifact stays selected
+main CI's verdict verified that commit (`main-ci-verdict.py`, the predicate
+Dev delivery also uses): its own `ci.yaml` push run on `main` printed the
+verdict marker in Required verification, after every selected capability
+group succeeded or an exact tested-tree receipt was accepted. A superseded run
+prints no marker and a failed run proved nothing, so after either, a pending
+or missing run, and for a dispatch, a force push, an unavailable Forgejo API
+or any planner failure, every artifact stays selected
 (`apply-verification-plan.py --unclassified`), as it did for every push before.
 
 A Rust package compiles only from its crates and the files the graph lists.

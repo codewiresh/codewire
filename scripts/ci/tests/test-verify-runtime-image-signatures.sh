@@ -36,7 +36,10 @@ printf '%s\n' 'synthetic-pull-password' >"$3"
 FETCH
 chmod 0755 "$work/fetcher"
 
-# A signature record is "REFERENCE FAMILY SOURCE_SHA".
+# A signature record is "REFERENCE FAMILY SOURCE_SHA VERIFIED", where VERIFIED
+# is the dev.codewire.verified annotation, or "none" for a set signed before
+# Deploy Dev waited for main CI (#2892). Cosign matches the requested
+# annotations as a subset of the signed ones.
 cat >"$work/fake-cosign" <<'COSIGN'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -46,7 +49,7 @@ printf '\n' >>"$COSIGN_LOG"
 [[ -z "${BAO_ADDR:-}" && -z "${BAO_TOKEN:-}" ]]
 [[ -f "${DOCKER_CONFIG:?}/config.json" ]]
 [[ " $* " == *' --insecure-ignore-tlog '* && " $* " == *' --new-bundle-format=true '* ]]
-family='' source=''
+family='' source='' verified=''
 args=("$@")
 for ((index = 0; index < ${#args[@]}; index += 1)); do
   case "${args[$index]}" in
@@ -55,14 +58,19 @@ for ((index = 0; index < ${#args[@]}; index += 1)); do
       case "$value" in
         dev.codewire.image-family=*) family="${value#*=}" ;;
         dev.codewire.source-sha=*) source="${value#*=}" ;;
+        dev.codewire.verified=*) verified="${value#*=}" ;;
       esac
       ;;
   esac
 done
-grep -Fxq "${!#} $family $source" "$SIGNATURES" || {
-  echo 'no matching signatures' >&2
-  exit 10
-}
+while read -r signed_ref signed_family signed_source signed_verified; do
+  [[ "$signed_ref" == "${!#}" && "$signed_family" == "$family" && "$signed_source" == "$source" ]] ||
+    continue
+  [[ -z "$verified" || "$signed_verified" == "$verified" ]] || continue
+  exit 0
+done <"$SIGNATURES"
+echo 'no matching signatures' >&2
+exit 10
 COSIGN
 chmod 0755 "$work/fake-cosign"
 
@@ -108,7 +116,7 @@ python3 "$ROOT/scripts/ci/images/image-bundle.py" create \
   --candidate mesh "$source_sha" "registry.example.invalid/codewire/mesh@$digest"
 
 sign() {
-  printf 'registry.example.invalid/codewire/%s@%s %s %s\n' "$1" "$digest" "$1" "$2" >>"$signatures"
+  printf 'registry.example.invalid/codewire/%s@%s %s %s %s\n' "$1" "$digest" "$1" "$2" "${3:-main-ci}" >>"$signatures"
 }
 run_verifier() {
   PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
@@ -127,8 +135,10 @@ run_verifier >"$work/signed.out" 2>"$work/signed.err" || {
 }
 [[ "$(grep -c '^Runtime signature accepted: ' "$work/signed.out")" -eq 5 ]] ||
   fail "the verifier did not accept exactly five signatures"
-grep -Fq "carries the delivery signature for source $source_sha" "$work/signed.out" ||
+grep -Fq "carries the main-CI-verified delivery signature for source $source_sha" "$work/signed.out" ||
   fail "the verifier omitted its complete-set result"
+[[ "$(grep -c '^verify .*--annotations dev.codewire.verified=main-ci ' "$cosign_log")" -eq 5 ]] ||
+  fail "the verifier does not require main CI's verdict on every image"
 [[ "$(cat "$fetch_log")" == --pull* ]] ||
   fail "the verifier did not use the read-only pull identity"
 if grep -q '^sign ' "$cosign_log"; then
@@ -155,6 +165,25 @@ grep -Fq 'Refusing to reuse unsigned runtime images: services' "$work/other.err"
   fail "a signature for another source was not refused by name"
 sign services "$source_sha"
 run_verifier >/dev/null 2>&1 || fail "a re-signed set was refused"
+
+# A set signed before Deploy Dev waited for main CI's verdict lacks
+# dev.codewire.verified=main-ci, so it can never be released.
+: >"$signatures"
+for family in dashboard derp daemon services mesh; do
+  sign "$family" "$source_sha" none
+done
+if run_verifier >"$work/legacy.out" 2>"$work/legacy.err"; then
+  fail "a set signed before main CI verdicts was accepted"
+fi
+grep -Fxq 'Refusing to reuse unsigned runtime images: dashboard derp daemon services mesh' "$work/legacy.err" ||
+  fail "a set without main CI's verdict was not refused by name"
+grep -Fq 'has no valid main-CI-verified delivery signature' "$work/legacy.err" ||
+  fail "the refusal does not say the verdict is missing"
+: >"$signatures"
+for family in dashboard derp daemon services mesh; do
+  sign "$family" "$source_sha"
+done
+run_verifier >/dev/null 2>&1 || fail "a main-CI-verified set was refused"
 
 if FAKE_COSIGN_MISSING=1 run_verifier >"$work/no-cosign.out" 2>"$work/no-cosign.err"; then
   fail "the verifier pulled or accepted an unapproved Cosign runtime"

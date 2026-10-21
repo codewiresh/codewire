@@ -3,6 +3,11 @@
 # signs the Harbor references the build pushed and every deployment pulls;
 # --ghcr-mirror separately signs the public GHCR copies, which never gate
 # delivery.
+#
+# Deploy Dev signs only after main CI's verdict verified the exact commit
+# (#2892), so every signature carries dev.codewire.verified=main-ci and the
+# verifying ci.yaml run (CODEWIRE_MAIN_CI_RUN); deploy-prod requires the
+# former. Without that run this signs nothing.
 set -euo pipefail
 
 sign_target=delivery
@@ -37,6 +42,11 @@ readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
 : "${GITHUB_REF:?GITHUB_REF is required}"
 : "${ACTIONS_ID_TOKEN_REQUEST_URL:?Forgejo OIDC request URL is required}"
 : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?Forgejo OIDC request token is required}"
+readonly MAIN_CI_RUN="${CODEWIRE_MAIN_CI_RUN:-}"
+[[ "$MAIN_CI_RUN" =~ ^[1-9][0-9]*$ ]] || {
+  echo "Runtime signing requires main CI's verifying ci.yaml run (CODEWIRE_MAIN_CI_RUN)" >&2
+  exit 1
+}
 
 [[ "$GITHUB_REF" == refs/heads/main ]] || {
   echo 'Runtime signing is restricted to canonical main' >&2
@@ -260,6 +270,8 @@ verify_signature() {
     --annotations "dev.codewire.image-family=$family" \
     --annotations "dev.codewire.source-sha=$GITHUB_SHA" \
     --annotations "dev.codewire.built-from-sha=$built_from" \
+    --annotations "dev.codewire.verified=main-ci" \
+    --annotations "dev.codewire.ci-run=$MAIN_CI_RUN" \
     "$reference"
 }
 
@@ -281,6 +293,8 @@ sign_reference() {
     --annotations "dev.codewire.image-family=$family" \
     --annotations "dev.codewire.source-sha=$GITHUB_SHA" \
     --annotations "dev.codewire.built-from-sha=$built_from" \
+    --annotations "dev.codewire.verified=main-ci" \
+    --annotations "dev.codewire.ci-run=$MAIN_CI_RUN" \
     "$reference" >/dev/null
   verify_signature "$family" "$reference" "$built_from" >/dev/null
   printf 'Runtime signature accepted: family=%s ref=%s\n' "$family" "$reference"
@@ -336,7 +350,7 @@ if [[ "${#failed[@]}" -gt 0 ]]; then
 fi
 
 if [[ "$sign_target" == delivery ]]; then
-  echo 'Verified and signed the exact five-image runtime set in Harbor'
+  echo "Verified and signed the exact five-image runtime set in Harbor, verified by ci.yaml run $MAIN_CI_RUN"
 else
-  echo 'Verified and signed the exact five-image runtime set in the GHCR mirror'
+  echo "Verified and signed the exact five-image runtime set in the GHCR mirror, verified by ci.yaml run $MAIN_CI_RUN"
 fi

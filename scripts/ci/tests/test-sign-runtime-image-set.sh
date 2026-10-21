@@ -20,10 +20,13 @@ docker_log="$work/docker.log"
 cosign_log="$work/cosign.log"
 curl_log="$work/curl.log"
 signature_state="$work/signatures"
+# One "REFERENCE ANNOTATION" line per annotation a signature carries.
+signature_annotations="$work/signature-annotations"
 : >"$docker_log"
 : >"$cosign_log"
 : >"$curl_log"
 : >"$signature_state"
+: >"$signature_annotations"
 
 cat >"$work/bin/curl" <<'SH'
 #!/usr/bin/env bash
@@ -97,6 +100,11 @@ case "$command" in
       [[ "$(find "$FAKE_SIGN_BARRIER" -type f | wc -l)" -ge 5 ]]
     fi
     grep -Fxq "$reference" "$SIGNATURE_STATE" || printf '%s\n' "$reference" >>"$SIGNATURE_STATE"
+    for ((index = 0; index < ${#args[@]}; index += 1)); do
+      if [[ "${args[$index]}" == --annotations ]]; then
+        printf '%s %s\n' "$reference" "${args[$((index + 1))]}" >>"$SIGNATURE_ANNOTATIONS"
+      fi
+    done
     ;;
   verify)
     [[ -z "${BAO_ADDR:-}" && -z "${BAO_TOKEN:-}" ]]
@@ -112,6 +120,12 @@ case "$command" in
     [[ " $* " == *' --insecure-ignore-tlog '* ]]
     [[ " $* " == *' --new-bundle-format=true '* ]]
     grep -Fxq "$reference" "$SIGNATURE_STATE"
+    # Cosign matches the requested annotations as a subset of the signed ones.
+    for ((index = 0; index < ${#args[@]}; index += 1)); do
+      if [[ "${args[$index]}" == --annotations ]]; then
+        grep -Fxq "$reference ${args[$((index + 1))]}" "$SIGNATURE_ANNOTATIONS"
+      fi
+    done
     ;;
   *) exit 64 ;;
 esac
@@ -222,6 +236,8 @@ export COSIGN_LOG="$cosign_log"
 export CURL_LOG="$curl_log"
 export FAKE_COSIGN_BINARY="$work/fake-cosign"
 export SIGNATURE_STATE="$signature_state"
+export SIGNATURE_ANNOTATIONS="$signature_annotations"
+export CODEWIRE_MAIN_CI_RUN=16457
 export GITHUB_SHA="$source_sha"
 export GITHUB_REF=refs/heads/main
 export ACTIONS_ID_TOKEN_REQUEST_URL='https://git.example.invalid/api/actions/runs/1/id_token?token=opaque'
@@ -231,6 +247,22 @@ run_signer() {
   PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
     "$SIGNER" "$bundle" "$public_key"
 }
+
+# No verifying main CI run, no signature (#2892).
+if env -u CODEWIRE_MAIN_CI_RUN PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    "$SIGNER" "$bundle" "$public_key" >"$work/no-ci.out" 2>"$work/no-ci.err"; then
+  fail 'signer signed without main CI'"'"'s verifying run'
+fi
+grep -Fq "requires main CI's verifying ci.yaml run" "$work/no-ci.err" ||
+  fail 'missing verifying run rejection was not attributable'
+for bad_run in 0 abc '41 42'; do
+  if CODEWIRE_MAIN_CI_RUN="$bad_run" PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+      "$SIGNER" "$bundle" "$public_key" >/dev/null 2>&1; then
+    fail "signer accepted the verifying run '$bad_run'"
+  fi
+done
+[[ ! -s "$signature_state" && ! -s "$cosign_log" && ! -s "$curl_log" ]] ||
+  fail 'signer did any work before it had a verifying main CI run'
 
 mkdir "$work/sign-barrier"
 if ! FAKE_SIGN_BARRIER="$work/sign-barrier" run_signer >"$work/first.out" 2>"$work/first.err"; then
@@ -270,8 +302,18 @@ fi
   fail 'signer did not verify provenance for every Harbor reference'
 [[ "$(grep -c "buildx imagetools inspect .*SBOM.SPDX" "$docker_log")" -eq 5 ]] ||
   fail 'signer did not verify SBOMs for every Harbor reference'
-grep -Fq 'Verified and signed the exact five-image runtime set in Harbor' \
+grep -Fq 'Verified and signed the exact five-image runtime set in Harbor, verified by ci.yaml run 16457' \
   "$work/first.out" || fail 'signer omitted its complete-set result'
+# Every signature, and every check of one, carries main CI's verdict.
+for verb in sign verify; do
+  while IFS= read -r line; do
+    [[ "$line" == *'dev.codewire.verified=main-ci '* && "$line" == *'dev.codewire.ci-run=16457 '* ]] ||
+      fail "a $verb call omits main CI's verdict annotations: $line"
+  done < <(grep "^$verb " "$cosign_log")
+done
+[[ "$(grep -c '^registry.example.invalid/codewire/[a-z]*@sha256:[0-9a-f]* dev.codewire.verified=main-ci$' \
+    "$signature_annotations")" -eq 5 ]] ||
+  fail 'signer did not annotate all five Harbor signatures as verified by main CI'
 if rg -n 'synthetic-(request|forgejo|openbao|ghcr-token|harbor-password)' \
   "$work/first.out" "$work/first.err" "$docker_log" "$cosign_log"; then
   fail 'signer exposed short-lived identity or registry credential material'
@@ -289,6 +331,25 @@ run_signer >"$work/second.out" 2>"$work/second.err"
   fail 'idempotent signer refreshed OpenBao for already accepted signatures'
 [[ "$(grep -Fc 'Runtime signature already accepted:' "$work/second.out")" -eq 5 ]] ||
   fail 'idempotent signer did not report all accepted signatures'
+
+# A signature from before #2892, without main CI's verdict, is not accepted:
+# the signer signs again with it.
+: >"$signature_annotations"
+for family in dashboard derp daemon services mesh; do
+  printf 'registry.example.invalid/codewire/%s@%s dev.codewire.image-family=%s\n' "$family" "$digest" "$family"
+  printf 'registry.example.invalid/codewire/%s@%s dev.codewire.source-sha=%s\n' "$family" "$digest" "$source_sha"
+  printf 'registry.example.invalid/codewire/%s@%s dev.codewire.built-from-sha=%s\n' "$family" "$digest" "$source_sha"
+done >"$signature_annotations"
+sign_calls_before="$(grep -c '^sign ' "$cosign_log")"
+run_signer >"$work/legacy.out" 2>"$work/legacy.err" || {
+  sed -n '1,40p' "$work/legacy.err" >&2
+  fail 'signer failed to re-sign a set signed before main CI verdicts'
+}
+[[ "$(grep -c '^sign ' "$cosign_log")" -eq $((sign_calls_before + 5)) ]] ||
+  fail 'a signature without main CI'"'"'s verdict was accepted as already signed'
+if grep -Fq 'Runtime signature already accepted:' "$work/legacy.out"; then
+  fail 'a legacy signature counted as accepted'
+fi
 
 if GITHUB_REF=refs/pull/1/head run_signer >"$work/pr.out" 2>"$work/pr.err"; then
   fail 'signer accepted a pull-request ref'
@@ -355,6 +416,7 @@ python3 "$ROOT/scripts/ci/images/image-bundle.py" create \
   --candidate mesh "$source_sha" "$carried_ref"
 
 : >"$signature_state"
+: >"$signature_annotations"
 : >"$cosign_log"
 : >"$curl_log"
 if ! PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \

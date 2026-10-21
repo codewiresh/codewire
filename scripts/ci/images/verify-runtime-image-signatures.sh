@@ -9,7 +9,10 @@
 # stop before signing (a failed or superseded delivery), so provenance and SBOM
 # alone do not prove an image completed delivery. Each image must carry a valid
 # signature from the non-exportable codewire-runtime key that binds its image
-# family and the bundle's exact source SHA. This only verifies: it never signs.
+# family, the bundle's exact source SHA and main CI's verdict
+# (dev.codewire.verified=main-ci, #2892). Sets signed before Deploy Dev waited
+# for that verdict lack it and are refused: a release candidate must be a
+# commit Dev delivered since. This only verifies: it never signs.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -109,10 +112,11 @@ while IFS=$'\t' read -r family reference; do
         --new-bundle-format=true \
         --annotations "dev.codewire.image-family=$family" \
         --annotations "dev.codewire.source-sha=$source_sha" \
+        --annotations "dev.codewire.verified=main-ci" \
         "$reference" >/dev/null 2>"$work/$family.verify.err"; then
     printf 'Runtime signature accepted: family=%s ref=%s\n' "$family" "$reference"
   else
-    printf 'Runtime image has no valid delivery signature for source %s: %s\n' \
+    printf 'Runtime image has no valid main-CI-verified delivery signature for source %s: %s\n' \
       "$source_sha" "$reference" >&2
     sed -n '1,5p' "$work/$family.verify.err" >&2
     failed+=("$family")
@@ -122,4 +126,4 @@ if [[ "${#failed[@]}" -gt 0 ]]; then
   printf 'Refusing to reuse unsigned runtime images: %s\n' "${failed[*]}" >&2
   exit 1
 fi
-echo "Every runtime image carries the delivery signature for source $source_sha"
+echo "Every runtime image carries the main-CI-verified delivery signature for source $source_sha"
