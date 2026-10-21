@@ -970,7 +970,7 @@ impl UnifiedEnvironmentLifecycle {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum UnifiedEnvironmentTarget {
+pub(crate) enum UnifiedEnvironmentTarget {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     NativeLocal(String),
     Platform(String),
@@ -1962,7 +1962,7 @@ async fn handle_unified_environment_refresh_skills(
     }
 }
 
-async fn resolve_unified_environment_target(
+pub(crate) async fn resolve_unified_environment_target(
     globals: &Globals,
     placement: Option<EnvironmentPlacement>,
     target_ref: &str,
@@ -2505,92 +2505,7 @@ pub(crate) fn prepare_platform_env_create(
     Ok((request, provenance))
 }
 
-#[derive(serde::Serialize)]
-pub(crate) struct ResolvedCodewireYaml {
-    pub(crate) version: u32,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) preset: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) image: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) repositories: Vec<ResolvedCodewireRepositoryYaml>,
-    pub(crate) working_directory: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) install_command: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) startup_script: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) secrets: Option<ResolvedCodewireSecretsYaml>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) environment: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) agents: Option<ResolvedCodewireAgentsYaml>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) skills: Vec<ResolvedCodewireSkillYaml>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) ports: Vec<ResolvedCodewirePortYaml>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) cpu: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) memory: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) disk: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) credentials: Option<ResolvedCodewireCredentialsYaml>,
-}
-
-#[derive(serde::Serialize)]
-pub(crate) struct ResolvedCodewireRepositoryYaml {
-    pub(crate) source: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) revision: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) branch: String,
-    pub(crate) destination: String,
-}
-
-#[derive(serde::Serialize)]
-pub(crate) struct ResolvedCodewirePortYaml {
-    pub(crate) port: u16,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) label: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) access: String,
-}
-
-#[derive(serde::Serialize)]
-pub(crate) struct ResolvedCodewireAgentsYaml {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) install: Option<bool>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) tools: Vec<String>,
-}
-
-#[derive(serde::Serialize)]
-pub(crate) struct ResolvedCodewireSecretsYaml {
-    pub(crate) organization: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) user: Option<codewire_project::StoragePlacement>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) project: String,
-}
-
-#[derive(serde::Serialize)]
-pub(crate) struct ResolvedCodewireSkillYaml {
-    pub(crate) source: &'static str,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) path: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) name: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) agents: Vec<String>,
-}
-
-#[derive(serde::Serialize)]
-pub(crate) struct ResolvedCodewireCredentialsYaml {
-    pub(crate) profile: String,
-}
-
+/// `--write-preset` and `cw init`: the request's project as codewire.yaml.
 pub(crate) fn write_resolved_codewire_yaml(
     path: &Path,
     request: &CreateEnvironmentRequest,
@@ -2601,94 +2516,21 @@ pub(crate) fn write_resolved_codewire_yaml(
     {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let data = serde_yaml::to_string(&codewire_yaml_from_request(request))?;
+    let data = codewire_yaml_from_request(request)?;
     fs::write(path, data).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
+/// The request's portable project, which is all a cloud create declares.
 pub(crate) fn codewire_yaml_from_request(
     request: &CreateEnvironmentRequest,
-) -> ResolvedCodewireYaml {
-    let spec = &request.project_spec;
-    ResolvedCodewireYaml {
-        version: spec.schema_version,
-        preset: spec.preset.clone(),
-        image: spec.image.clone(),
-        repositories: spec
-            .repositories
-            .iter()
-            .map(|repository| ResolvedCodewireRepositoryYaml {
-                source: repository.source.clone(),
-                revision: repository.revision.clone(),
-                branch: repository.branch.clone(),
-                destination: repository.destination.clone(),
-            })
-            .collect(),
-        working_directory: spec.working_directory.clone(),
-        install_command: spec.install_command.clone(),
-        startup_script: spec.startup_script.clone(),
-        secrets: (!spec.secrets.is_empty()).then(|| ResolvedCodewireSecretsYaml {
-            organization: spec.secrets.organization,
-            user: spec.secrets.user,
-            project: spec.secrets.project.clone(),
-        }),
-        environment: spec.environment.clone(),
-        agents: codewire_yaml_agents_from_request(request),
-        skills: spec
-            .skills
-            .iter()
-            .map(|skill| {
-                let (source, path, name) = match skill.source {
-                    codewire_project::SkillSource::Repository => {
-                        ("repository", skill.reference.clone(), String::new())
-                    }
-                    codewire_project::SkillSource::User => {
-                        ("user", String::new(), skill.reference.clone())
-                    }
-                };
-                ResolvedCodewireSkillYaml {
-                    source,
-                    path,
-                    name,
-                    agents: skill.agents.clone(),
-                }
-            })
-            .collect(),
-        ports: spec
-            .application_ports
-            .iter()
-            .map(|port| ResolvedCodewirePortYaml {
-                port: port.port,
-                label: port.label.clone(),
-                access: port.access.clone(),
-            })
-            .collect(),
-        cpu: spec
-            .resources
-            .cpu_millicores
-            .map(|value| format!("{value}m")),
-        memory: spec.resources.memory_mib.map(|value| format!("{value}Mi")),
-        disk: spec.resources.disk_gib.map(|value| format!("{value}Gi")),
-        credentials: spec
-            .credentials
-            .as_ref()
-            .map(|credentials| ResolvedCodewireCredentialsYaml {
-                profile: credentials.profile.clone(),
-            }),
-    }
-}
-
-pub(crate) fn codewire_yaml_agents_from_request(
-    request: &CreateEnvironmentRequest,
-) -> Option<ResolvedCodewireAgentsYaml> {
-    let tools = request.project_spec.agents.tools.clone();
-    if tools.is_empty() && request.project_spec.agents.install.is_none() {
-        return None;
-    }
-    Some(ResolvedCodewireAgentsYaml {
-        install: request.project_spec.agents.install,
-        tools,
-    })
+) -> anyhow::Result<String> {
+    Ok(codewire_project::ProjectDocument::new(
+        request.project_spec.clone(),
+        codewire_project::LocalProjectIntent::default(),
+        true,
+    )
+    .to_yaml()?)
 }
 
 pub(crate) fn create_preset_request_from_environment(

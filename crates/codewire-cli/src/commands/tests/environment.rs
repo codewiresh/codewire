@@ -1327,7 +1327,7 @@ fn init_direct_request_keeps_ttl_for_save_preset_but_yaml_omits_it() {
 
     assert!(!init_needs_platform_resolution(&args));
     let request = init_request_from_args(&args).unwrap();
-    let yaml = serde_yaml::to_string(&codewire_yaml_from_request(&request)).unwrap();
+    let yaml = codewire_yaml_from_request(&request).unwrap();
 
     assert_eq!(request.name.as_deref(), Some("builder"));
     assert_eq!(request.ttl_seconds, Some(7200));
@@ -1388,7 +1388,7 @@ fn codewire_yaml_from_request_round_trips_the_canonical_project_spec() {
         project_spec: project_spec.clone(),
         ..CreateEnvironmentRequest::default()
     };
-    let yaml = serde_yaml::to_string(&codewire_yaml_from_request(&request)).unwrap();
+    let yaml = codewire_yaml_from_request(&request).unwrap();
     let parsed = codewire_project::parse_project_yaml(&yaml).unwrap();
 
     assert_eq!(parsed.spec, project_spec);

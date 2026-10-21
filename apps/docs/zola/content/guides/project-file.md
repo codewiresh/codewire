@@ -45,6 +45,21 @@ changes. A new `cw create` reads the file again.
 direct inputs (image, commands, resources, variables) it works offline;
 resolving a preset, a repository or a branch needs a signed-in platform.
 
+## Save an existing environment
+
+`cw export ENV` writes a local VM's saved configuration as `./codewire.yaml`,
+the file the next `cw create` in that folder reads. `--file PATH` writes
+elsewhere, `--stdout` prints it, and an existing file is kept unless you pass
+`--force`. Export only reads: it never starts or changes the environment.
+
+The file holds the repositories with their branch or revision, setup
+commands, resources, ports, agents, and secret and credential references as
+exact IDs, never their values. Declared `environment` values are left out
+and named. The workspace's host folder is reported, never turned into a
+repository: create again from that folder to mount it. `local:` references
+resolve only on the machine that created them. Cloud environments cannot be
+exported yet.
+
 ## Example
 
 ```yaml

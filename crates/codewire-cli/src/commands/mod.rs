@@ -1582,6 +1582,35 @@ pub(crate) struct PortsArgs {
     pub(crate) output: OutputFormat,
 }
 
+/// `cw export [ENV]`: write an environment's saved configuration as
+/// codewire.yaml without changing the environment.
+#[derive(Debug, Args)]
+pub(crate) struct ExportArgs {
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
+    pub(crate) environment: Option<String>,
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID (same as ENV)"
+    )]
+    pub(crate) in_environment: Option<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "stdout",
+        help = "Write to PATH instead of ./codewire.yaml"
+    )]
+    pub(crate) file: Option<PathBuf>,
+    #[arg(
+        long,
+        conflicts_with = "force",
+        help = "Print the YAML instead of writing a file"
+    )]
+    pub(crate) stdout: bool,
+    #[arg(long, help = "Overwrite an existing file")]
+    pub(crate) force: bool,
+}
+
 /// A `cw ports` request after its environment selector was resolved.
 #[derive(Debug)]
 pub(crate) struct EnvPortTarget {
@@ -2546,6 +2575,7 @@ mod collaboration;
 mod core;
 mod current_environment;
 mod environment;
+mod export;
 pub(crate) mod flat;
 pub(crate) mod inventory;
 pub(crate) mod lifecycle_output;
@@ -2561,6 +2591,7 @@ pub(crate) use collaboration::*;
 pub(crate) use core::*;
 pub(crate) use current_environment::{handle_current_command, handle_use_command};
 pub(crate) use environment::*;
+pub(crate) use export::handle_export;
 #[cfg(test)]
 pub(crate) use flat::env_operation;
 pub(crate) use flat::{HelpArgs, RetiredEnvArgs};

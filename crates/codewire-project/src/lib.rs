@@ -16,9 +16,12 @@ mod platform_projection;
 mod repository;
 mod selection;
 mod vm_only;
+mod yaml;
 
 #[cfg(test)]
 mod selection_tests;
+#[cfg(test)]
+mod yaml_tests;
 
 pub use platform_projection::{
     PlatformProjectionSelection, PlatformProjectionSelectionError,

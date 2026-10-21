@@ -171,7 +171,7 @@ const HELP_SECTIONS: &[HelpSection] = &[
     ),
     HelpSection::everyday(
         "Configuration and transfer",
-        &["init", "update", "cp", "credentials", "secrets"],
+        &["init", "update", "export", "cp", "credentials", "secrets"],
     ),
     HelpSection::everyday("Codewire", &["upgrade", "doctor", "help"]),
     HelpSection::full(
@@ -532,6 +532,11 @@ enum Command {
     Logs(LogsArgs),
     #[command(about = "Show configuration, state, and connection details")]
     Info(EnvInfoArgs),
+    #[command(
+        about = "Write an environment's saved configuration as codewire.yaml",
+        long_about = "Write an environment's saved configuration as codewire.yaml:\n  cw export ENV                    (writes ./codewire.yaml)\n  cw export ENV --file PATH\n  cw export --in ENV --stdout\n\nThe file names repositories, setup commands, resources, ports, agents, and secret and credential references; it never holds their values or declared environment values. An existing file is kept unless --force. Export never starts or changes the environment, and reports what the file leaves out or applies only to this placement."
+    )]
+    Export(ExportArgs),
     #[command(
         about = "Create an environment without launching an agent",
         long_about = "Create a new environment from the nearest codewire.yaml and direct CLI flags; flags win over the file.\n\nThe search starts in the current directory (--path for --local) and goes up to the root of its Git repository; outside a Git repository only that directory is checked. --file selects another file. The create shows which configuration it uses before it starts.\n\nMultiple repos can be specified as positional args or with --repo flags, on both placements; each is cloned into its own path, and they replace the file's repositories.\nUse URL[@branch][::/workspace/path] to set a branch and optional checkout path per repo.\n\nWith --local, create a local VM; with --cloud, a cloud environment. Starting an existing environment uses its saved configuration, never a changed file."
@@ -943,6 +948,7 @@ where
         Command::Logs(args) => flat::handle_logs(&globals, args).await,
         Command::Update(args) => flat::handle_update(&globals, args).await,
         Command::Ports(args) => flat::handle_ports(&globals, args).await,
+        Command::Export(args) => handle_export(&globals, args).await,
         command @ (Command::Info(_)
         | Command::Create(_)
         | Command::Start(_)
@@ -1015,6 +1021,7 @@ fn validate_placement_scope(
             | Command::Stop(_)
             | Command::Restart(_)
             | Command::Info(_)
+            | Command::Export(_)
             | Command::Create(_)
             | Command::Start(_)
             | Command::Rm(_)
