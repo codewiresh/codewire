@@ -2266,9 +2266,19 @@ async fn a_failing_broker_restarts_until_its_environment_stops_it_and_never_afte
         .unwrap();
     let log_path = config.root.join("logs").join("brokers.log");
     let spawned = child_pids.lock().unwrap().clone();
+    // Each replacement's lease closes before it is ready while its child
+    // still runs, and that is what the log says (#3069).
     let logged = fs::read_to_string(&log_path).unwrap();
-    assert!(logged.contains("reason=lease_closed_before_ready"));
-    assert!(logged.contains("event=broker_restart_scheduled"));
+    assert!(
+        logged.contains("event=broker_not_ready")
+            && logged.contains("reason=lease_closed_before_ready")
+            && !logged.contains("reason=ended_before_ready"),
+        "{logged}"
+    );
+    assert!(
+        logged.contains("event=broker_restart_scheduled"),
+        "{logged}"
+    );
     // Well past the next restart delay (at most 1.6 s after three children).
     tokio::time::sleep(Duration::from_millis(2500)).await;
     assert_eq!(*child_pids.lock().unwrap(), spawned);

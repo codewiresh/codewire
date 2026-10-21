@@ -1045,6 +1045,18 @@ impl<S: ProtectedStore> BrokerChild<S> {
         }
     }
 
+    /// Why the broker ended before it was ready: the child exited, or else
+    /// its lease channel closed. A child's exit closes its lease too, so both
+    /// can be seen at once; the reason comes from the child's state, never
+    /// from which event was noticed first (#3069).
+    fn not_ready_reason(&mut self) -> &'static str {
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            "ended_before_ready"
+        } else {
+            "lease_closed_before_ready"
+        }
+    }
+
     /// The child's exit status and the lease channel's outcome so far, for
     /// the broker log. Call before [`Self::stop`], which kills the child.
     fn outcome(&mut self) -> (String, &'static str) {
@@ -1230,8 +1242,8 @@ async fn start_broker<S: ProtectedStore + 'static>(
     };
     let mut start_timeout = Box::pin(tokio::time::sleep_until(start_deadline));
     let not_ready = tokio::select! {
-        ready = &mut ready_rx => ready.is_err().then_some("lease_closed_before_ready"),
-        () = broker.ended() => Some("ended_before_ready"),
+        ready = &mut ready_rx => ready.is_err().then(|| broker.not_ready_reason()),
+        () = broker.ended() => Some(broker.not_ready_reason()),
         _ = shutdown.changed() => {
             broker.stop().await;
             return Err(BrokerAttempt::Stopped);
