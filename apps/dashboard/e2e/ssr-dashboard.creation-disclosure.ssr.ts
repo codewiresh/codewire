@@ -73,6 +73,15 @@ const fixtureUrl = () => {
   return `${origin}/reference/fixtures/create-sandbox.html`;
 };
 
+// A fresh Create form with a saved draft restores it by itself as the page
+// opens. It holds the form (inert and aria-busy) until that restore settles or
+// its own 8 s deadline gives the form back (environments.js). A test that
+// drives a restore waits for that first, so its route never meets the
+// automatic request and its clicks reach a form that is not held (#2991).
+async function settleAutomaticRestore(page: Page) {
+  await expect(page.locator("[data-environment-form]")).not.toHaveAttribute("aria-busy", "true", { timeout: 10_000 });
+}
+
 function loadingCreateFixture(hydratedHtml: string) {
   const start = hydratedHtml.indexOf('<div class="cw-create-stack" data-create-optional-options>');
   const end = hydratedHtml.indexOf('<details class="cw-create-panel cw-runtime-options', start);
@@ -845,6 +854,7 @@ test("Create recovery restores authored values only after current selections are
   };
   await page.addInitScript(({ key, bytes }) => sessionStorage.setItem(key, bytes), { key: keyForDraft(draft), bytes: JSON.stringify(draft) });
   await page.goto(fixtureUrl());
+  await settleAutomaticRestore(page);
   const html = await restoredCard(page, draft);
   await page.route("**/fixture/_fragments/create-draft", async (route) => {
     const body = new URLSearchParams(route.request().postData()!);
@@ -880,6 +890,7 @@ test("restored repositories set each GitHub row's Add or Remove", async ({ page 
   };
   await page.addInitScript(({ key, bytes }) => sessionStorage.setItem(key, bytes), { key: keyForDraft(draft), bytes: JSON.stringify(draft) });
   await page.goto(fixtureUrl());
+  await settleAutomaticRestore(page);
   const html = await restoredCard(page, draft);
   await page.route("**/fixture/_fragments/create-draft", (route) => route.fulfill({ status: 200, contentType: "text/html", body: html }));
   const browser = page.locator("[data-github-browser]");
@@ -905,6 +916,7 @@ test("Create recovery keeps the restored preset lifetime when the draft left it 
   };
   await page.addInitScript(({ key, bytes }) => sessionStorage.setItem(key, bytes), { key: keyForDraft(draft), bytes: JSON.stringify(draft) });
   await page.goto(fixtureUrl());
+  await settleAutomaticRestore(page);
   // The server shows the restored preset's default lifetime for such a draft.
   const restored = 'name="ttl" value="7d" placeholder="7d"';
   const html = (await restoredCard(page, draft)).replace('name="ttl" value="infinity" placeholder="Not scheduled"', restored);
@@ -933,6 +945,7 @@ test("explicit Create recovery keeps exact large revision bytes and makes no Cre
   const draft = selectionsDraft();
   await page.addInitScript(({ key, bytes }) => sessionStorage.setItem(key, bytes), { key: keyForDraft(draft), bytes: JSON.stringify(draft) });
   await page.goto(fixtureUrl());
+  await settleAutomaticRestore(page);
   // Native selects without an explicit selected attribute default to their
   // first option; that is still a pristine, explicitly restorable form.
   await page.locator('[name="cpu"]').evaluate((select: HTMLSelectElement) => {
@@ -967,6 +980,7 @@ for (const interruption of ["edit", "property edit", "close", "discard", "replac
     const draft = selectionsDraft();
     await page.addInitScript(({ key, bytes }) => sessionStorage.setItem(key, bytes), { key: keyForDraft(draft), bytes: JSON.stringify(draft) });
     await page.goto(fixtureUrl());
+    await settleAutomaticRestore(page);
     const html = await restoredCard(page, draft);
     let release!: () => void;
     let announced!: () => void;

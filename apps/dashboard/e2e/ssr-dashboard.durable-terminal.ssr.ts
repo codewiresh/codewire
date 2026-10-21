@@ -80,9 +80,29 @@ async function gotoFixture(page: Page) {
   await page.goto(`${origin}/reference/fixtures/terminal-tabs.html`);
 }
 
+// Start-up is the page's own asynchronous work. The first readiness poll
+// disables the readiness refresh until it settles, and its fetch aborts after
+// 10 s (terminal-readiness.js). For a ready Sandbox it starts the session
+// list in the same task, which disables the session refresh until it settles
+// and aborts after 15 s (durable-terminal.js). Waits for start-up take those
+// deadlines, not the 5 s default meant for a reaction in a settled page: on a
+// loaded machine start-up can outlast 5 s and still be correct (#2991).
+const readinessDeadline = { timeout: 12_000 };
+const listDeadline = { timeout: 17_000 };
+
+async function settleStartup(page: Page) {
+  await expect(page.locator("[data-terminal-readiness-refresh]")).toBeEnabled(readinessDeadline);
+  await expect(page.locator("[data-terminal-refresh]")).toBeEnabled(listDeadline);
+}
+
 async function openFixture(page: Page) {
   await gotoFixture(page);
-  await expect(page.locator("[data-terminal-refresh]")).toBeEnabled();
+  await settleStartup(page);
+}
+
+async function reloadFixture(page: Page) {
+  await page.reload();
+  await settleStartup(page);
 }
 
 // With no live session to re-attach, opening the page opens one terminal by
@@ -152,7 +172,7 @@ function connectionStatus(page: Page, id: string) {
 // A fake-clock jump can start a readiness poll. Let it finish before time
 // moves again so its own abort deadline cannot report the Sandbox unavailable.
 async function settleReadiness(page: Page) {
-  await expect(page.locator("[data-terminal-readiness-refresh]")).toBeEnabled();
+  await expect(page.locator("[data-terminal-readiness-refresh]")).toBeEnabled(readinessDeadline);
 }
 
 // fastForward fires each due timer once at the target time; runFor would also
@@ -1264,7 +1284,7 @@ test("terminal names survive reload and reconnect, render literally, and clear o
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect.poll(() => state.connections.length).toBe(2);
   await renameTerminal(page, "Logs");
-  await page.reload();
+  await reloadFixture(page);
   await expect.poll(() => state.connections.length).toBe(4);
   await expect(page.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", sessionId(2));
@@ -1296,7 +1316,7 @@ test("new terminal names do not collide with restored numeric labels", async ({ 
   await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
   await closeSelected(page);
   await expect(page.getByRole("tab")).toHaveCount(1);
-  await page.reload();
+  await reloadFixture(page);
   await expect(page.getByRole("tab", { name: "Terminal 2", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Terminal 3", exact: true })).toBeVisible();
@@ -1387,7 +1407,7 @@ test("terminal labels preserve v1 references and reject malformed or differently
   for (const item of cases) {
     const raw = JSON.stringify(item.value) + (item.oversized ? " ".repeat(4097) : "");
     await page.evaluate(({ key, raw }) => sessionStorage.setItem(key, raw), { key: `${prefix}account-a:${org}:${environment}`, raw });
-    await page.reload();
+    await reloadFixture(page);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", item.selected);
     await expect(page.getByRole("tab", { name: "Deploy", exact: true })).toHaveCount(item.named ? 1 : 0);
   }
@@ -1438,7 +1458,7 @@ test("disconnect retains output, reload replays from zero, and Close requires co
   await expect.poll(() => state.connections.length).toBe(2);
   expect(state.connections[1].url.searchParams.get("output_offset")).toBe(String(cursor));
   expect(state.connections[1].url.searchParams.get("session_id")).toBe(sessionId(1));
-  await page.reload();
+  await reloadFixture(page);
   await expect.poll(() => state.connections.length).toBe(3);
   expect(state.connections[2].url.searchParams.get("output_offset")).toBe("0");
   expect(state.connections[2].url.searchParams.get("session_id")).toBe(sessionId(1));
@@ -1627,7 +1647,8 @@ test("initial terminal restoration waits for fresh status rather than rendered r
   state.sessions = [{ sessionId: sessionId(1), state: "running" }];
   let release!: () => void;
   state.statusGate = new Promise<void>((resolve) => { release = resolve; });
-  await openFixture(page);
+  // Readiness is held, so start-up cannot settle; read the waiting page.
+  await gotoFixture(page);
   await expect(page.locator("[data-terminal-empty]")).toHaveText("Checking Sandbox status before restoring terminals…");
   await expect(page.locator("[data-terminal-message]")).toBeHidden();
   await expect(page.locator("[data-sandbox-observation-status]")).toBeHidden();
