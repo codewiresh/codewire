@@ -48,6 +48,8 @@ SMOKE_CW_BUILD_TIMEOUT="${SMOKE_CW_BUILD_TIMEOUT:-600s}"
 SMOKE_EXISTING_ENV_ID="${SMOKE_EXISTING_ENV_ID:-}"
 SMOKE_COLLECT_FAILURE_DIAGNOSTICS="${SMOKE_COLLECT_FAILURE_DIAGNOSTICS:-1}"
 SMOKE_PACKET_DIAGNOSTICS="${SMOKE_PACKET_DIAGNOSTICS:-0}"
+SMOKE_CLEANUP_ATTEMPTS="${SMOKE_CLEANUP_ATTEMPTS:-3}"
+SMOKE_CLEANUP_RETRY_DELAY="${SMOKE_CLEANUP_RETRY_DELAY:-2}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}"
 CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
@@ -113,6 +115,9 @@ declare -a SMOKE_OAUTH_ENV=()
 APP_SECRET_DOCUMENT=""
 APP_SECRET_CREATE_ATTEMPTED=0
 APP_SECRET_ALL_SCOPES=0
+# Exact names this smoke gives its own synthetic keys and secret projects.
+APP_SYNTHETIC_KEY_PATTERN='^CWAPP_[0-9A-F]{32}_(ORG|PROJECT|USER|ORG_PROJECT|PROJECT_USER|CONFIG)$'
+APP_SYNTHETIC_PROJECT_PATTERN='^dev-app-[0-9a-f]{32}-[01]$'
 APP_WORKSPACE_MARKER_SHA256=""
 APP_RESTART_WITNESS_SESSION_ID=""
 GUEST_NPROC=""
@@ -265,6 +270,11 @@ Environment:
                            Defaults to 0. Set to 1 only for the admitted
                            host-network diagnostic. Captures route metadata and
                            UDP headers for the configured peer relay without payload.
+  SMOKE_CLEANUP_ATTEMPTS   Defaults to 3. Tries per idempotent application
+                           cleanup command before cleanup fails.
+  SMOKE_CLEANUP_RETRY_DELAY
+                           Defaults to 2. Seconds before the first cleanup
+                           retry; each later retry waits one step longer.
   EXPECTED_DAEMON_IMAGE    Optional exact assertion for the daemon image the
                            workspace Pod mounts (SANDBOX_DAEMON_IMAGE)
   EXPECTED_DOCKER_MODE     Expected workspace Docker mode. Defaults to
@@ -757,6 +767,84 @@ cw_with_timeout() {
     return
   fi
   timeout "$duration" "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"
+}
+
+# Value-blind class of one failed cw command: dns, connect, tls, timeout,
+# http_<status> or exit_<code>. It reads only the exit status and fixed
+# patterns in the captured stderr, and never prints the stderr. cw reports any
+# failure before a response as "error sending request" without its cause, so
+# connect also covers DNS and TLS failures that cw does not name.
+cw_failure_class() {
+  local status="$1" error="$2" code=''
+  if [[ "$status" == 124 || "$status" == 137 ]]; then printf timeout; return; fi
+  if [[ -f "$error" ]]; then
+    code="$(grep -oE 'HTTP (error|status (client|server) error \() ?[1-5][0-9]{2}' -- "$error" 2>/dev/null |
+      head -n 1 | grep -oE '[1-5][0-9]{2}$' || true)"
+    if [[ "$code" =~ ^[1-5][0-9]{2}$ ]]; then printf 'http_%s' "$code"; return; fi
+    if grep -Eqi -- 'dns error|failed to lookup address|name or service not known|temporary failure in name resolution' "$error"; then
+      printf dns; return
+    fi
+    if grep -Eqi -- 'certificate|tls handshake' "$error"; then printf tls; return; fi
+    if grep -Eqi -- 'timed out|deadline exceeded|deadline_exceeded' "$error"; then printf timeout; return; fi
+    if grep -Eqi -- 'error sending request|connection refused|connection reset|tcp connect error|broken pipe' "$error"; then
+      printf connect; return
+    fi
+  fi
+  printf 'exit_%s' "$status"
+}
+
+# One fail-fast setup command under a fixed step label. A failure records its
+# value-blind class and logs it, then returns the status for the caller's fixed
+# die message. Standard input passes through for protected writes.
+prepare_cw() {
+  local step="$1" output="$2" error="$3" status class
+  shift 3
+  if cw_with_timeout 30 "$@" >"$output" 2>"$error"; then return 0; else status=$?; fi
+  class="$(cw_failure_class "$status" "$error")"
+  printf '%s\t%s\t%s\n' "$step" "$status" "$class" >>"$TMPDIR_SMOKE/app-prepare-commands.tsv"
+  log "cw-failure step=$step class=$class"
+  return "$status"
+}
+
+# One idempotent cleanup command under a fixed step label, tried up to
+# SMOKE_CLEANUP_ATTEMPTS times with a short growing backoff. A failure whose
+# stderr carries the exact NOT_FOUND text means the object is already gone.
+# Each attempt lands in the classification TSV as
+# step, index, attempt, exit status, class; logs carry only label and class.
+cleanup_cw() {
+  local duration="$1" classification="$2" step="$3" index="$4" output="$5" error="$6" not_found="$7"
+  local attempt status class=''
+  shift 7
+  for ((attempt = 1; attempt <= SMOKE_CLEANUP_ATTEMPTS; attempt++)); do
+    if cw_with_timeout "$duration" "$@" >"$output" 2>"$error"; then status=0; else status=$?; fi
+    if [[ "$status" == 0 ]]; then
+      printf '%s\t%s\t%s\t0\tok\n' "$step" "$index" "$attempt" >>"$classification"
+      return 0
+    fi
+    if [[ -n "$not_found" ]] && grep -Fq -- "$not_found" "$error"; then
+      printf '%s\t%s\t%s\t%s\tnot_found\n' "$step" "$index" "$attempt" "$status" >>"$classification"
+      return 0
+    fi
+    class="$(cw_failure_class "$status" "$error")"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$step" "$index" "$attempt" "$status" "$class" >>"$classification"
+    if ((attempt < SMOKE_CLEANUP_ATTEMPTS)); then
+      log "cleanup retry step=$step attempt=$attempt class=$class"
+      sleep "$((SMOKE_CLEANUP_RETRY_DELAY * attempt))"
+    fi
+  done
+  log "cw-failure step=$step class=$class"
+  return 1
+}
+
+milliseconds_now() {
+  date +%s%3N
+}
+
+# Fixed completion marker for one application smoke stage, in the walkthrough's
+# "<stage>:passed duration_ms=<n>" shape so acceptance timings can relay it.
+application_stage_passed() {
+  local stage="$1" started="$2"
+  log "$stage:passed duration_ms=$(($(milliseconds_now) - started))"
 }
 
 kubectl_dev() {
@@ -1337,16 +1425,64 @@ create_application_secret_project() {
   # Retain exact intent before the request so a committed create with a lost
   # response is still reconciled by cleanup.
   APP_SECRET_PROJECTS+=("$project")
-  cw_with_timeout 30 secrets --cloud projects create "$project" \
-    >"$TMPDIR_SMOKE/app-create-project-$index.out" 2>"$TMPDIR_SMOKE/app-create-project-$index.err" ||
+  prepare_cw create-project "$TMPDIR_SMOKE/app-create-project-$index.out" \
+    "$TMPDIR_SMOKE/app-create-project-$index.err" secrets --cloud projects create "$project" ||
     die 'dedicated smoke identity cannot create its disposable secret project'
-  cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-projects.json" ||
+  prepare_cw list-projects "$TMPDIR_SMOKE/app-projects.json" "$TMPDIR_SMOKE/app-projects.err" \
+    secrets --cloud projects list --output json ||
     die 'cannot resolve the created platform secret project'
   project_id="$(jq -er --arg name "$project" '
     [.[] | select(.name == $name)] | if length == 1 then .[0].id else error("ambiguous project") end
     | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
   ' "$TMPDIR_SMOKE/app-projects.json")" || die 'created application project ID is missing or ambiguous'
   APP_SECRET_IDS+=("$project_id")
+}
+
+# One failed cleanup must not poison every later start (#2986): a key left by
+# an earlier run fails the empty-scope check below. Before that check, remove
+# only this smoke's own synthetic residue, by exact name; anything else still
+# refuses the run. Hosted journeys for the dedicated identity are serialized
+# (promote-dev's concurrency group), so no live journey owns residue here.
+clear_application_all_scope_residue() {
+  local scope label metadata name id index=0
+  local classification="$TMPDIR_SMOKE/app-residue-commands.tsv"
+  for scope in user organization; do
+    label=personal
+    [[ "$scope" == user ]] || label=organization
+    metadata="$TMPDIR_SMOKE/app-residue-$scope.json"
+    prepare_cw "residue-list-$label-keys" "$metadata" "$TMPDIR_SMOKE/app-residue-$scope.err" \
+      secrets --cloud "--$scope" list --output json ||
+      die "dedicated all-scope identity cannot list $label secret metadata"
+    jq -es 'length == 1 and (.[0] | type == "array" and
+        all(.[]; type == "object" and (.key | type) == "string"))' "$metadata" >/dev/null ||
+      die 'all-scope start received malformed shared-scope metadata'
+    while IFS= read -r name; do
+      [[ "$name" =~ $APP_SYNTHETIC_KEY_PATTERN ]] || continue
+      cleanup_cw 30 "$classification" "residue-delete-$label-key" "$index" \
+        "$TMPDIR_SMOKE/app-residue-$scope-$index.out" "$TMPDIR_SMOKE/app-residue-$scope-$index.err" \
+        'secret not found' secrets --cloud "--$scope" delete "$name" ||
+        die 'all-scope start could not remove its own synthetic residue'
+      log "removed own synthetic residue: $label key $name"
+      index=$((index + 1))
+    done < <(jq -r '.[].key' "$metadata")
+  done
+  metadata="$TMPDIR_SMOKE/app-residue-projects.json"
+  prepare_cw residue-list-projects "$metadata" "$TMPDIR_SMOKE/app-residue-projects.err" \
+    secrets --cloud projects list --output json ||
+    die 'dedicated all-scope identity cannot list platform secret projects'
+  jq -e 'type == "array" and all(.[]; type == "object" and
+      (.name | type) == "string" and (.id | type) == "string")' "$metadata" >/dev/null ||
+    die 'all-scope start received malformed secret project metadata'
+  while IFS=$'\t' read -r id name; do
+    [[ "$name" =~ $APP_SYNTHETIC_PROJECT_PATTERN &&
+       "$id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || continue
+    cleanup_cw 30 "$classification" residue-delete-project "$index" \
+      "$TMPDIR_SMOKE/app-residue-project-$index.out" "$TMPDIR_SMOKE/app-residue-project-$index.err" \
+      'platform secret project was not found' secrets --cloud projects delete "id:$id" --yes ||
+      die 'all-scope start could not remove its own synthetic residue'
+    log "removed own synthetic residue: secret project $name"
+    index=$((index + 1))
+  done < <(jq -r '.[] | [.id, .name] | @tsv' "$metadata")
 }
 
 prepare_application_all_scope_secrets() {
@@ -1359,19 +1495,28 @@ prepare_application_all_scope_secrets() {
   APP_SECRET_ALL_KEYS=("${prefix}_ORG" "${prefix}_PROJECT" "${prefix}_USER"
     "${prefix}_ORG_PROJECT" "${prefix}_PROJECT_USER" "${prefix}_CONFIG")
 
-  cw_with_timeout 30 secrets --cloud --user list --output json >"$TMPDIR_SMOKE/app-user-before.json" ||
+  clear_application_all_scope_residue
+  prepare_cw list-personal-keys "$TMPDIR_SMOKE/app-user-before.json" "$TMPDIR_SMOKE/app-user-before.err" \
+    secrets --cloud --user list --output json ||
     die 'dedicated all-scope identity cannot list personal secret metadata'
-  cw_with_timeout 30 secrets --cloud --organization list --output json >"$TMPDIR_SMOKE/app-org-before.json" ||
+  prepare_cw list-organization-keys "$TMPDIR_SMOKE/app-org-before.json" "$TMPDIR_SMOKE/app-org-before.err" \
+    secrets --cloud --organization list --output json ||
     die 'dedicated all-scope identity cannot list organization secret metadata'
   if ! jq -es 'length == 1 and (.[0] | type == "array" and length == 0)' \
-      "$TMPDIR_SMOKE/app-user-before.json" >/dev/null ||
-     ! jq -es 'length == 1 and (.[0] | type == "array" and length == 0)' \
-      "$TMPDIR_SMOKE/app-org-before.json" >/dev/null; then
+      "$TMPDIR_SMOKE/app-user-before.json" >/dev/null; then
+    log 'start-scope-not-empty scope=personal'
     die 'all-scope acceptance requires initially empty personal and organization scopes'
   fi
-  cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-projects-before.json" ||
+  if ! jq -es 'length == 1 and (.[0] | type == "array" and length == 0)' \
+      "$TMPDIR_SMOKE/app-org-before.json" >/dev/null; then
+    log 'start-scope-not-empty scope=organization'
+    die 'all-scope acceptance requires initially empty personal and organization scopes'
+  fi
+  prepare_cw list-projects "$TMPDIR_SMOKE/app-projects-before.json" "$TMPDIR_SMOKE/app-projects-before.err" \
+    secrets --cloud projects list --output json ||
     die 'dedicated all-scope identity cannot list platform secret projects'
-  cw_with_timeout 30 --cloud ls --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
+  prepare_cw list-environments "$TMPDIR_SMOKE/app-environments-before.json" \
+    "$TMPDIR_SMOKE/app-environments-before.err" --cloud ls --output json ||
     die 'dedicated all-scope identity cannot inspect its environment names'
   jq -e --arg name "$SMOKE_NAME" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/app-environments-before.json" >/dev/null ||
@@ -1392,15 +1537,17 @@ prepare_application_all_scope_secrets() {
   for index in "${!org_keys[@]}"; do
     key="${org_keys[$index]}"; value="${org_values[$index]}"
     APP_SECRET_ORG_ATTEMPTS+=("$key")
-    printf '%s' "$value" | cw_with_timeout 30 secrets --cloud --organization set "$key" \
-      >"$TMPDIR_SMOKE/app-set-org-$index.out" 2>"$TMPDIR_SMOKE/app-set-org-$index.err" ||
+    printf '%s' "$value" | prepare_cw set-organization-key \
+      "$TMPDIR_SMOKE/app-set-org-$index.out" "$TMPDIR_SMOKE/app-set-org-$index.err" \
+      secrets --cloud --organization set "$key" ||
       die 'cannot write an owned organization secret via protected stdin'
   done
   for index in "${!user_keys[@]}"; do
     key="${user_keys[$index]}"; value="${user_values[$index]}"
     APP_SECRET_USER_ATTEMPTS+=("$key")
-    printf '%s' "$value" | cw_with_timeout 30 secrets --cloud --user set "$key" \
-      >"$TMPDIR_SMOKE/app-set-user-$index.out" 2>"$TMPDIR_SMOKE/app-set-user-$index.err" ||
+    printf '%s' "$value" | prepare_cw set-personal-key \
+      "$TMPDIR_SMOKE/app-set-user-$index.out" "$TMPDIR_SMOKE/app-set-user-$index.err" \
+      secrets --cloud --user set "$key" ||
       die 'cannot write an owned personal secret via protected stdin'
   done
 
@@ -1419,13 +1566,14 @@ prepare_application_all_scope_secrets() {
       "${project_pu[$index]}" "${project_cfg[$index]}")
     local key_index
     for key_index in "${!project_keys[@]}"; do
-      printf '%s' "${project_values[$key_index]}" | cw_with_timeout 30 secrets --cloud \
-        --project "id:${APP_SECRET_IDS[$index]}" set "${project_keys[$key_index]}" \
-        >"$TMPDIR_SMOKE/app-set-$index-$key_index.out" 2>"$TMPDIR_SMOKE/app-set-$index-$key_index.err" ||
+      printf '%s' "${project_values[$key_index]}" | prepare_cw set-project-key \
+        "$TMPDIR_SMOKE/app-set-$index-$key_index.out" "$TMPDIR_SMOKE/app-set-$index-$key_index.err" \
+        secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" set "${project_keys[$key_index]}" ||
         die 'cannot write an owned project secret via protected stdin'
     done
-    cw_with_timeout 30 secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" list --output json \
-      >"$TMPDIR_SMOKE/app-keys-$index.json" || die 'cannot inspect write-only application key metadata'
+    prepare_cw list-project-keys "$TMPDIR_SMOKE/app-keys-$index.json" "$TMPDIR_SMOKE/app-keys-$index.err" \
+      secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" list --output json ||
+      die 'cannot inspect write-only application key metadata'
     assert_application_scope_metadata "$TMPDIR_SMOKE/app-keys-$index.json" "${project_keys[@]}" ||
       die 'application project key metadata is malformed or contains unknown fields'
   done
@@ -1461,9 +1609,11 @@ prepare_application_all_scope_secrets() {
 }
 
 verify_application_all_scope_metadata() {
-  cw_with_timeout 30 secrets --cloud --user list --output json >"$TMPDIR_SMOKE/app-user-final.json" ||
+  prepare_cw list-personal-keys-final "$TMPDIR_SMOKE/app-user-final.json" "$TMPDIR_SMOKE/app-user-final.err" \
+    secrets --cloud --user list --output json ||
     die 'cannot re-list owned personal secret metadata before environment creation'
-  cw_with_timeout 30 secrets --cloud --organization list --output json >"$TMPDIR_SMOKE/app-org-final.json" ||
+  prepare_cw list-organization-keys-final "$TMPDIR_SMOKE/app-org-final.json" "$TMPDIR_SMOKE/app-org-final.err" \
+    secrets --cloud --organization list --output json ||
     die 'cannot re-list owned organization secret metadata before environment creation'
   if ! assert_application_scope_metadata "$TMPDIR_SMOKE/app-user-final.json" "${APP_SECRET_USER_ATTEMPTS[@]}" ||
      ! assert_application_scope_metadata "$TMPDIR_SMOKE/app-org-final.json" "${APP_SECRET_ORG_ATTEMPTS[@]}"; then
@@ -1480,9 +1630,11 @@ prepare_application_secrets() {
   nonce="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 'synthetic application identity generation failed'
   # Use only the already checked dedicated smoke org, never a personal scope.
-  cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-projects-before.json" ||
+  prepare_cw list-projects "$TMPDIR_SMOKE/app-projects-before.json" "$TMPDIR_SMOKE/app-projects-before.err" \
+    secrets --cloud projects list --output json ||
     die 'dedicated smoke identity cannot list platform secret projects'
-  cw_with_timeout 30 --cloud ls --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
+  prepare_cw list-environments "$TMPDIR_SMOKE/app-environments-before.json" \
+    "$TMPDIR_SMOKE/app-environments-before.err" --cloud ls --output json ||
     die 'dedicated smoke identity cannot inspect its environment names'
   jq -e --arg name "$SMOKE_NAME" 'all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/app-environments-before.json" >/dev/null ||
@@ -1494,12 +1646,14 @@ prepare_application_secrets() {
     value="${APP_SECRET_VALUES[$index]}"
     APP_SECRET_HASHES+=("$(printf '%s' "$value" | sha256sum | cut -d ' ' -f 1)")
     for key in DATABASE_URL CW_DEV_PRECEDENCE; do
-      printf '%s' "$value" | cw_with_timeout 30 secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" set "$key" \
-        >"$TMPDIR_SMOKE/app-set-$index-$key.out" 2>"$TMPDIR_SMOKE/app-set-$index-$key.err" ||
+      printf '%s' "$value" | prepare_cw set-project-key \
+        "$TMPDIR_SMOKE/app-set-$index-$key.out" "$TMPDIR_SMOKE/app-set-$index-$key.err" \
+        secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" set "$key" ||
         die 'dedicated smoke identity cannot write its synthetic project secret via protected stdin'
     done
-    cw_with_timeout 30 secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" list --output json \
-      >"$TMPDIR_SMOKE/app-keys-$index.json" || die 'cannot inspect write-only application key metadata'
+    prepare_cw list-project-keys "$TMPDIR_SMOKE/app-keys-$index.json" "$TMPDIR_SMOKE/app-keys-$index.err" \
+      secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" list --output json ||
+      die 'cannot inspect write-only application key metadata'
     jq -e 'map(.key) | sort == ["CW_DEV_PRECEDENCE", "DATABASE_URL"]' \
       "$TMPDIR_SMOKE/app-keys-$index.json" >/dev/null || die 'application key metadata changed names'
   done
@@ -1865,8 +2019,9 @@ run_application_secret_exec() {
 }
 
 run_application_secrets_smoke() {
-  local phase expected project generation=0 previous_uid='' guest_script hashes_name='' phase_deadline
+  local phase expected project generation=0 previous_uid='' guest_script hashes_name='' phase_deadline phase_started
   for phase in a b clear; do
+    phase_started="$(milliseconds_now)"
     phase_deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
     case "$phase" in
       a)
@@ -1943,6 +2098,7 @@ run_application_secrets_smoke() {
     run_application_secret_pty "$guest_script" "$phase"
     cw_with_timeout 30 ls "$ENV_ID" --output json >"$TMPDIR_SMOKE/app-sessions-$phase.json" || die 'session metadata inspection failed'
     assert_application_artifacts_redacted "$TMPDIR_SMOKE"/app-*.json "$TMPDIR_SMOKE"/app-*.out "$TMPDIR_SMOKE"/app-*.err "$TMPDIR_SMOKE"/app-pty-*.log "$TMPDIR_SMOKE/create.out"
+    application_stage_passed "app-source-$phase" "$phase_started"
   done
   if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
     log 'application organization/project/personal precedence passed install/startup, exec/PTY, replacement/clear and preservation'
@@ -1966,89 +2122,84 @@ application_environment_destroyed() {
   [[ "$state" == destroyed ]]
 }
 
+# Delete every attempted key by name (#2986). A server delete of a missing key
+# succeeds, so no list result gates a delete: one failed per-key list once left
+# a key behind, which then failed every later run's empty-scope start. Each
+# command is retried and a lasting failure is classified, but only what is
+# really left behind fails cleanup: the final list must be empty.
 cleanup_application_shared_scope() {
   local scope="$1" attempts_name="$2"
   local -n attempts="$attempts_name"
-  local key index status rc=0 metadata="$TMPDIR_SMOKE/app-cleanup-$scope.json"
+  local key index label metadata="$TMPDIR_SMOKE/app-cleanup-$scope.json"
   local classification="$TMPDIR_SMOKE/app-cleanup-$scope-commands.tsv"
-  local -a scope_args=("--$scope")
+  label=personal
+  [[ "$scope" == user ]] || label=organization
   for index in "${!attempts[@]}"; do
     key="${attempts[$index]}"
-    if cw_with_timeout 30 secrets --cloud "${scope_args[@]}" list --output json >"$metadata" \
-        2>"$TMPDIR_SMOKE/app-cleanup-$scope-list-$index.err"; then status=0; else status=$?; fi
-    printf 'list\t%s\t%s\n' "$index" "$status" >>"$classification"
-    if [[ "$status" != 0 ]]; then
-      rc=1
-      continue
-    fi
-    if ! jq -es --arg key "$key" '
-        length == 1 and (.[0] | type == "array" and
-          all(.[]; type == "object" and (.key | type) == "string") and
-          ([.[] | select(.key == $key)] | length) <= 1)
-      ' "$metadata" >/dev/null 2>"$TMPDIR_SMOKE/app-cleanup-$scope-metadata-$index.err"; then
-      rc=1
-      continue
-    fi
-    if jq -es --arg key "$key" '.[0] | any(.[]; .key == $key)' "$metadata" >/dev/null \
-        2>>"$TMPDIR_SMOKE/app-cleanup-$scope-metadata-$index.err"; then
-      if cw_with_timeout 30 secrets --cloud "${scope_args[@]}" delete "$key" \
-        >"$TMPDIR_SMOKE/app-cleanup-$scope-$index.out" \
-        2>"$TMPDIR_SMOKE/app-cleanup-$scope-$index.err"; then status=0; else status=$?; rc=1; fi
-      printf 'delete\t%s\t%s\n' "$index" "$status" >>"$classification"
-    fi
+    cleanup_cw 30 "$classification" "cleanup-delete-$label-key" "$index" \
+      "$TMPDIR_SMOKE/app-cleanup-$scope-$index.out" "$TMPDIR_SMOKE/app-cleanup-$scope-$index.err" \
+      'secret not found' secrets --cloud "--$scope" delete "$key" || true
   done
-  if cw_with_timeout 30 secrets --cloud "${scope_args[@]}" list --output json >"$metadata" \
-      2>"$TMPDIR_SMOKE/app-cleanup-$scope-list-final.err"; then status=0; else status=$?; fi
-  printf 'list\tfinal\t%s\n' "$status" >>"$classification"
-  if [[ "$status" != 0 ]]; then
+  if ! cleanup_cw 30 "$classification" "cleanup-list-$label-keys" final "$metadata" \
+      "$TMPDIR_SMOKE/app-cleanup-$scope-list-final.err" '' secrets --cloud "--$scope" list --output json; then
+    log "cleanup-incomplete part=$label-keys reason=list-failed"
     return 1
   fi
-  local attempted_json
-  attempted_json="$(printf '%s\n' "${attempts[@]}" | jq -Rsc 'split("\n")[:-1]')"
-  jq -es --argjson attempted "$attempted_json" '
-    length == 1 and (.[0] | type == "array" and
-      all(.[]; type == "object" and (.key | type) == "string") and
-      all(.[]; (.key as $key | $attempted | index($key) | not)) and length == 0)
-  ' "$metadata" >/dev/null 2>"$TMPDIR_SMOKE/app-cleanup-$scope-metadata-final.err" || rc=1
-  return "$rc"
+  if ! jq -es 'length == 1 and (.[0] | type == "array" and length == 0)' "$metadata" >/dev/null \
+      2>"$TMPDIR_SMOKE/app-cleanup-$scope-metadata-final.err"; then
+    log "cleanup-incomplete part=$label-keys reason=not-empty"
+    return 1
+  fi
 }
 
 cleanup_application_secrets() {
-  local project project_id selector index status rc=0 deadline
+  local project project_id selector index status rc=0 deadline started
+  local classification="$TMPDIR_SMOKE/app-cleanup-commands.tsv"
+  started="$(milliseconds_now)"
   if [[ -z "$ENV_ID" && "$APP_SECRET_CREATE_ATTEMPTED" == 1 ]]; then
-    if cw_with_timeout 30 --cloud ls --output json >"$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null; then
+    if cleanup_cw 30 "$classification" cleanup-list-environments 0 "$TMPDIR_SMOKE/app-cleanup-environments.json" \
+        "$TMPDIR_SMOKE/app-cleanup-environments.err" '' --cloud ls --output json; then
       ENV_ID="$(jq -ers --arg name "$SMOKE_NAME" '
         if length != 1 or (.[0] | type) != "array" then error("expected environment array") else .[0] end |
         [.[] | select(.name == $name)] |
         if length == 1 then .[0].id else error("ambiguous owned environment") end |
         select(type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))' \
-        "$TMPDIR_SMOKE/app-cleanup-environments.json")" || rc=1
-    else rc=1; fi
+        "$TMPDIR_SMOKE/app-cleanup-environments.json")" || { rc=1; log 'cleanup-incomplete part=environment reason=not-resolved'; }
+    else rc=1; log 'cleanup-incomplete part=environment reason=list-failed'; fi
   fi
   if [[ -n "$ENV_ID" ]]; then
-    cw_with_timeout 60 --cloud rm --yes "$ENV_ID" >"$TMPDIR_SMOKE/app-cleanup-env.out" 2>"$TMPDIR_SMOKE/app-cleanup-env.err" || rc=1
+    cleanup_cw 60 "$classification" cleanup-remove-environment 0 "$TMPDIR_SMOKE/app-cleanup-env.out" \
+      "$TMPDIR_SMOKE/app-cleanup-env.err" '' --cloud rm --yes "$ENV_ID" || true
     deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
     while :; do
       if application_environment_destroyed; then break; else status=$?; fi
-      if [[ "$status" != 1 ]]; then rc=1; break; fi
-      if (( $(seconds_now) >= deadline )); then rc=1; break; fi
+      if [[ "$status" != 1 ]]; then rc=1; log 'cleanup-incomplete part=environment reason=report-invalid'; break; fi
+      if (( $(seconds_now) >= deadline )); then rc=1; log 'cleanup-incomplete part=environment reason=not-destroyed'; break; fi
       sleep 5
     done
   fi
+  # Delete each attempted project directly; one already gone counts as removed,
+  # and the final project list decides.
   for index in "${!APP_SECRET_PROJECTS[@]}"; do
     project="${APP_SECRET_PROJECTS[$index]}"
     project_id="${APP_SECRET_IDS[$index]:-}"
     selector="$project"
     [[ -z "$project_id" ]] || selector="id:$project_id"
-    cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-cleanup-projects.json" 2>/dev/null || { rc=1; continue; }
-    jq -e 'type == "array"' "$TMPDIR_SMOKE/app-cleanup-projects.json" >/dev/null || { rc=1; continue; }
-    if jq -e --arg name "$project" --arg id "$project_id" \
-        'any(.[]; if $id == "" then .name == $name else .id == $id end)' "$TMPDIR_SMOKE/app-cleanup-projects.json" >/dev/null; then
-      cw_with_timeout 30 secrets --cloud projects delete "$selector" --yes >"$TMPDIR_SMOKE/app-cleanup-project.out" 2>"$TMPDIR_SMOKE/app-cleanup-project.err" || rc=1
-    fi
-    cw_with_timeout 30 secrets --cloud projects list --output json >"$TMPDIR_SMOKE/app-cleanup-projects.json" 2>/dev/null &&
-      jq -e --arg name "$project" --arg id "$project_id" 'type == "array" and all(.[]; .name != $name and .id != $id)' "$TMPDIR_SMOKE/app-cleanup-projects.json" >/dev/null || rc=1
+    cleanup_cw 30 "$classification" cleanup-delete-project "$index" "$TMPDIR_SMOKE/app-cleanup-project-$index.out" \
+      "$TMPDIR_SMOKE/app-cleanup-project-$index.err" 'platform secret project was not found' \
+      secrets --cloud projects delete "$selector" --yes || true
   done
+  if ((${#APP_SECRET_PROJECTS[@]} > 0)); then
+    if cleanup_cw 30 "$classification" cleanup-list-projects final "$TMPDIR_SMOKE/app-cleanup-projects.json" \
+        "$TMPDIR_SMOKE/app-cleanup-projects.err" '' secrets --cloud projects list --output json; then
+      for index in "${!APP_SECRET_PROJECTS[@]}"; do
+        jq -e --arg name "${APP_SECRET_PROJECTS[$index]}" --arg id "${APP_SECRET_IDS[$index]:-}" \
+          'type == "array" and all(.[]; .name != $name and .id != $id)' \
+          "$TMPDIR_SMOKE/app-cleanup-projects.json" >/dev/null ||
+          { rc=1; log 'cleanup-incomplete part=projects reason=not-removed'; }
+      done
+    else rc=1; log 'cleanup-incomplete part=projects reason=list-failed'; fi
+  fi
   if ((${#APP_SECRET_USER_ATTEMPTS[@]} > 0)); then
     cleanup_application_shared_scope user APP_SECRET_USER_ATTEMPTS || rc=1
   fi
@@ -2059,7 +2210,11 @@ cleanup_application_secrets() {
     assert_application_artifacts_redacted "$TMPDIR_SMOKE"/app-cleanup-*.json \
       "$TMPDIR_SMOKE"/app-cleanup-*.out "$TMPDIR_SMOKE"/app-cleanup-*.err || rc=1
   fi
-  [[ "$rc" == 0 ]] || log 'application smoke cleanup incomplete; exact owned IDs remain in private smoke evidence'
+  if [[ "$rc" == 0 ]]; then
+    application_stage_passed app-cleanup "$started"
+  else
+    log 'ERROR: application cleanup incomplete; exact owned IDs remain in private smoke evidence'
+  fi
   return "$rc"
 }
 
@@ -5037,6 +5192,9 @@ main() {
       die 'browser automation supports only the all-scope or provider-SSH acceptance journey'
     fi
   fi
+  require_uint SMOKE_CLEANUP_ATTEMPTS "$SMOKE_CLEANUP_ATTEMPTS"
+  require_uint SMOKE_CLEANUP_RETRY_DELAY "$SMOKE_CLEANUP_RETRY_DELAY"
+  ((SMOKE_CLEANUP_ATTEMPTS >= 1)) || die 'SMOKE_CLEANUP_ATTEMPTS must be at least 1'
   if application_all_scopes_requested; then
     APP_SECRET_ALL_SCOPES=1
     SMOKE_SKIP_KUBE=1
@@ -5050,8 +5208,14 @@ main() {
   else
     prepare_cli
   fi
-  if application_secrets_selected; then prepare_application_secrets; fi
+  local stage_started
+  stage_started="$(milliseconds_now)"
+  if application_secrets_selected; then
+    prepare_application_secrets
+    application_stage_passed app-prepare "$stage_started"
+  fi
   if provider_ssh_selected; then prepare_provider_ssh; fi
+  stage_started="$(milliseconds_now)"
   if [[ -n "$SMOKE_EXISTING_ENV_ID" ]]; then
     ENV_ID="$SMOKE_EXISTING_ENV_ID"
     SMOKE_KEEP_ENV=1
@@ -5063,6 +5227,7 @@ main() {
   if [[ -z "$SMOKE_EXISTING_ENV_ID" ]]; then
     wait_environment
   fi
+  if application_secrets_selected; then application_stage_passed app-create "$stage_started"; fi
 
   if smoke_only_configured; then
     run_selected_phases

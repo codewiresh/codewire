@@ -43,6 +43,7 @@ fixture() {
   SMOKE_OAUTH_LOGIN_DIR=''; SMOKE_OAUTH_RUNTIME_PARENT=''; SMOKE_OAUTH_RUNTIME_DIR=''
   APP_SECRET_DOCUMENT=''; APP_SECRET_CREATE_ATTEMPTED=0; ENV_ID=''; CLAIM_NAME=fixture-claim
   SMOKE_NAME=fixture-env; SMOKE_TIMEOUT_SECONDS=1; SMOKE_EXEC_TIMEOUT=5
+  SMOKE_CLEANUP_ATTEMPTS=3; SMOKE_CLEANUP_RETRY_DELAY=0
   SMOKE_KEEP_ENV=0; SMOKE_SKIP_KUBE=0; SMOKE_EXISTING_ENV_ID=''
   SMOKE_AUTH_MODE=api-key; ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE=0; ALLOW_NON_DEV=0
   CODEWIRE_SERVER_URL=https://synthetic.invalid; EXPECTED_CODEWIRE_DEV_SERVER_URL="$CODEWIRE_SERVER_URL"
@@ -75,6 +76,12 @@ cw() {
       if [[ "$APP_FAILURE" == cleanup-user-list ]]; then
         printf '[]\n'; printf 'synthetic private list failure\n' >&2; return 23
       fi
+      # One armed transport failure on the first personal-scope cleanup
+      # command, whichever it is (#2986: the old per-key list, now a delete).
+      if [[ "$APP_FAILURE" == cleanup-user-transient && -e "$TMPDIR_SMOKE/transient-armed" ]]; then
+        rm -f -- "$TMPDIR_SMOKE/transient-armed"
+        printf 'send request: error sending request for url (https://synthetic.invalid/private)\n' >&2; return 1
+      fi
       cat "$TMPDIR_SMOKE/user.db" ;;
     'secrets --cloud --organization list --output json')
       cat "$TMPDIR_SMOKE/organization.db" ;;
@@ -91,6 +98,17 @@ cw() {
       local scope db key
       scope="$3"; scope="${scope#--}"; db="$TMPDIR_SMOKE/$scope.db"; key="$5"
       [[ "$APP_FAILURE" != "cleanup-$scope" ]] || return 1
+      if [[ "$scope" == user && "$APP_FAILURE" == cleanup-user-transient && -e "$TMPDIR_SMOKE/transient-armed" ]]; then
+        rm -f -- "$TMPDIR_SMOKE/transient-armed"
+        printf 'send request: error sending request for url (https://synthetic.invalid/private)\n' >&2; return 1
+      fi
+      if [[ "$scope" == user && "$APP_FAILURE" == cleanup-user-transport-down ]]; then
+        printf 'send request: error sending request for url (https://synthetic.invalid/private)\n' >&2; return 1
+      fi
+      if [[ "$scope" == user && "$APP_FAILURE" == cleanup-user-not-found ]] &&
+         ! jq -e --arg key "$key" 'any(.[]; .key == $key)' "$db" >/dev/null; then
+        printf 'delete user secret: secret not found\n' >&2; return 1
+      fi
       jq --arg key "$key" 'map(select(.key != $key))' "$db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$db"
       if [[ "$APP_FAILURE" == cleanup-user-delete-lost && "$scope" == user ]]; then
@@ -708,6 +726,8 @@ if grep -Eq '^(--cloud )?create ' "$TMPDIR_SMOKE/calls"; then fail 'environment 
 expect_failure unknown-key-cleanup cleanup_application_secrets
 jq -e 'map(.key) == ["FOREIGN"]' "$TMPDIR_SMOKE/user.db" >/dev/null ||
   fail 'cleanup removed an unknown shared-scope key or retained an owned key'
+grep -Fx '[runtime-smoke] cleanup-incomplete part=personal-keys reason=not-empty' \
+  "$APP_TEST_ROOT/failure.err" >/dev/null || fail 'a non-empty final list was not named'
 [[ "$(jq length "$TMPDIR_SMOKE/organization.db")" == 0 ]]
 pass
 
@@ -720,6 +740,10 @@ if (trap 'cleanup_application_secrets' EXIT; prepare_application_secrets) \
 fi
 [[ "$(jq length "$TMPDIR_SMOKE/organization.db")" == 0 ]] ||
   fail 'partial write cleanup did not remove the exact attempted key'
+grep -Fx '[runtime-smoke] cw-failure step=set-organization-key class=exit_1' "$TMPDIR_SMOKE/partial.err" >/dev/null ||
+  fail 'failed setup command class was not named'
+grep -Fx $'set-organization-key\t1\texit_1' "$TMPDIR_SMOKE/app-prepare-commands.tsv" >/dev/null ||
+  fail 'failed setup command was not classified'
 [[ "$(jq length "$TMPDIR_SMOKE/projects.db")" == 0 ]] ||
   fail 'partial shared-scope write unexpectedly reached project creation'
 pass
@@ -754,7 +778,11 @@ if grep -Fq preservation-marker < <(jq -r '.install_command,.startup_script' "$A
   fail 'all-scope setup scripts recreate the post-setup workspace marker'
 fi
 create_environment
-run_application_secrets_smoke
+run_application_secrets_smoke 2>"$TMPDIR_SMOKE/journey.err"
+for phase in a b clear; do
+  grep -Eqx "\[runtime-smoke\] app-source-$phase:passed duration_ms=[0-9]+" "$TMPDIR_SMOKE/journey.err" ||
+    fail "all-scope phase $phase did not emit its stage marker"
+done
 [[ "$APP_WORKSPACE_MARKER_SHA256" =~ ^[0-9a-f]{64}$ ]]
 [[ "$(sha256sum "$TMPDIR_SMOKE/workspace-marker" | cut -d ' ' -f 1)" == "$APP_WORKSPACE_MARKER_SHA256" ]]
 [[ "$(awk '$0 == "application-restart-witness-ready" { count++ } END { print count + 0 }' \
@@ -1111,7 +1139,7 @@ pass
 pass
 
 for variant in cleanup-user-list cleanup-user-delete-lost; do
-  reject_shared_cleanup_command() {
+  run_shared_cleanup_command() {
     fixture
     APP_SECRET_ALL_SCOPES=1
     prepare_application_secrets
@@ -1122,18 +1150,153 @@ for variant in cleanup-user-list cleanup-user-delete-lost; do
     cp "$TMPDIR_SMOKE/app-cleanup-user-commands.tsv" "$APP_TEST_ROOT/cleanup-commands.tsv"
     cat "$TMPDIR_SMOKE"/app-cleanup-user-*.err >"$APP_TEST_ROOT/cleanup-private.err"
   }
-  reject_shared_cleanup_command >"$APP_TEST_ROOT/cleanup-result.out" 2>"$APP_TEST_ROOT/cleanup-result.err"
-  [[ ! -s "$APP_TEST_ROOT/cleanup-result.out" ]] || fail 'failed command emitted cleanup success'
+  run_shared_cleanup_command >"$APP_TEST_ROOT/cleanup-result.out" 2>"$APP_TEST_ROOT/cleanup-result.err"
   jq -e 'length == 0' "$APP_TEST_ROOT/cleanup-organization.json" >/dev/null || fail 'user failure skipped organization cleanup'
+  # Deletes no longer wait on a list, so every attempted key is gone in both.
+  jq -e 'length == 0' "$APP_TEST_ROOT/cleanup-user.json" >/dev/null ||
+    fail 'a failed cleanup command kept cleanup from deleting attempted keys'
   [[ -s "$APP_TEST_ROOT/cleanup-private.err" ]] || fail 'private command diagnostic was discarded'
   if [[ "$variant" == cleanup-user-list ]]; then
-    grep -Fx $'list\tfinal\t23' "$APP_TEST_ROOT/cleanup-commands.tsv" >/dev/null
+    # The final list cannot prove the scope empty, so cleanup fails.
+    [[ ! -s "$APP_TEST_ROOT/cleanup-result.out" ]] || fail 'unverifiable cleanup emitted success'
+    for attempt in 1 2 3; do
+      grep -Fx $'cleanup-list-personal-keys\tfinal\t'"$attempt"$'\t23\texit_23' "$APP_TEST_ROOT/cleanup-commands.tsv" >/dev/null ||
+        fail 'final list failure was not retried and classified'
+    done
+    grep -Fx '[runtime-smoke] cleanup-incomplete part=personal-keys reason=list-failed' \
+      "$APP_TEST_ROOT/cleanup-result.err" >/dev/null || fail 'list failure was not named'
+    grep -Fx '[runtime-smoke] ERROR: application cleanup incomplete; exact owned IDs remain in private smoke evidence' \
+      "$APP_TEST_ROOT/cleanup-result.err" >/dev/null || fail 'incomplete cleanup was not named'
   else
-    jq -e 'length == 0' "$APP_TEST_ROOT/cleanup-user.json" >/dev/null
-    grep -Fx $'delete\t0\t24' "$APP_TEST_ROOT/cleanup-commands.tsv" >/dev/null
+    # A delete whose response was lost removed its key: nothing is left
+    # behind, so cleanup passes and still names the failed command.
+    grep -Fx 'cleanup-success' "$APP_TEST_ROOT/cleanup-result.out" >/dev/null ||
+      fail 'cleanup failed although nothing was left behind'
+    grep -Fx $'cleanup-delete-personal-key\t0\t3\t24\texit_24' "$APP_TEST_ROOT/cleanup-commands.tsv" >/dev/null ||
+      fail 'failed delete was not retried and classified'
+    grep -Fx '[runtime-smoke] cw-failure step=cleanup-delete-personal-key class=exit_24' \
+      "$APP_TEST_ROOT/cleanup-result.err" >/dev/null || fail 'delete failure class was not named'
+    if grep -Fq 'ERROR: application cleanup incomplete' "$APP_TEST_ROOT/cleanup-result.err"; then
+      fail 'cleanup reported incomplete although nothing was left behind'
+    fi
   fi
   if grep -Fq 'synthetic private' "$APP_TEST_ROOT/cleanup-result.err"; then fail 'cleanup printed raw diagnostic'; fi
   pass
 done
+
+# Value-blind classes come only from the exit status and fixed stderr patterns.
+fixture
+for case in '124||timeout' '137||timeout' '1|HTTP error 502|http_502' \
+    '1|HTTP status server error (503 Service Unavailable)|http_503' \
+    '1|dns error: failed to lookup address information|dns' \
+    '1|invalid peer certificate: UnknownIssuer|tls' \
+    '1|send request: error sending request for url (https://synthetic.invalid/x)|connect' \
+    '1|operation timed out|timeout' '7|synthetic private refusal|exit_7'; do
+  IFS='|' read -r status text expected <<<"$case"
+  printf '%s\n' "$text" >"$TMPDIR_SMOKE/class.err"
+  [[ "$(cw_failure_class "$status" "$TMPDIR_SMOKE/class.err")" == "$expected" ]] ||
+    fail "cw failure class for $expected was wrong"
+done
+pass
+
+# #2986: one transient failure of the first personal-scope cleanup command.
+# The old cleanup listed before each delete and skipped the key on a failed
+# list, leaving it to fail every later start. Each delete is now retried.
+fixture
+APP_SECRET_ALL_SCOPES=1
+prepare_application_secrets
+APP_FAILURE=cleanup-user-transient
+: >"$TMPDIR_SMOKE/transient-armed"
+cleanup_application_secrets 2>"$TMPDIR_SMOKE/transient.err" ||
+  fail 'a transient cleanup failure was not retried to success'
+[[ ! -e "$TMPDIR_SMOKE/transient-armed" ]] || fail 'transient failure was never exercised'
+jq -e 'length == 0' "$TMPDIR_SMOKE/user.db" >/dev/null || fail 'transient cleanup failure leaked a personal key'
+grep -Fx $'cleanup-delete-personal-key\t0\t1\t1\tconnect' "$TMPDIR_SMOKE/app-cleanup-user-commands.tsv" >/dev/null ||
+  fail 'transient delete attempt was not classified'
+grep -Fx $'cleanup-delete-personal-key\t0\t2\t0\tok' "$TMPDIR_SMOKE/app-cleanup-user-commands.tsv" >/dev/null ||
+  fail 'transient delete attempt was not retried'
+grep -Fx '[runtime-smoke] cleanup retry step=cleanup-delete-personal-key attempt=1 class=connect' \
+  "$TMPDIR_SMOKE/transient.err" >/dev/null || fail 'cleanup retry was not logged with its class'
+grep -Eqx '\[runtime-smoke\] app-cleanup:passed duration_ms=[0-9]+' "$TMPDIR_SMOKE/transient.err" ||
+  fail 'successful cleanup did not emit its stage marker'
+if grep -Fq 'error sending request' "$TMPDIR_SMOKE/transient.err"; then fail 'cleanup echoed raw cw stderr'; fi
+pass
+
+# A persistent transport failure retries, then fails loudly and names itself.
+fixture
+APP_SECRET_ALL_SCOPES=1
+prepare_application_secrets
+APP_FAILURE=cleanup-user-transport-down
+if cleanup_application_secrets 2>"$TMPDIR_SMOKE/down.err"; then fail 'persistent cleanup failure succeeded'; fi
+[[ "$(jq length "$TMPDIR_SMOKE/user.db")" == 3 ]] || fail 'persistent failure fixture changed personal keys'
+jq -e 'length == 0' "$TMPDIR_SMOKE/organization.db" >/dev/null || fail 'personal failure skipped organization cleanup'
+[[ "$(grep -c $'^cleanup-delete-personal-key\t0\t' "$TMPDIR_SMOKE/app-cleanup-user-commands.tsv")" == 3 ]] ||
+  fail 'persistent delete failure was not retried exactly three times'
+for line in \
+    '[runtime-smoke] cleanup retry step=cleanup-delete-personal-key attempt=1 class=connect' \
+    '[runtime-smoke] cleanup retry step=cleanup-delete-personal-key attempt=2 class=connect' \
+    '[runtime-smoke] cw-failure step=cleanup-delete-personal-key class=connect' \
+    '[runtime-smoke] cleanup-incomplete part=personal-keys reason=not-empty' \
+    '[runtime-smoke] ERROR: application cleanup incomplete; exact owned IDs remain in private smoke evidence'; do
+  grep -Fx -- "$line" "$TMPDIR_SMOKE/down.err" >/dev/null || fail "persistent failure did not log: $line"
+done
+if grep -Fq 'error sending request' "$TMPDIR_SMOKE/down.err"; then fail 'cleanup echoed raw cw stderr'; fi
+pass
+
+# A precise "not found" means the key is already gone.
+fixture
+APP_SECRET_ALL_SCOPES=1
+prepare_application_secrets
+APP_FAILURE=cleanup-user-not-found
+jq --arg key "${APP_SECRET_USER_ATTEMPTS[1]}" 'map(select(.key != $key))' "$TMPDIR_SMOKE/user.db" >"$TMPDIR_SMOKE/db.next"
+mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/user.db"
+cleanup_application_secrets 2>"$TMPDIR_SMOKE/not-found.err" || fail 'an already removed key failed cleanup'
+grep -Fx $'cleanup-delete-personal-key\t1\t1\t1\tnot_found' "$TMPDIR_SMOKE/app-cleanup-user-commands.tsv" >/dev/null ||
+  fail 'not-found delete was not recorded as already removed'
+jq -e 'length == 0' "$TMPDIR_SMOKE/user.db" >/dev/null || fail 'not-found handling skipped another key'
+pass
+
+# The start removes only its own synthetic residue, by exact name, and logs it.
+old_nonce=0123456789abcdef0123456789abcdef
+old_prefix="CWAPP_${old_nonce^^}"
+fixture
+APP_SECRET_ALL_SCOPES=1
+jq -n --arg k "${old_prefix}_USER" '[{key:$k,created_at:"then",updated_at:"then"}]' >"$TMPDIR_SMOKE/user.db"
+jq -n --arg a "${old_prefix}_ORG" --arg b "${old_prefix}_PROJECT_USER" \
+  '[{key:$a,created_at:"then",updated_at:"then"},{key:$b,created_at:"then",updated_at:"then"}]' >"$TMPDIR_SMOKE/organization.db"
+jq -n --arg name "dev-app-${old_nonce}-0" '[{id:"00000000-0000-4000-8000-0000000000aa",name:$name}]' >"$TMPDIR_SMOKE/projects.db"
+prepare_application_secrets 2>"$TMPDIR_SMOKE/residue.err" || fail 'own synthetic residue still failed the start'
+if grep -Fq "$old_prefix" "$TMPDIR_SMOKE/user.db" "$TMPDIR_SMOKE/organization.db" ||
+   grep -Fq "dev-app-${old_nonce}" "$TMPDIR_SMOKE/projects.db"; then
+  fail 'start kept its own synthetic residue'
+fi
+[[ "$(jq length "$TMPDIR_SMOKE/user.db")" == 3 && "$(jq length "$TMPDIR_SMOKE/organization.db")" == 4 ]] ||
+  fail 'start did not continue with exactly this run'\''s keys'
+for line in "removed own synthetic residue: personal key ${old_prefix}_USER" \
+    "removed own synthetic residue: organization key ${old_prefix}_ORG" \
+    "removed own synthetic residue: organization key ${old_prefix}_PROJECT_USER" \
+    "removed own synthetic residue: secret project dev-app-${old_nonce}-0"; do
+  grep -Fx -- "[runtime-smoke] $line" "$TMPDIR_SMOKE/residue.err" >/dev/null || fail "residue removal was not logged: $line"
+done
+pass
+
+# Anything that is not exactly this smoke's synthetic name still fails the start.
+fixture
+APP_SECRET_ALL_SCOPES=1
+jq -n --arg synthetic "${old_prefix}_CONFIG" --arg lower "CWAPP_${old_nonce}_USER" --arg suffix "${old_prefix}_OTHER" '
+  [$synthetic, $lower, $suffix, "MY_KEY"] | map({key:.,created_at:"then",updated_at:"then"})' >"$TMPDIR_SMOKE/user.db"
+jq -n --arg name "dev-app-${old_nonce}-2" '[{id:"00000000-0000-4000-8000-0000000000ab",name:$name}]' >"$TMPDIR_SMOKE/projects.db"
+expect_failure foreign-start-item prepare_application_secrets
+jq -e --arg lower "CWAPP_${old_nonce}_USER" --arg suffix "${old_prefix}_OTHER" \
+  'map(.key) == [$lower, $suffix, "MY_KEY"]' "$TMPDIR_SMOKE/user.db" >/dev/null ||
+  fail 'start removed a non-synthetic key or kept its own residue'
+jq -e --arg name "dev-app-${old_nonce}-2" 'map(.name) == [$name]' "$TMPDIR_SMOKE/projects.db" >/dev/null ||
+  fail 'start removed a project outside its exact synthetic pattern'
+grep -Fx '[runtime-smoke] start-scope-not-empty scope=personal' "$APP_TEST_ROOT/failure.err" >/dev/null ||
+  fail 'foreign start scope was not named'
+grep -Fx '[runtime-smoke] ERROR: all-scope acceptance requires initially empty personal and organization scopes' \
+  "$APP_TEST_ROOT/failure.err" >/dev/null || fail 'foreign start item was not named'
+[[ "$(jq length "$TMPDIR_SMOKE/organization.db")" == 0 ]] || fail 'refused start wrote organization keys'
+pass
 
 printf 'Dev application-source shell fixtures passed: %s\n' "$APP_TEST_COUNT"
