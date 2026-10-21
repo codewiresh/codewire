@@ -10,7 +10,7 @@ readonly WORKSPACE_BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1
 # untrusted bucket. Each token covers exactly one bucket, so main never imports
 # a layer or compiler object a pull request wrote.
 case "${CODEWIRE_R2_CACHE_TRUST:-untrusted}" in
-  main|main-read) readonly WORKSPACE_CACHE_TRUST="$CODEWIRE_R2_CACHE_TRUST" WORKSPACE_CACHE_SCOPE=main ;;
+  main|main-read) readonly WORKSPACE_CACHE_TRUST="$CODEWIRE_R2_CACHE_TRUST" WORKSPACE_CACHE_SCOPE=protected ;;
   *) readonly WORKSPACE_CACHE_TRUST=untrusted WORKSPACE_CACHE_SCOPE=untrusted ;;
 esac
 readonly WORKSPACE_CACHE_BUCKET="example-ci-cache-$WORKSPACE_CACHE_SCOPE"

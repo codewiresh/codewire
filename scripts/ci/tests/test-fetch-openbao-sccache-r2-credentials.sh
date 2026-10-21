@@ -51,7 +51,7 @@ case "$url" in
     ;;
   https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/untrusted|\
   https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/main-read|\
-  https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/main)
+  https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/protected)
     [[ "${FAKE_R2_FAIL:-0}" != 1 ]] || exit 92
     jq -n --arg accessKeyId "${FAKE_ACCESS_KEY_ID:?}" \
       --arg secretAccessKey "${FAKE_SECRET_ACCESS_KEY:?}" \
@@ -96,7 +96,7 @@ done
   fail 'OIDC or OpenBao request lacks the reviewed network deadline'
 
 # A pull request reads main's caches through the read-only document by default.
-grep -Fq 'sccache-r2/main-read' "$FAKE_CURL_CALLS" && ! grep -Eq 'sccache-r2/(untrusted|main )' "$FAKE_CURL_CALLS" ||
+grep -Fq 'sccache-r2/main-read' "$FAKE_CURL_CALLS" && ! grep -Eq 'sccache-r2/(untrusted|protected|main )' "$FAKE_CURL_CALLS" ||
   fail 'a pull request must read only the main-read cache document by default'
 [[ "$(grep -c 'sccache-r2/' "$FAKE_CURL_CALLS")" == 1 ]] || fail 'a pull request read more than one cache document'
 
@@ -127,8 +127,8 @@ main_credentials_file="$work/output/main-aws-credentials"
 "$FETCHER" "$main_credentials_file" >"$work/main.out"
 grep -Fxq "aws_access_key_id = $FAKE_ACCESS_KEY_ID" "$main_credentials_file" ||
   fail 'protected-main role wrote a different AWS credential'
-grep -Fq 'sccache-r2/main ' "$FAKE_CURL_CALLS" && ! grep -Eq 'sccache-r2/(untrusted|main-read)' "$FAKE_CURL_CALLS" ||
-  fail 'canonical main must read only the main cache document'
+grep -Fq 'sccache-r2/protected ' "$FAKE_CURL_CALLS" && ! grep -Eq 'sccache-r2/(untrusted|main-read|main )' "$FAKE_CURL_CALLS" ||
+  fail 'canonical main must read only the protected cache document'
 grep -Fq 'wrote one private main-cache credential file' "$work/main.out" ||
   fail 'canonical main did not report its main cache credential'
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
@@ -199,6 +199,57 @@ for job in "${cache_jobs[@]}"; do
   grep -Fq "scripts/ci/setup/finish-untrusted-rust-cache.sh \"\$RUNNER_TEMP/codewire-sccache-r2.aws\"" \
     <<<"$job_block" || fail "$job does not clean the cache credential"
 done
+
+# A main push writes the one protected cache, which only main-only builders on
+# fresh metal VMs may write (infra#1544). A job that fetches cache credentials
+# therefore runs main pushes on the metal-only sized Heavy label, or forces its
+# job-local caches on a main push: an unsized ci-heavy-main job can land on a
+# PR-shared cloud pod.
+readonly main_push="github.event_name == 'push' && github.ref == 'refs/heads/main'"
+# Only the main-push branch of the expression matters here; pull requests read.
+readonly sized_runs_on="    runs-on: \${{ $main_push && 'ci-main-large' || "
+check_main_cache_runners() {
+  local workflow="$1" job block step checked=0
+  while IFS= read -r job; do
+    block="$(awk -v wanted="$job" '
+      $0 == "  " wanted ":" { capture = 1 }
+      capture && /^  [A-Za-z0-9_-]+:$/ && $0 != "  " wanted ":" { exit }
+      capture { print }
+    ' "$workflow")"
+    grep -Eq 'scripts/ci/setup/select-untrusted-(rust|workspace)-cache\.sh' <<<"$block" || continue
+    checked=$((checked + 1))
+    grep -Fq -- "$sized_runs_on" <<<"$block" && continue
+    # Unsized: every selector step must force local caches on a main push.
+    while IFS= read -r -d '' step; do
+      grep -Eq 'select-untrusted-(rust|workspace)-cache\.sh' <<<"$step" || continue
+      grep -Fq "CODEWIRE_SCCACHE_REQUEST: \${{ $main_push && 'local' || " <<<"$step" &&
+        { ! grep -q 'select-untrusted-workspace-cache\.sh' <<<"$step" ||
+          grep -Fq "CODEWIRE_BUILDKIT_CACHE_REQUEST: \${{ $main_push && 'local' || " <<<"$step"; } || {
+        printf 'job %s fetches the protected cache on main without the metal-only sized runner\n' "$job" >&2
+        return 1
+      }
+    done < <(awk '/^      - / { if (step != "") printf "%s%c", step, 0; step = "" } { step = step $0 "\n" } END { if (step != "") printf "%s%c", step, 0 }' <<<"$block")
+  done < <(awk '/^jobs:$/ { jobs = 1; next } jobs && /^  [A-Za-z0-9_-]+:$/ { sub(/^  /, ""); sub(/:$/, ""); print }' "$workflow")
+  [[ "$checked" -gt 0 ]]
+}
+check_main_cache_runners "$WORKFLOW" || fail 'a main cache job may run on a PR-shared Heavy pod'
+# Fixtures: one sized cache job moved to the unsized main label, and one
+# unsized job that no longer forces local caches on a main push.
+sed '0,/ci-main-large/s//ci-heavy-main/' "$WORKFLOW" >"$work/unsized-ci.yaml"
+if check_main_cache_runners "$work/unsized-ci.yaml" 2>"$work/unsized.err"; then
+  fail 'an unsized main cache job was accepted'
+fi
+grep -Fq 'without the metal-only sized runner' "$work/unsized.err" || fail 'the unsized refusal did not name its job'
+python3 - "$WORKFLOW" "$work/unforced-ci.yaml" "CODEWIRE_SCCACHE_REQUEST: \${{ $main_push && 'local' || " <<'PY'
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+Path(sys.argv[2]).write_text(text.replace(sys.argv[3], "CODEWIRE_SCCACHE_REQUEST: ${{ ", 1))
+PY
+! cmp -s "$WORKFLOW" "$work/unforced-ci.yaml" || fail 'the unforced fixture changed nothing'
+if check_main_cache_runners "$work/unforced-ci.yaml" 2>"$work/unforced.err"; then
+  fail 'an unsized cache job that fetches on main was accepted'
+fi
 
 grep -Fq "readonly fetcher=\"\${OPENBAO_SCCACHE_FETCHER:-\$ROOT/scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh}\"" \
   "$SELECTOR" || fail 'cache selector does not use the reviewed OpenBao exchange'

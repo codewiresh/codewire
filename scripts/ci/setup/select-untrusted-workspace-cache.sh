@@ -32,7 +32,7 @@ if [[ "${GITHUB_EVENT_NAME:-}" == pull_request && -n "${GITHUB_EVENT_PATH:-}" ]]
   fi
   [[ "$experiment" != true ]] || trust=untrusted
 fi
-bucket=example-ci-cache-main prefix=main/codewire/v1
+bucket=example-ci-cache-protected prefix=protected/codewire/v1
 [[ "$trust" != untrusted ]] || bucket=example-ci-cache-untrusted prefix=untrusted/codewire/v1
 
 for request in "$rust_request" "$layer_request"; do

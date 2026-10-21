@@ -35,7 +35,8 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$output" && -n "$url" ]]
 case "$url" in
-  https://git.example.invalid/*audience=openbao-codewire-source-dev-publisher)
+  https://git.example.invalid/*audience=openbao-codewire-source-dev-publisher|\
+  https://git.example.invalid/*audience=openbao-codewire-source-support-publisher)
     jq -n --arg value "${FAKE_FORGEJO_JWT:?}" '{value:$value}' >"$output"
     ;;
   https://openbao.example.invalid/v1/auth/forgejo-jwt/login)
@@ -66,6 +67,7 @@ export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
 export GITHUB_EVENT_NAME=push
 export GITHUB_REF=refs/heads/main
 export FAKE_EXPECTED_ROLE=codewire-source-dev-publisher
+export OPENBAO_ROLE=codewire-source-dev-publisher
 export RUNNER_TEMP="$work/runner"
 
 credentials_file="$work/output/aws-credentials"
@@ -146,5 +148,25 @@ fi
 grep -Fq 'protected cache document read failed' "$work/failed-fetch.out" ||
   fail 'failed protected R2 read was not attributable'
 unset FAKE_R2_FAIL
+
+# The support-images publisher writes the same one CI cache with the same
+# document; no other role may (infra#1544).
+export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
+: >"$FAKE_CURL_CALLS"
+OPENBAO_ROLE=codewire-source-support-publisher FAKE_EXPECTED_ROLE=codewire-source-support-publisher \
+  "$FETCHER" "$work/output/support-credentials" >/dev/null ||
+  fail 'the support publisher could not read the protected cache document'
+grep -Fq 'audience=openbao-codewire-source-support-publisher' "$FAKE_CURL_CALLS" ||
+  fail 'the support publisher did not request its own audience'
+grep -Fq 'sccache-r2/protected ' "$FAKE_CURL_CALLS" || fail 'the support publisher read another document'
+for role in codewire-source-prod-publisher codewire-source-ci-sccache-r2-pr ''; do
+  export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
+  : >"$FAKE_CURL_CALLS"
+  if OPENBAO_ROLE="$role" "$FETCHER" "$work/output/refused-role" >/dev/null 2>&1; then
+    fail "role '$role' was accepted for the protected cache"
+  fi
+  [[ ! -s "$FAKE_CURL_CALLS" && ! -e "$work/output/refused-role" ]] ||
+    fail "role '$role' reached an external request or wrote credentials"
+done
 
 printf '[test-fetch-openbao-sccache-r2-protected-credentials] protected-main private-file contract passed\n'

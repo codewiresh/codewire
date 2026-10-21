@@ -687,18 +687,6 @@ run_paths_case sccache_r2_protected_selector pull_request refs/pull/2356/head fa
 run_paths_case sccache_r2_protected_selector_fixture pull_request refs/pull/2357/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/test-select-protected-rust-cache.sh
-run_paths_case sccache_r2_protected_workspace_consumer pull_request refs/pull/2358/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
-  scripts/ci/setup/fetch-openbao-sccache-r2-protected-workspace-credentials.sh
-run_paths_case sccache_r2_protected_workspace_consumer_fixture pull_request refs/pull/2359/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
-  scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-workspace-credentials.sh
-run_paths_case sccache_r2_protected_workspace_selector pull_request refs/pull/2360/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
-  scripts/ci/setup/select-protected-workspace-rust-cache.sh
-run_paths_case sccache_r2_protected_workspace_selector_fixture pull_request refs/pull/2361/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
-  scripts/ci/tests/test-select-protected-workspace-rust-cache.sh
 run_paths_case sccache_host_selector pull_request refs/pull/1751/head false \
   'policy rust rust_workspace security security_js' \
   scripts/ci/setup/select-untrusted-rust-cache.sh \

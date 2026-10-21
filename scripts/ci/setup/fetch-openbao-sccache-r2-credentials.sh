@@ -46,7 +46,12 @@ esac
   fail 'credential output must be a new nonsymlink path in an existing directory'
 
 readonly openbao_addr="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
-readonly secret_path="platform/data/ci/codewire/sccache-r2/$trust"
+# Canonical main writes the one CI cache with the protected token, shared with
+# the other main-only builders; main-read is that cache's read-only token.
+case "$trust" in
+  main) readonly secret_path='platform/data/ci/codewire/sccache-r2/protected' ;;
+  *) readonly secret_path="platform/data/ci/codewire/sccache-r2/$trust" ;;
+esac
 readonly -a curl_bounds=(--connect-timeout 10 --max-time 30)
 oidc_request_token="$ACTIONS_ID_TOKEN_REQUEST_TOKEN"
 unset ACTIONS_ID_TOKEN_REQUEST_TOKEN

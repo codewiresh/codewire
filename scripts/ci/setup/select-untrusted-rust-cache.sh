@@ -18,9 +18,9 @@ readonly fetcher="${OPENBAO_SCCACHE_FETCHER:-$ROOT/scripts/ci/setup/fetch-openba
 trust=main-read
 [[ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" != 'push|refs/heads/main' ]] || trust=main
 readonly trust
-readonly bucket='example-ci-cache-main'
+readonly bucket='example-ci-cache-protected'
 readonly endpoint='https://00000000000000000000000000000000.r2.cloudflarestorage.com'
-readonly prefix='main/codewire/v1'
+readonly prefix='protected/codewire/v1'
 
 : "${GITHUB_ENV:?Forgejo job environment file is required}"
 : "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"

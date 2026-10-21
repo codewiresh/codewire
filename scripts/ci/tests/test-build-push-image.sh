@@ -922,7 +922,7 @@ cd "$source_fixture"
 : >"$FAKE_MANIFESTS"
 
 CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_RUST_PROFILE=ci \
-  SCCACHE_BUCKET=codewire-ci \
+  SCCACHE_BUCKET=example-ci-cache-protected \
   SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
   CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/test \
   AWS_SHARED_CREDENTIALS_FILE="$r2_credentials_file" \
@@ -1290,7 +1290,7 @@ docker_config="$(sed -nE 's/^DOCKER_CONFIG=([^ ]+).* login.*/\1/p' \
   CODEWIRE_BAKE_METADATA_FILE="$work/kind-r2-metadata.json" \
   CODEWIRE_SCCACHE_MODE=r2 \
   CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
-  SCCACHE_BUCKET=codewire-ci \
+  SCCACHE_BUCKET=example-ci-cache-protected \
   SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
   CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/test \
     "$source_fixture/scripts/ci/images/build-kind-images.sh"
@@ -1308,7 +1308,7 @@ assert_cw_context runtime
   cd "$source_fixture"
   CODEWIRE_SCCACHE_MODE=r2 \
   CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
-  SCCACHE_BUCKET=codewire-ci \
+  SCCACHE_BUCKET=example-ci-cache-protected \
   SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
   CODEWIRE_SCCACHE_PREFIX=protected/codewire/test \
     "$BUILDER" derp deployments/docker/derp.Dockerfile .
@@ -1334,7 +1334,7 @@ runtime_builds_before="$(build_invocation_count)"
   CODEWIRE_BUILD_RUNTIME_SET=1 \
   CODEWIRE_SCCACHE_MODE=r2 \
   CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
-  SCCACHE_BUCKET=codewire-ci \
+  SCCACHE_BUCKET=example-ci-cache-protected \
   SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
   CODEWIRE_SCCACHE_PREFIX=protected/codewire/test \
     "$BUILDER" services deployments/docker/services.Dockerfile .
@@ -1666,26 +1666,19 @@ if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_f
     "$BUILDER" workspace images/workspace/Dockerfile . >"$work/compiler-rejection.out" 2>&1; then
   fail 'published workspace accepted an untrusted compiler prefix'
 fi
-# The support lane and the Dev delivery lane each name only their own bucket
-# and prefix.
-if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
-    SCCACHE_BUCKET=example-ci-cache-protected SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
-    CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
-    "$BUILDER" workspace images/workspace/Dockerfile . >"$work/lane-rejection.out" 2>&1; then
-  fail 'published workspace accepted the Dev delivery compiler cache'
-fi
-if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
-    SCCACHE_BUCKET=example-ci-cache-protected-workspace SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
-    CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
-    "$BUILDER" workspace images/workspace/Dockerfile . >"$work/lane-rejection.out" 2>&1; then
-  fail 'published workspace accepted the Dev delivery prefix in its own bucket'
-fi
-if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
-    SCCACHE_BUCKET=example-ci-cache-protected-workspace SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
-    CODEWIRE_SCCACHE_PREFIX=protected/codewire/workspace/v1 \
-    "$BUILDER" services deployments/docker/services.Dockerfile . >"$work/lane-rejection.out" 2>&1; then
-  fail 'a non-support image accepted the protected-workspace compiler cache'
-fi
+# Every published image writes only the one protected CI cache (infra#1544):
+# any other bucket is refused, whatever its prefix.
+for image in 'workspace images/workspace/Dockerfile' 'services deployments/docker/services.Dockerfile'; do
+  # shellcheck disable=SC2086 # Each fixture is a deliberate argument vector.
+  if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
+      SCCACHE_BUCKET=example-ci-cache-protected-workspace SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+      CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
+      "$BUILDER" $image . >"$work/lane-rejection.out" 2>&1; then
+    fail "published image ${image%% *} accepted a bucket other than the protected cache"
+  fi
+  grep -Fq 'Published images may use only the protected sccache bucket' "$work/lane-rejection.out" ||
+    fail "published image ${image%% *} rejection was not attributable"
+done
 
 # Exercise old release sources and explicit cold mode through the real argument
 # construction. Only the synthetic registry manifests are removed between runs.
@@ -1703,8 +1696,8 @@ for variant in legacy disabled protected; do
         "$BUILDER" workspace images/workspace/Dockerfile . ;;
     protected)
       CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
-        SCCACHE_BUCKET=example-ci-cache-protected-workspace SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
-        CODEWIRE_SCCACHE_PREFIX=protected/codewire/workspace/v1 CODEWIRE_BASE_IMAGE_REF="$base_ref" \
+        SCCACHE_BUCKET=example-ci-cache-protected SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+        CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 CODEWIRE_BASE_IMAGE_REF="$base_ref" \
         "$BUILDER" workspace images/workspace/Dockerfile . ;;
   esac
   [[ "$(build_invocation_count)" == 1 ]] || fail "$variant workspace was not built exactly once"
@@ -1717,7 +1710,7 @@ for variant in legacy disabled protected; do
   if [[ "$variant" == protected ]]; then
     grep -qF -- '--no-cache-filter workspace-floating-tools' "$FAKE_DOCKER_CALLS" || fail 'protected compiler cache omitted freshness'
     grep -qF -- '--build-arg CODEWIRE_SCCACHE_MODE=r2' "$FAKE_DOCKER_CALLS" || fail 'protected workspace compiler API was lost'
-    grep -qF -- 'CODEWIRE_SCCACHE_PREFIX=protected/codewire/workspace/v1' "$FAKE_DOCKER_CALLS" || fail 'protected compiler prefix was lost'
+    grep -qF -- 'CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1' "$FAKE_DOCKER_CALLS" || fail 'protected compiler prefix was lost'
   else
     grep -qF -- '--no-cache ' "$FAKE_DOCKER_CALLS" || fail "$variant workspace lacks cold-layer bypass"
     if grep -qF -- '--no-cache-filter' "$FAKE_DOCKER_CALLS"; then fail 'publisher combined exclusive no-cache flags'; fi

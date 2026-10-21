@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Exchange this exact Codewire CI job's Forgejo OIDC token for the disposable
-# protected R2 cache credential and write it as a private AWS credentials file.
-# The protected prefix is the trusted compiler cache: only the canonical-main
-# deploy lane's own publisher identity may read this document, so untrusted
-# pull-request builds can never poison the objects protected builds consume.
+# Exchange this exact Codewire CI job's Forgejo OIDC token for the write token of
+# the one Codewire CI cache (infra#1544) and write it as a private AWS
+# credentials file. Only canonical-main publisher identities may read it: the
+# Dev deploy lane and the support-images lane, each named by its job's
+# OPENBAO_ROLE. Pull requests only read the cache, through a read-only token.
 set -euo pipefail
 
 fail() {
@@ -23,11 +23,15 @@ readonly credentials_file="$1"
 : "${GITHUB_REF:?Forgejo ref is required}"
 
 case "$GITHUB_EVENT_NAME|$GITHUB_REF" in
-  push\|refs/heads/main)
-    readonly openbao_role='codewire-source-dev-publisher'
-    readonly openbao_audience='openbao-codewire-source-dev-publisher'
-    ;;
+  push\|refs/heads/main) ;;
   *) fail 'event and ref are not approved for the protected cache' ;;
+esac
+case "${OPENBAO_ROLE:-}" in
+  codewire-source-dev-publisher|codewire-source-support-publisher)
+    readonly openbao_role="$OPENBAO_ROLE"
+    readonly openbao_audience="openbao-$OPENBAO_ROLE"
+    ;;
+  *) fail 'only the Dev and support publishers may write the protected cache' ;;
 esac
 
 [[ -d "$(dirname "$credentials_file")" && ! -e "$credentials_file" && ! -L "$credentials_file" ]] ||

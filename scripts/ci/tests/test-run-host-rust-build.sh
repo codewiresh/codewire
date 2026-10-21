@@ -57,11 +57,11 @@ if env PATH="$work/bin:$PATH" \
   CARGO_TARGET_DIR="$work/target" \
   CODEWIRE_SCCACHE_MODE=r2 \
   CODEWIRE_SCCACHE_CREDENTIALS_FILE="$work/r2.aws" \
-  CODEWIRE_SCCACHE_PREFIX=protected/codewire/test \
+  CODEWIRE_SCCACHE_PREFIX=other/codewire/test \
   SCCACHE_BUCKET=test \
   SCCACHE_ENDPOINT=https://example.invalid \
   "$RUNNER" true >/dev/null 2>&1; then
-  printf 'host Rust cache accepted a protected prefix in an untrusted job\n' >&2
+  printf 'host Rust cache accepted a prefix outside the reviewed caches\n' >&2
   exit 1
 fi
 

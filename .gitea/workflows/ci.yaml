@@ -1905,8 +1905,8 @@ jobs:
 
       - name: Select independent workspace caches
         env:
-          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
-          CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ github.event.inputs.layer_cache }}
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'local' || github.event.inputs.rust_cache }}
+          CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'local' || github.event.inputs.layer_cache }}
         run: scripts/ci/setup/select-untrusted-workspace-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Prove labeled R2 backend compatibility
@@ -1998,7 +1998,7 @@ jobs:
 
       - name: Select existing compiler cache
         env:
-          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'local' || github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Build exact Kind service images
@@ -2075,7 +2075,7 @@ jobs:
 
       - name: Select existing compiler cache
         env:
-          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'local' || github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Build exact Kind daemon image
@@ -2151,7 +2151,7 @@ jobs:
 
       - name: Select existing compiler cache
         env:
-          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'local' || github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Install pinned protoc for Rust compilation
@@ -2496,8 +2496,8 @@ jobs:
 
       - name: Select independent measurement caches
         env:
-          CODEWIRE_SCCACHE_REQUEST: ${{ matrix.compiler == 'r2' && 'auto' || 'disabled' }}
-          CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ matrix.layers == 'r2' && 'auto' || 'disabled' }}
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'local' || matrix.compiler == 'r2' && 'auto' || 'disabled' }}
+          CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'local' || matrix.layers == 'r2' && 'auto' || 'disabled' }}
         run: scripts/ci/setup/select-untrusted-workspace-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Bind measurement modes and source
@@ -2563,8 +2563,8 @@ jobs:
 
       - name: Select existing probe cache identity once
         env:
-          CODEWIRE_SCCACHE_REQUEST: auto
-          CODEWIRE_BUILDKIT_CACHE_REQUEST: auto
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'local' || 'auto' }}
+          CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'local' || 'auto' }}
         run: scripts/ci/setup/select-untrusted-workspace-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Run bounded cache effect probes

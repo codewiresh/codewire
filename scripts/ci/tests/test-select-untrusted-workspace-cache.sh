@@ -66,17 +66,17 @@ for rust in disabled local auto; do
   done
 done
 # Pull requests read main's caches read-only; canonical main reads and writes them.
-grep -Fxq SCCACHE_BUCKET=example-ci-cache-main "$work/env"
-grep -Fxq CODEWIRE_SCCACHE_PREFIX=main/codewire/v1 "$work/env"
+grep -Fxq SCCACHE_BUCKET=example-ci-cache-protected "$work/env"
+grep -Fxq CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 "$work/env"
 grep -Fxq CODEWIRE_R2_CACHE_TRUST=main-read "$work/env"
 grep -Fxq SCCACHE_S3_RW_MODE=READ_ONLY "$work/env"
 grep -Fxq 'fetch main-read' "$work/fetch-calls"
 ! grep -Fq untrusted "$work/env" || exit 1
 : >"$work/env"; : >"$work/fetch-calls"
 TEST_REF=refs/heads/main select_cache auto auto "$credential_work/runner/main.aws" >"$work/output"
-grep -Fxq SCCACHE_BUCKET=example-ci-cache-main "$work/env"
-grep -Fxq CODEWIRE_SCCACHE_PREFIX=main/codewire/v1 "$work/env"
-grep -Fxq SCCACHE_S3_KEY_PREFIX=main/codewire/v1 "$work/env"
+grep -Fxq SCCACHE_BUCKET=example-ci-cache-protected "$work/env"
+grep -Fxq CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 "$work/env"
+grep -Fxq SCCACHE_S3_KEY_PREFIX=protected/codewire/v1 "$work/env"
 grep -Fxq CODEWIRE_R2_CACHE_TRUST=main "$work/env"
 grep -Fxq 'fetch main' "$work/fetch-calls"
 ! grep -Eq 'untrusted|READ_ONLY' "$work/env" || exit 1

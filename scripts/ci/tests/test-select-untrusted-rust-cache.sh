@@ -79,8 +79,8 @@ grep -Fxq 'RUSTC_WRAPPER=/usr/local/bin/sccache' "$r2_env" || fail 'host rustc w
 grep -Fxq "SCCACHE_BASEDIRS=$ROOT" "$r2_env" || fail 'checkout path is not normalized'
 grep -Fxq 'SCCACHE_IGNORE_SERVER_IO_ERROR=1' "$r2_env" || fail 'cache failure is not best effort'
 # A pull request reads main's caches read-only and writes nothing remote.
-grep -Fxq 'SCCACHE_BUCKET=example-ci-cache-main' "$r2_env" || fail 'R2 bucket is not exact'
-grep -Fxq 'SCCACHE_S3_KEY_PREFIX=main/codewire/v1' "$r2_env" || fail 'main prefix is not exact'
+grep -Fxq 'SCCACHE_BUCKET=example-ci-cache-protected' "$r2_env" || fail 'R2 bucket is not exact'
+grep -Fxq 'SCCACHE_S3_KEY_PREFIX=protected/codewire/v1' "$r2_env" || fail 'main prefix is not exact'
 grep -Fxq 'SCCACHE_S3_RW_MODE=READ_ONLY' "$r2_env" || fail 'a pull request may write the main cache'
 grep -Fxq 'CODEWIRE_R2_CACHE_TRUST=main-read' "$r2_env" || fail 'pull-request trust is not main-read'
 [[ "$(tail -n 1 "$work/fetch.trust")" == main-read ]] || fail 'fetcher was not asked for the main-read token'
@@ -88,7 +88,7 @@ if grep -Fq untrusted "$r2_env"; then fail 'a pull request selected the untruste
 grep -Fxq "AWS_SHARED_CREDENTIALS_FILE=$r2_credentials" "$r2_env" || fail 'private credential path is not selected'
 # The server starts during selection, with the minute-long startup wait and an
 # idle timeout longer than any job, on the R2 mode's own socket.
-grep -Fxq "start bucket=example-ci-cache-main uds=$work/runner/codewire-sccache-r2.sock conf=$work/runner/codewire-sccache.conf idle=3600" \
+grep -Fxq "start bucket=example-ci-cache-protected uds=$work/runner/codewire-sccache-r2.sock conf=$work/runner/codewire-sccache.conf idle=3600" \
   "$work/sccache.calls" || fail 'R2 server was not started during selection'
 grep -Fxq "SCCACHE_SERVER_UDS=$work/runner/codewire-sccache-r2.sock" "$r2_env" || fail 'R2 socket is not selected'
 grep -Fxq "SCCACHE_CONF=$work/runner/codewire-sccache.conf" "$r2_env" || fail 'startup timeout config is not selected'
@@ -110,8 +110,8 @@ main_env="$work/main.env"
 main_credentials="$work/runner/main.aws"
 SELECT_EVENT=push SELECT_REF=refs/heads/main \
   run_selector auto "$work/bin/fetch-success" "$main_env" "$main_credentials" >"$work/main.out"
-grep -Fxq 'SCCACHE_BUCKET=example-ci-cache-main' "$main_env" || fail 'main bucket is not exact'
-grep -Fxq 'SCCACHE_S3_KEY_PREFIX=main/codewire/v1' "$main_env" || fail 'main prefix is not exact'
+grep -Fxq 'SCCACHE_BUCKET=example-ci-cache-protected' "$main_env" || fail 'main bucket is not exact'
+grep -Fxq 'SCCACHE_S3_KEY_PREFIX=protected/codewire/v1' "$main_env" || fail 'main prefix is not exact'
 if grep -Eq 'untrusted|READ_ONLY' "$main_env"; then
   fail 'canonical main selected an untrusted or read-only cache'
 fi

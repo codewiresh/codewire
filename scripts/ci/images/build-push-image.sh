@@ -96,30 +96,17 @@ case "$sccache_mode" in
         exit 2
         ;;
     esac
-    # Each publishing lane has its own bucket and credential, and a lane can
-    # name only its own: the support lane (base, workspace, confidential-probe)
-    # reads and writes the protected-workspace cache; every other published
-    # image uses the Dev delivery cache prefix and never the workspace one.
-    case "$image_name" in
-      base|workspace|confidential-probe)
-        if [ "$SCCACHE_BUCKET" != example-ci-cache-protected-workspace ] \
-            || [ "$CODEWIRE_SCCACHE_PREFIX" != protected/codewire/workspace/v1 ]; then
-          echo 'Support-lane images may use only the protected-workspace sccache bucket and prefix' >&2
-          exit 2
-        fi
-        ;;
+    # Every publishing lane writes the one CI cache that only main-only
+    # builders write (infra#1544).
+    if [ "$SCCACHE_BUCKET" != example-ci-cache-protected ]; then
+      echo 'Published images may use only the protected sccache bucket' >&2
+      exit 2
+    fi
+    case "$CODEWIRE_SCCACHE_PREFIX" in
+      protected/codewire/*) ;;
       *)
-        case "$CODEWIRE_SCCACHE_PREFIX" in
-          protected/codewire/workspace/*)
-            echo 'Only the support-lane images may use the protected-workspace sccache prefix' >&2
-            exit 2
-            ;;
-          protected/codewire/*) ;;
-          *)
-            echo 'Published-image sccache prefix must remain below protected/codewire/' >&2
-            exit 2
-            ;;
-        esac
+        echo 'Published-image sccache prefix must remain below protected/codewire/' >&2
+        exit 2
         ;;
     esac
     ;;

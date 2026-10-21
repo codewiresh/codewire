@@ -664,7 +664,7 @@ if steps[contract[0]] != expected:
     sys.exit("the workspace contract step differs from the reviewed exact-image step")
 build = [index for index, step in enumerate(steps) if step.get("id") == "build"]
 removal = [index for index, name in enumerate(names)
-           if name == "Remove the protected-workspace R2 compiler-cache credential"]
+           if name == "Remove the protected R2 compiler-cache credential"]
 if len(build) != 1 or len(removal) != 1 or not build[0] < removal[0] < contract[0]:
     sys.exit("the workspace contract does not follow the build and the credential removal")
 if (job.get("outputs") or {}).get("workspace_digest") != "${{ steps.contract.outputs.workspace_digest }}":
@@ -717,7 +717,7 @@ for mutation in "${contract_mutations[@]}"; do
   [[ -n "$(contract_step_violation "$contract_tree/workflow.yaml" 2>&1)" ]] ||
     fail "contract mutation was accepted: $label"
 done
-move_contract_before '      - name: Remove the protected-workspace R2 compiler-cache credential' >"$contract_tree/removal.yaml"
+move_contract_before '      - name: Remove the protected R2 compiler-cache credential' >"$contract_tree/removal.yaml"
 move_contract_before '      - name: Build the linux/amd64 base and workspace by digest' >"$contract_tree/build.yaml"
 for moved in removal build; do
   ! cmp -s "$WORKFLOW" "$contract_tree/$moved.yaml" || fail "contract move did not apply: $moved"

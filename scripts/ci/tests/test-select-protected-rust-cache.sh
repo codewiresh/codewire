@@ -38,7 +38,8 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$output" && -n "$url" ]]
 case "$url" in
-  https://git.example.invalid/*audience=openbao-codewire-source-dev-publisher)
+  https://git.example.invalid/*audience=openbao-codewire-source-dev-publisher|\
+  https://git.example.invalid/*audience=openbao-codewire-source-support-publisher)
     jq -n '{value:"synthetic-forgejo-jwt"}' >"$output"
     ;;
   https://openbao.example.invalid/v1/auth/forgejo-jwt/login)
@@ -73,6 +74,7 @@ run_selector() {
     GITHUB_OUTPUT="$work/$name.output" \
     GITHUB_EVENT_NAME="$event" \
     GITHUB_REF="$ref" \
+    OPENBAO_ROLE="${SELECT_ROLE:-codewire-source-dev-publisher}" \
     ACTIONS_ID_TOKEN_REQUEST_URL='https://git.example.invalid/api/actions/oidc?job=synthetic' \
     ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token' \
     FAKE_SECRET_ACCESS_KEY="$synthetic_secret" \
@@ -151,10 +153,9 @@ if env RUNNER_TEMP="$work/runner" GITHUB_OUTPUT="$work/existing.output" \
 fi
 rm -f -- "$work/runner/existing.aws"
 
-# Only the canonical-main Dev publisher job references the protected cache.
-# PCRE patterns: the protected-workspace cache is a different boundary with its
-# own selector (test-select-protected-workspace-rust-cache.sh) and must not
-# match these.
+# Only the canonical-main Dev deploy and support-images publisher jobs use the
+# protected cache, the one cache main-only builders write (infra#1544).
+# PCRE patterns: retired protected-workspace names must not match these.
 readonly -a protected_markers=(
   'select-protected-rust-cache\.sh'
   "${FETCHER_NAME//./\\.}"
@@ -162,8 +163,9 @@ readonly -a protected_markers=(
   'protected/codewire/(?!workspace/)'
   'sccache-r2/protected(?!-workspace)'
 )
+readonly SUPPORT_WORKFLOW="$ROOT/.gitea/workflows/support-images.yaml"
 while IFS= read -r -d '' workflow; do
-  [[ "$workflow" == "$DEPLOY_WORKFLOW" ]] && continue
+  [[ "$workflow" == "$DEPLOY_WORKFLOW" || "$workflow" == "$SUPPORT_WORKFLOW" ]] && continue
   for marker in "${protected_markers[@]}"; do
     if grep -Pq -- "$marker" "$workflow"; then
       fail "${workflow#"$ROOT/"} references the protected compiler cache ($marker)"
@@ -171,6 +173,24 @@ while IFS= read -r -d '' workflow; do
   done
 done < <(find "$ROOT/.gitea/workflows" "$ROOT/.forgejo/workflows" "$ROOT/.github/workflows" \
   -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null)
+# Each support build leg selects the protected cache as the support publisher,
+# on the protected runner tier, and removes the credential afterwards.
+for job_header in '  build-support-amd64:' '  build-support-arm64:'; do
+  support_job="$(awk -v header="$job_header" '
+    /^  [A-Za-z0-9_-]+:$/ { capture = ($0 == header) }
+    capture { print }
+  ' "$SUPPORT_WORKFLOW")"
+  [[ -n "$support_job" ]] || fail "Support images lacks its build job${job_header%:}"
+  grep -Fq 'select-protected-rust-cache.sh' <<<"$support_job" ||
+    fail "support build job${job_header%:} does not select the protected compiler cache"
+  grep -Exq '    runs-on: ci-protected(-metal)?' <<<"$support_job" ||
+    fail 'protected compiler cache is reachable outside the protected runner tier'
+  grep -Fxq '      OPENBAO_ROLE: codewire-source-support-publisher' <<<"$support_job" ||
+    fail 'support cache job is not the support publisher identity'
+  grep -Fxq '          SCCACHE_BUCKET: example-ci-cache-protected' <<<"$support_job" ||
+    fail "support build job${job_header%:} does not name the protected bucket"
+  grep -Fq 'shred -u' <<<"$support_job" || fail "support build job${job_header%:} does not remove the credential"
+done
 
 # Only the two protected build halves reference the protected compiler cache;
 # the publishing job and deploy selection never do.
@@ -208,14 +228,15 @@ done
 [[ "$(sed -n '/^on:$/,/^jobs:$/p' "$DEPLOY_WORKFLOW" | grep -Ec '^[a-z-]+:')" -eq 3 ]] ||
   fail 'Deploy Dev declares an unexpected key between its trigger and its jobs'
 
-# Untrusted cache selection never names a protected bucket, prefix, or document,
-# and the protected selector never names the untrusted ones.
+# ci.yaml cache selection reads and, on main, writes the same one CI cache
+# (infra#1544), but never through the Dev publisher's selector or fetcher; the
+# protected selector never names the untrusted cache.
 for untrusted in \
     scripts/ci/setup/select-untrusted-rust-cache.sh \
     scripts/ci/setup/select-untrusted-workspace-cache.sh \
     scripts/ci/setup/finish-untrusted-rust-cache.sh \
     scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh; do
-  for marker in "${protected_markers[@]}"; do
+  for marker in "${protected_markers[@]:0:2}"; do
     if grep -Pq -- "$marker" "$ROOT/$untrusted"; then
       fail "$untrusted references the protected compiler cache ($marker)"
     fi
@@ -232,17 +253,17 @@ for protected in \
   done
 done
 
-# Untrusted Kind image builds refuse the protected prefix before any build.
+# Kind image builds refuse a prefix outside the reviewed caches before any build.
 printf '[default]\n' >"$work/kind.aws"
 chmod 0600 "$work/kind.aws"
 if env CODEWIRE_DOCKER_BIN=/bin/false \
     CODEWIRE_SCCACHE_MODE=r2 \
     SCCACHE_BUCKET=example-ci-cache-untrusted \
     SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com \
-    CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
+    CODEWIRE_SCCACHE_PREFIX=other/codewire/v1 \
     CODEWIRE_SCCACHE_CREDENTIALS_FILE="$work/kind.aws" \
     "$ROOT/scripts/ci/images/build-kind-images.sh" >"$work/kind.out" 2>&1; then
-  fail 'untrusted Kind image build accepted the protected compiler-cache prefix'
+  fail 'Kind image build accepted a prefix outside the reviewed caches'
 fi
 grep -Fq 'Kind sccache prefix must remain below untrusted/codewire/' "$work/kind.out" ||
   fail 'untrusted Kind image build rejection was not attributable'

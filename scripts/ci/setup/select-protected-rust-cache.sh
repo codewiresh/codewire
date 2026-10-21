@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Select the compiler cache for the protected Dev runtime-image build.
+# Select the compiler cache for a protected canonical-main image build: the Dev
+# runtime images or the support images (the job's OPENBAO_ROLE).
 #
-# The shared protected R2 cache is best effort. When this exact canonical-main
-# deploy job obtains its protected credential, the build uses the dedicated
-# protected bucket and prefix. Any failure to obtain it (OpenBao document not
+# The one Codewire CI cache is best effort (infra#1544). When this exact
+# canonical-main publisher job obtains its protected credential, the build uses
+# the protected bucket and prefix. Any failure to obtain it (OpenBao document not
 # yet created, policy not yet reconciled, OpenBao or Forgejo OIDC outage, or a
 # malformed value) selects the job-local cache instead: the compiler cache must
 # never fail or block delivery. The fallback is the more conservative mode, so
