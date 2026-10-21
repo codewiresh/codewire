@@ -5,12 +5,25 @@
 # shellcheck disable=SC2034 # State is consumed by the sourcing script.
 
 integration_postgres_init() {
-  INTEGRATION_POSTGRES_CONTAINER="codewire-product-postgres-${GITHUB_RUN_ID:-local-$$}"
+  # Each run names its containers for its own process: the concurrent lanes of
+  # one merge qualification share a run ID, and on CI also a Docker daemon.
+  INTEGRATION_POSTGRES_CONTAINER="codewire-product-postgres-${GITHUB_RUN_ID:-local}-$$"
   INTEGRATION_POSTGRES_MANAGED=false
   INTEGRATION_POSTGRES_SOURCE=""
   INTEGRATION_POSTGRES_LANE_CONTAINERS=()
   INTEGRATION_POSTGRES_LANE_URL=""
   INTEGRATION_POSTGRES_LANE_URL_RUST=""
+}
+
+integration_postgres_require_tools() {
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "::error::local integration verification requires Docker or explicit DATABASE_URL and DATABASE_URL_RUST" >&2
+    return 1
+  fi
+  if ! command -v psql >/dev/null 2>&1; then
+    echo "::error::local integration verification requires psql" >&2
+    return 1
+  fi
 }
 
 integration_postgres_configure() {
@@ -35,6 +48,32 @@ integration_postgres_configure() {
     return
   fi
 
+  local image="${INTEGRATION_POSTGRES_IMAGE:-postgres:17-alpine}"
+
+  # A CI job runs in a container on its own Docker network, which cannot reach
+  # a port published on the Docker host's loopback. Without an explicit
+  # database, the run starts its own PostgreSQL on that network under its
+  # container name, so the concurrent lanes of one job never share one.
+  if [ -n "${INTEGRATION_DOCKER_NETWORK:-}" ]; then
+    if [[ "$INTEGRATION_DOCKER_NETWORK" =~ [^A-Za-z0-9_.-] ]]; then
+      echo "::error::invalid integration Docker network" >&2
+      return 1
+    fi
+    integration_postgres_require_tools || return 1
+    docker rm -f "$INTEGRATION_POSTGRES_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --rm --name "$INTEGRATION_POSTGRES_CONTAINER" --pids-limit 2048 \
+      --network "$INTEGRATION_DOCKER_NETWORK" \
+      --network-alias "$INTEGRATION_POSTGRES_CONTAINER" \
+      -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire \
+      "$image" >/dev/null
+    INTEGRATION_POSTGRES_MANAGED=true
+    DATABASE_URL="postgres://codewire:codewire@${INTEGRATION_POSTGRES_CONTAINER}:5432/codewire?sslmode=disable"
+    DATABASE_URL_RUST="postgres://codewire:codewire@${INTEGRATION_POSTGRES_CONTAINER}:5432/codewire"
+    integration_postgres_wait_ready "$DATABASE_URL" "job-network" || return 1
+    INTEGRATION_POSTGRES_SOURCE=network
+    return
+  fi
+
   if [ "${GITHUB_ACTIONS:-false}" = true ]; then
     DATABASE_URL="postgres://codewire:codewire@127.0.0.1:5432/codewire?sslmode=disable"
     DATABASE_URL_RUST="postgres://codewire:codewire@127.0.0.1:5432/codewire"
@@ -42,16 +81,8 @@ integration_postgres_configure() {
     return
   fi
 
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "::error::local integration verification requires Docker or explicit DATABASE_URL and DATABASE_URL_RUST" >&2
-    return 1
-  fi
-  if ! command -v psql >/dev/null 2>&1; then
-    echo "::error::local integration verification requires psql" >&2
-    return 1
-  fi
+  integration_postgres_require_tools || return 1
 
-  local image="${INTEGRATION_POSTGRES_IMAGE:-postgres:17-alpine}"
   local requested_port="${INTEGRATION_POSTGRES_HOST_PORT:-}"
   local publish="127.0.0.1::5432"
   local port=""
@@ -101,11 +132,12 @@ integration_postgres_configure() {
 }
 
 # A database lane gets its own disposable PostgreSQL beside the selected one:
-# on CI's job network when CI provides the database, or as another managed
+# on the CI job's network when the database is there, or as another managed
 # loopback container locally. Against any other explicit database there is
 # nowhere to create one, and lanes share that database one after another.
 integration_postgres_lanes_available() {
   [ "${INTEGRATION_POSTGRES_SOURCE:-}" = managed ] \
+    || [ "${INTEGRATION_POSTGRES_SOURCE:-}" = network ] \
     || { [ "${INTEGRATION_POSTGRES_SOURCE:-}" = explicit ] && [ -n "${INTEGRATION_DOCKER_NETWORK:-}" ]; }
 }
 

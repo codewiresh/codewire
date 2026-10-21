@@ -15,7 +15,9 @@ source "$ROOT/scripts/ci/verify/local-rust-cache.sh"
 select_local_rust_cache "$ROOT" || true
 CARGO_CI_TARGET_DIR="${CODEWIRE_CARGO_CI_TARGET_DIR:-$CARGO_TARGET_DIR}"
 CARGO_CI_DIR="$CARGO_CI_TARGET_DIR/ci"
-RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-product-integration-${GITHUB_RUN_ID:-local-$$}}"
+# Names below are per process: merge qualification runs several of these
+# side by side under one run ID (scripts/dev/preflight.sh --for-merge).
+RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-product-integration-${GITHUB_RUN_ID:-local}-$$}"
 DATABASE_URL_EXPLICIT=false
 DATABASE_URL_RUST_EXPLICIT=false
 [[ -v DATABASE_URL ]] && DATABASE_URL_EXPLICIT=true
@@ -57,7 +59,7 @@ else
   NATS_MONITOR_URL="http://127.0.0.1:${NATS_MONITOR_PORT}/healthz"
 fi
 TEMPORAL_CLI_VERSION="${TEMPORAL_CLI_VERSION:-1.5.0}"
-NATS_CONTAINER="codewire-product-nats-${GITHUB_RUN_ID:-local-$$}"
+NATS_CONTAINER="codewire-product-nats-${GITHUB_RUN_ID:-local}-$$"
 IDP_SIGNING_KEK_DIR=""
 BILLING_FIXTURE_LOADED=false
 

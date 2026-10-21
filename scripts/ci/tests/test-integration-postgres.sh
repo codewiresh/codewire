@@ -97,6 +97,61 @@ integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration$" "$FAKE_DOCKER_LOG"
 unset INTEGRATION_DOCKER_NETWORK
 
+# A CI job's network without an explicit database: the run starts its own
+# PostgreSQL on that network under its per-process container name, never a
+# loopback port the job container cannot reach. Its lanes join the network.
+reset_case
+GITHUB_ACTIONS=true
+INTEGRATION_DOCKER_NETWORK=codewire-fixture-net
+integration_postgres_configure
+[ "$INTEGRATION_POSTGRES_SOURCE" = network ]
+[ "$INTEGRATION_POSTGRES_CONTAINER" = "codewire-product-postgres-fixture-$$-$$" ]
+[ "$DATABASE_URL" = "postgres://codewire:codewire@$INTEGRATION_POSTGRES_CONTAINER:5432/codewire?sslmode=disable" ]
+[ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@$INTEGRATION_POSTGRES_CONTAINER:5432/codewire" ]
+grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER --pids-limit 2048 --network codewire-fixture-net --network-alias $INTEGRATION_POSTGRES_CONTAINER .* postgres:17-alpine$" "$FAKE_DOCKER_LOG"
+if grep -q -- '127.0.0.1:' "$FAKE_DOCKER_LOG"; then
+  echo 'a job-network PostgreSQL published a loopback port' >&2
+  exit 1
+fi
+grep -q "@$INTEGRATION_POSTGRES_CONTAINER:5432/codewire?sslmode=disable.*SELECT 1" "$FAKE_PSQL_LOG"
+integration_postgres_lanes_available
+integration_postgres_start_lane orchestration
+[ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@codewire-integration-postgres-orchestration:5432/codewire" ]
+grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net " "$FAKE_DOCKER_LOG"
+integration_postgres_cleanup
+grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
+grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration$" "$FAKE_DOCKER_LOG"
+[ "$INTEGRATION_POSTGRES_MANAGED" = false ]
+
+reset_case
+INTEGRATION_DOCKER_NETWORK='invalid/network'
+if integration_postgres_configure >/dev/null 2>&1; then
+  echo 'an invalid integration Docker network was accepted' >&2
+  exit 1
+fi
+[ ! -s "$FAKE_DOCKER_LOG" ]
+unset INTEGRATION_DOCKER_NETWORK
+
+# Concurrent runs under one run ID (the lanes of one merge qualification)
+# never share a run directory or a container name.
+: > "$FAKE_DOCKER_LOG"
+for _ in 1 2; do
+  if GITHUB_RUN_ID="fixture-shared-$$" CODEWIRE_LOCAL_RUST_CACHE=off \
+      "$ROOT/scripts/ci/verify/run-integration-verification.sh" no-such-mode >/dev/null 2>&1; then
+    echo 'an unknown integration mode was accepted' >&2
+    exit 1
+  fi
+done
+shared_run_dirs=("$ROOT/.tmp/codewire-product-integration-fixture-shared-$$-"*)
+rm -rf -- "${shared_run_dirs[@]}"
+[ "${#shared_run_dirs[@]}" -eq 2 ]
+[ "$(grep -c "^rm -f codewire-product-nats-fixture-shared-$$-[0-9]*$" "$FAKE_DOCKER_LOG")" -eq 2 ]
+[ "$(sort -u "$FAKE_DOCKER_LOG" | grep -c '^rm -f codewire-product-nats-')" -eq 2 ]
+first_container="$(bash -c 'GITHUB_RUN_ID=7; source "$1"; integration_postgres_init; printf %s "$INTEGRATION_POSTGRES_CONTAINER"' _ "$ROOT/scripts/ci/verify/integration-postgres.sh")"
+second_container="$(bash -c 'GITHUB_RUN_ID=7; source "$1"; integration_postgres_init; printf %s "$INTEGRATION_POSTGRES_CONTAINER"' _ "$ROOT/scripts/ci/verify/integration-postgres.sh")"
+[[ "$first_container" == codewire-product-postgres-7-* ]]
+[ "$first_container" != "$second_container" ]
+
 reset_case
 INTEGRATION_POSTGRES_HOST_PORT=55432
 FAKE_DOCKER_PORT=55432
