@@ -217,17 +217,19 @@ def external_download_errors(text):
 
 # A target build that fails cancels its run, so the other targets stop instead
 # of building a delivery that can no longer be assembled (#2995). Each job that
-# can run beside another ends with ci.yaml's own fail-fast step, gated on its
-# own failure and on the job's existing step condition.
+# can run beside another ends with one shared fail-fast step, gated on its own
+# failure and on the job's existing step condition. The checked-in
+# cli-release.yaml holds the reference copy: the dry run, support-images and
+# deploy-prod match it, and cancel_probe_cases runs it.
 TARGET_JOBS = ("build-runtime-linux", "build-helper-darwin", "sign-helper", "build-darwin",
                "sign-darwin", "build-linux-musl", "build-linux-gnu")
 CANCEL_STEP = "Cancel the run after this failure"
 
 
-def ci_cancel_body(ci_text):
-    """The run and env lines of ci.yaml's fail-fast step, which every copy shares."""
+def cancel_body(reference_text):
+    """The run and env lines of the reference fail-fast step, which every copy shares."""
     bodies = set()
-    for block in jobs(ci_text).values():
+    for block in jobs(reference_text).values():
         lines = block.splitlines()
         for index, line in enumerate(lines):
             if line == f"      - name: {CANCEL_STEP}":
@@ -239,11 +241,11 @@ def ci_cancel_body(ci_text):
     return bodies.pop() if len(bodies) == 1 else None
 
 
-def fail_fast_errors(text, ci_text, gates):
+def fail_fast_errors(text, reference_text, gates):
     """Errors unless each target job ends with exactly one fail-fast step."""
-    errors, reference = [], ci_cancel_body(ci_text)
+    errors, reference = [], cancel_body(reference_text)
     if reference is None:
-        return ["ci.yaml has no single fail-fast step to match"]
+        return ["cli-release.yaml has no single fail-fast step to match"]
     blocks = jobs(text)
     for job in TARGET_JOBS:
         named = steps(blocks.get(job, ""))
@@ -258,7 +260,7 @@ def fail_fast_errors(text, ci_text, gates):
         own = "\n".join(line for line in body.rstrip("\n").splitlines()
                         if not line.startswith("        #") and not line.startswith("        if:"))
         if own != reference:
-            errors.append(f"target job {job} fail-fast step differs from ci.yaml's")
+            errors.append(f"target job {job} fail-fast step differs from cli-release.yaml's")
     return errors
 
 
@@ -270,6 +272,86 @@ def drop_cancel(text, job):
     block = text[start:end]
     cut = block.index(f"      - name: {CANCEL_STEP}\n")
     return text[:start] + block[:cut].rstrip("\n") + text[end:]
+
+
+FAKE_CURL = """#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$FAIL_FAST_ARGS"
+config=''
+while [ "$#" -gt 0 ]; do
+  [ "$1" = --config ] && config="$2"
+  shift
+done
+cp "$config" "$FAIL_FAST_CONFIG"
+printf '%s' "$FAIL_FAST_STATUS"
+exit "${FAIL_FAST_EXIT:-0}"
+"""
+# name, HTTP status, curl exit, run id, expected line.
+CANCEL_CASES = (
+    ("accepted", "200", "0", "8185", "requested cancellation of run 8185 (HTTP 200)"),
+    ("forbidden", "403", "0", "8185", "requested cancellation of run 8185 (HTTP 403)"),
+    ("network", "000", "7", "8185", "requested cancellation of run 8185 (HTTP 000)"),
+    ("missing_run", "200", "0", "", "run identity or token unavailable; run not cancelled"),
+)
+
+
+def cancel_probe_cases(reference_text):
+    """Run the reference fail-fast step against a fake curl.
+
+    It never fails the job, logs before the POST (the cancel severs log upload,
+    infra#1229), posts exactly this run's cancel, passes the job token only in
+    a private config file it removes, and calls nothing without a run id.
+    """
+    body = cancel_body(reference_text)
+    if body is None:
+        raise ValueError("cli-release.yaml has no single fail-fast step to probe")
+    lines = body.splitlines()
+    run = lines[lines.index("        run: |") + 1:]
+    if any(line and not line.startswith("          ") for line in run):
+        raise ValueError("the fail-fast run block is not one literal block")
+    script = "set -eo pipefail\n" + "\n".join(line[10:] for line in run) + "\n"
+    token = "synthetic-fail-fast-token"
+    with tempfile.TemporaryDirectory(prefix="cw-release-cancel-") as directory:
+        work = Path(directory)
+        (work / "bin").mkdir()
+        curl = work / "bin/curl"
+        curl.write_text(FAKE_CURL)
+        curl.chmod(0o700)
+        step = work / "step.sh"
+        step.write_text(script)
+        args, config = work / "args", work / "config"
+        for name, status, curl_exit, run_id, expected in CANCEL_CASES:
+            args.unlink(missing_ok=True)
+            config.unlink(missing_ok=True)
+            env = {"PATH": f"{work / 'bin'}:/usr/bin:/bin", "HOME": str(work), "TMPDIR": str(work),
+                   "GITHUB_RUN_ID": run_id, "GITHUB_REPOSITORY": "codewire/codewire",
+                   "GITHUB_SERVER_URL": "https://forgejo.example", "GITEA_TOKEN": token,
+                   "FAIL_FAST_STATUS": status, "FAIL_FAST_EXIT": curl_exit, "FAIL_FAST_ARGS": str(args),
+                   "FAIL_FAST_CONFIG": str(config), "FAIL_FAST_FLUSH_SECONDS": "0"}
+            result = subprocess.run(["/usr/bin/bash", str(step)], env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                    timeout=30, check=False)
+            out = result.stdout
+            if result.returncode != 0:
+                raise RuntimeError(f"fail-fast {name}: step exited {result.returncode}: {out}")
+            if expected not in out:
+                raise RuntimeError(f"fail-fast {name}: missing {expected!r}: {out}")
+            if token in out or (args.exists() and token in args.read_text()):
+                raise RuntimeError(f"fail-fast {name}: token leaked into output or curl arguments")
+            if not run_id:
+                if args.exists():
+                    raise RuntimeError("fail-fast: called curl without a run id")
+                continue
+            if f"fail-fast: job unknown failed; requesting cancellation of run {run_id}" not in out:
+                raise RuntimeError(f"fail-fast {name}: missing the pre-cancel evidence line: {out}")
+            sent = args.read_text().splitlines()
+            if ("https://forgejo.example/api/v1/repos/codewire/codewire/actions/runs/8185/cancel" not in sent
+                    or "POST" not in sent):
+                raise RuntimeError(f"fail-fast {name}: did not POST this run's cancel")
+            if f'header = "Authorization: token {token}"' not in config.read_text().splitlines():
+                raise RuntimeError(f"fail-fast {name}: the token was not passed in the config file")
+            if list(work.glob("tmp.*")):
+                raise RuntimeError(f"fail-fast {name}: left its credential file behind")
+    return len(CANCEL_CASES)
 
 
 def check(text, ci_text):
@@ -608,7 +690,7 @@ def check(text, ci_text):
         need(len(refs) == 1 and refs <= set(re.findall(r"https://git\.example\.invalid/noel/" + action + r"[0-9a-f]{40}",
                                                        ci_text)), f"{action} is not the pinned mirrored action")
     errors.extend(fail_fast_errors(
-        text, ci_text, {"sign-helper": HELPER_IF.strip().removeprefix("if: ")}))
+        text, WORKFLOW.read_text(), {"sign-helper": HELPER_IF.strip().removeprefix("if: ")}))
     return errors
 
 
@@ -1205,7 +1287,7 @@ def check_dry_run(text, release):
          f"sealed toolchain lacks: {runner_targets_sealed(text)}")
     need("    branches: [main]" in text and "pull_request" not in text,
          "the dry run is not limited to main")
-    errors.extend(fail_fast_errors(text, CI.read_text(), {job: "steps.superseded.outputs.superseded == 'false'" for job in (
+    errors.extend(fail_fast_errors(text, release, {job: "steps.superseded.outputs.superseded == 'false'" for job in (
         "build-runtime-linux", "build-helper-darwin", "build-darwin", "build-linux-musl", "build-linux-gnu")}))
     return errors
 
@@ -1472,9 +1554,14 @@ def main():
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
         print(f"test-cli-release-workflow: FAIL pre-read route proof: {error}", file=sys.stderr)
         return 1
+    try:
+        cancel_cases = cancel_probe_cases(text)
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(f"test-cli-release-workflow: FAIL fail-fast step proof: {error}", file=sys.stderr)
+        return 1
     print(f"test-cli-release-workflow: PASS properties=accepted mutations_rejected={len(MUTATIONS)} "
           f"dry_run_mutations_rejected={len(DRY_RUN_MUTATIONS)} "
-          f"pre_read_route_cases={route_cases}")
+          f"pre_read_route_cases={route_cases} fail_fast_cases={cancel_cases}")
     return 0
 
 

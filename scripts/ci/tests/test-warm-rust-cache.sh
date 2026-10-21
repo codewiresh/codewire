@@ -103,9 +103,8 @@ for name, job in jobs.items():
     assert str(checkout.get("uses", "")).startswith("https://git.example.invalid/noel/actions-checkout@"), name
     assert steps[index]["if"] == checkout["if"], name
     assert steps[index]["run"] == "scripts/ci/setup/select-warm-rust-cache.sh", name
-    # The fail-fast cancel stays the single last step; the report runs just before it.
-    assert steps[-1]["name"] == "Cancel the run after this failure", name
-    report = steps[-2]
+    # The report is the job's last step.
+    report = steps[-1]
     assert report["name"] == "Report the warm Rust cache", name
     assert report["if"] == checkout["if"].replace("${{ ", "${{ always() && ", 1), name
 assert wired == expected, sorted(wired ^ expected)

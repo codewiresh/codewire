@@ -930,10 +930,11 @@ grep -qF "::error::the %s support build exceeded its %s-minute budget in the %s 
 "$ROOT/scripts/ci/tests/test-fetch-openbao-trusted-buildkit-client.sh" >/dev/null
 
 # A failed half of the support pair cancels the run instead of leaving the
-# other half building on a protected slot (#2987). Each half ends with ci.yaml's
-# own fail-fast step, gated on its own failure.
+# other half building on a protected slot (#2987). Each half ends with the
+# release workflow's fail-fast step, gated on its own failure; that copy is the
+# one test-cli-release-workflow.py proves.
 pair_fail_fast_violation() {
-  python3 - "$1" "$ROOT/.gitea/workflows/ci.yaml" <<'PY'
+  python3 - "$1" "$ROOT/.gitea/workflows/cli-release.yaml" <<'PY'
 import sys
 
 import yaml
@@ -941,13 +942,13 @@ import yaml
 NAME = "Cancel the run after this failure"
 try:
     jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
-    ci_jobs = yaml.safe_load(open(sys.argv[2]))["jobs"]
+    release_jobs = yaml.safe_load(open(sys.argv[2]))["jobs"]
 except Exception as error:  # A mutation may break the document itself.
     sys.exit(f"the workflow does not parse: {error}")
-reference = [step for job in ci_jobs.values() for step in job.get("steps") or []
+reference = [step for job in release_jobs.values() for step in job.get("steps") or []
              if step.get("name") == NAME]
 if not reference:
-    sys.exit("ci.yaml has no fail-fast step to match")
+    sys.exit("cli-release.yaml has no fail-fast step to match")
 for job in ("build-support-amd64", "build-support-arm64"):
     steps = (jobs.get(job) or {}).get("steps") or []
     cancels = [step for step in steps if step.get("name") == NAME]
@@ -957,7 +958,7 @@ for job in ("build-support-amd64", "build-support-arm64"):
     if step.get("if") != "${{ failure() }}":
         sys.exit(f"{job} cancels the run on something other than its own failure")
     if step.get("run") != reference[0]["run"] or step.get("env") != reference[0]["env"]:
-        sys.exit(f"{job} fail-fast step differs from ci.yaml's")
+        sys.exit(f"{job} fail-fast step differs from cli-release.yaml's")
 PY
 }
 violation="$(pair_fail_fast_violation "$WORKFLOW" 2>&1)" && [[ -z "$violation" ]] || fail "$violation"

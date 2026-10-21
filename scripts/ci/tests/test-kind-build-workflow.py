@@ -165,7 +165,6 @@ class WorkflowContractTests(unittest.TestCase):
                 clean = named_step(job, "Clean compiler cache credentials")
                 self.assertEqual(clean["if"], "${{ always() }}")
                 self.assertLess(job["steps"].index(cache), job["steps"].index(clean))
-                self.assertIs(job["steps"][-1], named_step(job, "Cancel the run after this failure"))
 
     def test_kind_workspace_takes_the_pin_unless_the_definition_changed(self) -> None:
         selection = self.jobs["verification-selection"]
@@ -443,9 +442,6 @@ class WorkflowContractTests(unittest.TestCase):
             named_step(edge, "Delete the shard Kind cluster")["run"],
             'scripts/ci/verify/kind-e2e.sh down || true',
         )
-        cancel = named_step(edge, "Cancel the run after this failure")
-        self.assertIs(edge["steps"][-1], cancel)
-
         # A failed dashboard leg uploads its Playwright test results before
         # teardown; no other leg has browser output to preserve.
         upload = named_step(edge, "Upload dashboard browser test results on failure")
