@@ -442,7 +442,9 @@ def main():
     udp("udp-1.1.1.1-123", "1.1.1.1", 123, b"\x1b" + b"\0" * 47)
     udp("udp-192.0.2.1-123", "192.0.2.1", 123, b"\x1b" + b"\0" * 47)
     udp("udp-192.0.2.1-5353", "192.0.2.1", 5353, dns_query("example.com"))
-    tcp("tcp-192.0.2.1-53", "192.0.2.1", 53)
+    # The worker's own address serves only UDP DNS: any TCP port is refused (#3060).
+    for port in (53, 7777, 8080):
+        tcp(f"tcp-192.0.2.1-{port}", "192.0.2.1", port)
     for host, port in DENIED_PORTS:
         tcp(f"tcp-{host}-{port}", host, port)
     for host in PROTECTED + tuple(args.host_address):

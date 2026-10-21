@@ -466,6 +466,39 @@ mod tests {
         );
     }
 
+    /// A guest falls back to DNS over TCP only on a truncated reply, and
+    /// nothing serves TCP at the resolver (#3060), so every reply must fit
+    /// whole: an AAAA answer for the longest name fits the smallest IPv4
+    /// datagram every host accepts, with TC clear.
+    #[test]
+    fn the_longest_answer_fits_one_datagram_and_is_never_truncated() {
+        let name = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        assert_eq!(name.len(), MAX_DNS_NAME_LEN);
+        let mut dns = dns_query(&name);
+        let qtype = dns.len() - 4;
+        dns[qtype..qtype + 2].copy_from_slice(&28u16.to_be_bytes());
+        let packet = query_packet(DNS_PORT, &dns);
+        let question =
+            parse_ipv4_dns_question(&packet, RESOLVER, 1232).expect("longest DNS question");
+        assert_eq!(question.record_type, DnsRecordType::Aaaa);
+        let answer_ip = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x44);
+        let response = build_ipv4_dns_response(&question, DnsAnswer::Ipv6(answer_ip), 30, 576)
+            .expect("the longest answer fits");
+        let ipv4 = Ipv4Packet::new_checked(response.as_slice()).expect("response IPv4");
+        let udp = UdpPacket::new_checked(ipv4.payload()).expect("response UDP");
+        let reply = udp.payload();
+        let flags = u16::from_be_bytes([reply[2], reply[3]]);
+        assert_eq!(flags & 0x0200, 0, "TC is never set");
+        assert_eq!(u16::from_be_bytes([reply[6], reply[7]]), 1, "one answer");
+        assert_eq!(&reply[reply.len() - 16..], &answer_ip.octets());
+    }
+
     /// musl's res_mkquery, and so BusyBox nslookup, sets AD in its queries.
     #[test]
     fn authentic_data_query_bit_is_admitted_and_never_answered() {

@@ -41,6 +41,8 @@ NOT_CONNECTED = {"timeout", "refused", "ENETUNREACH", "EHOSTUNREACH", "EADDRNOTA
                  "EAFNOSUPPORT", "ECONNRESET", "EPERM", "EACCES"}
 # Reachable paths reviewed and recorded as safe, with where the finding lives.
 ACCEPTED_REVIEWS = {}
+# TCP to the network worker's own address, which it must refuse visibly.
+WORKER_TCP = ("tcp-192.0.2.1-", "tcp-protected-192.0.2.1-")
 # Docker gives containers CAP_NET_RAW and their own network namespace; their
 # traffic still leaves through the VM's cw0, which the other probes prove.
 EXPECTED_INTERFACES = {"workload": "cw0 lo", "docker": "eth0 lo"}
@@ -96,6 +98,9 @@ def judge(case, outcome, detail, where="workload"):
     if case.startswith(("tcp-", "tcp6-")):
         if outcome == "unknown":
             return "invalid", detail
+        if case.startswith(WORKER_TCP):
+            # Nothing serves TCP there; the worker refuses at once (#3060).
+            return ("pass", "") if outcome == "refused" else ("bypass", f"TCP {outcome}, not refused")
         return ("pass", "") if outcome in NOT_CONNECTED else ("bypass", f"TCP {outcome}")
     if case.startswith("dns-alternating-answers"):
         if outcome == "refused":
@@ -178,7 +183,7 @@ class GuestRunner:
         self.environment = environment
 
     def sh(self, command, timeout):
-        return self.call("run", self.environment, "--no-tty", "--", "sh", "-c", command, timeout=timeout)
+        return self.call("run", "--in", self.environment, "--no-tty", "--", "sh", "-c", command, timeout=timeout)
 
     def stage(self):
         encoded = base64.b64encode(PROBE.read_bytes()).decode()

@@ -476,6 +476,18 @@ async fn dispatch_packets<B: EgressBroker>(
             continue;
         }
         if tcp.destination.ip() == IpAddr::V4(WORKER_IP) {
+            if tcp.initial_syn {
+                // Nothing serves TCP at the worker's address (its DNS is UDP),
+                // and the catch-all listener must not accept a connection
+                // there: refuse it as any refused dial is (#3060).
+                if let Ok(refusal) = build_ipv4_tcp_refusal(&packet) {
+                    outbound
+                        .send(refusal)
+                        .await
+                        .map_err(|_| NetworkSessionError::Engine)?;
+                }
+                continue;
+            }
             // Host-port publication creates an outbound userspace-netstack
             // connection from WORKER_IP to one exact guest port. Feed return
             // packets to that stack; it rejects non-matching connections.
@@ -1079,6 +1091,43 @@ mod tests {
             assert_eq!(u16::from_be_bytes([refusal[22], refusal[23]]), 40_000);
             assert_eq!(broker.dials.load(Ordering::Acquire), usize::from(authorize));
         }
+    }
+
+    /// #3060: a guest connection to the worker's own address is refused at
+    /// once, on every port, without asking the broker; nothing serves TCP
+    /// there and the catch-all listener must not accept it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_to_the_worker_address_is_refused_without_the_broker() {
+        let broker = Arc::new(DialBroker {
+            authorize: true,
+            connect: true,
+            dial: Duration::ZERO,
+            dials: AtomicUsize::new(0),
+        });
+        let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
+        for (source_port, port) in [(41_022, 22), (41_053, 53), (41_080, 80), (41_443, 443)] {
+            let syn = tcp_packet(source_port, SocketAddrV4::new(WORKER_IP, port), 1, 0, 0x02);
+            write_guest_packet(&mut guest, &mut session, &syn)
+                .await
+                .unwrap();
+            let packets = drain(&mut guest, &mut session, Duration::from_millis(200)).await;
+            let tcp: Vec<&Vec<u8>> = packets.iter().filter(|packet| packet[9] == 6).collect();
+            assert!(
+                !tcp.iter().any(|packet| tcp_flags(packet) & 0x12 == 0x12),
+                "port {port}: a handshake was offered"
+            );
+            let refusal = tcp
+                .iter()
+                .find(|packet| tcp_flags(packet) & 0x04 != 0)
+                .unwrap_or_else(|| panic!("port {port}: no RST"));
+            assert_eq!(tcp_flags(refusal), 0x14, "port {port}: RST and ACK");
+            assert_eq!(u16::from_be_bytes([refusal[22], refusal[23]]), source_port);
+        }
+        assert_eq!(
+            broker.dials.load(Ordering::Acquire),
+            0,
+            "the broker is never asked"
+        );
     }
 
     /// #3003: the guest's handshake waits for the upstream dial, and a SYN the
