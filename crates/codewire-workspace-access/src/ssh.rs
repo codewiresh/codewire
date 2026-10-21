@@ -25,7 +25,8 @@ mod stock_credentials;
 use forward::Forwarding;
 pub use forward::{
     FORWARD_CLOSE_GRACE, FORWARD_DIAL_TIMEOUT, ForwardDialError, ForwardDialer, ForwardIo,
-    ForwardRefusal, ForwardTarget, MAX_FORWARDS_PER_CONNECTION, WorkloadLoopbackDialer,
+    ForwardRefusal, ForwardTarget, MAX_FORWARDS_PER_CONNECTION, PlatformListeners,
+    WorkloadLoopbackDialer,
 };
 
 /// How often the server asks a silent client whether it is still there, and
@@ -837,9 +838,15 @@ where
 
     /// Serve `direct-tcpip` channels (`ssh -L`, `ssh -W`, `ssh -D`, VS Code
     /// Remote-SSH) through `dialer`, which must reach the workload's own
-    /// network namespace. Without a dialer they are refused with a reason.
-    pub fn with_port_forwarding(mut self, dialer: Arc<dyn ForwardDialer>) -> Self {
-        self.forwarding = Some(Forwarding::new(dialer));
+    /// network namespace, refusing the `platform` listeners there
+    /// (`codewire_daemon_proto::platform_listeners`). Without a dialer every
+    /// forward is refused with a reason.
+    pub fn with_port_forwarding(
+        mut self,
+        dialer: Arc<dyn ForwardDialer>,
+        platform: Arc<PlatformListeners>,
+    ) -> Self {
+        self.forwarding = Some(Forwarding::new(dialer, platform));
         self
     }
 
@@ -990,12 +997,6 @@ pub fn parse_exec_command(command: &[u8]) -> Result<Vec<String>, WorkspaceSshErr
         .map_err(|err| WorkspaceSshError::InvalidExecCommand(err.to_string()))?;
     shell_words::split(command)
         .map_err(|err| WorkspaceSshError::InvalidExecCommand(err.to_string()))
-}
-
-/// Whether a `direct-tcpip` channel may reach `host:port`: only a loopback
-/// address inside the workload; see [`ForwardTarget::local`].
-pub fn allow_local_port_forward(host: &str, port: u32) -> bool {
-    ForwardTarget::local(host, port).is_ok()
 }
 
 pub fn allow_reverse_port_forward(_host: &str, _port: u32) -> bool {
@@ -1971,33 +1972,6 @@ mod tests {
                 height: i32::MAX,
             })
         );
-    }
-
-    #[test]
-    fn local_port_forward_policy_allows_only_pod_local_targets() {
-        for host in [
-            "",
-            "localhost",
-            "LOCALHOST",
-            "127.0.0.1",
-            "0.0.0.0",
-            "::1",
-            "::",
-        ] {
-            assert!(
-                allow_local_port_forward(host, 8080),
-                "{host:?} should be allowed"
-            );
-        }
-
-        for host in ["10.0.0.1", "8.8.8.8", "codewire.dev"] {
-            assert!(
-                !allow_local_port_forward(host, 8080),
-                "{host:?} should be denied"
-            );
-        }
-
-        assert!(!allow_local_port_forward("127.0.0.1", 0));
     }
 
     #[test]

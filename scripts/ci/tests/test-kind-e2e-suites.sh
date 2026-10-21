@@ -690,10 +690,17 @@ for binding in 'kind_credential_cli setup ssh --ssh-config-file "$config"' \
     'timeout 60 "$tool" -F "$ssh_config"' "'printf a && printf b | tr b B; echo \" \$((1+2)) \$HOME\"; exit 7'" \
     'scp -O' 'sftp -b' '[ "$status" -eq 255 ]' 'wait_kind_credential_environment "$environment" destroyed' \
     '-W "127.0.0.1:$forward_port"' '-L "127.0.0.1:$local_port:127.0.0.1:$forward_port"' \
-    '-D "127.0.0.1:$local_port"' '--socks5-hostname' '-W 169.254.169.254:80' \
-    "port forwarding reaches only this environment's own loopback"; do
+    '-D "127.0.0.1:$socks_port"' '--socks5-hostname' '-W 169.254.169.254:80' \
+    "port forwarding reaches only this environment's own loopback" \
+    '-L "127.0.0.1:$local_port:127.0.0.1:$bridge_port"' '"http://localhost:$bridge_port/v1/models"' \
+    'is the credential bridge, which belongs to the platform'; do
   grep -Fq -- "$binding" <<<"$user_ssh" || fail "user SSH journey is missing: $binding"
 done
+# The journey's bridge port is the platform's credential bridge constant.
+grep -Fq 'local bridge_port=38081 ' <<<"$user_ssh" &&
+  grep -Fq 'pub const CREDENTIAL_BRIDGE_LOOPBACK_PORT: u16 = 38_081;' \
+    "$ROOT/crates/codewire-daemon-proto/src/lib.rs" ||
+  fail 'the user SSH journey does not probe the credential bridge port'
 if grep -Fq 'KnownHostsCommand=' <<<"$user_ssh"; then
   fail 'the user SSH journey hand-builds the managed block'
 fi

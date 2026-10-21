@@ -8,6 +8,12 @@
 //! service. Names are never resolved: `localhost` is the two loopback
 //! addresses themselves, not whatever a resolver or `/etc/hosts` says.
 //!
+//! Nor does a forward reach the platform's own listeners in the workload
+//! ([`PlatformListeners`], from `codewire_daemon_proto::platform_listeners`):
+//! the credential bridge answers provider requests with the creator's
+//! credentials injected, and VS Code forwards every listening port it sees to
+//! the localhost of the machine it runs on (#3068).
+//!
 //! Where the dial happens is the [`ForwardDialer`]'s job. The hosted daemon
 //! serves SSH inside the workload's network namespace, so it dials loopback
 //! itself ([`WorkloadLoopbackDialer`]). A server outside that namespace, such
@@ -41,6 +47,8 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+pub use codewire_daemon_proto::PlatformListeners;
+
 use super::SshSessionKey;
 
 /// How long a forward's dial may take before the channel is refused.
@@ -59,7 +67,7 @@ const FORWARD_READ_CHUNK: usize = 32 * 1024;
 
 /// A `direct-tcpip` target the policy admits: the loopback addresses to try,
 /// in order. Only [`ForwardTarget::local`] makes one, so every address is a
-/// loopback address.
+/// loopback address and the port is none of the platform's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardTarget {
     host: String,
@@ -69,8 +77,13 @@ pub struct ForwardTarget {
 
 impl ForwardTarget {
     /// The loopback addresses `host:port` names inside the workload, or why
-    /// a channel may not reach it.
-    pub fn local(host: &str, port: u32) -> Result<Self, ForwardRefusal> {
+    /// a channel may not reach it: a host outside the workload's loopback, or
+    /// a port one of the `platform` listeners holds.
+    pub fn local(
+        host: &str,
+        port: u32,
+        platform: &PlatformListeners,
+    ) -> Result<Self, ForwardRefusal> {
         let port = u16::try_from(port)
             .ok()
             .filter(|port| *port != 0)
@@ -90,6 +103,12 @@ impl ForwardTarget {
                 }
             },
         };
+        if let Some(listener) = platform.get(&port) {
+            return Err(ForwardRefusal(format!(
+                "port {port} is {listener}, which belongs to the platform; port forwarding \
+                 cannot reach it"
+            )));
+        }
         Ok(Self {
             host: if requested.is_empty() {
                 "localhost".into()
@@ -199,17 +218,20 @@ impl ForwardDialer for WorkloadLoopbackDialer {
     }
 }
 
-/// One connection's port forwarding: its dialer and its forward slots.
+/// One connection's port forwarding: its dialer, the platform listeners it
+/// never reaches, and its forward slots.
 pub(super) struct Forwarding {
     dialer: Arc<dyn ForwardDialer>,
+    platform: Arc<PlatformListeners>,
     slots: Arc<Semaphore>,
     close_grace: Duration,
 }
 
 impl Forwarding {
-    pub(super) fn new(dialer: Arc<dyn ForwardDialer>) -> Self {
+    pub(super) fn new(dialer: Arc<dyn ForwardDialer>, platform: Arc<PlatformListeners>) -> Self {
         Self {
             dialer,
+            platform,
             slots: Arc::new(Semaphore::new(MAX_FORWARDS_PER_CONNECTION)),
             close_grace: FORWARD_CLOSE_GRACE,
         }
@@ -234,7 +256,7 @@ impl Forwarding {
         reply: server::ChannelOpenHandle,
         ended: &CancellationToken,
     ) -> Option<CancellationToken> {
-        let target = match ForwardTarget::local(host, port) {
+        let target = match ForwardTarget::local(host, port, &self.platform) {
             Ok(target) => target,
             Err(refusal) => {
                 refuse(

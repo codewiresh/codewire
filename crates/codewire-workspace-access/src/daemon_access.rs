@@ -24,9 +24,9 @@ use crate::host_key::generate_ed25519_key;
 use crate::scp::DaemonScpRunner;
 use crate::sftp::DaemonSftpRunner;
 use crate::ssh::{
-    DaemonBackedSshRunner, DaemonSessionStart, ForwardDialer, SshChannelOutput, SshSession,
-    SshSessionInput, SshSessionKey, SshSessionOutput, SshSessionRunner, SshSessionRunnerError,
-    WorkspaceSshHandler, workspace_ssh_server_config,
+    DaemonBackedSshRunner, DaemonSessionStart, ForwardDialer, PlatformListeners, SshChannelOutput,
+    SshSession, SshSessionInput, SshSessionKey, SshSessionOutput, SshSessionRunner,
+    SshSessionRunnerError, WorkspaceSshHandler, workspace_ssh_server_config,
 };
 
 const HOST_KEY_PREFIX: &str = "ssh_host_ed25519_g";
@@ -245,9 +245,10 @@ pub struct DaemonSshRunners {
     /// The workspace's default shell, which runs every exec request's
     /// command line (`<shell> -c <command>`), as sshd does.
     pub exec_shell: String,
-    /// Dials local port forwards inside the workload's network namespace;
-    /// without one, every forward is refused with a reason.
-    pub forward: Option<Arc<dyn ForwardDialer>>,
+    /// Dials local port forwards inside the workload's network namespace,
+    /// never to the platform's own listeners there; without one, every
+    /// forward is refused with a reason.
+    pub forward: Option<(Arc<dyn ForwardDialer>, Arc<PlatformListeners>)>,
 }
 
 impl DaemonSshRunners {
@@ -272,9 +273,13 @@ impl DaemonSshRunners {
 
     /// Serve local port forwards (`ssh -L`, `ssh -W`, VS Code Remote-SSH)
     /// through `dialer`, which must reach the workload's own network
-    /// namespace.
-    pub fn with_port_forwarding(mut self, dialer: Arc<dyn ForwardDialer>) -> Self {
-        self.forward = Some(dialer);
+    /// namespace, refusing the `platform` listeners there.
+    pub fn with_port_forwarding(
+        mut self,
+        dialer: Arc<dyn ForwardDialer>,
+        platform: PlatformListeners,
+    ) -> Self {
+        self.forward = Some((dialer, Arc::new(platform)));
         self
     }
 
@@ -290,7 +295,9 @@ impl DaemonSshRunners {
         )
         .with_exec_shell(self.exec_shell.clone());
         let handler = match &self.forward {
-            Some(dialer) => handler.with_port_forwarding(dialer.clone()),
+            Some((dialer, platform)) => {
+                handler.with_port_forwarding(dialer.clone(), platform.clone())
+            }
             None => handler,
         };
         let connection = handler.connection_id();

@@ -120,10 +120,13 @@ pub(crate) async fn serve(
     // before that they are refused at once instead of waiting out a launch
     // the platform cannot admit yet.
     let (access_ready, access_ready_rx) = watch::channel(false);
+    // The platform's own listeners in this Pod (#3068), which neither SSH
+    // port forwarding nor the tailnet's application ports ever reach.
+    let platform = codewire_daemon_proto::platform_listeners(bound.daemon_port);
     // The daemon runs in the workload's Pod, so its loopback is the
     // workload's: local port forwards dial it directly (#3045).
     let runners = DaemonSshRunners::new(daemon, access_ready_rx, bound.exec_shell.clone())
-        .with_port_forwarding(Arc::new(WorkloadLoopbackDialer));
+        .with_port_forwarding(Arc::new(WorkloadLoopbackDialer), platform.clone());
     let listener = tokio::net::TcpListener::bind(SocketAddr::from((
         Ipv4Addr::UNSPECIFIED,
         WORKSPACE_SSH_PORT,
@@ -155,10 +158,7 @@ pub(crate) async fn serve(
                 app_ports.clone(),
                 shutdown.clone(),
             ));
-            let reserved_ports = [Some(WORKSPACE_SSH_PORT), bound.daemon_port]
-                .into_iter()
-                .flatten()
-                .collect();
+            let reserved_ports = platform.keys().copied().collect();
             let tailnet = daemon_tailnet::run(
                 DaemonTailnetConfig {
                     environment_id: bound.environment_id,

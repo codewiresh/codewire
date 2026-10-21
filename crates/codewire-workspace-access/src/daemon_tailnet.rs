@@ -519,8 +519,10 @@ pub struct DaemonTailnetConfig {
     pub environment_id: Uuid,
     /// The workspace's tailnet UDP port, on all addresses.
     pub udp_listen_addr: SocketAddr,
-    /// Local ports never served as application ports on the tailnet (the
-    /// daemon's own SSH and gRPC listeners). Port 22 is always SSH.
+    /// Local ports never served as application ports on the tailnet: the
+    /// platform's own listeners in the workload (the credential bridge, the
+    /// daemon's SSH and gRPC listeners; `codewire_daemon_proto::
+    /// platform_listeners`). Port 22 is always SSH.
     pub reserved_ports: BTreeSet<u16>,
 }
 

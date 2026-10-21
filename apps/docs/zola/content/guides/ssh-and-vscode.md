@@ -52,6 +52,10 @@ ssh -N -D 1080 cw-my-app                    # SOCKS, as VS Code uses it
 A forward reaches only the sandbox's own loopback: `localhost`, `127.0.0.1`
 or `::1`. Any other target, such as another host, the node or a metadata
 address, is refused with that reason, and so is a port nothing listens on.
+The platform's own listeners in the sandbox are refused too: the credential
+bridge on port 38081, which answers provider requests with your credentials,
+and the daemon's SSH and API ports. So VS Code, which forwards every port it
+sees listening, never publishes them on your machine.
 Reverse forwards (`ssh -R`) and agent and X11 forwarding are not available.
 
 ## VS Code

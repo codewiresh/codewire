@@ -107,6 +107,34 @@ pub const DAEMON_CAPABILITY_CREDENTIAL_BRIDGE: &str = "credential_bridge.v1";
 // single-ciphertext peers fail admission instead of discovering it at launch.
 pub const CREDENTIAL_BRIDGE_PROTOCOL_VERSION: u32 = 4;
 pub const CREDENTIAL_BRIDGE_LOOPBACK_PORT: u16 = 38_081;
+
+/// The TCP listeners the platform itself runs inside a workload, by port.
+pub type PlatformListeners = std::collections::BTreeMap<u16, &'static str>;
+
+/// The platform's fixed TCP listeners inside every workload, each with the
+/// constant its component binds: the credential bridge's loopback ingress
+/// ([`CREDENTIAL_BRIDGE_LOOPBACK_PORT`]) and the daemon's SSH server
+/// ([`WORKSPACE_SSH_PORT`]). Docker in a workload listens on a Unix socket
+/// only. Workload access never reaches these ports: SSH port forwarding
+/// refuses them, and the tailnet never serves them as application ports. The
+/// credential bridge answers provider requests with the creator's
+/// credentials injected, so a forward to it would carry that authority off
+/// the workload, for example to the localhost of a machine running VS Code,
+/// which forwards every listening port it sees (#3068).
+pub const PLATFORM_WORKLOAD_LISTENERS: [(u16, &str); 2] = [
+    (CREDENTIAL_BRIDGE_LOOPBACK_PORT, "the credential bridge"),
+    (WORKSPACE_SSH_PORT, "the workspace SSH server"),
+];
+
+/// The platform's TCP listeners in a workload whose daemon serves its gRPC
+/// API on `daemon_port`, a per-placement setting: the fixed ones in
+/// [`PLATFORM_WORKLOAD_LISTENERS`] plus the daemon itself.
+pub fn platform_listeners(daemon_port: Option<u16>) -> PlatformListeners {
+    PLATFORM_WORKLOAD_LISTENERS
+        .into_iter()
+        .chain(daemon_port.map(|port| (port, "the workspace daemon")))
+        .collect()
+}
 pub const CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 pub const CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES: usize = 64 * 1024;
@@ -259,6 +287,23 @@ pub mod broker {
 mod tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn platform_listeners_name_the_bridge_ssh_and_daemon_ports() {
+        let listeners = platform_listeners(Some(7777));
+        assert_eq!(
+            listeners.into_iter().collect::<Vec<_>>(),
+            [
+                (WORKSPACE_SSH_PORT, "the workspace SSH server"),
+                (7777, "the workspace daemon"),
+                (CREDENTIAL_BRIDGE_LOOPBACK_PORT, "the credential bridge"),
+            ]
+        );
+        assert_eq!(
+            platform_listeners(None).into_keys().collect::<Vec<_>>(),
+            [WORKSPACE_SSH_PORT, CREDENTIAL_BRIDGE_LOOPBACK_PORT]
+        );
+    }
 
     #[test]
     fn projected_token_audiences_are_pairwise_distinct_and_mounts_do_not_overlap() {

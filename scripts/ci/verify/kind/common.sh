@@ -3708,6 +3708,9 @@ workspace_user_ssh_smoke() (
   umask 077
   local name="kind-ssh-${RANDOM}${RANDOM}" environment="" image config host started first
   local output status up background=() token request reply forward_port=18765 local_port
+  # codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT, the platform's
+  # credential bridge in every workload (test-kind-e2e-suites.sh binds it).
+  local bridge_port=38081 socks_port socks_log forward_log refusal
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-ssh.XXXXXX)" || return 1
   # Stop OpenSSH clients started in the background: the subshell running
   # each, and its timeout, which passes the signal on to ssh.
@@ -3826,18 +3829,62 @@ workspace_user_ssh_smoke() (
   }
   # ssh -D, the dynamic forward VS Code Remote-SSH reaches its server through,
   # naming the target as localhost.
-  local_port="$(kind_user_free_port)"
-  kind_user_ssh_tool "$config" ssh -N -o ExitOnForwardFailure=yes \
-    -D "127.0.0.1:$local_port" "$host" >/dev/null 2>&1 &
+  socks_port="$(kind_user_free_port)"
+  socks_log="$KIND_CREDENTIAL_CLI_HOME/socks.log"
+  KIND_USER_SSH_LOG_LEVEL=INFO kind_user_ssh_tool "$config" ssh -N -o ExitOnForwardFailure=yes \
+    -D "127.0.0.1:$socks_port" "$host" >/dev/null 2>"$socks_log" &
   background+=("$!")
   reply=""
   for _ in $(seq 1 30); do
-    reply="$(curl -fsS --max-time 10 --socks5-hostname "127.0.0.1:$local_port" \
+    reply="$(curl -fsS --max-time 10 --socks5-hostname "127.0.0.1:$socks_port" \
       "http://localhost:$forward_port/forward.txt" 2>/dev/null)" && [ "$reply" = "$token" ] && break
     sleep 1
   done
   [ "$reply" = "$token" ] || {
     echo "::error::ssh -D did not reach a server on the Sandbox's loopback: '${reply:0:200}'"
+    return 1
+  }
+  # The platform's own listeners stay out of reach (#3068): the credential
+  # bridge, which answers provider requests with the creator's credentials,
+  # through that dynamic forward and through ssh -L. Each is refused with its
+  # reason, which OpenSSH logs, while the user's server stays reachable.
+  status=0
+  curl -sS --max-time 10 --socks5-hostname "127.0.0.1:$socks_port" \
+    "http://localhost:$bridge_port/v1/models" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || {
+    echo "::error::ssh -D reached the credential bridge on port $bridge_port"
+    return 1
+  }
+  forward_log="$KIND_CREDENTIAL_CLI_HOME/bridge-forward.log"
+  local_port="$(kind_user_free_port)"
+  KIND_USER_SSH_LOG_LEVEL=INFO kind_user_ssh_tool "$config" ssh -N -o ExitOnForwardFailure=yes \
+    -L "127.0.0.1:$local_port:127.0.0.1:$bridge_port" "$host" >/dev/null 2>"$forward_log" &
+  background+=("$!")
+  status=7
+  for _ in $(seq 1 30); do
+    status=0
+    curl -sS --max-time 10 "http://127.0.0.1:$local_port/v1/models" >/dev/null 2>&1 || status=$?
+    # 7: ssh -L is not listening yet.
+    [ "$status" -eq 7 ] || break
+    sleep 1
+  done
+  [ "$status" -ne 0 ] && [ "$status" -ne 7 ] || {
+    echo "::error::ssh -L to the credential bridge on port $bridge_port was not refused (curl exit $status)"
+    return 1
+  }
+  refusal="administratively prohibited: port $bridge_port is the credential bridge, which belongs to the platform"
+  for _ in $(seq 1 10); do
+    grep -Fq "$refusal" "$forward_log" && grep -Fq "$refusal" "$socks_log" && break
+    sleep 1
+  done
+  grep -Fq "$refusal" "$forward_log" && grep -Fq "$refusal" "$socks_log" || {
+    echo "::error::the credential bridge forwards were not refused with their reason:" \
+      "$(cat "$forward_log" "$socks_log" | head -c 600)"
+    return 1
+  }
+  reply="$(curl -fsS --max-time 10 --socks5-hostname "127.0.0.1:$socks_port" \
+    "http://localhost:$forward_port/forward.txt" 2>/dev/null)" && [ "$reply" = "$token" ] || {
+    echo "::error::the user's server stopped forwarding after the refused bridge forwards: '${reply:0:200}'"
     return 1
   }
   # A target outside the Sandbox, the metadata service: refused at once, with
@@ -3894,7 +3941,7 @@ workspace_user_ssh_smoke() (
     echo "::error::ssh trusted a host key the platform did not record (exit $status)"
     return 1
   }
-  log "user SSH journey: shell syntax and exit status, forwards through -W, -L and -D with an outside target refused, scp in both modes, sftp, a forged key refused"
+  log "user SSH journey: shell syntax and exit status, forwards through -W, -L and -D with an outside target and the credential bridge refused, scp in both modes, sftp, a forged key refused"
 )
 
 environment_resize_smoke() (

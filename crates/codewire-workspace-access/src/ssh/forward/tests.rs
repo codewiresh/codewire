@@ -12,7 +12,7 @@ use tokio::time::{sleep, timeout};
 
 use super::super::{
     DaemonSessionStart, SshChannelOutput, SshSession, SshSessionRunner, SshSessionRunnerError,
-    WorkspaceSshHandler, allow_local_port_forward, workspace_ssh_server_config,
+    WorkspaceSshHandler, workspace_ssh_server_config,
 };
 use super::*;
 
@@ -76,8 +76,19 @@ async fn gateway(
     (addr, task)
 }
 
+/// Forwarding through `dialer`, with no platform listeners: the test's own
+/// ephemeral ports could be any port.
 fn dialing(dialer: Arc<dyn ForwardDialer>) -> impl Fn() -> Option<Forwarding> + Send + 'static {
-    move || Some(Forwarding::new(dialer.clone()))
+    dialing_except(dialer, PlatformListeners::new())
+}
+
+/// Forwarding through `dialer` that never reaches the `platform` listeners.
+fn dialing_except(
+    dialer: Arc<dyn ForwardDialer>,
+    platform: PlatformListeners,
+) -> impl Fn() -> Option<Forwarding> + Send + 'static {
+    let platform = Arc::new(platform);
+    move || Some(Forwarding::new(dialer.clone(), platform.clone()))
 }
 
 async fn connect(addr: SocketAddr) -> client::Handle<AcceptAllKeys> {
@@ -293,28 +304,93 @@ fn forward_targets_are_only_the_workloads_own_loopback() {
         ("::1", vec![v6(8080)]),
         ("::", vec![v6(8080)]),
     ] {
-        let target = ForwardTarget::local(host, 8080)
+        let target = ForwardTarget::local(host, 8080, &PlatformListeners::new())
             .unwrap_or_else(|refusal| panic!("{host:?} refused: {refusal}"));
         assert_eq!(target.addrs(), addrs, "{host:?}");
         assert!(target.addrs().iter().all(|addr| addr.ip().is_loopback()));
     }
     assert_eq!(
-        ForwardTarget::local("::1", 22).unwrap().to_string(),
+        ForwardTarget::local("::1", 22, &PlatformListeners::new())
+            .unwrap()
+            .to_string(),
         "[::1]:22"
     );
 
     for host in OUTSIDE {
-        let refusal = ForwardTarget::local(host, 8080).unwrap_err();
+        let refusal = ForwardTarget::local(host, 8080, &PlatformListeners::new()).unwrap_err();
         assert!(
             refusal.0.contains("only this environment's own loopback"),
             "{host:?}: {refusal}"
         );
-        assert!(!allow_local_port_forward(host, 8080), "{host:?}");
     }
     for port in [0, 65536, u32::MAX] {
-        let refusal = ForwardTarget::local("127.0.0.1", port).unwrap_err();
+        let refusal =
+            ForwardTarget::local("127.0.0.1", port, &PlatformListeners::new()).unwrap_err();
         assert_eq!(refusal.0, format!("{port} is not a TCP port"));
     }
+}
+
+#[test]
+fn platform_listeners_are_refused_however_loopback_is_spelled() {
+    // The listeners the hosted daemon refuses: the credential bridge, its SSH
+    // server and its own gRPC port (#3068).
+    let platform = codewire_daemon_proto::platform_listeners(Some(7777));
+    assert!(platform.contains_key(&codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT));
+    for (port, listener) in &platform {
+        for host in [
+            "localhost",
+            "",
+            "127.0.0.1",
+            "127.3.2.1",
+            "0.0.0.0",
+            "::1",
+            "::",
+        ] {
+            let refusal = ForwardTarget::local(host, (*port).into(), &platform).unwrap_err();
+            assert_eq!(
+                refusal.0,
+                format!(
+                    "port {port} is {listener}, which belongs to the platform; port forwarding \
+                     cannot reach it"
+                ),
+                "{host:?}"
+            );
+        }
+    }
+    // A user's own server on loopback still forwards.
+    assert!(ForwardTarget::local("localhost", 8080, &platform).is_ok());
+}
+
+#[tokio::test]
+async fn a_platform_listener_is_refused_and_user_ports_still_forward() {
+    // A live listener standing in for the credential bridge.
+    let bridge = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bridge_port = bridge.local_addr().unwrap().port();
+    let echo = echo_server().await;
+    let platform = PlatformListeners::from([(bridge_port, "the credential bridge")]);
+    let (addr, _gateway) =
+        gateway(dialing_except(Arc::new(WorkloadLoopbackDialer), platform)).await;
+    let client = connect(addr).await;
+    for host in ["127.0.0.1", "localhost", "0.0.0.0", "::1"] {
+        assert_eq!(
+            open_failure_code(open(&client, host, bridge_port).await),
+            1,
+            "{host}"
+        );
+    }
+    assert!(
+        timeout(Duration::from_millis(300), bridge.accept())
+            .await
+            .is_err(),
+        "a forward reached the platform listener"
+    );
+    let (mut read, write) = open(&client, "localhost", echo.port())
+        .await
+        .unwrap()
+        .split();
+    write.data_bytes(b"user port".to_vec()).await.unwrap();
+    write.eof().await.unwrap();
+    assert_eq!(read_to_eof(&mut read).await, b"user port");
 }
 
 #[tokio::test]
@@ -377,7 +453,10 @@ async fn refused_forwards_get_an_open_failure_naming_the_reason() {
         2
     );
     let error = WorkloadLoopbackDialer
-        .dial(&ForwardTarget::local("127.0.0.1", closed_port.into()).unwrap())
+        .dial(
+            &ForwardTarget::local("127.0.0.1", closed_port.into(), &PlatformListeners::new())
+                .unwrap(),
+        )
         .await
         .err()
         .expect("nothing listens");
@@ -473,7 +552,7 @@ async fn a_finished_forward_the_client_leaves_open_is_closed_by_the_server() {
     let echo = echo_server().await;
     let (addr, _gateway) = gateway(|| {
         Some(
-            Forwarding::new(Arc::new(WorkloadLoopbackDialer))
+            Forwarding::new(Arc::new(WorkloadLoopbackDialer), Arc::default())
                 .with_close_grace(Duration::from_millis(100)),
         )
     })
@@ -621,7 +700,7 @@ async fn the_connection_ending_ends_its_forwards() {
 async fn forwards_beyond_the_connection_limit_are_refused_until_one_ends() {
     let echo = echo_server().await;
     let (addr, _gateway) = gateway(|| {
-        let mut forwarding = Forwarding::new(Arc::new(WorkloadLoopbackDialer));
+        let mut forwarding = Forwarding::new(Arc::new(WorkloadLoopbackDialer), Arc::default());
         forwarding.slots = Arc::new(Semaphore::new(2));
         Some(forwarding)
     })
@@ -691,12 +770,9 @@ async fn many_sequential_forwards_leave_no_tasks_or_connections() {
 
 /// The host's OpenSSH client, as `cw setup ssh`'s users and VS Code run it.
 #[cfg(target_os = "linux")]
-async fn openssh_stdio_forward(
-    gateway: SocketAddr,
-    target: &str,
-    input: &[u8],
-) -> std::process::Output {
-    let mut child = tokio::process::Command::new("/usr/bin/ssh")
+fn openssh(gateway: SocketAddr) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("/usr/bin/ssh");
+    command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", std::env::temp_dir())
@@ -710,13 +786,23 @@ async fn openssh_stdio_forward(
         ])
         .arg("-p")
         .arg(gateway.port().to_string())
+        .kill_on_drop(true);
+    command
+}
+
+#[cfg(target_os = "linux")]
+async fn openssh_stdio_forward(
+    gateway: SocketAddr,
+    target: &str,
+    input: &[u8],
+) -> std::process::Output {
+    let mut child = openssh(gateway)
         .arg("-W")
         .arg(target)
         .arg("codewire@127.0.0.1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
         .spawn()
         .expect("spawn OpenSSH");
     let mut stdin = child.stdin.take().unwrap();
@@ -760,6 +846,105 @@ async fn openssh_stdio_forwards_and_prints_the_refusal_reason() {
     assert!(!output.status.success());
     assert!(
         stderr.contains("connect failed: nothing in the environment accepted a connection"),
+        "{stderr}"
+    );
+}
+
+/// A SOCKS5 CONNECT to `host:port` through OpenSSH's dynamic forward at
+/// `proxy`, naming the host as VS Code does: the open stream, or `None` when
+/// the proxy ends the connection instead of answering success (OpenSSH
+/// answers once its channel opens).
+#[cfg(target_os = "linux")]
+async fn socks5_connect(proxy: SocketAddr, host: &str, port: u16) -> Option<tokio::net::TcpStream> {
+    let mut stream = tokio::net::TcpStream::connect(proxy).await.unwrap();
+    stream.write_all(&[5, 1, 0]).await.unwrap();
+    let mut method = [0u8; 2];
+    stream.read_exact(&mut method).await.unwrap();
+    assert_eq!(method, [5, 0], "no-authentication SOCKS5");
+    let mut request = vec![5, 1, 0, 3, u8::try_from(host.len()).unwrap()];
+    request.extend_from_slice(host.as_bytes());
+    request.extend_from_slice(&port.to_be_bytes());
+    stream.write_all(&request).await.unwrap();
+    // VER REP RSV ATYP (IPv4) ADDR PORT.
+    let mut reply = [0u8; 10];
+    match timeout(BOUND, stream.read_exact(&mut reply))
+        .await
+        .expect("the SOCKS5 CONNECT was answered")
+    {
+        Ok(_) if reply[..2] == [5, 0] => Some(stream),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn openssh_dynamic_forward_refuses_platform_listeners_and_reaches_user_ports() {
+    let bridge = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bridge_port = bridge.local_addr().unwrap().port();
+    let echo = echo_server().await;
+    let platform = PlatformListeners::from([(bridge_port, "the credential bridge")]);
+    let (addr, _gateway) =
+        gateway(dialing_except(Arc::new(WorkloadLoopbackDialer), platform)).await;
+    let socks = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let ssh = openssh(addr)
+        .args(["-N", "-D"])
+        .arg(socks.to_string())
+        .arg("codewire@127.0.0.1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn OpenSSH");
+    timeout(BOUND, async {
+        while tokio::net::TcpStream::connect(socks).await.is_err() {
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("ssh -D listens");
+
+    // A user's server, named localhost as VS Code names its server.
+    let mut user = socks5_connect(socks, "localhost", echo.port())
+        .await
+        .expect("SOCKS reaches the user's server");
+    user.write_all(b"through socks").await.unwrap();
+    user.shutdown().await.unwrap();
+    let mut echoed = Vec::new();
+    timeout(BOUND, user.read_to_end(&mut echoed))
+        .await
+        .expect("the echo ended")
+        .unwrap();
+    assert_eq!(echoed, b"through socks");
+
+    // The platform listener: SOCKS ends the connection without success.
+    assert!(
+        socks5_connect(socks, "localhost", bridge_port)
+            .await
+            .is_none()
+    );
+    assert!(
+        timeout(Duration::from_millis(300), bridge.accept())
+            .await
+            .is_err(),
+        "a forward reached the platform listener"
+    );
+
+    let mut ssh = ssh;
+    ssh.start_kill().unwrap();
+    let output = timeout(BOUND, ssh.wait_with_output())
+        .await
+        .expect("OpenSSH ended")
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "administratively prohibited: port {bridge_port} is the credential bridge, which \
+             belongs to the platform"
+        )),
         "{stderr}"
     );
 }
