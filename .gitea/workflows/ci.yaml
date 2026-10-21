@@ -719,6 +719,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # On a main push or a pull request in a metal guest, start from that
+      # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
+      - name: Select the warm Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
+        run: scripts/ci/setup/select-warm-rust-cache.sh
+
       - name: Set up Go 1.26.9
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|go_support|') || contains(needs.verification-selection.outputs.selection, '|sdk_go|')) }}
         run: scripts/ci/setup/setup-go.sh 1.26.9
@@ -797,6 +805,10 @@ jobs:
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Report the warm Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/finish-warm-rust-cache.sh
 
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run
@@ -956,6 +968,14 @@ jobs:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
+      # On a main push or a pull request in a metal guest, start from that
+      # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
+      - name: Select the warm Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
+        run: scripts/ci/setup/select-warm-rust-cache.sh
+
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
@@ -991,6 +1011,10 @@ jobs:
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Report the warm Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/finish-warm-rust-cache.sh
 
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run
@@ -1044,6 +1068,14 @@ jobs:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
+      # On a main push or a pull request in a metal guest, start from that
+      # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
+      - name: Select the warm Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
+        run: scripts/ci/setup/select-warm-rust-cache.sh
+
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
@@ -1082,6 +1114,10 @@ jobs:
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Report the warm Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/finish-warm-rust-cache.sh
 
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run
@@ -1135,6 +1171,14 @@ jobs:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
 
+      # On a main push or a pull request in a metal guest, start from that
+      # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
+      - name: Select the warm Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
+        run: scripts/ci/setup/select-warm-rust-cache.sh
+
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
@@ -1173,6 +1217,10 @@ jobs:
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Report the warm Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/finish-warm-rust-cache.sh
 
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run
@@ -1226,6 +1274,14 @@ jobs:
 
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      # On a main push or a pull request in a metal guest, start from that
+      # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
+      - name: Select the warm Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
+        run: scripts/ci/setup/select-warm-rust-cache.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
@@ -1307,6 +1363,10 @@ jobs:
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
+      - name: Report the warm Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/finish-warm-rust-cache.sh
+
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run
         # instead of letting slower groups (Rust, Kind) run on. Best effort;
@@ -1358,6 +1418,14 @@ jobs:
 
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+
+      # On a main push or a pull request in a metal guest, start from that
+      # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
+      - name: Select the warm Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
+        run: scripts/ci/setup/select-warm-rust-cache.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
@@ -1437,6 +1505,10 @@ jobs:
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
+      - name: Report the warm Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/finish-warm-rust-cache.sh
+
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run
         # instead of letting slower groups (Rust, Kind) run on. Best effort;
@@ -1508,6 +1580,14 @@ jobs:
 
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+
+      # On a main push or a pull request in a metal guest, start from that
+      # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
+      - name: Select the warm Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        env:
+          CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
+        run: scripts/ci/setup/select-warm-rust-cache.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
@@ -1589,6 +1669,10 @@ jobs:
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
+      - name: Report the warm Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        run: scripts/ci/setup/finish-warm-rust-cache.sh
+
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run
         # instead of letting slower groups (Rust, Kind) run on. Best effort;
@@ -1660,6 +1744,14 @@ jobs:
 
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+
+      # On a main push or a pull request in a metal guest, start from that
+      # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
+      - name: Select the warm Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        env:
+          CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
+        run: scripts/ci/setup/select-warm-rust-cache.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
@@ -1743,6 +1835,10 @@ jobs:
 
   # Independent build groups use private workers. Native same-run artifacts
   # carry exact outputs; the consumer never treats cache entries as proof.
+
+      - name: Report the warm Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        run: scripts/ci/setup/finish-warm-rust-cache.sh
 
       - name: Cancel the run after this failure
         # Fail fast: a failed required group cancels the rest of the run

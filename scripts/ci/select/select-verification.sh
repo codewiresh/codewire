@@ -1814,14 +1814,17 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/ci/setup/select-untrusted-rust-cache.sh|\
-      scripts/ci/setup/finish-untrusted-rust-cache.sh)
+      scripts/ci/setup/finish-untrusted-rust-cache.sh|\
+      scripts/ci/setup/select-warm-rust-cache.sh|\
+      scripts/ci/setup/finish-warm-rust-cache.sh)
         select_token policy
         select_token rust
         select_token rust_workspace
         select_token security
         recognized=true
         ;;
-      scripts/ci/tests/test-select-untrusted-rust-cache.sh)
+      scripts/ci/tests/test-select-untrusted-rust-cache.sh|\
+      scripts/ci/tests/test-warm-rust-cache.sh)
         select_token policy
         select_token security
         recognized=true

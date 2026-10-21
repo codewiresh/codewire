@@ -233,6 +233,7 @@ run_policy_core_one() {
   run_verification_shell_syntax
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-run-side-by-side.sh
+  scripts/ci/tests/test-warm-rust-cache.sh
   scripts/ci/tests/test-select-verification.sh
   python3 -B scripts/ci/tests/test-last-scheduled-run.py
   scripts/ci/tests/test-service-ssh-image-verifier.sh

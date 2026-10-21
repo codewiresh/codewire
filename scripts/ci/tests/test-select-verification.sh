@@ -685,6 +685,13 @@ run_paths_case sccache_host_selector pull_request refs/pull/1751/head false \
 run_paths_case sccache_host_selector_fixture pull_request refs/pull/1752/head false \
   'policy security security_js' \
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
+run_paths_case warm_rust_cache pull_request refs/pull/3094/head false \
+  'policy rust rust_workspace security security_js' \
+  scripts/ci/setup/select-warm-rust-cache.sh \
+  scripts/ci/setup/finish-warm-rust-cache.sh
+run_paths_case warm_rust_cache_fixture pull_request refs/pull/3095/head false \
+  'policy security security_js' \
+  scripts/ci/tests/test-warm-rust-cache.sh
 run_paths_case workspace_cache_consumers pull_request refs/pull/2047/head false \
   'policy security security_js' \
   scripts/ci/setup/select-untrusted-workspace-cache.sh \
@@ -4831,6 +4838,7 @@ SUPPORT = {
     "Verify sealed producer tools", "Verify sealed producer tools and isolated Buildx load",
     "Verify Rust cache capacity", "Verify Rust protobuf compiler", "Verify GPUI and Wry build prerequisites",
     "Verify Kind runner tools", "Select best-effort shared Rust cache", "Select existing compiler cache",
+    "Select the warm Rust cache", "Report the warm Rust cache",
     "Select independent workspace caches", "Install pinned protobuf compiler",
     "Install pinned protoc for Rust builds", "Install pinned protoc for Rust-backed standard checks",
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",
