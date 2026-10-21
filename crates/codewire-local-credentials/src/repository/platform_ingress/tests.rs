@@ -134,6 +134,37 @@ impl Fixture {
         .await;
     }
 
+    /// Closes the ingress and proves it released its own listener and
+    /// connections. On Linux the proof is the exact sockets the ingress held
+    /// before close: none of them stays open in this process. A probe connect
+    /// to the old port would also reach any later listener that a concurrent
+    /// test bound there, or a child forked before its exec, under load.
+    #[cfg(target_os = "linux")]
+    async fn finish(mut self) -> Result<(), RepositoryExecutorError> {
+        let held = own_sockets_at(self.address);
+        assert!(
+            held.values().any(|state| state == LISTEN),
+            "the ingress listener is visible before close: {held:?}"
+        );
+        let result = tokio::time::timeout(BOUND, self.ingress.close())
+            .await
+            .expect("owned ingress drain is bounded");
+        let open = own_socket_inodes();
+        let kept: Vec<_> = held.keys().filter(|inode| open.contains(*inode)).collect();
+        assert!(
+            kept.is_empty(),
+            "the closed ingress at {} still holds sockets {kept:?} of {held:?}",
+            self.address
+        );
+        self.shutdown.send(()).unwrap();
+        tokio::time::timeout(BOUND, self.driver)
+            .await
+            .unwrap()
+            .unwrap();
+        result
+    }
+
+    #[cfg(not(target_os = "linux"))]
     async fn finish(mut self) -> Result<(), RepositoryExecutorError> {
         // Reserve a distinct client source while the ingress still owns its port.
         // A fresh auto-bound loopback client can otherwise connect to itself.
@@ -162,6 +193,54 @@ impl Fixture {
         );
         result
     }
+}
+
+/// `/proc/net/tcp` state of a listening socket.
+#[cfg(target_os = "linux")]
+const LISTEN: &str = "0A";
+
+/// This process's TCP sockets whose local address is `address`, by inode,
+/// with their `/proc/net/tcp` state.
+#[cfg(target_os = "linux")]
+fn own_sockets_at(address: SocketAddr) -> std::collections::BTreeMap<u64, String> {
+    let SocketAddr::V4(address) = address else {
+        panic!("the ingress binds IPv4 loopback");
+    };
+    // The kernel prints the address as its in-memory 32 bits, then the port.
+    let local = format!(
+        "{:08X}:{:04X}",
+        u32::from_ne_bytes(address.ip().octets()),
+        address.port()
+    );
+    let open = own_socket_inodes();
+    std::fs::read_to_string("/proc/self/net/tcp")
+        .unwrap()
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let inode = fields.get(9)?.parse::<u64>().ok()?;
+            (fields.get(1) == Some(&local.as_str()) && open.contains(&inode))
+                .then(|| (inode, fields[3].to_owned()))
+        })
+        .collect()
+}
+
+/// Inodes of every socket this process has open.
+#[cfg(target_os = "linux")]
+fn own_socket_inodes() -> std::collections::BTreeSet<u64> {
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+        .filter_map(|target| {
+            target
+                .to_str()?
+                .strip_prefix("socket:[")?
+                .strip_suffix(']')?
+                .parse()
+                .ok()
+        })
+        .collect()
 }
 
 use prost::Message as _;

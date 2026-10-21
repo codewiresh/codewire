@@ -26,7 +26,7 @@ use zeroize::Zeroizing;
 
 use super::*;
 use crate::control::v1;
-use crate::service::{serve_until, serve_until_with_process_spawners, serve_until_with_spawner};
+use crate::service::{serve_until, serve_until_with_process_spawners};
 use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, MINIMUM_AUTHORITY_PROTOCOL_VERSION, bind_owner_only,
     bind_owner_only_for_uid, current_uid, owner_only_connector, remove_bound_socket,
@@ -77,18 +77,21 @@ impl TestProtectedStore {
         }
     }
 
-    async fn wait_for_put(&self) {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let notified = self.put_gate.notify.notified();
-                if self.put_gate.reached.load(Ordering::SeqCst) > 0 {
-                    return;
-                }
-                notified.await;
+    /// Waits until `request` reaches the protected-store put, or fails with the
+    /// request's own outcome if it ends first, never against a wall clock.
+    async fn wait_for_put<T: std::fmt::Debug>(&self, request: &mut tokio::task::JoinHandle<T>) {
+        loop {
+            let notified = self.put_gate.notify.notified();
+            if self.put_gate.reached.load(Ordering::SeqCst) > 0 {
+                return;
             }
-        })
-        .await
-        .expect("protected-store put was not reached");
+            tokio::select! {
+                () = notified => {}
+                ended = &mut *request => {
+                    panic!("request ended before reaching the protected-store put: {ended:?}")
+                }
+            }
+        }
     }
 }
 
@@ -190,13 +193,47 @@ async fn start_server(
     oneshot::Sender<()>,
     tokio::task::JoinHandle<Result<(), AuthorityRuntimeError>>,
 ) {
+    start_listening_authority(config, store, catalog(), Default::default()).await
+}
+
+/// Starts an authority and returns once its socket is bound and listening,
+/// so a client connects once instead of guessing readiness against a clock.
+/// An authority that ends before listening fails the test with its own error.
+async fn start_listening_authority(
+    config: AuthorityRuntimeConfig,
+    store: TestProtectedStore,
+    catalog: ProviderCatalog,
+    adapters: crate::service::AuthorityRuntimeAdapters,
+) -> (
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), AuthorityRuntimeError>>,
+) {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let task = tokio::spawn(async move {
-        serve_until(config, store, catalog(), async move {
-            let _ = shutdown_rx.await;
-        })
+    let (listening_tx, listening_rx) = oneshot::channel();
+    let adapters = crate::service::AuthorityRuntimeAdapters {
+        listening: Some(listening_tx),
+        ..adapters
+    };
+    let mut task = tokio::spawn(async move {
+        serve_until_with_process_spawners(
+            config,
+            store,
+            catalog,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            adapters,
+        )
         .await
     });
+    tokio::select! {
+        listening = listening_rx => {
+            if listening.is_err() {
+                panic!("authority ended before listening: {:?}", (&mut task).await);
+            }
+        }
+        ended = &mut task => panic!("authority ended before listening: {ended:?}"),
+    }
     (shutdown_tx, task)
 }
 
@@ -475,20 +512,16 @@ async fn start_server_with_spawner(
     oneshot::Sender<()>,
     tokio::task::JoinHandle<Result<(), AuthorityRuntimeError>>,
 ) {
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let task = tokio::spawn(async move {
-        serve_until_with_spawner(
-            config,
-            store,
-            catalog(),
-            async move {
-                let _ = shutdown_rx.await;
-            },
-            Some(spawner),
-        )
-        .await
-    });
-    (shutdown_tx, task)
+    start_listening_authority(
+        config,
+        store,
+        catalog(),
+        crate::service::AuthorityRuntimeAdapters {
+            broker_spawner: Some(spawner),
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 async fn start_server_with_repository_spawner(
@@ -499,36 +532,24 @@ async fn start_server_with_repository_spawner(
     oneshot::Sender<()>,
     tokio::task::JoinHandle<Result<(), AuthorityRuntimeError>>,
 ) {
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let task = tokio::spawn(async move {
-        serve_until_with_process_spawners(
-            config,
-            store,
-            codewire_access::builtin_provider_catalog(),
-            async move {
-                let _ = shutdown_rx.await;
-            },
-            crate::service::AuthorityRuntimeAdapters {
-                repository_spawner: Some(spawner),
-                ..Default::default()
-            },
-        )
-        .await
-    });
-    (shutdown_tx, task)
+    start_listening_authority(
+        config,
+        store,
+        codewire_access::builtin_provider_catalog(),
+        crate::service::AuthorityRuntimeAdapters {
+            repository_spawner: Some(spawner),
+            ..Default::default()
+        },
+    )
+    .await
 }
 
+/// The start helpers return only once the authority listens, so one connect
+/// either succeeds or reports why.
 async fn connect_when_ready(config: &AuthorityRuntimeConfig) -> LocalCredentialClient {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        match LocalCredentialClient::connect(config).await {
-            Ok(client) => return client,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            Err(error) => panic!("authority did not become ready: {error}"),
-        }
-    }
+    LocalCredentialClient::connect(config)
+        .await
+        .unwrap_or_else(|error| panic!("the listening authority refused a client: {error}"))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -777,24 +798,28 @@ async fn abandoned_ssh_enrollment_waiter_cannot_cancel_published_journal_work() 
     let put_block = store.block_puts();
     let (shutdown, server) = start_server(config.clone(), store.clone()).await;
     let mut enrolling = connect_when_ready(&config).await;
-    let request = tokio::spawn(async move {
+    let mut request = tokio::spawn(async move {
         enrolling
             .generate_ssh_credential("abandoned-ssh".into(), None)
             .await
     });
-    store.wait_for_put().await;
+    store.wait_for_put(&mut request).await;
     request.abort();
     assert!(request.await.unwrap_err().is_cancelled());
     drop(put_block);
 
     let mut observer = connect_when_ready(&config).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    // The abandoned waiter's journal work publishes on its own. Poll for it
+    // while the authority runs, never against a wall clock.
     let credentials = loop {
         let credentials = observer.list_credentials().await.unwrap();
         if !credentials.is_empty() {
             break credentials;
         }
-        assert!(tokio::time::Instant::now() < deadline);
+        assert!(
+            !server.is_finished(),
+            "authority ended before publishing the abandoned credential"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     assert_eq!(credentials.len(), 1);
@@ -814,12 +839,12 @@ async fn abandoned_ssh_enrollment_waiter_cancels_before_publication() {
     let put_block = store.block_puts();
     let (shutdown, server) = start_server(config.clone(), store.clone()).await;
     let mut first_client = connect_when_ready(&config).await;
-    let first = tokio::spawn(async move {
+    let mut first = tokio::spawn(async move {
         first_client
             .generate_ssh_credential("published-first".into(), None)
             .await
     });
-    store.wait_for_put().await;
+    store.wait_for_put(&mut first).await;
 
     let mut cancelled_client = connect_when_ready(&config).await;
     let cancelled = tokio::spawn(async move {
@@ -850,12 +875,12 @@ async fn shutdown_cancels_ssh_enrollment_waiting_before_publication() {
     let put_block = store.block_puts();
     let (shutdown, server) = start_server(config.clone(), store.clone()).await;
     let mut first_client = connect_when_ready(&config).await;
-    let first = tokio::spawn(async move {
+    let mut first = tokio::spawn(async move {
         first_client
             .generate_ssh_credential("published-ssh".into(), None)
             .await
     });
-    store.wait_for_put().await;
+    store.wait_for_put(&mut first).await;
 
     let mut second_client = connect_when_ready(&config).await;
     let second = tokio::spawn(async move {
@@ -896,7 +921,7 @@ async fn ninth_concurrent_ssh_enrollment_fails_fast_without_queued_material() {
             .generate_ssh_credential("ssh-worker-0".into(), None)
             .await
     }));
-    store.wait_for_put().await;
+    store.wait_for_put(&mut requests[0]).await;
     for (index, mut client) in clients.drain(..7).enumerate() {
         requests.push(tokio::spawn(async move {
             client
@@ -1837,17 +1862,16 @@ impl CompatibilityAuthorityProcess {
             child,
             temp: Some(temp),
         };
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while !fixture.config.root.join("synthetic-ready").exists() {
-                assert!(
-                    fixture.child.try_wait().unwrap().is_none(),
-                    "synthetic authority exited before readiness"
-                );
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("synthetic authority readiness timeout");
+        // The child writes its witness once its socket is bound, or exits:
+        // wait for either, not for a wall clock that its start-up under load
+        // can exceed.
+        while !fixture.config.root.join("synthetic-ready").exists() {
+            assert!(
+                fixture.child.try_wait().unwrap().is_none(),
+                "synthetic authority exited before readiness"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         fixture
     }
 }
@@ -1863,19 +1887,17 @@ async fn assert_present_authority_refusal_retains_process(mode: &str) {
             spawns.fetch_add(1, Ordering::SeqCst);
             Err(AuthorityRuntimeError::Spawn)
         };
-        let error = tokio::time::timeout(Duration::from_secs(3), async {
-            if admission_only {
-                LocalCredentialClient::admit_existing_or_replace_with(&config, spawn)
-                    .await
-                    .map(|_| ())
-            } else {
-                LocalCredentialClient::connect_or_start_with(&config, spawn)
-                    .await
-                    .map(|_| ())
-            }
-        })
-        .await
-        .expect("present authority admission timeout")
+        // Admission carries the client's own connect and request bounds; no
+        // shorter wall clock of the test's own sits over them.
+        let error = if admission_only {
+            LocalCredentialClient::admit_existing_or_replace_with(&config, spawn)
+                .await
+                .map(|_| ())
+        } else {
+            LocalCredentialClient::connect_or_start_with(&config, spawn)
+                .await
+                .map(|_| ())
+        }
         .unwrap_err();
         if mode == "protocol-mismatch" {
             assert!(

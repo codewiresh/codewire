@@ -219,6 +219,8 @@ pub async fn serve_os_local_credential_authority_with_process_spawners(
             repository_spawner: Some(repository_spawner),
             ssh_signer: Some(ssh_signer),
             platform_connector: Some(platform_connector),
+            #[cfg(test)]
+            listening: None,
         },
     )
     .await
@@ -343,6 +345,10 @@ pub(crate) struct AuthorityRuntimeAdapters {
     pub repository_spawner: Option<Arc<dyn LocalRepositoryProcessSpawner>>,
     pub ssh_signer: Option<Arc<dyn LocalSshSigner>>,
     pub platform_connector: Option<Arc<dyn crate::PlatformCredentialConnector>>,
+    /// Tests learn here that the authority's socket is bound and listening,
+    /// instead of guessing with a wall clock.
+    #[cfg(test)]
+    pub listening: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 pub(crate) async fn serve_until_with_process_spawners<S, F>(
@@ -376,6 +382,8 @@ where
         repository_spawner,
         ssh_signer,
         platform_connector,
+        #[cfg(test)]
+        listening,
     } = adapters;
     let authority_root = config.root.clone();
     let socket_dir = config.socket_dir.clone();
@@ -394,6 +402,10 @@ where
     // The persistence singleton lock is held before a stale endpoint is ever
     // removed, so a losing process cannot unlink the live authority socket.
     let (incoming, socket_identity) = bind_owner_only(&config)?;
+    #[cfg(test)]
+    if let Some(listening) = listening {
+        let _ = listening.send(());
+    }
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let broker_audit = Arc::new(BrokerLeaseAuditLog::default());
     let ssh_runtime = LocalSshOperationRuntime::new(ssh_signer);
