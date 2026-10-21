@@ -31,7 +31,6 @@
     "test": "make test-ui-kind",
     "test:billing": "env DATABASE_URL=postgres://codewire:codewire@localhost:54320/codewire?sslmode=disable ./apps/dashboard/node_modules/.bin/playwright test --config apps/dashboard/playwright.config.ts --project=dashboard-ssr-desktop --project=dashboard-ssr-mobile apps/dashboard/e2e/ssr-dashboard.billing-admin.ssr.ts",
     "test:billing:kind": "make test-ui-kind-billing",
-    "test:billing:smoke:kind": "make test-billing-smoke-kind",
     "test:lifecycle": "scripts/dev/kind/test-dashboard-kind.sh apps/dashboard/e2e/ssr-dashboard.environment-lifecycle.ssr.ts --project=dashboard-ssr-desktop",
     "kind:billing": "make kind-billing-listen",
     "stripe": "XDG_CONFIG_HOME=/tmp/stripe-config stripe listen --forward-to localhost:8080/api/webhooks/stripe"

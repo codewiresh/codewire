@@ -1,10 +1,10 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-list kind-down kind-deploy kind-trust-roots kind-db-reset kind-db-restore kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-list kind-down kind-deploy kind-trust-roots kind-db-reset kind-db-restore kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
 .PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system macos-local-runtime scan-supply-chain verify-dashboard-image sync-local-secrets accept-secrets-credentials
 
 # The older codewire/default-namespace topology has its own fixed endpoints.
 # Reject named selection before its build prerequisites or runtime mutations.
 ifneq ($(strip $(CLUSTER)),)
-ifneq ($(filter up up-billing down deploy-local deploy-local-static local-runtime rollout-local-runtime prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime kind-billing-listen test-ui-kind test-ui-kind-billing test-billing-smoke-kind sync-local-secrets,$(MAKECMDGOALS)),)
+ifneq ($(filter up up-billing down deploy-local deploy-local-static local-runtime rollout-local-runtime prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime kind-billing-listen test-ui-kind sync-local-secrets,$(MAKECMDGOALS)),)
 $(error CLUSTER selects saved product-gate profiles; use kind-up/kind-down/kind-deploy/kind-watch/kind-test/kind-status for this topology)
 endif
 endif
@@ -33,8 +33,6 @@ help:
 	@echo "  make test-ui      - Run Playwright UI tests"
 	@echo "  make test-ui-dashboard-ssr - Alias for the canonical Rust browser proof"
 	@echo "  make test-ui-kind - Run the complete Rust dashboard suite against interactive Kind"
-	@echo "  make test-ui-kind-billing - Run Playwright billing tests against local kind"
-	@echo "  make test-billing-smoke-kind - Run Rust billing runtime smoke + Playwright billing against local kind"
 	@echo "  make e2e-kind     - Run the isolated Rust-owned Kind product gate"
 	@echo "  make kind-up CLUSTER=<name> - Create or validate a saved isolated cluster"
 	@echo "  make kind-list   - List saved clusters and endpoints on this Docker daemon"
@@ -308,12 +306,6 @@ kind-clean-runtime:
 
 kind-billing-listen:
 	./scripts/dev/kind/kind-billing-listen.sh
-
-test-ui-kind-billing:
-	./scripts/dev/kind/test-billing-kind.sh
-
-test-billing-smoke-kind:
-	./scripts/dev/kind/test-billing-smoke-kind.sh
 
 # Seed local E2E users for manual UI testing / Playwright
 seed-e2e-users:

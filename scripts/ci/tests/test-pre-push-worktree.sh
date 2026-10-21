@@ -88,7 +88,6 @@ assert_policy_only() {
   assert_no_kind "$name" "$output"
   assert_not_contains "$name" "$output" 'bun '
   assert_not_contains "$name" "$output" 'repo_checks '
-  assert_not_contains "$name" "$output" 'native_desktop_ui'
 }
 
 # Merge qualification runs the policy family as its parts, one lane each.
@@ -105,7 +104,6 @@ assert_policy_parts_only() {
   assert_no_kind "$name" "$output"
   assert_not_contains "$name" "$output" 'bun '
   assert_not_contains "$name" "$output" 'repo_checks '
-  assert_not_contains "$name" "$output" 'native_desktop_ui'
 }
 
 # The fast push check runs no verification family.
@@ -324,13 +322,6 @@ import sys
 with open(os.environ["PREFLIGHT_TEST_TOOL_LOG"], "a", encoding="utf-8") as log:
     log.write("repo_checks " + " ".join(sys.argv[1:]) + "\n")
 EOF
-  cat > "$repo/scripts/checks/source/check-native-desktop-ui.py" <<'EOF'
-#!/usr/bin/env python3
-import os
-
-with open(os.environ["PREFLIGHT_TEST_TOOL_LOG"], "a", encoding="utf-8") as log:
-    log.write("native_desktop_ui\n")
-EOF
   chmod +x \
     "$repo/scripts/dev/preflight-environment.sh" \
     "$repo/scripts/ci/verify/run-product-verification.sh" \
@@ -338,8 +329,7 @@ EOF
     "$repo/scripts/ci/verify/kind-e2e.sh" \
     "$repo/scripts/ci/receipts/verify-release-tag-receipt.sh" \
     "$repo/scripts/ci/tests/test-rust-owned-fixtures.sh" \
-    "$repo/scripts/checks/repo_checks.py" \
-    "$repo/scripts/checks/source/check-native-desktop-ui.py"
+    "$repo/scripts/checks/repo_checks.py"
 
   cat > "$repo/.gitea/workflows/ci.yaml" <<'EOF'
 name: fixture

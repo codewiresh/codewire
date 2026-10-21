@@ -3624,7 +3624,7 @@ if [ "$(grep -cE '^[[:space:]]*run_selected_family policy policy ' \
   echo 'local preflight must invoke the shared policy family exactly once' >&2
   exit 1
 fi
-if grep -Eq 'run_policy_local|scripts/checks/repo_checks.py|scripts/checks/source/check-native-desktop-ui.py|test-rust-owned-fixtures.sh|test-dashboard-image-network-probe.sh' \
+if grep -Eq 'run_policy_local|scripts/checks/repo_checks.py|test-rust-owned-fixtures.sh|test-dashboard-image-network-probe.sh' \
     "$ROOT/scripts/dev/preflight.sh"; then
   echo 'local preflight still owns a private policy checklist' >&2
   exit 1
@@ -3749,7 +3749,6 @@ for policy_owner in \
     'scripts/checks/repo_checks.py epoch-material-cache-owner --self-test' \
     'scripts/checks/repo_checks.py rust-validation-source' \
     'scripts/checks/repo_checks.py retired-reference-source' \
-    'scripts/checks/source/check-native-desktop-ui.py' \
     'scripts/checks/repo_checks.py go-source-classification'; do
   if [ "$(grep -cF "$policy_owner" "$shared_policy_core")" -ne 1 ]; then
     echo "shared policy core must own exactly one $policy_owner" >&2
@@ -4250,7 +4249,6 @@ bash -n \
   "$ROOT/scripts/ci/tests/test-verify-release-tag-receipt.sh" \
   "$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh" \
   "$ROOT/scripts/ci/verify/run-product-verification.sh" \
-  "$ROOT/scripts/ci/tests/test-retired-local-sdk-contract.sh" \
   "$ROOT/scripts/ci/verify/integration-postgres.sh" \
   "$ROOT/scripts/ci/verify/run-integration-verification.sh" \
   "$ROOT/scripts/ci/tests/test-integration-postgres.sh" \

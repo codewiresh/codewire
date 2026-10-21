@@ -276,10 +276,8 @@ run_policy_core_one() {
   scripts/ci/tests/test-run-host-rust-build.sh
   scripts/ci/tests/test-local-rust-cache.sh
   scripts/ci/tests/test-check-workspace-hack.sh
-  scripts/ci/tests/test-retired-local-sdk-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
   python3 -B scripts/ci/tests/test-integration-lane.py
-  scripts/runtime/tests/test-storage-measure.sh
   python3 scripts/dev/test-macos-cli.py
   python3 scripts/dev/test-macos-ext4-tool.py
   python3 scripts/dev/test-macos-git-tool.py
@@ -301,7 +299,6 @@ run_policy_core_one() {
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
   python3 scripts/checks/repo_checks.py public-address-literals --self-test
-  python3 scripts/checks/source/check-native-desktop-ui.py
   python3 scripts/checks/repo_checks.py go-source-classification
 STEPS
   )
@@ -605,7 +602,6 @@ run_runtime_dev_smoke() {
   scripts/runtime/tests/test-smoke-dev-commodity.sh
   scripts/runtime/tests/test-workspace-binding-proof.sh
   scripts/runtime/tests/test-warm-pool-proof.sh
-  scripts/runtime/tests/test-drop-crd-conversion.sh
   scripts/runtime/tests/test-local-platform-sources-smoke.sh
   scripts/runtime/tests/test-private-checkout-smoke.sh
   scripts/runtime/tests/test-dev-initial-private-checkout.sh

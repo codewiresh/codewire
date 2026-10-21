@@ -1,5 +1,0 @@
-{
-  "snapshot": {"label": "snapshot-local", "class": "linstor-local", "status": "ok", "error": null, "source_used_mib": 1450, "create_to_ready_ms": 1800, "server_cut_after_create_ms": 1000, "restore_size": "20Gi", "content": "snapcontent-1", "snapshot_handle_present": true},
-  "clone": {"label": "clone-local", "role": "clone", "warmup": false, "status": "ok", "error": null, "data_source": {"kind": "VolumeSnapshot", "name": "sm-20260929100000-abcdef-snapshot-local"}, "client": {"create_to_bound_ms": 2600, "create_to_ready_ms": 5200, "bound_to_ready_ms": 2600}, "server": {"provision_ms": 2000, "attach_ms": 2000, "create_to_ready_ms": 5000, "image_pulled": false}, "content_verified": true, "teardown": {"status": "ok", "error": null, "reclaim_policy": "Delete", "pod_delete_ms": 1200, "pvc_delete_ms": 100, "pv_delete_ms": 600, "total_ms": 1900}},
-  "deletion": {"status": "ok", "snapshot_delete_ms": 900, "content_delete_ms": 300}
-}

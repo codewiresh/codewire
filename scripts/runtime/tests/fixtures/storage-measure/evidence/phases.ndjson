@@ -1,8 +1,0 @@
-{"phase":"baseline","status":"ok","reason":null,"started_ms":1790676000000,"duration_ms":20000}
-{"phase":"attach","status":"failed","reason":"1 of 6 runs failed","started_ms":1790676020000,"duration_ms":120000}
-{"phase":"bench","status":"ok","reason":null,"started_ms":1790676140000,"duration_ms":9000}
-{"phase":"fio","status":"ok","reason":null,"started_ms":1790676149000,"duration_ms":210000}
-{"phase":"workload","status":"ok","reason":null,"started_ms":1790676359000,"duration_ms":81000}
-{"phase":"snapshot","status":"ok","reason":null,"started_ms":1790676440000,"duration_ms":12000}
-{"phase":"remote","status":"failed","reason":"restore from the remote snapshot failed","started_ms":1790676452000,"duration_ms":730000}
-{"phase":"bench-teardown","status":"ok","reason":null,"started_ms":1790677182000,"duration_ms":10}
