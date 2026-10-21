@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""A newer push cancels an older Dev delivery only when it can never sign (#2892).
+"""At most two Dev deliveries build at once, and none that can never sign.
 
 Recorded-response tests of scripts/ci/deploy/cancel-superseded-deliveries.py on
 a real history A-B-C, where C changes only documentation.
 
-Old rule: one concurrency group cancelled the older delivery on every push,
-whatever it was, so steady merges starved Dev. Rejected refinement: cancel
-when the newer push changes something Dev delivery carries; under steady
-merges that cancelled the delivery of the one commit main CI was verifying.
-New rule: a delivery is never cancelled while its commit can still be
-verified by its own main CI. An older commit whose main CI has not started
-(main moved past it) or was recorded as superseded can never sign, so its
-delivery is cancelled before it publishes; a red one is kept, because a rerun
-can still verify it. Nothing unreadable
-cancels anything, a publishing run is never stopped, and the job never fails.
+Old rules:
+- One concurrency group cancelled the older delivery on every push, whatever
+  it was, so steady merges starved Dev.
+- Then a delivery was never cancelled while its own main CI could still verify
+  it, however many built at once.
+
+Rule now (owner, 2026-10-21, on infra#1594: "we need to cancel older if > 2"):
+- Walking from the newest, this run, newer or unrelated runs, publishing runs,
+  and the newest runs main CI can still verify keep building, up to two.
+- Every other older run is cancelled before it publishes, even one already
+  building: one beyond the two, or one whose main CI can no longer verify it.
+  A red one can still be verified by a rerun.
+- Nothing unreadable cancels anything, a publishing run is never stopped, only
+  Deploy Dev push runs on main are touched, and the job never fails.
 """
 
 from __future__ import annotations
@@ -206,7 +210,7 @@ class CancelSuperseded(unittest.TestCase):
         self.assertEqual(cancelled, [50])
         self.assertEqual(api.posts(), ["POST /actions/runs/50/cancel"])
         self.assertIn(f"Deploy Dev run 40 for {self.a} keeps delivering", log)
-        self.assertIn(f"cancelled Deploy Dev run 50 for {self.b}, which can never sign", log)
+        self.assertIn(f"cancelled Deploy Dev run 50 for {self.b} (it can never sign", log)
         self.assertIn("has not started; main has moved past", log)
 
     def test_docs_only_push_keeps_a_delivery_main_ci_can_still_verify(self) -> None:
@@ -223,6 +227,82 @@ class CancelSuperseded(unittest.TestCase):
                 api = FakeForgejo([deploy_run(50, self.b)], {50: deploy_jobs(50)}, [self.ci_b(phase)])
                 cancelled, _ = self.decide(api)
                 self.assertEqual(cancelled, [50])
+
+    # At most two deliveries build at once (owner, 2026-10-21, on infra#1594).
+    def test_one_or_two_active_deliveries_all_keep_building(self) -> None:
+        # Only this run.
+        api = FakeForgejo([deploy_run(60, self.c)], {})
+        cancelled, log = self.decide(api)
+        self.assertEqual((cancelled, api.posts()), ([], []))
+        self.assertIn("cancelled 0 older Deploy Dev run(s)", log)
+        # This run and one older delivery main CI can still verify.
+        api = FakeForgejo([deploy_run(60, self.c), deploy_run(50, self.b)], {50: deploy_jobs(50)},
+                          [self.ci_b("verifying")])
+        cancelled, log = self.decide(api)
+        self.assertEqual((cancelled, api.posts()), ([], []))
+        self.assertIn(f"Deploy Dev run 50 for {self.b} keeps delivering", log)
+
+    def test_the_third_active_delivery_cancels_the_oldest_even_while_it_builds(self) -> None:
+        # A is verified and B is verifying, so both could still sign; C makes three.
+        for builds in ("waiting", "running"):
+            with self.subTest(builds=builds):
+                api = FakeForgejo(
+                    [deploy_run(60, self.c), deploy_run(50, self.b), deploy_run(40, self.a)],
+                    {40: deploy_jobs(40, builds=builds), 50: deploy_jobs(50)},
+                    [self.ci_a("verified"), self.ci_b("verifying")],
+                )
+                cancelled, log = self.decide(api)
+                self.assertEqual(cancelled, [40])
+                self.assertEqual(api.posts(), ["POST /actions/runs/40/cancel"])
+                self.assertIn(f"Deploy Dev run 50 for {self.b} keeps delivering", log)
+                self.assertIn(f"cancelled Deploy Dev run 40 for {self.a} (2 newer deliveries are "
+                              f"building, and at most 2 build at once)", log)
+
+    def test_a_delivery_that_can_never_sign_does_not_hold_one_of_the_two(self) -> None:
+        # B can never sign, so A, which main CI is verifying, keeps the second place.
+        api = FakeForgejo(
+            [deploy_run(60, self.c), deploy_run(50, self.b), deploy_run(40, self.a)],
+            {40: deploy_jobs(40), 50: deploy_jobs(50)},
+            [self.ci_a("verifying"), self.ci_b("queued")],
+        )
+        cancelled, log = self.decide(api)
+        self.assertEqual((cancelled, api.posts()), ([50], ["POST /actions/runs/50/cancel"]))
+        self.assertIn(f"Deploy Dev run 40 for {self.a} keeps delivering", log)
+
+    def test_a_publishing_delivery_holds_its_place_and_is_never_stopped(self) -> None:
+        # B is publishing: it is never stopped, and with C it makes two, so A goes.
+        api = FakeForgejo(
+            [deploy_run(60, self.c), deploy_run(50, self.b), deploy_run(40, self.a)],
+            {40: deploy_jobs(40), 50: deploy_jobs(50, builds="success", publish="running")},
+            [self.ci_a("verified"), self.ci_b("verified")],
+        )
+        cancelled, _ = self.decide(api)
+        self.assertEqual((cancelled, api.posts()), ([40], ["POST /actions/runs/40/cancel"]))
+        # Every older run is publishing: nothing is stopped, though three run.
+        api = FakeForgejo(
+            [deploy_run(60, self.c), deploy_run(50, self.b), deploy_run(40, self.a)],
+            {40: deploy_jobs(40, builds="success", publish="running"),
+             50: deploy_jobs(50, builds="success", publish="running")},
+        )
+        cancelled, _ = self.decide(api)
+        self.assertEqual((cancelled, api.posts()), ([], []))
+
+    def test_main_ci_release_dry_run_and_production_runs_are_never_cancelled(self) -> None:
+        # Even if Forgejo returned them for the Deploy Dev listing, other
+        # workflows' runs on main are not deliveries and are never touched.
+        others = [
+            fx.run(self.a, run_id=41, workflow="ci.yaml", status="running"),
+            fx.run(self.a, run_id=42, workflow="cli-release.yaml", status="running",
+                   event="workflow_dispatch", trigger_event="workflow_dispatch"),
+            fx.run(self.a, run_id=43, workflow="cw-release-dry-run.yaml", status="running"),
+            fx.run(self.a, run_id=44, workflow="deploy-prod.yaml", status="running",
+                   event="workflow_dispatch", trigger_event="workflow_dispatch"),
+            fx.run(self.b, run_id=45, workflow="support-images.yaml", status="running"),
+        ]
+        api = FakeForgejo([deploy_run(60, self.c), *others], {})
+        cancelled, _ = self.decide(api)
+        self.assertEqual((cancelled, api.posts()), ([], []))
+        self.assertEqual([call for call in api.calls if "jobs" in call], [])
 
     def test_a_delivery_without_a_main_ci_run_yet_is_kept(self) -> None:
         api = FakeForgejo([deploy_run(50, self.b)], {50: deploy_jobs(50)})
@@ -304,7 +384,7 @@ class CancelSuperseded(unittest.TestCase):
         )
         cancelled, log = self.decide(api)
         self.assertEqual(cancelled, [])
-        self.assertEqual(api.posts(), ["POST /actions/runs/40/cancel", "POST /actions/runs/50/cancel"])
+        self.assertEqual(api.posts(), ["POST /actions/runs/50/cancel", "POST /actions/runs/40/cancel"])
         self.assertIn("Forgejo refused to cancel Deploy Dev run 50", log)
         self.assertIn("cancelled 0 older Deploy Dev run(s)", log)
 

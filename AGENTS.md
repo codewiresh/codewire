@@ -264,9 +264,11 @@ release publication always finish; a newer `main` push cancels the superseded
 support-image and release dry-run runs itself.
 Dev runs only commits whose main CI passed: Deploy Dev signs and dispatches a
 commit only after its own `main` CI run's verdict, and only while it descends
-from the source Dev runs. A newer push cancels an older Dev delivery, before
-it publishes, only once that commit's own `main` CI can no longer verify it
-(#2892).
+from the source Dev runs. At most two Dev deliveries build at once: a newer
+push cancels an older one, queued or building, once two newer deliveries are
+building or once its own `main` CI can no longer verify it, but never one
+that has started publishing, so a cancelled run never signs or dispatches
+(owner, 2026-10-21, cited on infra#1594; #2892).
 Pull-request CI runs only the quick checks (selection, policy, compiling every
 Rust target); `main` runs the full verification after merge. Label the pull
 request `ci-full` to run that full verification, Kind included, on the pull

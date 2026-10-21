@@ -1,33 +1,36 @@
 #!/usr/bin/env python3
-"""Cancel the older Dev deliveries that can never sign (#2892).
+"""At most two Dev deliveries build at once, and none that can never sign.
 
-A Deploy Dev run signs only after its own commit's main CI verdict. Main CI
-runs queue one at a time, and a queued run that starts after main moved on
-prints "superseded" and verifies nothing (ci.yaml, "Skip a superseded main
-commit"), and no rerun of it can verify anything either, since main never
-moves back. So once a newer commit M is on main, an older commit S whose main
-CI has not started, or recorded it as superseded, can never be verified. Its
-delivery would build a set that never signs. A red or unverified run is
-different: rerunning it can still verify S, so its delivery is kept.
+The owner's rule (2026-10-21, on infra#1594): "we need to cancel older if > 2".
+A Deploy Dev run signs only after its own commit's main CI verdict. Each run's
+selection job runs this once, as the only place one delivery stops another.
+It walks the active Deploy Dev push runs on main from the newest, and keeps
+building:
 
-Deploy Dev runs no longer cancel each other through a concurrency group, which
-cancelled every older delivery on every push and starved Dev under steady
-merges. Instead each run's selection job runs this once, as the only decision
-point, and cancels an older commit's Deploy Dev push run on main only when:
+- this run, and any run of a commit that is not a proper ancestor of it (a
+  rerun of this commit, or a newer or unrelated one), since this run cannot
+  speak for those;
+- a run that has started publishing. Publishing signs and dispatches, so it is
+  never stopped: a cancelled run never signs or dispatches anything, and no set
+  is left half signed. Such a run finishes within minutes;
+- the newest runs whose own main CI can still verify them, until two are
+  building.
 
-- S is a proper ancestor of M, so M's delivery carries S's change and Dev
-  never moves backwards;
-- S's own main CI can no longer verify it: its ci.yaml push run's selection
-  has not started, or that selection recorded S as superseded;
-- S's run has not started publishing, so no set is left half signed.
+It cancels every other run of an older commit before it publishes, whether it
+is still queued or already building:
 
-A delivery is never cancelled while its commit can still be verified by its
-own main CI (codewire-4f, 2026-10-21, on #2892). Every commit main CI verifies
-therefore keeps its delivery, Dev advances on every verdict, and since main
-CI verifies one commit at a time, at most about two sets build at once: the
-verifying commit's and the newest one's. An older run never decides to skip
-itself; if it is registered only after this ran, both deliver, in order, as
-promote-dev accepts only descendants of Dev's current source.
+- a run whose main CI can no longer verify it: its ci.yaml push run's
+  selection has not started, so main moved past it, or that selection
+  recorded it as superseded. It would build a set that never signs;
+- a run beyond the two newest that can still sign. When a third delivery
+  starts, the oldest goes.
+
+A red or unverified main CI run is not a reason to cancel, because a rerun can
+still verify it. Only older commits are cancelled, so a newer delivery carries
+each cancelled change and Dev never moves backwards. Only Deploy Dev push runs
+on main are considered: main CI, releases, the release dry run and Production
+runs always finish. An older run never cancels itself; the newer runs'
+selections decide for it.
 
 Cancelling is an optimisation, never a gate: anything unreadable keeps the
 older delivery, and once loaded this script always exits 0 so its own run
@@ -53,6 +56,8 @@ SELECTION_JOB = "Deploy selection"
 BUILD_JOBS = ("Build and push the service runtime images", "Build and push the daemon runtime image")
 PUBLISH_JOB = "Publish the exact runtime image set"
 UNFINISHED_RUN_STATES = ("waiting", "blocked", "running", "unknown")
+# Deliveries that build at once (owner, 2026-10-21, on infra#1594).
+ACTIVE_DELIVERY_LIMIT = 2
 # Main CI's first job, and the line its "Skip a superseded main commit" step
 # prints when main had moved past the commit as the run started.
 CI_SELECTION_JOB = "Verification selection"
@@ -160,44 +165,60 @@ def cancel_superseded(
     *,
     log: Callable[[str], None] = print,
 ) -> list[int]:
-    """Cancel each older delivery that can never sign; return the cancelled run IDs."""
+    """Cancel the older deliveries beyond two, or that can never sign; return their run IDs."""
     cancelled: list[int] = []
     try:
         runs = unfinished_main_runs(api)
     except Unproven as exc:
         log(f"::warning::cannot list unfinished Deploy Dev runs ({exc}); cancelling nothing")
         return cancelled
-    for run in sorted(runs, key=lambda record: record["id"]):
+    building = 0
+    for run in sorted(runs, key=lambda record: record["id"], reverse=True):
         run_id = run["id"]
         older = run.get("head_sha") or run.get("commit_sha")
         if not is_proper_ancestor(repository, older, head):
+            # This run, a rerun of its commit, or a newer or unrelated commit.
+            building += 1
             continue
         try:
-            if delivery_stage(api, run_id) != CANCELLABLE:
+            stage = delivery_stage(api, run_id)
+            if stage == ENDED:
+                continue
+            if stage == PUBLISHING:
+                building += 1
                 continue
             reason = unverifiable_reason(api, repository, older)
-            if reason is None:
+            if reason is None and building < ACTIVE_DELIVERY_LIMIT:
+                building += 1
                 log(f"Deploy Dev run {run_id} for {older} keeps delivering: its main CI can still "
-                    f"verify it")
+                    f"verify it, and it is one of the newest {ACTIVE_DELIVERY_LIMIT} that can")
                 continue
+            if reason is None:
+                reason = (f"{ACTIVE_DELIVERY_LIMIT} newer deliveries are building, and at most "
+                          f"{ACTIVE_DELIVERY_LIMIT} build at once")
+            else:
+                reason = f"it can never sign: {reason}"
             # Read the jobs again just before cancelling: a run that started
             # publishing is never stopped.
             if delivery_stage(api, run_id) != CANCELLABLE:
+                building += 1
                 log(f"Deploy Dev run {run_id} for {older} started publishing; it is left to finish")
                 continue
             status = api.post(f"/actions/runs/{run_id}/cancel")
         except Unproven as exc:
+            building += 1
             log(f"::warning::cannot read or cancel Deploy Dev run {run_id} ({exc}); it is left to finish")
             continue
         if status in (200, 202, 204):
             cancelled.append(run_id)
-            log(f"cancelled Deploy Dev run {run_id} for {older}, which can never sign ({reason}); "
+            log(f"cancelled Deploy Dev run {run_id} for {older} ({reason}); "
                 f"{head}'s delivery carries its change")
         else:
+            building += 1
             log(f"::warning::Forgejo refused to cancel Deploy Dev run {run_id} for {older} "
-                f"(HTTP {status}); it builds a set that never signs")
+                f"(HTTP {status}); it keeps building")
     log(f"cancel-superseded: cancelled {len(cancelled)} older Deploy Dev run(s) for {head}")
-    return cancelled
+    return sorted(cancelled)
 
 
 def main() -> int:

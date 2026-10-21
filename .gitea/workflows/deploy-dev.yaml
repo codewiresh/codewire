@@ -10,11 +10,13 @@ on:
 # dispatches them only after main CI's verdict for this exact commit, and only
 # while the commit descends from the source Dev runs; when main CI finishes
 # later, its final job reruns that publish job. Runs of different commits
-# never cancel or queue behind each other: each commit has its own group, so
-# only a rerun of the same commit queues. A newer push cancels this run,
-# before it publishes, only once this commit's own main CI can no longer
-# verify it (#2893, #2892); see "Cancel the older deliveries this push
-# supersedes". Leaving the block out would cancel on every push.
+# never cancel or queue behind each other through concurrency: each commit has
+# its own group, so only a rerun of the same commit queues. At most two
+# deliveries build at once: a newer push cancels this run, before it
+# publishes, once two newer deliveries are building or once this commit's own
+# main CI can no longer verify it (owner, 2026-10-21, on infra#1594; #2892);
+# see "Cancel the older deliveries this push supersedes". Leaving the block
+# out would cancel on every push.
 concurrency:
   group: deploy-dev-${{ github.sha }}
   cancel-in-progress: false
@@ -51,9 +53,10 @@ jobs:
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       # The only place one delivery stops another: this push cancels an older
-      # commit's run, before that run publishes, only when that commit's own
-      # main CI can no longer verify it, so it could never sign. A delivery
-      # main CI can still verify always completes. An optimisation, never a
+      # commit's run, before that run publishes, when two newer deliveries are
+      # building or when that commit's own main CI can no longer verify it, so
+      # it could never sign. A run that started publishing always finishes,
+      # so a cancelled run never signs or dispatches. An optimisation, never a
       # gate: it cannot fail or hold up this run's own delivery.
       - name: Cancel the older deliveries this push supersedes
         timeout-minutes: 5
