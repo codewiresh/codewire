@@ -30,4 +30,4 @@ kind	no	Post-merge CI on metal runs Kind and failures are fixed forward. Owner, 
 release	yes	Release provenance and workflow contracts.
 deploy	yes	Deploy inputs, overlays and delivery workflow contracts.
 security	yes	Selected security scanners.
-workflow_audit	yes	Changed workflow files pass the zizmor audit source approval runs (supplychain workflows).
+workflow_audit	yes	Changed workflow files pass the zizmor audit the supply-chain scan runs (supplychain workflows).

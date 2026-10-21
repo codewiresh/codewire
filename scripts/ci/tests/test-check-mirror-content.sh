@@ -325,12 +325,12 @@ grep -Fq "if: forgejo.event_name == 'pull_request_target'" "$APPROVAL" &&
   grep -Fq 'trusted="$GITHUB_WORKSPACE/.source-approval-base/scripts/ci/release"' "$APPROVAL" &&
   grep -Fq 'bash "$trusted/check-mirror-content.sh" --pull-request' "$APPROVAL" &&
   grep -Fq -- '--patterns "$trusted/public-content-patterns.txt"' "$APPROVAL" ||
-  fail 'source approval does not run the protected-base content scan on pull requests'
+  fail 'the supply-chain scan does not run the protected-base content scan on pull requests'
 # shellcheck disable=SC2016 # the workflow expression is matched literally
 grep -Fq 'MIRROR_PRIVATE_CONTENT_PATTERNS: ${{ vars.MIRROR_PRIVATE_CONTENT_PATTERNS }}' "$APPROVAL" ||
-  fail 'source approval does not pass the private content patterns'
+  fail 'the supply-chain scan does not pass the private content patterns'
 if grep -Fq 'MIRROR_CONTENT_LOCAL_TEST' "$APPROVAL"; then
-  fail 'source approval runs the content scan as a local test'
+  fail 'the supply-chain scan runs the content scan as a local test'
 fi
 
 # The mirror script scans the pending range before it pushes.

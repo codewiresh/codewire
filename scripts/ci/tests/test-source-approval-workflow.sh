@@ -16,7 +16,7 @@ fail() {
 
 [[ -f "$WORKFLOW" ]] || fail 'source-approval workflow is missing'
 grep -Fq 'runs-on: ci-lite' "$WORKFLOW" ||
-  fail 'source approval does not use the credential-free validation profile'
+  fail 'the supply-chain scan does not use the credential-free validation profile'
 grep -Fq 'EXPECTED_SUPPLYCHAIN: ee0abebcd79661e59b02a22688d929dffa4b9506' \
   "$WORKFLOW" || fail 'sealed Supplychain revision changed without review'
 grep -Fq 'Candidate files are scanned as data only' "$WORKFLOW" ||
@@ -51,7 +51,7 @@ grep -Fq -- '--baseline="$bun_baseline"' "$WORKFLOW" ||
 readonly INSTALL_COMMAND=install
 if grep -Eq "npm (ci|${INSTALL_COMMAND})|bun ${INSTALL_COMMAND}|cargo (build|run|test)|docker (build|run)" \
     "$WORKFLOW"; then
-  fail 'source approval executes a candidate build or dependency installer'
+  fail 'the supply-chain scan executes a candidate build or dependency installer'
 fi
 
 command -v gitleaks >/dev/null || fail 'gitleaks is required for source-approval policy fixtures'

@@ -447,13 +447,13 @@ if selection_has kind && gate_runs kind; then
   PREFLIGHT_RUNS_KIND=true
 fi
 
-# Changed workflow definitions get the zizmor audit source approval runs.
+# Changed workflow definitions get the zizmor audit the supply-chain scan runs.
 PREFLIGHT_RUNS_WORKFLOW_AUDIT=false
 if grep -Eq '^\.(gitea|github)/workflows/' "$PREFLIGHT_CHANGED_PATHS" \
     && gate_runs workflow_audit; then
   PREFLIGHT_RUNS_WORKFLOW_AUDIT=true
   command -v supplychain >/dev/null \
-    || fail "workflow audit needs supplychain, the scanner source approval runs"
+    || fail "workflow audit needs supplychain, the scanner the supply-chain scan runs"
 fi
 
 # Fail fast on the workstation conditions the selected families need.

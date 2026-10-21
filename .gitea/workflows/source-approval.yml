@@ -1,4 +1,4 @@
-name: Supply-chain source approval
+name: Supply-chain scan
 
 # The pull-request workflow comes from protected base, not from the candidate.
 # Candidate files are scanned as data only; no repository script, hook,
@@ -15,7 +15,7 @@ on:
 
 jobs:
   source-approval: # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the disposable runner and network policy enforce no write.
-    name: Supply-chain source approval
+    name: Supply-chain scan
     runs-on: ci-lite
     timeout-minutes: 15
     steps:
@@ -117,7 +117,7 @@ jobs:
             --patterns "$trusted/public-content-patterns.txt" --message-file "$text" \
             "$BASE_SHA" "$HEAD_SHA"
 
-      - name: Run sealed source approval
+      - name: Run the sealed supply-chain scan
         shell: bash
         working-directory: candidate
         env:
