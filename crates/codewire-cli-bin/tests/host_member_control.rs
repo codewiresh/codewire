@@ -1086,6 +1086,102 @@ async fn journey(
                 > info["path_before"]["direct_wg_received"].as_u64().unwrap()
         );
     }
+    if !direct {
+        // The full journey runs once, over direct UDP. Over TLS DERP, one
+        // typed command proves the relay route end to end: its launch, wait
+        // and output each cross the relay with their own qualified route
+        // witness, then the same owned cleanup runs (#3119 T12).
+        let request = Uuid::new_v4().to_string();
+        let launched = caller
+            .json(
+                &[
+                    "--member",
+                    "target",
+                    "run",
+                    "--request-id",
+                    &request,
+                    "--no-tty",
+                    "--detach",
+                    "--output",
+                    "json",
+                    "--",
+                    "/bin/sh",
+                    "-c",
+                    "printf derp-member-output",
+                ],
+                None,
+            )
+            .await;
+        let sid = launched[0]["session_id"].as_str().unwrap().to_owned();
+        assert_eq!(sid, format!("session-{request}"));
+        let waited = caller
+            .json(
+                &[
+                    "--member",
+                    "target",
+                    "wait",
+                    "--session",
+                    &sid,
+                    "--timeout",
+                    "20s",
+                    "--output",
+                    "json",
+                ],
+                None,
+            )
+            .await;
+        assert_eq!(waited["session"]["exit_code"], 0);
+        let output = caller
+            .run(&["--member", "target", "logs", "--session", &sid], None)
+            .await;
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"derp-member-output");
+        assert!(!terminal(&helper.fd));
+        assert!(!terminal(&daemon.fd));
+        target
+            .json(&["member", "down", "--output", "json"], None)
+            .await;
+        assert!(terminal(&helper.fd));
+        target
+            .json(
+                &["stop", env, "--session", sentinel_sid, "--output", "json"],
+                None,
+            )
+            .await;
+        assert!(terminal(&sentinel_process));
+        target
+            .json(&["stop", env, "--local", "--output", "json"], None)
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !terminal(&daemon.fd) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("stopped host daemon did not exit through its original pidfd");
+        let witnesses = caller.path_witnesses.lock().unwrap().clone();
+        assert!(witnesses.iter().all(|value| value["environment_id"] == env
+            && value["scope_sha256"] == witnesses[0]["scope_sha256"]));
+        assert!(
+            witnesses.iter().any(|value| value["action"] == 2
+                && value["request_id"] == request.as_str()
+                && value["qualified"] == true),
+            "the DERP launch lacks its own request path evidence"
+        );
+        for action in [5, 6] {
+            assert!(
+                witnesses.iter().any(|value| value["action"] == action
+                    && value["session_id"] == sid.as_str()
+                    && value["qualified"] == true),
+                "a DERP exact-session read lacks correlated path evidence"
+            );
+        }
+        let report = json!({"transport":path,"co_located_not_nat":true,"info":info,"environment_id":env,"launch_request":request,
+            "session_id":sid,"actual_exchange_path_witnesses":witnesses,"inbound_derp_counter_available":false,
+            "ordinary_command":true,"helper_and_daemon_terminal":true});
+        drop(server);
+        return (report, target, caller, helper, daemon);
+    }
     let request = Uuid::new_v4().to_string();
     let command =
         r#"printf 'member-start\n'; IFS= read -r line; printf '%s\n' "$line"; printf end-marker"#;
@@ -1225,8 +1321,9 @@ async fn journey(
     assert!(!terminal(&helper.fd));
     assert!(!terminal(&daemon.fd));
     assert!(!terminal(&sentinel_process));
-    // Retained logs larger than one daemon page, a unique final marker, and
-    // stdout/stderr byte handling all travel through the actual terminal API.
+    // Retained logs two member read pages long (8 KiB each), a unique final
+    // marker, and stdout/stderr byte handling all travel through the actual
+    // terminal API.
     let large = caller
         .json(
             &[
@@ -1240,7 +1337,7 @@ async fn journey(
                 "--",
                 "/bin/sh",
                 "-c",
-                r"head -c 300000 /dev/zero | tr '\000' x; printf '\nlarge-final-marker\n'",
+                r"head -c 12000 /dev/zero | tr '\000' x; printf '\nlarge-final-marker\n'",
             ],
             None,
         )
