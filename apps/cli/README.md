@@ -207,7 +207,10 @@ cw setup ssh remove
 
 `cw shell --stdio` is the permanent OpenSSH/VS Code proxy path.
 
-`cw setup ssh` writes its managed `Host cw-*` block first in `~/.ssh/config`,
+`cw setup ssh` writes its managed block first in `~/.ssh/config`: `Host
+cw-cloud-*`, whose commands pass `--cloud`, then the catch-all `Host cw-*`,
+which keeps bare `cw-NAME` aliases on the cloud through at least v0.5.
+`cw-local-` is reserved for local VMs and refused for now. The block goes first
 because OpenSSH keeps the first value it finds. The block runs the `cw` that
 wrote it by absolute path, because OpenSSH runs `KnownHostsCommand` only from
 one; re-run `cw setup ssh` if you move `cw`. Host keys are trusted only

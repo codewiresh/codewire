@@ -1991,11 +1991,24 @@ pub(crate) struct SshConfigOptions {
     pub(crate) ssh_options: Vec<String>,
 }
 
-/// The managed directives with `cw_command` in place of the executable.
-fn managed_ssh_directives(cw_command: &str) -> impl Iterator<Item = (&'static str, String)> + '_ {
-    MANAGED_SSH_DIRECTIVES
-        .iter()
-        .map(move |(keyword, value)| (*keyword, value.replace(SSH_CW_PLACEHOLDER, cw_command)))
+/// The managed host blocks, most specific first, with the placement flag
+/// each block's commands pass. OpenSSH takes each option from the first block
+/// that sets it, so `cw-cloud-*` precedes the catch-all `cw-*`, which keeps
+/// resolving bare aliases in the cloud during the transition (#3025).
+pub(crate) const MANAGED_SSH_HOSTS: &[(&str, &str)] = &[("cw-cloud-*", " --cloud"), ("cw-*", "")];
+
+/// The managed directives with `cw_command` and the block's placement flag
+/// in place of the executable.
+fn managed_ssh_directives<'a>(
+    cw_command: &'a str,
+    placement_flag: &'a str,
+) -> impl Iterator<Item = (&'static str, String)> + 'a {
+    MANAGED_SSH_DIRECTIVES.iter().map(move |(keyword, value)| {
+        (
+            *keyword,
+            value.replace(SSH_CW_PLACEHOLDER, &format!("{cw_command}{placement_flag}")),
+        )
+    })
 }
 
 /// The `cw` the managed block runs: the first `cw` on `PATH` when it is this
@@ -2332,11 +2345,11 @@ impl SshConfigOutcome {
             SshConfigChange::Written | SshConfigChange::Unchanged => {
                 let ssh = if self.file.named {
                     format!(
-                        "ssh -F {} cw-NAME",
+                        "ssh -F {} {CLOUD_ALIAS_PREFIX}NAME",
                         shell_word(&self.file.path.to_string_lossy())
                     )
                 } else {
-                    "ssh cw-NAME".to_string()
+                    format!("ssh {CLOUD_ALIAS_PREFIX}NAME")
                 };
                 out.push_str(&format!(
                     "\n{} {}\n  {}\n",
@@ -2344,7 +2357,7 @@ impl SshConfigOutcome {
                     terminal_text(&ssh),
                     style.paint(
                         Role::Dim,
-                        "Cloud environments, by name or ID. Local VMs: use `cw shell NAME`."
+                        "A cloud environment, by name or ID. Local VMs: use `cw shell NAME`."
                     )
                 ));
             }
@@ -2615,10 +2628,7 @@ pub(crate) fn ssh_config_block(options: &SshConfigOptions) -> anyhow::Result<Str
     output.push_str(
         "# It stays first in this file: OpenSSH uses the first value it finds for an option.\n",
     );
-    output.push_str("Host cw-*\n");
-    for (keyword, value) in managed_ssh_directives(&options.cw_command) {
-        output.push_str(&format!("    {keyword} {value}\n"));
-    }
+    let mut ssh_options = Vec::new();
     for option in &options.ssh_options {
         let option = option.trim();
         if option.is_empty() {
@@ -2637,9 +2647,16 @@ pub(crate) fn ssh_config_block(options: &SshConfigOptions) -> anyhow::Result<Str
                 .any(|reserved| reserved.eq_ignore_ascii_case(keyword)),
             "SSH option {keyword} is fixed by the managed Codewire block and cannot be overridden"
         );
-        output.push_str("    ");
-        output.push_str(option);
-        output.push('\n');
+        ssh_options.push(option);
+    }
+    for (host, placement_flag) in MANAGED_SSH_HOSTS {
+        output.push_str(&format!("Host {host}\n"));
+        for (keyword, value) in managed_ssh_directives(&options.cw_command, placement_flag) {
+            output.push_str(&format!("    {keyword} {value}\n"));
+        }
+        for option in &ssh_options {
+            output.push_str(&format!("    {option}\n"));
+        }
     }
     // Restore the global scope so the user's entries after this block keep
     // their meaning for every host.
@@ -2655,8 +2672,9 @@ fn ssh_option_keyword(option: &str) -> &str {
         .unwrap_or_default()
 }
 
-/// Whether `content` starts with a Codewire section that carries every current
-/// managed directive, running `cw_command`.
+/// Whether `content` starts with a Codewire section whose host blocks are the
+/// current ones, in order, each carrying every managed directive running
+/// `cw_command`, and which ends with `Host *`.
 pub(crate) fn managed_ssh_section_is_current(content: &str, cw_command: &str) -> bool {
     let content = content.trim_start_matches(['\n', '\r']);
     let Some(rest) = content.strip_prefix(SSH_CONFIG_MARKER_START) else {
@@ -2666,10 +2684,29 @@ pub(crate) fn managed_ssh_section_is_current(content: &str, cw_command: &str) ->
         return false;
     };
     let section = &rest[..end];
-    managed_ssh_directives(cw_command)
-        .all(|(keyword, value)| section.contains(&format!("\n    {keyword} {value}\n")))
-        && section.contains("\nHost cw-*\n")
-        && section.ends_with("\nHost *\n")
+    // Each `Host` line opens a block that holds the lines up to the next one.
+    let mut blocks: Vec<(&str, Vec<&str>)> = Vec::new();
+    for line in section.lines() {
+        if let Some(host) = line.strip_prefix("Host ") {
+            blocks.push((host, Vec::new()));
+        } else if let Some((_, lines)) = blocks.last_mut() {
+            lines.push(line);
+        }
+    }
+    let Some(((last, trailing), managed)) = blocks.split_last() else {
+        return false;
+    };
+    *last == "*"
+        && trailing.is_empty()
+        && managed.len() == MANAGED_SSH_HOSTS.len()
+        && managed.iter().zip(MANAGED_SSH_HOSTS).all(
+            |((host, lines), (expected, placement_flag))| {
+                host == expected
+                    && managed_ssh_directives(cw_command, placement_flag).all(|(keyword, value)| {
+                        lines.contains(&format!("    {keyword} {value}").as_str())
+                    })
+            },
+        )
 }
 
 /// Puts `managed` first in the file, replacing any earlier Codewire section

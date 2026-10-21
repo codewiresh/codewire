@@ -3778,7 +3778,7 @@ workspace_user_ssh_smoke() (
     python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
   }
   image="$(kind_workspace_runtime_image)"
-  host="cw-$name"
+  host="cw-cloud-$name"
   started="$SECONDS"
   environment="$(kind_credential_cli --cloud create --name "$name" --image "$image" \
     --cpu 500 --memory 1Gi --disk 1Gi --ttl 1h --yes --output json | jq -er '.id')"

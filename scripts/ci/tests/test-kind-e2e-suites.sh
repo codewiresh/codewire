@@ -686,7 +686,7 @@ bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$DASHBOARD_BROWSER" "$FINAL_FENCING" 
 # crates select its suite.
 user_ssh="$(sed -n '/^workspace_user_ssh_smoke() (/,/^)$/p' "$COMMON")"
 grep -Fq '  workspace_user_ssh_smoke' "$COMMON" || fail 'workspace services do not run the user SSH journey'
-for binding in 'kind_credential_cli setup ssh --ssh-config-file "$config"' \
+for binding in 'kind_credential_cli setup ssh --ssh-config-file "$config"' 'host="cw-cloud-$name"' \
     'timeout 60 "$tool" -F "$ssh_config"' "'printf a && printf b | tr b B; echo \" \$((1+2)) \$HOME\"; exit 7'" \
     'scp -O' 'sftp -b' '[ "$status" -eq 255 ]' 'wait_kind_credential_environment "$environment" destroyed' \
     '-W "127.0.0.1:$forward_port"' '-L "127.0.0.1:$local_port:127.0.0.1:$forward_port"' \

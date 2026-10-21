@@ -1042,6 +1042,8 @@ fn validate_placement_scope(
             | Command::Prune(_)
             | Command::Nuke(_)
             | Command::RefreshSkills(_)
+            // `cw --cloud ssh known-hosts`, as the `cw-cloud-*` block runs it.
+            | Command::Ssh { .. }
             // --cloud: the platform's hosted Mesh; --local: the local Mesh service.
             | Command::Network { .. }
     );

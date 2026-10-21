@@ -127,6 +127,11 @@ pub(crate) async fn handle_vscode_command(
         globals.placement != Some(EnvironmentPlacement::Local),
         "`cw vscode` opens cloud environments; for a local VM use `cw shell ENV`"
     );
+    if let Some(alias) = environment.as_deref().and_then(SshAlias::parse)
+        && alias.placement == AliasPlacement::Local
+    {
+        return Err(refuse_local_alias(globals, alias.environment_ref).await);
+    }
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
@@ -136,14 +141,10 @@ pub(crate) async fn handle_vscode_command(
         .await
         .context("list orgs")?;
     let org_id = resolve_org_id(&platform, &orgs, args.org.as_deref())?;
-    let environment = environment.as_deref().and_then(vscode_environment_ref);
-    let environment_id = resolve_port_environment_id(
-        &environment_client,
-        &org_id,
-        &paths.mesh_data_dir,
-        environment,
-    )
-    .await?;
+    let alias = environment.as_deref().and_then(SshAlias::parse);
+    let environment_id =
+        resolve_alias_or_selected(&environment_client, &org_id, &paths.mesh_data_dir, alias)
+            .await?;
 
     // Keeps the managed SSH section current, silently: the link below
     // connects through it.
@@ -155,7 +156,7 @@ pub(crate) async fn handle_vscode_command(
     eprintln!(
         "{} Opening VS Code for {}{}",
         style.status(crate::output::Status::Next),
-        terminal_text(environment.unwrap_or(&environment_id)),
+        terminal_text(alias.map_or(environment_id.as_str(), |alias| alias.environment_ref)),
         style.paint(
             crate::output::Role::Dim,
             &format!("{}{}", style.separator(), terminal_text(&args.folder))
@@ -168,6 +169,13 @@ pub(crate) async fn handle_shell_stdio(
     globals: &Globals,
     environment: Option<&str>,
 ) -> anyhow::Result<()> {
+    let alias = environment.and_then(SshAlias::parse);
+    if let Some(alias) = alias {
+        alias.check_placement(globals.placement)?;
+        if alias.placement == AliasPlacement::Local {
+            return Err(refuse_local_alias(globals, alias.environment_ref).await);
+        }
+    }
     if std::env::var_os("CW_DEBUG_TAILNET").is_some() {
         init_tailnet_debug_log();
     }
@@ -181,9 +189,8 @@ pub(crate) async fn handle_shell_stdio(
         .await
         .context("list organizations")?;
     let org_id = resolve_org_id(&platform, &orgs, None)?;
-    let target = environment.and_then(vscode_environment_ref);
     let environment_id =
-        resolve_port_environment_id(&environment_client, &org_id, &paths.mesh_data_dir, target)
+        resolve_alias_or_selected(&environment_client, &org_id, &paths.mesh_data_dir, alias)
             .await?;
     let mode = tailnet_ssh::SshTransportMode::from_env()?;
     tailnet_ssh::pipe_shell_stdio(&client, &org_id, &environment_id, mode).await
@@ -203,13 +210,26 @@ fn init_tailnet_debug_log() {
         .try_init();
 }
 
-pub(crate) fn vscode_environment_ref(value: &str) -> Option<&str> {
-    let value = trimmed_str(value)?;
-    Some(value.strip_prefix("cw-").unwrap_or(value))
+/// The cloud environment an alias or reference names, or with none the
+/// selected one.
+async fn resolve_alias_or_selected(
+    client: &EnvironmentClient,
+    org_id: &str,
+    data_dir: &Path,
+    alias: Option<SshAlias<'_>>,
+) -> anyhow::Result<String> {
+    match alias {
+        Some(alias) => resolve_cloud_alias(client, org_id, alias).await,
+        None => resolve_port_environment_id(client, org_id, data_dir, None).await,
+    }
 }
 
+/// The editor link for a cloud environment, by its placement-qualified
+/// alias. `cw vscode` writes the managed SSH section first, so the alias is
+/// always configured. (The dashboard's link stays on the bare `cw-<id>`,
+/// which every `cw` resolves, until the bare-alias transition ends.)
 pub(crate) fn vscode_remote_uri(environment_id: &str, folder: &str) -> String {
-    format!("vscode://vscode-remote/ssh-remote+cw-{environment_id}/{folder}")
+    format!("vscode://vscode-remote/ssh-remote+{CLOUD_ALIAS_PREFIX}{environment_id}/{folder}")
 }
 
 pub(crate) fn init_request_from_args(args: &InitArgs) -> anyhow::Result<CreateEnvironmentRequest> {

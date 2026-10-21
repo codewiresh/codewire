@@ -116,6 +116,22 @@ fn ssh_test_options(ssh_options: &[&str]) -> SshConfigOptions {
 const CURRENT_MANAGED_SSH_BLOCK: &str = "# ---- START CODEWIRE ----
 # This section is managed by Codewire. Re-run `cw setup ssh` to update it.
 # It stays first in this file: OpenSSH uses the first value it finds for an option.
+Host cw-cloud-*
+    ProxyCommand /opt/codewire/bin/cw --cloud shell --stdio %n
+    User codewire
+    StrictHostKeyChecking yes
+    UserKnownHostsFile /dev/null
+    GlobalKnownHostsFile /dev/null
+    KnownHostsCommand /opt/codewire/bin/cw --cloud ssh known-hosts %H
+    HostKeyAlgorithms ssh-ed25519
+    UpdateHostKeys no
+    ForwardAgent no
+    ForwardX11 no
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    PubkeyAuthentication no
+    GSSAPIAuthentication no
+    GSSAPIDelegateCredentials no
 Host cw-*
     ProxyCommand /opt/codewire/bin/cw shell --stdio %n
     User codewire
@@ -198,6 +214,9 @@ fn managed_ssh_block_placement_is_idempotent() {
     let twice = place_managed_ssh_section(&once, &block).unwrap();
     assert_eq!(once, twice);
     assert!(once.contains("    ServerAliveInterval 30\nHost *\n"));
+    // A user option applies to both managed host blocks.
+    assert_eq!(once.matches("    ServerAliveInterval 30\n").count(), 2);
+    assert!(once.contains("    ServerAliveInterval 30\nHost cw-*\n"));
 }
 
 #[test]
@@ -286,6 +305,22 @@ fn openssh_resolves_the_managed_block_first() {
         );
         String::from_utf8(output.stdout).unwrap()
     };
+    // A qualified cloud alias takes the `cw-cloud-*` block's commands, which
+    // pass --cloud; a bare alias keeps the catch-all block's.
+    let cloud = resolve("cw-cloud-demo");
+    for (keyword, value) in [
+        ("proxycommand", "/opt/codewire/bin/cw --cloud shell --stdio %n"),
+        (
+            "knownhostscommand",
+            "/opt/codewire/bin/cw --cloud ssh known-hosts %H",
+        ),
+        ("forwardagent", "no"),
+    ] {
+        assert!(
+            cloud.lines().any(|line| line == format!("{keyword} {value}")),
+            "cw-cloud-demo {keyword}:\n{cloud}"
+        );
+    }
     let codewire = resolve("cw-demo");
     // OpenSSH versions spell some booleans differently (`no` or `false`).
     for (keyword, accepted) in [
@@ -393,6 +428,19 @@ fn managed_ssh_section_is_current_only_for_the_same_cw() {
     assert!(!managed_ssh_section_is_current(&content, "/usr/bin/cw"));
     let bare = CURRENT_MANAGED_SSH_BLOCK.replace(TEST_CW, "cw");
     assert!(!managed_ssh_section_is_current(&bare, TEST_CW));
+    // The section an older cw wrote, with only `Host cw-*`, is outdated.
+    let (head, cloud_and_rest) = CURRENT_MANAGED_SSH_BLOCK
+        .split_once("Host cw-cloud-*\n")
+        .unwrap();
+    let (_, rest) = cloud_and_rest.split_once("Host cw-*\n").unwrap();
+    let single = format!("{head}Host cw-*\n{rest}\n");
+    assert!(!managed_ssh_section_is_current(&single, TEST_CW));
+    // So is one whose blocks are swapped: the catch-all would win.
+    let swapped = content
+        .replace("Host cw-cloud-*\n", "Host SWAP\n")
+        .replace("Host cw-*\n", "Host cw-cloud-*\n")
+        .replace("Host SWAP\n", "Host cw-*\n");
+    assert!(!managed_ssh_section_is_current(&swapped, TEST_CW));
 }
 
 fn ssh_test_file(path: &std::path::Path) -> SshConfigFile {
@@ -730,11 +778,11 @@ fn ssh_setup_output_names_the_outcome_the_file_and_the_next_step() {
     };
     assert_eq!(
         outcome(SshConfigChange::Written, &default, true, false, "", "x"),
-        "✓ Codewire SSH section written\n  /home/u/.ssh/config\n\n→ ssh cw-NAME\n  Cloud environments, by name or ID. Local VMs: use `cw shell NAME`.\n"
+        "✓ Codewire SSH section written\n  /home/u/.ssh/config\n\n→ ssh cw-cloud-NAME\n  A cloud environment, by name or ID. Local VMs: use `cw shell NAME`.\n"
     );
     assert_eq!(
         outcome(SshConfigChange::Unchanged, &default, true, false, "x", "x"),
-        "✓ Codewire SSH section unchanged\n  /home/u/.ssh/config\n\n→ ssh cw-NAME\n  Cloud environments, by name or ID. Local VMs: use `cw shell NAME`.\n"
+        "✓ Codewire SSH section unchanged\n  /home/u/.ssh/config\n\n→ ssh cw-cloud-NAME\n  A cloud environment, by name or ID. Local VMs: use `cw shell NAME`.\n"
     );
     assert_eq!(
         outcome(SshConfigChange::Removed, &default, true, false, "x", ""),
@@ -770,7 +818,7 @@ fn ssh_setup_output_names_the_outcome_the_file_and_the_next_step() {
     };
     assert_eq!(
         outcome(SshConfigChange::Written, &named, true, false, "", "x"),
-        "✓ Codewire SSH section written\n  /tmp/my ssh/config -> /tmp/dotfiles/config\n\n→ ssh -F '/tmp/my ssh/config' cw-NAME\n  Cloud environments, by name or ID. Local VMs: use `cw shell NAME`.\n"
+        "✓ Codewire SSH section written\n  /tmp/my ssh/config -> /tmp/dotfiles/config\n\n→ ssh -F '/tmp/my ssh/config' cw-cloud-NAME\n  A cloud environment, by name or ID. Local VMs: use `cw shell NAME`.\n"
     );
     assert_eq!(
         outcome(SshConfigChange::Removed, &named, true, false, "x", ""),

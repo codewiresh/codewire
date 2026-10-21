@@ -4894,7 +4894,7 @@ user_ssh() {
     -o BatchMode=yes \
     -o "LogLevel=$SMOKE_SSH_LOG_LEVEL" \
     -o ConnectTimeout="$SMOKE_SSH_CONNECT_TIMEOUT" \
-    "cw-$ENV_ID" "$@"
+    "cw-cloud-$ENV_ID" "$@"
 }
 
 user_scp() {
@@ -4959,8 +4959,8 @@ run_user_ssh_journey() {
   up="$TMPDIR_SMOKE/scp-up.txt"
   down="$TMPDIR_SMOKE/scp-down.txt"
   printf 'smoke-scp-%s\n' "$ENV_ID" >"$up"
-  user_scp "$up" "cw-$ENV_ID:smoke-scp.txt" </dev/null || die "scp (SFTP mode) upload to the home directory failed"
-  user_scp "cw-$ENV_ID:smoke-scp.txt" "$down" </dev/null || die "scp (SFTP mode) download from the home directory failed"
+  user_scp "$up" "cw-cloud-$ENV_ID:smoke-scp.txt" </dev/null || die "scp (SFTP mode) upload to the home directory failed"
+  user_scp "cw-cloud-$ENV_ID:smoke-scp.txt" "$down" </dev/null || die "scp (SFTP mode) download from the home directory failed"
   cmp -s "$up" "$down" || die "scp (SFTP mode) round trip changed the file"
   log "user SSH: shell command lines keep their exit status; SFTP-mode scp round-trips"
 }

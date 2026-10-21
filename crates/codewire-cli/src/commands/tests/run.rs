@@ -21,12 +21,17 @@ fn vscode_command_parser_accepts_folder_and_org() {
 
 #[test]
 fn vscode_uri_helpers_use_environment_ids() {
-    assert_eq!(vscode_environment_ref("cw-env_123"), Some("env_123"));
-    assert_eq!(vscode_environment_ref("env_123"), Some("env_123"));
-    assert_eq!(vscode_environment_ref(" "), None);
+    let bare = |environment_ref| SshAlias {
+        placement: AliasPlacement::Bare,
+        environment_ref,
+    };
+    assert_eq!(SshAlias::parse("cw-env_123"), Some(bare("env_123")));
+    assert_eq!(SshAlias::parse("env_123"), Some(bare("env_123")));
+    assert_eq!(SshAlias::parse(" "), None);
+    // The editor connects through the placement-qualified cloud alias.
     assert_eq!(
         vscode_remote_uri("env_123", "/workspace/app"),
-        "vscode://vscode-remote/ssh-remote+cw-env_123//workspace/app"
+        "vscode://vscode-remote/ssh-remote+cw-cloud-env_123//workspace/app"
     );
 }
 

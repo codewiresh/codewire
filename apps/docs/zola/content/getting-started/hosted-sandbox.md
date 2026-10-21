@@ -66,7 +66,7 @@ cw wait my-app --session tests
 cw logs my-app --session tests
 ```
 
-`cw vscode my-app` opens it in VS Code over SSH, and `ssh cw-my-app` works
+`cw vscode my-app` opens it in VS Code over SSH, and `ssh cw-cloud-my-app` works
 after `cw setup`; see [SSH, VS Code and files](@/guides/ssh-and-vscode.md).
 
 Publish a port as an HTTPS preview URL:

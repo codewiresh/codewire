@@ -75,7 +75,7 @@ grep -qF 'check "hit $n: SSH presents the host key the platform recorded" ssh_pr
   fail 'hits do not prove SSH against the recorded host key'
 # The SSH check runs OpenSSH through the block `cw setup ssh` writes, as a
 # user does, never through hand-built trust options.
-for option in 'setup ssh --ssh-config-file "$config"' 'ssh -F "$config"' \
+for option in 'setup ssh --ssh-config-file "$config"' 'ssh -F "$config"' '"cw-cloud-$id"' \
     'env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' 'BatchMode=yes'; do
   grep -qF -- "$option" "$PROOF" || fail "SSH host-key proof is missing $option"
 done

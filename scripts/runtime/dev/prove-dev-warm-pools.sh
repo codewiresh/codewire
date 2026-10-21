@@ -348,8 +348,8 @@ ssh_presents_recorded_key() {
   config="$(managed_ssh_config)" || return 1
   env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" timeout 120 ssh -F "$config" -T \
     -o BatchMode=yes -o ConnectTimeout=60 \
-    "cw-$id" true </dev/null >/dev/null 2>"$TMPDIR_PROOF/ssh-$id.err" ||
-    { log "ssh: cw-$id: $(sed 's/[[:cntrl:]]//g' "$TMPDIR_PROOF/ssh-$id.err" | tail -n 2 | tr '\n' ' ')"; return 1; }
+    "cw-cloud-$id" true </dev/null >/dev/null 2>"$TMPDIR_PROOF/ssh-$id.err" ||
+    { log "ssh: cw-cloud-$id: $(sed 's/[[:cntrl:]]//g' "$TMPDIR_PROOF/ssh-$id.err" | tail -n 2 | tr '\n' ' ')"; return 1; }
 }
 
 # The block `cw setup ssh` writes, once per run.
@@ -371,7 +371,7 @@ first_ssh_ms() { # ID STARTED_MS CONFIG -> elapsed ms
   deadline=$(( $(date +%s) + FIRST_SSH_TIMEOUT_SECONDS ))
   while (( $(date +%s) < deadline )); do
     if env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" CW_TAILNET_EXPECTED_TRANSPORT="$FIRST_SSH_TRANSPORT" \
-      timeout 30 ssh -F "$config" -T -o BatchMode=yes -o ConnectTimeout=20 "cw-$id" true \
+      timeout 30 ssh -F "$config" -T -o BatchMode=yes -o ConnectTimeout=20 "cw-cloud-$id" true \
       </dev/null >/dev/null 2>&1; then
       printf '%s\n' "$(( $(now_ms) - started ))"
       return 0

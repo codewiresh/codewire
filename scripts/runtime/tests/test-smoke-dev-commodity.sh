@@ -103,7 +103,7 @@ assert_static_contract() {
   # is refused; stop and start rotate it. A user's own command line and an
   # SFTP-mode scp run over that same block.
   host_key_smoke="$(awk '/^user_ssh_config\(\)/,/^run_ssh_smoke\(\)/' "$SMOKE")"
-  for binding in 'setup ssh --ssh-config-file "$config"' 'ssh -F "$config"' \
+  for binding in 'setup ssh --ssh-config-file "$config"' 'ssh -F "$config"' '"cw-cloud-$ENV_ID" "$@"' \
       'env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' 'user_ssh "printf' \
       'StrictHostKeyChecking=yes' 'GlobalKnownHostsFile=/dev/null' \
       'UserKnownHostsFile=$pinned' 'run_user_ssh_journey' \

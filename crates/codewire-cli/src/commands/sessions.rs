@@ -1871,6 +1871,9 @@ pub(crate) async fn handle_environment_shell_command(
         super::flat::select_environment("shell", args.environment, args.in_environment, &[])?;
     if args.stdio {
         if globals.placement == Some(EnvironmentPlacement::Local) {
+            if let Some(alias) = environment.as_deref().and_then(SshAlias::parse) {
+                alias.check_placement(globals.placement)?;
+            }
             return super::native::native_shell_stdio(environment.as_deref()).await;
         }
         return handle_shell_stdio(globals, environment.as_deref()).await;
