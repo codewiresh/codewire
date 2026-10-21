@@ -584,10 +584,6 @@ PY
   rm -rf -- "$package_work"
 }
 
-run_apikey_smoke_tooling() {
-  scripts/runtime/tests/test-apikey-smoke.sh
-}
-
 run_runtime_confidential() {
   scripts/runtime/tests/test-resolve-coco-support-lock.sh
   scripts/runtime/tests/test-confidential-snp-smoke-contract.sh
@@ -1120,7 +1116,6 @@ case "$FAMILY" in
   sdk-go) run_sdk_go ;;
   sdk-ts) run_sdk_ts ;;
   sdk-python) run_sdk_python ;;
-  service-apikey-smoke) run_apikey_smoke_tooling ;;
   runtime-confidential) run_runtime_confidential ;;
   runtime-dev-smoke) run_runtime_dev_smoke ;;
   rust) run_rust ;;
@@ -1133,7 +1128,7 @@ case "$FAMILY" in
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-core-1|policy-core-2|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-core-1|policy-core-2|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|release|deploy|security" >&2
     exit 2
     ;;
 esac

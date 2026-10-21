@@ -175,11 +175,6 @@ orchestration_temporal_output="$(emit '|valid:v3|service_integration|service_orc
 assert_output "$orchestration_temporal_output" services_control false
 assert_output "$orchestration_temporal_output" services_runtime true
 
-apikey_output="$(emit '|valid:v3|service_apikey_smoke|complete|' fallback false false)"
-assert_output "$apikey_output" tooling true
-assert_output "$apikey_output" services_control false
-assert_output "$apikey_output" services_runtime false
-
 unknown_output="$(emit '|valid:v3|future_capability|complete|' fallback false false)"
 for group in policy standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind cw_release_assets; do

@@ -81,7 +81,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
     && expected[standard]=true
   selected_any \
     deploy release runtime_confidential runtime_dev_smoke security \
-    service_apikey_smoke policy_shell edge_kind \
+    policy_shell edge_kind \
     && expected[tooling]=true
   if selected policy && ! selected policy_shell_omittable; then
     expected[tooling]=true
@@ -128,7 +128,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
       rust|rust_workspace|rust_curated_locks|rust_pkg_*|\
       transport|transport_derp_contract|transport_pkg_*|\
       database|edge_kind|kind|\
-      service_integration|service_apikey_smoke|service_idp|service_coordinator|\
+      service_integration|service_idp|service_coordinator|\
       service_billing|service_connectcore|service_orchestration|service_nats|\
       service_temporal)
         ;;

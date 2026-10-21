@@ -632,10 +632,6 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|policy_shell|') || (contains(needs.verification-selection.outputs.selection, '|policy|') && !contains(needs.verification-selection.outputs.selection, '|policy_shell_omittable|'))) }}
         run: scripts/ci/verify/run-product-verification.sh policy-shell
 
-      - name: Run API key smoke tooling
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|service_apikey_smoke|') }}
-        run: scripts/ci/verify/run-product-verification.sh service-apikey-smoke
-
       - name: Run Confidential runtime tooling
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|runtime_confidential|') }}
         run: scripts/ci/verify/run-product-verification.sh runtime-confidential

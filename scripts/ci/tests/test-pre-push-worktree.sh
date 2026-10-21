@@ -1484,20 +1484,6 @@ assert_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'product sdk-python 
 assert_not_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'integration '
 assert_no_kind sdk_runner_tools "$(cat "$sdk_runner_log")"
 
-apikey_tooling_paths="$TMP/apikey-tooling.paths"
-printf '%s\n' scripts/runtime/tests/test-apikey-smoke.sh > "$apikey_tooling_paths"
-apikey_tooling_log="$TMP/apikey-tooling.log"
-apikey_tooling_output="$({
-  cd "$repo"
-  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$apikey_tooling_log" \
-    PREFLIGHT_CHANGED_FILES="$apikey_tooling_paths" "$repo/scripts/dev/preflight.sh"
-} 2>&1)"
-assert_contains apikey_tooling "$apikey_tooling_output" \
-  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|security|security_js|service_apikey_smoke|complete|'
-assert_contains apikey_tooling_tools "$(cat "$apikey_tooling_log")" \
-  'product service-apikey-smoke '
-assert_not_contains apikey_tooling_tools "$(cat "$apikey_tooling_log")" 'integration '
-
 confidential_tooling_paths="$TMP/confidential-tooling.paths"
 printf '%s\n' \
   scripts/runtime/confidential/resolve-coco-support-lock.sh \

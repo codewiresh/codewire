@@ -19,7 +19,6 @@ ios	yes	The iOS client builds.
 sdk_go	yes	The Go SDK builds and tests.
 sdk_ts	yes	The TypeScript SDK builds and tests.
 sdk_python	yes	The Python SDK builds and tests.
-service_apikey_smoke	yes	API key smoke tooling tests.
 runtime_confidential	yes	Confidential runtime tooling tests.
 runtime_dev_smoke	yes	Dev smoke tooling tests.
 database	yes	Migrations and database tests against a local Postgres.

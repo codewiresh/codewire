@@ -566,8 +566,6 @@ run_selected_family ios ios "iOS verification"
 run_selected_family sdk_go sdk-go "Go SDK verification"
 run_selected_family sdk_ts sdk-ts "TypeScript SDK verification"
 run_selected_family sdk_python sdk-python "Python SDK verification"
-run_selected_family service_apikey_smoke service-apikey-smoke \
-  "API key smoke tooling verification"
 run_selected_family runtime_confidential runtime-confidential \
   "confidential runtime tooling verification"
 run_selected_family runtime_dev_smoke runtime-dev-smoke \
@@ -733,7 +731,7 @@ step_tokens() {
     rust-curated-locks) printf 'rust_curated_locks\n' ;;
     services-control|services-runtime) printf 'service_integration\n' ;;
     edge) printf 'edge_kind\n' ;;
-    contracts|rust|go-support|web|docs|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|\
+    contracts|rust|go-support|web|docs|ios|sdk-go|sdk-ts|sdk-python|\
     runtime-confidential|runtime-dev-smoke|database|transport|release|deploy|security|kind)
       printf '%s\n' "${1//-/_}" ;;
     *) return 1 ;;

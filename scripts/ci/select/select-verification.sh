@@ -220,7 +220,6 @@ js_audit_scans() {
 
 select_services() {
   select_token service_integration
-  select_token service_apikey_smoke
   select_token service_idp
   select_token service_billing
   select_token service_orchestration
@@ -1600,7 +1599,9 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/runtime/*apikey*)
-        select_token service_apikey_smoke
+        # The retired API key smoke tooling (#3119 E4): its deletion needs
+        # only Policy.
+        select_token policy
         recognized=true
         ;;
       scripts/runtime/dev/run-sdk-python-e2e.sh|\

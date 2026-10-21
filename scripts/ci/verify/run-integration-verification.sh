@@ -1382,9 +1382,6 @@ run_nats() {
 
 run_services() {
   reset_schema
-  if selected service_apikey_smoke; then
-    scripts/runtime/tests/test-apikey-smoke.sh
-  fi
   build_selected_services
   selected service_idp && run_idp
   selected service_coordinator && run_coordinator
@@ -1418,7 +1415,7 @@ case "$MODE" in
     integration_postgres_configure
     log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
     SELECTION="$(filter_service_selection \
-      service_apikey_smoke service_idp service_coordinator service_billing \
+      service_idp service_coordinator service_billing \
       service_connectcore service_temporal)"
     run_services
     ;;

@@ -931,7 +931,7 @@ run_paths_case side_by_side_runner pull_request refs/pull/2949/head false \
   scripts/ci/verify/side-by-side.sh \
   scripts/ci/tests/test-run-side-by-side.sh
 run_paths_case application_migration pull_request refs/pull/6/head false \
-  'database policy rust rust_pkg_codewire_server_core service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  'database policy rust rust_pkg_codewire_server_core service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   crates/codewire-server-core/migrations/0001_baseline.sql
 run_paths_case retired_go_migration_deletion pull_request refs/pull/600/head false \
   'policy' apps/api/db/migrations/0001_baseline.sql
@@ -989,7 +989,7 @@ run_paths_case coordinator_seed_fixture pull_request refs/pull/602/head false \
 run_paths_case orchestration_seed_fixture pull_request refs/pull/603/head false \
   'policy service_integration service_orchestration' tests/fixtures/orchestration/seed.sql
 run_paths_case application_schema_fingerprint pull_request refs/pull/60/head false \
-  'database policy rust rust_pkg_codewire_server_core service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  'database policy rust rust_pkg_codewire_server_core service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   crates/codewire-server-core/tests/data/application_schema_fingerprint.sql
 run_paths_case server_core_lifecycle_test pull_request refs/pull/6010/head false \
   'database policy rust rust_pkg_codewire_server_core' \
@@ -1004,11 +1004,11 @@ for oauth_input in tests/oauth_bearer_auth.rs tests/oauth_bearer_auth/authority.
 done
 for oauth_input in src/auth.rs src/auth/oauth_authority.rs src/connect.rs; do
   run_paths_case server_core_oauth_publication_source pull_request refs/pull/6010/head false \
-    'database policy rust rust_pkg_codewire_server_core service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+    'database policy rust rust_pkg_codewire_server_core service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
     "crates/codewire-server-core/$oauth_input"
 done
 run_paths_case server_core_runtime_source pull_request refs/pull/6011/head false \
-  'policy rust rust_pkg_codewire_server_core service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  'policy rust rust_pkg_codewire_server_core service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   crates/codewire-server-core/src/lib.rs
 run_paths_case rust_migration_database pull_request refs/pull/61/head false \
   'database policy rust rust_pkg_codewire_billing service_billing service_integration' \
@@ -1062,12 +1062,12 @@ run_paths_case retired_connectcore_deletion pull_request refs/pull/83/head false
   'policy service_billing service_connectcore service_integration service_orchestration' \
   tests/contract/connectcore/connectcore_test.go
 run_paths_case integration_service_harness pull_request refs/pull/831/head false \
-  'database policy security security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  'database policy security security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   scripts/ci/verify/run-integration-verification.sh
 # The integration lane lock and service-ownership helper (#2755) is part of
 # the same harness.
 run_present_paths_case integration_lane_lock pull_request refs/pull/2755/head false \
-  'database policy security security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  'database policy security security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   scripts/ci/verify/integration-lane.py
 run_paths_case temporal_service pull_request refs/pull/84/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
@@ -1119,8 +1119,8 @@ run_paths_case temporal_shared_fixture pull_request refs/pull/841/head false \
 run_paths_case nats_service pull_request refs/pull/85/head false \
   'policy service_coordinator service_integration service_nats transport transport_pkg_codewire_coordinator' \
   crates/codewire-coordinator/src/nats.rs
-run_paths_case apikey_smoke pull_request refs/pull/86/head false \
-  'policy security security_js service_apikey_smoke' \
+run_paths_case retired_apikey_smoke pull_request refs/pull/86/head false \
+  'policy security security_js' \
   scripts/runtime/tests/test-apikey-smoke.sh
 run_paths_case retired_go_e2e_source pull_request refs/pull/87/head false \
   'policy' \
@@ -1564,7 +1564,7 @@ run_paths_case edge_browser_runtime pull_request refs/pull/1530/head true \
 run_paths_case pinned_browser_installer pull_request refs/pull/1531/head true \
   'edge_kind kind policy security security_js web' scripts/ci/install-pinned-playwright-chromium.sh
 run_paths_case mixed_sdk_and_runtime pull_request refs/pull/154/head false \
-  'policy rust rust_pkg_codewire_server_core sdk_python service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  'policy rust rust_pkg_codewire_server_core sdk_python service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   libs/sdk-python/codewire/client.py crates/codewire-server-core/src/lib.rs
 run_paths_case edge_without_kind pull_request refs/pull/16/head false \
   'policy' Caddyfile
@@ -1667,9 +1667,9 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
-all_product='contracts contracts_proto database deploy docs edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product='contracts contracts_proto database deploy docs edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 # A pull request without the Kind opt-in never selects Kind.
-all_product_pr='contracts contracts_proto database deploy docs go_consumer_interop go_support go_tailnet policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product_pr='contracts contracts_proto database deploy docs go_consumer_interop go_support go_tailnet policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy security security_js" scripts/dev/dashboard-watch.py
 run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
@@ -2219,7 +2219,7 @@ grep -qF 'scripts/ci/verify/build-local-vmm-initramfs.sh --verify' \
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=service_integration "$SELECTOR")"
 assert_tokens dispatch_services \
-  'service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  'service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   "$dispatch_output"
 
 output_file="$TMP/github-output"
@@ -2766,8 +2766,6 @@ run_service_scope_case temporal_modifier_rejects_control "$control_scope_script"
   '|valid:v3|service_integration|service_temporal|complete|' false
 run_service_scope_case temporal_modifier_rejects_runtime "$runtime_scope_script" \
   '|valid:v3|service_integration|service_temporal|complete|' false
-run_service_scope_case apikey_tooling_rejects_control "$control_scope_script" \
-  '|valid:v3|service_apikey_smoke|complete|' false
 run_service_scope_case billing_temporal_selects_control "$control_scope_script" \
   '|valid:v3|service_billing|service_integration|service_temporal|complete|' true
 run_service_scope_case orchestration_temporal_selects_runtime "$runtime_scope_script" \
@@ -3046,7 +3044,6 @@ if [ "$tooling_bun_line" -ge "$tooling_dev_smoke_line" ]; then
   exit 1
 fi
 for contract in \
-    'Run API key smoke tooling|service_apikey_smoke' \
     'Run Confidential runtime tooling|runtime_confidential' \
     'Run Dev smoke tooling|runtime_dev_smoke' \
     'Run Release provenance|release' \
@@ -3282,7 +3279,7 @@ grep -qF -- '--network "$INTEGRATION_DOCKER_NETWORK"' "$integration_runner"
 grep -qF -- '--network-alias "$INTEGRATION_NATS_HOST"' "$integration_runner"
 grep -qF 'NATS_MONITOR_URL="http://${INTEGRATION_NATS_HOST}:8222/healthz"' \
   "$integration_runner"
-grep -qF 'service_apikey_smoke service_idp service_coordinator service_billing' \
+grep -qF 'service_idp service_coordinator service_billing' \
   "$integration_runner"
 grep -qF 'service_connectcore service_temporal)' "$integration_runner"
 grep -qF 'service_orchestration service_nats service_temporal)' \
@@ -4547,7 +4544,7 @@ WORK = {
         "Run iOS package tests in the pinned Swift image",
     },
     "tooling": {
-        "Run Shell policy", "Run API key smoke tooling", "Run Confidential runtime tooling",
+        "Run Shell policy", "Run Confidential runtime tooling",
         "Run Dev smoke tooling", "Run Release provenance", "Run Deploy", "Run Security",
         "Run Edge static verification",
     },
