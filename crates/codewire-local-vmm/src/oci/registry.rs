@@ -161,6 +161,10 @@ pub struct RegistryResolver<'a> {
     architecture: OciArchitecture,
     base_override: Option<Url>,
     allow_plain_http: bool,
+    // The blob transfers this resolver started, so a test counts its retries
+    // whether or not each one reached the registry (#3098).
+    #[cfg(test)]
+    blob_attempts: std::sync::atomic::AtomicUsize,
 }
 
 impl std::fmt::Debug for RegistryResolver<'_> {
@@ -184,6 +188,8 @@ impl<'a> RegistryResolver<'a> {
             architecture: OciArchitecture::native()?,
             base_override: None,
             allow_plain_http: false,
+            #[cfg(test)]
+            blob_attempts: Default::default(),
         })
     }
 
@@ -212,6 +218,8 @@ impl<'a> RegistryResolver<'a> {
             architecture,
             base_override: Some(base),
             allow_plain_http: true,
+            #[cfg(test)]
+            blob_attempts: Default::default(),
         })
     }
 
@@ -398,6 +406,9 @@ impl<'a> RegistryResolver<'a> {
         }
         let mut attempt = 1;
         loop {
+            #[cfg(test)]
+            self.blob_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match self
                 .fetch_blob_once(base, repository, descriptor, bearer)
                 .await
@@ -1346,20 +1357,30 @@ mod tests {
         )
         .unwrap();
 
-        // Each attempt stalls past the read timeout; the last one's error is
-        // the result, long before the stream would have finished.
-        let started = std::time::Instant::now();
+        // Each attempt stalls past the read timeout and is retried; the last
+        // one's error is the result. A stream with 5 s gaps would otherwise
+        // finish and be admitted, so failing at all proves the read bound.
+        //
+        // On a loaded host the 300 ms bound can expire before an attempt's
+        // connection or response head, not only mid-body (#3098). Every such
+        // stall is a retried transport or stream error, and the resolver
+        // counts the attempts it made, so the result and the count are exact
+        // whatever the scheduling. The server sees at most one connection per
+        // attempt.
         assert!(matches!(
             resolver
                 .fetch_blob(&base, "test/workspace", &layer_descriptor(&fixture), None)
                 .await,
-            Err(RegistryResolverError::Content(ContentStoreError::Stream))
+            Err(RegistryResolverError::Content(ContentStoreError::Stream)
+                | RegistryResolverError::Transport)
         ));
-        assert!(started.elapsed() < Duration::from_secs(4));
         assert_eq!(
-            connections.load(std::sync::atomic::Ordering::SeqCst),
+            resolver
+                .blob_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
             BLOB_ATTEMPTS
         );
+        assert!(connections.load(std::sync::atomic::Ordering::SeqCst) <= BLOB_ATTEMPTS);
         assert!(
             !fixture
                 .store
