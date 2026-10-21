@@ -762,16 +762,21 @@ async fn run_attach_session<S>(
                             }
                         }
                         Some(v1::session_attach_message::Payload::Resize(resize)) => {
+                            // Resize and detach wait for the session's metadata
+                            // lock. A pending read set aside by this loop may
+                            // hold that lock, or be next in line for it, and
+                            // cannot finish while the loop waits here, so the
+                            // control would wait out its deadline and end the
+                            // attachment (#2484). Discard the read first: it
+                            // is read-only and its cursor never advanced, so
+                            // replay is safe and it cannot replace this
+                            // control's state with an older clone.
+                            read = None;
                             match attach_control(&tx, engine.resize(&session_id, resize.width, resize.height)).await {
                                 Ok(updated) => {
                                     // Apply first, then coalesce the informational
                                     // acknowledgement. Output capacity never holds
                                     // up another input or detach request.
-                                    // Discard any read-only refresh begun before
-                                    // this resize. Its cursor never advanced, so
-                                    // replay is safe and it cannot replace this
-                                    // acknowledged state with an older clone.
-                                    read = None;
                                     refresh_due = true;
                                     if is_attached_session_live(updated.state) {
                                         terminal_status = None;
@@ -795,6 +800,9 @@ async fn run_attach_session<S>(
                                     ))).await;
                                 return;
                             }
+                            // As for resize: never wait on the lock behind this
+                            // loop's own pending read.
+                            drop(read.take());
                             match attach_control(&tx, engine.get(&session_id)).await {
                                 Ok(record) => {
                                     // Never announce terminal completion before
@@ -2180,6 +2188,131 @@ mod tests {
         .await
         .expect("bounded ordered replay");
         owner.await.unwrap();
+    }
+
+    /// Holds the session's metadata lock as output capture does across a
+    /// chunk's write and fdatasync, long enough for the attachment's idle
+    /// read (every 10 ms) to queue behind it; `release` lets it go.
+    async fn hold_metadata_behind_attach_read(
+        engine: &SessionEngine,
+        session_id: &str,
+    ) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let (held, acquired) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let holder = tokio::spawn({
+            let engine = engine.clone();
+            let session_id = session_id.to_owned();
+            async move {
+                engine
+                    .hold_test_metadata_lock(&session_id, held, released)
+                    .await
+                    .unwrap();
+            }
+        });
+        acquired.await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+        (release, holder)
+    }
+
+    /// Closing one browser terminal tab refits the surviving one, so its
+    /// attachment resizes the PTY while the shell redraws. Resize and detach
+    /// wait for the session's metadata lock, which output capture holds
+    /// across each chunk's write and fdatasync, and which the attachment's
+    /// own pending read waits for as well. Once capture lets go, the control
+    /// gets the lock: the attachment never leaves its own read holding it
+    /// while the control waits, which stalled the terminal's input until the
+    /// 5 s control deadline ended it (#2484).
+    #[tokio::test]
+    async fn attach_controls_never_wait_behind_their_own_pending_read() {
+        let (temp, engine) = attach_engine();
+        let session = engine.launch(v1::LaunchSessionRequest {
+            command: vec!["sh".into(), "-c".into(),
+                "stty -echo; printf ready > attach-ready; IFS= read -r line; printf '%s' \"$line\" > attach-input; stty size > attach-size; exec sleep 30".into()],
+            pty: true,
+            term: "xterm-256color".into(),
+            width: 80,
+            height: 24,
+            ..Default::default()
+        }).await.unwrap();
+        wait_attach_fixture_ready(&temp).await;
+        let (input, incoming) = mpsc::channel(8);
+        let (output, mut replies) = mpsc::channel(32);
+        let owner = tokio::spawn(run_attach_session(
+            engine.clone(),
+            ReceiverStream::new(incoming),
+            v1::AttachSessionRequest {
+                session_id: session.session_id.clone(),
+                output_offset: 0,
+            },
+            output,
+        ));
+        let control = |payload| {
+            let input = input.clone();
+            async move {
+                input
+                    .send(Ok(v1::SessionAttachMessage {
+                        payload: Some(payload),
+                    }))
+                    .await
+                    .unwrap();
+            }
+        };
+
+        let (release, holder) =
+            hold_metadata_behind_attach_read(&engine, &session.session_id).await;
+        control(v1::session_attach_message::Payload::Resize(
+            v1::ResizeRequest {
+                width: 132,
+                height: 43,
+            },
+        ))
+        .await;
+        control(v1::session_attach_message::Payload::Input(
+            v1::SessionInput {
+                data: b"after-resize\n".to_vec(),
+            },
+        ))
+        .await;
+        sleep(Duration::from_millis(100)).await;
+        release.send(()).unwrap();
+        holder.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let input = std::fs::read_to_string(temp.path().join("home/attach-input"));
+                let size = std::fs::read_to_string(temp.path().join("home/attach-size"));
+                if input.as_deref().is_ok_and(|input| input == "after-resize")
+                    && size.as_deref().is_ok_and(|size| size.trim() == "43 132")
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("resize and the input after it apply once capture releases the lock");
+
+        let (release, holder) =
+            hold_metadata_behind_attach_read(&engine, &session.session_id).await;
+        control(v1::session_attach_message::Payload::Detach(
+            v1::DetachSessionRequest {
+                session_id: session.session_id.clone(),
+            },
+        ))
+        .await;
+        sleep(Duration::from_millis(100)).await;
+        release.send(()).unwrap();
+        holder.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), owner)
+            .await
+            .expect("detach completes once capture releases the lock")
+            .unwrap();
+        while let Ok(reply) = replies.try_recv() {
+            let reply = reply.expect("the attachment never ends with a control deadline");
+            if let Some(v1::session_attach_message::Payload::Status(status)) = reply.payload {
+                assert!(is_attached_session_live(status.state));
+            }
+        }
+        engine.stop(&session.session_id).await.unwrap();
     }
 
     #[cfg(target_os = "linux")]

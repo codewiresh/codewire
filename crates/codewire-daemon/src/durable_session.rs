@@ -477,6 +477,22 @@ impl SessionEngine {
         Ok(())
     }
 
+    /// Test-only: holds a session's metadata lock, as output capture does
+    /// across each chunk's write and fdatasync, from `held` until `release`.
+    #[cfg(test)]
+    pub(crate) async fn hold_test_metadata_lock(
+        &self,
+        session_id: &str,
+        held: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    ) -> Result<(), SessionError> {
+        let handle = self.handle(session_id)?;
+        let _metadata = handle.metadata.lock().await;
+        let _ = held.send(());
+        let _ = release.await;
+        Ok(())
+    }
+
     pub(crate) fn new(config: &Config, credential_bridge: CredentialBridge) -> Self {
         Self {
             inner: Arc::new(SessionEngineInner {
