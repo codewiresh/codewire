@@ -8,6 +8,10 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 #[cfg(target_os = "linux")]
+#[path = "../../tests/support/proc_children.rs"]
+mod proc_children;
+
+#[cfg(target_os = "linux")]
 async fn completed_directory_command(engine: &SessionEngine, session: &str) -> v1::SessionRecord {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
@@ -1253,36 +1257,9 @@ struct FixtureDescendant {
 
 #[cfg(target_os = "linux")]
 impl FixtureDescendant {
-    /// Direct children of PID, from each process's /proc stat: a kernel
-    /// without CONFIG_PROC_CHILDREN (the CI's Kata guests) has no task
-    /// children lists. A process gone mid-scan is skipped; the parent pid
-    /// follows the last ')' because comm may contain spaces and parentheses.
     fn children(pid: u32) -> std::collections::BTreeSet<u32> {
-        let mut children = std::collections::BTreeSet::new();
-        for entry in std::fs::read_dir("/proc").unwrap() {
-            let Some(child) = entry
-                .unwrap()
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            let Ok(stat) = std::fs::read(format!("/proc/{child}/stat")) else {
-                continue;
-            };
-            let Some(close) = stat.iter().rposition(|byte| *byte == b')') else {
-                continue;
-            };
-            let parent = std::str::from_utf8(&stat[close + 1..])
-                .ok()
-                .and_then(|fields| fields.split_whitespace().nth(1))
-                .and_then(|field| field.parse::<u32>().ok());
-            if parent == Some(pid) {
-                assert_ne!(child, 0);
-                children.insert(child);
-            }
-        }
+        let children = proc_children::child_pids(pid).unwrap();
+        assert!(!children.contains(&0));
         children
     }
 

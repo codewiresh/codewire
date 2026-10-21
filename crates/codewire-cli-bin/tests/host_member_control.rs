@@ -25,6 +25,10 @@ mod managed;
 #[path = "support/cw_fixture.rs"]
 mod cw_fixture;
 
+#[path = "../../codewire-daemon/tests/support/proc_children.rs"]
+mod proc_children;
+use proc_children::child_pids;
+
 const ORG: &str = "org-host-member-proof";
 const NETWORK: &str = "network-host-member-proof";
 const NODE: &str = "target-host-member-proof";
@@ -479,51 +483,14 @@ impl OwnedChild {
     }
 }
 
-/// Direct children of PARENT, from each process's /proc stat. Not the task
-/// children lists: a kernel built without CONFIG_PROC_CHILDREN, such as the
-/// CI's Kata guest kernel, has none. A process that exits during the scan is
-/// skipped; the parent pid follows the last ')' because comm may contain
-/// spaces and parentheses.
-fn child_pids(parent: u32) -> std::io::Result<std::collections::BTreeSet<u32>> {
-    let mut ids = std::collections::BTreeSet::new();
-    for entry in fs::read_dir("/proc")? {
-        let Some(pid) = entry?
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let stat = match fs::read(format!("/proc/{pid}/stat")) {
-            Ok(stat) => stat,
-            Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let Some(close) = stat.iter().rposition(|byte| *byte == b')') else {
-            continue;
-        };
-        let ppid = std::str::from_utf8(&stat[close + 1..])
-            .ok()
-            .and_then(|fields| fields.split_whitespace().nth(1))
-            .and_then(|field| field.parse::<u32>().ok())
-            .ok_or_else(|| std::io::Error::other("malformed /proc stat"))?;
-        if ppid == parent {
-            ids.insert(pid);
-            if ids.len() > 128 {
-                return Err(std::io::Error::other(
-                    "fixture child inventory exceeded bound",
-                ));
-            }
-        }
-    }
-    Ok(ids)
-}
-
 fn owned_children() -> std::io::Result<Vec<OwnedChild>> {
-    child_pids(std::process::id())?
-        .into_iter()
+    let ids = child_pids(std::process::id())?;
+    if ids.len() > 128 {
+        return Err(std::io::Error::other(
+            "fixture child inventory exceeded bound",
+        ));
+    }
+    ids.into_iter()
         .map(|pid| OwnedChild::capture(pid, None))
         .collect()
 }
@@ -686,15 +653,102 @@ impl Endpoint {
     }
     async fn json(&self, args: &[&str], input: Option<&str>) -> Value {
         let output = self.run(args, input).await;
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stderr),
-            member_up_failure_context(&self.root, args)
-        );
+        if !output.status.success() {
+            panic!(
+                "{}{}{}",
+                String::from_utf8_lossy(&output.stderr),
+                member_up_failure_context(&self.root, args),
+                self.member_mutation_failure_context(args, &output.stderr)
+                    .await
+            );
+        }
         serde_json::from_slice(&output.stdout).unwrap()
     }
+    /// A failed `--member` mutation names its retained outcome: the original
+    /// request's observed phase and reason, and its session's state and
+    /// cleanup status. Only closed fields are printed, and a status message
+    /// only from the daemon's own cleanup outcomes; never paths or commands.
+    async fn member_mutation_failure_context(&self, args: &[&str], stderr: &[u8]) -> String {
+        let (Some(&"--member"), Some(alias)) = (args.first(), args.get(1)) else {
+            return String::new();
+        };
+        let Some(request) = std::str::from_utf8(stderr).ok().and_then(|text| {
+            text.lines().find_map(|line| {
+                let id = line
+                    .strip_prefix("[cw] member request ")?
+                    .split(';')
+                    .next()?;
+                Uuid::parse_str(id).ok().map(|id| id.to_string())
+            })
+        }) else {
+            return String::new();
+        };
+        let Some(receipt) = self
+            .unrecorded_json(&["member", "observe", alias, &request, "--output", "json"])
+            .await
+        else {
+            return "\n[member mutation] original request observation unavailable".into();
+        };
+        let mut context = format!(
+            "\n[member mutation] observed phase={} reason={} cleanup_unknown={}",
+            receipt["phase"], receipt["reason"], receipt["cleanup_unknown"]
+        );
+        let session = self
+            .unrecorded_json(&["--member", alias, "ls", "--output", "json"])
+            .await
+            .and_then(|sessions| {
+                sessions
+                    .as_array()?
+                    .iter()
+                    .find(|session| session["session_id"] == receipt["session_id"])
+                    .cloned()
+            });
+        match session {
+            Some(session) => {
+                let status = session["status_message"].as_str().unwrap_or_default();
+                let status = if HOST_CLEANUP_STATUS.contains(&status) {
+                    status
+                } else {
+                    "other"
+                };
+                context += &format!(
+                    "; session state={} cleanup_unknown={} exit_code={} status={status}",
+                    session["state"], session["cleanup_unknown"], session["exit_code"]
+                );
+            }
+            None => context += "; session record unavailable",
+        }
+        context
+    }
+    /// One bounded diagnostic command, outside the path witness record.
+    async fn unrecorded_json(&self, args: &[&str]) -> Option<Value> {
+        let mut command = tokio::process::Command::from(self.command(args));
+        command.kill_on_drop(true);
+        let child = cw_fixture::spawn_written(|| command.spawn()).ok()?;
+        let output = tokio::time::timeout(Duration::from_secs(45), child.wait_with_output())
+            .await
+            .ok()?
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&output.stdout).ok()
+    }
 }
+
+/// The daemon's closed host cleanup outcomes, the only status messages a
+/// failed member mutation's diagnostic repeats.
+const HOST_CLEANUP_STATUS: &[&str] = &[
+    "host output drain timed out; cleanup is unknown",
+    "host process cleanup could not be confirmed",
+    "host process cleanup could not be confirmed; restart is unavailable",
+    "host PTY cleanup could not be confirmed",
+    "host PTY control join could not be confirmed",
+    "host session interrupted; process cleanup is unknown; restart is unavailable",
+    "session launch cleanup could not be confirmed; restart is unavailable",
+    "session launch outcome could not be confirmed",
+    "session stop outcome could not be confirmed",
+];
 struct Services {
     origin: String,
     mesh: tokio::task::JoinHandle<()>,
