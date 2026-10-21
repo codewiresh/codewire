@@ -116,6 +116,9 @@
       "note": "Alpine's patches and build configuration for the pinned busybox-static APK, as one tar",
       "aports": {
         "base": "https://gitlab.alpinelinux.org/alpine/aports/-/raw",
+        "mirrors": [
+          "https://raw.githubusercontent.com/alpinelinux/aports"
+        ],
         "commit": "1e823a60eb85606954b3a5af5f8e5bbd1ea680cf",
         "path": "main/busybox",
         "files": {

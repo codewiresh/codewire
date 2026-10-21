@@ -51,6 +51,11 @@ class SourcesError(Exception):
     pass
 
 
+class SourcesUnavailable(SourcesError):
+    """A host did not answer with the bytes: the next mirror may. A wrong
+    SHA-256 is a SourcesError, which no mirror overrides."""
+
+
 def require(condition, reason):
     if not condition:
         raise SourcesError(reason)
@@ -94,6 +99,10 @@ def load_pins(path=PINS):
             require(release.is_hex(aports.get("commit"), 40) and aports.get("files")
                     and all(release._runtime_text(file, "-_.") and release.is_hex(digest, 64)
                             for file, digest in aports["files"].items()), f"source {name} aports pins are invalid")
+            bases = aports_bases(aports)
+            require(all(isinstance(base, str) and base.startswith("https://") and not base.endswith("/")
+                        for base in bases) and len(set(bases)) == len(bases),
+                    f"source {name} aports hosts must be distinct HTTPS bases")
         else:
             require(source.get("from") == "kernel-build", f"source {name} has no origin")
     return pins
@@ -128,10 +137,37 @@ def download(url, digest, limit=release.MAX_OBJECT):
             require(response.geturl().startswith("https://"), f"{url} redirected off HTTPS")
             data = response.read(limit + 1)
     except OSError as error:
-        raise SourcesError(f"{url}: {error}") from None
+        raise SourcesUnavailable(f"{url}: {error}") from None
     require(len(data) <= limit, f"{url} exceeds its bound")
     require(hashlib.sha256(data).hexdigest() == digest, f"{url} differs from its pinned SHA-256")
     return data
+
+
+def aports_bases(aports):
+    """Alpine's aports host, then its mirrors, in the order they are tried."""
+    return [aports.get("base"), *aports.get("mirrors", [])]
+
+
+def aports_file(aports, file, fetch, down):
+    """One pinned aports file from the first host that serves it.
+
+    Only an unavailable host passes to the next one, and it joins `down`, so
+    the rest of one tar never waits on it again: a dead host costs one
+    timeout, not one per file. Bytes that differ from the pin are refused
+    wherever they come from: the pinned SHA-256 alone admits a file,
+    whichever host served it.
+    """
+    unavailable = []
+    for base in aports_bases(aports):
+        if base in down:
+            continue
+        url = f"{base}/{aports['commit']}/{aports['path']}/{urllib.parse.quote(file)}"
+        try:
+            return fetch(url, aports["files"][file])
+        except SourcesUnavailable as error:
+            down.add(base)
+            unavailable.append(str(error))
+    raise SourcesUnavailable(f"no aports host served {file}: {'; '.join(unavailable) or 'every host is down'}")
 
 
 def aports_tar(name, source, fetch=download):
@@ -139,9 +175,9 @@ def aports_tar(name, source, fetch=download):
     aports = source["aports"]
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        down = set()
         for file in sorted(aports["files"]):
-            url = f"{aports['base']}/{aports['commit']}/{aports['path']}/{urllib.parse.quote(file)}"
-            data = fetch(url, aports["files"][file])
+            data = aports_file(aports, file, fetch, down)
             info = tarfile.TarInfo(f"{name}-{source['version']}/{file}")
             info.size, info.mode, info.mtime = len(data), 0o644, 0
             info.uid = info.gid = 0

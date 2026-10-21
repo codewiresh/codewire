@@ -752,6 +752,83 @@ class SourcesTest(unittest.TestCase):
                                                                                  "busyboxconfig")])
         self.assertTrue(all(member.mode == 0o644 and member.mtime == 0 and member.uid == 0 for member in members))
 
+    def test_alpine_build_files_fall_through_to_the_mirror_only_when_a_host_is_down(self):
+        pins, served, fetch = self.synthetic()
+        entry = pins["sources"]["busybox-alpine-build"]
+        aports = entry["aports"]
+        self.assertEqual(sources.aports_bases(aports),
+                         ["https://gitlab.alpinelinux.org/alpine/aports/-/raw",
+                          "https://raw.githubusercontent.com/alpinelinux/aports"])
+        expected = sources.aports_tar("busybox-alpine-build", entry, fetch)
+        primary, mirror = sources.aports_bases(aports)
+        # The mirror serves the identical files at the same commit.
+        for url, data in list(served.items()):
+            if url.startswith(primary + "/"):
+                served[mirror + url[len(primary):]] = data
+        asked = []
+
+        def primary_down(url, digest):
+            asked.append(url)
+            if url.startswith(primary + "/"):
+                raise sources.SourcesUnavailable(f"{url}: HTTP Error 503")
+            return fetch(url, digest)
+        # The first host down: each file comes from the mirror, as the same tar,
+        # and the dead host is asked exactly once, not once per file.
+        self.assertEqual(sources.aports_tar("busybox-alpine-build", entry, primary_down), expected)
+        self.assertEqual(len([url for url in asked if url.startswith(primary + "/")]), 1)
+        self.assertEqual(len([url for url in asked if url.startswith(mirror + "/")]), len(aports["files"]))
+        # Only within one tar: the next tar asks the primary host again.
+        asked.clear()
+        sources.aports_tar("busybox-alpine-build", entry, primary_down)
+        self.assertEqual(len([url for url in asked if url.startswith(primary + "/")]), 1)
+        # Bytes that differ from the pin are refused, on the first host or a
+        # mirror; the next host is never asked to make up for them.
+        for tampered_base in (primary, mirror):
+            with self.subTest(tampered=tampered_base):
+                tampered = dict(served)
+                tampered[f"{tampered_base}/{aports['commit']}/{aports['path']}/APKBUILD"] = b"tampered\n"
+                asked.clear()
+
+                def serve(url, digest, tampered=tampered, down=(tampered_base == mirror)):
+                    asked.append(url)
+                    if down and url.startswith(primary + "/"):
+                        raise sources.SourcesUnavailable(f"{url}: timed out")
+                    data = tampered[url]
+                    if hashlib.sha256(data).hexdigest() != digest:
+                        raise sources.SourcesError(f"{url} differs from its pinned SHA-256")
+                    return data
+                with self.assertRaisesRegex(sources.SourcesError, "APKBUILD differs from its pinned SHA-256") as caught:
+                    sources.aports_tar("busybox-alpine-build", entry, serve)
+                self.assertNotIsInstance(caught.exception, sources.SourcesUnavailable)
+                if tampered_base == primary:
+                    self.assertNotIn(f"{mirror}/{aports['commit']}/{aports['path']}/APKBUILD", asked,
+                                     "a refused file fell through to the mirror")
+
+        asked.clear()
+
+        def all_down(url, digest):
+            asked.append(url)
+            raise sources.SourcesUnavailable(f"{url}: unreachable")
+        with self.assertRaisesRegex(sources.SourcesUnavailable, "no aports host served 0001-a.patch"):
+            sources.aports_tar("busybox-alpine-build", entry, all_down)
+        # Each host is asked once before the tar gives up.
+        self.assertEqual(len(asked), 2)
+        # The real downloader reports a transport failure as unavailable.
+        with self.assertRaises(sources.SourcesUnavailable):
+            sources.download("https://127.0.0.1:9/never", "0" * 64)
+
+    def test_alpine_mirrors_must_be_distinct_https_hosts(self):
+        for mirrors in (["http://raw.githubusercontent.com/alpinelinux/aports"],
+                        ["https://gitlab.alpinelinux.org/alpine/aports/-/raw"],
+                        ["https://raw.githubusercontent.com/alpinelinux/aports/"]):
+            with self.subTest(mirrors=mirrors):
+                pins = json.loads(sources.PINS.read_bytes())
+                pins["sources"]["busybox-alpine-build"]["aports"]["mirrors"] = mirrors
+                path = self.base / "pins.json"
+                path.write_text(json.dumps(pins))
+                with self.assertRaisesRegex(sources.SourcesError, "aports hosts must be distinct HTTPS bases"):
+                    sources.load_pins(path)
+
     def test_each_side_writes_its_sources_and_components(self):
         pins, _served, fetch = self.synthetic()
         kernel = self.base / "kernel"
