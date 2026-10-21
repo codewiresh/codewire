@@ -43,7 +43,7 @@ import yaml
 MIRROR = "http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080"
 NAME = "CODEWIRE_APT_SNAPSHOT_MIRROR"
 BUILDER = re.compile(
-    r"verify-workspace-image\.sh|probe-workspace-r2-cache\.sh|build-push-image\.sh (base|workspace) "
+    r"verify-workspace-image\.sh|build-push-image\.sh (base|workspace) "
     r"|build-support-platform\.sh linux/"
 )
 HEAVY = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}"
@@ -60,8 +60,6 @@ CANONICAL = {
 }
 EXPECTED = {
     "ci.yaml:kind-workspace",
-    "ci.yaml:workspace-cache-measurement",
-    "ci.yaml:workspace-cache-probes",
     "ci.yaml:workspace-image",
     "deploy-prod.yaml:build-support-amd64",
     "support-images.yaml:build-support-amd64",
@@ -165,9 +163,8 @@ fi
 [[ "$(grep -Ec '^workspace_cache_build (base|workspace) ' "$VERIFY")" -eq 2 ]] ||
   fail 'verification does not build the exact local base/workspace pair'
 # The published arm64 leg cross-compiles cw. Verification builds exactly that
-# stage on amd64 hosts, without publication, emulation or a measured case.
-# shellcheck disable=SC2016 # Match the verifier's literal shell condition.
-arm64_cw_block="$(sed -n '/^if \[\[ "$architecture" == amd64 && -z "$workspace_measurement_case" \]\]; then$/,/^fi$/p' "$VERIFY")"
+# stage on amd64 hosts, without publication or emulation.
+arm64_cw_block="$(sed -n '/^# The published arm64 leg cross-compiles cw on the build platform/,/^fi$/p' "$VERIFY")"
 [[ "$(grep -c '^ *workspace_cache_build ' <<<"$arm64_cw_block")" -eq 1 \
     && "$(grep -c '^  workspace_cache_build cw-arm64 ' "$VERIFY")" -eq 1 ]] ||
   fail 'verification does not gate exactly one arm64 cw cross-compile build'
@@ -241,9 +238,7 @@ grep -qF "[[ \"\$VERIFICATION_SELECTION\" != *'|kind|'* ]] || [ \"\${KIND_WORKSP
 # The companion suites are independent programs with private scratch
 # directories. They run in two lanes beside the verifier fixture below and
 # are joined, in this order, before the contract is reported: every suite
-# still runs every case, and any failure fails this test. The cache
-# experiment suite is its own step beside this one wherever this test is a
-# step (run-product-verification.sh).
+# still runs every case, and any failure fails this test.
 mkdir -p "$ROOT/.tmp"
 work=''
 companions="$(mktemp -d "$ROOT/.tmp/workspace-image-companions.XXXXXX")"
@@ -294,9 +289,8 @@ join_companion_lanes() {
   companion_pids=()
   [[ "$failed" == false ]] || exit 1
 }
-start_companion_lane artifact-and-probes \
-  "$ROOT/scripts/ci/tests/test-workspace-image-artifact.py" \
-  "$ROOT/scripts/ci/tests/test-workspace-cache-probes.py"
+start_companion_lane artifact \
+  "$ROOT/scripts/ci/tests/test-workspace-image-artifact.py"
 start_companion_lane selector-and-cache \
   "$ROOT/scripts/ci/tests/test-select-untrusted-workspace-cache.sh" \
   "$ROOT/scripts/ci/tests/test-workspace-cache.sh" \
@@ -386,23 +380,16 @@ OWNER = ("${{ github.event_name == 'push' && github.ref == 'refs/heads/main' "
          "&& 'support-images' || 'ci' }}")
 RECEIPT = "needs.verification-selection.outputs.tested_tree_receipt != 'accepted'"
 WORKSPACE = "steps.container-scope.outputs.workspace == 'true'"
-EXPERIMENT = "needs.verification-selection.outputs.workspace_cache_experiment == 'true'"
 GUARDED = {
     "Prove isolated Buildx load contract": f"${{{{ {RECEIPT} && {WORKSPACE} }}}}",
     "Select independent workspace caches": f"${{{{ {RECEIPT} && {WORKSPACE} }}}}",
-    "Prove labeled R2 backend compatibility":
-        f"${{{{ {RECEIPT} && {WORKSPACE} && env.CODEWIRE_WORKSPACE_CACHE_CANARY == 'true' }}}}",
-    "Prepare selected workspace cache seed": f"${{{{ {RECEIPT} && {EXPERIMENT} && {WORKSPACE} }}}}",
     "Build and inspect without publication": f"${{{{ {RECEIPT} && {WORKSPACE} }}}}",
     "Clean workspace cache credentials": f"${{{{ always() && {RECEIPT} && {WORKSPACE} }}}}",
-    "Finalize selected workspace cache seed":
-        f"${{{{ success() && {RECEIPT} && {EXPERIMENT} && {WORKSPACE} }}}}",
 }
 # Commands that build, verify or cache the exact-source workspace.
 WORKSPACE_WORK = (
     "verify-workspace-image.sh", "select-untrusted-workspace-cache.sh",
-    "canary-workspace-r2-cache.sh", "prepare-workspace-cache-measurement.sh",
-    "workspace-cache-report.py", "finish-untrusted-rust-cache.sh",
+    "finish-untrusted-rust-cache.sh",
     "test-build-local-image.sh", "test-workspace-agent-contract.sh",
     "rehearse-build-local-image.sh",
 )
@@ -527,47 +514,6 @@ OWNER_PY
 owner_report="$(owner_violation "$WORKFLOW" --mutations 2>&1)" ||
   fail "${owner_report:-workspace owner check failed}"
 printf '%s\n' "$owner_report"
-# Both workflow owners execute the same fail-closed canary entrypoint. Execute
-# that checked-in shell in an isolated mock tree; unavailable identity must fail
-# before the harness, and a failed harness must stop the selected job.
-awk '
-  /- name: Prove labeled R2 backend compatibility/ { scope = 1; next }
-  scope && /^        run: \|$/ { run = 1; next }
-  run && /^          / { print substr($0, 11); next }
-  run { exit }
-' "$WORKFLOW" >"$work/canary-step.sh"
-[[ -s "$work/canary-step.sh" ]] || fail 'labeled canary script was not extracted'
-[[ "$(grep -Fc "env.CODEWIRE_WORKSPACE_CACHE_CANARY == 'true'" "$WORKFLOW")" -eq 2 ]] ||
-  fail 'both workspace owners must explicitly select the labeled canary'
-mkdir -p "$work/scripts/ci/tests"
-cat >"$work/scripts/ci/tests/canary-workspace-r2-cache.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$@" >"$CANARY_CALL"
-exit "${CANARY_STATUS:-0}"
-EOF
-chmod +x "$work/scripts/ci/tests/canary-workspace-r2-cache.sh"
-for mode in local disabled r2; do
-  rm -f "$work/canary-call"
-  status=0
-  (cd "$work" && env CODEWIRE_BUILDKIT_CACHE_MODE="$mode" \
-    CODEWIRE_SCCACHE_CREDENTIALS_FILE='/mock/private-cache.aws' RUNNER_TEMP='/mock/temp' \
-    CANARY_CALL="$work/canary-call" bash "$work/canary-step.sh") >"$work/canary-step.log" 2>&1 || status=$?
-  if [[ "$mode" == r2 ]]; then
-    [[ "$status" == 0 && -s "$work/canary-call" ]] || fail 'R2 canary was not executed'
-    [[ "$(cat "$work/canary-call")" == $'/mock/private-cache.aws\n/mock/temp/workspace-r2-cache-canary' ]] ||
-      fail 'canary did not receive only the existing credential path and bounded report path'
-  else
-    [[ "$status" != 0 && ! -e "$work/canary-call" ]] || fail 'canary accepted unavailable R2 identity'
-    grep -qF 'could not obtain its existing cache identity' "$work/canary-step.log" ||
-      fail 'identity failure was not distinguished from backend failure'
-  fi
-done
-if (cd "$work" && env CODEWIRE_BUILDKIT_CACHE_MODE=r2 \
-    CODEWIRE_SCCACHE_CREDENTIALS_FILE='/mock/private-cache.aws' RUNNER_TEMP='/mock/temp' \
-    CANARY_CALL="$work/canary-call" CANARY_STATUS=71 bash "$work/canary-step.sh"); then
-  fail 'workflow accepted a failed R2 compatibility canary'
-fi
 # Run the actual verifier and identity helper in a private source fixture. Never
 # write a synthetic acceptance receipt into the developer checkout.
 fixture_root="$work/source"
@@ -610,9 +556,6 @@ printf '%q ' "$@" >>"$FAKE_DOCKER_LOG"
 printf '\n' >>"$FAKE_DOCKER_LOG"
 
 case "${1:-} ${2:-}" in
-  'info --format') printf 'daemon-%s\n' "$FAKE_BUILDER_SUFFIX" ;;
-  'version --format') printf '29.7.1\n' ;;
-  'buildx version') printf 'buildx pinned-fixture\n' ;;
   'buildx inspect')
     if [[ "${FAKE_FAIL:-}" == cleanup-gone && -e "$FAKE_DAEMON_FILE.removed" && "${3:-}" == codewire-workspace-* ]]; then
       echo "ERROR: no builder \"$3\" found" >&2
@@ -623,22 +566,6 @@ case "${1:-} ${2:-}" in
     ;;
   'buildx create')
     printf 'workspace-verifier-%s\n' "$FAKE_BUILDER_SUFFIX"
-    ;;
-  'buildx history')
-    [[ "$3 $4 $6 $7" == 'logs --builder --progress rawjson' ]] || exit 97
-    [[ "${FAKE_FAIL:-}" != history-failure ]] || exit 47
-    if [[ "$8" == bbbbbbbbbbbbbbbbbbbbbbbbb ]]; then
-      [[ "$5/$5-node/$8" == "$(<"$FAKE_IMAGE_ID.producer-ref")" ]] || exit 97
-      vertex='[cw-builder 1/1] RUN fixed synthetic compiler input'
-    else
-      [[ "$5/$5-node/$8" == "$(<"$FAKE_IMAGE_ID.build-ref")" ]] || exit 97
-      if [[ "$(uname -m)" == x86_64 ]]; then
-        vertex='[cw-builder 1/1] COPY admitted cw /usr/local/bin/cw'
-      else
-        vertex='[cw-builder 1/1] RUN cargo build'
-      fi
-    fi
-    printf '{"vertexes":[{"digest":"sha256:%064d","inputs":["sha256:%064d"],"name":"%s","started":"2026-09-10T10:00:00Z","completed":"2026-09-10T10:00:01Z"}]}\n' 6 7 "$vertex" >&2
     ;;
   'buildx build')
     if [[ "${FAKE_FAIL:-}" == cancel ]]; then
@@ -697,32 +624,7 @@ case "${1:-} ${2:-}" in
         printf '%s\n' "$result_path" >"$FAKE_SELECTED_RESULT"
       fi
     fi
-    if [[ -n "${CODEWIRE_WORKSPACE_CACHE_CASE:-}" ]]; then
-      measurement_sleep_pid=''
-      trap 'trap "" TERM INT
-        measurement_sleep_pid="${measurement_sleep_pid:-${!:-}}";
-        if [[ -n "$measurement_sleep_pid" ]]; then
-          wait "$measurement_sleep_pid" 2>/dev/null || true
-        fi
-        exit 143' TERM INT
-      sleep 0.1 &
-      measurement_sleep_pid=$!
-      wait "$measurement_sleep_pid"
-      trap - TERM INT
-      if [[ -n "$archive_file" ]]; then
-        if [[ "${FAKE_FAIL:-}" == sampler-bookkeeping ]]; then
-          mkdir "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR/sampler-stop-request"
-        fi
-        printf '#1 [workspace-floating-tools 1/2] RUN npm install\n#1 DONE 0.1s\n'
-        printf '#2 [workspace-floating-tools 2/2] RUN go install\n#2 DONE 0.1s\n'
-        if [[ "$(uname -m)" == x86_64 ]]; then
-          printf '#3 [cw-builder 1/1] COPY admitted cw /usr/local/bin/cw\n#3 DONE 0.1s\n'
-        else
-          printf '#3 [cw-builder 1/1] RUN cargo build\n#3 DONE 0.1s\n#3 0.1 Cache hits 4\n'
-        fi
-      fi
-      [[ "$CODEWIRE_BUILDKIT_CACHE_MODE" != r2 ]] || printf '#9 exporting cache to Amazon S3\n#9 DONE 0.1s\n'
-    elif [[ -n "$archive_file" ]]; then
+    if [[ -n "$archive_file" ]]; then
       if [[ "$(uname -m)" == x86_64 ]]; then
         printf '#3 [cw-builder 1/1] COPY admitted cw /usr/local/bin/cw\n#3 DONE 0.1s\n'
       else
@@ -776,8 +678,6 @@ PY
     fi
     if [[ "$5" == '{{.Id}}' ]]; then
       printf '%064d\n' 4
-    elif [[ "$5" == '{{.Image}}' ]]; then
-      printf 'sha256:%064d\n' 8
     else
       printf '%s\n' 'docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
     fi
@@ -859,17 +759,6 @@ PY
     fi
     ;;
   *)
-    if [[ "$1" == exec && "${3:-}" == sh ]]; then
-      if tr '\0' ' ' <"/proc/$PPID/cmdline" | grep -q 'workspace-cache-report.py sample ' \
-          && [[ ! -e "$FAKE_SAMPLER_PROCESS" ]]; then
-        # Publish one complete private identity without unlinking an open reader.
-        sampler_identity="$(mktemp "$FAKE_SAMPLER_PROCESS.XXXXXX")"
-        printf '%s\n' "$PPID" >"$sampler_identity"
-        mv -T -- "$sampler_identity" "$FAKE_SAMPLER_PROCESS"
-      fi
-      printf '1000 10000 2000 8000 3000 4000\n'
-      exit 0
-    fi
     if [[ "$1" == exec && "${3:-}" == rm ]]; then
       [[ "${FAKE_FAIL:-}" != daemon-erase ]] || exit 45
       rm -f "$FAKE_DAEMON_FILE"
@@ -881,8 +770,7 @@ PY
 esac
 EOF
 chmod +x "$work/bin/docker" "$work/bin/git"
-printf '{"repository":{"full_name":"codewire/codewire"},"pull_request":{"number":2047,"base":{"ref":"main","repo":{"full_name":"codewire/codewire"}},"head":{"ref":"experiment/workspace-r2-cache/fixture","sha":"%s"},"labels":[]}}\n' "$fixture_sha" >"$work/measurement-event.json"
-mkdir "$work/measurement"
+mkdir "$work/runner-temp"
 
 run_mock_verifier() {
   printf '%s\n' "${4:-}" >"$work/current-fixture-mode"
@@ -894,12 +782,10 @@ run_mock_verifier() {
     CODEWIRE_BUILDKIT_CACHE_MODE="${MOCK_LAYERS:-local}" \
     CODEWIRE_WORKSPACE_IMAGE_REUSE="${MOCK_REUSE:-auto}" \
     CODEWIRE_WORKSPACE_CW_PRODUCER_RETAIN="${MOCK_RETAIN:-0}" \
-    CODEWIRE_WORKSPACE_CACHE_CASE="${MOCK_MEASUREMENT_CASE:-}" \
-    CODEWIRE_WORKSPACE_CACHE_REPORT_DIR="$work/measurement/$1" \
     CODEWIRE_EXPECTED_SOURCE_SHA="$fixture_sha" CODEWIRE_EXPECTED_SOURCE_TREE="$fixture_tree" \
-    GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$work/measurement-event.json" \
+    GITHUB_EVENT_NAME=pull_request \
     GITHUB_REF=refs/pull/2047/head GITHUB_SHA="$fixture_sha" GITHUB_REPOSITORY=codewire/codewire \
-    GITHUB_JOB=workspace-fixture GITHUB_RUN_ID=2047 GITHUB_RUN_ATTEMPT=1 RUNNER_TEMP="$work/measurement" \
+    GITHUB_JOB=workspace-fixture GITHUB_RUN_ID=2047 GITHUB_RUN_ATTEMPT=1 RUNNER_TEMP="$work/runner-temp" \
     CODEWIRE_SCCACHE_CREDENTIALS_FILE="${MOCK_CREDENTIALS:-}" \
     SCCACHE_BUCKET=example-ci-cache-untrusted \
     SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com \
@@ -918,10 +804,10 @@ run_mock_verifier() {
     FAKE_CONTRACT_PROCESS="$work/contract-process" \
     FAKE_CONTRACT_CHILD="$work/contract-child" \
     FAKE_CONTRACT_RUNNING="$work/contract-running" \
-    FAKE_SAMPLER_PROCESS="$work/sampler-process" \
     FAKE_FAIL="${4:-}" \
     FAKE_DIRTY="${5:-false}" \
     TMPDIR="$work/tmp" \
+    ${MOCK_PRIOR_VERIFIER:+"workspace_measurement_case="} \
     "$fixture_root/scripts/ci/verify/verify-workspace-image.sh")
   if [[ "${MOCK_EXEC:-false}" == true ]]; then exec "${invocation[@]}"; fi
   "${invocation[@]}"
@@ -1063,8 +949,7 @@ replacement_archive="$(jq -er '.workspace_oci.file' "$fixture_receipt")"
 [[ ! -e "$previous_archive" && -s "$fixture_root/.tmp/$replacement_archive" ]] ||
   fail 'successful fresh verification did not retire only its prior archive'
 
-# Explicit experiments must build even when an identical receipt exists. A
-# failed fresh attempt invalidates the old receipt before it can be consumed.
+# A failed fresh attempt invalidates the old receipt before it can be consumed.
 : >"$work/docker.log"
 if MOCK_REUSE=disabled run_mock_verifier invalid missing docker >/dev/null 2>&1; then fail 'accepted missing base digest'; fi
 [[ "$(grep -c '^buildx build ' "$work/docker.log")" == 1 ]] || fail 'invalid base reached workspace build'
@@ -1225,197 +1110,6 @@ for pid_file in "$work/contract-process" "$work/contract-child"; do
   [[ -z "$state" || "$state" == Z* ]] || { kill -TERM "$child_pid"; fail 'contract left a live child'; }
 done
 
-# Exercise the complete measurement lifecycle against the absolute fake client.
-# Reports are finalized only after the job-owned credential finisher succeeds.
-crash_owned_sampler() {
-  python3 - "$work/sampler-process" "$1" <<'PY'
-import os, select, signal, stat, sys, time
-from pathlib import Path
-
-# A readiness budget only: every check below asserts state, not speed.
-deadline = time.monotonic() + 60
-pins = {}
-paused = False
-sampler = None
-verifier = None
-injected = False
-
-def interrupted(_signal, _frame):
-    raise InterruptedError('owned sampler crash observation interrupted')
-
-signal.signal(signal.SIGTERM, interrupted)
-
-def require(value, message):
-    if not value:
-        raise ValueError(message)
-
-def identity(pid):
-    directory = Path('/proc') / str(pid)
-    fields = (directory / 'stat').read_text().rsplit(') ', 1)[1].split()
-    return (int(fields[1]), fields[19], directory.stat().st_uid), fields[0]
-
-def alive(fd):
-    poll = select.poll()
-    poll.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR)
-    return not poll.poll(0)
-
-def pin(pid):
-    before, _ = identity(pid)
-    require(before[2] == os.geteuid(), 'sampler ancestor is not owned')
-    fd = os.pidfd_open(pid)
-    try:
-        require(identity(pid)[0] == before and alive(fd), 'sampler ancestor birth changed')
-    except BaseException:
-        os.close(fd)
-        raise
-    pins[pid] = (fd, before)
-    return before
-
-def revalidate():
-    for pid, (fd, expected) in pins.items():
-        require(alive(fd) and identity(pid)[0] == expected, 'sampler ancestry changed')
-
-def proc_children(parent):
-    # Each process's /proc stat names its parent; a kernel without
-    # CONFIG_PROC_CHILDREN (the CI's Kata guests) has no task children
-    # lists. A process gone mid-scan is skipped; comm may hold ')'.
-    found = set()
-    for entry in os.scandir('/proc'):
-        if not entry.name.isdecimal():
-            continue
-        try:
-            raw = (Path('/proc') / entry.name / 'stat').read_bytes()
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        if b')' in raw and int(raw[raw.rindex(b')') + 2:].split()[1]) == parent:
-            found.add(int(entry.name))
-    return found
-
-def paused_children():
-    tasks = list((Path('/proc') / str(sampler) / 'task').iterdir())
-    require(0 < len(tasks) <= 128, 'sampler task count refused')
-    for task in tasks:
-        require(task.name.isdecimal(), 'sampler task identity refused')
-        fields = (task / 'stat').read_text().rsplit(') ', 1)[1].split()
-        if fields[0] not in ('T', 't'):
-            return None
-    result = proc_children(sampler)
-    require(len(result) <= 1024, 'sampler child inventory is too large')
-    return result
-
-try:
-    verifier = int(sys.argv[2])
-    require(pin(verifier)[0] == os.getppid(), 'verifier is not an owned direct child')
-    while not Path(sys.argv[1]).is_file():
-        require(time.monotonic() < deadline, 'sampler identity was not reported')
-        revalidate()
-        time.sleep(0.01)
-    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-    try:
-        metadata = os.fstat(fd)
-        require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.geteuid()
-                and metadata.st_nlink == 1 and stat.S_IMODE(metadata.st_mode) == 0o600
-                and 0 < metadata.st_size <= 32, 'sampler identity file refused')
-        raw = os.read(fd, 33)
-        require(raw.endswith(b'\n') and raw[:-1].isdigit(), 'sampler identity bytes refused')
-        sampler = int(raw)
-    finally:
-        os.close(fd)
-    current = sampler
-    for _ in range(12):
-        require(current > 1 and current not in pins, 'sampler lineage refused')
-        current = pin(current)[0]
-        if current == verifier:
-            break
-    else:
-        raise ValueError('sampler is not a verifier descendant')
-    while True:
-        require(time.monotonic() < deadline, 'sampler could not reach child-free pause')
-        revalidate()
-        signal.pidfd_send_signal(pins[sampler][0], signal.SIGSTOP)
-        paused = True
-        children = paused_children()
-        while children is None:
-            require(time.monotonic() < deadline, 'sampler pause did not complete')
-            revalidate()
-            time.sleep(0.005)
-            children = paused_children()
-        revalidate()
-        if children:
-            signal.pidfd_send_signal(pins[sampler][0], signal.SIGCONT)
-            paused = False
-            time.sleep(0.01)
-            continue
-        require(paused_children() == set(), 'paused sampler child inventory changed')
-        revalidate()
-        signal.pidfd_send_signal(pins[sampler][0], signal.SIGKILL)
-        paused = False
-        injected = True
-        break
-finally:
-    try:
-        if paused and sampler in pins:
-            fd, _ = pins[sampler]
-            if alive(fd):
-                signal.pidfd_send_signal(fd, signal.SIGCONT)
-    finally:
-        try:
-            if not injected and verifier in pins:
-                fd, _ = pins[verifier]
-                if alive(fd):
-                    signal.pidfd_send_signal(fd, signal.SIGTERM)
-        finally:
-            for fd, _ in pins.values():
-                os.close(fd)
-PY
-}
-
-for measurement in seed sampler-crash sampler-bookkeeping history-failure; do
-  status=0
-  rm -f "$work/sampler-process"
-  : >"$work/docker.log"
-  if [[ "$measurement" == sampler-crash ]]; then
-    MOCK_EXEC=true MOCK_MEASUREMENT_CASE=seed MOCK_COMPILER=r2 MOCK_LAYERS=r2 MOCK_CREDENTIALS="$work/r2.aws" \
-      run_mock_verifier "$measurement" valid docker "$measurement" >"$work/$measurement.log" 2>&1 &
-    verifier_pid=$!
-    crash_owned_sampler "$verifier_pid" || {
-      wait "$verifier_pid" 2>/dev/null || true
-      fail 'owned sampler crash injection failed'
-    }
-    wait "$verifier_pid" || status=$?
-  else
-    MOCK_MEASUREMENT_CASE=seed MOCK_COMPILER=r2 MOCK_LAYERS=r2 MOCK_CREDENTIALS="$work/r2.aws" \
-      run_mock_verifier "$measurement" valid docker "$measurement" >"$work/$measurement.log" 2>&1 || status=$?
-  fi
-  directory="$work/measurement/$measurement"
-  [[ ! -e "$work/daemon.aws" ]] || fail 'measurement retained daemon credentials'
-  grep -q '^buildx rm --force codewire-workspace-' "$work/docker.log" || fail 'measurement retained its owned builder'
-  if [[ -s "$work/sampler-process" ]]; then
-    sampler_process="$(<"$work/sampler-process")"
-    state="$(ps -o stat= -p "$sampler_process" || true)"
-    [[ -z "$state" || "$state" == Z* ]] || { kill -TERM "$sampler_process"; fail 'measurement left a live sampler'; }
-  fi
-  if [[ "$measurement" == sampler-* || "$measurement" == history-failure ]]; then
-    [[ "$status" != 0 && ! -e "$fixture_receipt" && ! -e "$directory/result.json" ]] || fail 'sampler failure emitted an acceptance marker'
-    continue
-  fi
-  [[ "$status" == 0 && -s "$fixture_receipt" ]] || {
-    cat "$work/$measurement.log" >&2
-    fail 'measurement verifier did not complete its ordinary contracts'
-  }
-  status=0
-  env RUNNER_TEMP="$work/measurement" GITHUB_OUTPUT="$work/measurement-output" \
-    CODEWIRE_EXPECTED_SOURCE_SHA="$fixture_sha" CODEWIRE_EXPECTED_SOURCE_TREE="$fixture_tree" \
-    CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 \
-    python3 "$fixture_root/scripts/ci/verify/workspace-cache-report.py" finalize "$directory" "$fixture_receipt" \
-    >"$work/$measurement-report.log" 2>&1 || status=$?
-  [[ "$status" == 0 && -s "$directory/result.json" ]] || {
-    cat "$work/$measurement-report.log" >&2
-    fail 'valid seed measurement failed'
-  }
-  grep -q 'ignore-error=false' "$work/docker.log" || fail 'seed export remains best effort'
-done
-
 # Bind the original policy witness to its actual prior bytes, not a modified
 # success stub. Both policies reuse one real-admission synthetic producer and
 # drive the existing workspace/base/contract/seal route through the CW wrapper.
@@ -1439,6 +1133,111 @@ def replace_once(old, new):
     assert current.count(old) == 1
     current = current.replace(old, new, 1)
 
+# The measurement code that #3119 (A15) removed is part of the prior bytes:
+# put it back first. Each pair is (the code now, the prior code).
+restorations = (
+    # floating versions
+    (r'''contract_container=''
+
+printf 'workspace image verification: base=''',
+     r'''contract_container=''
+if [[ -n "$report_dir" ]]; then
+  contract_container="$builder-floating-versions"
+  workspace_cache_command "$docker_bin" run --rm --interactive --pids-limit=2048 \
+    --name "$contract_container" --user codewire --entrypoint python3 \
+    "$workspace_id" - versions <"$report_tool" >"$report_dir/versions.json"
+  contract_container=''
+fi
+
+printf 'workspace image verification: base='''),
+    # build history
+    (r'''# state before any runtime inspection or potentially slow agent command.
+workspace_cache_cleanup_builder
+''',
+     r'''# state before any runtime inspection or potentially slow agent command.
+if [[ -n "$report_dir" ]]; then
+  # Plain progress can hide a cache hit behind later lazy layer extraction.
+  # Capture this exact completed build's native events before deleting its state.
+  workspace_cache_timed_command 60s python3 "$report_tool" capture-history "$docker_bin" "$builder" "$report_dir"
+  stop_sampler
+  workspace_cache_command python3 "$report_tool" sample-once "$docker_bin" "$builder_container" "$report_dir"
+fi
+workspace_cache_cleanup_builder
+'''),
+    # identity and sampler
+    (r'''workspace_cache_compiler_args
+
+# Export the exact base as a local OCI layout.''',
+     'workspace_cache_compiler_args\nif [[ -n "$report_dir" ]]; then\n  if [[ "$workspace_measurement_case" == seed ]]; then\n    export CODEWIRE_WORKSPACE_CACHE_SEED_ID="run-${GITHUB_RUN_ID:?}/tree-$source_tree/seed-$builder_container"\n  fi\n  workspace_cache_command "$docker_bin" info --format \'{{.ID}}\' >"$report_dir/docker-id"\n  workspace_cache_command "$docker_bin" version --format \'{{.Client.Version}}\' >"$report_dir/docker-version"\n  workspace_cache_command "$docker_bin" buildx version >"$report_dir/buildx-version"\n  workspace_cache_command "$docker_bin" container inspect "${HOSTNAME:?}" --format \'{{.Image}}\' >"$report_dir/job-image-id"\n  python3 - "$report_dir" "$identity" "$builder_container" "$WORKSPACE_BUILDKIT_IMAGE" "$HOSTNAME" "$builder" <<\'PY\'\nimport json, os, re, sys\nfrom pathlib import Path\ndirectory, identity, builder, pin, job_container, builder_name = sys.argv[1:]\ndirectory = Path(directory)\nvalue = json.loads(identity)\ndaemon = (directory / "docker-id").read_text().strip()\njob_image = (directory / "job-image-id").read_text().strip()\nif not re.fullmatch(r"[A-Za-z0-9:_-]{8,128}", daemon) or not re.fullmatch(r"sha256:[0-9a-f]{64}", job_image):\n    raise SystemExit("invalid worker identity")\nheader = {key: value[key] for key in ("source_sha", "source_tree", "architecture")}\nheader.update(case=os.environ["CODEWIRE_WORKSPACE_CACHE_CASE"],\n              docker_daemon_id=daemon, builder_container_id=builder, builder_name=builder_name,\n              job_container_id=job_container, job_id=os.environ["GITHUB_JOB"],\n              run_id=os.environ["GITHUB_RUN_ID"], run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1"),\n              seed_cache_id=os.environ["CODEWIRE_WORKSPACE_CACHE_SEED_ID"],\n              pins={"buildkit_image": pin, "job_image_id": job_image,\n                    "docker_client": (directory / "docker-version").read_text().strip(),\n                    "buildx": (directory / "buildx-version").read_text().strip(),\n                    "workspace_dockerfile_sha256": value["inputs"]["images/workspace/Dockerfile"],\n                    "base_dockerfile_sha256": value["inputs"]["images/base/Dockerfile"],\n                    "rust_build_wrapper_sha256": value["inputs"]["scripts/ci/images/run-rust-build.sh"]})\n(directory / "identity.json").write_text(json.dumps(header, sort_keys=True) + "\\n")\nPY\n  workspace_cache_command python3 "$report_tool" sample-once "$docker_bin" "$builder_container" "$report_dir"\n  timeout --signal=TERM --kill-after=3s 3300s \\\n    python3 "$report_tool" sample "$docker_bin" "$builder_container" "$report_dir" &\n  sampler_pid=$!\nfi\n\n# Export the exact base as a local OCI layout.'),
+    # elapsed seconds
+    (r'''    [[ ! -e "$previous_receipt" ]] || prior_receipt+=("$previous_receipt")
+  fi
+''',
+     r'''    [[ ! -e "$previous_receipt" ]] || prior_receipt+=("$previous_receipt")
+    if [[ -n "$report_dir" ]]; then
+      printf '%s\n' "$(( $(date +%s) - started_at ))" >"$report_dir/elapsed-seconds" || status=$?
+    fi
+  fi
+'''),
+    # stop sampler call
+    (r'''  trap - EXIT INT TERM
+
+  workspace_cache_cleanup_builder || cleanup_status=$?
+''',
+     r'''  trap - EXIT INT TERM
+
+  stop_sampler || cleanup_status=$?
+  workspace_cache_cleanup_builder || cleanup_status=$?
+'''),
+    # stop sampler
+    ('PY\n}\n\ncleanup() {\n',
+     'PY\n}\n\nstop_sampler() {\n  local sampler_status=0 wait_status=0\n  if [[ -n "$sampler_pid" ]]; then\n    # Report IO is fallible (including ENOSPC). It must never prevent stopping\n    # the observer or the caller\'s subsequent provider-file/builder cleanup.\n    : >"$report_dir/sampler-stop-request" || sampler_status=$?\n    kill -TERM "$sampler_pid" 2>/dev/null || true\n    wait "$sampler_pid" 2>/dev/null || wait_status=$?\n    case "$wait_status" in\n      0|143) ;;\n      *) [[ "$sampler_status" != 0 ]] || sampler_status="$wait_status" ;;\n    esac\n    sampler_pid=\'\'\n    [[ ! -e "$report_dir/metrics-error" ]] || sampler_status=1\n    if [[ "$sampler_status" != 0 ]]; then\n      printf \'resource sampler failed with status %s\\n\' "$sampler_status" >"$report_dir/metrics-error" || true\n    fi\n  fi\n  return "$sampler_status"\n}\n\ncleanup() {\n'),
+    # sampler pid
+    (r'''contract_container=''
+cw_copy_started=false
+''',
+     r'''contract_container=''
+sampler_pid=''
+cw_copy_started=false
+'''),
+    # build log root
+    (r'''build_log_root="$work"
+''',
+     r'''build_log_root="${report_dir:-$work}"
+'''),
+    # report directory
+    (r'''umask 077
+work="$(mktemp -d''',
+     r'''umask 077
+if [[ -n "$workspace_measurement_case" ]]; then
+  report_dir="${CODEWIRE_WORKSPACE_CACHE_REPORT_DIR:?measurement report directory is required}"
+  [[ "$report_dir" == "${RUNNER_TEMP:?}/"* && "$report_dir" == /* \
+      && "$(realpath -m -- "$report_dir")" == "$report_dir" \
+      && "$report_dir" != "$(realpath -- "$ROOT")/"* && ! -e "$report_dir" && ! -L "$report_dir" ]] || exit 2
+  mkdir -m 0700 "$report_dir"
+fi
+work="$(mktemp -d'''),
+    # experiment reuse
+    (r'''esac
+case "${CODEWIRE_WORKSPACE_IMAGE_REUSE:-auto}" in''',
+     r'''esac
+if [[ -n "$workspace_measurement_case" ]]; then
+  # Experiments always build; an old image receipt cannot seed a measurement.
+  export CODEWIRE_WORKSPACE_IMAGE_REUSE=disabled
+  CODEWIRE_BUILDKIT_CACHE_REQUEST=auto python3 "$ROOT/scripts/ci/setup/select-workspace-cache-experiment.py" \
+    | jq -e '.selected == true' >/dev/null
+fi
+case "${CODEWIRE_WORKSPACE_IMAGE_REUSE:-auto}" in'''),
+    # report tool
+    (r'''workspace_cache_validate
+retain_cw_producer=''',
+     r'''workspace_cache_validate
+report_tool="$ROOT/scripts/ci/verify/workspace-cache-report.py"
+report_dir=''
+retain_cw_producer='''),
+)
+for removed, prior in restorations:
+    replace_once(removed, prior)
 remove_between('retain_cw_producer="${CODEWIRE_WORKSPACE_CW_PRODUCER_RETAIN:-0}"\n',
                'if [[ -n "$workspace_measurement_case" ]]; then\n  # Experiments always build; an old image receipt cannot seed a measurement.\n')
 remove_between('if [[ "$retain_cw_producer" == 1 && "$architecture" != amd64 ]]; then\n',
@@ -1507,7 +1306,9 @@ PY
   }
   fixture_policy "$work/prior-verifier.sh"
   : >"$work/docker.log"
-  MOCK_REUSE=disabled MOCK_PRODUCER_RESULT="$work/copy-policy-result.json" \
+  # The prior verifier read workspace_measurement_case, which the shared cache
+  # helper no longer sets; define it, empty, for this witness alone.
+  MOCK_PRIOR_VERIFIER=true MOCK_REUSE=disabled MOCK_PRODUCER_RESULT="$work/copy-policy-result.json" \
     run_mock_verifier copy-policy-old valid docker cw-mismatch >"$work/copy-policy-old.log" 2>&1 || {
       cat "$work/copy-policy-old.log" >&2; fail 'exact prior copy policy witness did not accept';
     }

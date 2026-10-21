@@ -96,10 +96,6 @@ class WorkflowContractTests(unittest.TestCase):
                     "artifact_name": "${{ steps.export.outputs.artifact_name }}",
                     "manifest_sha256": "${{ steps.export.outputs.manifest_sha256 }}",
                 }
-                if job_name == "kind-workspace":
-                    expected_outputs["workspace_cache_seed"] = (
-                        "${{ steps.cache-seed-report.outputs.workspace_cache_seed }}"
-                    )
                 self.assertEqual(
                     job["outputs"],
                     expected_outputs,

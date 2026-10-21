@@ -49,7 +49,6 @@ case "$url" in
     jq -e --arg role "${FAKE_EXPECTED_ROLE:?}" '.role == $role' "$data_file" >/dev/null
     jq -n --arg token "${FAKE_OPENBAO_TOKEN:?}" '{auth:{client_token:$token}}' >"$output"
     ;;
-  https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/untrusted|\
   https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/protected-read|\
   https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/protected)
     [[ "${FAKE_R2_FAIL:-0}" != 1 ]] || exit 92
@@ -100,13 +99,8 @@ grep -Fq 'sccache-r2/protected-read' "$FAKE_CURL_CALLS" && ! grep -Eq 'sccache-r
   fail 'a pull request must read only the protected-read cache document by default'
 [[ "$(grep -c 'sccache-r2/' "$FAKE_CURL_CALLS")" == 1 ]] || fail 'a pull request read more than one cache document'
 
-# The labelled experiments alone select the disposable untrusted document.
-export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
-: >"$FAKE_CURL_CALLS"
-CODEWIRE_R2_CACHE_TRUST=untrusted "$FETCHER" "$work/output/experiment-aws-credentials" >/dev/null
-grep -Fq 'sccache-r2/untrusted' "$FAKE_CURL_CALLS" && ! grep -Fq 'sccache-r2/main' "$FAKE_CURL_CALLS" ||
-  fail 'a labelled experiment must read only the untrusted cache document'
-for refused in main other; do
+# Nothing else: the untrusted bucket's document is refused like main's.
+for refused in untrusted main other; do
   export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
   : >"$FAKE_CURL_CALLS"
   if CODEWIRE_R2_CACHE_TRUST="$refused" "$FETCHER" "$work/output/refused-$refused" >/dev/null 2>&1; then
@@ -176,8 +170,6 @@ cache_jobs=(
   kind-product
   kind-daemon
   kind-smokes
-  workspace-cache-measurement
-  workspace-cache-probes
 )
 [[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq "${#cache_jobs[@]}" ]] ||
   fail 'CI OIDC is not confined to the declared cache-consuming jobs'
@@ -190,8 +182,7 @@ for job in "${cache_jobs[@]}"; do
   grep -Fq '    enable-openid-connect: true' <<<"$job_block" ||
     fail "$job cannot request its untrusted cache identity"
   cache_selector=select-untrusted-rust-cache.sh
-  if [[ "$job" == workspace-image || "$job" == kind-workspace \
-      || "$job" == workspace-cache-measurement || "$job" == workspace-cache-probes ]]; then
+  if [[ "$job" == workspace-image || "$job" == kind-workspace ]]; then
     cache_selector=select-untrusted-workspace-cache.sh
   fi
   grep -Fq "scripts/ci/setup/$cache_selector \"\$RUNNER_TEMP/codewire-sccache-r2.aws\"" \

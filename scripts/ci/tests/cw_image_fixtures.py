@@ -39,7 +39,7 @@ EXTRA_INPUTS = (
     "docker-bake.hcl", "deployments/docker/rust-base.Dockerfile",
     "deployments/docker/daemon.Dockerfile", "scripts/ci/images/cw-image-consumer.py",
     "scripts/ci/images/cw-image-consumer.sh", "scripts/ci/images/cw-image-source.py",
-    "scripts/ci/images/build-product-images.sh", "scripts/ci/tests/canary-workspace-r2-cache.sh",
+    "scripts/ci/images/build-product-images.sh",
 )
 PRODUCER_ID = "b" * 25
 CLAIM = "synthetic-source-and-api; no-Cargo-Docker-or-CW-execution"

@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 selector="$ROOT/scripts/ci/setup/select-untrusted-workspace-cache.sh"
 test_source="$(git -C "$ROOT" rev-parse HEAD)"
-test_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
 mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/workspace-cache-selector-test.XXXXXX")"
 credential_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-workspace-selector-data.XXXXXX")"
@@ -18,7 +17,6 @@ cat >"$work/bin/sccache" <<'SH'
 printf 'sccache %s\n' "${FAKE_SCCACHE_VERSION:-0.17.0}"
 SH
 chmod 0755 "$work/bin/sccache"
-printf '{}\n' >"$work/event.json"
 cat >"$work/fetch" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -36,10 +34,9 @@ chmod 0755 "$work/fetch"
 select_cache() {
   local rust="$1" layer="$2" file="$3"
   PATH="${TEST_PATH:-$work/bin:$PATH}" RUNNER_TEMP="$credential_work/runner" GITHUB_WORKSPACE="$ROOT" GITHUB_ENV="$work/env" \
-    GITHUB_EVENT_NAME="${TEST_EVENT_NAME:-push}" GITHUB_EVENT_PATH="$work/event.json" \
+    GITHUB_EVENT_NAME="${TEST_EVENT_NAME:-push}" \
     GITHUB_SHA="$test_source" GITHUB_REF="${TEST_REF:-refs/pull/2047/head}" \
     GITHUB_REPOSITORY=codewire/codewire \
-    CODEWIRE_EXPECTED_SOURCE_SHA="$test_source" CODEWIRE_EXPECTED_SOURCE_TREE="$test_tree" \
     FETCH_CALLS="$work/fetch-calls" OPENBAO_SCCACHE_FETCHER="$work/fetch" \
     CODEWIRE_SCCACHE_REQUEST="$rust" CODEWIRE_BUILDKIT_CACHE_REQUEST="$layer" \
     "$selector" "$file"
@@ -112,52 +109,5 @@ for availability in missing wrong; do
     select_cache auto local "$credential_work/runner/$availability-local.aws" >"$work/output"
   grep -Fxq CODEWIRE_SCCACHE_MODE=disabled "$work/env"
   [[ ! -s "$work/fetch-calls" && ! -e "$credential_work/runner/$availability-local.aws" ]]
-done
-for event in unlabeled null_labels omitted_labels exact other manual; do
-  case "$event" in
-    exact|manual) printf '{"pull_request":{"labels":[{"name":"ci/r2-cache-canary"}]}}\n' >"$work/event.json" ;;
-    other) printf '{"pull_request":{"labels":[{"name":"ci/r2-cache-canary-extra"}]}}\n' >"$work/event.json" ;;
-    unlabeled) printf '{"pull_request":{"labels":[]}}\n' >"$work/event.json" ;;
-    null_labels) printf '{"pull_request":{"labels":null}}\n' >"$work/event.json" ;;
-    omitted_labels) printf '{"pull_request":{}}\n' >"$work/event.json" ;;
-  esac
-  jq --arg source "$test_source" '.repository={full_name:"codewire/codewire"} | .pull_request += {number:2047,head:{sha:$source,ref:"ci/cache-fixture"},base:{ref:"main",repo:{full_name:"codewire/codewire"}}}' \
-    "$work/event.json" >"$work/event-complete.json"
-  mv "$work/event-complete.json" "$work/event.json"
-  for request in '' auto local disabled; do
-    : >"$work/env"; : >"$work/fetch-calls"
-    event_name=pull_request
-    [[ "$event" != manual ]] || event_name=workflow_dispatch
-    TEST_EVENT_NAME="$event_name" select_cache disabled "$request" "$credential_work/runner/label-$event-${request:-implicit}.aws" >"$work/output"
-    expected_canary=false expected_layers="${request:-local}"
-    [[ "$expected_layers" != auto ]] || expected_layers=r2
-    if [[ "$event" == exact && ( -z "$request" || "$request" == auto ) ]]; then
-      expected_canary=true expected_layers=r2
-    fi
-    grep -Fxq "CODEWIRE_WORKSPACE_CACHE_CANARY=$expected_canary" "$work/env"
-    grep -Fxq "CODEWIRE_BUILDKIT_CACHE_MODE=$expected_layers" "$work/env"
-    # Only a labelled pull-request experiment uses the disposable untrusted bucket.
-    if [[ "$expected_layers" == r2 ]]; then
-      expected_trust=protected-read
-      [[ "$event" != exact ]] || expected_trust=untrusted
-      grep -Fxq "CODEWIRE_R2_CACHE_TRUST=$expected_trust" "$work/env"
-      grep -Fxq "fetch $expected_trust" "$work/fetch-calls"
-    fi
-  done
-done
-printf '{"pull_request":{"labels":[{"name":"ci/r2-cache-canary"}]}}\n' >"$work/event.json"
-jq --arg source "$test_source" '.repository={full_name:"codewire/codewire"} | .pull_request += {number:2047,head:{sha:$source,ref:"ci/cache-fixture"},base:{ref:"main",repo:{full_name:"codewire/codewire"}}}' \
-  "$work/event.json" >"$work/event-complete.json"
-mv "$work/event-complete.json" "$work/event.json"
-: >"$work/env"; : >"$work/fetch-calls"
-TEST_EVENT_NAME=pull_request FETCH_RESULT=unavailable select_cache disabled '' "$credential_work/runner/label-unavailable.aws" >"$work/output"
-grep -Fxq CODEWIRE_WORKSPACE_CACHE_CANARY=true "$work/env"
-grep -Fxq CODEWIRE_BUILDKIT_CACHE_MODE=local "$work/env"
-for malformed in 'not-json' '{"pull_request":{"labels":false}}' \
-  '{"pull_request":{"labels":true}}' '{"pull_request":{"labels":"ci/r2-cache-canary"}}'; do
-  printf '%s\n' "$malformed" >"$work/event.json"
-  : >"$work/fetch-calls"
-  if TEST_EVENT_NAME=pull_request select_cache disabled '' "$credential_work/runner/label-malformed.aws" >/dev/null 2>&1; then exit 1; fi
-  [[ ! -s "$work/fetch-calls" ]]
 done
 printf 'workspace cache selector: 9 mode pairs, one-fetch fallback and private-path rejection passed\n'

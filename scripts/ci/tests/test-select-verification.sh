@@ -2865,11 +2865,11 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 14 ]] || {
-  echo 'Codewire CI requires twelve ordinary heavy groups (policy included), the measurement matrix and its probe on the metal labels' >&2
+[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 12 ]] || {
+  echo 'Codewire CI requires its twelve ordinary heavy groups (policy included) on the metal labels' >&2
   exit 1
 }
-[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 14 ]] || {
+[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 12 ]] || {
   echo 'each metal group must bound its cargo jobs to its guest memory' >&2
   exit 1
 }
@@ -2894,7 +2894,6 @@ for output in selector_version classification selection required_local_mode \
     ci_head_commit ci_head_tree \
     cw_package_state cw_package_selected desktop_package_state \
     desktop_package_selected workspace_image_state workspace_image_selected \
-    workspace_cache_experiment workspace_cache_measurement_matrix \
     kind_workspace_source \
     tested_tree_receipt tested_tree_reason \
     tested_tree_pr tested_tree_head tested_tree_run; do
@@ -2981,8 +2980,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 22 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, four Kind producers, aggregate, opted-in measurement matrix, post-measurement probe and the Dev delivery trigger" >&2
+if [ "$top_level_jobs" != 20 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, four Kind producers, aggregate and the Dev delivery trigger" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -4781,8 +4780,7 @@ SUPPORT = {
     "Install locked dashboard browser-test dependencies", "Set up pinned cross-build tools",
     "Set up Go 1.26.9", "Set up Go 1.26.9 for security checks", "Set up Go 1.26.9 for DERP interop",
     "Set up pinned Darwin C cross-check tools", "Prove isolated Buildx load contract",
-    "Prove labeled R2 backend compatibility", "Prepare selected workspace cache seed",
-    "Finalize selected workspace cache seed", "Clean workspace cache credentials",
+    "Clean workspace cache credentials",
     "Clean compiler cache credentials", "Report and clean Rust cache", "Start integration Postgres",
     "Wait for integration Postgres", "Stop integration Postgres",
     "Require fresh artifact download directories outside the checkout",
@@ -5035,7 +5033,6 @@ for selection in sorted(set(realistic) | synthetic):
             "needs.verification-selection.outputs.selection": selection,
             "needs.verification-selection.outputs.tested_tree_receipt": "fallback",
             "needs.verification-selection.outputs.superseded": "false",
-            "needs.verification-selection.outputs.workspace_cache_experiment": "false",
             "needs.verification-selection.outputs.cw_package_selected": facts[0],
             "needs.verification-selection.outputs.desktop_package_selected": facts[1],
             "needs.verification-selection.outputs.workspace_image_selected": facts[2],
@@ -5091,7 +5088,6 @@ for selection in scheduled:
             "needs.verification-selection.outputs.selection": selection,
             "needs.verification-selection.outputs.tested_tree_receipt": "fallback",
             "needs.verification-selection.outputs.superseded": "false",
-            "needs.verification-selection.outputs.workspace_cache_experiment": "false",
             "needs.verification-selection.outputs.cw_package_selected": cw,
             "needs.verification-selection.outputs.desktop_package_selected": desktop,
             "needs.verification-selection.outputs.workspace_image_selected": workspace,

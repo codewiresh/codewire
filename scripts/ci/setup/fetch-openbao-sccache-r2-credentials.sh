@@ -2,9 +2,7 @@
 # Exchange this exact Codewire CI job's Forgejo OIDC token for its R2 cache
 # credential and write it as a private AWS credentials file. A canonical-main
 # push receives the main bucket's read-write token. A pull request receives the
-# main bucket's read-only token, or, for the labelled cache experiments only
-# (CODEWIRE_R2_CACHE_TRUST=untrusted), the untrusted bucket's token. Pull
-# requests can read main's caches and never write them.
+# main bucket's read-only token: it can read main's caches and never write them.
 set -euo pipefail
 
 fail() {
@@ -28,8 +26,8 @@ case "$GITHUB_EVENT_NAME|$GITHUB_REF" in
     readonly openbao_role='codewire-source-ci-sccache-r2-pr'
     readonly openbao_audience='openbao-codewire-source-ci-sccache-r2-pr'
     case "${CODEWIRE_R2_CACHE_TRUST:-protected-read}" in
-      protected-read|untrusted) readonly trust="${CODEWIRE_R2_CACHE_TRUST:-protected-read}" ;;
-      *) fail 'a pull request may use only the protected-read or untrusted cache' ;;
+      protected-read) readonly trust=protected-read ;;
+      *) fail 'a pull request may use only the protected-read cache' ;;
     esac
     ;;
   push\|refs/heads/main)

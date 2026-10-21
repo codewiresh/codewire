@@ -786,13 +786,8 @@ class VerificationProfileTests(unittest.TestCase):
         shell = (root / "scripts/ci/images/workspace-cache.sh").read_text()
         pins = [line.split("=", 1)[1] for line in shell.splitlines()
                 if line.startswith("readonly WORKSPACE_CW_PROFILE=")]
-        spec = importlib.util.spec_from_file_location(
-            "workspace_cache_report_profile", root / "scripts/ci/verify/workspace-cache-report.py")
-        report = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(report)
         self.assertEqual(pins, ["runtime"])
         self.assertEqual(artifact.WORKSPACE_CW_PROFILE, "runtime")
-        self.assertEqual(report.WORKSPACE_CW_PROFILE, "runtime")
         self.assertEqual(shell.count('cw-image-consumer.sh" "$WORKSPACE_CW_PROFILE" '), 2)
         self.assertNotIn('cw-image-consumer.sh" release', shell)
         # Verification and publication build the workspace image's cw with the

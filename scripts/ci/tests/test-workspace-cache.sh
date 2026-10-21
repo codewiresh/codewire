@@ -51,44 +51,6 @@ case "$1 $2" in
       exec python3 -B "$CW_IMAGE_FIXTURES" export -- "$@"
     fi
     printf 'build\n' >>"$FAKE_BUILDS"
-    if [[ "${FAKE_CANARY:-}" == hang ]]; then
-      printf '%s\n' "$$" >"$FAKE_CANARY_PROCESS"
-      sleep "${FAKE_CANARY_READY_DELAY:-0}"
-      sleep 30 &
-      child_pid=$!
-      # Arm the handler before publishing readiness: the test signals as
-      # soon as the child file appears.
-      trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; exit 143' TERM INT
-      printf '%s\n' "$child_pid" >"$FAKE_CANARY_CHILD"
-      wait "$child_pid"
-      exit 0
-    fi
-    if [[ -n "${FAKE_CANARY:-}" ]]; then
-      destination=''
-      for arg in "$@"; do
-        case "$arg" in type=local,dest=*) destination="${arg#type=local,dest=}" ;; esac
-      done
-      mkdir -p "$destination"
-      cp "${@: -1}/payload" "$destination/payload"
-      printf '#7 [1/1] COPY payload /payload\n'
-      if [[ "$FAKE_CANARY" == hit && "$(wc -l <"$FAKE_BUILDS")" == 2 ]]; then
-        printf '#7 CACHED\n'
-      elif [[ "$FAKE_CANARY" == lazy-hit || "$FAKE_CANARY" == lazy-wrong ]]; then
-        digest=7
-        [[ "$FAKE_CANARY" != lazy-wrong ]] || digest=8
-        if [[ "$(wc -l <"$FAKE_BUILDS")" == 2 ]]; then
-          printf '#7 sha256:%064d 0B / 8.39MB 0.1s\n' "$digest"
-          printf '#7 sha256:%064d 8.39MB / 8.39MB 0.2s done\n' "$digest"
-        else
-          printf '#7 DONE 0.1s\n'
-        fi
-      else printf '#7 DONE 0.1s\n'; fi
-      if [[ "$FAKE_CANARY" == lazy-* && "$(wc -l <"$FAKE_BUILDS")" == 1 ]]; then
-        printf '#8 exporting cache to Amazon S3\n'
-        printf '#8 writing layer sha256:%064d 0.1s done\n' 7
-      fi
-      [[ "$FAKE_CANARY" != export-failure ]] || echo 'ignoring error exporting cache to Amazon S3'
-    fi
     case "${FAKE_FAILURE:-}" in
       cache) if [[ "$(wc -l <"$FAKE_BUILDS")" == 1 ]]; then
         echo 'ERROR: failed to solve: failed to load cache key: S3 GetObject unavailable' >&2; exit 1; fi ;;
@@ -102,9 +64,7 @@ case "$1 $2" in
         fi ;;
       compile) echo 'ERROR cargo compilation failed' >&2; exit 44 ;;
     esac
-    if [[ -z "${FAKE_CANARY:-}" ]]; then
-      printf '#7 [cw-builder 1/1] COPY admitted cw /usr/local/bin/cw\n#7 DONE 0.1s\n'
-    fi ;;
+    printf '#7 [cw-builder 1/1] COPY admitted cw /usr/local/bin/cw\n#7 DONE 0.1s\n' ;;
   *)
     [[ "$1" == exec && "$3 $4 $5" == 'rm -f /run/codewire-cache/aws-credentials' ]] || exit 99
     [[ "${FAKE_FAILURE:-}" != erase ]] || exit 45
@@ -228,8 +188,7 @@ if CODEWIRE_R2_CACHE_TRUST=main SCCACHE_BUCKET=example-ci-cache-protected CODEWI
   exit 1
 fi
 grep -Fq 'workspace cache requires the reviewed main R2 configuration' "$work/out"
-# A pull request imports main's layers read-only and exports nothing remote,
-# and never runs a cache measurement against the main bucket.
+# A pull request imports main's layers read-only and exports nothing remote.
 : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
 CODEWIRE_R2_CACHE_TRUST=protected-read SCCACHE_BUCKET=example-ci-cache-protected CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
   GITHUB_REF=refs/pull/2047/head CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 exercise >"$work/out" 2>&1 || {
@@ -240,22 +199,16 @@ grep -q 'bucket=example-ci-cache-protected,.*name=amd64/workspace/main$' "$work/
 ! grep -q -- '--cache-to' "$work/layer-args" || exit 1
 ! grep -q -- '--cache-to' "$FAKE_BUILDS" "$FAKE_CW_BUILDS" || exit 1
 ! grep -q 'pr-2047' "$work/layer-args" || exit 1
-if CODEWIRE_R2_CACHE_TRUST=protected-read SCCACHE_BUCKET=example-ci-cache-protected CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
-    CODEWIRE_WORKSPACE_CACHE_CASE=seed CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 \
-    exercise >"$work/out" 2>&1; then
-  exit 1
-fi
-grep -Fq 'workspace cache measurements use only the untrusted bucket' "$work/out"
 # The CI apt snapshot cache reaches only base and workspace builds, as an
 # optional secret named by environment, and never as an argument value.
 readonly apt_mirror_secret=' --secret id=codewire-apt-mirror\,env=CODEWIRE_APT_SNAPSHOT_MIRROR '
-for target in base workspace canary-probe; do
+for target in base workspace cw-arm64; do
   for mirror in '' http://apt-cache.invalid:8080; do
     : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
     CODEWIRE_APT_SNAPSHOT_MIRROR="$mirror" EXERCISE_TARGET="$target" \
       CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=local exercise >"$work/out"
     expected=0
-    [[ -z "$mirror" || "$target" == canary-probe ]] || expected=1
+    [[ -z "$mirror" || "$target" == cw-arm64 ]] || expected=1
     [[ "$(grep '^buildx build ' "$FAKE_LOG" | grep -cF -- "$apt_mirror_secret" || true)" == "$expected" ]] || {
       echo "apt snapshot secret for target=$target mirror=${mirror:-unset} is not $expected" >&2; exit 1;
     }
@@ -269,46 +222,6 @@ CODEWIRE_APT_SNAPSHOT_MIRROR=http://apt-cache.invalid:8080 \
 [[ "$(wc -l <"$FAKE_BUILDS")" == 2 && "$(cat "$work/fallback")" == true ]]
 [[ "$(grep '^buildx build ' "$FAKE_LOG" | grep -cF -- "$apt_mirror_secret")" == 2 ]]
 grep '^buildx build ' "$FAKE_LOG" | tail -n 1 | grep -qF -- "--no-cache$apt_mirror_secret--file "
-# The measured warm workers import only their successful producer. Their own
-# exports are distinct, so neither parallel replicate can seed the other.
-measurement_args() (
-  source "$ROOT/scripts/ci/images/workspace-cache.sh"
-  CODEWIRE_WORKSPACE_CACHE_CASE="$1" CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2
-  workspace_cache_validate
-  builder_container="$(printf '%064d' "$2")"
-  GITHUB_RUN_ID=2047
-  CODEWIRE_WORKSPACE_CACHE_SEED_ID="run-2047/tree-1111111111111111111111111111111111111111/seed-$(printf '%064d' 1)"
-  workspace_cache_layer_args workspace 1111111111111111111111111111111111111111 amd64
-  printf '%s\n' "${layer_args[@]}"
-)
-for measurement in seed warm-1 warm-2; do
-  measurement_args "$measurement" 2 >"$work/$measurement.args"
-  grep -q 'ignore-error=false' "$work/$measurement.args"
-  grep -Fxq workspace-floating-tools "$work/$measurement.args"
-done
-for measurement in warm-1 warm-2; do
-  awk 'previous == "--cache-from" { print } { previous = $0 }' "$work/$measurement.args" >"$work/$measurement.imports"
-  [[ "$(wc -l <"$work/$measurement.imports")" == 1 ]]
-  grep -q "name=amd64/workspace/experiments/run-2047/tree-1111111111111111111111111111111111111111/seed-$(printf '%064d' 1)$" \
-    "$work/$measurement.imports"
-  grep -q "seed-$(printf '%064d' 1)/$measurement-$(printf '%064d' 2),mode=max" "$work/$measurement.args"
-done
-cmp "$work/warm-1.imports" "$work/warm-2.imports"
-if cmp -s "$work/warm-1.args" "$work/warm-2.args"; then echo 'warm exports overlap' >&2; exit 1; fi
-for failure in mode run tree; do
-  if (
-    source "$ROOT/scripts/ci/images/workspace-cache.sh"
-    CODEWIRE_WORKSPACE_CACHE_CASE=warm-1 CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2
-    [[ "$failure" != mode ]] || CODEWIRE_SCCACHE_MODE=local
-    workspace_cache_validate || exit
-    builder_container="$(printf '%064d' 2)" GITHUB_RUN_ID=2047
-    CODEWIRE_WORKSPACE_CACHE_SEED_ID="run-2047/tree-1111111111111111111111111111111111111111/seed-$(printf '%064d' 1)"
-    [[ "$failure" != run ]] || GITHUB_RUN_ID=2048
-    tree=1111111111111111111111111111111111111111
-    [[ "$failure" != tree ]] || tree=2222222222222222222222222222222222222222
-    workspace_cache_layer_args workspace "$tree" amd64
-  ) >/dev/null 2>&1; then echo "accepted invalid measurement $failure" >&2; exit 1; fi
-done
 for failure in copy pin erase cleanup compile; do
   : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
   set +e
@@ -455,88 +368,5 @@ if (
   workspace_cache_validate
 ) >"$work/context-rejection.out" 2>&1; then exit 1; fi
 grep -q 'outside the build context' "$work/context-rejection.out"
-# Run the actual bounded canary against the fake API. A generic CACHED line is
-# insufficient: the COPY vertex in the second daemon must reuse remote data.
-for canary in hit lazy-hit lazy-wrong miss export-failure; do
-  : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
-  set +e
-  FAKE_CANARY="$canary" "$ROOT/scripts/ci/tests/canary-workspace-r2-cache.sh" \
-    "$credential_work/r2.aws" "$work/report-$canary" >"$work/canary.out" 2>&1
-  status=$?
-  set -e
-  if [[ "$canary" == hit || "$canary" == lazy-hit ]]; then
-    [[ "$status" == 0 && -s "$work/report-$canary/result.txt" ]]
-    [[ "$(grep -c '^buildx create ' "$FAKE_LOG")" == 2 && "$(grep -c '^buildx rm ' "$FAKE_LOG")" == 2 ]]
-  else
-    [[ "$status" != 0 && ! -e "$work/report-$canary/result.txt" ]]
-  fi
-  [[ -s "$credential_work/r2.aws" && ! -e "$FAKE_FILE" ]]
-done
-export FAKE_CANARY_PROCESS="$work/canary-process" FAKE_CANARY_CHILD="$work/canary-child"
-# True once the recorded process has exited. A reparented zombie cannot
-# execute or access credentials; the host reaper owns its final wait.
-process_gone() {
-  local state
-  state="$(ps -o stat= -p "$1" 2>/dev/null || true)"
-  [[ -z "$state" || "$state" == Z* ]]
-}
-# Poll a condition for at most ten seconds; never assume a fixed delay.
-eventually() {
-  local attempt
-  for ((attempt=0; attempt<200; attempt++)); do
-    "$@" && return 0
-    sleep 0.05
-  done
-  "$@"
-}
-credential_erased() { [[ ! -e "$FAKE_FILE" ]]; }
-# Cancel a hanging canary, then check each cleanup guarantee separately. GNU
-# timeout delivers the signal it receives twice, to the canary and then to its
-# whole process group, and under load the second can arrive while the canary's
-# signal trap is already running (#3079). The repeated mode keeps signalling
-# the group until the canary exits, so any window in which a later TERM can
-# cut cleanup short is hit.
-cancel_canary() {
-  local mode="$1" canary_pid status pid_file
-  : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; rm -f "$FAKE_CANARY_CHILD"
-  rm -rf "$work/report-cancel"
-  FAKE_CANARY=hang FAKE_CANARY_READY_DELAY=3 \
-    "$ROOT/scripts/ci/tests/canary-workspace-r2-cache.sh" \
-    "$credential_work/r2.aws" "$work/report-cancel" >"$work/canary-cancel.out" 2>&1 &
-  canary_pid=$!
-  if ! eventually test -s "$FAKE_CANARY_CHILD" || [[ ! -s "$FAKE_FILE" ]]; then
-    kill -TERM "$canary_pid" 2>/dev/null || true
-    wait "$canary_pid" 2>/dev/null || true
-    echo "cache canary ($mode) did not publish cancellation readiness within ten seconds" >&2
-    return 1
-  fi
-  kill -TERM "$canary_pid"
-  if [[ "$mode" == repeated ]]; then
-    # The bounded canary leads its own process group (GNU timeout's setpgid).
-    while kill -TERM -- "-$canary_pid" 2>/dev/null; do :; done
-  fi
-  set +e
-  wait "$canary_pid"
-  status=$?
-  set -e
-  for pid_file in "$FAKE_CANARY_PROCESS" "$FAKE_CANARY_CHILD"; do
-    eventually process_gone "$(<"$pid_file")" || {
-      kill -TERM "$(<"$pid_file")" 2>/dev/null || true
-      echo "cache canary ($mode) left a live child" >&2
-      return 1
-    }
-  done
-  eventually credential_erased || {
-    echo "cache canary ($mode) cancellation left the daemon credential" >&2; return 1;
-  }
-  [[ "$status" != 0 ]] || { echo "cache canary ($mode) cancellation reported success" >&2; return 1; }
-  [[ ! -e "$work/report-cancel/result.txt" ]] || {
-    echo "cache canary ($mode) cancellation left a success report" >&2; return 1;
-  }
-  grep -q 'exec .* rm -f /run/codewire-cache/aws-credentials' "$FAKE_LOG"
-  grep -q '^buildx rm --force codewire-workspace-' "$FAKE_LOG"
-}
-cancel_canary single
-cancel_canary repeated
 printf 'workspace cache: 9 mode pairs, 7 apt snapshot cases, %s diagnostic cases, owned daemon credentials, bounded retry and failure cleanup passed\n' \
   "$diagnostic_cases"

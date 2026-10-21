@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Sourced by non-publishing workspace verification and the bounded R2 canary.
+# Sourced by non-publishing workspace verification.
 # This is the owner's explicitly accepted provider-key projection, not a broker.
 # shellcheck source=scripts/ci/images/buildx-builder.sh
 source "$(dirname "${BASH_SOURCE[0]}")/buildx-builder.sh"
 readonly WORKSPACE_BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 # The cache selector names the trust. Canonical-main pushes read and write the
 # main bucket (main); pull requests only read it (protected-read) with a read-only
-# token; the labelled experiments, canary and local probes use the disposable
-# untrusted bucket. Each token covers exactly one bucket, so main never imports
+# token; anything else, such as a local run, uses the disposable untrusted
+# bucket. Each token covers exactly one bucket, so main never imports
 # a layer or compiler object a pull request wrote.
 case "${CODEWIRE_R2_CACHE_TRUST:-untrusted}" in
   main|protected-read) readonly WORKSPACE_CACHE_TRUST="$CODEWIRE_R2_CACHE_TRUST" WORKSPACE_CACHE_SCOPE=protected ;;
@@ -21,9 +21,9 @@ readonly WORKSPACE_DAEMON_CREDENTIALS='/run/codewire-cache/aws-credentials'
 # Verification builds the amd64 cw producer with the runtime Cargo profile,
 # the one profile publication (build-push-image.sh) and every other image
 # build use, so Kind's workspace runs the cw profile Dev and Production run.
-# This verified cw is never published. The Python readers pin the same value
-# (WORKSPACE_CW_PROFILE in workspace-image-artifact.py and
-# workspace-cache-report.py); test-workspace-image-artifact.py checks it.
+# This verified cw is never published. The Python reader pins the same value
+# (WORKSPACE_CW_PROFILE in workspace-image-artifact.py);
+# test-workspace-image-artifact.py checks it.
 readonly WORKSPACE_CW_PROFILE=runtime
 
 workspace_cache_validate() {
@@ -31,14 +31,6 @@ workspace_cache_validate() {
   docker_bin="${CODEWIRE_DOCKER_BIN:-docker}"
   sccache_mode="${CODEWIRE_SCCACHE_MODE:-local}"
   layer_cache_mode="${CODEWIRE_BUILDKIT_CACHE_MODE:-local}"
-  workspace_measurement_case="${CODEWIRE_WORKSPACE_CACHE_CASE:-}"
-  case "$workspace_measurement_case:$sccache_mode:$layer_cache_mode" in
-    :*|seed:r2:r2|cold:disabled:disabled|compiler:r2:disabled|warm-1:r2:r2|warm-2:r2:r2) ;;
-    *) echo 'workspace measurement cache modes differ from its case' >&2; return 2 ;;
-  esac
-  [[ -z "$workspace_measurement_case" || "$WORKSPACE_CACHE_TRUST" == untrusted ]] || {
-    echo 'workspace cache measurements use only the untrusted bucket' >&2; return 2;
-  }
   for mode in "$sccache_mode" "$layer_cache_mode"; do
     case "$mode" in
       disabled|local|r2) ;;
@@ -172,7 +164,7 @@ workspace_cache_cleanup_builder() {
 workspace_cache_layer_args() {
   local target="$1" source_tree="$2" architecture="$3" name common alias
   layer_args=()
-  [[ "$target" =~ ^(base|workspace|cw-runtime|cw-arm64|canary-[a-z0-9-]+)$ ]] || return 2
+  [[ "$target" =~ ^(base|workspace|cw-runtime|cw-arm64)$ ]] || return 2
   [[ "$source_tree" =~ ^[0-9a-f]{40}$ && "$architecture" =~ ^(amd64|arm64)$ ]] || return 2
   if [[ "$layer_cache_mode" == disabled ]]; then
     layer_args+=(--no-cache)
@@ -182,34 +174,16 @@ workspace_cache_layer_args() {
   fi
   if [[ "$layer_cache_mode" == r2 ]]; then
     common="type=s3,bucket=$WORKSPACE_CACHE_BUCKET,region=auto,endpoint_url=$WORKSPACE_CACHE_ENDPOINT,use_path_style=true,prefix=$WORKSPACE_CACHE_PREFIX"
-    if [[ -n "$workspace_measurement_case" ]]; then
-      [[ "$target" == base || "$target" == workspace || "$target" == cw-runtime ]] || return 2
-      [[ "${CODEWIRE_WORKSPACE_CACHE_SEED_ID:-}" =~ ^run-[0-9]+/tree-[0-9a-f]{40}/seed-[0-9a-f]{64}$ \
-          && "$CODEWIRE_WORKSPACE_CACHE_SEED_ID" == "run-${GITHUB_RUN_ID:?}/tree-$source_tree/"* \
-          && "$builder_container" =~ ^[0-9a-f]{64}$ ]] || return 2
-      name="$architecture/$target/experiments/$CODEWIRE_WORKSPACE_CACHE_SEED_ID"
-      if [[ "$workspace_measurement_case" == seed ]]; then
-        layer_args+=(--cache-from "$common,name=$architecture/$target/tree-$source_tree"
-          --cache-from "$common,name=$architecture/$target/main")
-      else
-        # Immutable producer binding: sibling case exports are never imports.
-        layer_args+=(--cache-from "$common,name=$name")
-        name="$name/$workspace_measurement_case-$builder_container"
-      fi
-      layer_args+=(--cache-to "$common,name=$name,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false")
-      return
-    fi
     name="$architecture/$target/tree-$source_tree"
     layer_args+=(--cache-from "$common,name=$name")
     if [[ "$WORKSPACE_CACHE_TRUST" == protected-read ]]; then
       # Pull requests import main's layers and export nothing remote.
-      [[ "$target" == canary-* ]] || layer_args+=(--cache-from "$common,name=$architecture/$target/main")
+      layer_args+=(--cache-from "$common,name=$architecture/$target/main")
       return
     fi
     # Each bucket has one producer class: canonical-main pushes write the main
-    # bucket, and only the labelled pull-request experiments write the
-    # untrusted one. These aliases are performance hints only and must never be
-    # imported by publication.
+    # bucket, and only runs outside CI write the untrusted one. These aliases
+    # are performance hints only and must never be imported by publication.
     alias=''
     case "${GITHUB_REF:-}" in
       refs/pull/*/head)
@@ -219,7 +193,7 @@ workspace_cache_layer_args() {
       refs/heads/main) alias=main ;;
     esac
     [[ -z "$alias" ]] || layer_args+=(--cache-from "$common,name=$architecture/$target/$alias")
-    [[ "$alias" == main || "$target" == canary-* ]] || layer_args+=(--cache-from "$common,name=$architecture/$target/main")
+    [[ "$alias" == main ]] || layer_args+=(--cache-from "$common,name=$architecture/$target/main")
     [[ -z "$alias" ]] || name="$name;$architecture/$target/$alias"
     if [[ -n "${GITHUB_RUN_ID:-}" ]]; then
       [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "${GITHUB_RUN_ATTEMPT:-0}" =~ ^[0-9]+$ ]] || return 2

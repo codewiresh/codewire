@@ -7,33 +7,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 credentials_file="$1"
 rust_request="${CODEWIRE_SCCACHE_REQUEST:-auto}"
-# Remote layer reuse remains opt-in until the pinned-daemon R2 canary passes.
+# Remote layer reuse is opt-in: a dispatch asks for it with layer_cache=auto.
 layer_request="${CODEWIRE_BUILDKIT_CACHE_REQUEST:-local}"
 fetcher="${OPENBAO_SCCACHE_FETCHER:-$ROOT/scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh}"
 # Canonical-main pushes read and write the main bucket. Pull requests read it
-# with a read-only token and write nothing remote, except the labelled cache
-# experiments, which keep the disposable untrusted bucket.
+# with a read-only token and write nothing remote.
 trust=protected-read
 [[ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" != 'push|refs/heads/main' ]] || trust=main
 : "${GITHUB_ENV:?Forgejo job environment file is required}"
 : "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
 : "${RUNNER_TEMP:?Forgejo runner temporary directory is required}"
 
-# The exact experiment branch or label opts into bounded cache measurements.
-# Read the stored event, never a mutable API lookup or a new credential/role.
-# A newly attached label takes effect on the next eligible source update.
-canary=false
-if [[ "${GITHUB_EVENT_NAME:-}" == pull_request && -n "${GITHUB_EVENT_PATH:-}" ]]; then
-  experiment="$(python3 "$ROOT/scripts/ci/setup/select-workspace-cache-experiment.py" | jq -er '.selected | tostring')"
-  if [[ "$experiment" == true \
-      && ( -z "${CODEWIRE_BUILDKIT_CACHE_REQUEST:-}" || "$layer_request" == auto ) ]]; then
-    layer_request=auto
-    canary=true
-  fi
-  [[ "$experiment" != true ]] || trust=untrusted
-fi
 bucket=example-ci-cache-protected prefix=protected/codewire/v1
-[[ "$trust" != untrusted ]] || bucket=example-ci-cache-untrusted prefix=untrusted/codewire/v1
 
 for request in "$rust_request" "$layer_request"; do
   case "$request" in
@@ -107,7 +92,6 @@ if [[ ( "$rust_request" == auto && "$rust_mode" != disabled ) || "$layer_request
 fi
 emit_env CODEWIRE_SCCACHE_MODE "$rust_mode"
 emit_env CODEWIRE_BUILDKIT_CACHE_MODE "$layer_mode"
-emit_env CODEWIRE_WORKSPACE_CACHE_CANARY "$canary"
 
 # The same compiler selection serves Kind's later host builds. The workspace
 # compiler itself uses the checksum-pinned sccache installed in its Dockerfile.
