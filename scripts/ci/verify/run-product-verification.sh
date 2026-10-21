@@ -297,6 +297,8 @@ run_policy_core_one() {
   python3 scripts/checks/repo_checks.py identity-free-workspace --self-test
   python3 scripts/checks/repo_checks.py workspace-image-pin --self-test
   python3 scripts/checks/repo_checks.py workspace-image-pin
+  python3 scripts/checks/repo_checks.py webpki-roots-floor --self-test
+  python3 scripts/checks/repo_checks.py webpki-roots-floor
   python3 scripts/checks/repo_checks.py mcp-settings --self-test
   python3 scripts/checks/repo_checks.py epoch-material-cache-owner --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source

@@ -45,7 +45,7 @@ tokio-rustls = { version = "=0.26.4", default-features = false, features = ["rin
 tower = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
-webpki-roots = "=1.0.7"
+webpki-roots = "=1.0.10"
 
 tokio = { workspace = true }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }

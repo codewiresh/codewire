@@ -19,6 +19,7 @@ from repo_policy.production import check_production_source_ownership
 from repo_policy.public_addresses import check_public_address_literals
 from repo_policy.proto import check_proto_package_boundaries
 from repo_policy.workspace_identity import check_identity_free_workspace
+from repo_policy.webpki_roots_floor import check_webpki_roots_floor
 from repo_policy.workspace_image_pin import check_workspace_image_pin
 from repo_policy.source_classification import (
     check_go_source_classification,
@@ -76,6 +77,9 @@ def main(argv: list[str] | None = None) -> int:
     workspace_pin_parser = subparsers.add_parser("workspace-image-pin")
     workspace_pin_parser.add_argument("--self-test", action="store_true")
     workspace_pin_parser.set_defaults(func=check_workspace_image_pin)
+    webpki_roots_parser = subparsers.add_parser("webpki-roots-floor")
+    webpki_roots_parser.add_argument("--self-test", action="store_true")
+    webpki_roots_parser.set_defaults(func=check_webpki_roots_floor)
     material_cache_parser = subparsers.add_parser("epoch-material-cache-owner")
     material_cache_parser.add_argument("--self-test", action="store_true")
     material_cache_parser.set_defaults(func=check_epoch_material_cache_owner)

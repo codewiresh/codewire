@@ -32,6 +32,7 @@ from repo_policy import (  # noqa: E402 - dispatcher directory is the import roo
     source_classification,
     ses_security,
     turnstile_security,
+    webpki_roots_floor,
     workspace_image_pin,
 )
 from repo_policy.kubernetes import documents, resource_name, top_level_field
@@ -100,6 +101,11 @@ COMMANDS = {
     "workspace-image-pin": (
         workspace_image_pin.check_workspace_image_pin,
         "workspace image pin: OK",
+        True,
+    ),
+    "webpki-roots-floor": (
+        webpki_roots_floor.check_webpki_roots_floor,
+        "webpki-roots floor: OK",
         True,
     ),
     "public-address-literals": (

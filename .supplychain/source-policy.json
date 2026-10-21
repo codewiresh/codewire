@@ -4,5 +4,14 @@
     "minimum_severity": "high",
     "only_fixed": true
   },
-  "exceptions": []
+  "exceptions": [
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2026-0381",
+      "package": "webpki-roots",
+      "reason": "Admits only the webpki-roots 0.26.11 semver-trick shim, which bundles no roots and re-exports webpki-roots 1 (sqlx 0.8, tokio-tungstenite and async-nats have no release off 0.26). Supplychain cannot scope an exception by version, so the policy-core guard scripts/checks/repo_policy/webpki_roots_floor.py (repo_checks.py webpki-roots-floor) narrows it: every webpki-roots in Cargo.lock, crates/codewire-desktop/Cargo.lock and deployments/docker/*.Cargo.lock must be exactly 0.26.11 or at least 1.0.10",
+      "owner": "noel",
+      "expires": "2026-12-31"
+    }
+  ]
 }

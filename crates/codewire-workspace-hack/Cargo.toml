@@ -109,7 +109,7 @@ ring = { version = "0.17.14" }
 rsa = { version = "0.10.0-rc.18", features = ["sha2"] }
 rustix = { version = "1.1.4", features = ["fs", "net", "pipe", "process", "thread"] }
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
-rustls-webpki = { version = "0.103.15", default-features = false, features = ["ring", "std"] }
+rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
 sec1 = { version = "0.8.1", features = ["ctutils", "pem", "std", "subtle"] }
 serde = { version = "1.0.228", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1.0.228", features = ["alloc", "rc"] }
@@ -242,7 +242,7 @@ ring = { version = "0.17.14" }
 rsa = { version = "0.10.0-rc.18", features = ["sha2"] }
 rustix = { version = "1.1.4", features = ["fs", "net", "pipe", "process", "thread"] }
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
-rustls-webpki = { version = "0.103.15", default-features = false, features = ["ring", "std"] }
+rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
 sec1 = { version = "0.8.1", features = ["ctutils", "pem", "std", "subtle"] }
 serde = { version = "1.0.228", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1.0.228", features = ["alloc", "rc"] }
