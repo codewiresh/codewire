@@ -423,6 +423,10 @@ fn broker_refuses_to_serve_without_seccomp() {
 /// table is closed to this test.
 #[test]
 fn a_prepared_broker_holds_exactly_its_inherited_descriptors() {
+    // Metal CI Kata guest only; see metal_guest_skip.
+    if skipped_on_metal_guest() {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let (vm_id, generation) = identity();
     let (mut bootstrap, broker) = spawn_role(
@@ -488,6 +492,10 @@ fn a_prepared_broker_holds_exactly_its_inherited_descriptors() {
 
 #[test]
 fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
+    // Metal CI Kata guest only; see metal_guest_skip.
+    if skipped_on_metal_guest() {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let (vm_id, generation) = identity();
 
@@ -762,9 +770,71 @@ struct UnixSocket {
     peer: Option<u64>,
 }
 
+/// Set to `1` by a CI job's step only inside a metal Kata guest, which alone
+/// mounts the ext4 warm cache at `/ci-cache`; a cloud runner never sets it.
+const METAL_KATA_GUEST: &str = "CODEWIRE_CI_METAL_KATA_GUEST";
+
+/// The metal CI Kata guests' kernel has no `CONFIG_UNIX_DIAG`, so it refuses
+/// the AF_UNIX sock_diag dump these descriptor proofs read. Owner, 2026-10-21
+/// (codewire#2940): skip them there, and run them by name in the Linux release
+/// host check, on a full kernel, before each release. Only a job that declares
+/// the metal guest AND a refused dump skip; anywhere else a refused dump still
+/// fails the test.
+fn metal_guest_skip(declared: Option<&std::ffi::OsStr>, dump: Result<(), i32>) -> Option<String> {
+    match (declared == Some(std::ffi::OsStr::new("1")), dump) {
+        (true, Err(errno)) => Some(format!(
+            "skipped on the metal CI Kata guest: its kernel has no CONFIG_UNIX_DIAG \
+             (sock_diag errno {errno}); this descriptor proof runs in the Linux release \
+             host check instead (owner, 2026-10-21, codewire#2940)"
+        )),
+        _ => None,
+    }
+}
+
+fn skipped_on_metal_guest() -> bool {
+    let declared = std::env::var_os(METAL_KATA_GUEST);
+    if declared.is_none() {
+        return false;
+    }
+    let dump = unix_socket_dump().map(|_| ());
+    match metal_guest_skip(declared.as_deref(), dump) {
+        Some(reason) => {
+            eprintln!("{reason}");
+            true
+        }
+        None => false,
+    }
+}
+
+#[test]
+fn the_unix_diag_skip_needs_the_metal_guest_declaration_and_a_refused_dump() {
+    let metal = Some(std::ffi::OsStr::new("1"));
+    let refused = Err(libc::ENOENT);
+    let reason = metal_guest_skip(metal, refused).unwrap();
+    assert!(reason.contains("CONFIG_UNIX_DIAG") && reason.contains("owner, 2026-10-21"));
+    assert!(reason.contains("Linux release host check"));
+    // A refused dump without the declaration, or with any other value, fails.
+    assert_eq!(metal_guest_skip(None, refused), None);
+    for other in ["0", "", "true", "yes", " 1"] {
+        assert_eq!(
+            metal_guest_skip(Some(std::ffi::OsStr::new(other)), refused),
+            None
+        );
+    }
+    // A declared guest whose kernel answers the dump runs the proof.
+    assert_eq!(metal_guest_skip(metal, Ok(())), None);
+    assert_eq!(metal_guest_skip(None, Ok(())), None);
+}
+
 /// Every AF_UNIX socket in this network namespace with its peer, read from
 /// the kernel through `NETLINK_SOCK_DIAG`.
 fn unix_sockets() -> BTreeMap<u64, UnixSocket> {
+    unix_socket_dump().unwrap_or_else(|errno| panic!("sock_diag refused the dump (errno {errno})"))
+}
+
+/// The AF_UNIX sock_diag dump, or the errno with which the kernel refused it.
+/// A kernel without `CONFIG_UNIX_DIAG` has no handler for the family.
+fn unix_socket_dump() -> Result<BTreeMap<u64, UnixSocket>, i32> {
     const SOCK_DIAG_BY_FAMILY: u16 = 20;
     const UDIAG_SHOW_NAME: u32 = 0x1;
     const UDIAG_SHOW_PEER: u32 = 0x4;
@@ -811,8 +881,14 @@ fn unix_sockets() -> BTreeMap<u64, UnixSocket> {
             if kind == libc::NLMSG_DONE as u16 {
                 break 'receive;
             }
-            assert_ne!(kind, libc::NLMSG_ERROR as u16, "sock_diag refused the dump");
             let body = &messages[HEADER..length];
+            if kind == libc::NLMSG_ERROR as u16 {
+                // struct nlmsgerr begins with the negative errno.
+                assert!(body.len() >= 4);
+                let errno = -i32::from_ne_bytes(body[..4].try_into().unwrap());
+                unsafe { libc::close(socket) };
+                return Err(errno);
+            }
             let mut socket = UnixSocket {
                 kind: body[1],
                 named: false,
@@ -837,7 +913,7 @@ fn unix_sockets() -> BTreeMap<u64, UnixSocket> {
         }
     }
     unsafe { libc::close(socket) };
-    sockets
+    Ok(sockets)
 }
 
 #[repr(C)]

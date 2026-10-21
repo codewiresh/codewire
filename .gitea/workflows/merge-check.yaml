@@ -106,6 +106,16 @@ jobs:
           CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
         run: scripts/ci/setup/select-warm-rust-cache.sh
 
+      # As in ci.yaml's Rust packages job: only a metal Kata guest mounts the
+      # ext4 warm cache, and its kernel has no CONFIG_UNIX_DIAG, so
+      # native_network_confinement's descriptor proofs skip there (owner,
+      # 2026-10-21, codewire#2940).
+      - name: Declare a metal Kata guest
+        run: |
+          if [[ "$(stat -f -c %T /ci-cache 2>/dev/null)" == ext2/ext3 ]]; then
+            echo 'CODEWIRE_CI_METAL_KATA_GUEST=1' >> "$GITHUB_ENV"
+          fi
+
       - name: Set up Go 1.26.9
         run: scripts/ci/setup/setup-go.sh 1.26.9
 

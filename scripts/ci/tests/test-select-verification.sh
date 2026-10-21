@@ -4774,6 +4774,7 @@ SUPPORT = {
     "Verify Rust cache capacity", "Verify Rust protobuf compiler", "Verify GPUI and Wry build prerequisites",
     "Verify Kind runner tools", "Select best-effort shared Rust cache", "Select existing compiler cache",
     "Select the warm Rust cache", "Report the warm Rust cache", "Bound cargo jobs by memory",
+    "Declare a metal Kata guest",
     "Select independent workspace caches", "Install pinned protobuf compiler",
     "Install pinned protoc for Rust builds", "Install pinned protoc for Rust-backed standard checks",
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",

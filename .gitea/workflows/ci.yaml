@@ -876,6 +876,18 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
+      # Only a metal Kata guest mounts the ext4 warm cache at /ci-cache
+      # (infra#1534); a cloud runner can serve the same label. That guest's
+      # kernel has no CONFIG_UNIX_DIAG, so native_network_confinement's
+      # descriptor proofs skip there and run in the Linux release host check
+      # (owner, 2026-10-21, codewire#2940).
+      - name: Declare a metal Kata guest
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: |
+          if [[ "$(stat -f -c %T /ci-cache 2>/dev/null)" == ext2/ext3 ]]; then
+            echo 'CODEWIRE_CI_METAL_KATA_GUEST=1' >> "$GITHUB_ENV"
+          fi
+
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
