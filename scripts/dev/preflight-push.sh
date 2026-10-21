@@ -132,44 +132,10 @@ if [ "$detached_desktop" = true ]; then
 fi
 
 shellcheck_changed() {
-  local report status=0 findings expected
-  if ! command -v shellcheck >/dev/null || ! command -v jq >/dev/null; then
-    echo 'push-check: shellcheck and jq are required on PATH' >&2
-    return 1
-  fi
-  # Match the repository policy: warnings fail unless the reviewed baseline
-  # owns them. The full ShellCheck domain runs in merge qualification.
-  # shellcheck source=scripts/ci/verify/shellcheck-baseline.sh
-  source "$ROOT/scripts/ci/verify/shellcheck-baseline.sh"
-  # The policy check analyzes each script together with every script it
-  # sources (check-shell-scripts.sh), so a variable a sourced file reads is
-  # used. Follow the sources here too; findings stay those of the changed files.
-  # Status 1 means findings; anything else above 0 is a ShellCheck failure.
-  report="$(shellcheck --external-sources --severity=warning --format=json1 "${shell_files[@]}")" || status=$?
-  if [ "$status" -gt 1 ]; then
-    echo "push-check: shellcheck failed with status $status" >&2
-    return 1
-  fi
-  findings="$(
-    jq -r --args '
-        [.comments[] | select(.file as $file | $ARGS.positional | index($file))]
-        | group_by([.file, .code])[]
-        | "\(.[0].file)\tSC\(.[0].code)\t\(length)"' "${shell_files[@]}" <<<"$report" \
-      | LC_ALL=C sort
-  )"
-  expected="$(
-    printf '%s\n' "$SHELLCHECK_BASELINE_TSV" \
-      | awk -F '\t' 'NR == FNR { keep[$0] = 1; next }
-          /^#/ || NF != 4 { next }
-          ($1 in keep) { print $1 "\t" $2 "\t" $3 }' \
-        <(printf '%s\n' "${shell_files[@]}") - \
-      | LC_ALL=C sort
-  )"
-  if [ "$findings" != "$expected" ]; then
-    shellcheck --external-sources --severity=warning "${shell_files[@]}" || true
-    printf 'push-check: ShellCheck findings differ from the reviewed baseline\n' >&2
-    return 1
-  fi
+  # The policy check's own changed-script mode: each script with every script
+  # it sources, and warnings fail unless the reviewed baseline owns them. The
+  # full ShellCheck domain runs on main.
+  "$ROOT/scripts/ci/verify/check-shell-scripts.sh" --files "${shell_files[@]}"
 }
 if [ "${#shell_files[@]}" -gt 0 ]; then
   step shellcheck shellcheck_changed

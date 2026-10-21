@@ -23,6 +23,8 @@ mkdir -p "$repo/scripts/dev" "$repo/scripts/ci/verify" "$repo/scripts/fixture"
 install -m 755 "$ROOT/scripts/dev/preflight-push.sh" "$repo/scripts/dev/preflight-push.sh"
 install -m 644 "$ROOT/scripts/ci/verify/shellcheck-baseline.sh" \
   "$repo/scripts/ci/verify/shellcheck-baseline.sh"
+install -m 755 "$ROOT/scripts/ci/verify/check-shell-scripts.sh" \
+  "$repo/scripts/ci/verify/check-shell-scripts.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/scripts/dev/preflight-environment.sh"
 chmod 755 "$repo/scripts/dev/preflight-environment.sh"
 
@@ -62,8 +64,41 @@ grep -qx shellcheck "$work/ran" || fail 'the push check did not run ShellCheck'
 if push_check scripts/fixture/unused.sh; then
   fail 'a variable nothing reads passed the push check'
 fi
-grep -Fq 'push-check: ShellCheck findings differ from the reviewed baseline' "$work/out" ||
+grep -Fq 'check-shell-scripts: ShellCheck findings differ from the reviewed baseline' "$work/out" ||
   fail 'an unused variable did not fail as a ShellCheck finding'
 grep -Fq 'SC2034' "$work/out" || fail 'the failure did not name the finding'
 
-printf '[test-push-check-shellcheck] sourced use passes, unused variable fails\n'
+# A pull request checks only the scripts changed since its base (#3119 A7),
+# with the same rule; a base the checkout lacks checks every script.
+git_fixture() {
+  git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false "$@"
+}
+changed_since() {
+  (cd "$work" && "$repo/scripts/ci/verify/check-shell-scripts.sh" --changed-since "$1") \
+    >"$work/out" 2>&1
+}
+git_fixture init -q
+git_fixture add -A
+git_fixture commit -q -m base
+base="$(git -C "$repo" rev-parse HEAD)"
+changed_since "$base" || { cat "$work/out" >&2; fail 'an unchanged pull request failed ShellCheck'; }
+grep -Fq 'ShellCheck: no script changed since' "$work/out" || fail 'an unchanged pull request checked scripts'
+printf 'printf "%%s\\n" changed\n' >>"$repo/scripts/fixture/caller.sh"
+git_fixture commit -q -am 'change the clean caller'
+changed_since "$base" || { cat "$work/out" >&2; fail 'a clean changed script failed ShellCheck'; }
+grep -Fq 'ShellCheck of 1 script(s) changed since' "$work/out" ||
+  fail 'the pull request did not check exactly its changed script'
+printf 'printf "%%s\\n" changed\n' >>"$repo/scripts/fixture/unused.sh"
+git_fixture commit -q -am 'change the script with a finding'
+if changed_since "$base"; then
+  fail 'a changed script with an unreviewed finding passed'
+fi
+grep -Fq 'SC2034' "$work/out" || fail 'the changed-script failure did not name the finding'
+if changed_since "$(printf '%040d' 0)"; then
+  fail 'an unknown base passed although a script has a finding'
+fi
+grep -Fq 'is not in this checkout; checking every script' "$work/out" ||
+  fail 'an unknown base did not fall back to every script'
+
+printf '[test-push-check-shellcheck] sourced use passes, unused variable fails, pull requests check changed scripts\n'

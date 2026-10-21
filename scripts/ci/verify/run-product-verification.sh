@@ -183,9 +183,15 @@ run_verification_shell_syntax() {
   fi
 }
 
+# A pull request names its base: ShellCheck then covers only the scripts it
+# changes. Without a base (main, dispatch, local) it covers every script.
 run_shell_policy() {
   scripts/ci/verify/check-shell-scripts.sh --self-test
-  scripts/ci/verify/check-shell-scripts.sh
+  if [ -n "${CODEWIRE_SHELL_POLICY_BASE:-}" ]; then
+    scripts/ci/verify/check-shell-scripts.sh --changed-since "$CODEWIRE_SHELL_POLICY_BASE"
+  else
+    scripts/ci/verify/check-shell-scripts.sh
+  fi
 }
 
 isolate_kind_fixture_environment() {

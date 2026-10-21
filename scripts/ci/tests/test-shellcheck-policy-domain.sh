@@ -108,6 +108,32 @@ fi
 [[ "$omitted_failure_status" -eq 42 && "$omitted_failure_output" == core-1 ]] \
   || fail 'shell-omitted policy did not preserve the core failure'
 
+# A pull request names its base, so ShellCheck covers only its changed
+# scripts; without a base every script is checked. Run the runner's own
+# function against a stub checker that records its arguments.
+shell_policy="$TMP/run-shell-policy.sh"
+awk '
+  /^run_shell_policy\(\) \{/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$RUNNER" > "$shell_policy"
+stub_tree="$TMP/shell-policy-tree"
+mkdir -p "$stub_tree/scripts/ci/verify"
+printf '#!/usr/bin/env bash\nprintf "[%%s]\\n" "$*" >> "$SHELL_POLICY_LOG"\n' \
+  > "$stub_tree/scripts/ci/verify/check-shell-scripts.sh"
+chmod +x "$stub_tree/scripts/ci/verify/check-shell-scripts.sh"
+run_shell_policy_fixture() {
+  : > "$TMP/shell-policy.log"
+  (cd "$stub_tree" && SHELL_POLICY_LOG="$TMP/shell-policy.log" CODEWIRE_SHELL_POLICY_BASE="$1" \
+    bash -c 'set -euo pipefail; source "$1"; run_shell_policy' bash "$shell_policy")
+  cat "$TMP/shell-policy.log"
+}
+pull_request_base="$(printf '%040d' 7)"
+[[ "$(run_shell_policy_fixture "$pull_request_base")" == $'[--self-test]\n[--changed-since '"$pull_request_base]" ]] \
+  || fail 'a pull request did not ShellCheck only its changed scripts'
+[[ "$(run_shell_policy_fixture '')" == $'[--self-test]\n[]' ]] \
+  || fail 'a run without a pull-request base did not ShellCheck every script'
+
 # Validate the shared syntax owner, including a second fixed-list file and a
 # runtime path containing spaces. No product runner or heavy policy is invoked.
 syntax_dispatch="$TMP/run-verification-shell-syntax.sh"

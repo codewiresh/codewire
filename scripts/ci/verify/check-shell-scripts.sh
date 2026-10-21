@@ -228,18 +228,88 @@ plan_shards() {
     '
 }
 
-if [[ "${1:-}" == --self-test ]]; then
-  [[ $# -eq 1 ]] || {
-    printf 'usage: check-shell-scripts.sh [--self-test]\n' >&2
-    exit 2
-  }
-  self_test
-  exit 0
-fi
-[[ $# -eq 0 ]] || {
-  printf 'usage: check-shell-scripts.sh [--self-test]\n' >&2
+# check_files PATH...: ShellCheck exactly these scripts, each together with the
+# scripts it sources (--external-sources), so a variable a sourced file reads is
+# used. Findings stay those of the named files, and must equal the reviewed
+# baseline's entries for them. The fast push check and a pull request use this.
+check_files() {
+  local report status=0 findings expected tool
+  for tool in shellcheck jq; do
+    command -v "$tool" >/dev/null || {
+      printf 'check-shell-scripts: %s is required on PATH\n' "$tool" >&2
+      return 1
+    }
+  done
+  # Status 1 means findings; anything else above 0 is a ShellCheck failure.
+  report="$(shellcheck --external-sources --severity=warning --format=json1 "$@")" || status=$?
+  if [ "$status" -gt 1 ]; then
+    printf 'check-shell-scripts: shellcheck failed with status %s\n' "$status" >&2
+    return 1
+  fi
+  findings="$(
+    jq -r --args '
+        [.comments[] | select(.file as $file | $ARGS.positional | index($file))]
+        | group_by([.file, .code])[]
+        | "\(.[0].file)\tSC\(.[0].code)\t\(length)"' "$@" <<<"$report" \
+      | LC_ALL=C sort
+  )"
+  expected="$(
+    printf '%s\n' "$SHELLCHECK_BASELINE_TSV" \
+      | awk -F '\t' 'NR == FNR { keep[$0] = 1; next }
+          /^#/ || NF != 4 { next }
+          ($1 in keep) { print $1 "\t" $2 "\t" $3 }' \
+        <(printf '%s\n' "$@") - \
+      | LC_ALL=C sort
+  )"
+  if [ "$findings" != "$expected" ]; then
+    shellcheck --external-sources --severity=warning "$@" || true
+    printf 'check-shell-scripts: ShellCheck findings differ from the reviewed baseline\n' >&2
+    return 1
+  fi
+}
+
+usage() {
+  printf 'usage: check-shell-scripts.sh [--self-test | --files PATH... | --changed-since COMMIT]\n' >&2
   exit 2
 }
+
+case "${1:-}" in
+  --self-test)
+    [[ $# -eq 1 ]] || usage
+    self_test
+    exit 0
+    ;;
+  --files)
+    shift
+    [[ $# -gt 0 ]] || usage
+    cd "$ROOT"
+    check_files "$@"
+    printf 'ShellCheck of %s named script(s): OK\n' "$#"
+    exit 0
+    ;;
+  --changed-since)
+    # A pull request checks only the scripts it changes (#3119 A7); main
+    # checks every script. A base this checkout lacks checks every script.
+    [[ $# -eq 2 && "$2" =~ ^[0-9a-f]{40}$ ]] || usage
+    cd "$ROOT"
+    if git cat-file -e "$2^{commit}" 2>/dev/null && base="$(git merge-base "$2" HEAD)"; then
+      changed=()
+      while IFS= read -r -d '' script; do
+        [[ -f "$script" ]] && changed+=("$script")
+      done < <(git diff -z --name-only --diff-filter=d "$base" HEAD -- '*.sh')
+      if [[ "${#changed[@]}" -eq 0 ]]; then
+        printf 'ShellCheck: no script changed since %s\n' "$base"
+        exit 0
+      fi
+      check_files "${changed[@]}"
+      printf 'ShellCheck of %s script(s) changed since %s: OK\n' "${#changed[@]}" "$base"
+      exit 0
+    fi
+    printf 'ShellCheck: %s is not in this checkout; checking every script\n' "$2"
+    ;;
+  '') ;;
+  *) usage ;;
+esac
 
 
 cd "$ROOT"

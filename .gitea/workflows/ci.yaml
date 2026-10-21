@@ -628,8 +628,12 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|deploy|') || contains(needs.verification-selection.outputs.selection, '|release|') || contains(needs.verification-selection.outputs.selection, '|security|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
+      # A pull request ShellChecks only the scripts it changes; main checks
+      # every script (#3119 A7).
       - name: Run Shell policy
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|policy_shell|') || (contains(needs.verification-selection.outputs.selection, '|policy|') && !contains(needs.verification-selection.outputs.selection, '|policy_shell_omittable|'))) }}
+        env:
+          CODEWIRE_SHELL_POLICY_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
         run: scripts/ci/verify/run-product-verification.sh policy-shell
 
       - name: Run Confidential runtime tooling

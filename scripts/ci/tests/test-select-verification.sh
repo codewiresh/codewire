@@ -4108,7 +4108,10 @@ if grep -Eq 'run_verification_shell_syntax|bash -n|find scripts/runtime|run_poli
   exit 1
 fi
 grep -qxF '  scripts/ci/verify/check-shell-scripts.sh --self-test' "$shared_shell_policy"
-grep -qxF '  scripts/ci/verify/check-shell-scripts.sh' "$shared_shell_policy"
+# shellcheck disable=SC2016 # Match the runner's literal shell variable.
+grep -qxF '    scripts/ci/verify/check-shell-scripts.sh --changed-since "$CODEWIRE_SHELL_POLICY_BASE"' \
+  "$shared_shell_policy"
+grep -qxF '    scripts/ci/verify/check-shell-scripts.sh' "$shared_shell_policy"
 grep -qF 'scripts/runtime/tests/test-run-sdk-python-e2e.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'Python SDK wheel leaked generated codewire/$forbidden_package' \
