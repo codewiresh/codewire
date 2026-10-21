@@ -800,8 +800,14 @@ grep -Fq 'SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_HTTP_URL"' "$COMMON" ||
   fail 'orchestration smoke callers do not dial the requested orchestration endpoint'
 grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
   fail 'Kind cluster creation does not adapt the remote DinD network boundary'
-[[ "$(grep -Fc '"$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e"' "$COMMON")" -eq 1 ]] ||
+[[ "$(grep -Fc '"$ROOT/scripts/ci/verify/dashboard-image.sh" "$dashboard_image"' "$COMMON")" -eq 1 ]] \
+    && grep -Fq 'local dashboard_image=codewire-dashboard:e2e' "$COMMON" ||
   fail 'Kind does not verify the exact dashboard image it already built'
+# A named profile admits its product images by ID straight after producing
+# them, and checks the dashboard it holds rather than the shared tag (#3073).
+grep -Fq 'profile-artifacts.py" admit' "$COMMON" \
+    && grep -Fq 'dashboard_image="$(jq -er '"'"'.holds["codewire-dashboard:e2e"]'"'"'' "$COMMON" ||
+  fail 'a named Kind profile does not admit its product images by ID before the smoke build'
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
 fi

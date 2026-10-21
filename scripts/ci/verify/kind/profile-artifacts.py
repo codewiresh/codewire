@@ -651,20 +651,141 @@ def image_identity_mode() -> str:
     return "config"
 
 
-def inspect_products(inventory, head: str) -> dict[str, str]:
+PRODUCT_TEMPLATE = ('{"id":{{json .Id}},"os":{{json .Os}},"arch":{{json .Architecture}},'
+                    '"profile":{{json (index .Config.Labels "dev.codewire.build.profile")}},'
+                    '"promotable":{{json (index .Config.Labels "dev.codewire.promotable")}},'
+                    '"source":{{json (index .Config.Labels "org.opencontainers.image.revision")}}}')
+ADMISSION = "kind-product-images.json"
+ADMISSION_SCHEMA = "codewire.kind-product-admission/v1"
+IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def product_id(reference: str, head: str, label: str) -> str:
+    """The image ID a reference names now, if it is this source's runtime product."""
+    try:
+        value = decode(run("docker", "image", "inspect", "--format", PRODUCT_TEMPLATE, reference))
+    except SealError:
+        raise SealError(f"{label}: {reference} is not in the Docker image store") from None
+    require(isinstance(value, dict) and IMAGE_ID.fullmatch(value.get("id") or "") is not None
+            and value.get("os") == "linux" and value.get("arch") == "amd64"
+            and value.get("profile") == "runtime" and value.get("promotable") == "false"
+            and value.get("source") == head, f"{label}: product image identity or runtime profile differs")
+    return value["id"]
+
+
+def hold_name(core, cluster: str, tag: str) -> str:
+    """The profile-private name holding an admitted image; see admitted_image."""
+    return core.admitted_image(cluster, tag.removeprefix("codewire-").removesuffix(":e2e"))
+
+
+def bake_ids(metadata: Path, inventory, identity: str) -> dict[str, str]:
+    """The exact image each Kind Bake target produced, read from its metadata."""
+    value = decode(read_bytes(metadata, bound=1024**2))
+    require(isinstance(value, dict), "Kind Bake metadata is invalid")
+    key = "containerimage.digest" if identity == "manifest" else "containerimage.config.digest"
     result = {}
-    template = ('{"id":{{json .Id}},"os":{{json .Os}},"arch":{{json .Architecture}},'
-                '"profile":{{json (index .Config.Labels "dev.codewire.build.profile")}},'
-                '"promotable":{{json (index .Config.Labels "dev.codewire.promotable")}},'
-                '"source":{{json (index .Config.Labels "org.opencontainers.image.revision")}}}')
-    for reference in inventory.PRODUCT_IMAGES:
-        value = decode(run("docker", "image", "inspect", "--format", template, reference))
-        require(isinstance(value, dict) and re.fullmatch(r"sha256:[0-9a-f]{64}", value.get("id", ""))
-                and value.get("os") == "linux" and value.get("arch") == "amd64"
-                and value.get("profile") == "runtime" and value.get("promotable") == "false"
-                and value.get("source") == head, "product image identity or runtime profile differs")
-        result[reference] = value["id"]
+    for tag in inventory.PRODUCT_IMAGES:
+        target = tag.removeprefix("codewire-").removesuffix(":e2e") + "-ci"
+        entry = value.get(target)
+        require(isinstance(entry, dict) and IMAGE_ID.fullmatch(entry.get(key) or "") is not None
+                and "docker.io/library/" + tag in str(entry.get("image.name", "")).split(","),
+                f"Kind Bake metadata has no {identity} identity for {tag}")
+        result[tag] = entry[key]
     return result
+
+
+def admit(root: Path, run_dir: Path, metadata: Path | None) -> dict:
+    """Admit the product images by ID straight after they are produced.
+
+    Each admitted ID gets a profile-private name, so sealing reads exactly
+    these images however long the smoke build takes and whatever happens to the
+    shared tags meanwhile.
+    """
+    with transaction(root, publication=True) as (_, value, fields):
+        require(run_dir == Path(fields["RUN_DIR"]), "artifact run directory differs from its profile")
+        binding, inventory = provenance(root), load_inventory(root)
+        identity, head, core = image_identity_mode(), binding["source_head"], load_core(root)
+        built = bake_ids(metadata, inventory, identity) if metadata is not None else {}
+        images, holds = {}, {}
+        for tag in inventory.PRODUCT_IMAGES:
+            # Hold the Bake's own output by ID, never whatever the shared tag
+            # names now. Without Bake metadata (imported CI artifacts) the
+            # images were loaded moments ago into this job's own store.
+            source = built.get(tag) or product_id(tag, head, tag)
+            hold = hold_name(core, value["cluster_name"], tag)
+            try:
+                run("docker", "image", "tag", source, hold)
+            except SealError:
+                raise SealError(f"{tag}: the image the Bake built ({source}) is no longer "
+                                "in the Docker image store") from None
+            images[tag], holds[tag] = product_id(hold, head, tag), hold
+            require(images[tag] == source, f"{tag}: {hold} does not name the admitted image {source}")
+        record = {"schema": ADMISSION_SCHEMA, "cluster_name": value["cluster_name"],
+                  "source_head": head, "source_tree": binding["source_tree"],
+                  "image_identity": identity, "images": images, "holds": holds}
+        destination = run_dir / ADMISSION
+        staged = run_dir / (".staged-" + ADMISSION)
+        for path in (staged, destination):
+            if path.exists() or path.is_symlink():
+                path.unlink()
+        write_bytes(staged, encode(record), 0o400)
+        os.replace(staged, destination)
+        for tag in inventory.PRODUCT_IMAGES:
+            print(f"kind product image admitted: {tag} {images[tag]} held as {holds[tag]}", file=sys.stderr)
+        return record
+
+
+def admitted_products(core, run_dir: Path, value: dict, binding: dict, inventory, identity: str) -> dict:
+    """This run's admission, re-proved: every held name still names its ID."""
+    try:
+        record = decode(read_bytes(run_dir / ADMISSION))
+    except SealError:
+        raise SealError("product image admission is missing; admit runs straight after the image build") from None
+    tags = set(inventory.PRODUCT_IMAGES)
+    require(isinstance(record, dict) and record.get("schema") == ADMISSION_SCHEMA
+            and record.get("cluster_name") == value["cluster_name"]
+            and record.get("source_head") == binding["source_head"]
+            and record.get("source_tree") == binding["source_tree"]
+            and record.get("image_identity") == identity
+            and isinstance(record.get("images"), dict) and set(record["images"]) == tags
+            and isinstance(record.get("holds"), dict) and set(record["holds"]) == tags,
+            "product image admission is missing or belongs to another source or store")
+    for tag in inventory.PRODUCT_IMAGES:
+        admitted, hold = record["images"][tag], record["holds"][tag]
+        require(IMAGE_ID.fullmatch(admitted or "") is not None
+                and hold == hold_name(core, value["cluster_name"], tag), "product image admission is invalid")
+        try:
+            held = product_id(hold, binding["source_head"], tag)
+        except SealError:
+            raise SealError(f"{tag}: the admitted image {admitted} is no longer in the Docker image "
+                            f"store ({hold} is missing)") from None
+        require(held == admitted, f"{tag}: {hold} names {held}, not the admitted image {admitted}")
+    return record
+
+
+def point_products(record: dict, inventory) -> None:
+    """Name each admitted image by its product tag for the archive Kind loads.
+
+    The archive's identity is checked by ID afterwards; the tag only names it.
+    """
+    for tag in inventory.PRODUCT_IMAGES:
+        admitted = record["images"][tag]
+        try:
+            current = run("docker", "image", "inspect", "--format", "{{.Id}}", tag)
+        except SealError:
+            current = ""
+        if current != admitted:
+            print(f"kind artifact: {tag} names {current or 'nothing'}, not the admitted {admitted}; "
+                  "another checkout moved it. Sealing the admitted image.", file=sys.stderr)
+            run("docker", "image", "tag", record["holds"][tag], tag)
+
+
+def release_holds(record: dict, inventory) -> None:
+    for tag in inventory.PRODUCT_IMAGES:
+        try:
+            run("docker", "image", "rm", record["holds"][tag])
+        except SealError:
+            print(f"kind artifact: {record['holds'][tag]} was not released", file=sys.stderr)
 
 
 def publish(stage: Path, destination: Path) -> None:
@@ -704,19 +825,25 @@ def seal(root: Path, cargo_ci: Path, run_dir: Path) -> Path:
         require(not destination.exists() and not destination.is_symlink(),
                 f"unadmitted artifact directory retained without overwrite: {destination}")
         image_identity = image_identity_mode()
-        expected = inspect_products(inventory, binding["source_head"])
+        # Seal the images admitted by ID after the Bake, never whatever the
+        # shared product tags name now: another checkout may have moved one.
+        core = load_core(root)
+        admission = admitted_products(core, run_dir, value, binding, inventory, image_identity)
+        expected = dict(admission["images"])
         print(f"kind artifact image identity: {image_identity}", file=sys.stderr)
         budget, files = Budget(), {}
         with tempfile.TemporaryDirectory(prefix=".sealing-", dir=profile) as temporary:
             stage = Path(temporary)
             archive = stage / "images.tar"
+            point_products(admission, inventory)
             run("docker", "image", "save", "--output", str(archive), *inventory.PRODUCT_IMAGES,
                 timeout=900, file_limit=FILE_BOUND)
             archive_size = seal_archive_mode(archive, budget)
+            # A tag moved again between naming and saving fails here, by ID.
             verify_archive(archive, expected, image_identity=image_identity)
             require(image_identity_mode() == image_identity
-                    and inspect_products(inventory, binding["source_head"]) == expected,
-                    "product tags or image store changed during archive publication")
+                    and admitted_products(core, run_dir, value, binding, inventory, image_identity) == admission,
+                    "admitted product images or image store changed during archive publication")
             files["images.tar"] = {"sha256": digest(archive), "bytes": archive_size, "mode": 0o400}
             copy_smokes(inventory, cargo_ci, run_dir, stage, destination, budget, files)
             for name, checksum in binding["inputs"].items():
@@ -748,17 +875,26 @@ def seal(root: Path, cargo_ci: Path, run_dir: Path) -> Path:
             profiles.record_artifacts(value["cluster_name"], value["ownership_nonce"], destination / "manifest.json")
         except Exception as error:
             raise SealError(f"artifact admission outcome requires reconciliation; retained: {destination}") from error
+        release_holds(admission, inventory)
         return destination
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["seal", "reuse"])
+    parser.add_argument("command", choices=["admit", "seal", "reuse"])
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--cargo-ci-dir", type=Path, required=True)
+    parser.add_argument("--cargo-ci-dir", type=Path)
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--bake-metadata", type=Path)
     args = parser.parse_args()
+    if (args.command == "admit") == (args.cargo_ci_dir is not None) \
+            or args.bake_metadata is not None and args.command != "admit":
+        parser.error("admit takes --bake-metadata; seal and reuse take --cargo-ci-dir")
     try:
+        if args.command == "admit":
+            admit(args.root.absolute(), args.run_dir.absolute(),
+                  args.bake_metadata.absolute() if args.bake_metadata is not None else None)
+            return
         function = seal if args.command == "seal" else reuse
         function(args.root.absolute(), args.cargo_ci_dir.absolute(), args.run_dir.absolute())
     except NoAdmission as error:

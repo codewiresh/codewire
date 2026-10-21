@@ -111,6 +111,18 @@ def cluster_name(value: str) -> str:
     return value
 
 
+def admitted_image(cluster: str, name: str) -> str:
+    """The profile-private name that holds one admitted product image (#3073).
+
+    The codewire-*:e2e tags are shared by every checkout on a Docker host, and
+    another cluster's dev loop may move one at any time. Under the containerd
+    image store an image whose only name moves away is collected, so an admitted
+    ID alone would not survive; this name keeps it until the profile is sealed.
+    """
+    require(name in IMAGE_NAMES, "unknown product image")
+    return f"localhost/codewire-kind-admitted/{cluster_name(cluster)}/codewire-{name}:held"
+
+
 def origin(value: str) -> str:
     require(isinstance(value, str) and len(value) <= 512
             and not re.search(r"[\x00-\x20\x7f\\]", value), "invalid profile origin")
@@ -371,8 +383,9 @@ class Docker:
                                value["role"], value["created"], value["running"]))
         return result
 
-    def image_ids(self) -> dict[str, str]:
-        return {name: self.run("image", "inspect", "--format", "{{.Id}}", f"codewire-{name}:e2e")
+    def image_ids(self, cluster: str) -> dict[str, str]:
+        """The images this profile admitted, read by their private names."""
+        return {name: self.run("image", "inspect", "--format", "{{.Id}}", admitted_image(cluster, name))
                 for name in IMAGE_NAMES}
 
     def cluster_names(self) -> list[str]:
@@ -885,8 +898,8 @@ class Profiles:
             require(nonce == value["ownership_nonce"] and value["lifecycle"] != "deleted",
                     "artifact profile ownership/lifecycle mismatch")
             manifest, raw = self.artifact_manifest(value, manifest_path.absolute())
-            require(self.docker.image_ids() == manifest["product_images"],
-                    "sealed artifact image IDs differ from the admitted :e2e producer outputs")
+            require(self.docker.image_ids(cluster) == manifest["product_images"],
+                    "sealed artifact image IDs differ from this profile's admitted product images")
             value["artifacts"] = {key: manifest[key] for key in ("source_head", "source_tree", "product_images")}
             value["artifacts"]["manifest_sha256"] = hashlib.sha256(raw).hexdigest()
             self.save(value)

@@ -1162,8 +1162,23 @@ build_images_and_smokes() {
       ;;
   esac
 
+  local dashboard_image=codewire-dashboard:e2e
+  if [ "${KIND_PROFILE:-0}" = 1 ]; then
+    # Admit the product images by ID now and hold them under profile-private
+    # names. The smoke build takes long, and another checkout's dev loop may
+    # move a shared codewire-*:e2e tag meanwhile; sealing reads these (#3073).
+    local admission_args=()
+    if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = build-ci ]; then
+      admission_args=(--bake-metadata "$RUN_DIR/kind-image-build-metadata.json")
+    fi
+    python3 "$ROOT/scripts/ci/verify/kind/profile-artifacts.py" admit \
+      --root "$ROOT" --run-dir "$RUN_DIR" ${admission_args[@]+"${admission_args[@]}"} || return $?
+    dashboard_image="$(jq -er '.holds["codewire-dashboard:e2e"]' "$RUN_DIR/kind-product-images.json")" ||
+      return $?
+  fi
+
   log "verifying the exact dashboard candidate runtime contract"
-  "$ROOT/scripts/ci/verify/dashboard-image.sh" "codewire-dashboard:e2e" || return $?
+  "$ROOT/scripts/ci/verify/dashboard-image.sh" "$dashboard_image" || return $?
 
   prepare_kind_support_images || return $?
 

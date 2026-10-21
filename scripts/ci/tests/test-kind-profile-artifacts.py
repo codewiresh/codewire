@@ -498,15 +498,26 @@ class ArtifactTests(unittest.TestCase):
 
 
 class FakeDocker:
-    """Only synthetic daemon/image metadata; never invoke Docker or reserve ports."""
+    """Only synthetic daemon/image metadata; never invoke Docker or reserve ports.
+
+    configs holds each image's content by name; tags maps every reference,
+    shared product tags and profile-private holds alike, to one of them.
+    """
 
     def __init__(self):
         self.daemon = "synthetic-daemon"
         self.configs = {name: json.dumps({"architecture": "amd64", "os": "linux", "family": name}).encode()
-                        for name in CORE.IMAGE_NAMES}
+                        for name in (*CORE.IMAGE_NAMES, "foreign-daemon", "foreign-source-daemon")}
         self.images = {name: "sha256:" + hashlib.sha256(config).hexdigest()
                        for name, config in self.configs.items()}
+        self.tags = {f"codewire-{name}:e2e": name for name in CORE.IMAGE_NAMES}
+        self.sources = {"foreign-source-daemon": "4" * 40}
         self.image_reads = 0
+
+    def content(self, reference):
+        if reference in self.tags:
+            return self.tags[reference]
+        return next((name for name, image in self.images.items() if image == reference), None)
 
     def identity(self):
         return self.daemon
@@ -514,9 +525,10 @@ class FakeDocker:
     def nodes(self, cluster):
         return []
 
-    def image_ids(self):
+    def image_ids(self, cluster):
+        """The admitted images, by the profile-private names that hold them."""
         self.image_reads += 1
-        return self.images.copy()
+        return {name: self.images[self.tags[CORE.admitted_image(cluster, name)]] for name in CORE.IMAGE_NAMES}
 
 
 class TransactionTests(unittest.TestCase):
@@ -577,6 +589,16 @@ class TransactionTests(unittest.TestCase):
         self.stack.enter_context(patch.object(ARTIFACTS, "load_inventory", return_value=self.inventory))
         self.stack.enter_context(patch.object(CORE, "Docker", return_value=self.docker))
         self.stack.enter_context(patch.object(ARTIFACTS, "run", side_effect=self.command))
+        self.metadata = self.run_dir / "kind-image-build-metadata.json"
+        self.metadata.write_text(json.dumps({
+            f"{name}-ci": {"containerimage.config.digest": self.docker.images[name],
+                           "containerimage.digest": "sha256:" + "e" * 64,
+                           "image.name": f"docker.io/library/codewire-{name}:e2e"}
+            for name in CORE.IMAGE_NAMES}))
+        self.admission = self.admit()
+
+    def admit(self):
+        return ARTIFACTS.admit(self.root, self.run_dir, self.metadata)
 
     def refresh(self):
         os.environ.update(self.profiles.env("alpha"))
@@ -590,24 +612,41 @@ class TransactionTests(unittest.TestCase):
             return json.dumps({"driver": "vfs", "status": None})
         if argv[:3] == ("docker", "image", "inspect"):
             self.inspect_count += 1
-            name = argv[-1].removeprefix("codewire-").removesuffix(":e2e")
+            name = self.docker.content(argv[-1])
+            if name is None:
+                raise ARTIFACTS.SealError("artifact metadata command failed")
+            if argv[3:5] == ("--format", "{{.Id}}"):
+                return self.docker.images[name]
             return json.dumps({"id": self.docker.images[name], "os": "linux", "arch": "amd64",
-                               "profile": "runtime", "promotable": "false", "source": self.head})
+                               "profile": "runtime", "promotable": "false",
+                               "source": self.docker.sources.get(name, self.head)})
+        if argv[:3] == ("docker", "image", "tag"):
+            name = self.docker.content(argv[3])
+            if name is None:
+                raise ARTIFACTS.SealError("artifact metadata command failed")
+            self.docker.tags[argv[4]] = name
+            return ""
+        if argv[:3] == ("docker", "image", "rm"):
+            if self.docker.tags.pop(argv[3], None) is None:
+                raise ARTIFACTS.SealError("artifact metadata command failed")
+            return ""
         if argv[:3] == ("docker", "image", "save"):
-            self.save_archive(Path(argv[4]))
+            self.save_archive(Path(argv[4]), argv[5:])
             if self.after_save is not None:
                 self.after_save()
             return ""
         self.fail(f"unexpected metadata command: {argv}")
 
-    def save_archive(self, path):
+    def save_archive(self, path, references):
         entries = []
         with tarfile.open(path, "w") as archive:
-            for name, config in self.docker.configs.items():
+            for reference in references:
+                name = self.docker.tags[reference]
+                config = self.docker.configs[name]
                 member = tarfile.TarInfo(f"{name}.json")
                 member.size = len(config)
                 archive.addfile(member, io.BytesIO(config))
-                entries.append({"Config": member.name, "RepoTags": [f"codewire-{name}:e2e"], "Layers": []})
+                entries.append({"Config": member.name, "RepoTags": [reference], "Layers": []})
             data = json.dumps(entries).encode()
             member = tarfile.TarInfo("manifest.json")
             member.size = len(data)
@@ -635,6 +674,66 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(self.reuse(), destination)
         self.assertEqual((self.docker.image_reads, self.inspect_count), (reads, inspections))
         self.assertEqual((destination / "smokes/fixture-smoke").read_bytes(), b"synthetic executable\n")
+
+    def sealed_archive_ids(self, destination):
+        with tarfile.open(destination / "images.tar") as archive:
+            entries = json.loads(archive.extractfile("manifest.json").read())
+            return {entry["RepoTags"][0]: "sha256:" + hashlib.sha256(
+                archive.extractfile(entry["Config"]).read()).hexdigest() for entry in entries}
+
+    def assert_seals_admitted_daemon_after_tag_moved_to(self, foreign):
+        # #3073: another checkout's dev loop moved codewire-daemon:e2e during
+        # the smoke build. The tag is ignored; the image admitted by ID after
+        # the Bake is sealed, and the profile-private holds are released.
+        admitted = self.docker.images["daemon"]
+        self.docker.tags["codewire-daemon:e2e"] = foreign
+        with redirect_stderr(io.StringIO()) as log:
+            destination = self.seal()
+        self.assertIn(f"codewire-daemon:e2e names {self.docker.images[foreign]}", log.getvalue())
+        manifest = json.loads((destination / "manifest.json").read_bytes())
+        self.assertEqual(manifest["product_images"]["daemon"], admitted)
+        self.assertEqual(self.sealed_archive_ids(destination)["codewire-daemon:e2e"], admitted)
+        self.assertEqual([key for key in self.docker.tags if key.startswith("localhost/")], [])
+
+    def test_tag_moved_to_a_same_source_image_seals_the_admitted_image(self):
+        # The worst case: the foreign image carries this source's labels, so
+        # sealing by tag would admit it without any error.
+        self.assert_seals_admitted_daemon_after_tag_moved_to("foreign-daemon")
+
+    def test_tag_moved_to_another_source_seals_the_admitted_image(self):
+        # Sealing by tag refused this one ("identity or runtime profile differs").
+        self.assert_seals_admitted_daemon_after_tag_moved_to("foreign-source-daemon")
+
+    def test_admission_holds_the_bake_output_not_the_current_tag(self):
+        # The tag moved before admission; the Bake's own ID is held.
+        self.docker.tags["codewire-mesh:e2e"] = "foreign-daemon"
+        record = self.admit()
+        self.assertEqual(record["images"]["codewire-mesh:e2e"], self.docker.images["mesh"])
+        self.assertEqual(self.docker.tags[record["holds"]["codewire-mesh:e2e"]], "mesh")
+
+    def test_an_admitted_image_missing_from_the_store_is_named(self):
+        hold = self.admission["holds"]["codewire-services:e2e"]
+        del self.docker.tags[hold]
+        with self.assertRaisesRegex(ARTIFACTS.SealError,
+                                    "codewire-services:e2e: the admitted image sha256:[0-9a-f]{64} "
+                                    "is no longer in the Docker image store"):
+            self.seal()
+        self.assert_unpublished()
+        # The Bake's image is gone before admission, as under the containerd
+        # store once its only name moved away.
+        self.docker.images["dashboard"] = "sha256:" + "0" * 64
+        self.metadata.write_text(self.metadata.read_text().replace(
+            json.loads(self.metadata.read_text())["dashboard-ci"]["containerimage.config.digest"],
+            "sha256:" + "d" * 64))
+        with self.assertRaisesRegex(ARTIFACTS.SealError, "codewire-dashboard:e2e: the image the Bake built "
+                                    r"\(sha256:d{64}\) is no longer in the Docker image store"):
+            self.admit()
+
+    def test_seal_requires_this_sources_admission(self):
+        (self.run_dir / ARTIFACTS.ADMISSION).unlink()
+        with self.assertRaisesRegex(ARTIFACTS.SealError, "admission is missing"):
+            self.seal()
+        self.assert_unpublished()
 
     def test_reuse_exit_three_only_for_a_valid_profile_with_no_admission(self):
         def invoke():

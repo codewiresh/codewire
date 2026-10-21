@@ -47,7 +47,7 @@ class FakeDocker:
     def nodes(self, cluster):
         return self.selected_nodes.get(cluster, [])
 
-    def image_ids(self):
+    def image_ids(self, cluster):
         self.image_reads += 1
         return self.images
 
