@@ -1734,40 +1734,6 @@ run_present_paths_case macos_local_vm_journeys pull_request refs/pull/20660/head
   scripts/dev/test-local-vm-hostile-guest.py
 run_present_paths_case macos_local_vm_journey_unknown pull_request refs/pull/20661/head false \
   "$all_product_pr" scripts/dev/test-local-vm-future-macos.py
-run_present_paths_case macos_console_pair pull_request refs/pull/20641/head false \
-  'policy security security_js transport transport_pkg_codewire_local_vmm' \
-  scripts/dev/macos-vz-console-pair.py scripts/dev/test-macos-vz-console-pair.py
-run_present_paths_case macos_console_pair_unknown pull_request refs/pull/20642/head false \
-  "$all_product_pr" scripts/dev/macos-vz-console-pair-future.py
-run_present_paths_case macos_product_network pull_request refs/pull/20644/head false \
-  'policy security security_js transport transport_pkg_codewire_local_vmm' \
-  scripts/dev/macos-vz-product-network.py scripts/dev/test-macos-vz-product-network.py
-run_present_paths_case macos_product_network_unknown pull_request refs/pull/20645/head false \
-  "$all_product_pr" scripts/dev/macos-vz-product-network-future.py
-run_present_paths_case macos_workload_network pull_request refs/pull/20646/head true \
-  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
-  scripts/dev/macos-vz-workload-network.py scripts/dev/test-macos-vz-workload-network.py
-run_present_paths_case macos_workload_network_unknown pull_request refs/pull/20647/head false \
-  "$all_product_pr" scripts/dev/macos-vz-workload-network-future.py
-run_present_paths_case macos_workspace_inputs_parent pull_request refs/pull/20652/head true \
-  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
-  scripts/dev/macos-vz-workspace-inputs.py
-run_present_paths_case macos_workspace_inputs_tests pull_request refs/pull/20653/head true \
-  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
-  scripts/dev/test-macos-vz-workspace-inputs.py
-run_present_paths_case macos_workspace_inputs_unknown pull_request refs/pull/20654/head false \
-  "$all_product_pr" scripts/dev/macos-vz-workspace-inputs-future.py
-run_paths_case macos_workload_network_rust pull_request refs/pull/20648/head true \
-  'policy transport transport_pkg_codewire_local_vmm' \
-  crates/codewire-local-vmm/src/bin/codewire-macos-workload-network-fixture.rs \
-  crates/codewire-local-vmm/src/bin/vz_workload_network_fixture/mod.rs \
-  crates/codewire-local-vmm/src/bin/vz_workload_network_fixture/workload.rs \
-  crates/codewire-local-vmm/src/bin/vz_workload_network_fixture/tests.rs \
-  crates/codewire-local-vmm/src/bin/vz_production_fixture/common.rs \
-  crates/codewire-local-vmm/src/bin/vz_production_fixture/session.rs
-run_paths_case macos_workload_network_client pull_request refs/pull/20649/head true \
-  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
-  crates/codewire-vmm-guest-probe/src/macos_workload_network_fixture.rs
 run_paths_case macos_workload_network_native pull_request refs/pull/20650/head true \
   'policy transport transport_pkg_codewire_local_vmm' \
   crates/codewire-local-vmm/macos-vz-runner/Sources/CodewireVZRunnerProtocol/WorkloadNetwork.swift \
@@ -1776,19 +1742,8 @@ run_paths_case macos_workload_network_native pull_request refs/pull/20650/head t
   crates/codewire-local-vmm/macos-vz-runner/Sources/CodewireVZRunnerRuntime/WorkloadNetworkLifecycle.swift \
   crates/codewire-local-vmm/macos-vz-runner/Sources/CodewireVZRunnerRuntime/WorkloadNetworkWire.swift \
   crates/codewire-local-vmm/macos-vz-runner/Tests/CodewireVZRunnerTests/WorkloadNetworkTests.swift
-run_paths_case macos_workload_network_documentation pull_request refs/pull/20651/head true \
-  "$policy" docs/dev/MACOS-WORKLOAD-NETWORK.md
-run_paths_case macos_console_pair_rust pull_request refs/pull/20643/head false \
-  'policy transport transport_pkg_codewire_local_vmm' \
-  crates/codewire-local-vmm/src/macos_console_pair_fixture/runtime.rs
 run_present_paths_case macos_sandbox_canary_harness pull_request refs/pull/2066/head false \
   "$policy security security_js" scripts/dev/macos-app-sandbox-canary.py scripts/dev/test-macos-app-sandbox-canary.py
-run_present_paths_case macos_vz_inode_probe pull_request refs/pull/2065/head false \
-  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
-  scripts/dev/macos-vz-inode-probe.py scripts/dev/test-macos-vz-inode-probe.py
-run_present_paths_case macos_vz_production_boot pull_request refs/pull/2064/head false \
-  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
-  scripts/dev/macos-vz-production-boot.py scripts/dev/test-macos-vz-production-boot.py
 run_present_paths_case dashboard_watch_unlisted pull_request refs/pull/2003/head false \
   "$all_product_pr" scripts/dev/unlisted-dashboard-helper.py
 if grep -Fq 'scripts/ci/cache/*.sh' "$SELECTOR"; then

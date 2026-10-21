@@ -35,8 +35,6 @@ pub(crate) mod host_port;
 pub mod hybrid_vsock;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod lifecycle;
-#[cfg(all(target_os = "linux", feature = "macos-console-pair-fixture"))]
-pub mod macos_console_pair_fixture;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod mesh_enrollment;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

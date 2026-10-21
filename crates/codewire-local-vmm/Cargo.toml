@@ -10,33 +10,6 @@ build = "build.rs"
 
 [features]
 synthetic-oci-input-smoke = []
-macos-console-pair-fixture = []
-macos-product-network-fixture = ["macos-console-pair-fixture"]
-macos-workload-network-fixture = [
-    "macos-production-init-fixture",
-    "codewire-vmm-guest-probe/macos-workload-network-fixture",
-]
-macos-production-init-fixture = []
-
-[[bin]]
-name = "codewire-macos-workload-network-fixture"
-path = "src/bin/codewire-macos-workload-network-fixture.rs"
-required-features = ["macos-workload-network-fixture"]
-
-[[bin]]
-name = "codewire-macos-product-network-fixture"
-path = "src/bin/codewire-macos-product-network-fixture.rs"
-required-features = ["macos-product-network-fixture"]
-
-[[bin]]
-name = "codewire-macos-console-pair-fixture"
-path = "src/bin/codewire-macos-console-pair-fixture.rs"
-required-features = ["macos-console-pair-fixture"]
-
-[[bin]]
-name = "codewire-macos-vz-fixture"
-path = "src/bin/codewire-macos-vz-fixture.rs"
-required-features = ["macos-production-init-fixture"]
 
 [[bin]]
 name = "codewire-local-oci-import-smoke"

@@ -35,10 +35,6 @@ PUBLIC_GIT = {
 SMOKE = [[], ["create"], ["run"], ["list"], ["mesh"], ["network"]]
 SSH_OPTIONS = ["-oBatchMode=yes", "-oForwardAgent=no", "-oConnectTimeout=10",
                "-oServerAliveInterval=10", "-oServerAliveCountMax=2"]
-VZ_FIXTURES = {
-    "vz-fixture": ("macos-production-init-fixture", "codewire-macos-vz-fixture"),
-    "vz-workload-network": ("macos-workload-network-fixture", "codewire-macos-workload-network-fixture"),
-}
 SWIFT_COMPONENTS = {
     "vz-runner": ("macos-vz-runner", "swift-vz-runner", ("codewire-vz-runner",)),
     "sandbox-canary": ("macos-sandbox-canary-experiment", "swift-sandbox-canary",
@@ -411,26 +407,6 @@ def worker(root, run):
                              "-p", "codewire-local-vmm", "--lib", "--no-run"])
                     shutil.copy2(root / "target/x86_64-apple-darwin/debug/cw",
                                  run / "artifacts/cw-x86_64-apple-darwin")
-            elif component in VZ_FIXTURES:
-                if request["intel"]:
-                    raise RuntimeError("VZ production fixture accepts native arm64 only")
-                feature, executable = VZ_FIXTURES[component]
-                for argv in (["rustc", "-Vv"], ["cargo", "-V"], ["protoc", "--version"],
-                             ["xcrun", "--show-sdk-version"]):
-                    command(argv)
-                native = ["--locked", "--offline", "--target", "aarch64-apple-darwin",
-                          "-p", "codewire-local-vmm", "--features", feature]
-                if action in ("build", "verify"):
-                    command(["cargo", "build", *native, "--bin", executable])
-                    binary = root / "target/aarch64-apple-darwin/debug" / executable
-                    shutil.copy2(binary, run / "artifacts" / (executable + "-arm64"))
-                if action in ("test", "verify"):
-                    if component == "vz-fixture":
-                        command(["cargo", "test", *native, "--lib", "network_session::tests"])
-                    command(["cargo", "test", *native, "--bin", executable])
-                if action in ("clippy", "verify"):
-                    command(["cargo", "clippy", *native, "--lib", "--bin", executable,
-                             "--", "-D", "warnings"])
             elif component in SWIFT_COMPONENTS:
                 if action == "clippy" or request["intel"]:
                     raise RuntimeError("Swift components accept build, test, or verify on native arm64 only")
@@ -523,7 +499,6 @@ run = pathlib.Path(sys.argv[1])
 paths = [run / 'request.json', run / 'result.json', *run.glob('command-*.log')]
 paths += [run / 'artifacts' / name for name in (
     'cw-aarch64-apple-darwin', 'cw-x86_64-apple-darwin', 'codewire-vz-runner-arm64',
-    'codewire-macos-vz-fixture-arm64', 'codewire-macos-workload-network-fixture-arm64',
     'sandbox-experiment-owner-arm64', 'sandbox-candidate-arm64', 'canary-deputy-arm64')]
 if not (run / 'request.json').is_file(): raise SystemExit('run not found')
 with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
@@ -560,9 +535,6 @@ def evidence_status(evidence, run_id):
     if component in SWIFT_COMPONENTS:
         if request["action"] in ("build", "verify"):
             expected.update(f"{product}-arm64" for product in SWIFT_COMPONENTS[component][2])
-    elif component in VZ_FIXTURES:
-        if request["action"] in ("build", "verify"):
-            expected.add(VZ_FIXTURES[component][1] + "-arm64")
     elif component == "cli":
         if request["action"] in ("build", "verify"):
             expected.add("cw-aarch64-apple-darwin")
@@ -586,7 +558,7 @@ def main():
     parser.add_argument("--host", default=os.environ.get("CODEWIRE_MAC_HOST"),
                         help="SSH destination of the Mac, such as user@mac.example.invalid "
                              "(default: $CODEWIRE_MAC_HOST)")
-    parser.add_argument("--component", choices=["cli", *VZ_FIXTURES, *SWIFT_COMPONENTS], default="cli")
+    parser.add_argument("--component", choices=["cli", *SWIFT_COMPONENTS], default="cli")
     parser.add_argument("--action", choices=["build", "test", "clippy", "verify"], default="build")
     parser.add_argument("--intel", action="store_true", help="also compile/link x86_64; never execute it")
     parser.add_argument("--seed-cargo", action="store_true", help="seed locked public source dependencies")
@@ -606,8 +578,6 @@ def main():
         parser.error("--runtime-tools must be an absolute plain path on the Mac")
     if args.component in SWIFT_COMPONENTS and (args.action == "clippy" or args.intel or args.seed_cargo):
         parser.error("Swift components accept build, test, or verify without --intel/--seed-cargo")
-    if args.component in VZ_FIXTURES and args.intel:
-        parser.error("VZ production fixture accepts native arm64 only")
     repo = Path(output(["git", "rev-parse", "--show-toplevel"])).resolve()
     key = hashlib.sha256(str(repo).encode()).hexdigest()[:16]
     run_id = args.recover or uuid.uuid4().hex

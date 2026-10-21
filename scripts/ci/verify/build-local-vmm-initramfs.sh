@@ -40,7 +40,7 @@ usage() {
     '  build-local-vmm-initramfs.sh --verify-root --busybox ABSOLUTE_PATH' \
     '    --busybox-sha256 SHA256 --runc ABSOLUTE_PATH' \
     '    --runc-sha256 SHA256 [--target TARGET]' \
-    '    [--output ABSOLUTE_PATH] [--workload-network-fixture]' \
+    '    [--output ABSOLUTE_PATH]' \
     '' \
     '--probe/--output creates a deterministic archive from caller-supplied bytes.' \
     'It does not prove the probe is static or came from the sealed Rust toolchain.' \
@@ -56,9 +56,6 @@ usage() {
     'reviewed release digest. BusyBox must also match the built-in reviewed' \
     'Alpine package payload digest for the target.' \
     'cw is supplied separately through the pinned read-only runtime disk.' \
-    '--workload-network-fixture is allowed only with --verify-root and adds the' \
-    'fixed opt-in developer client to both independent builds. This is not a' \
-    'default production guest or CLI parity claim.' \
     'Artifact provenance remains a separate gate.' >&2
 }
 
@@ -154,10 +151,6 @@ required_runc_sha256() {
 build_one() {
   local target_dir="$1" build_target="$2"
   local cargo_home remap_flags
-  local -a feature_args=()
-  if [[ "$workload_network_fixture" -eq 1 ]]; then
-    feature_args=(--features macos-workload-network-fixture)
-  fi
   cargo_home="${CARGO_HOME:-${HOME:?HOME is required}/.cargo}"
   [[ -d "$cargo_home" ]] || die "Cargo home does not exist: $cargo_home"
   cargo_home="$(cd "$cargo_home" && pwd -P)"
@@ -192,7 +185,7 @@ build_one() {
       RUSTFLAGS="$remap_flags" \
       SOURCE_DATE_EPOCH=0 \
       TZ=UTC \
-      cargo build --locked --release --target "$build_target" -p "$PACKAGE" --bin "$BINARY" "${feature_args[@]}"
+      cargo build --locked --release --target "$build_target" -p "$PACKAGE" --bin "$BINARY"
   )
 }
 
@@ -322,9 +315,6 @@ verify_reproducible() {
   fi
 
   printf 'local VMM initramfs: static-musl reproducibility OK\n'
-  if [[ "$workload_network_fixture" -eq 1 ]]; then
-    printf 'local VMM initramfs: developer feature=macos-workload-network-fixture production_default=false\n'
-  fi
   printf 'local VMM initramfs: probe sha256=%s size=%s\n' \
     "$(sha256sum "$binary_a" | awk '{print $1}')" \
     "$(stat -c '%s' "$binary_a")"
@@ -370,7 +360,6 @@ runc_sha256=''
 output=''
 TARGET="$DEFAULT_TARGET"
 target_set=0
-workload_network_fixture=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --verify)
@@ -381,11 +370,6 @@ while [[ $# -gt 0 ]]; do
     --verify-root)
       [[ -z "$mode" ]] || { usage; exit 2; }
       mode='verify-root'
-      shift
-      ;;
-    --workload-network-fixture)
-      [[ "$workload_network_fixture" -eq 0 ]] || { usage; exit 2; }
-      workload_network_fixture=1
       shift
       ;;
     --probe)
@@ -445,12 +429,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ "$workload_network_fixture" -eq 1 && "$mode" != verify-root ]]; then
-  usage
-  exit 2
-fi
-
 
 case "$mode" in
   verify)

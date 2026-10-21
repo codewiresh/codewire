@@ -172,28 +172,6 @@ for relative in (
     if "codewire-vz-runner" in (ROOT / relative).read_text(encoding="utf-8"):
         fail(f"helper became reachable from {relative}")
 
-parent = (ROOT / "scripts/dev/macos-vz-inode-probe.py").read_text(encoding="utf-8")
-for required in (
-    "socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)",
-    "socket.SCM_RIGHTS", 'expect_response(parent, "descriptors-admitted")',
-    "for descriptor in descriptors:", "descriptors.clear()", "os.replace(decoy, path)",
-    'parent.sendall(framed(b"\\x01"))', "expect_response(parent, ready_result)",
-    "os.kill(process.pid, signal.SIGKILL)", 'parent.recv(1) != b""',
-    "os.killpg(process.pid, 0)",
-    'return "inode-probe", "guest-ready"',
-    'return "inode-probe-path-control", "boot-path-control-ready"',
-    "NOT exact-inode proof", '"--path-backed-boot-control"',
-    'entitlements.get("com.apple.security.virtualization") is not True',
-    "helper_sha256 = exact_sha256",
-    "kernel_sha256 = exact_sha256", "initramfs_sha256 = exact_sha256",
-    "data_uuid = exact_uuid", "private_helper = root / \"codewire-vz-runner\"",
-):
-    if required not in parent:
-        fail(f"inode-probe parent lost kill/swap assertion: {required}")
-for forbidden in ('"codesign", "-s"', "ssh", "scp", "http://", "https://"):
-    if forbidden in parent:
-        fail(f"inode-probe parent gained prohibited operation: {forbidden}")
-
 main = source("Sources/CodewireVZRunner/main.swift")
 for required in (
     '"inode-probe-path-control"',
@@ -240,28 +218,6 @@ for forbidden in (
         fail(f"console pair gained prohibited host capability: {forbidden}")
 if 'arguments[1] == "console-pair-fixture"' not in main:
     fail("console pair must remain a distinct developer-only command")
-
-local_vmm = ROOT / "crates/codewire-local-vmm"
-if '#[cfg(all(target_os = "linux", feature = "macos-console-pair-fixture"))]' not in (
-    local_vmm / "src/lib.rs"
-).read_text():
-    fail("Linux console pair lost opt-in feature isolation")
-if 'required-features = ["macos-console-pair-fixture"]' not in (
-    local_vmm / "Cargo.toml"
-).read_text():
-    fail("console pair binary must require its developer feature")
-
-product_binary = re.search(
-    r'^\[\[bin\]\]\s*\nname = "codewire-macos-product-network-fixture"\n(.*?)(?=^\[|\Z)',
-    (local_vmm / "Cargo.toml").read_text(), re.M | re.S,
-)
-if (product_binary is None or
-        'required-features = ["macos-product-network-fixture"]' not in product_binary.group(1)):
-    fail("product-network binary must require its distinct developer feature")
-if '#[cfg(all(target_os = "linux", feature = "macos-product-network-fixture"))]' not in (
-    local_vmm / "src/bin/codewire-macos-product-network-fixture.rs"
-).read_text():
-    fail("product-network entrypoint lost Linux opt-in feature isolation")
 
 for relative in (
     "Tests/CodewireVZRunnerTests/ConfigurationTests.swift",
@@ -372,29 +328,5 @@ for forbidden in (
         fail(f"workload-network acquired prohibited host authority: {forbidden}")
 if 'arguments[1] == "workload-network-fixture"' not in main:
     fail("workload-network must remain a distinct developer-only command")
-
-workload_binary = re.search(
-    r'^\[\[bin\]\]\s*\nname = "codewire-macos-workload-network-fixture"\n(.*?)(?=^\[|\Z)',
-    (local_vmm / "Cargo.toml").read_text(), re.M | re.S,
-)
-if (workload_binary is None or
-        'required-features = ["macos-workload-network-fixture"]' not in workload_binary.group(1)):
-    fail("workload-network binary must require its distinct developer feature")
-guest_root = ROOT / "crates/codewire-vmm-guest-probe/src"
-for path, pattern in (
-    (guest_root / "lib.rs", r'#\[cfg\(feature = "macos-workload-network-fixture"\)\]\s*'
-     r'pub mod macos_workload_network_fixture;'),
-    (guest_root / "main.rs", r'#\[cfg\(feature = "macos-workload-network-fixture"\)\]\s*'
-     r'Some\("macos-workload-network-client"\)'),
-):
-    if not re.search(pattern, path.read_text()):
-        fail("workload client must remain excluded from the default guest")
-workload_host = "\n".join(
-    path.read_text() for path in sorted((local_vmm / "src/bin/vz_workload_network_fixture").glob("*.rs"))
-    if path.name != "tests.rs"
-)
-for forbidden in ("run_network_session", "DenyBroker", '"--network-fd"'):
-    if forbidden in workload_host:
-        fail(f"workload verifier acquired a host packet engine: {forbidden}")
 
 print("macOS VZ runner static boundary: OK")

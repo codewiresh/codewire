@@ -3,9 +3,6 @@
 
 mod network;
 
-#[cfg(feature = "macos-workload-network-fixture")]
-pub mod macos_workload_network_fixture;
-
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod direct_share;
 

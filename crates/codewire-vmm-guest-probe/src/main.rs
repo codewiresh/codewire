@@ -102,15 +102,6 @@ fn entrypoint() -> anyhow::Result<()> {
             );
             guest::run_network_check()
         }
-        #[cfg(feature = "macos-workload-network-fixture")]
-        Some("macos-workload-network-client") => {
-            ensure!(
-                arguments.next().is_none(),
-                "macOS workload-network client accepts no arguments"
-            );
-            codewire_vmm_guest_probe::macos_workload_network_fixture::run_client()
-                .context("run fixed macOS workload-network client")
-        }
         Some("poweroff") => {
             ensure!(arguments.next().is_none(), "poweroff accepts no arguments");
             guest::run_poweroff()

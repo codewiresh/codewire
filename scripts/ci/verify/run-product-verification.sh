@@ -287,11 +287,6 @@ run_policy_core_one() {
   python3 scripts/dev/test-linux-local-runtime.py
   python3 scripts/dev/test-macos-app-sandbox-canary.py
   python3 crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py
-  python3 scripts/dev/test-macos-vz-inode-probe.py
-  python3 scripts/dev/test-macos-vz-console-pair.py
-  python3 scripts/dev/test-macos-vz-product-network.py
-  python3 scripts/dev/test-macos-vz-production-boot.py
-  python3 scripts/dev/test-macos-vz-workload-network.py
   python3 scripts/checks/repo_checks.py license-map
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py design-tokens --self-test
@@ -761,33 +756,7 @@ run_transport() {
   if selected transport_pkg_codewire_local_vmm; then
     crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh
     python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
-    python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_console_pair_static_contract.py
-    cargo test --locked -p codewire-local-vmm --features macos-console-pair-fixture \
-      --lib macos_console_pair_fixture
-    cargo clippy --locked -p codewire-local-vmm --features macos-console-pair-fixture \
-      --lib --bin codewire-macos-console-pair-fixture -- -D warnings
-    cargo test --locked -p codewire-local-vmm --features macos-product-network-fixture \
-      --lib macos_console_pair_fixture
-    cargo clippy --locked -p codewire-local-vmm --features macos-product-network-fixture \
-      --lib --bin codewire-macos-product-network-fixture \
-      --bin codewire-macos-console-pair-fixture -- -D warnings
     scripts/ci/verify/check-darwin-cross.sh
-    # The opt-in developer verifier is not exercised by default package tests.
-    # Keep its production-codec preparation and control-loop proof selected.
-    cargo test --locked -p codewire-local-vmm --features macos-production-init-fixture \
-      --bin codewire-macos-vz-fixture
-    cargo clippy --locked -p codewire-local-vmm --features macos-production-init-fixture \
-      --bin codewire-macos-vz-fixture -- -D warnings
-    cargo test --locked -p codewire-local-vmm --features macos-workload-network-fixture \
-      --bin codewire-macos-workload-network-fixture
-    cargo clippy --locked -p codewire-local-vmm --features macos-workload-network-fixture \
-      --bin codewire-macos-workload-network-fixture -- -D warnings
-    # The workload client and isolated service endpoint must retain one exact
-    # transcript even though they are built by different feature entrypoints.
-    cargo test --locked -p codewire-local-vmm \
-      --features macos-product-network-fixture,macos-workload-network-fixture \
-      --lib macos_console_pair_fixture::product_network::tests::actual_workload_client_and_service_endpoint_share_exact_transcript \
-      -- --exact
   fi
   if selected transport_pkg_codewire_vmm_guest_probe; then
     # These kernel fixtures need a private mount namespace, which only root
@@ -802,10 +771,6 @@ run_transport() {
       echo '::notice::guest-probe kernel fixtures not run: no CAP_SYS_ADMIN here; run this shard on a workstation with sudo'
     fi
     scripts/ci/verify/build-local-vmm-initramfs.sh --verify
-    cargo test --locked -p codewire-vmm-guest-probe --features macos-workload-network-fixture \
-      --lib macos_workload_network_fixture::
-    cargo clippy --locked -p codewire-vmm-guest-probe --features macos-workload-network-fixture \
-      --lib --bin codewire-vmm-guest-probe -- -D warnings
   fi
   if selected transport_derp_contract; then
     run_derp_contract

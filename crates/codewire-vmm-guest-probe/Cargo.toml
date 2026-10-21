@@ -9,7 +9,6 @@ description = "Minimal Codewire microVM guest init and authenticated daemon prob
 
 [features]
 default = []
-macos-workload-network-fixture = []
 
 [lib]
 name = "codewire_vmm_guest_probe"
