@@ -250,7 +250,8 @@ snapshots restore saved state; checkpoints resume execution.
   with their tools; Codewire owns process cleanup only.
 
 The project folder is mounted live by default (`--path-mode mount`);
-`snapshot`, `clone`, `copy` and `empty` are the alternatives. Dependency and
+`copy` (a one-time copy of the folder as it is), `clone` (a one-time clone of
+the committed Git state) and `empty` are the alternatives. Dependency and
 build folders listed in `workspace.vm_only` live on the VM disk. Local
 environments join Codewire Mesh only when a network is selected; the host
 owns Mesh identity, and the VM sees only admitted streams for its declared

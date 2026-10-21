@@ -59,7 +59,6 @@ pub fn workspace_content_limit(disk_bytes: u64) -> u64 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceSelection {
-    Auto,
     Clone,
     Copy,
     Direct,
@@ -109,19 +108,9 @@ pub fn resolve_workspace_mode(
     requested_source: &Path,
     requested_mode: WorkspaceSelection,
 ) -> Result<WorkspaceSourceMode, WorkspaceError> {
-    let source = open_source_directory(requested_source)?;
+    // The source must still be a safe directory to open.
+    open_source_directory(requested_source)?;
     match requested_mode {
-        WorkspaceSelection::Auto => match fs::symlink_metadata(source.path.join(".git")) {
-            Ok(metadata) if metadata.is_dir() || metadata.is_file() => {
-                Ok(WorkspaceSourceMode::Clone)
-            }
-            Ok(_) => Err(WorkspaceError::UnsafeGitMarker(source.path.join(".git"))),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(WorkspaceSourceMode::Copy),
-            Err(source_error) => Err(WorkspaceError::Io {
-                path: source.path.join(".git"),
-                source: source_error,
-            }),
-        },
         WorkspaceSelection::Clone => Ok(WorkspaceSourceMode::Clone),
         WorkspaceSelection::Copy => Ok(WorkspaceSourceMode::Copy),
         WorkspaceSelection::Direct => Err(WorkspaceError::DirectModeUnavailable),
@@ -2249,8 +2238,6 @@ pub enum WorkspaceError {
     SourceNotDirectory(PathBuf),
     #[error("workspace source root changed while it was being opened or copied: {0}")]
     SourceRootChanged(PathBuf),
-    #[error("workspace source has an unsafe .git marker: {0}")]
-    UnsafeGitMarker(PathBuf),
     #[error("direct workspace mounts are not available in this native runtime slice")]
     DirectModeUnavailable,
     #[error("--path must name the Git worktree root ({requested} is inside {root})")]
@@ -2547,17 +2534,21 @@ mod tests {
     }
 
     #[test]
-    fn auto_classifies_exact_git_roots_and_ordinary_directories() {
+    fn the_requested_mode_is_used_as_selected() {
         let ordinary = tempfile::tempdir().unwrap();
         assert_eq!(
-            resolve_workspace_mode(ordinary.path(), WorkspaceSelection::Auto).unwrap(),
+            resolve_workspace_mode(ordinary.path(), WorkspaceSelection::Copy).unwrap(),
             WorkspaceSourceMode::Copy
         );
 
         let repository = tempfile::tempdir().unwrap();
         git(repository.path(), &["init", "-q"]);
         assert_eq!(
-            resolve_workspace_mode(repository.path(), WorkspaceSelection::Auto).unwrap(),
+            resolve_workspace_mode(repository.path(), WorkspaceSelection::Copy).unwrap(),
+            WorkspaceSourceMode::Copy
+        );
+        assert_eq!(
+            resolve_workspace_mode(repository.path(), WorkspaceSelection::Clone).unwrap(),
             WorkspaceSourceMode::Clone
         );
         assert!(matches!(
@@ -2665,6 +2656,127 @@ mod tests {
                 1,
             ),
             Err(WorkspaceError::CopyEntryLimitExceeded)
+        ));
+    }
+
+    /// A repository at `root/repo` with one committed README.
+    fn committed_repository(root: &Path) -> PathBuf {
+        let repository = root.join("repo");
+        fs::create_dir(&repository).unwrap();
+        git(&repository, &["init", "-q"]);
+        fs::write(repository.join("README.md"), b"committed\n").unwrap();
+        git(&repository, &["add", "README.md"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "initial",
+            ],
+        );
+        repository
+    }
+
+    #[test]
+    fn copy_refuses_a_symlinked_git_marker_and_copies_a_redirect_file_inert() {
+        let outside = tempfile::tempdir().unwrap();
+        let repository = committed_repository(outside.path());
+
+        // A .git symlink that leaves the folder is refused.
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("README.md"), b"committed\n").unwrap();
+        symlink(repository.join(".git"), source.path().join(".git")).unwrap();
+        assert!(matches!(
+            inspect_workspace(source.path(), WorkspaceSelection::Copy, MAXIMUM_COPY_BYTES),
+            Err(WorkspaceError::UnsafeCopySymlink(path)) if path == Path::new(".git")
+        ));
+
+        // A .git file redirecting outside is copied as the plain file it is:
+        // nothing it points at is read or copied.
+        fs::remove_file(source.path().join(".git")).unwrap();
+        let redirect = format!("gitdir: {}\n", repository.join(".git").display());
+        fs::write(source.path().join(".git"), &redirect).unwrap();
+        let admitted =
+            inspect_workspace(source.path(), WorkspaceSelection::Copy, MAXIMUM_COPY_BYTES).unwrap();
+        assert_eq!(admitted.mode, WorkspaceSourceMode::Copy);
+        let destination = tempfile::tempdir().unwrap();
+        let copied = copy_directory_manifest(
+            &open_source_directory(source.path()).unwrap(),
+            Some(destination.path()),
+            MAXIMUM_COPY_BYTES,
+            MAXIMUM_COPY_ENTRIES,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(copied.sha256, admitted.commit);
+        let marker = fs::symlink_metadata(destination.path().join(".git")).unwrap();
+        assert!(marker.is_file());
+        assert_eq!(
+            fs::read_to_string(destination.path().join(".git")).unwrap(),
+            redirect
+        );
+        let mut names = fs::read_dir(destination.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, [".git", "README.md"]);
+    }
+
+    #[test]
+    fn clone_takes_committed_state_through_a_git_marker_into_its_own_repository() {
+        let outside = tempfile::tempdir().unwrap();
+        let repository = committed_repository(outside.path());
+
+        // A .git symlink and a linked worktree's redirecting .git file both
+        // name the repository; the clone reads only its committed state and
+        // gets a repository of its own, never the marker.
+        let symlinked = outside.path().join("symlinked");
+        fs::create_dir(&symlinked).unwrap();
+        fs::write(symlinked.join("README.md"), b"committed\n").unwrap();
+        symlink(repository.join(".git"), symlinked.join(".git")).unwrap();
+        let linked = outside.path().join("linked");
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                linked.to_str().unwrap(),
+            ],
+        );
+        assert!(fs::symlink_metadata(linked.join(".git")).unwrap().is_file());
+
+        for source in [&symlinked, &linked] {
+            let admitted =
+                inspect_workspace(source, WorkspaceSelection::Clone, MAXIMUM_COPY_BYTES).unwrap();
+            assert_eq!(admitted.mode, WorkspaceSourceMode::Clone);
+            let staging = tempfile::tempdir().unwrap();
+            let workspace = staging.path().join("workspace");
+            fs::create_dir(&workspace).unwrap();
+            prepare_git_clone(&admitted, &workspace, staging.path()).unwrap();
+            let marker = fs::symlink_metadata(workspace.join(".git")).unwrap();
+            assert!(marker.is_dir(), "{}", source.display());
+            assert!(!workspace.join(".git/objects/info/alternates").exists());
+            let config = fs::read_to_string(workspace.join(".git/config")).unwrap();
+            assert!(!config.contains(outside.path().to_string_lossy().as_ref()));
+            assert_eq!(
+                fs::read(workspace.join("README.md")).unwrap(),
+                b"committed\n"
+            );
+        }
+
+        // Uncommitted work behind either marker is still refused.
+        fs::write(linked.join("README.md"), b"changed\n").unwrap();
+        assert!(matches!(
+            inspect_workspace(&linked, WorkspaceSelection::Clone, MAXIMUM_COPY_BYTES),
+            Err(WorkspaceError::DirtyWorktree)
         ));
     }
 

@@ -33,7 +33,7 @@ as positionals or with `--repo`; they replace the file's repositories.
 | `--file FILE` | Project YAML file instead of the nearest `codewire.yaml` (relative to `--path` for local creation) |
 | `--no-file` | Use only the flags; read no `codewire.yaml` |
 | `--path PATH` | Local: the project directory, where the `codewire.yaml` search starts (default `.`) |
-| `--path-mode mount\|snapshot\|clone\|copy\|empty` | Local: mount the directory live (default), copy it once (a Git repository's committed state, or the directory), or start empty |
+| `--path-mode mount\|copy\|clone\|empty` | Local: mount the directory live (default), copy it once as it is now, clone the Git repository's committed state once, or start empty |
 | `--cpu`, `--memory`, `--disk` | Resources, for example `--cpu 2 --memory 8GB --disk 40GB` |
 | `--docker-disk SIZE`, `--no-docker` | Local: the guest Docker data disk (default 8 GiB), or no Docker daemon |
 | `--install CMD`, `--startup CMD` | Install command and startup script |

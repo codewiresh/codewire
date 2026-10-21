@@ -66,8 +66,10 @@ defaults:
 With the live mount, you and the VM edit the same files. Dependency and build
 folders (`node_modules`, `target` and `.venv` by default) live on the VM's
 disk instead; see [The project file](@/guides/project-file.md) to change the
-list. `--path-mode snapshot|clone|copy|empty` copies the directory once or
-starts empty instead of mounting it.
+list. Instead of mounting it, `--path-mode copy` copies the folder once as it
+is now, uncommitted work included; `--path-mode clone` clones the Git
+repository's committed state once; `--path-mode empty` starts with an empty
+`/workspace`.
 
 While it works, one line names the current stage (sources, disk, image, VM,
 boot). A failed create leaves nothing behind.

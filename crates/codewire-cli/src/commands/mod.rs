@@ -1082,7 +1082,7 @@ pub(crate) struct EnvCreateArgs {
         long = "path-mode",
         value_enum,
         value_name = "MODE",
-        help = "How --path becomes the workspace: mount (default, live), snapshot, clone, copy, or empty; requires --local"
+        help = "How --path becomes the workspace: mount (default, live), copy (a one-time copy of the folder as it is now), clone (a one-time clone of the Git repository's committed state), or empty; requires --local"
     )]
     path_mode: Option<PathModeArg>,
     #[arg(
@@ -1202,12 +1202,10 @@ pub(crate) struct EnvCreateArgs {
 pub(crate) enum PathModeArg {
     /// Mount the directory live, read-write, at /workspace/<name> (default).
     Mount,
-    /// Copy it once: clone a Git repository's committed state, otherwise copy.
-    Snapshot,
+    /// Copy the folder once, as it is now, uncommitted work included.
+    Copy,
     /// Clone the Git repository's committed state once.
     Clone,
-    /// Copy the directory once.
-    Copy,
     /// Start with an empty /workspace.
     Empty,
 }

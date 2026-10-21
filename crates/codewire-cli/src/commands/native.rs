@@ -956,19 +956,18 @@ fn edit_native_create(args: &mut EnvCreateArgs) -> anyhow::Result<()> {
     }
     let current_mode = match args.path_mode.unwrap_or(PathModeArg::Mount) {
         PathModeArg::Mount => "mount",
-        PathModeArg::Snapshot => "snapshot",
         PathModeArg::Clone => "clone",
         PathModeArg::Copy => "copy",
         PathModeArg::Empty => "empty",
     };
     loop {
-        let mode = prompt_default("Workspace (mount, snapshot, empty)", current_mode)?;
+        let mode = prompt_default("Workspace (mount, copy, clone, empty)", current_mode)?;
         match <PathModeArg as clap::ValueEnum>::from_str(&mode, true) {
             Ok(mode) => {
                 args.path_mode = Some(mode);
                 break;
             }
-            Err(_) => eprintln!("Choose mount, snapshot, clone, copy or empty."),
+            Err(_) => eprintln!("Choose mount, copy, clone or empty."),
         }
     }
     let image = prompt_default(
@@ -3150,11 +3149,10 @@ fn canonical_native_workspace_image(image: &str) -> anyhow::Result<String> {
 
 fn workspace_selection_from_arg(value: PathModeArg) -> WorkspaceSelection {
     match value {
-        PathModeArg::Snapshot => WorkspaceSelection::Auto,
         PathModeArg::Clone => WorkspaceSelection::Clone,
         PathModeArg::Copy => WorkspaceSelection::Copy,
         PathModeArg::Mount | PathModeArg::Empty => {
-            unreachable!("mount and empty workspaces are not snapshots")
+            unreachable!("mount and empty workspaces are not one-time copies")
         }
     }
 }
@@ -3170,7 +3168,7 @@ fn workspace_source_mode_name(value: WorkspaceSourceMode) -> &'static str {
 /// summary and the request.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct NativeWorkspace {
-    /// The implicit snapshot source and its mode; empty for mounts and for
+    /// The implicit one-time copy or clone source and its mode; empty for mounts and for
     /// workspaces that codewire.yaml declares.
     source_path: String,
     path_mode: String,
@@ -3187,7 +3185,7 @@ struct NativeWorkspace {
     vm_only_notes: Vec<String>,
 }
 
-/// Mount the project directory live by default. A snapshot (clone or copy) or
+/// Mount the project directory live by default. A one-time copy or clone, or
 /// an empty workspace is an explicit choice. No mode ever mounts or copies a
 /// directory the host share policy refuses, such as the home directory itself
 /// or a credential store; the default then falls back to an empty workspace.
@@ -3254,13 +3252,13 @@ fn resolve_native_workspace(
             if !mounts_supported {
                 if requested_mode.is_some() {
                     anyhow::bail!(
-                        "this local runtime has no virtiofsd, so it cannot mount {shown}; reinstall the runtime or use --path-mode snapshot"
+                        "this local runtime has no virtiofsd, so it cannot mount {shown}; reinstall the runtime or use --path-mode copy"
                     );
                 }
                 let mut workspace = resolve_native_workspace(
                     source_path,
                     project,
-                    Some(PathModeArg::Snapshot),
+                    Some(PathModeArg::Copy),
                     empty_workspace,
                     mounts_supported,
                 )?;
@@ -3294,7 +3292,7 @@ fn resolve_native_workspace(
                 ..NativeWorkspace::default()
             })
         }
-        mode @ (PathModeArg::Snapshot | PathModeArg::Clone | PathModeArg::Copy) => {
+        mode @ (PathModeArg::Clone | PathModeArg::Copy) => {
             if let Some(reason) = refusal {
                 anyhow::bail!("refusing to copy {shown} into the workspace: {reason}");
             }
@@ -3316,7 +3314,7 @@ fn resolve_native_workspace(
                 .collect();
             Ok(NativeWorkspace {
                 source_path: source_path.to_string_lossy().into_owned(),
-                description: format!("snapshot of {shown} ({path_mode})"),
+                description: format!("one-time {path_mode} of {shown}"),
                 path_mode,
                 notice: None,
                 vm_only,
@@ -3343,7 +3341,7 @@ fn native_runtime_supports_mounts() -> bool {
     true
 }
 
-/// An empty workspace is a snapshot of one empty directory that cw keeps.
+/// An empty workspace is a one-time copy of one empty directory that cw keeps.
 /// Without a directory this only describes the choice, for the create review.
 fn empty_native_workspace(
     directory: Option<&Path>,
@@ -4581,7 +4579,7 @@ working_directory: /workspace/github
         let workspace =
             resolve_native_workspace(&source.project_directory, &mut project, None, None, true)
                 .unwrap();
-        // Isolated clones: no host mount and no implicit snapshot.
+        // Isolated clones: no host mount and no implicit one-time copy.
         assert!(project.local_mounts.is_empty());
         assert!(workspace.source_path.is_empty());
         assert_eq!(
@@ -4591,7 +4589,7 @@ working_directory: /workspace/github
         let error = resolve_native_workspace(
             &source.project_directory,
             &mut project,
-            Some(PathModeArg::Snapshot),
+            Some(PathModeArg::Copy),
             None,
             true,
         )
@@ -4708,11 +4706,28 @@ working_directory: /workspace/github
     }
 
     #[test]
-    fn path_mode_arguments_map_only_the_implicit_local_source() {
-        assert_eq!(
-            workspace_selection_from_arg(PathModeArg::Snapshot),
-            WorkspaceSelection::Auto
+    fn path_mode_offers_mount_copy_clone_and_empty_only() {
+        use clap::Parser as _;
+        for mode in ["mount", "copy", "clone", "empty"] {
+            assert!(
+                crate::Cli::try_parse_from(["cw", "--local", "create", "--path-mode", mode])
+                    .is_ok(),
+                "{mode}"
+            );
+        }
+        let error =
+            crate::Cli::try_parse_from(["cw", "--local", "create", "--path-mode", "snapshot"])
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("invalid value 'snapshot'")
+                && error.contains("[possible values: mount, copy, clone, empty]"),
+            "{error}"
         );
+    }
+
+    #[test]
+    fn path_mode_arguments_map_only_the_implicit_local_source() {
         assert_eq!(
             workspace_selection_from_arg(PathModeArg::Clone),
             WorkspaceSelection::Clone
@@ -4780,7 +4795,7 @@ working_directory: /workspace/github
     }
 
     #[test]
-    fn without_virtiofs_the_default_falls_back_to_a_snapshot() {
+    fn without_virtiofs_the_default_falls_back_to_a_one_time_copy() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("file"), "content").unwrap();
         let source = std::fs::canonicalize(temp.path()).unwrap();
@@ -4794,10 +4809,7 @@ working_directory: /workspace/github
         let error =
             resolve_native_workspace(&source, &mut project, Some(PathModeArg::Mount), None, false)
                 .unwrap_err();
-        assert!(
-            error.to_string().contains("--path-mode snapshot"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("--path-mode copy"), "{error}");
     }
 
     #[test]
@@ -4829,7 +4841,7 @@ working_directory: /workspace/github
             Some("Kept in the VM: dist, web/node_modules")
         );
 
-        // A copy snapshot skips the list; a clone takes only committed files.
+        // A one-time copy skips the list; a clone takes only committed files.
         std::fs::write(source.join("codewire.yaml"), "version: 1\n").unwrap();
         let mut project = yaml_in(&source).unwrap();
         let copy =
@@ -5001,12 +5013,7 @@ working_directory: /workspace/github
                 .is_some_and(|notice| notice.starts_with("Not mounting /: it is a system")),
             "{workspace:?}"
         );
-        for mode in [
-            PathModeArg::Mount,
-            PathModeArg::Snapshot,
-            PathModeArg::Clone,
-            PathModeArg::Copy,
-        ] {
+        for mode in [PathModeArg::Mount, PathModeArg::Clone, PathModeArg::Copy] {
             let error =
                 resolve_native_workspace(root, &mut project, Some(mode), None, true).unwrap_err();
             assert!(error.to_string().starts_with("refusing to"), "{error}");
