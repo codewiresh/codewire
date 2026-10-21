@@ -27,7 +27,9 @@ name: Merge check
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled]
+    # Closing or merging the pull request cancels a merge check in flight: the
+    # run it starts takes no runner, and the group below cancels the old one.
+    types: [opened, synchronize, reopened, labeled, closed]
 
 concurrency:
   group: merge-check-${{ github.event.pull_request.number }}
@@ -46,7 +48,7 @@ jobs:
     name: Merge check
     # Forgejo evaluates this on the server, so an unlabelled pull request
     # takes no runner.
-    if: ${{ (github.event.action == 'labeled' && github.event.label.name == 'merge-check') || (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'merge-check')) }}
+    if: ${{ (github.event.action == 'labeled' && github.event.label.name == 'merge-check') || (github.event.action != 'labeled' && github.event.action != 'closed' && contains(github.event.pull_request.labels.*.name, 'merge-check')) }}
     # The pull-request Heavy class on the metal guests (infra#1534), as in
     # ci.yaml. A pull_request event never uses the main variant.
     runs-on: ci-heavy-cpu10-ram17g

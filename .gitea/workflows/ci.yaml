@@ -6,9 +6,12 @@ on:
     branches: [main]
   # Adding or removing a label (ci-full, kind-e2e) starts a fresh run with the
   # new labels; the concurrency group below cancels the superseded one.
+  # Closing or merging a pull request starts a run that does nothing, so the
+  # same group cancels the pull request's run still in flight, which no one
+  # needs any more and which holds metal guests main is waiting for.
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, closed]
   workflow_dispatch:
     inputs:
       verification:
@@ -82,6 +85,8 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job receives no write-capable integration.
     name: Verification selection
     runs-on: ci-lite
+    # A closed pull request verifies nothing; every other job needs this one.
+    if: ${{ github.event.action != 'closed' }}
     outputs:
       selector_version: ${{ steps.select.outputs.selector_version }}
       classification: ${{ steps.select.outputs.classification }}
@@ -2577,7 +2582,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this aggregator receives no write-capable integration.
     name: Required verification
     runs-on: ci-lite
-    if: ${{ always() }}
+    if: ${{ always() && github.event.action != 'closed' }}
     needs:
       - verification-selection
       - cw-release-assets

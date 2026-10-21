@@ -2763,6 +2763,45 @@ if len(runs) != 1:
 with open(script, "w", encoding="utf-8") as handle:
     handle.write("set -eo pipefail\n" + runs.pop())
 PY
+# Closing or merging a pull request cancels its CI and merge check in flight:
+# both workflows take the closed event into the same concurrency group, and
+# the run it starts takes no runner (#2892). Old behaviour: a merged pull
+# request's run kept its metal guests until it finished.
+python3 - "$WORKFLOW" "$ROOT/.gitea/workflows/merge-check.yaml" <<'PY'
+import sys
+import yaml
+
+ci_path, merge_check_path = sys.argv[1:]
+for path in (ci_path, merge_check_path):
+    workflow = yaml.safe_load(open(path, encoding="utf-8"))
+    # PyYAML reads the bare key `on` as True.
+    trigger = (workflow.get("on") or workflow.get(True))["pull_request"]
+    if "closed" not in trigger["types"]:
+        raise SystemExit(f"{path}: a closed pull request does not cancel its run")
+ci = yaml.safe_load(open(ci_path, encoding="utf-8"))
+if not ci["concurrency"]["cancel-in-progress"].startswith("${{ github.event_name == 'pull_request'"):
+    raise SystemExit("ci.yaml: pull request runs no longer cancel their predecessor")
+jobs = ci["jobs"]
+if jobs["verification-selection"].get("if") != "${{ github.event.action != 'closed' }}":
+    raise SystemExit("ci.yaml: a closed pull request must start no verification")
+if jobs["required-verification"].get("if") != "${{ always() && github.event.action != 'closed' }}":
+    raise SystemExit("ci.yaml: Required verification must not run for a closed pull request")
+for job_id, job in jobs.items():
+    if job_id in ("verification-selection", "required-verification"):
+        continue
+    if "verification-selection" not in job.get("needs", []):
+        raise SystemExit(f"ci.yaml: {job_id} could run for a closed pull request")
+    if "always()" in str(job.get("if", "")) and "needs.verification-selection.result == 'success'" not in job["if"]:
+        raise SystemExit(f"ci.yaml: {job_id} runs always() without a successful selection")
+merge_check = yaml.safe_load(open(merge_check_path, encoding="utf-8"))
+condition = merge_check["jobs"]["merge-check"]["if"]
+if "github.event.action != 'closed'" not in condition:
+    raise SystemExit("merge-check.yaml: a closed, labelled pull request would start a merge check")
+if merge_check["concurrency"] != {"group": "merge-check-${{ github.event.pull_request.number }}",
+                                  "cancel-in-progress": True}:
+    raise SystemExit("merge-check.yaml: the closed event no longer cancels the merge check in flight")
+PY
+
 fail_fast_probe="$TMP/fail-fast"
 mkdir -p "$fail_fast_probe/bin"
 cat > "$fail_fast_probe/bin/curl" <<'SH'
@@ -4755,7 +4794,7 @@ import yaml
 workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 triggers = workflow.get("on", workflow.get(True))
 types = set(triggers["pull_request"].get("types", []))
-wanted = {"opened", "synchronize", "reopened", "labeled", "unlabeled"}
+wanted = {"opened", "synchronize", "reopened", "labeled", "unlabeled", "closed"}
 if types != wanted:
     raise SystemExit(f"pull_request types {sorted(types)} != {sorted(wanted)}")
 steps = workflow["jobs"]["verification-selection"]["steps"]
