@@ -8,13 +8,16 @@ on:
 # Dev runs only commits whose main CI passed (#2892). This push run builds and
 # pushes the runtime images by digest, unsigned. Its publish job signs and
 # dispatches them only after main CI's verdict for this exact commit, and only
-# while the commit is main's head; when main CI finishes later, its final job
-# reruns that publish job. A newer main push cancels this run, queued or
-# building (#2893), and a run that starts after main moved on builds nothing;
-# see "Skip a superseded commit".
+# while the commit descends from the source Dev runs; when main CI finishes
+# later, its final job reruns that publish job. Runs of different commits
+# never cancel or queue behind each other: each commit has its own group, so
+# only a rerun of the same commit queues. A newer push cancels this run,
+# before it publishes, only once this commit's own main CI can no longer
+# verify it (#2893, #2892); see "Cancel the older deliveries this push
+# supersedes". Leaving the block out would cancel on every push.
 concurrency:
-  group: deploy-dev-${{ github.ref }}
-  cancel-in-progress: true
+  group: deploy-dev-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   deploy-selection:
@@ -25,7 +28,6 @@ jobs:
     timeout-minutes: 15
     outputs:
       deploy_dev: ${{ steps.select.outputs.deploy_dev }}
-      superseded: ${{ steps.canonical.outputs.superseded }}
       reason: ${{ steps.select.outputs.reason }}
       matched_categories: ${{ steps.select.outputs.matched_categories }}
       dashboard_image_state: ${{ steps.select.outputs.dashboard_image_state }}
@@ -48,26 +50,17 @@ jobs:
       - name: Verify sealed Rust toolchain
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
-      # A newer push cancels this run when its own run is created (#2893). A
-      # run that starts after main moved on builds nothing: the newer
-      # commit's run plans against the deployed source, so it delivers the
-      # cumulative change. A run main moves past later is cancelled, or its
-      # publish job's head checks sign and dispatch nothing.
-      - name: Skip a superseded commit
-        id: canonical
-        run: |
-          set -euo pipefail
-          canonical_main_sha="$(
-            git ls-remote origin refs/heads/main |
-              awk '$2 == "refs/heads/main" { print $1 }'
-          )"
-          [[ "$canonical_main_sha" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "$canonical_main_sha" == "$GITHUB_SHA" ]]; then
-            echo 'superseded=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'superseded=true' >> "$GITHUB_OUTPUT"
-            echo "main is now ${canonical_main_sha}; its queued run delivers this commit's changes"
-          fi
+      # The only place one delivery stops another: this push cancels an older
+      # commit's run, before that run publishes, only when that commit's own
+      # main CI can no longer verify it, so it could never sign. A delivery
+      # main CI can still verify always completes. An optimisation, never a
+      # gate: it cannot fail or hold up this run's own delivery.
+      - name: Cancel the older deliveries this push supersedes
+        timeout-minutes: 5
+        continue-on-error: true
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/deploy/cancel-superseded-deliveries.py
 
       - name: Resolve untrusted deployed Dev source
         run: |
@@ -113,7 +106,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 110
     needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
     outputs:
       dashboard_candidate_ref: ${{ steps.build.outputs.dashboard_candidate_ref }}
       dashboard_built_from: ${{ steps.build.outputs.dashboard_built_from }}
@@ -173,7 +166,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 110
     needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
     outputs:
       daemon_candidate_ref: ${{ steps.build.outputs.daemon_candidate_ref }}
       daemon_built_from: ${{ steps.build.outputs.daemon_built_from }}
@@ -224,7 +217,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 45
     needs: [deploy-selection, build-service-images, build-daemon-image]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.deploy-selection.outputs.superseded == 'false' }}
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
     env:
       OPENBAO_ROLE: codewire-source-dev-publisher
       CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
@@ -232,7 +225,11 @@ jobs:
       OPENBAO_GHCR_ROLE: codewire-source-dev-publisher
       OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher
     steps:
+      # The descent checks compare this commit with Dev's source in main's
+      # history.
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
 
       # Main CI's verdict for this exact commit, from its own ci.yaml push run
       # on main (main-ci-verdict.py). Waiting for it, a red verdict, a
@@ -274,17 +271,18 @@ jobs:
           # default Harbor lacks is imported once from the public mirror.
           scripts/ci/images/publish-image-to-harbor.sh --pinned-defaults
 
-      # A commit main has moved past signs nothing, so a rerun of any older
-      # run never signs: the newer commit's delivery carries its change.
-      - name: Require this commit to be main's head before signing
-        id: head-before-signing
+      # A verified commit delivers even after main moved on, as long as it
+      # moves Dev forward; one Dev already runs or has passed signs nothing,
+      # so a rerun of an older run signs only while Dev is still behind it.
+      - name: Require this commit to move Dev forward before signing
+        id: descent-before-signing
         if: ${{ steps.verdict.outputs.verified == 'true' }}
-        run: scripts/ci/deploy/require-main-head.sh signing
+        run: scripts/ci/deploy/require-dev-descent.sh signing
 
       # The signature records main CI's verdict: dev.codewire.verified=main-ci
       # and the verifying ci.yaml run, which deploy-prod requires.
       - name: Sign the exact runtime set
-        if: ${{ steps.head-before-signing.outputs.head == 'true' }}
+        if: ${{ steps.descent-before-signing.outputs.deliver == 'true' }}
         env:
           CODEWIRE_MAIN_CI_RUN: ${{ steps.verdict.outputs.ci_run }}
           CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
@@ -298,16 +296,16 @@ jobs:
             "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \
             scripts/ci/trust/codewire-runtime-signing.pub
 
-      # Dev receives only main's head, so it never moves backwards: main may
-      # have moved while the set was signed.
-      - name: Require this commit to be main's head before dispatch
-        id: head-before-dispatch
-        if: ${{ steps.head-before-signing.outputs.head == 'true' }}
-        run: scripts/ci/deploy/require-main-head.sh dispatching
+      # Dev never moves backwards: a descendant may have reached Dev while
+      # this set was signed. promote-dev checks descent again.
+      - name: Require this commit to move Dev forward before dispatch
+        id: descent-before-dispatch
+        if: ${{ steps.descent-before-signing.outputs.deliver == 'true' }}
+        run: scripts/ci/deploy/require-dev-descent.sh dispatching
 
       - name: Dispatch only the canonical source SHA
         id: dispatch
-        if: ${{ steps.head-before-dispatch.outputs.head == 'true' }}
+        if: ${{ steps.descent-before-dispatch.outputs.deliver == 'true' }}
         run: scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"
 
       # The public GHCR mirror is best effort: Dev already pulls from Harbor,

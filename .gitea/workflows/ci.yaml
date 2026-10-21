@@ -2666,7 +2666,7 @@ jobs:
   # The final job of a push to main (#2892): after a green verdict for this
   # exact commit, start Dev delivery. Deploy Dev's publish job for the same
   # commit signs and dispatches only on that verdict and only while the commit
-  # is main's head; when it already ran while this run was still verifying,
+  # moves Dev forward; when it already ran while this run was still verifying,
   # this reruns exactly that job, with the job token. Nothing waits for CI.
   deliver-to-dev:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token reads runs and reruns one Deploy Dev job.

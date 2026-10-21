@@ -7,7 +7,7 @@ reads main CI's verdict for its own commit with the shared predicate
 
 Deploy Dev's push run for the same commit builds the runtime images and then
 runs its publish job, which signs and dispatches only on a verified verdict,
-and only while the commit is main's head. Whichever finishes last delivers:
+and only while the commit moves Dev forward. Whichever finishes last delivers:
 
 - the publish job has not started yet: it reads this verdict itself;
 - it already finished without delivering (it ran while CI was still running):
@@ -133,7 +133,7 @@ def trigger(
                 status = api.post(f"/actions/jobs/{job_id}/rerun")
                 if status in (200, 201, 204):
                     log(f"reran Deploy Dev run {run_id}'s publish job {job_id} for {sha}; "
-                        f"it signs and dispatches only while {sha} is main's head")
+                        f"it signs and dispatches only while {sha} moves Dev forward")
                     return 0
                 if status != 400:
                     log(f"::error::missed trigger: Forgejo refused to rerun Deploy Dev run {run_id}'s "
@@ -146,8 +146,8 @@ def trigger(
             if clock() >= deadline:
                 log(f"::error::missed trigger: Deploy Dev run {run_id}'s publish job {job_id} was still "
                     f"running after {int(wait_seconds)} s, so main CI's verdict did not reach it and {sha} "
-                    f"is not delivered. Rerun that job once it finishes; it signs only while {sha} is "
-                    f"main's head.")
+                    f"is not delivered. Rerun that job once it finishes; it signs only while {sha} "
+                    f"moves Dev forward.")
                 return 1
             if not waiting_logged:
                 log(f"Deploy Dev run {run_id}'s publish job {job_id} is running; waiting up to "

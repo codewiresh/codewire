@@ -1909,7 +1909,9 @@ if [ "$event_selected" = false ]; then
       # Main CI's final job starts Dev delivery (#2892); its contract, with
       # the ci.yaml job that runs it, runs in Policy and Deploy.
       scripts/ci/deploy/rerun-dev-publish.py|\
-      scripts/ci/tests/test-rerun-dev-publish.py)
+      scripts/ci/tests/test-rerun-dev-publish.py|\
+      scripts/ci/deploy/cancel-superseded-deliveries.py|\
+      scripts/ci/tests/test-cancel-superseded-deliveries.py)
         select_token deploy
         select_token policy
         recognized=true

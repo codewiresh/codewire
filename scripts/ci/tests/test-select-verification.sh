@@ -548,11 +548,16 @@ run_paths_case protected_runtime_builder push refs/heads/main false \
   'deploy go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
   scripts/ci/images/build-push-runtime-images.sh \
   scripts/ci/tests/test-build-push-runtime-images.sh
-# Dev delivery from main CI's verdict (#2892): the head check runs in Deploy,
-# and the trigger CI's final job runs, with its contract, in Deploy and Policy.
-run_paths_case dev_delivery_head_check push refs/heads/main false \
+# Dev delivery from main CI's verdict (#2892): the descent check runs in
+# Deploy, as does the superseded-delivery cancellation with its contract, and
+# the trigger CI's final job runs, with its contract, in Deploy and Policy.
+run_paths_case dev_delivery_descent_check push refs/heads/main false \
   'deploy policy policy_shell security security_js' \
-  scripts/ci/deploy/require-main-head.sh
+  scripts/ci/deploy/require-dev-descent.sh
+run_paths_case dev_delivery_cancel_superseded push refs/heads/main false \
+  'deploy policy security security_js' \
+  scripts/ci/deploy/cancel-superseded-deliveries.py \
+  scripts/ci/tests/test-cancel-superseded-deliveries.py
 run_paths_case dev_delivery_trigger push refs/heads/main false \
   'deploy policy security security_js' \
   scripts/ci/deploy/rerun-dev-publish.py \
@@ -2997,6 +3002,7 @@ python3 "$ROOT/scripts/ci/plan/tests/test_plan_main_push.py"
 # Main CI's verdict, and the final job that starts Dev delivery from it (#2892).
 python3 -B "$ROOT/scripts/ci/plan/tests/test_main_ci_verdict.py"
 python3 -B "$ROOT/scripts/ci/tests/test-rerun-dev-publish.py"
+python3 -B "$ROOT/scripts/ci/tests/test-cancel-superseded-deliveries.py"
 grep -qF "grep -Fxq 'selector_version=v3'" "$selection_block"
 if grep -qF 'selector_version=v2' "$selection_block" \
     || grep -qF 'One-time contract bridge' "$selection_block"; then

@@ -244,10 +244,12 @@ hosted-only claim (such as scheduling, credentials, permissions, cache, or
 timing) that lacks equivalent accepted exact local/read-only evidence. Never
 cancel a `main` run by hand, and fix forward when one fails. `main` CI and
 release publication always finish; a newer `main` push cancels the superseded
-Dev delivery, support-image and release dry-run runs itself.
+support-image and release dry-run runs itself.
 Dev runs only commits whose main CI passed: Deploy Dev signs and dispatches a
-commit only after its own `main` CI run's verdict, and only while it is
-`main`'s head (#2892).
+commit only after its own `main` CI run's verdict, and only while it descends
+from the source Dev runs. A newer push cancels an older Dev delivery, before
+it publishes, only once that commit's own `main` CI can no longer verify it
+(#2892).
 Pull-request CI runs only the quick checks (selection, policy, compiling every
 Rust target); `main` runs the full verification after merge. Label the pull
 request `ci-full` to run that full verification, Kind included, on the pull

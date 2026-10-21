@@ -537,9 +537,10 @@ done
 
 # Forgejo keeps every queued run, so one that starts after main moved on must
 # publish nothing; the newer commit's run is queued behind it and plans against
-# the published pair. The rule is deploy-dev.yaml's own: execute the checked-in
-# step for the current, superseded, unreadable and malformed cases, and require
-# both workflows to carry the same step.
+# the published pair. Execute the checked-in step for the current, superseded,
+# unreadable and malformed cases. (Deploy Dev no longer skips itself: a newer
+# run cancels an older delivery once that commit's main CI can no longer
+# verify it, #2892.)
 step_of() {
   awk '
     /- name: Skip a superseded commit/ { scope = 1 }
@@ -553,9 +554,6 @@ superseded_bin="$(mktemp -d)"
 trap 'rm -rf -- "$superseded_step" "$superseded_bin"' EXIT
 step_of "$WORKFLOW" >"$superseded_step"
 [[ -s "$superseded_step" ]] || fail 'support selection has no superseded-commit step'
-deploy_step="$(step_of "$ROOT/.gitea/workflows/deploy-dev.yaml")"
-[[ "$(sed 's/publishes this/delivers this/' "$superseded_step")" == "$deploy_step" ]] ||
-  fail 'support publication and Dev delivery judge a superseded commit differently'
 # shellcheck disable=SC2016 # Match the literal workflow expression.
 grep -Fq '      superseded: ${{ steps.canonical.outputs.superseded }}' <<<"$selection_job" ||
   fail 'support selection does not expose whether its commit was superseded'
