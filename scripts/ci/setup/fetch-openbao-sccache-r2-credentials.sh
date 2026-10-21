@@ -27,9 +27,9 @@ case "$GITHUB_EVENT_NAME|$GITHUB_REF" in
   pull_request\|refs/pull/*/head)
     readonly openbao_role='codewire-source-ci-sccache-r2-pr'
     readonly openbao_audience='openbao-codewire-source-ci-sccache-r2-pr'
-    case "${CODEWIRE_R2_CACHE_TRUST:-main-read}" in
-      main-read|untrusted) readonly trust="${CODEWIRE_R2_CACHE_TRUST:-main-read}" ;;
-      *) fail 'a pull request may use only the main-read or untrusted cache' ;;
+    case "${CODEWIRE_R2_CACHE_TRUST:-protected-read}" in
+      protected-read|untrusted) readonly trust="${CODEWIRE_R2_CACHE_TRUST:-protected-read}" ;;
+      *) fail 'a pull request may use only the protected-read or untrusted cache' ;;
     esac
     ;;
   push\|refs/heads/main)
@@ -47,7 +47,7 @@ esac
 
 readonly openbao_addr="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 # Canonical main writes the one CI cache with the protected token, shared with
-# the other main-only builders; main-read is that cache's read-only token.
+# the other main-only builders; protected-read is that cache's read-only token.
 case "$trust" in
   main) readonly secret_path='platform/data/ci/codewire/sccache-r2/protected' ;;
   *) readonly secret_path="platform/data/ci/codewire/sccache-r2/$trust" ;;

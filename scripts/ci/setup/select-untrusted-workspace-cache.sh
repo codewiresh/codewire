@@ -13,7 +13,7 @@ fetcher="${OPENBAO_SCCACHE_FETCHER:-$ROOT/scripts/ci/setup/fetch-openbao-sccache
 # Canonical-main pushes read and write the main bucket. Pull requests read it
 # with a read-only token and write nothing remote, except the labelled cache
 # experiments, which keep the disposable untrusted bucket.
-trust=main-read
+trust=protected-read
 [[ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" != 'push|refs/heads/main' ]] || trust=main
 : "${GITHUB_ENV:?Forgejo job environment file is required}"
 : "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
@@ -126,7 +126,7 @@ if [[ "$rust_mode" != disabled ]]; then
     emit_env SCCACHE_REGION auto
     emit_env SCCACHE_S3_USE_SSL true
     emit_env SCCACHE_S3_KEY_PREFIX "$prefix"
-    [[ "$trust" != main-read ]] || emit_env SCCACHE_S3_RW_MODE READ_ONLY
+    [[ "$trust" != protected-read ]] || emit_env SCCACHE_S3_RW_MODE READ_ONLY
     emit_env SCCACHE_MULTILEVEL_CHAIN disk,s3
     emit_env SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY ignore
     emit_env SCCACHE_IGNORE_SERVER_IO_ERROR 1

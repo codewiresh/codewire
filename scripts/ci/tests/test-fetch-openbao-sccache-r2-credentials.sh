@@ -50,7 +50,7 @@ case "$url" in
     jq -n --arg token "${FAKE_OPENBAO_TOKEN:?}" '{auth:{client_token:$token}}' >"$output"
     ;;
   https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/untrusted|\
-  https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/main-read|\
+  https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/protected-read|\
   https://openbao.example.invalid/v1/platform/data/ci/codewire/sccache-r2/protected)
     [[ "${FAKE_R2_FAIL:-0}" != 1 ]] || exit 92
     jq -n --arg accessKeyId "${FAKE_ACCESS_KEY_ID:?}" \
@@ -96,8 +96,8 @@ done
   fail 'OIDC or OpenBao request lacks the reviewed network deadline'
 
 # A pull request reads main's caches through the read-only document by default.
-grep -Fq 'sccache-r2/main-read' "$FAKE_CURL_CALLS" && ! grep -Eq 'sccache-r2/(untrusted|protected|main )' "$FAKE_CURL_CALLS" ||
-  fail 'a pull request must read only the main-read cache document by default'
+grep -Fq 'sccache-r2/protected-read' "$FAKE_CURL_CALLS" && ! grep -Eq 'sccache-r2/(untrusted|protected |main )' "$FAKE_CURL_CALLS" ||
+  fail 'a pull request must read only the protected-read cache document by default'
 [[ "$(grep -c 'sccache-r2/' "$FAKE_CURL_CALLS")" == 1 ]] || fail 'a pull request read more than one cache document'
 
 # The labelled experiments alone select the disposable untrusted document.
@@ -127,12 +127,12 @@ main_credentials_file="$work/output/main-aws-credentials"
 "$FETCHER" "$main_credentials_file" >"$work/main.out"
 grep -Fxq "aws_access_key_id = $FAKE_ACCESS_KEY_ID" "$main_credentials_file" ||
   fail 'protected-main role wrote a different AWS credential'
-grep -Fq 'sccache-r2/protected ' "$FAKE_CURL_CALLS" && ! grep -Eq 'sccache-r2/(untrusted|main-read|main )' "$FAKE_CURL_CALLS" ||
+grep -Fq 'sccache-r2/protected ' "$FAKE_CURL_CALLS" && ! grep -Eq 'sccache-r2/(untrusted|protected-read|main )' "$FAKE_CURL_CALLS" ||
   fail 'canonical main must read only the protected cache document'
 grep -Fq 'wrote one private main-cache credential file' "$work/main.out" ||
   fail 'canonical main did not report its main cache credential'
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN='synthetic-request-token'
-if CODEWIRE_R2_CACHE_TRUST=main-read "$FETCHER" "$work/output/main-read-on-main" >/dev/null 2>&1; then
+if CODEWIRE_R2_CACHE_TRUST=protected-read "$FETCHER" "$work/output/protected-read-on-main" >/dev/null 2>&1; then
   fail 'canonical main accepted a cache other than main'
 fi
 

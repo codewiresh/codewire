@@ -5,12 +5,12 @@
 source "$(dirname "${BASH_SOURCE[0]}")/buildx-builder.sh"
 readonly WORKSPACE_BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 # The cache selector names the trust. Canonical-main pushes read and write the
-# main bucket (main); pull requests only read it (main-read) with a read-only
+# main bucket (main); pull requests only read it (protected-read) with a read-only
 # token; the labelled experiments, canary and local probes use the disposable
 # untrusted bucket. Each token covers exactly one bucket, so main never imports
 # a layer or compiler object a pull request wrote.
 case "${CODEWIRE_R2_CACHE_TRUST:-untrusted}" in
-  main|main-read) readonly WORKSPACE_CACHE_TRUST="$CODEWIRE_R2_CACHE_TRUST" WORKSPACE_CACHE_SCOPE=protected ;;
+  main|protected-read) readonly WORKSPACE_CACHE_TRUST="$CODEWIRE_R2_CACHE_TRUST" WORKSPACE_CACHE_SCOPE=protected ;;
   *) readonly WORKSPACE_CACHE_TRUST=untrusted WORKSPACE_CACHE_SCOPE=untrusted ;;
 esac
 readonly WORKSPACE_CACHE_BUCKET="example-ci-cache-$WORKSPACE_CACHE_SCOPE"
@@ -201,7 +201,7 @@ workspace_cache_layer_args() {
     fi
     name="$architecture/$target/tree-$source_tree"
     layer_args+=(--cache-from "$common,name=$name")
-    if [[ "$WORKSPACE_CACHE_TRUST" == main-read ]]; then
+    if [[ "$WORKSPACE_CACHE_TRUST" == protected-read ]]; then
       # Pull requests import main's layers and export nothing remote.
       [[ "$target" == canary-* ]] || layer_args+=(--cache-from "$common,name=$architecture/$target/main")
       return

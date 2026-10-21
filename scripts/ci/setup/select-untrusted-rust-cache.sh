@@ -15,7 +15,7 @@ readonly fetcher="${OPENBAO_SCCACHE_FETCHER:-$ROOT/scripts/ci/setup/fetch-openba
 # Canonical-main pushes read and write the main bucket; pull requests read it
 # with a read-only token and write nothing remote. Each token covers exactly
 # one bucket, so main never reads an object a pull request wrote.
-trust=main-read
+trust=protected-read
 [[ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" != 'push|refs/heads/main' ]] || trust=main
 readonly trust
 readonly bucket='example-ci-cache-protected'
@@ -98,7 +98,7 @@ sccache_env() {
       "CODEWIRE_R2_CACHE_TRUST=$trust" \
       'SCCACHE_MULTILEVEL_CHAIN=disk,s3' \
       'SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=ignore'
-    [[ "$trust" != main-read ]] || printf '%s\n' 'SCCACHE_S3_RW_MODE=READ_ONLY'
+    [[ "$trust" != protected-read ]] || printf '%s\n' 'SCCACHE_S3_RW_MODE=READ_ONLY'
   fi
 }
 

@@ -82,8 +82,8 @@ grep -Fxq 'SCCACHE_IGNORE_SERVER_IO_ERROR=1' "$r2_env" || fail 'cache failure is
 grep -Fxq 'SCCACHE_BUCKET=example-ci-cache-protected' "$r2_env" || fail 'R2 bucket is not exact'
 grep -Fxq 'SCCACHE_S3_KEY_PREFIX=protected/codewire/v1' "$r2_env" || fail 'main prefix is not exact'
 grep -Fxq 'SCCACHE_S3_RW_MODE=READ_ONLY' "$r2_env" || fail 'a pull request may write the main cache'
-grep -Fxq 'CODEWIRE_R2_CACHE_TRUST=main-read' "$r2_env" || fail 'pull-request trust is not main-read'
-[[ "$(tail -n 1 "$work/fetch.trust")" == main-read ]] || fail 'fetcher was not asked for the main-read token'
+grep -Fxq 'CODEWIRE_R2_CACHE_TRUST=protected-read' "$r2_env" || fail 'pull-request trust is not protected-read'
+[[ "$(tail -n 1 "$work/fetch.trust")" == protected-read ]] || fail 'fetcher was not asked for the protected-read token'
 if grep -Fq untrusted "$r2_env"; then fail 'a pull request selected the untrusted cache'; fi
 grep -Fxq "AWS_SHARED_CREDENTIALS_FILE=$r2_credentials" "$r2_env" || fail 'private credential path is not selected'
 # The server starts during selection, with the minute-long startup wait and an
@@ -95,7 +95,7 @@ grep -Fxq "SCCACHE_CONF=$work/runner/codewire-sccache.conf" "$r2_env" || fail 's
 grep -Fxq 'SCCACHE_IDLE_TIMEOUT=3600' "$r2_env" || fail 'server may idle out within a job'
 [[ "$(cat "$work/runner/codewire-sccache.conf")" == 'server_startup_timeout_ms = 60000' ]] ||
   fail 'startup timeout config is not exact'
-grep -Fxq 'CODEWIRE_CI_CACHE state=remote-selected backend=r2 trust=main-read' "$work/r2.out" ||
+grep -Fxq 'CODEWIRE_CI_CACHE state=remote-selected backend=r2 trust=protected-read' "$work/r2.out" ||
   fail 'R2 selection did not report its state'
 [[ "$(stat -c '%a' "$r2_credentials")" == 600 ]] || fail 'R2 credential is not private'
 if rg -n 'synthetic-(access|secret)' "$r2_env" "$work/r2.out"; then

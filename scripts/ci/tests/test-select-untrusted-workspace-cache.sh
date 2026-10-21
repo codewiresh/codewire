@@ -68,9 +68,9 @@ done
 # Pull requests read main's caches read-only; canonical main reads and writes them.
 grep -Fxq SCCACHE_BUCKET=example-ci-cache-protected "$work/env"
 grep -Fxq CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 "$work/env"
-grep -Fxq CODEWIRE_R2_CACHE_TRUST=main-read "$work/env"
+grep -Fxq CODEWIRE_R2_CACHE_TRUST=protected-read "$work/env"
 grep -Fxq SCCACHE_S3_RW_MODE=READ_ONLY "$work/env"
-grep -Fxq 'fetch main-read' "$work/fetch-calls"
+grep -Fxq 'fetch protected-read' "$work/fetch-calls"
 ! grep -Fq untrusted "$work/env" || exit 1
 : >"$work/env"; : >"$work/fetch-calls"
 TEST_REF=refs/heads/main select_cache auto auto "$credential_work/runner/main.aws" >"$work/output"
@@ -138,7 +138,7 @@ for event in unlabeled null_labels omitted_labels exact other manual; do
     grep -Fxq "CODEWIRE_BUILDKIT_CACHE_MODE=$expected_layers" "$work/env"
     # Only a labelled pull-request experiment uses the disposable untrusted bucket.
     if [[ "$expected_layers" == r2 ]]; then
-      expected_trust=main-read
+      expected_trust=protected-read
       [[ "$event" != exact ]] || expected_trust=untrusted
       grep -Fxq "CODEWIRE_R2_CACHE_TRUST=$expected_trust" "$work/env"
       grep -Fxq "fetch $expected_trust" "$work/fetch-calls"
