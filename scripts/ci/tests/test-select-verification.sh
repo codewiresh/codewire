@@ -8,6 +8,10 @@ WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
 # uses the shared Heavy pool (infra forgejo-runners dispatcher).
 # shellcheck disable=SC2016 # The workflow expression is literal text.
 HEAVY_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-heavy-main'"'"' || '"'"'ci-heavy'"'"' }}'
+# A main push's ordinary Heavy groups run on the metal guests' sized label
+# (infra#1534); pull requests keep cloud Heavy.
+METAL_MAIN_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-main-large'"'"' || '"'"'ci-heavy'"'"' }}'
+METAL_MAIN_CARGO_JOBS='      CARGO_BUILD_JOBS: ${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'11'"'"' || '"'"'8'"'"' }}'
 DIAGNOSTICS_WORKFLOW="$ROOT/.gitea/workflows/manual-diagnostics.yaml"
 CLI_RELEASE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
 TMP_ROOT="$ROOT/.tmp"
@@ -2473,6 +2477,10 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
   grep -qF "  ${job_id}:" "$block"
   grep -qF "    name: ${job_name}" "$block"
   if [ "$runner" = heavy ]; then runner="$HEAVY_RUNS_ON"; fi
+  if [ "$runner" = metal-main ]; then
+    runner="$METAL_MAIN_RUNS_ON"
+    grep -qxF "$METAL_MAIN_CARGO_JOBS" "$block"
+  fi
   grep -qxF "    runs-on: ${runner}" "$block"
   if [ "$job_id" = edge-kind ]; then
     # Its optional producer dependencies need an always() condition so edge-
@@ -2498,18 +2506,18 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     exit 1
   fi
 done <<'EOF'
-cw-release-assets|CW release-assets verification|heavy|cw_release_assets
-workspace-image|Container contract verification|heavy|workspace_image
-policy|Policy verification|heavy|policy
-standard|Standard verification|heavy|standard
-tooling|Tooling / delivery contract verification|heavy|tooling
-rust-compile|Compile every Rust target|heavy|rust_compile
-rust-packages|Rust / transport packages|heavy|rust_shards
-rust-features|Rust / transport feature graphs|heavy|rust_shards
-rust-transport|Rust / transport verification|heavy|rust_transport
-database|Database verification|heavy|database
-services-control|Service control-plane verification|heavy|services_control
-services-runtime|Service runtime-plane verification|heavy|services_runtime
+cw-release-assets|CW release-assets verification|metal-main|cw_release_assets
+workspace-image|Container contract verification|metal-main|workspace_image
+policy|Policy verification|metal-main|policy
+standard|Standard verification|metal-main|standard
+tooling|Tooling / delivery contract verification|metal-main|tooling
+rust-compile|Compile every Rust target|metal-main|rust_compile
+rust-packages|Rust / transport packages|metal-main|rust_shards
+rust-features|Rust / transport feature graphs|metal-main|rust_shards
+rust-transport|Rust / transport verification|metal-main|rust_transport
+database|Database verification|metal-main|database
+services-control|Service control-plane verification|metal-main|services_control
+services-runtime|Service runtime-plane verification|metal-main|services_runtime
 edge-kind|Edge / Kind verification|heavy|edge_kind
 EOF
 
@@ -2901,8 +2909,16 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fxc "    runs-on: ${HEAVY_RUNS_ON}" "$WORKFLOW")" -eq 19 ]] || {
-  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), four parallel Kind producers, one opted-in measurement matrix and its post-measurement probe, each selecting the main-first Heavy label' >&2
+[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 12 ]] || {
+  echo 'Codewire CI requires twelve ordinary heavy groups (policy included) on the metal main label' >&2
+  exit 1
+}
+[[ "$(grep -Fxc "$METAL_MAIN_CARGO_JOBS" "$WORKFLOW")" -eq 12 ]] || {
+  echo 'each metal main group must bound its cargo jobs to its guest memory' >&2
+  exit 1
+}
+[[ "$(grep -Fxc "    runs-on: ${HEAVY_RUNS_ON}" "$WORKFLOW")" -eq 7 ]] || {
+  echo 'Codewire CI requires Edge / Kind, four parallel Kind producers, one opted-in measurement matrix and its post-measurement probe, each selecting the main-first Heavy label' >&2
   exit 1
 }
 if grep -Eq '^ *runs-on: ci-heavy(-main)?$' "$WORKFLOW"; then
@@ -3028,7 +3044,7 @@ awk '
 ' "$WORKFLOW" > "$cw_block"
 grep -qF '  cw-release-assets:' "$cw_block"
 grep -qF '    name: CW release-assets verification' "$cw_block"
-grep -qxF "    runs-on: ${HEAVY_RUNS_ON}" "$cw_block"
+grep -qxF "    runs-on: ${METAL_MAIN_RUNS_ON}" "$cw_block"
 grep -qF 'name: CW release assets not selected' "$cw_block"
 grep -qF "needs.verification-selection.outputs.cw_package_selected != 'true'" \
   "$cw_block"
@@ -3087,7 +3103,7 @@ awk '
 ' "$WORKFLOW" > "$workspace_block"
 grep -qF '  workspace-image:' "$workspace_block"
 grep -qF '    name: Container contract verification' "$workspace_block"
-grep -qxF "    runs-on: ${HEAVY_RUNS_ON}" "$workspace_block"
+grep -qxF "    runs-on: ${METAL_MAIN_RUNS_ON}" "$workspace_block"
 grep -qF '    needs: [verification-selection]' "$workspace_block"
 grep -qF 'name: Container contracts not selected' "$workspace_block"
 grep -qF 'no checkout, download, installation, or build required' "$workspace_block"

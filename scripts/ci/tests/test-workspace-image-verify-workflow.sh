@@ -47,6 +47,8 @@ BUILDER = re.compile(
     r"|build-support-platform\.sh linux/"
 )
 HEAVY = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}"
+# Metal main guests carry the ci-heavy pool label, so the same cache policy admits them.
+METAL_MAIN = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}"
 # Jobs that call an image builder without the cache: the arm64 support legs
 # build on the remote ci-arm64-builder node outside the cluster, and the
 # support join only assembles the two platform digests. A release's own pair
@@ -82,7 +84,7 @@ for path in sorted(pathlib.Path(sys.argv[1]).glob("*.y*ml")):
             if job["env"][NAME] != MIRROR:
                 raise SystemExit(f"{key}: unexpected apt snapshot cache value")
             # ci-protected-metal slots are ci-protected pool pods (same cache policy).
-            if job.get("runs-on") not in ("ci-heavy", "ci-protected", "ci-protected-metal", HEAVY):
+            if job.get("runs-on") not in ("ci-heavy", "ci-protected", "ci-protected-metal", HEAVY, METAL_MAIN):
                 raise SystemExit(f"{key}: apt snapshot cache set outside ci-heavy/ci-protected")
             configured.add(key)
             file_jobs += 1
@@ -100,7 +102,7 @@ grep -qF '  workspace-image:' <<<"$workspace_job" || fail 'workspace-image job i
 grep -qF '    name: Container contract verification' <<<"$workspace_job" ||
   fail 'workspace job is not named for its complete non-publishing scope'
 # shellcheck disable=SC2016 # The workflow expression is literal text.
-grep -qxF '    runs-on: ${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-heavy-main'"'"' || '"'"'ci-heavy'"'"' }}' <<<"$workspace_job" ||
+grep -qxF '    runs-on: ${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-main-large'"'"' || '"'"'ci-heavy'"'"' }}' <<<"$workspace_job" ||
   fail 'Docker-backed workspace verification is not assigned to the heavy capability profile'
 grep -qF '    timeout-minutes: 55' <<<"$workspace_job" ||
   fail 'workspace cold-build ceiling does not preserve the runner cleanup margin'
