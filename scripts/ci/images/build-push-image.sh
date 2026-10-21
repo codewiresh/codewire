@@ -396,6 +396,23 @@ create_buildx_builder() {
     return
   fi
   buildx_builder="codewire-publish-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${image_name}-${BASHPID}"
+  # A protected job that builds here directly may ask for the trusted BuildKit
+  # builder; it fails fast without it, and only the owner's recovery builds in
+  # this job instead.
+  case "${CODEWIRE_TRUSTED_BUILDKIT:-0}" in
+    0) ;;
+    1)
+      # shellcheck source=scripts/ci/setup/trusted-buildkit.sh
+      source "$ROOT/scripts/ci/setup/trusted-buildkit.sh"
+      if ! trusted_buildkit_in_job; then
+        mkdir -m 0700 "$work/trusted-buildkit-tls"
+        buildx_builder_owned=1
+        trusted_buildkit_attach "$buildx_builder" "$docker_config" "$work/trusted-buildkit-tls" || exit 1
+        return
+      fi
+      ;;
+    *) echo 'CODEWIRE_TRUSTED_BUILDKIT must be exactly 0 or 1' >&2; exit 2 ;;
+  esac
   DOCKER_CONFIG="$docker_config" docker buildx create \
     --name "$buildx_builder" \
     --driver docker-container \
@@ -723,6 +740,13 @@ verify_build_sbom() {
   done
 }
 
+cargo_build_jobs="${CODEWIRE_CARGO_BUILD_JOBS:-}"
+if [ -n "$cargo_build_jobs" ] && [[ ! "$cargo_build_jobs" =~ ^[1-9][0-9]{0,2}$ ]]; then
+  echo 'CODEWIRE_CARGO_BUILD_JOBS must be a whole number of jobs' >&2
+  exit 2
+fi
+readonly cargo_build_jobs
+
 label_args=(
   "--label" "org.opencontainers.image.source=$public_source_url"
   "--label" "org.opencontainers.image.revision=$source_sha"
@@ -754,6 +778,11 @@ if [ "$image_name" = workspace ]; then
     fi
   fi
   build_args+=(--build-arg "CODEWIRE_SCCACHE_MODE=$sccache_mode")
+  # The trusted BuildKit builder bounds Cargo's jobs to its memory; product
+  # Bake targets read the same CODEWIRE_CARGO_BUILD_JOBS as a Bake variable.
+  if [ -n "$cargo_build_jobs" ]; then
+    build_args+=(--build-arg "CARGO_BUILD_JOBS=$cargo_build_jobs")
+  fi
   if [ "$sccache_mode" = r2 ]; then
     build_args+=(--secret "id=aws_shared_credentials,src=$credentials_file"
       --build-arg "SCCACHE_BUCKET=$SCCACHE_BUCKET" --build-arg "SCCACHE_ENDPOINT=$SCCACHE_ENDPOINT"

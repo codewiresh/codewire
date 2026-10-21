@@ -102,14 +102,15 @@ jobs:
 
   # Each platform of the support pair builds in its own job, with its own time
   # budget below the protected runner's ceiling, and streams every build step
-  # into its log. amd64 builds on the job's own BuildKit container and also
-  # builds the admitted static CW producer. arm64 builds natively on the
-  # protected arm64 BuildKit node over mutual TLS, never under emulation. Both
-  # push only by digest; the join below publishes them as one index.
+  # into its log. amd64 builds on the trusted BuildKit builder over mutual TLS
+  # and also builds the admitted static CW producer there. arm64 builds
+  # natively on the protected arm64 BuildKit node over mutual TLS, never under
+  # emulation. Both push only by digest; the join below publishes them as one
+  # index.
   build-support-amd64:
     # zizmor: ignore[excessive-permissions] This exact protected job receives the scoped publisher identity for its platform of the pair.
     name: Build exact support pair (linux/amd64)
-    runs-on: ci-protected-metal
+    runs-on: ci-protected
     enable-openid-connect: true
     timeout-minutes: 120
     needs: [support-selection]
@@ -125,6 +126,10 @@ jobs:
       # secret. The arm64 leg builds on the remote ci-arm64-builder node,
       # outside the cluster, and keeps the canonical snapshots.
       CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
+      # The trusted builder fails fast when unreachable; only the owner's
+      # recovery variable naming this exact commit, then a rerun of all jobs,
+      # builds in this job.
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
@@ -341,6 +346,11 @@ jobs:
       OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
       OPENBAO_GHCR_ROLE: codewire-source-support-publisher
       OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher
+      # The probe builds on the trusted BuildKit builder, so this job pulls no
+      # BuildKit image of its own; only the owner's recovery variable naming
+      # this exact commit builds it in the job.
+      CODEWIRE_TRUSTED_BUILDKIT: '1'
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 

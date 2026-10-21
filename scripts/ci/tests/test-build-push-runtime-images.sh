@@ -19,6 +19,16 @@ cp "$ROOT/scripts/ci/images/build-push-runtime-images.sh" \
 cp "$ROOT/scripts/ci/images/pipeline-identity.sh" \
   "$fixture/scripts/ci/images/pipeline-identity.sh"
 mkdir -p "$fixture/scripts/ci/setup"
+cp "$ROOT/scripts/ci/setup/trusted-buildkit.sh" \
+  "$fixture/scripts/ci/setup/trusted-buildkit.sh"
+# The trusted builder's client tuple: three private files, or a refused read.
+cat >"$fixture/scripts/ci/setup/fetch-openbao-trusted-buildkit-client.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${FAKE_TRUSTED_CLIENT:-valid}" = valid ] || { echo 'OpenBao refused the publisher login' >&2; exit 1; }
+for file in ca.crt client.crt client.key; do printf 'synthetic\n' >"$1/$file"; done
+SH
+chmod 0755 "$fixture/scripts/ci/setup/fetch-openbao-trusted-buildkit-client.sh"
 cat >"$fixture/scripts/ci/setup/fetch-openbao-harbor-credentials.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -53,6 +63,11 @@ fi
 if [ "${1:-} ${2:-} ${3:-}" = 'buildx imagetools create' ]; then
   exit 0
 fi
+if [ "${1:-} ${2:-}" = 'buildx inspect' ]; then
+  [ "${FAKE_BUILDER_DOWN:-0}" = 0 ] || { echo 'connection refused' >&2; exit 1; }
+  printf 'Name: %s\nDriver: remote\nStatus: running\nPlatforms: linux/amd64, linux/amd64/v2\n' "${3:-}"
+  exit 0
+fi
 if [ "${1:-} ${2:-} ${3:-}" = 'image inspect --format' ]; then
   case "${4:-}" in
     *dev.codewire.build.profile*) printf '%s\n' "${FAKE_PROFILE:-runtime}" ;;
@@ -84,10 +99,11 @@ if [ "${FAKE_FATAL_IMAGE:-}" = "$name" ]; then
     "$name" >&2
   exit 1
 fi
-printf '%s|%s|%s|%s|%s|%s\n' \
+printf '%s|%s|%s|%s|%s|%s|%s\n' \
   "$name" "$CODEWIRE_EXTERNAL_BUILDX_BUILDER" \
   "$CODEWIRE_EXTERNAL_DOCKER_CONFIG" "$CODEWIRE_SCCACHE_MODE" \
-  "$CODEWIRE_PROVENANCE_BUILDER_ID" "${CODEWIRE_BUILD_RUNTIME_SET:-0}" >>"$BUILD_LOG"
+  "$CODEWIRE_PROVENANCE_BUILDER_ID" "${CODEWIRE_BUILD_RUNTIME_SET:-0}" \
+  "${CODEWIRE_CARGO_BUILD_JOBS:-default}" >>"$BUILD_LOG"
 printf 'candidate_ref=registry.example.invalid/codewire/%s@sha256:%064d\n' \
   "$name" 0 >>"$GITHUB_OUTPUT"
 SH
@@ -213,14 +229,69 @@ builder="$(cut -d'|' -f2 "$build_log" | sort -u)"
   fail "services did not anchor the service runtime-set Bake transaction"
 [[ "$(awk -F'|' '$1 != "services" { print $6 }' "$build_log" | sort -u)" = 0 ]] ||
   fail "post-build product verification attempted another runtime-set Bake"
-grep -Fq "buildx create --name $builder --driver docker-container" "$docker_log" ||
-  fail "wrapper did not create the shared docker-container builder"
-grep -Fq 'provenance-add-gha=false' "$docker_log" ||
-  fail "wrapper may leak the Forgejo event payload into public provenance"
-grep -Fq 'moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
-  "$docker_log" || fail "wrapper did not pin BuildKit"
+# Both halves attach the trusted BuildKit builder over mutual TLS and start
+# no BuildKit daemon of their own.
+grep -Fq "buildx create --name $builder --driver remote --platform linux/amd64 --driver-opt cacert=" "$docker_log" ||
+  fail "wrapper did not attach the trusted BuildKit builder"
+grep -Fq 'servername=buildkit-trusted.forgejo-ci-builder.svc.cluster.local tcp://buildkit-trusted.forgejo-ci-builder.svc.cluster.local:1234' \
+  "$docker_log" || fail "wrapper did not pin the trusted builder's endpoint and server name"
+grep -Fq "buildx inspect $builder --bootstrap" "$docker_log" ||
+  fail "wrapper did not prove the trusted builder answers before building"
+# Every image on the builder bounds Cargo's jobs to its memory.
+[[ "$(cut -d'|' -f7 "$build_log" "$daemon_build_log" | sort -u)" = 14 ]] ||
+  fail "trusted builds did not bound Cargo's jobs to the builder's memory"
+if grep -Eq 'driver docker-container|moby/buildkit' "$docker_log" "$daemon_docker_log"; then
+  fail "wrapper started its own BuildKit daemon without the owner's recovery"
+fi
 grep -Fq "buildx rm --force $builder" "$docker_log" ||
-  fail "wrapper did not destroy its BuildKit daemon"
+  fail "wrapper did not forget its builder"
+if find "$fixture/tmp" -mindepth 1 -print -quit | grep -q .; then
+  fail "the trusted builder's client tuple survived the build"
+fi
+
+# An unreachable builder or an unreadable client certificate fails the half
+# before any image builds, says how to recover, and never builds in the job.
+for failure in FAKE_BUILDER_DOWN=1 FAKE_TRUSTED_CLIENT=denied; do
+  if run_group daemon "$work/down-output" "$work/down-docker.log" "$work/down-build.log" 46 \
+      "$failure" >"$work/down.stdout" 2>"$work/down.stderr"; then
+    fail "a half built without the trusted builder ($failure)"
+  fi
+  [[ ! -s "$work/down-build.log" && ! -s "$work/down-output" ]] ||
+    fail "a half reached a build without the trusted builder ($failure)"
+  grep -Fq 'do not fall back to building in the job' "$work/down.stderr" ||
+    fail "the trusted builder failure was not attributable ($failure)"
+  grep -Fq 'CODEWIRE_IN_JOB_BUILD_SHA' "$work/down.stderr" ||
+    fail "the trusted builder failure did not name the owner's recovery ($failure)"
+  if grep -q 'driver docker-container' "$work/down-docker.log"; then
+    fail "a trusted builder failure fell back to building in the job ($failure)"
+  fi
+  rm -f "$work/down-build.log" "$work/down-output" "$work/down-docker.log"
+done
+
+# The owner's explicit recovery builds in the job on its own pinned BuildKit
+# container, and attaches no remote builder.
+recovery_docker_log="$work/recovery-docker.log"
+run_group daemon "$work/recovery-output" "$recovery_docker_log" "$work/recovery-build.log" 47 \
+  CODEWIRE_IN_JOB_BUILD=1 >"$work/recovery.stdout" 2>"$work/recovery.stderr"
+recovery_builder="$(cut -d'|' -f2 "$work/recovery-build.log")"
+grep -Fq "buildx create --name $recovery_builder --driver docker-container" "$recovery_docker_log" ||
+  fail "the owner's recovery did not build on the job's own BuildKit container"
+grep -Fq 'provenance-add-gha=false' "$recovery_docker_log" ||
+  fail "the in-job recovery may leak the Forgejo event payload into public provenance"
+grep -Fq 'moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
+  "$recovery_docker_log" || fail "the in-job recovery did not pin BuildKit"
+if grep -q 'driver remote' "$recovery_docker_log"; then
+  fail "the in-job recovery still attached the trusted builder"
+fi
+grep -Fq 'owner-invoked recovery path' "$work/recovery.stderr" ||
+  fail "the in-job recovery was not announced"
+[[ "$(cut -d'|' -f7 "$work/recovery-build.log")" = default ]] ||
+  fail "the in-job recovery imposed the trusted builder's Cargo job count"
+if run_group daemon "$work/bad-recovery-output" "$work/bad-recovery-docker.log" \
+    "$work/bad-recovery-build.log" 47 CODEWIRE_IN_JOB_BUILD=yes \
+    >"$work/bad-recovery.stdout" 2>"$work/bad-recovery.stderr"; then
+  fail "an ambiguous recovery switch was accepted"
+fi
 [[ "$(grep -Ec '^pull registry\.example\.invalid/codewire/' "$docker_log")" -eq 4 ]] ||
   fail "service half did not pull all four protected candidates by digest"
 for family in dashboard derp mesh services; do

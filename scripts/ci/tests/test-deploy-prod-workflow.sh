@@ -424,4 +424,22 @@ PY
 done
 rm -rf -- "$pair_tree"
 
+# The release's amd64 support build runs on the trusted BuildKit builder and
+# fails fast without it. Only the owner's explicit in_job_build dispatch builds
+# it in the job; nothing else sets the switch.
+python3 - "$WORKFLOW" <<'PY' || fail 'the owner-only in-job recovery input is not exactly wired'
+import sys
+
+import yaml
+
+document = yaml.safe_load(open(sys.argv[1]))
+triggers = document.get("on", document.get(True))
+recovery = triggers["workflow_dispatch"]["inputs"]["in_job_build"]
+assert recovery["type"] == "boolean" and recovery["default"] is False and recovery["required"] is False, recovery
+expected = "${{ (inputs.in_job_build == true || inputs.in_job_build == 'true') && '1' || '0' }}"
+jobs = document["jobs"]
+assert jobs["build-support-amd64"]["env"]["CODEWIRE_IN_JOB_BUILD"] == expected
+assert [name for name, job in jobs.items() if "CODEWIRE_IN_JOB_BUILD" in (job.get("env") or {})] == ["build-support-amd64"]
+assert all(job.get("runs-on") != "ci-protected-metal" for job in jobs.values())
+PY
 printf '[test-deploy-prod-workflow] signed-tag publication and dispatch contract passed\n'

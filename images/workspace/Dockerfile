@@ -116,6 +116,9 @@ COPY --from=codewire-verified-cw --chown=0:0 --chmod=0444 /provenance.json /out/
 # provenance. arm64 cross-compiles the same static musl target from source.
 FROM cw-cross-compiler AS cw-builder-arm64
 ARG CODEWIRE_RUST_PROFILE=runtime
+# Cargo's job count, set on the trusted BuildKit builder to fit its memory
+# (scripts/ci/setup/trusted-buildkit.sh); empty means Cargo's default.
+ARG CARGO_BUILD_JOBS
 ARG CODEWIRE_SCCACHE_MODE=disabled
 ARG SCCACHE_BUCKET
 ARG SCCACHE_ENDPOINT

@@ -4,6 +4,16 @@ set -euo pipefail
 
 mode="${CODEWIRE_SCCACHE_MODE:-disabled}"
 build_profile="${CODEWIRE_RUST_PROFILE:-runtime}"
+# An explicit Cargo job count bounds rustc processes to the builder's memory;
+# an empty build argument means Cargo's own default.
+if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+  unset CARGO_BUILD_JOBS
+elif [[ ! "$CARGO_BUILD_JOBS" =~ ^[1-9][0-9]{0,2}$ ]]; then
+  printf 'codewire-rust-build: invalid CARGO_BUILD_JOBS: %s\n' "$CARGO_BUILD_JOBS" >&2
+  exit 2
+else
+  export CARGO_BUILD_JOBS
+fi
 case "$build_profile" in
   ci|release|runtime) ;;
   *)

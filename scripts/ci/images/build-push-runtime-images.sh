@@ -4,9 +4,9 @@
 #   build-push-runtime-images.sh services   # dashboard, services, mesh, derp
 #   build-push-runtime-images.sh daemon     # the static CW producer and daemon
 #
-# Each half runs in its own protected job on its own worker, so the daemon's
-# static CW producer, the longest single build, runs beside the service Bake
-# instead of before it. The halves never share a target, so they never race
+# Each half runs in its own protected job, so the daemon's static CW
+# producer, the longest single build, runs beside the service Bake instead of
+# before it. Both build on the trusted BuildKit builder (trusted-buildkit.sh). The halves never share a target, so they never race
 # for an immutable source tag. The publishing job joins both halves by the
 # exact digests these jobs report.
 set -euo pipefail
@@ -15,6 +15,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 # shellcheck source=scripts/ci/images/pipeline-identity.sh
 source "$ROOT/scripts/ci/images/pipeline-identity.sh"
+# shellcheck source=scripts/ci/setup/trusted-buildkit.sh
+source "$ROOT/scripts/ci/setup/trusted-buildkit.sh"
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 readonly PROVENANCE_BUILDER_ID="$PIPELINE_BUILDER_ID"
 readonly PUBLISH_REGISTRY_HOST='registry.example.invalid'
@@ -83,17 +85,23 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -m 0700 "$docker_config"
-printf '%s\n' \
-  '[worker.oci]' \
-  '  max-parallelism = 2' >"$buildkit_config"
-
-DOCKER_CONFIG="$docker_config" docker buildx create \
-  --name "$builder" \
-  --driver docker-container \
-  --driver-opt "image=$BUILDKIT_IMAGE" \
-  --driver-opt provenance-add-gha=false \
-  --buildkitd-config "$buildkit_config" \
-  --bootstrap >/dev/null
+# Both halves build on the trusted BuildKit builder and its persistent layer
+# cache; the owner's explicit recovery builds them in this job instead.
+if trusted_buildkit_in_job; then
+  printf '%s\n' \
+    '[worker.oci]' \
+    '  max-parallelism = 2' >"$buildkit_config"
+  DOCKER_CONFIG="$docker_config" docker buildx create \
+    --name "$builder" \
+    --driver docker-container \
+    --driver-opt "image=$BUILDKIT_IMAGE" \
+    --driver-opt provenance-add-gha=false \
+    --buildkitd-config "$buildkit_config" \
+    --bootstrap >/dev/null
+else
+  mkdir -m 0700 "$work/trusted-buildkit-tls"
+  trusted_buildkit_attach "$builder" "$docker_config" "$work/trusted-buildkit-tls"
+fi
 
 # The deploy-selection job's trusted planner certifies, per runtime image
 # family, whether the exact canonical head changes that family's inputs

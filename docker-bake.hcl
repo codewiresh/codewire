@@ -30,6 +30,12 @@ variable "CODEWIRE_SCCACHE_PREFIX" {
   default = ""
 }
 
+# Cargo's job count on the trusted BuildKit builder (trusted-buildkit.sh);
+# empty keeps Cargo's default of one job per CPU.
+variable "CODEWIRE_CARGO_BUILD_JOBS" {
+  default = ""
+}
+
 group "default" {
   targets = ["dashboard", "services", "mesh", "daemon", "derp"]
 }
@@ -65,6 +71,7 @@ target "_rust-product" {
     SCCACHE_ENDPOINT      = SCCACHE_ENDPOINT
     CODEWIRE_SCCACHE_PREFIX = CODEWIRE_SCCACHE_PREFIX
     CODEWIRE_RUST_PROFILE = "runtime"
+    CARGO_BUILD_JOBS      = CODEWIRE_CARGO_BUILD_JOBS
   }
   pull = true
 }

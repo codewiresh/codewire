@@ -148,4 +148,23 @@ grep -qF 'CODEWIRE_CI_PHASE name=rust-compile-link mode=local' "$work/r2.out"
   printf 'the startup timeout config outlived the build\n' >&2
   exit 1
 }
+# An explicit Cargo job count reaches Cargo; an empty build argument leaves
+# Cargo's own default, and anything else is refused before Cargo runs.
+jobs_of() {
+  rm -f "$work/jobs.seen"
+  # shellcheck disable=SC2016 # The probe expands in the wrapped command.
+  env "$@" CODEWIRE_SCCACHE_MODE=disabled PATH="$work/bin:$PATH" JOBS_SEEN="$work/jobs.seen" \
+    "$RUNNER" bash -c 'printf "%s" "${CARGO_BUILD_JOBS-unset}" >"$JOBS_SEEN"' >/dev/null || return
+  cat "$work/jobs.seen"
+}
+[[ "$(jobs_of CARGO_BUILD_JOBS=14)" == 14 ]] || { echo 'explicit Cargo jobs did not reach Cargo' >&2; exit 1; }
+[[ "$(jobs_of CARGO_BUILD_JOBS=)" == unset ]] || { echo 'an empty Cargo job count reached Cargo' >&2; exit 1; }
+[[ "$(jobs_of -u CARGO_BUILD_JOBS)" == unset ]] || { echo 'an absent Cargo job count was invented' >&2; exit 1; }
+for bad in 0 -1 1x 1000 ' 4'; do
+  if jobs_of CARGO_BUILD_JOBS="$bad" >/dev/null 2>"$work/jobs.err"; then
+    echo "an invalid Cargo job count was accepted: $bad" >&2
+    exit 1
+  fi
+  grep -qF 'invalid CARGO_BUILD_JOBS' "$work/jobs.err" || { echo "Cargo job refusal was not attributable: $bad" >&2; exit 1; }
+done
 printf '[test-run-rust-build] an R2 startup failure falls back to the local cache\n'

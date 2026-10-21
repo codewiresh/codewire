@@ -44,6 +44,9 @@ ARG SCCACHE_BUCKET
 ARG SCCACHE_ENDPOINT
 ARG CODEWIRE_SCCACHE_PREFIX
 ARG CODEWIRE_RUST_PROFILE=runtime
+# Cargo's job count, set on the trusted BuildKit builder to fit its memory
+# (scripts/ci/setup/trusted-buildkit.sh); empty means Cargo's default.
+ARG CARGO_BUILD_JOBS
 RUN --mount=type=cache,id=codewire-dashboard-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=codewire-dashboard-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \

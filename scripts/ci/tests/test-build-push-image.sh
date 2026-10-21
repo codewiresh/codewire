@@ -451,6 +451,7 @@ printf 'CODEWIRE_IMAGE_SOURCE_SHA=%q CODEWIRE_RUST_PROFILE=%q CODEWIRE_SCCACHE_M
   "$(git -C "${CODEWIRE_SOURCE_DIR:-.}" remote get-url origin)" \
   >>"$FAKE_DOCKER_CALLS"
 printf 'CODEWIRE_APT_SNAPSHOT_MIRROR=%q ' "${CODEWIRE_APT_SNAPSHOT_MIRROR:-}" >>"$FAKE_DOCKER_CALLS"
+printf 'CODEWIRE_CARGO_BUILD_JOBS=%q ' "${CODEWIRE_CARGO_BUILD_JOBS:-}" >>"$FAKE_DOCKER_CALLS"
 printf '%q ' "$@" >>"$FAKE_DOCKER_CALLS"
 printf '\n' >>"$FAKE_DOCKER_CALLS"
 
@@ -681,6 +682,11 @@ case "${1:-} ${2:-} ${3:-}" in
     set_manifest "$destination" "${source##*@}"
     ;;
   buildx\ create\ *)
+    if [[ "$*" == *' --driver remote '* ]]; then
+      # The trusted BuildKit builder: mutual TLS to its pinned endpoint only.
+      [[ "$*" == *' --driver-opt cacert='*'/ca.crt,cert='*'/client.crt,key='*'/client.key,servername=buildkit-trusted.forgejo-ci-builder.svc.cluster.local tcp://buildkit-trusted.forgejo-ci-builder.svc.cluster.local:1234' ]]
+      exit 0
+    fi
     [[ "$*" == *' --driver docker-container '* ]]
     [[ "$*" == *' --driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5 '* ]]
     [[ "$*" == *' --bootstrap'* ]]
@@ -702,6 +708,12 @@ case "${1:-} ${2:-} ${3:-}" in
       echo 'ERROR: failed to remove one or more builders' >&2
       exit 73
     fi
+    ;;
+  buildx\ inspect\ codewire-publish-*)
+    # The trusted BuildKit builder a direct protected build may attach.
+    [ "${FAKE_TRUSTED_DOWN:-0}" = 0 ] || { echo 'connection refused' >&2; exit 1; }
+    printf 'Name: %s\nDriver: remote\nStatus: running\nPlatforms: linux/amd64\n' "${4:-}"
+    exit 0
     ;;
   buildx\ inspect\ codewire-kind-*|container\ inspect\ --format|volume\ inspect\ --format)
     [[ "$1" == buildx || "${*: -1}" == buildx_buildkit_codewire-kind-* ]] || {
@@ -1081,10 +1093,15 @@ grep -qxF "candidate_ref=registry.example.invalid/codewire/daemon@$digest" "$GIT
   cd "$source_fixture"
   FAKE_DIGEST="$second_digest" \
   CODEWIRE_BASE_IMAGE_REF="$base_ref" \
+  CODEWIRE_CARGO_BUILD_JOBS=14 \
     "$BUILDER" workspace images/workspace/Dockerfile .
 )
 grep -qxF 'family=workspace' "$GITHUB_OUTPUT" ||
   fail 'workspace candidate family is absent'
+# On the trusted builder both the workspace solve and its CW producer bound
+# Cargo's jobs to the builder's memory.
+[[ "$(grep -E ' buildx build ' "$FAKE_DOCKER_CALLS" | grep -F 'CODEWIRE_CARGO_BUILD_JOBS=14 ' | grep -c -- '--build-arg CARGO_BUILD_JOBS=14')" -eq 2 ]] ||
+  fail 'the workspace build and its CW producer did not bound Cargo jobs'
 grep -qF -- "--build-arg BASE_IMAGE_REF=$base_ref" "$FAKE_DOCKER_CALLS" ||
   fail 'exact base digest did not reach the workspace build'
 [[ "$(build_invocation_count)" -eq 2 ]] ||
@@ -1094,6 +1111,16 @@ grep -qF -- "--build-arg BASE_IMAGE_REF=$base_ref" "$FAKE_DOCKER_CALLS" ||
 assert_cw_context runtime
 grep -qF -- '--no-cache-filter workspace-floating-tools' "$FAKE_DOCKER_CALLS" ||
   fail 'published workspace could reuse floating developer tools'
+
+if (
+  cd "$source_fixture"
+  CODEWIRE_BASE_IMAGE_REF="$base_ref" CODEWIRE_CARGO_BUILD_JOBS=many \
+    "$BUILDER" workspace images/workspace/Dockerfile . >"$work/cargo-jobs.out" 2>&1
+); then
+  fail 'an invalid Cargo job count was accepted'
+fi
+grep -qF 'CODEWIRE_CARGO_BUILD_JOBS must be a whole number of jobs' "$work/cargo-jobs.out" ||
+  fail 'the Cargo job count refusal was not attributable'
 
 : >"$GITHUB_OUTPUT"
 create_calls_before="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
@@ -1742,6 +1769,69 @@ for variant in base-mirror workspace-mirror base-empty-mirror probe-mirror; do
       ;;
   esac
 done
+
+# A direct protected build that asks for the trusted BuildKit builder attaches
+# it over mutual TLS and starts no BuildKit container of its own; without the
+# builder it fails before building, and only the owner's recovery builds here.
+cat >"$work/trusted-fetcher" <<'SH'
+#!/usr/bin/env bash
+[ "${FAKE_TRUSTED_CLIENT:-valid}" = valid ] || exit 1
+for file in ca.crt client.crt client.key; do printf 'synthetic\n' >"$1/$file"; done
+SH
+chmod 0755 "$work/trusted-fetcher"
+for variant in trusted trusted-down trusted-refused in-job ambiguous; do
+  awk -F '\t' -v reference="$probe_source_tag" '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
+  mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
+  : >"$FAKE_DOCKER_CALLS"
+  case "$variant" in
+    trusted) case_env=() ;;
+    trusted-down) case_env=(FAKE_TRUSTED_DOWN=1) ;;
+    trusted-refused) case_env=(FAKE_TRUSTED_CLIENT=refused) ;;
+    in-job) case_env=(CODEWIRE_IN_JOB_BUILD=1) ;;
+    ambiguous) case_env=(CODEWIRE_IN_JOB_BUILD=yes) ;;
+  esac
+  status=0
+  env "${case_env[@]}" CODEWIRE_TRUSTED_BUILDKIT=1 TRUSTED_BUILDKIT_CLIENT_FETCHER="$work/trusted-fetcher" \
+    "$BUILDER" confidential-probe images/confidential-probe/Dockerfile images/confidential-probe \
+    >"$work/$variant.out" 2>&1 || status=$?
+  case "$variant" in
+    trusted|in-job)
+      [[ "$status" == 0 && "$(build_invocation_count)" == 1 ]] || fail "$variant probe build failed"
+      ;;
+    *)
+      [[ "$status" != 0 && "$(build_invocation_count)" == 0 ]] || fail "$variant probe build was not refused"
+      ;;
+  esac
+  case "$variant" in
+    trusted)
+      grep -qE ' buildx create --name codewire-publish-[^ ]+ --driver remote --platform linux/amd64 ' "$FAKE_DOCKER_CALLS" ||
+        fail 'the probe did not attach the trusted BuildKit builder'
+      if grep -qF -- '--driver docker-container' "$FAKE_DOCKER_CALLS"; then
+        fail 'the probe started its own BuildKit container'
+      fi
+      grep -qE ' buildx rm --force codewire-publish-' "$FAKE_DOCKER_CALLS" ||
+        fail 'the probe did not forget the trusted builder'
+      ;;
+    trusted-down|trusted-refused)
+      grep -qF 'do not fall back to building in the job' "$work/$variant.out" ||
+        fail "$variant refusal was not attributable"
+      if grep -qF -- '--driver docker-container' "$FAKE_DOCKER_CALLS"; then
+        fail "$variant fell back to building in the job"
+      fi
+      ;;
+    in-job)
+      grep -qF -- '--driver docker-container' "$FAKE_DOCKER_CALLS" ||
+        fail 'the owner recovery did not build on the job builder'
+      if grep -qF -- '--driver remote' "$FAKE_DOCKER_CALLS"; then
+        fail 'the owner recovery still attached the trusted builder'
+      fi
+      ;;
+  esac
+done
+if CODEWIRE_TRUSTED_BUILDKIT=yes "$BUILDER" confidential-probe images/confidential-probe/Dockerfile \
+    images/confidential-probe >"$work/trusted-ambiguous.out" 2>&1; then
+  fail 'an ambiguous trusted builder switch was accepted'
+fi
 
 # The support pair publishes one index for amd64 and arm64. Every platform in
 # that index, and no other, must carry its own valid provenance and SBOM.

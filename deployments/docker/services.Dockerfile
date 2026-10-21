@@ -86,6 +86,9 @@ ARG SCCACHE_BUCKET
 ARG SCCACHE_ENDPOINT
 ARG CODEWIRE_SCCACHE_PREFIX
 ARG CODEWIRE_RUST_PROFILE=runtime
+# Cargo's job count, set on the trusted BuildKit builder to fit its memory
+# (scripts/ci/setup/trusted-buildkit.sh); empty means Cargo's default.
+ARG CARGO_BUILD_JOBS
 ARG CODEWIRE_ORCHESTRATION_FEATURES=
 # One Cargo invocation builds every shipped binary: the three historical
 # invocations shared one target tree and lockfile, so their common dependency

@@ -6,12 +6,14 @@
 # so a slow leg fails here with a clear message instead of an unexplained
 # runner kill.
 #
-# linux/amd64 builds on the job's own pinned BuildKit container. linux/arm64
-# builds natively on the protected arm64 BuildKit node (infra
-# runbooks/ci-arm64-builder.md), reached over mutual TLS with the client
-# certificate this job's support-publisher role reads from OpenBao. If that
-# certificate cannot be read or the node does not answer as linux/arm64, the
-# build fails: it never falls back to emulation, which cannot finish in time.
+# linux/amd64 builds on the trusted BuildKit builder (trusted-buildkit.sh), or
+# in the job's own pinned BuildKit container only on the owner's explicit
+# recovery. linux/arm64 builds natively on the protected arm64 BuildKit node
+# (infra runbooks/ci-arm64-builder.md). Both are reached over mutual TLS with
+# client certificates this job's publisher role reads from OpenBao. If a
+# certificate cannot be read or a builder does not answer as its platform,
+# the build fails: arm64 never falls back to emulation, which cannot finish in
+# time, and amd64 never silently falls back to building in the job.
 #
 # Usage: build-support-platform.sh linux/amd64|linux/arm64
 # Requires SUPPORT_PLATFORM_BUDGET_MINUTES; writes base_digest and
@@ -30,6 +32,8 @@ readonly BUILDER="$ROOT/scripts/ci/images/build-push-image.sh"
 readonly ARM64_CLIENT_FETCHER="$ROOT/scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh"
 readonly ARM64_BUILDKIT_HOST="${ARM64_BUILDKIT_HOST:-arm64-builder.example.invalid}"
 readonly ARM64_BUILDKIT_ENDPOINT="tcp://$ARM64_BUILDKIT_HOST:1234"
+# shellcheck source=scripts/ci/setup/trusted-buildkit.sh
+source "$ROOT/scripts/ci/setup/trusted-buildkit.sh"
 
 fail() {
   printf '[build-support-platform] ERROR: %s\n' "$*" >&2
@@ -101,6 +105,11 @@ attach_arm64_builder() {
 builder_env=()
 if [[ "$PLATFORM" == linux/arm64 ]]; then
   attach_arm64_builder
+  builder_env=(CODEWIRE_EXTERNAL_BUILDX_BUILDER="$remote_builder" CODEWIRE_EXTERNAL_DOCKER_CONFIG="$work/docker-config")
+elif ! trusted_buildkit_in_job; then
+  mkdir -m 0700 "$work/trusted-buildkit-tls" "$work/docker-config"
+  remote_builder="codewire-support-amd64-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$$"
+  trusted_buildkit_attach "$remote_builder" "$work/docker-config" "$work/trusted-buildkit-tls"
   builder_env=(CODEWIRE_EXTERNAL_BUILDX_BUILDER="$remote_builder" CODEWIRE_EXTERNAL_DOCKER_CONFIG="$work/docker-config")
 fi
 

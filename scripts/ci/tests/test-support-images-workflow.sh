@@ -125,6 +125,12 @@ grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher' \
   <<<"$publish_job" || fail 'support-pair publisher lacks its exact OpenBao GHCR audience'
 grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher' \
   <<<"$probe_job" || fail 'confidential-probe publisher lacks its exact OpenBao GHCR audience'
+# The probe builds on the trusted BuildKit builder, never on a BuildKit image
+# this job pulls itself, except under the owner's exact-commit recovery.
+grep -qxF "      CODEWIRE_TRUSTED_BUILDKIT: '1'" <<<"$probe_job" ||
+  fail 'confidential-probe does not build on the trusted BuildKit builder'
+grep -qxF "      CODEWIRE_IN_JOB_BUILD: \${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}" <<<"$probe_job" ||
+  fail "confidential-probe lacks the owner's exact-commit recovery switch"
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail 'support workflow retains a split Forgejo GHCR username'
 fi
@@ -591,14 +597,19 @@ superseded_case() {
 [[ "$(superseded_case not-a-commit)" == failed ]] ||
   fail 'a malformed canonical main did not fail closed'
 
+if grep -q 'ci-protected-metal' "$WORKFLOW"; then
+  fail 'support images still select a metal protected slot'
+fi
+
 # Each platform of the pair builds in its own protected job with its own time
 # budget below the runner's ceiling, pushes only by digest and publishes
 # nothing; the join is the only publisher.
 for platform in amd64 arm64; do
   case "$platform" in
-    # amd64 compiles cw on a 32-CPU metal slot; arm64 drives the remote builder.
-    # The amd64 workspace digest leaves its job only through the contract.
-    amd64) timeout_minutes=120 budget=110 next_job=build-support-arm64 runs_on=ci-protected-metal digest_step=contract ;;
+    # amd64 compiles cw on the trusted BuildKit builder; arm64 drives the
+    # remote arm64 node. The amd64 workspace digest leaves its job only
+    # through the contract.
+    amd64) timeout_minutes=120 budget=110 next_job=build-support-arm64 runs_on=ci-protected digest_step=contract ;;
     arm64) timeout_minutes=120 budget=110 next_job=publish-support-images runs_on=ci-protected digest_step=build ;;
   esac
   platform_job="$(sed -n "/^  build-support-$platform:/,/^  $next_job:/p" "$WORKFLOW")"
@@ -613,6 +624,10 @@ for platform in amd64 arm64; do
   done
   [[ "$budget" -lt "$timeout_minutes" && "$timeout_minutes" -lt 180 ]] ||
     fail "linux/$platform support build budget does not fail before the runner ceiling"
+  if [[ "$platform" == amd64 ]]; then
+    grep -qxF "      CODEWIRE_IN_JOB_BUILD: \${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}" <<<"$platform_job" ||
+      fail "linux/amd64 support build lacks the owner's exact-commit recovery switch"
+  fi
   if grep -Eq 'publish-image-to-|OPENBAO_GHCR|secrets\.|--support-pair' <<<"$platform_job"; then
     fail "linux/$platform support build crosses the publication boundary"
   fi
@@ -720,10 +735,12 @@ platform_tree="$(mktemp -d)"
 trap 'rm -rf -- "$superseded_step" "$superseded_bin" "$contract_tree" "$platform_tree"' EXIT
 mkdir -p "$platform_tree/scripts/ci/images" "$platform_tree/scripts/ci/setup" "$platform_tree/bin" "$platform_tree/runner"
 cp "$PLATFORM_BUILDER" "$platform_tree/scripts/ci/images/"
+cp "$ROOT/scripts/ci/setup/trusted-buildkit.sh" "$platform_tree/scripts/ci/setup/"
 cat >"$platform_tree/scripts/ci/images/build-push-image.sh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s|%s|%s|%s|%s\n' "$1" "${CODEWIRE_IMAGE_PLATFORM:-}" "${CODEWIRE_BASE_IMAGE_REF:-}" \
   "${CODEWIRE_EXTERNAL_BUILDX_BUILDER:-}" "$*" >>"$STUB_CALLS"
+printf '%s %s\n' "$1" "${CODEWIRE_CARGO_BUILD_JOBS:-default}" >>"$STUB_CALLS.jobs"
 [[ -z "${CODEWIRE_EXTERNAL_DOCKER_CONFIG:-}" || -d "$CODEWIRE_EXTERNAL_DOCKER_CONFIG" ]] || exit 7
 case "${STUB_MODE:-ok}:$1" in
   fail:base) exit 9 ;;
@@ -741,12 +758,20 @@ printf '%s %s\n' "$1" "$(stat -c '%a' "$1")" >>"$STUB_FETCHES"
 [[ "${STUB_FETCH:-ok}" == ok ]] || exit 1
 for file in ca.crt client.crt client.key; do printf 'synthetic\n' >"$1/$file"; done
 STUB
+cat >"$platform_tree/scripts/ci/setup/fetch-openbao-trusted-buildkit-client.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "$(stat -c '%a' "$1")" >>"$STUB_TRUSTED_FETCHES"
+[[ "${STUB_TRUSTED_FETCH:-ok}" == ok ]] || exit 1
+for file in ca.crt client.crt client.key; do printf 'synthetic\n' >"$1/$file"; done
+STUB
 cat >"$platform_tree/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf 'DOCKER_CONFIG=%s %s\n' "${DOCKER_CONFIG:-}" "$*" >>"$STUB_DOCKER"
+node="${STUB_NODE:-arm64}"
+[[ "${3:-}" != codewire-support-amd64-* ]] || node="${STUB_TRUSTED_NODE:-amd64}"
 case "$1 $2" in
   'buildx inspect')
-    case "${STUB_NODE:-arm64}" in
+    case "$node" in
       arm64) printf 'Name: x\nDriver: remote\nStatus:             running\nPlatforms:          linux/arm64*, linux/arm64/v8\n' ;;
       amd64) printf 'Status:             running\nPlatforms:          linux/amd64*\n' ;;
       stopped) printf 'Status:             stopped\nPlatforms:          linux/arm64*\n' ;;
@@ -756,13 +781,16 @@ esac
 exit 0
 STUB
 chmod +x "$platform_tree/scripts/ci/images/build-push-image.sh" "$platform_tree/scripts/ci/images/build-support-platform.sh" \
-  "$platform_tree/scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh" "$platform_tree/bin/docker"
+  "$platform_tree/scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh" \
+  "$platform_tree/scripts/ci/setup/fetch-openbao-trusted-buildkit-client.sh" "$platform_tree/bin/docker"
 platform_case() {
   local budget="$1" platform="$2"
   shift 2
   : >"$platform_tree/calls"; : >"$platform_tree/output"; : >"$platform_tree/fetches"; : >"$platform_tree/docker"
+  : >"$platform_tree/trusted-fetches"; : >"$platform_tree/calls.jobs"
   if env "$@" PATH="$platform_tree/bin:$PATH" RUNNER_TEMP="$platform_tree/runner" \
       STUB_CALLS="$platform_tree/calls" STUB_FETCHES="$platform_tree/fetches" STUB_DOCKER="$platform_tree/docker" \
+      STUB_TRUSTED_FETCHES="$platform_tree/trusted-fetches" \
       GITHUB_OUTPUT="$platform_tree/output" GITHUB_RUN_ID=77 GITHUB_RUN_ATTEMPT=1 \
       SUPPORT_PLATFORM_BUDGET_MINUTES="$budget" \
       "$platform_tree/scripts/ci/images/build-support-platform.sh" "$platform" >"$platform_tree/out" 2>&1; then
@@ -772,13 +800,29 @@ platform_case() {
   fi
 }
 base_a=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-# amd64 builds on the job's own builder: no certificate, no remote node.
+# amd64 builds on the trusted BuildKit builder, attached with this job's
+# publisher certificate; it never reads the arm64 node's certificate.
 [[ "$(platform_case 110 linux/amd64)" == ok ]] || { cat "$platform_tree/out" >&2; fail 'amd64 platform build failed'; }
-[[ "$(cat "$platform_tree/calls")" == "base|linux/amd64|||base images/base/Dockerfile images/base
-workspace|linux/amd64|registry.example.invalid/codewire/base@$base_a||workspace images/workspace/Dockerfile ." ]] ||
-  fail 'amd64 build does not build its base, then its workspace from that exact base, on its own builder'
-[[ ! -s "$platform_tree/fetches" && ! -s "$platform_tree/docker" ]] ||
-  fail 'amd64 build read the arm64 certificate or attached a remote node'
+read -r tls_dir tls_mode <"$platform_tree/trusted-fetches"
+[[ "$tls_mode" == 700 && "$tls_dir" == "$platform_tree/runner/codewire-support-platform."*/trusted-buildkit-tls ]] ||
+  fail 'the trusted builder certificate was not fetched into a private job directory'
+[[ ! -s "$platform_tree/fetches" ]] || fail 'amd64 build read the arm64 certificate'
+[[ -z "$(find "$platform_tree/runner" -mindepth 1 -print -quit)" ]] ||
+  fail 'the trusted builder certificate or the private Docker configuration survived the build'
+docker_config="${tls_dir%/trusted-buildkit-tls}/docker-config"
+create_call="$(grep ' buildx create ' "$platform_tree/docker")"
+[[ "$create_call" == "DOCKER_CONFIG=$docker_config buildx create --name codewire-support-amd64-77-1-"*" --driver remote --platform linux/amd64 --driver-opt cacert=$tls_dir/ca.crt,cert=$tls_dir/client.crt,key=$tls_dir/client.key,servername=buildkit-trusted.forgejo-ci-builder.svc.cluster.local tcp://buildkit-trusted.forgejo-ci-builder.svc.cluster.local:1234" ]] ||
+  fail "the trusted builder is not attached as the mutual-TLS remote builder: $create_call"
+trusted_name="$(sed -n 's/^.* buildx create --name \([^ ]*\) .*$/\1/p' "$platform_tree/docker")"
+grep -qxF "DOCKER_CONFIG=$docker_config buildx inspect $trusted_name --bootstrap" "$platform_tree/docker" ||
+  fail 'the trusted builder was not checked before building'
+grep -qxF "DOCKER_CONFIG=$docker_config buildx rm $trusted_name" "$platform_tree/docker" ||
+  fail 'the trusted builder was not forgotten after the build'
+[[ "$(cat "$platform_tree/calls")" == "base|linux/amd64||$trusted_name|base images/base/Dockerfile images/base
+workspace|linux/amd64|registry.example.invalid/codewire/base@$base_a|$trusted_name|workspace images/workspace/Dockerfile ." ]] ||
+  fail 'amd64 build does not build its base, then its workspace from that exact base, on the trusted builder'
+[[ "$(cat "$platform_tree/calls.jobs")" == $'base 14\nworkspace 14' ]] ||
+  fail 'amd64 builds on the trusted builder did not bound Cargo'"'"'s jobs to its memory'
 [[ "$(cat "$platform_tree/output")" == "base_digest=$base_a
 workspace_digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ]] ||
   fail 'platform build does not report both exact digests'
@@ -804,6 +848,8 @@ grep -qxF "DOCKER_CONFIG=$docker_config buildx rm $remote_name" "$platform_tree/
 [[ "$(cat "$platform_tree/calls")" == "base|linux/arm64||$remote_name|base images/base/Dockerfile images/base
 workspace|linux/arm64|registry.example.invalid/codewire/base@$base_a|$remote_name|workspace images/workspace/Dockerfile ." ]] ||
   fail 'arm64 images were not built on the attached node'
+[[ "$(cat "$platform_tree/calls.jobs")" == $'base default\nworkspace default' ]] ||
+  fail 'arm64 builds took the trusted builder'"'"'s Cargo job count'
 # deploy-prod.yaml builds a release tag's pair from its separate checkout with
 # this tree's scripts; arm64 still builds only on the attached native node.
 mkdir -p "$platform_tree/.release-source"
@@ -822,7 +868,8 @@ done
 published_base=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 [[ "$(platform_case 110 linux/amd64 SUPPORT_PLATFORM_BASE_DIGEST="$published_base")" == ok ]] ||
   { cat "$platform_tree/out" >&2; fail 'platform build from a published base failed'; }
-[[ "$(cat "$platform_tree/calls")" == "workspace|linux/amd64|registry.example.invalid/codewire/base@$published_base||workspace images/workspace/Dockerfile ." ]] ||
+trusted_name="$(sed -n 's/^.* buildx create --name \([^ ]*\) .*$/\1/p' "$platform_tree/docker")"
+[[ "$(cat "$platform_tree/calls")" == "workspace|linux/amd64|registry.example.invalid/codewire/base@$published_base|$trusted_name|workspace images/workspace/Dockerfile ." ]] ||
   fail 'a published base was rebuilt or not used for the workspace'
 grep -qxF "base_digest=$published_base" "$platform_tree/output" ||
   fail 'a platform build from a published base does not report that base'
@@ -841,6 +888,31 @@ for arm64_failure in 'STUB_FETCH=fail|client certificate could not be read' \
   [[ -z "$(find "$platform_tree/runner" -mindepth 1 -print -quit)" ]] ||
     fail "a failed arm64 attach left the certificate behind: ${arm64_failure%%|*}"
 done
+# The amd64 build fails fast without the trusted builder and never builds in
+# the job on its own; the error names the owner's recovery.
+for amd64_failure in 'STUB_TRUSTED_FETCH=fail|client certificate could not be read' \
+    'STUB_TRUSTED_NODE=down|did not answer as a running linux/amd64 builder' \
+    'STUB_TRUSTED_NODE=arm64|did not answer as a running linux/amd64 builder'; do
+  [[ "$(platform_case 110 linux/amd64 "${amd64_failure%%|*}")" == failed* ]] ||
+    fail "amd64 build did not fail fast: ${amd64_failure%%|*}"
+  for expected in "${amd64_failure#*|}" 'do not fall back to building in the job' 'CODEWIRE_IN_JOB_BUILD_SHA'; do
+    grep -qF "$expected" "$platform_tree/out" || fail "amd64 failure was not attributable: ${amd64_failure%%|*}"
+  done
+  [[ ! -s "$platform_tree/calls" ]] || fail "amd64 build ran without the trusted builder: ${amd64_failure%%|*}"
+  [[ -z "$(find "$platform_tree/runner" -mindepth 1 -print -quit)" ]] ||
+    fail "a failed trusted attach left the certificate behind: ${amd64_failure%%|*}"
+done
+# The owner's explicit recovery builds amd64 in the job's own builder.
+[[ "$(platform_case 110 linux/amd64 CODEWIRE_IN_JOB_BUILD=1)" == ok ]] ||
+  { cat "$platform_tree/out" >&2; fail 'the in-job amd64 recovery failed'; }
+[[ "$(cat "$platform_tree/calls")" == "base|linux/amd64|||base images/base/Dockerfile images/base
+workspace|linux/amd64|registry.example.invalid/codewire/base@$base_a||workspace images/workspace/Dockerfile ." ]] ||
+  fail 'the in-job amd64 recovery did not build on the job'"'"'s own builder'
+[[ ! -s "$platform_tree/trusted-fetches" && ! -s "$platform_tree/fetches" && ! -s "$platform_tree/docker" ]] ||
+  fail 'the in-job amd64 recovery read a certificate or attached a remote builder'
+grep -qF 'owner-invoked recovery path' "$platform_tree/out" || fail 'the in-job amd64 recovery was not announced'
+[[ "$(platform_case 110 linux/amd64 CODEWIRE_IN_JOB_BUILD=true)" == failed* && ! -s "$platform_tree/calls" ]] ||
+  fail 'an ambiguous recovery switch was accepted'
 [[ "$(platform_case 110 linux/amd64 STUB_MODE=fail)" == 'failed 9' && ! -s "$platform_tree/output" ]] ||
   fail 'a failed platform base did not fail the build with its status'
 [[ "$(platform_case 110 linux/amd64 STUB_MODE=nodigest)" == 'failed 1' ]] ||
@@ -854,6 +926,7 @@ grep -qF -- '--kill-after=60s "${remaining}s"' "$PLATFORM_BUILDER" ||
 grep -qF "::error::the %s support build exceeded its %s-minute budget in the %s image" "$PLATFORM_BUILDER" ||
   fail 'platform build does not explain an exhausted budget'
 "$ROOT/scripts/ci/tests/test-fetch-openbao-arm64-buildkit-client.sh" >/dev/null
+"$ROOT/scripts/ci/tests/test-fetch-openbao-trusted-buildkit-client.sh" >/dev/null
 
 # A failed half of the support pair cancels the run instead of leaving the
 # other half building on a protected slot (#2987). Each half ends with ci.yaml's

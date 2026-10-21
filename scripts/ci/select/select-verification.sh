@@ -1901,6 +1901,7 @@ if [ "$event_selected" = false ]; then
       # The protected Dev runtime builder never builds a Kind image: Kind
       # builds through build-kind-images.sh. Its contract runs in Deploy.
       scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/setup/trusted-buildkit.sh|\
       scripts/ci/tests/test-build-push-runtime-images.sh)
         select_token deploy
         select_token release
@@ -1996,6 +1997,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/build-push-image.sh|scripts/ci/images/build-push-runtime-images.sh|\
       scripts/ci/images/pipeline-identity.sh|\
       scripts/ci/images/build-support-platform.sh|\
+      scripts/ci/setup/trusted-buildkit.sh|\
       scripts/ci/images/run-workspace-contract-on-image.sh|\
       scripts/ci/tests/test-run-workspace-contract-on-image.sh|\
       scripts/ci/images/release-support-pair-state.sh|scripts/ci/images/join-release-support-image.sh|\
@@ -2009,6 +2011,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/setup/fetch-openbao-harbor-credentials.sh|\
       scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh|\
+      scripts/ci/setup/fetch-openbao-trusted-buildkit-client.sh|\
       scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/images/publish-image-to-ghcr.sh|\
       scripts/ci/images/resolve-published-support-pair.sh|\
@@ -2069,6 +2072,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-harbor-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-arm64-buildkit-client.sh|\
+      scripts/ci/tests/test-fetch-openbao-trusted-buildkit-client.sh|\
       scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/tests/test-forgejo-action-mirrors.sh|\
       scripts/ci/tests/test-harbor-runtime-pull-contract.sh|\

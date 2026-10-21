@@ -120,6 +120,11 @@ jobs:
       OPENBAO_ROLE: codewire-source-dev-publisher
       CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
       OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+      # The images build on the trusted BuildKit builder and fail fast when it
+      # is unreachable. Only the owner's recovery builds them in this job: the
+      # repository variable CODEWIRE_IN_JOB_BUILD_SHA naming this exact commit,
+      # then a rerun of all jobs (this run passes no artifacts between jobs).
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
@@ -162,7 +167,7 @@ jobs:
   build-daemon-image:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
     name: Build and push the daemon runtime image
-    runs-on: ci-protected-metal
+    runs-on: ci-protected
     enable-openid-connect: true
     timeout-minutes: 110
     needs: [deploy-selection]
@@ -174,6 +179,11 @@ jobs:
       OPENBAO_ROLE: codewire-source-dev-publisher
       CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
       OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+      # The images build on the trusted BuildKit builder and fail fast when it
+      # is unreachable. Only the owner's recovery builds them in this job: the
+      # repository variable CODEWIRE_IN_JOB_BUILD_SHA naming this exact commit,
+      # then a rerun of all jobs (this run passes no artifacts between jobs).
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 

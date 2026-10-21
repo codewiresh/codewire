@@ -41,6 +41,9 @@ ENV PATH="/opt/zig:/opt/protoc/bin:${PATH}" PROTOC=/opt/protoc/bin/protoc PYTHON
 FROM cw-toolchain AS cw-builder
 ARG CW_SOURCE_REQUEST_SHA256
 ARG CODEWIRE_RUST_PROFILE=runtime
+# Cargo's job count, set on the trusted BuildKit builder to fit its memory
+# (scripts/ci/setup/trusted-buildkit.sh); empty means Cargo's default.
+ARG CARGO_BUILD_JOBS
 ARG CODEWIRE_SCCACHE_MODE=disabled
 ARG SCCACHE_BUCKET
 ARG SCCACHE_ENDPOINT

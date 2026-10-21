@@ -164,11 +164,18 @@ cancel_users="$(grep -rE '/actions/runs/[^ ]*/cancel' "$ROOT/.gitea/workflows" "
   fail "Dev delivery is not exactly selection, two build halves and one publisher"
 service_job="$(sed -n '/^  build-service-images:/,/^  build-daemon-image:/p' "$WORKFLOW")"
 daemon_job="$(sed -n '/^  build-daemon-image:/,/^  publish-runtime-images:/p' "$WORKFLOW")"
-# The daemon's cw producer is the longest compile; it runs on a 32-CPU metal slot.
-grep -Fxq '    runs-on: ci-protected-metal' <<<"$daemon_job" ||
-  fail "the daemon image build does not select a metal protected slot"
-grep -Fxq '    runs-on: ci-protected' <<<"$service_job" ||
-  fail "the service image build left the ordinary protected pool"
+# Both halves run in ordinary protected jobs and build on the trusted BuildKit
+# builder; nothing selects a metal slot. Only the owner's per-commit recovery
+# variable builds them in the job.
+for half in "$service_job" "$daemon_job"; do
+  grep -Fxq '    runs-on: ci-protected' <<<"$half" ||
+    fail "a runtime image build left the ordinary protected pool"
+  grep -Fxq "      CODEWIRE_IN_JOB_BUILD: \${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}" <<<"$half" ||
+    fail "a runtime image build lacks the owner's exact-commit recovery switch"
+done
+if grep -q 'ci-protected-metal' "$WORKFLOW"; then
+  fail "Dev delivery still selects a metal protected slot"
+fi
 publish_job="$(sed -n '/^  publish-runtime-images:/,$p' "$WORKFLOW")"
 [[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 4 ]] ||
   fail "Dev workflow does not confine OIDC to selection, the protected builds and publication"
