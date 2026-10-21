@@ -20,7 +20,7 @@ EXPECTED_TOP_LEVEL_KEYS = {"schema", "cases"}
 EXPECTED_CASE_KEYS = {"id", "event", "ref", "kind_e2e_opt_in", "paths", "expected"}
 EXPECTED_RESULT_KEYS = {"classification", "selection_tokens", "required_local_mode"}
 VALID_CLASSIFICATIONS = {"changed", "unchanged", "unclassified", "requested", "release"}
-VALID_LOCAL_MODES = {"default", "integration", "kind", "full"}
+VALID_LOCAL_MODES = {"default", "integration", "full"}
 # The corpus records path decisions. Its crate cases classify against a Cargo
 # workspace without crate edges, so a new dependency in the repository changes
 # no case; scripts/ci/tests/test-select-verification.sh proves the crate graph.

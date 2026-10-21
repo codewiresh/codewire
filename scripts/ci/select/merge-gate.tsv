@@ -1,0 +1,33 @@
+# What local merge qualification (scripts/dev/preflight.sh --for-merge)
+# requires before a pull request merges, one row per verification family.
+#
+# family<TAB>before_merge<TAB>reason
+#
+# before_merge is yes or no. A selected family marked no is reported with its
+# reason and recorded as not run; post-merge CI still runs it. Changing what
+# the gate needs is a one-line reviewed edit here. Every family preflight can
+# run has exactly one row; a family without one fails closed.
+policy	yes	Repository policy, shell and workflow contracts are fast and catch most CI breakage.
+contracts	yes	Generated contracts and their consumers must agree before they ship together.
+rust_compile	yes	Every Rust target and feature compiles; the fast check CI runs beside its heavy jobs.
+rust	yes	Unit and crate tests of the changed Rust packages.
+rust_curated_locks	yes	Curated image workspaces keep their reviewed lock files.
+go_support	yes	Go support modules build and test.
+web	yes	Dashboard and design web tests, browser included.
+docs	yes	The documentation site builds.
+ios	yes	The iOS client builds.
+sdk_go	yes	The Go SDK builds and tests.
+sdk_ts	yes	The TypeScript SDK builds and tests.
+sdk_python	yes	The Python SDK builds and tests.
+service_apikey_smoke	yes	API key smoke tooling tests.
+runtime_confidential	yes	Confidential runtime tooling tests.
+runtime_dev_smoke	yes	Dev smoke tooling tests.
+database	yes	Migrations and database tests against a local Postgres.
+service_integration	yes	Service integration tests against locally started services.
+transport	yes	Transport, daemon and local VM packages.
+edge_kind	yes	Static edge verification; it needs no cluster.
+kind	no	Post-merge CI on metal runs Kind and failures are fixed forward. Owner, 2026-10-21: "Remove the pre-flight gate that says to run a kind cluster. We can't be doing this stuff anymore."
+release	yes	Release provenance and workflow contracts.
+deploy	yes	Deploy inputs, overlays and delivery workflow contracts.
+security	yes	Selected security scanners.
+workflow_audit	yes	Changed workflow files pass the zizmor audit source approval runs (supplychain workflows).

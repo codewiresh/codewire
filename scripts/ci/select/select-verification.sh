@@ -639,6 +639,8 @@ if [ "$event_selected" = false ]; then
       scripts/dev/linux-local-runtime.py|scripts/dev/test-linux-local-runtime.py|\
       scripts/dev/macos-app-sandbox-canary.py|scripts/dev/test-macos-app-sandbox-canary.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
+      scripts/ci/select/merge-gate.tsv|scripts/ci/select/merge-gate.py|\
+      scripts/ci/tests/test-merge-gate.py|\
       scripts/dev/pre-push.sh|scripts/dev/preflight-push.sh|\
       scripts/dev/preflight-environment.sh|\
       scripts/ci/select/emit-verification-matrices.sh|\
@@ -2244,13 +2246,13 @@ fi
 
 # The local mode describes what merge qualification needs for this change, so
 # it comes from the complete selection, before any hosted quick reduction.
+# Kind is never a local mode: scripts/ci/select/merge-gate.tsv keeps it out of
+# the merge gate (owner, 2026-10-21).
 required_local_mode=default
 if [ "$classification" = unclassified ] \
   || [ "$classification" = release ] \
   || { [ "$classification" = requested ] && [ "${VERIFICATION_REQUEST:-policy}" = all ]; }; then
   required_local_mode=full
-elif [ "$kind_relevant" = true ] || token_selected kind; then
-  required_local_mode=kind
 elif token_selected database || token_selected service_integration; then
   required_local_mode=integration
 fi

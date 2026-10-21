@@ -118,7 +118,7 @@
       "expected": {
         "classification": "changed",
         "selection_tokens": ["deploy", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "release", "runtime_confidential"],
-        "required_local_mode": "kind"
+        "required_local_mode": "default"
       }
     },
     {
@@ -178,7 +178,7 @@
       "expected": {
         "classification": "changed",
         "selection_tokens": ["edge_kind", "kind", "policy", "policy_shell_omittable", "web"],
-        "required_local_mode": "kind"
+        "required_local_mode": "default"
       }
     }
   ]

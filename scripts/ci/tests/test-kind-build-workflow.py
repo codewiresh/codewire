@@ -1006,7 +1006,8 @@ class SelectorContractTests(unittest.TestCase):
                 classification, tokens, mode = self.select([candidate])
                 self.assertEqual(classification, "changed")
                 self.assertTrue({"edge_kind", "kind", "policy"}.issubset(tokens))
-                self.assertEqual(mode, "kind")
+                # Kind is never a local merge mode (merge-gate.tsv).
+                self.assertEqual(mode, "default")
 
     def test_unknown_future_python_path_still_fails_closed(self) -> None:
         classification, tokens, mode = self.select(["future/kind-build-artifacts.py"])
@@ -1025,7 +1026,7 @@ class SelectorContractTests(unittest.TestCase):
         self.assertTrue({
             "edge_kind", "kind", "policy", "policy_shell", "security",
         }.issubset(tokens))
-        self.assertEqual(mode, "kind")
+        self.assertEqual(mode, "default")
 
 
 class CommonConsumerContractTests(unittest.TestCase):

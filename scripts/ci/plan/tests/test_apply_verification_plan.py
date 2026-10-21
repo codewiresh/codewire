@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -114,6 +116,38 @@ class PlanAdapterTests(unittest.TestCase):
         plan["baseline"]["baseline_commit"] = COMMIT_B  # type: ignore[index]
         with self.assertRaisesRegex(adapter.AdapterError, "do not match"):
             self.invoke(plan)
+
+    def behind_plan(self) -> dict[str, object]:
+        # A pull request behind main: the trusted policy and target base are
+        # main's tip (A), the planned baseline is the older merge-base (C).
+        plan = fixture_plan(cw_state="affected")
+        plan["baseline"]["mode"] = "pull_request_merge_base"  # type: ignore[index]
+        plan["baseline"]["baseline_commit"] = "c" * 40  # type: ignore[index]
+        return plan
+
+    def test_pull_request_behind_main_plans_its_own_changes_with_a_notice(self) -> None:
+        # Old behaviour: "trusted policy, target base, and baseline do not
+        # match" failed every pull request behind main.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            outputs = self.invoke(self.behind_plan())
+        self.assertEqual(outputs["cw_package_selected"], "true")
+        self.assertEqual(outputs["ci_head_commit"], COMMIT_B)
+        self.assertRegex(stderr.getvalue(), r"::notice::behind main by \S+ commits: .*update the branch")
+
+    def test_behind_main_still_needs_the_trusted_policy_at_the_target_base(self) -> None:
+        plan = self.behind_plan()
+        plan["trusted_policy"]["commit"] = "c" * 40  # type: ignore[index]
+        with self.assertRaisesRegex(adapter.AdapterError, "do not match"):
+            self.invoke(plan)
+
+    def test_main_push_plans_stay_strict(self) -> None:
+        # plan-main-push.py calls the adapter without allow_behind.
+        with tempfile.TemporaryDirectory() as temporary:
+            plan_path = Path(temporary) / "plan.json"
+            plan_path.write_text(json.dumps(self.behind_plan()) + "\n")
+            with self.assertRaisesRegex(adapter.AdapterError, "do not match"):
+                adapter.trusted_plan_outputs(plan_path)
 
     def test_non_pr_mode_is_explicitly_unclassified(self) -> None:
         args = argparse.Namespace(

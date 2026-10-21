@@ -35,9 +35,9 @@ fi
 
 preflight_mode="${CODEWIRE_PREFLIGHT_MODE:-default}"
 case "$preflight_mode" in
-  default|integration|kind|full|ci) ;;
+  default|integration|full|ci) ;;
   *)
-    echo "pre-push: CODEWIRE_PREFLIGHT_MODE must be default, integration, kind, full, or ci" >&2
+    echo "pre-push: CODEWIRE_PREFLIGHT_MODE must be default, integration, full, or ci" >&2
     exit 2
     ;;
 esac
@@ -118,10 +118,17 @@ if [ "$preflight_mode" = ci ]; then
       "$canonical_ref" >&2
     exit 1
   fi
-  if ! git merge-base --is-ancestor "$canonical_base" "$head_sha"; then
-    printf 'pre-push: CI-owned verification requires head %s to contain canonical base %s\n' \
+  # A branch behind main pushes as it is: a pull request that merges cleanly
+  # merges without a rebase (owner, 2026-10-21: "if pr doesnt need rebase
+  # dont force rebase"). It needs only a history shared with main.
+  if ! shared_base="$(git merge-base "$canonical_base" "$head_sha" 2>/dev/null)"; then
+    printf 'pre-push: CI-owned verification requires head %s to share history with canonical base %s\n' \
       "$head_sha" "$canonical_base" >&2
     exit 1
+  fi
+  if [ "$shared_base" != "$canonical_base" ]; then
+    printf 'pre-push: head %s is behind canonical base %s; no rebase needed unless it conflicts\n' \
+      "$head_sha" "$canonical_base"
   fi
 
   printf 'pre-push: deferring exact-tree verification to required Forgejo CI head=%s base=%s\n' \

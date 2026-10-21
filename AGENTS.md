@@ -87,15 +87,17 @@ A change that affects anything a user or operator can see or do is not done
 until it has run in the product and been observed working. Tests, checks, and
 CI are necessary evidence; they are never proof of behavior.
 
-- Start every product session on the retained local Kind cluster
-  (`make kind-status`, then `make kind-watch`; see `docs/dev/AGENT-WORKFLOW.md`)
-  and confirm http://localhost:4174/ loads before editing. A broken local
-  cluster is the first blocker, not a later gate.
-- Before pushing a user-visible change, walk its acceptance journey where it
-  runs: dashboard and platform changes on the retained local Kind cluster through
-  the owner URL, CLI and host changes with a built `cw` on the host. Include the
-  empty, failure, and recovery states it touches. Record what was run and what
-  was observed.
+- Walk each user-visible change's acceptance journey where it runs: dashboard
+  and platform changes on Dev once delivered, or on the retained local Kind
+  cluster before merge when Dev is impractical; CLI and host changes with a
+  built `cw` on the host. Include the empty, failure, and recovery states it
+  touches. Record what was run and what was observed.
+- Kind is never a merge requirement (owner, 2026-10-21: "Remove the pre-flight
+  gate that says to run a kind cluster. We can't be doing this stuff anymore."
+  and "Keep it out of the merge gate, but keep it working so that locally it
+  can be used for things that are tricky to test or time consuming to test on
+  Dev."). It stays a maintained local tool for behaviour that is tricky or
+  slow to test on Dev.
 - Every workstream and handoff names a mandatory local acceptance journey. If
   it depends on tooling that does not exist yet, that tooling lands first; a
   journey is never "optional if available".
@@ -105,8 +107,8 @@ CI are necessary evidence; they are never proof of behavior.
 
 ## Local development loop
 
-Iterate on one retained local Kind cluster; commands live in
-`docs/dev/AGENT-WORKFLOW.md`.
+When behaviour is tricky or slow to test on Dev, iterate on one retained local
+Kind cluster; commands live in `docs/dev/AGENT-WORKFLOW.md`.
 
 - Never recreate the cluster to test a change. Create it once (`make kind-up`,
   or keep the gate's cluster), then deploy changed services into it
@@ -117,9 +119,9 @@ Iterate on one retained local Kind cluster; commands live in
   failed suite created. If a narrow change asks for the full gate only because
   a mapping is missing, add the mapping and its suite instead of running the
   full gate.
-- The full `make e2e-kind` is not a landing gate. Land on the merge rule in
-  "Delivery and verification"; a CLI change needs no Kind run unless it changes
-  a platform or dashboard path. Run the full gate only when the owner asks,
+- No Kind run is a landing gate, `make e2e-kind` included. Land on the merge
+  rule in "Delivery and verification"; post-merge CI runs Kind and a failure
+  there is fixed forward. Run the full Kind gate only when the owner asks,
   never as an iteration step, and never twice for an unchanged tree.
 - Switch the credential-service to `real` only for journeys that need a real
   provider; the synthetic fixture remains the gate's default.
@@ -205,16 +207,20 @@ formatting, lints and unit tests for the changed crates, and quick checks for
 the changed file types. Do not bypass the hook.
 
 Each pull request merges alone. Never bundle pull requests into a train or an
-integration branch: one failure then hides in several changes. Bring the branch
-up to date with `main`, which branch protection requires, and merge on:
+integration branch: one failure then hides in several changes. A pull request
+that merges cleanly merges without a rebase, even when it is behind `main`;
+rebase only on a conflict (owner, 2026-10-21: "if pr doesnt need rebase dont
+force rebase"). `main` CI verifies the landed tree after merge, and a failure
+is fixed forward. Merge on:
 
 - the focused checks the change needs. `scripts/dev/preflight.sh --for-merge`
-  runs the families the selection names, in parallel, with the same scripts as
-  CI on the shared compiler cache. Use it when a change crosses crates or
-  contracts; the changed crates' tests and lints are enough when it does not;
-- its product journey;
-- for a change to credential, broker, bridge or relay code, a green
-  `make kind-test SUITES=credentials` on the retained cluster.
+  runs, in parallel and with the same scripts as CI on the shared compiler
+  cache, the selected families that `scripts/ci/select/merge-gate.tsv` marks
+  required before merge. That table is the one place that says what the gate
+  needs; changing it is a one-line reviewed edit. Use the preflight when a
+  change crosses crates or contracts; the changed crates' tests and lints are
+  enough when it does not;
+- its product journey where "Done means observed working" places it.
 
 A merge check on a CI worker is the same evidence as a local `--for-merge`
 run. Label the pull request `merge-check`. A metal guest then runs
@@ -226,14 +232,12 @@ A change to the merge check's own machinery gets no receipt and qualifies
 locally. Merge on it only when
 `scripts/ci/receipts/ci-merge-check.py verify --pr N` passes, which binds the
 receipt to the current head and `main`. A local run stays valid. The product
-journey and the Kind rules are unchanged (owner, 2026-10-20, cited on #3013).
+journey is unchanged (owner, 2026-10-20, cited on #3013).
 
-Kind gates only platform, dashboard, and credential, broker, bridge or relay
-code. A CLI-only change merges on its unit tests, lints and host journey with
-a built `cw`, with no local Kind run; Kind confirms it after merge, and a
-failure there is fixed forward. A change that only rewrites `cw` callers in
-Kind suite scripts is covered by the offline script tests (owner, 2026-10-20,
-cited on #2940; the classifier follows in #2966).
+Kind is never part of the merge gate (merge-gate.tsv marks it no): post-merge
+CI on metal runs it, and a failure there is fixed forward. A CLI-only change
+merges on its unit tests, lints and host journey with a built `cw` (owner,
+2026-10-20, cited on #2940).
 
 Prefer the faster build or CI option. State a binary-size or cost trade-off in
 one line; do not gate on it or add measurement rounds before a speed change,
@@ -247,9 +251,10 @@ tag never points at a commit without them. When a protected build fails for an
 infrastructure reason, rerun it for that commit before the commit can become a
 release (owner, 2026-10-15, cited on #2892).
 
-When `main` moves after a check passed, bring the branch up to date again and
-reuse the result if the new commits touch none of the change's inputs. Rerun
-only what overlaps.
+When `main` moves after a check passed, the result still holds for a clean
+merge. When a conflict forces a rebase, merge qualification carries every
+family's pass forward whose inputs the main delta does not touch, by the
+selector's own file-to-family map, and reruns only what overlaps.
 
 Hosted CI confirms after merge; it is not a merge gate. The exception is a
 hosted-only claim (such as scheduling, credentials, permissions, cache, or

@@ -158,7 +158,6 @@ else
   explain="$("$ROOT/scripts/dev/preflight.sh" --explain 2>&1)" \
     || { printf '%s\n' "$explain" >&2; die "preflight could not classify the change"; }
   classification="$(sed -n 's/^preflight classification: //p' <<<"$explain")"
-  required_mode="$(sed -n 's/^preflight required local mode: //p' <<<"$explain")"
   selection="$(sed -n 's/^preflight selection: //p' <<<"$explain")"
   [ -n "$selection" ] || die "preflight printed no selection"
   if [ "$classification" = unclassified ]; then
@@ -181,10 +180,9 @@ else
     done
     tokens=("${kept[@]}")
   fi
-  # The selector marks a Kind-relevant path (harness, ingress, Kind overlay) by
-  # requiring the Kind mode; the printed selection omits its Kind tokens.
+  # The local selection carries the Kind tokens of a Kind-relevant path
+  # (harness, ingress, Kind overlay).
   kind_relevant=false
-  [ "$required_mode" != kind ] || kind_relevant=true
   for token in "${tokens[@]}"; do
     [ -n "$token" ] || continue
     case "$token" in edge_kind | kind | deploy) kind_relevant=true ;; esac

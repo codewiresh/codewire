@@ -147,6 +147,8 @@ write_stub_tree() {
   install -m 755 "$ROOT/scripts/dev/install-hooks.sh" "$repo/scripts/dev/install-hooks.sh"
   install -m 755 "$ROOT/scripts/ci/select/select-verification.sh" \
     "$repo/scripts/ci/select/select-verification.sh"
+  install -m 755 "$ROOT/scripts/ci/select/merge-gate.py" "$repo/scripts/ci/select/merge-gate.py"
+  install -m 644 "$ROOT/scripts/ci/select/merge-gate.tsv" "$repo/scripts/ci/select/merge-gate.tsv"
   install -m 755 "$ROOT/scripts/ci/verify/resolve-cargo-target-dir.sh" \
     "$repo/scripts/ci/verify/resolve-cargo-target-dir.sh"
   install -m 755 "$ROOT/scripts/ci/verify/shellcheck-baseline.sh" \
@@ -394,6 +396,8 @@ EOF
 chmod +x "$TMP/bin/tool-stub"
 ln -s tool-stub "$TMP/bin/bun"
 ln -s tool-stub "$TMP/bin/cargo"
+# The workflow audit's scanner (preflight runs it on changed workflow files).
+ln -s tool-stub "$TMP/bin/supplychain"
 # The toolchain identity is part of the merge pass key.
 cat > "$TMP/bin/rustc" <<'EOF'
 #!/usr/bin/env bash
@@ -454,7 +458,7 @@ if invalid_mode_output="$({
   fail 'pre-push accepted explain mode without verification'
 fi
 assert_contains invalid_mode "$invalid_mode_output" \
-  'CODEWIRE_PREFLIGHT_MODE must be default, integration, kind, full, or ci'
+  'CODEWIRE_PREFLIGHT_MODE must be default, integration, full, or ci'
 [ ! -s "$invalid_mode_log" ] || fail 'invalid mode ran verification tools'
 
 multi_ref_log="$TMP/multi-ref-tools.log"
@@ -757,6 +761,7 @@ assert_not_contains normal_toolchain "$normal_toolchain" 'reused the exact-tree 
   fail 'another toolchain reused a pass'
 # A tampered pass is not evidence.
 for marker in "$repo"/.tmp/preflight/passed/*; do
+  [ -f "$marker" ] || continue
   printf 'tampered\n' >> "$marker"
 done
 normal_tampered="$({
@@ -801,6 +806,25 @@ ci_owned_output="$({
 assert_contains ci_owned "$ci_owned_output" \
   "pre-push: deferring exact-tree verification to required Forgejo CI head=$ci_owned_head base=$ci_owned_base"
 [ ! -s "$ci_owned_log" ] || fail 'CI-owned feature push ran local verification tools'
+# A branch behind main pushes without a rebase (owner, 2026-10-21). Old
+# behaviour: "requires head to contain canonical base" refused it.
+ci_behind_main="$(
+  printf 'test: main moved past the branch\n' |
+    git -C "$repo" commit-tree "$(git -C "$repo" rev-parse 'origin/main^{tree}')" \
+      -p "$ci_owned_base"
+)"
+git -C "$repo" update-ref refs/remotes/origin/main "$ci_behind_main"
+ci_behind_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$ci_owned_log" \
+    CODEWIRE_PREFLIGHT_MODE=ci \
+    git push -q origin HEAD:refs/heads/ci-behind
+} 2>&1)"
+git -C "$repo" update-ref refs/remotes/origin/main "$ci_owned_base"
+assert_contains ci_behind "$ci_behind_output" \
+  "pre-push: head $ci_owned_head is behind canonical base $ci_behind_main; no rebase needed unless it conflicts"
+assert_contains ci_behind "$ci_behind_output" 'pre-push: deferring exact-tree verification to required Forgejo CI'
+assert_not_contains ci_behind "$ci_behind_output" 'to contain canonical base'
 
 if ci_main_output="$({
   printf '%s\n' \
@@ -943,8 +967,12 @@ assert_contains failed_receipt "$failed_receipt_output" \
   'preflight: release receipt unavailable; running full fail-closed verification'
 assert_contains failed_receipt_tools "$(cat "$failed_receipt_log")" \
   'integration database '
-assert_contains failed_receipt_tools "$(cat "$failed_receipt_log")" '--kind-browser'
-assert_has_line failed_receipt_tools "$(cat "$failed_receipt_log")" kind
+# Kind is never part of the local gate, full verification included: the
+# release gate's Kind run is CI's (merge-gate.tsv; owner, 2026-10-21).
+! grep -Fxq kind "$failed_receipt_log" || fail 'full verification ran the Kind e2e suite'
+! grep -Fq -- '--kind-browser' "$failed_receipt_log" || fail 'full verification prepared a Kind browser'
+assert_contains failed_receipt "$failed_receipt_output" \
+  'preflight: kind is not required before merge (scripts/ci/select/merge-gate.tsv)'
 
 linked_docs="$TMP/linked-docs"
 git -C "$repo" worktree add -q -b linked-docs "$linked_docs" main
@@ -1253,17 +1281,83 @@ assert_contains linked_proto_base "$proto_rerun" '==> policy verification (core-
 [ "$(grep -c '^product contracts ' "$proto_log")" -eq 2 ] ||
   fail 'a moved base reused the contracts pass'
 
-# A Kind-relevant change: merge qualification never runs Kind and its
-# receipt says so.
+# A family's pass survives a rebase (#2892). Old behaviour: any rebase changed
+# the tree, so every family ran again. New: a pass carries forward when the
+# selector maps the main delta to none of the family's tokens; the policy
+# parts, which every path selects, still run again.
+carry="$TMP/linked-carry"
+git -C "$repo" worktree add -q -b linked-carry "$carry" main
+printf 'carry\n' > "$carry/libs/tailnet/carry.txt"
+commit_all "$carry" 'test: linked carry-forward fixture'
+carry_log="$TMP/carry-tools.log"
+carry_merge() {
+  (
+    cd "$carry"
+    PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$carry_log" "$@" \
+      scripts/dev/preflight.sh --for-merge --emit-receipt 2>&1
+  )
+}
+# main_moves PATH: a new main commit touching PATH, and the branch rebased on it.
+main_moves() {
+  local main_commit
+  git -C "$repo" worktree add -q --detach "$TMP/carry-main" origin/main
+  mkdir -p "$(dirname "$TMP/carry-main/$1")"
+  # A comment line keeps every touched file valid, the gate table included.
+  printf '# main moved %s\n' "$RANDOM" >> "$TMP/carry-main/$1"
+  commit_all "$TMP/carry-main" "test: main moves $1"
+  main_commit="$(git -C "$TMP/carry-main" rev-parse HEAD)"
+  git -C "$repo" worktree remove --force "$TMP/carry-main"
+  git -C "$repo" update-ref refs/remotes/origin/main "$main_commit"
+  git -C "$carry" rebase -q "$main_commit"
+}
+go_runs() { grep -c '^product go-support ' "$carry_log" || true; }
+policy_runs() { grep -c '^product policy-core-1 ' "$carry_log" || true; }
+carry_output="$(carry_merge)"
+assert_contains carry_first "$carry_output" '==> Go support verification: passed'
+[ "$(go_runs)" -eq 1 ] || fail 'the first carry fixture run did not run Go support'
+# Main moves by a docs change: Go support carries, policy runs again.
+main_moves docs/carry.md
+carry_output="$(carry_merge)"
+assert_contains carry_docs "$carry_output" \
+  '==> Go support verification: carried forward the pass of tree'
+[ "$(go_runs)" -eq 1 ] || fail 'a docs-only main delta reran Go support'
+[ "$(policy_runs)" -eq 2 ] || fail 'a main delta every path selects did not rerun policy'
+grep -q '^reused=.*go-support' <<<"$(
+  cd "$carry" && scripts/ci/receipts/local-prepush-receipt.py verify --accept-scope merge
+)" || fail 'the receipt does not record the carried pass as reused'
+# Main moves under Go support's inputs: it runs again.
+main_moves libs/tailnet/main.txt
+carry_output="$(carry_merge)"
+assert_not_contains carry_go "$carry_output" 'Go support verification: carried forward'
+[ "$(go_runs)" -eq 2 ] || fail 'a main delta under Go support carried its pass'
+# The gate's own machinery in the delta carries nothing.
+main_moves scripts/ci/select/merge-gate.tsv
+carry_output="$(carry_merge)"
+assert_not_contains carry_machinery "$carry_output" 'carried forward'
+[ "$(go_runs)" -eq 3 ] || fail 'a delta under the gate machinery carried a pass'
+# Another toolchain never carries, and a removed pass is no evidence.
+main_moves docs/carry-toolchain.md
+carry_output="$(carry_merge env PREFLIGHT_TEST_RUSTC_ID=c)"
+assert_not_contains carry_toolchain "$carry_output" 'carried forward'
+rm -f "$carry"/.tmp/preflight/passed/[0-9a-f]*
+main_moves docs/carry-removed.md
+carry_output="$(carry_merge)"
+assert_not_contains carry_removed "$carry_output" 'carried forward'
+git -C "$repo" update-ref refs/remotes/origin/main "$(git -C "$repo" rev-parse main)"
+
+# A Kind-relevant change: merge-gate.tsv marks Kind not required before merge,
+# so merge qualification reports it with the table's reason, never runs it,
+# and its receipt says so. Kind is no local mode any more.
 linked_kind="$TMP/linked-kind"
 git -C "$repo" worktree add -q -b linked-kind "$linked_kind" main
 printf 'fixture\n' > "$linked_kind/Caddyfile"
 commit_all "$linked_kind" 'test: linked Kind-relevant fixture'
 kind_log="$TMP/kind-tools.log"
 kind_output="$(push_branch "$linked_kind" linked-kind "$kind_log")"
-assert_contains linked_kind "$kind_output" 'preflight required local mode: kind'
+assert_contains linked_kind "$kind_output" 'preflight required local mode: default'
 assert_contains linked_kind "$kind_output" \
-  'preflight: not run locally: kind (post-merge CI owns it; run make kind-test for platform or dashboard behaviour)'
+  'preflight: kind is not required before merge (scripts/ci/select/merge-gate.tsv): Post-merge CI on metal runs Kind'
+assert_not_contains linked_kind "$kind_output" 'run make kind-test'
 assert_contains linked_kind "$kind_output" \
   'pre-push: not run locally: kind; post-merge CI owns it'
 assert_lacks_line kind_tools "$(cat "$kind_log")" kind
@@ -1345,16 +1439,28 @@ done
 kind_mode_paths="$TMP/kind-mode.paths"
 printf 'Caddyfile\n' > "$kind_mode_paths"
 kind_mode_log="$TMP/kind-mode-tools.log"
-kind_mode_output="$({
+# Kind is no preflight mode any more (merge-gate.tsv; owner, 2026-10-21).
+if kind_mode_output="$({
   cd "$repo"
   PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$kind_mode_log" \
     PREFLIGHT_CHANGED_FILES="$kind_mode_paths" CODEWIRE_PREFLIGHT_MODE=kind \
     "$repo/scripts/dev/preflight.sh"
+} 2>&1)"; then
+  fail 'preflight accepted the retired kind mode'
+fi
+assert_contains kind_mode "$kind_mode_output" 'preflight: unsupported mode kind'
+# A Kind-relevant path runs its static edge checks, reports Kind with the
+# table's reason, and never runs Kind.
+kind_mode_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$kind_mode_log" \
+    PREFLIGHT_CHANGED_FILES="$kind_mode_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
+assert_contains kind_mode "$kind_mode_output" 'preflight required local mode: default'
 assert_contains kind_mode "$kind_mode_output" \
-  'preflight required local mode: kind'
+  'preflight: kind is not required before merge (scripts/ci/select/merge-gate.tsv)'
 assert_contains kind_mode_tools "$(cat "$kind_mode_log")" 'product edge '
-assert_has_line kind_mode_tools "$(cat "$kind_mode_log")" kind
+assert_lacks_line kind_mode_tools "$(cat "$kind_mode_log")" kind
 
 full_mode_paths="$TMP/full-mode.paths"
 printf 'docs/full.md\n' > "$full_mode_paths"
@@ -1367,7 +1473,10 @@ full_mode_output="$({
 } 2>&1)"
 assert_contains full_mode "$full_mode_output" 'preflight full selection: |valid:v3|'
 assert_contains full_mode_tools "$(cat "$full_mode_log")" 'integration database '
-assert_has_line full_mode_tools "$(cat "$full_mode_log")" kind
+# Full verification runs every family the table requires, which excludes Kind.
+assert_lacks_line full_mode_tools "$(cat "$full_mode_log")" kind
+assert_contains full_mode "$full_mode_output" \
+  'preflight: kind is not required before merge (scripts/ci/select/merge-gate.tsv)'
 
 sdk_runner_paths="$TMP/sdk-runner.paths"
 printf '%s\n' \

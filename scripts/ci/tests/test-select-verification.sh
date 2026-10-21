@@ -1837,7 +1837,7 @@ printf '%s\n' Caddyfile > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1911/head \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
-assert_contract_field edge "$contract_output" required_local_mode kind
+assert_contract_field edge "$contract_output" required_local_mode default
 printf '%s\n' scripts/ci/images/build-push-runtime-images.sh > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1914/head \
@@ -1853,7 +1853,7 @@ printf '%s\n' scripts/ci/tests/test-kind-e2e-suites.sh \
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1913/head \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
-assert_contract_field kind_fixture_mixed "$contract_output" required_local_mode kind
+assert_contract_field kind_fixture_mixed "$contract_output" required_local_mode default
 printf '%s\n' scripts/ci/tests/test-kind-cw-runtime.py \
   scripts/ci/tests/test-kind-cw-runtime-probe.py > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
@@ -1868,14 +1868,14 @@ contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/19132/head \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
 assert_contract_field kind_runtime_fixtures_mixed "$contract_output" classification changed
-assert_contract_field kind_runtime_fixtures_mixed "$contract_output" required_local_mode kind
+assert_contract_field kind_runtime_fixtures_mixed "$contract_output" required_local_mode default
 printf '%s\n' scripts/ci/tests/test-dashboard-browser-gate.sh \
   scripts/ci/verify/kind/suites/dashboard-browser.sh > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1914/head \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
 assert_contract_field dashboard_browser_gate_mixed "$contract_output" classification changed
-assert_contract_field dashboard_browser_gate_mixed "$contract_output" required_local_mode kind
+assert_contract_field dashboard_browser_gate_mixed "$contract_output" required_local_mode default
 printf '%s\n' unexplained/new-surface.txt > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/192/head \
@@ -2455,12 +2455,12 @@ switch_push() { # SELECTOR PATH... -> output; stderr in $TMP/switch.stderr
 }
 output="$(switch_push "$SELECTOR_KIND_OFF" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)"
 assert_tokens main_push_switch_off 'edge_kind policy web' "$output"
-assert_contract_field main_push_switch_off "$output" required_local_mode kind
+assert_contract_field main_push_switch_off "$output" required_local_mode default
 [ "$(grep -Fxc "$deferred_line" "$TMP/switch.stderr")" = 1 ] || {
   echo 'a main push that deferred Kind did not say so in one line' >&2; exit 1; }
 output="$(switch_push "$SELECTOR_KIND_ON" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)"
 assert_tokens main_push_switch_on 'edge_kind kind policy web' "$output"
-assert_contract_field main_push_switch_on "$output" required_local_mode kind
+assert_contract_field main_push_switch_on "$output" required_local_mode default
 ! grep -Fq 'Kind deferred' "$TMP/switch.stderr" || {
   echo 'a main push that runs Kind said it deferred Kind' >&2; exit 1; }
 # A push that selects no Kind defers nothing and says nothing.
@@ -4393,6 +4393,9 @@ bash -n \
   "$ROOT/.githooks/pre-push"
 
 "$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh"
+# What the merge gate requires: merge-gate.tsv, preflight honouring it, and
+# the verified-base override (owner, 2026-10-21).
+python3 -B "$ROOT/scripts/ci/tests/test-merge-gate.py"
 "$ROOT/scripts/ci/tests/test-pre-push-worktree.sh"
 "$ROOT/scripts/ci/tests/test-push-check-shellcheck.sh"
 "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"

@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,27 @@ def artifact_state(plan: dict[str, Any], name: str) -> str:
     return state
 
 
-def trusted_plan_outputs(plan_path: Path) -> dict[str, str]:
+def commits_behind(baseline: str, target: str) -> str:
+    """How many commits main has that the pull request's base lacks, best effort."""
+    try:
+        completed = subprocess.run(
+            ["git", "rev-list", "--count", f"{baseline}..{target}"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "some"
+    count = completed.stdout.strip()
+    return count if completed.returncode == 0 and count.isdigit() else "some"
+
+
+def trusted_plan_outputs(plan_path: Path, *, allow_behind: bool = False) -> dict[str, str]:
+    """Artifact facts from a trusted plan.
+
+    The trusted policy is always the target base. With allow_behind (a pull
+    request), the baseline may be an older merge-base: the pull request is
+    behind main, and its own changes are planned, with a notice to update the
+    branch. Everything else, a push to main included, needs all three equal.
+    """
     raw = plan_path.read_text()
     try:
         plan = json.loads(raw)
@@ -62,8 +83,17 @@ def trusted_plan_outputs(plan_path: Path) -> dict[str, str]:
     policy_commit = require_string(trusted, "commit", HEX40_RE)
     target_base = require_string(baseline, "target_base_commit", HEX40_RE)
     baseline_commit = require_string(baseline, "baseline_commit", HEX40_RE)
-    if policy_commit != target_base or baseline_commit != target_base:
+    if policy_commit != target_base:
         raise AdapterError("trusted policy, target base, and baseline do not match")
+    if baseline_commit != target_base:
+        if not allow_behind or baseline.get("mode") != "pull_request_merge_base":
+            raise AdapterError("trusted policy, target base, and baseline do not match")
+        print(
+            f"::notice::behind main by {commits_behind(baseline_commit, target_base)} commits: "
+            f"selection covers this pull request's own changes since {baseline_commit[:12]}; "
+            "update the branch before merging",
+            file=sys.stderr,
+        )
 
     cw_state = artifact_state(plan, "cw_cli_release_assets")
     desktop_state = artifact_state(plan, "desktop_package")
@@ -122,7 +152,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def build_outputs(args: argparse.Namespace) -> dict[str, str]:
     return (
-        trusted_plan_outputs(Path(args.plan))
+        trusted_plan_outputs(Path(args.plan), allow_behind=True)
         if args.plan
         else unclassified_outputs(args)
     )

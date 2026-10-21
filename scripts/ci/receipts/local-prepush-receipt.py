@@ -181,10 +181,16 @@ def resolve_base(root: Path, requested: str | None) -> str:
     raise fail("canonical-base-unavailable")
 
 
-def changed_paths(root: Path, base: str, head: str) -> list[str]:
-    commands = (
-        ("diff", "--name-only", "-z", f"{base}...{head}"),
-        ("diff", "--name-only", "-z", base, head),
+def changed_paths(root: Path, base: str, head: str, tree_diff: bool = False) -> list[str]:
+    # A verified base is compared tree to tree: a rewritten branch shares no
+    # history with the old main it reproduces.
+    commands: tuple[tuple[str, ...], ...] = (
+        (("diff", "--name-only", "-z", base, head),)
+        if tree_diff
+        else (
+            ("diff", "--name-only", "-z", f"{base}...{head}"),
+            ("diff", "--name-only", "-z", base, head),
+        )
     )
     raw: bytes | None = None
     for command in commands:
@@ -288,7 +294,7 @@ def parse_selector_output(output: str) -> dict[str, str]:
         raise fail("selection-malformed")
     if not fields["selection"].endswith("|complete|"):
         raise fail("selection-malformed")
-    if fields["required_local_mode"] not in {"default", "integration", "kind", "full"}:
+    if fields["required_local_mode"] not in {"default", "integration", "full"}:
         raise fail("selection-malformed")
     return fields
 
@@ -306,9 +312,9 @@ def invoke_selector(root: Path, paths: Sequence[str], full: bool = False) -> dic
         command = [os.fspath(selector)]
         path_file: Path | None = None
     else:
-        # Local qualification mirrors pull-request CI without the Kind opt-in:
-        # Kind is a dev-loop tool here and a post-merge CI gate.
-        environment.update(GITHUB_EVENT_NAME="pull_request", KIND_E2E_OPT_IN="false")
+        # Local qualification binds the complete selection, Kind included;
+        # scripts/ci/select/merge-gate.tsv decides what runs before merge.
+        environment.update(GITHUB_EVENT_NAME="pull_request", KIND_E2E_OPT_IN="true")
         fd, path_name = tempfile.mkstemp(prefix="codewire-prepush-paths.")
         path_file = Path(path_name)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -346,12 +352,13 @@ def current_context(
     head_value: str,
     base_value: str | None,
     remote_name: str | None,
+    base_evidence: str | None = None,
 ) -> dict[str, Any]:
     clean_worktree(root)
     head = exact_commit(root, head_value)
     tree = exact_tree(root, head)
     base = resolve_base(root, base_value)
-    paths = changed_paths(root, base, head)
+    paths = changed_paths(root, base, head, tree_diff=base_evidence is not None)
     initial = invoke_selector(root, paths)
     mode = initial["required_local_mode"]
     effective = invoke_selector(root, paths, full=True) if mode == "full" else initial
@@ -376,6 +383,14 @@ def current_context(
         "policy_sha256": policy_digest,
         "planner_sha256": planner_digest,
     }
+    source: dict[str, Any] = {"commit": head, "tree": tree, "base_commit": base}
+    if base_evidence is not None:
+        # Selected from a verified base (preflight PREFLIGHT_VERIFIED_BASE),
+        # with the evidence that verified it.
+        if not re.fullmatch(r"main-ci:[1-9][0-9]*", base_evidence):
+            raise fail("base-evidence-invalid")
+        plan_material["base_evidence"] = base_evidence
+        source["base_evidence"] = base_evidence
     plan_digest = sha256_bytes(
         json.dumps(plan_material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     )
@@ -386,7 +401,7 @@ def current_context(
             "git_common_dir": os.fspath(common),
         },
         "worktree": {"id": worktree_id, "real_path": os.fspath(root)},
-        "source": {"commit": head, "tree": tree, "base_commit": base},
+        "source": source,
         "policy": {
             "id": "codewire/local-ci-policy-v3",
             "version": initial["selector_version"],
@@ -692,6 +707,7 @@ def parser() -> argparse.ArgumentParser:
     subparsers.add_parser("check-clean")
     emit = subparsers.add_parser("emit")
     emit.add_argument("--verified-base", required=True)
+    emit.add_argument("--verified-base-evidence")
     emit.add_argument("--verified-mode", required=True)
     emit.add_argument("--verified-selection", required=True)
     emit.add_argument("--scope", required=True, choices=SCOPES)
@@ -730,6 +746,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else arguments.verified_base
             ),
             remote_name=arguments.remote_name if arguments.command != "emit" else None,
+            base_evidence=(
+                arguments.verified_base_evidence if arguments.command == "emit" else None
+            ),
         )
         if arguments.command == "emit":
             execution = execution_record(

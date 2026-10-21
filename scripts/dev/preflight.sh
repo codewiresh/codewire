@@ -12,11 +12,13 @@ PRODUCT_RUNNER="$REPO_ROOT/scripts/ci/verify/run-product-verification.sh"
 INTEGRATION_RUNNER="$REPO_ROOT/scripts/ci/verify/run-integration-verification.sh"
 ENVIRONMENT_CHECK="$REPO_ROOT/scripts/dev/preflight-environment.sh"
 PUSH_CHECK="$REPO_ROOT/scripts/dev/preflight-push.sh"
+MERGE_GATE="$REPO_ROOT/scripts/ci/select/merge-gate.py"
+VERIFIED_BASE="$REPO_ROOT/scripts/ci/plan/verified-base.py"
 cd "$REPO_ROOT"
 
 usage() {
   cat <<'EOF'
-usage: scripts/dev/preflight.sh [--default|--integration|--kind|--full|--explain]
+usage: scripts/dev/preflight.sh [--default|--integration|--full|--explain]
        scripts/dev/preflight.sh --for-push --emit-receipt
        scripts/dev/preflight.sh --for-merge --emit-receipt
 
@@ -25,15 +27,23 @@ unit tests for changed crates, quick checks for changed file types). The
 pre-push hook runs it when no receipt for the pushed tree exists.
 
 --for-merge is merge qualification: the environment precheck, then the
-families the selection needs, compile first and independent families in
-parallel lanes, reusing exact-tree passes. It never runs Kind; run
-`make kind-test` for platform or dashboard behaviour. Post-merge CI runs the
-rest.
+selected families that scripts/ci/select/merge-gate.tsv requires before
+merge, compile first and independent families in parallel lanes, reusing
+exact-tree passes. A selected family the table does not require is reported
+with its reason and left to post-merge CI. Kind is never required: `make
+kind-test` stays a local tool for behaviour that is tricky or slow to test on
+Dev.
+
+PREFLIGHT_VERIFIED_BASE=<sha> selects from that commit's tree instead of the
+merge-base with main, for example the old main a rewritten branch reproduces.
+It is used only when that commit's own main CI verified it; otherwise the
+merge-base is used.
 
 --emit-receipt stores an eight-hour exact-tree receipt recording exactly which
 checks ran. default runs lightweight selected checks sequentially;
-integration, Kind and full are explicit escalations. --full never publishes,
-deploys, releases, or mutates live state.
+integration and full are explicit escalations, and every mode runs only the
+families the table requires. --full never publishes, deploys, releases, or
+mutates live state.
 EOF
 }
 
@@ -45,7 +55,6 @@ for argument in "$@"; do
   case "$argument" in
     --default) PREFLIGHT_MODE=default; explicit_mode=true ;;
     --integration) PREFLIGHT_MODE=integration; explicit_mode=true ;;
-    --kind) PREFLIGHT_MODE=kind; explicit_mode=true ;;
     --full) PREFLIGHT_MODE=full; explicit_mode=true ;;
     --explain) PREFLIGHT_MODE=explain; explicit_mode=true ;;
     --for-push|--for-merge)
@@ -67,8 +76,7 @@ if [ -n "$PREFLIGHT_SCOPE" ]; then
     exit 2
   fi
   for diagnostic_input in PREFLIGHT_CHANGED_FILES PREFLIGHT_FORCE_UNKNOWN \
-      PREFLIGHT_HEAD_SHA PREFLIGHT_BASE_SHA PREFLIGHT_KIND_OPT_IN \
-      PREFLIGHT_RELEASE_TAG_REF; do
+      PREFLIGHT_HEAD_SHA PREFLIGHT_BASE_SHA PREFLIGHT_RELEASE_TAG_REF; do
     if [ -n "${!diagnostic_input:-}" ]; then
       printf 'preflight: --for-%s rejects diagnostic input %s\n' \
         "$PREFLIGHT_SCOPE" "$diagnostic_input" >&2
@@ -80,12 +88,25 @@ elif [ "$PREFLIGHT_EMIT_RECEIPT" = true ] || [ "$#" -gt 1 ]; then
   exit 2
 fi
 case "$PREFLIGHT_MODE" in
-  default|integration|kind|full|explain) ;;
+  default|integration|full|explain) ;;
   *)
     printf 'preflight: unsupported mode %s\n' "$PREFLIGHT_MODE" >&2
     exit 2
     ;;
 esac
+
+# The merge gate: which selected families run before merge, and why the
+# others do not. A malformed table fails closed.
+declare -A GATE_REQUIRED=() GATE_REASON=()
+if ! gate_rows="$("$MERGE_GATE" dump)"; then
+  printf 'preflight: scripts/ci/select/merge-gate.tsv is unusable\n' >&2
+  exit 2
+fi
+while IFS=$'\t' read -r gate_family gate_required gate_reason; do
+  GATE_REQUIRED["$gate_family"]="$gate_required"
+  GATE_REASON["$gate_family"]="$gate_reason"
+done <<<"$gate_rows"
+unset gate_rows gate_family gate_required gate_reason
 
 preflight_git_local_env_names="$(git rev-parse --local-env-vars)"
 while IFS= read -r git_env_name; do
@@ -96,6 +117,7 @@ unset preflight_git_local_env_names
 PREFLIGHT_TMP="$(mktemp -d)"
 PREFLIGHT_CHANGED_PATHS="$PREFLIGHT_TMP/changed-files"
 PREFLIGHT_EFFECTIVE_BASE_SHA=""
+PREFLIGHT_BASE_EVIDENCE=""
 # Lanes started and not yet reaped. Each leads its own process group.
 PREFLIGHT_LANE_PIDS=()
 stop_lanes() {
@@ -180,22 +202,41 @@ collect_changed_paths() {
     fail "head commit is unavailable"
   fi
 
-  base="${PREFLIGHT_BASE_SHA:-}"
-  if [ -n "$base" ] && is_zero_sha "$base"; then
-    base=""
+  # A verified base selects from its own tree, compared tree to tree: a
+  # rewritten branch shares no history with the old main it reproduces.
+  if [ -n "${PREFLIGHT_VERIFIED_BASE:-}" ]; then
+    local verified_output
+    if verified_output="$(python3 -I -B "$VERIFIED_BASE" "$PREFLIGHT_VERIFIED_BASE")"; then
+      PREFLIGHT_EFFECTIVE_BASE_SHA="$(sed -n 's/^verified_base=//p' <<<"$verified_output")"
+      PREFLIGHT_BASE_EVIDENCE="$(sed -n 's/^evidence=//p' <<<"$verified_output")"
+      printf 'preflight: selecting from verified base %s (%s)\n' \
+        "$PREFLIGHT_EFFECTIVE_BASE_SHA" "$PREFLIGHT_BASE_EVIDENCE"
+      git diff --name-only "$PREFLIGHT_EFFECTIVE_BASE_SHA" "$head" > "$out" \
+        || fail "changed paths cannot be derived from the verified base"
+    else
+      printf 'preflight: PREFLIGHT_VERIFIED_BASE %s is not verified; selecting from the merge-base with main\n' \
+        "$PREFLIGHT_VERIFIED_BASE" >&2
+    fi
   fi
-  if [ -z "$base" ]; then
-    base="$(preflight_base_ref)"
-  fi
-  if [ -z "$base" ] || ! ref_exists "$base"; then
-    fail "canonical baseline is unavailable"
-  fi
-  base="$(git rev-parse --verify "$base^{commit}")"
-  PREFLIGHT_EFFECTIVE_BASE_SHA="$base"
 
-  if ! git diff --name-only "$base...$head" > "$out" 2>/dev/null \
-    && ! git diff --name-only "$base" "$head" > "$out" 2>/dev/null; then
-    fail "changed paths cannot be derived from the canonical baseline"
+  if [ -z "$PREFLIGHT_BASE_EVIDENCE" ]; then
+    base="${PREFLIGHT_BASE_SHA:-}"
+    if [ -n "$base" ] && is_zero_sha "$base"; then
+      base=""
+    fi
+    if [ -z "$base" ]; then
+      base="$(preflight_base_ref)"
+    fi
+    if [ -z "$base" ] || ! ref_exists "$base"; then
+      fail "canonical baseline is unavailable"
+    fi
+    base="$(git rev-parse --verify "$base^{commit}")"
+    PREFLIGHT_EFFECTIVE_BASE_SHA="$base"
+
+    if ! git diff --name-only "$base...$head" > "$out" 2>/dev/null \
+      && ! git diff --name-only "$base" "$head" > "$out" 2>/dev/null; then
+      fail "changed paths cannot be derived from the canonical baseline"
+    fi
   fi
 
   # Direct invocation also covers uncommitted work. A real pre-push supplies
@@ -230,8 +271,7 @@ mode_rank() {
   case "$1" in
     default) printf '0\n' ;;
     integration) printf '1\n' ;;
-    kind) printf '2\n' ;;
-    full) printf '3\n' ;;
+    full) printf '2\n' ;;
     *) return 1 ;;
   esac
 }
@@ -297,20 +337,12 @@ else
   printf '  (no changed paths)\n'
 fi
 
-# Push and merge qualification mirror pull-request CI without its Kind opt-in:
-# Kind is the author's `make kind-test` dev loop and a post-merge CI gate.
-# Only the explicit Kind and full escalations select it locally. Local
-# qualification always takes the complete selection, never hosted CI's quick
-# pull-request scope.
-selector_kind_opt_in=false
-if [ -z "$PREFLIGHT_SCOPE" ] \
-    && { [ "$PREFLIGHT_MODE" = kind ] || [ "$PREFLIGHT_MODE" = full ]; }; then
-  selector_kind_opt_in=true
-fi
+# Local qualification always takes the complete selection, Kind included,
+# never hosted CI's quick pull-request scope; merge-gate.tsv then decides
+# which selected families run before merge.
 selector_output="$(
   env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u VERIFICATION_PR_SCOPE \
-    GITHUB_EVENT_NAME=pull_request \
-    KIND_E2E_OPT_IN="${PREFLIGHT_KIND_OPT_IN:-$selector_kind_opt_in}" \
+    GITHUB_EVENT_NAME=pull_request KIND_E2E_OPT_IN=true \
     "$SELECTOR" "$PREFLIGHT_CHANGED_PATHS"
 )"
 VERIFICATION_SELECTION="$(selection_value "$selector_output")"
@@ -321,7 +353,7 @@ export VERIFICATION_SELECTION
 if [[ "$VERIFICATION_SELECTION" != '|valid:v3|'* ]] \
   || [[ "$VERIFICATION_SELECTION" != *'|complete|' ]] \
   || [[ ! "$PREFLIGHT_CLASSIFICATION" =~ ^(changed|unchanged|unclassified)$ ]] \
-  || [[ ! "$PREFLIGHT_REQUIRED_MODE" =~ ^(default|integration|kind|full)$ ]]; then
+  || [[ ! "$PREFLIGHT_REQUIRED_MODE" =~ ^(default|integration|full)$ ]]; then
   fail "verification selection is missing or malformed"
 fi
 
@@ -334,6 +366,7 @@ emit_scope_receipt() {
   run_step "atomic local ${PREFLIGHT_SCOPE} receipt" \
     "$LOCAL_PREPUSH_RECEIPT" emit \
       --verified-base "$PREFLIGHT_EFFECTIVE_BASE_SHA" \
+      ${PREFLIGHT_BASE_EVIDENCE:+--verified-base-evidence "$PREFLIGHT_BASE_EVIDENCE"} \
       --verified-mode "$PREFLIGHT_MODE" \
       --verified-selection "$VERIFICATION_SELECTION" \
       --scope "$PREFLIGHT_SCOPE" \
@@ -395,11 +428,32 @@ if [ "$PREFLIGHT_MODE" = full ]; then
   printf 'preflight full selection: %s\n' "$VERIFICATION_SELECTION"
 fi
 
-# Kind runs only in the explicit Kind and full escalations. Merge
-# qualification records it as not run; post-merge CI owns it.
+# A selected family runs only when merge-gate.tsv requires it before merge;
+# the others are reported with the table's reason and left to post-merge CI.
+declare -a GATE_DEFERRED=()
+gate_runs() {
+  local family="$1"
+  [ -n "${GATE_REQUIRED[$family]:-}" ] \
+    || fail "family ${family} has no row in scripts/ci/select/merge-gate.tsv"
+  if [ "${GATE_REQUIRED[$family]}" = yes ]; then
+    return 0
+  fi
+  [[ " ${GATE_DEFERRED[*]} " == *" ${family} "* ]] || GATE_DEFERRED+=("$family")
+  return 1
+}
+
 PREFLIGHT_RUNS_KIND=false
-if [ "$PREFLIGHT_SCOPE" != merge ] && selection_has kind; then
+if selection_has kind && gate_runs kind; then
   PREFLIGHT_RUNS_KIND=true
+fi
+
+# Changed workflow definitions get the zizmor audit source approval runs.
+PREFLIGHT_RUNS_WORKFLOW_AUDIT=false
+if grep -Eq '^\.(gitea|github)/workflows/' "$PREFLIGHT_CHANGED_PATHS" \
+    && gate_runs workflow_audit; then
+  PREFLIGHT_RUNS_WORKFLOW_AUDIT=true
+  command -v supplychain >/dev/null \
+    || fail "workflow audit needs supplychain, the scanner source approval runs"
 fi
 
 # Fail fast on the workstation conditions the selected families need.
@@ -465,7 +519,7 @@ run_selected_family() {
   # The same environment as the family's CI step: release provenance checks
   # a source capsule that Python bytecode caches would pollute.
   [ "$family" != release ] || step_environment=(PYTHONDONTWRITEBYTECODE=1)
-  if selection_has "$token"; then
+  if selection_has "$token" && gate_runs "$token"; then
     if [ "$family" = policy ] && [ "$PREFLIGHT_SCOPE" = merge ]; then
       queue_policy_parts "$label"
       return
@@ -497,8 +551,10 @@ run_selected_family contracts contracts "contract verification"
 # feature, and each curated image workspace, before the long Rust suites.
 # These tokens are the CI selection's rust_transport expected rule.
 if selection_has_any rust rust_curated_locks transport transport_derp_contract; then
-  run_family rust-compile "every Rust target compiles" env VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
-    "$PRODUCT_RUNNER" rust-compile
+  if gate_runs rust_compile; then
+    run_family rust-compile "every Rust target compiles" env VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
+      "$PRODUCT_RUNNER" rust-compile
+  fi
 fi
 run_selected_family rust rust "Rust verification"
 run_selected_family rust_curated_locks rust-curated-locks \
@@ -517,13 +573,13 @@ run_selected_family runtime_confidential runtime-confidential \
 run_selected_family runtime_dev_smoke runtime-dev-smoke \
   "Dev smoke tooling verification"
 
-if selection_has database; then
+if selection_has database && gate_runs database; then
   run_family database "database verification" env \
     VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
     VERIFICATION_PORT_BASE="$(integration_port_base database)" \
     "$INTEGRATION_RUNNER" database
 fi
-if selection_has service_integration; then
+if selection_has service_integration && gate_runs service_integration; then
   integration_lane_selected=false
   if selection_has_any service_idp service_coordinator service_billing \
       service_connectcore; then
@@ -547,13 +603,25 @@ fi
 run_selected_family transport transport "Rust transport verification"
 run_selected_family edge_kind edge "edge static verification"
 if [ "$PREFLIGHT_RUNS_KIND" = true ]; then
-  run_step "Kind e2e verification" scripts/ci/verify/kind-e2e.sh
+  run_family kind "Kind e2e verification" scripts/ci/verify/kind-e2e.sh
 fi
 run_selected_family release release "release provenance verification"
 run_selected_family deploy deploy "deploy verification"
 run_selected_family security security "security verification"
+if [ "$PREFLIGHT_RUNS_WORKFLOW_AUDIT" = true ]; then
+  run_family workflow-audit "workflow audit (zizmor)" supplychain workflows .
+fi
+
+report_deferred() {
+  local family
+  for family in "${GATE_DEFERRED[@]}"; do
+    printf 'preflight: %s is not required before merge (scripts/ci/select/merge-gate.tsv): %s\n' \
+      "$family" "${GATE_REASON[$family]}"
+  done
+}
 
 if [ "$PREFLIGHT_SCOPE" != merge ]; then
+  report_deferred
   printf 'preflight: OK\n'
   exit 0
 fi
@@ -582,7 +650,8 @@ PREFLIGHT_PASS_DIR="$PREFLIGHT_STATE_DIR/passed"
 PREFLIGHT_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 PREFLIGHT_LOG_DIR="$PREFLIGHT_STATE_DIR/logs/$PREFLIGHT_RUN_ID"
 PREFLIGHT_RESULT_DIR="$PREFLIGHT_TMP/results"
-mkdir -p "$PREFLIGHT_PASS_DIR" "$PREFLIGHT_LOG_DIR" "$PREFLIGHT_RESULT_DIR"
+PREFLIGHT_INDEX_DIR="$PREFLIGHT_PASS_DIR/index"
+mkdir -p "$PREFLIGHT_PASS_DIR" "$PREFLIGHT_INDEX_DIR" "$PREFLIGHT_LOG_DIR" "$PREFLIGHT_RESULT_DIR"
 PREFLIGHT_TREE="$(git rev-parse 'HEAD^{tree}')"
 # Reading the identity never installs a toolchain as a side effect.
 PREFLIGHT_TOOLCHAIN="$( (cd "$REPO_ROOT" && RUSTUP_AUTO_INSTALL=0 rustc -vV 2>/dev/null) \
@@ -592,20 +661,21 @@ printf 'preflight family logs: %s\n' "$PREFLIGHT_LOG_DIR"
 
 marker_key() {
   local base=-
-  [ "$2" != contracts ] || base="$PREFLIGHT_EFFECTIVE_BASE_SHA"
+  [ "$2" != contracts ] || base="${3:-$PREFLIGHT_EFFECTIVE_BASE_SHA}"
   printf 'codewire-preflight-pass/v1\ntree=%s\nbase=%s\nselection=%s\ntoolchain=%s\nfamily=%s\n' \
     "$1" "$base" "$VERIFICATION_SELECTION" "$PREFLIGHT_TOOLCHAIN" "$2"
 }
 
 marker_path() {
-  printf '%s/%s\n' "$PREFLIGHT_PASS_DIR" "$(marker_key "$1" "$2" | sha256sum | cut -c1-64)"
+  printf '%s/%s\n' "$PREFLIGHT_PASS_DIR" "$(marker_key "$@" | sha256sum | cut -c1-64)"
 }
 
+# marker_valid TREE STEP [BASE]: the base matters only to contracts.
 marker_valid() {
-  local tree="$1" step="$2" path
-  path="$(marker_path "$tree" "$step")"
+  local path
+  path="$(marker_path "$@")"
   [ -f "$path" ] && [ ! -L "$path" ] \
-    && [ "$(cat "$path")" = "$(marker_key "$tree" "$step")" ]
+    && [ "$(cat "$path")" = "$(marker_key "$@")" ]
 }
 
 worktree_holds_key_tree() {
@@ -624,6 +694,129 @@ write_marker() {
   temporary="$(mktemp "$PREFLIGHT_PASS_DIR/.pass.XXXXXX")"
   marker_key "$PREFLIGHT_TREE" "$step" >"$temporary"
   mv -f "$temporary" "$path"
+  index_pass "$step"
+}
+
+# A family's pass survives a rebase (#2892, owner throughput target). Each
+# step keeps an index of the trees (and bases) it passed on, per selection and
+# toolchain. A step with no exact-tree pass carries an indexed pass forward
+# when the delta from that tree to this one, classified by the selector's own
+# file-to-family map, selects none of the step's tokens: the same contract
+# the selection itself rests on. Nothing carries when the delta touches the
+# gate's own machinery.
+index_path() {
+  printf '%s/%s\n' "$PREFLIGHT_INDEX_DIR" "$(
+    printf 'codewire-preflight-index/v1\nselection=%s\ntoolchain=%s\nfamily=%s\n' \
+      "$VERIFICATION_SELECTION" "$PREFLIGHT_TOOLCHAIN" "$1" | sha256sum | cut -c1-64
+  )"
+}
+
+index_pass() {
+  local step="$1" index temporary
+  index="$(index_path "$step")"
+  temporary="$(mktemp "$PREFLIGHT_INDEX_DIR/.index.XXXXXX")"
+  {
+    printf '%s %s\n' "$PREFLIGHT_TREE" "$PREFLIGHT_EFFECTIVE_BASE_SHA"
+    # Newest first; a few entries are enough to find the tree before a rebase.
+    if [ -f "$index" ]; then
+      grep -v "^${PREFLIGHT_TREE} " "$index" | head -n 7 || true
+    fi
+  } >"$temporary"
+  mv -f "$temporary" "$index"
+}
+
+# The selector tokens whose selection means a step must run again.
+step_tokens() {
+  case "$1" in
+    policy|policy-*) printf 'policy\n' ;;
+    rust-compile) printf 'rust rust_curated_locks transport transport_derp_contract\n' ;;
+    rust-curated-locks) printf 'rust_curated_locks\n' ;;
+    services-control|services-runtime) printf 'service_integration\n' ;;
+    edge) printf 'edge_kind\n' ;;
+    contracts|rust|go-support|web|docs|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|\
+    runtime-confidential|runtime-dev-smoke|database|transport|release|deploy|security|kind)
+      printf '%s\n' "${1//-/_}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The gate's own machinery: a delta under it carries nothing forward.
+GATE_MACHINERY_RE='^(\.githooks/pre-push|scripts/dev/(pre-push|preflight|preflight-push|preflight-environment)\.sh|scripts/ci/select/(select-verification\.sh|merge-gate\.(tsv|py))|scripts/ci/plan/(planner\.py|artifact-graph\.json)|scripts/ci/receipts/local-prepush-receipt\.py|scripts/ci/verify/(run-product-verification|run-integration-verification|kind-e2e)\.sh|rust-toolchain\.toml|go\.(mod|sum)|package\.json|bun\.lock)$'
+
+# Print the selection the delta between two trees (and, for a base-reading
+# step, two bases) produces, or "all" when it cannot be classified safely.
+delta_selection() {
+  local old_tree="$1" new_tree="$2" old_base="$3" new_base="$4" key paths output
+  key="$(printf '%s %s %s %s' "$@" | sha256sum | cut -c1-64)"
+  if [ -f "$PREFLIGHT_TMP/delta-$key" ]; then
+    cat "$PREFLIGHT_TMP/delta-$key"
+    return 0
+  fi
+  # Lanes ask concurrently: each call classifies from its own file and
+  # publishes its answer atomically, so no lane reads another's partial file.
+  paths="$(mktemp "$PREFLIGHT_TMP/delta-paths.XXXXXX")"
+  {
+    git diff --name-only "$old_tree" "$new_tree" || return 1
+    if [ -n "$old_base" ] && [ "$old_base" != "$new_base" ]; then
+      git diff --name-only "$old_base" "$new_base" || return 1
+    fi
+  } 2>/dev/null | sed '/^$/d' | sort -u >"$paths" || { printf 'all\n'; return 0; }
+  if [ ! -s "$paths" ]; then
+    output='|'
+  elif grep -Eq "$GATE_MACHINERY_RE" "$paths"; then
+    output=all
+  else
+    output="$(
+      env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u VERIFICATION_PR_SCOPE \
+        GITHUB_EVENT_NAME=pull_request KIND_E2E_OPT_IN=true \
+        "$SELECTOR" "$paths" 2>/dev/null
+    )" || output=''
+    if [[ ! "$(classification_value "$output")" =~ ^(changed|unchanged)$ ]] \
+        || [[ "$(selection_value "$output")" != '|valid:v3|'*'|complete|' ]]; then
+      output=all
+    else
+      output="$(selection_value "$output")"
+    fi
+  fi
+  rm -f -- "$paths"
+  paths="$(mktemp "$PREFLIGHT_TMP/delta-answer.XXXXXX")"
+  printf '%s\n' "$output" >"$paths"
+  mv -f -- "$paths" "$PREFLIGHT_TMP/delta-$key"
+  printf '%s\n' "$output"
+}
+
+# Carry an indexed pass of this step forward to the current tree, or fail.
+carry_forward() {
+  local step="$1" tokens index old_tree old_base base_old base_new delta token
+  tokens="$(step_tokens "$step")" || return 1
+  index="$(index_path "$step")"
+  [ -f "$index" ] || return 1
+  while read -r old_tree old_base; do
+    [[ "$old_tree" =~ ^[0-9a-f]{40}$ ]] || continue
+    # This tree's own pass is the exact-tree marker, never a carry.
+    [ "$old_tree" != "$PREFLIGHT_TREE" ] || continue
+    git cat-file -e "${old_tree}^{tree}" 2>/dev/null || continue
+    # The index only finds candidates; the old tree's own marker is the
+    # evidence, so a removed or tampered pass carries nothing.
+    marker_valid "$old_tree" "$step" "$old_base" || continue
+    base_old=''
+    base_new=''
+    # Contracts compare the change with its base; a moved base is part of
+    # its delta.
+    if [ "$step" = contracts ]; then
+      [[ "$old_base" =~ ^[0-9a-f]{40}$ ]] || continue
+      base_old="$old_base"
+      base_new="$PREFLIGHT_EFFECTIVE_BASE_SHA"
+    fi
+    delta="$(delta_selection "$old_tree" "$PREFLIGHT_TREE" "$base_old" "$base_new")"
+    [ "$delta" != all ] || continue
+    for token in $tokens; do
+      [[ "$delta" != *"|${token}|"* ]] || continue 2
+    done
+    printf '%s\n' "$old_tree"
+    return 0
+  done <"$index"
+  return 1
 }
 
 run_queued_step() {
@@ -631,6 +824,14 @@ run_queued_step() {
   label="${PREFLIGHT_STEP_LABEL[$step]}"
   if marker_valid "$PREFLIGHT_TREE" "$step"; then
     printf '==> %s: reused the exact-tree pass\n' "$label"
+    printf 'reused\n' >"$PREFLIGHT_RESULT_DIR/$step"
+    return 0
+  fi
+  local carried
+  if carried="$(carry_forward "$step")"; then
+    write_marker "$step"
+    printf '==> %s: carried forward the pass of tree %s; the delta touches none of its inputs\n' \
+      "$label" "$carried"
     printf 'reused\n' >"$PREFLIGHT_RESULT_DIR/$step"
     return 0
   fi
@@ -770,22 +971,18 @@ for step in "${PREFLIGHT_STEPS[@]}"; do
       marker_valid "$PREFLIGHT_TREE" "$step" || write_marker "$step"
       ran+=("$step")
       ;;
-    reused) reused+=("$step") ;;
+    reused)
+      marker_valid "$PREFLIGHT_TREE" "$step" || write_marker "$step"
+      reused+=("$step")
+      ;;
     *) fail "result for ${step}" ;;
   esac
   marker_valid "$PREFLIGHT_TREE" "$step" || fail "exact-tree pass for ${step}"
 done
-not_run=()
-if selection_has kind || [ "$PREFLIGHT_REQUIRED_MODE" = kind ] \
-    || [ "$PREFLIGHT_REQUIRED_MODE" = full ]; then
-  not_run+=(kind)
-fi
+not_run=("${GATE_DEFERRED[@]}")
 printf 'preflight: merge qualification passed in %ss (ran: %s; reused: %s)\n' \
   "$((SECONDS - qualification_started))" "${ran[*]:-none}" "${reused[*]:-none}"
-if [ "${#not_run[@]}" -gt 0 ]; then
-  printf 'preflight: not run locally: %s (post-merge CI owns it; run make kind-test for platform or dashboard behaviour)\n' \
-    "${not_run[*]}"
-fi
+report_deferred
 printf 'preflight: OK\n'
 join_checks() {
   local IFS=,
