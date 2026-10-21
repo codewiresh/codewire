@@ -2,18 +2,18 @@
 // the post-publish proposal rewrites this file and policy refuses other edits.
 
 /// Content digest of the published workspace image.
-pub const DIGEST: &str = "sha256:8f73a4ee68b00b4c93e18ce6b5afd0c18f1bcd3c30cc820e488fc7b44c92a027";
+pub const DIGEST: &str = "sha256:351bed9404bc79390c06a02d67a4e348f0cb2cd3d29a3555a9cef1505717b655";
 /// The image at the Harbor repository every deployment pulls.
-pub const HARBOR_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:8f73a4ee68b00b4c93e18ce6b5afd0c18f1bcd3c30cc820e488fc7b44c92a027";
+pub const HARBOR_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:351bed9404bc79390c06a02d67a4e348f0cb2cd3d29a3555a9cef1505717b655";
 /// The same digest at the public GHCR mirror, pulled anonymously by local
 /// environments.
-pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:8f73a4ee68b00b4c93e18ce6b5afd0c18f1bcd3c30cc820e488fc7b44c92a027";
+pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:351bed9404bc79390c06a02d67a4e348f0cb2cd3d29a3555a9cef1505717b655";
 /// Platforms the published image index serves.
 pub const PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];
 /// Commit the image was built from.
-pub const SOURCE_SHA: &str = "a13f2c8c087b1eaa402534ace1cd0fb0ba79951a";
+pub const SOURCE_SHA: &str = "4f02608732c073fa3914356a6e06542af0b7fda5";
 /// Identity of the image definition at `SOURCE_SHA`; see the generator.
-pub const INPUTS_SHA256: &str = "38792cdc933cea5007f4690bbb64605572583be743f4bece82edb9c1d3cb22c2";
+pub const INPUTS_SHA256: &str = "1eb0c5e8c364b4026f4d5a01b454ee56cc1675e27cc816ac805e5cdb2c45db0f";
 /// Agent CLI versions the image definition at `SOURCE_SHA` installs.
 pub const AGENT_VERSIONS: &[(&str, &str)] = &[
     ("claude", "2.1.288"),
@@ -24,6 +24,7 @@ pub const AGENT_VERSIONS: &[(&str, &str)] = &[
 ];
 /// Earlier published digests, newest first, that older clients may send.
 pub const PREVIOUS_DIGESTS: &[&str] = &[
+    "sha256:8f73a4ee68b00b4c93e18ce6b5afd0c18f1bcd3c30cc820e488fc7b44c92a027",
     "sha256:fd97e6b84c1a523802a7de6e1be94affa5ffc1e62cdfb52a3e4c2a012f6f28f3",
     "sha256:e89ce9e72bbeb7fb24761c1befa102bdfdc153562c176b13b00f40d292106456",
     "sha256:8e2285651bc4b45f0f6df4bbab437b73965d9ecef3b8af008a19fabde10886cc",
