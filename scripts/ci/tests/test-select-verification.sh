@@ -2351,8 +2351,8 @@ fi
 for scheduled_selection in '|valid:v3|kind|scheduled|complete|' '|valid:v3|scheduled|complete|'; do
   : > "$TMP/schedule-dispatch.out"
   VERIFICATION_SELECTION="$scheduled_selection" VERIFICATION_TESTED_TREE_RECEIPT=fallback \
-    CW_PACKAGE_SELECTED=true DESKTOP_PACKAGE_SELECTED=true WORKSPACE_IMAGE_SELECTED=true \
-    KIND_WORKSPACE_SOURCE=pinned WORKSPACE_IMAGE_OWNER=ci GITHUB_OUTPUT="$TMP/schedule-dispatch.out" \
+    CW_PACKAGE_SELECTED=true DESKTOP_PACKAGE_SELECTED=true \
+    GITHUB_OUTPUT="$TMP/schedule-dispatch.out" \
     "$ROOT/scripts/ci/select/emit-verification-matrices.sh"
   dispatched_groups="$({ grep '=true$' "$TMP/schedule-dispatch.out" || true; } | tr '\n' ' ')"
   if [[ "$scheduled_selection" == *'|kind|'* ]]; then
@@ -2459,7 +2459,6 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
   fi
 done <<'EOF'
 cw-release-assets|CW release-assets verification|metal-main|cw_release_assets
-workspace-image|Container contract verification|metal-main|workspace_image
 policy|Policy verification|metal-main|policy
 standard|Standard verification|metal-main|standard
 tooling|Tooling / delivery contract verification|metal-main|tooling
@@ -2511,7 +2510,7 @@ grep -qxF '      rust_shards_expected: ${{ steps.dispatch.outputs.rust_shards_ex
   exit 1
 }
 for expectation_name in policy standard tooling rust_compile rust_transport database \
-    services_control services_runtime edge_kind cw_release_assets workspace_image; do
+    services_control services_runtime edge_kind cw_release_assets; do
   grep -qF "${expectation_name}_expected: \${{ steps.dispatch.outputs.${expectation_name}_expected }}" \
     "$selection_block"
   if grep -qF "${expectation_name}_matrix:" "$selection_block"; then
@@ -2577,17 +2576,6 @@ if edge_kind_timeout_valid "$TMP/edge-kind-invalid.yaml"; then
   echo 'edge-kind: timeout guard accepted a duplicate deadline' >&2
   exit 1
 fi
-
-workspace_block="$TMP/workspace-image.yaml"
-awk '
-  $0 == "  workspace-image:" { capture = 1 }
-  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  workspace-image:" { exit }
-  capture { print }
-' "$WORKFLOW" > "$workspace_block"
-grep -qF '    timeout-minutes: 55' "$workspace_block" || {
-  echo 'workspace-image: cold-build ceiling must remain 55 minutes' >&2
-  exit 1
-}
 
 policy_block="$TMP/policy.yaml"
 grep -qF '    timeout-minutes: 30' "$policy_block"
@@ -2799,11 +2787,11 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 12 ]] || {
-  echo 'Codewire CI requires its twelve ordinary heavy groups (policy included) on the metal labels' >&2
+[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 11 ]] || {
+  echo 'Codewire CI requires its eleven ordinary heavy groups (policy included) on the metal labels' >&2
   exit 1
 }
-[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 12 ]] || {
+[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 11 ]] || {
   echo 'each metal group must bound its cargo jobs to its guest memory' >&2
   exit 1
 }
@@ -2827,7 +2815,7 @@ fi
 for output in selector_version classification selection required_local_mode \
     ci_head_commit ci_head_tree \
     cw_package_state cw_package_selected desktop_package_state \
-    desktop_package_selected workspace_image_state workspace_image_selected \
+    desktop_package_selected \
     kind_workspace_source \
     tested_tree_receipt tested_tree_reason \
     tested_tree_pr tested_tree_head tested_tree_run; do
@@ -2914,8 +2902,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 20 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, four Kind producers, aggregate and the Dev delivery trigger" >&2
+if [ "$top_level_jobs" != 19 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, the CW release-assets job, eleven groups, four Kind producers, aggregate and the Dev delivery trigger" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -2985,54 +2973,6 @@ if [ "$cw_selected_steps" != "$cw_guarded_steps" ]; then
   exit 1
 fi
 
-workspace_block="$TMP/workspace-image.yaml"
-awk '
-  $0 == "  workspace-image:" { capture = 1 }
-  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  workspace-image:" { exit }
-  capture { print }
-' "$WORKFLOW" > "$workspace_block"
-grep -qF '  workspace-image:' "$workspace_block"
-grep -qF '    name: Container contract verification' "$workspace_block"
-grep -qxF "    runs-on: ${METAL_MAIN_RUNS_ON}" "$workspace_block"
-grep -qF '    needs: [verification-selection]' "$workspace_block"
-grep -qF 'name: Container contracts not selected' "$workspace_block"
-grep -qF 'no checkout, download, installation, or build required' "$workspace_block"
-grep -qF 'name: Resolve container contract scope' "$workspace_block"
-grep -qF 'WORKSPACE_IMAGE_SELECTED: ${{ needs.verification-selection.outputs.workspace_image_selected }}' \
-  "$workspace_block"
-grep -qF "steps.container-scope.outputs.selected != 'true'" "$workspace_block"
-grep -qF "steps.container-scope.outputs.selected == 'true'" "$workspace_block"
-grep -qF "steps.container-scope.outputs.workspace == 'true'" "$workspace_block"
-# A push to main leaves the exact-source workspace to support-images (#2892);
-# the dispatch decision and the container scope read the same owner.
-workspace_owner_line="WORKSPACE_IMAGE_OWNER: \${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'support-images' || 'ci' }}"
-grep -qxF "          ${workspace_owner_line}" "$workspace_block"
-grep -qxF "          ${workspace_owner_line}" "$selection_block"
-[ "$(grep -cE '^ +WORKSPACE_IMAGE_OWNER: ' "$WORKFLOW")" -eq 2 ] || {
-  echo 'the workspace image owner is set somewhere other than dispatch and the container scope' >&2
-  exit 1
-}
-for command in \
-    scripts/ci/tests/test-build-local-image.sh \
-    scripts/ci/tests/test-workspace-agent-contract.sh \
-    scripts/ci/verify/rehearse-build-local-image.sh \
-    scripts/ci/verify/verify-workspace-image.sh; do
-  grep -qF "$command" "$workspace_block" || {
-    echo "workspace image verification omits ${command}" >&2
-    exit 1
-  }
-done
-workspace_steps="$(grep -Ec '^      - (name:|uses:)' "$workspace_block")"
-workspace_guards="$(grep -Ec '^        if:' "$workspace_block")"
-if [ "$workspace_steps" != "$workspace_guards" ]; then
-  echo 'every workspace verification step must be guarded by receipt/artifact selection' >&2
-  exit 1
-fi
-if grep -Eiq 'docker push|--push|contents: write|secrets\.' "$workspace_block"; then
-  echo 'PR workspace image verification crosses a publication boundary' >&2
-  exit 1
-fi
-
 standard_block="$TMP/standard.yaml"
 bun_setup_condition="$(grep -A1 -F \
   'uses: https://git.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
@@ -3059,7 +2999,7 @@ grep -qF 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selec
 }
 grep -qF 'CODEWIRE_DASHBOARD_IMAGE_DEFERRED:-false' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
-  echo 'standard: Web cannot defer image work to the container transaction' >&2
+  echo 'standard: Web cannot leave image work to Dev delivery' >&2
   exit 1
 }
 grep -qF '    run_dashboard_image' \
@@ -3067,24 +3007,6 @@ grep -qF '    run_dashboard_image' \
   echo 'local Web verification lost its standalone image gate' >&2
   exit 1
 }
-grep -qF 'name: Build and inspect the standalone dashboard image' \
-  "$workspace_block" || {
-  echo 'container contracts: standalone Web changes omit dashboard image verification' >&2
-  exit 1
-}
-dashboard_step="$(awk '
-  $0 == "      - name: Build and inspect the standalone dashboard image" { capture = 1 }
-  capture && $0 ~ /^      - / && $0 != "      - name: Build and inspect the standalone dashboard image" { exit }
-  capture { print }
-' "$workspace_block")"
-for token in web kind; do
-  grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
-    <<<"$dashboard_step" || {
-    echo "container contracts: dashboard selection guard omits ${token}" >&2
-    exit 1
-  }
-done
-grep -qF 'run-product-verification.sh dashboard-image' <<<"$dashboard_step"
 grep -A4 -F 'name: Run Web' "$WORKFLOW" \
   | grep -qF 'CODEWIRE_DASHBOARD_IMAGE_DEFERRED: "true"'
 
@@ -3095,7 +3017,8 @@ for contract in \
     'Run Docs|docs' \
     'Run SDK Go|sdk_go' \
     'Run SDK TypeScript|sdk_ts' \
-    'Run SDK Python|sdk_python'; do
+    'Run SDK Python|sdk_python' \
+    'Run iOS package tests in the pinned Swift image|ios'; do
   step_name="${contract%%|*}"
   token="${contract##*|}"
   step_condition="$(grep -A1 -F -- "- name: ${step_name}" "$standard_block")"
@@ -3140,37 +3063,37 @@ for contract in \
 done
 
 ios_run_line="$(grep -n -m1 'name: Run iOS package tests' \
-  "$workspace_block" | cut -d: -f1)"
-ios_run_block="$(sed -n "${ios_run_line},$((ios_run_line + 10))p" "$workspace_block")"
+  "$standard_block" | cut -d: -f1)"
+ios_run_block="$(sed -n "${ios_run_line},$((ios_run_line + 10))p" "$standard_block")"
 grep -qF "contains(needs.verification-selection.outputs.selection, '|ios|')" \
   <<<"$ios_run_block" || {
-  echo 'container contracts: iOS verification is not isolated to the iOS selection' >&2
+  echo 'standard: iOS verification is not isolated to the iOS selection' >&2
   exit 1
 }
 grep -qF 'scripts/ci/verify/run-product-verification.sh ios-config' \
   <<<"$ios_run_block" || {
-  echo 'container contracts: iOS callback configuration is not verified before package tests' >&2
+  echo 'standard: iOS callback configuration is not verified before package tests' >&2
   exit 1
 }
 grep -qF "docker build --file - apps/ios <<'DOCKERFILE'" <<<"$ios_run_block" || {
-  echo 'container contracts: iOS package tests do not stream their package context to Docker' >&2
+  echo 'standard: iOS package tests do not stream their package context to Docker' >&2
   exit 1
 }
 grep -qF 'swift@sha256:0ff707a48519cf1473616c759e019bcff21cfbafa3d2687bf8fd41a2757adc9a' \
   <<<"$ios_run_block" || {
-  echo 'container contracts: iOS package tests do not use the pinned Swift image' >&2
+  echo 'standard: iOS package tests do not use the pinned Swift image' >&2
   exit 1
 }
 grep -qF 'RUN swift test --scratch-path /tmp/codewire-ios-build' <<<"$ios_run_block" || {
-  echo 'container contracts: iOS package tests must build outside the checkout' >&2
+  echo 'standard: iOS package tests must build outside the checkout' >&2
   exit 1
 }
 if grep -qF -- '--mount "type=bind' <<<"$ios_run_block"; then
-  echo 'container contracts: iOS package tests must not assume the nested runner host path' >&2
+  echo 'standard: iOS package tests must not assume the nested runner host path' >&2
   exit 1
 fi
-if grep -qF 'swift-actions/setup-swift@' "$workspace_block"; then
-  echo 'container contracts: iOS verification must not depend on an external Swift keyserver' >&2
+if grep -qF 'swift-actions/setup-swift@' "$standard_block"; then
+  echo 'standard: iOS verification must not depend on an external Swift keyserver' >&2
   exit 1
 fi
 
@@ -3541,7 +3464,7 @@ grep -qF '    runs-on: ci-lite' "$required_block" || {
 # shellcheck disable=SC2016 # Match the literal Actions expression.
 grep -qF '    if: ${{ always() }}' "$WORKFLOW"
 grep -qF 'scripts/ci/select/require-verification-results.sh' "$required_block"
-for group in cw-release-assets workspace-image standard rust-compile rust-packages rust-features rust-transport database services-control services-runtime edge-kind; do
+for group in cw-release-assets standard rust-compile rust-packages rust-features rust-transport database services-control services-runtime edge-kind; do
   grep -qF "      - ${group}" "$required_block" || {
     echo "required CI does not wait on ${group}" >&2
     exit 1
@@ -3552,7 +3475,7 @@ for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT
     VERIFICATION_RUST_FEATURES_RESULT VERIFICATION_RUST_TRANSPORT_RESULT \
     VERIFICATION_DATABASE_RESULT \
     VERIFICATION_SERVICES_CONTROL_RESULT VERIFICATION_SERVICES_RUNTIME_RESULT \
-    VERIFICATION_EDGE_KIND_RESULT VERIFICATION_WORKSPACE_IMAGE_RESULT; do
+    VERIFICATION_EDGE_KIND_RESULT; do
   grep -qF "${result}:" "$required_block" || {
     echo "required CI omits ${result}" >&2
     exit 1
@@ -3563,7 +3486,7 @@ for expected in VERIFICATION_POLICY_EXPECTED VERIFICATION_STANDARD_EXPECTED \
     VERIFICATION_RUST_SHARDS_EXPECTED VERIFICATION_RUST_TRANSPORT_EXPECTED \
     VERIFICATION_DATABASE_EXPECTED VERIFICATION_SERVICES_CONTROL_EXPECTED \
     VERIFICATION_SERVICES_RUNTIME_EXPECTED VERIFICATION_EDGE_KIND_EXPECTED \
-    VERIFICATION_CW_RELEASE_ASSETS_EXPECTED VERIFICATION_WORKSPACE_IMAGE_EXPECTED; do
+    VERIFICATION_CW_RELEASE_ASSETS_EXPECTED; do
   grep -qF "${expected}:" "$required_block" || {
     echo "required CI omits ${expected}" >&2
     exit 1
@@ -4482,7 +4405,7 @@ quick_dispatch_and_require() {
   local -a results=()
   : > "$output"
   VERIFICATION_SELECTION="$selection" VERIFICATION_TESTED_TREE_RECEIPT=fallback \
-    CW_PACKAGE_SELECTED=true DESKTOP_PACKAGE_SELECTED=true WORKSPACE_IMAGE_SELECTED=true \
+    CW_PACKAGE_SELECTED=true DESKTOP_PACKAGE_SELECTED=true \
     GITHUB_OUTPUT="$output" "$ROOT/scripts/ci/select/emit-verification-matrices.sh"
   local -a jobs
   while IFS='=' read -r group value; do
@@ -4516,55 +4439,10 @@ for scope_case in rust_cli dashboard_kind release_shell selector_policy mixed; d
     exit 1
   fi
 done
-# A push to main leaves a selected workspace image to support-images (#2892):
-# with no dashboard or iOS work it dispatches no Container contract job, and
-# Required verification passes with that job skipped, and fails if it ran.
-main_dispatch_and_require() {
-  local selection="$1" workspace_result="$2" output="$TMP/main-dispatch.out" group value job
-  local -a results=() jobs=()
-  : > "$output"
-  VERIFICATION_SELECTION="$selection" VERIFICATION_TESTED_TREE_RECEIPT=fallback \
-    CW_PACKAGE_SELECTED=true DESKTOP_PACKAGE_SELECTED=false WORKSPACE_IMAGE_SELECTED=true \
-    KIND_WORKSPACE_SOURCE=pinned WORKSPACE_IMAGE_OWNER=support-images \
-    GITHUB_OUTPUT="$output" "$ROOT/scripts/ci/select/emit-verification-matrices.sh"
-  grep -Fxq 'workspace_image_expected=false' "$output" || return 2
-  while IFS='=' read -r group value; do
-    group="${group%_expected}"
-    results+=("VERIFICATION_${group^^}_EXPECTED=$value")
-    jobs=("${group^^}")
-    if [ "$group" = rust_shards ]; then
-      jobs=(RUST_PACKAGES RUST_FEATURES)
-    fi
-    for job in "${jobs[@]}"; do
-      if [ "$job" = WORKSPACE_IMAGE ]; then
-        results+=("VERIFICATION_${job}_RESULT=$workspace_result")
-      elif [ "$value" = true ]; then
-        results+=("VERIFICATION_${job}_RESULT=success")
-      else
-        results+=("VERIFICATION_${job}_RESULT=skipped")
-      fi
-    done
-  done < "$output"
-  env VERIFICATION_SELECTION="$selection" VERIFICATION_SELECTION_RESULT=success \
-    VERIFICATION_TESTED_TREE_RECEIPT=fallback "${results[@]}" \
-    "$ROOT/scripts/ci/select/require-verification-results.sh" >/dev/null 2>&1
-}
+# Policy always runs on main, so the release-tag receipt finds a green
+# capability group in every main run.
 for scope_case in docs rust_cli broker_database transport release_shell selector_policy; do
   main_selection="$(selection_value "$(scope_select push '' '' "$TMP/scope-${scope_case}.paths")")"
-  if grep -Eq '\|(web|ios)\|' <<<"$main_selection"; then
-    echo "${scope_case}: the main fixture selects dashboard or iOS work" >&2
-    exit 1
-  fi
-  main_dispatch_and_require "$main_selection" skipped || {
-    echo "${scope_case}: a main push dispatched the workspace or Required verification rejected it skipped" >&2
-    exit 1
-  }
-  if main_dispatch_and_require "$main_selection" success; then
-    echo "${scope_case}: Required verification accepted a Container contract run main did not dispatch" >&2
-    exit 1
-  fi
-  # Policy always runs on main, so the release-tag receipt still finds a green
-  # capability group when the Container contract job is skipped.
   grep -Fq '|policy|' <<<"$main_selection" || {
     echo "${scope_case}: a main push selects no policy group" >&2
     exit 1
@@ -4662,15 +4540,11 @@ jobs = workflow["jobs"]
 # before this fixture accepts it.
 WORK = {
     "cw-release-assets": {"Compile the macOS cw for both Mac targets", "Package Linux dry-run assets"},
-    "workspace-image": {
-        "Build and inspect without publication",
-        "Build and inspect the standalone dashboard image",
-        "Run iOS package tests in the pinned Swift image",
-    },
     "policy": {"Run Policy"},
     "standard": {
         "Run Contracts", "Run Go support", "Run Web", "Run Docs", "Run SDK Go",
         "Run SDK TypeScript typecheck and unit suite", "Run SDK Python",
+        "Run iOS package tests in the pinned Swift image",
     },
     "tooling": {
         "Run Shell policy", "Run API key smoke tooling", "Run Confidential runtime tooling",
@@ -4695,9 +4569,9 @@ WORK = {
 }
 SUPPORT = {
     "Reuse exact PR-head content verification",
-    "CW release assets not selected", "Container contracts not selected",
+    "CW release assets not selected",
     "Service control-plane integration not selected", "Service runtime-plane integration not selected",
-    "Resolve container contract scope", "Resolve service control-plane scope",
+    "Resolve service control-plane scope",
     "Resolve service runtime-plane scope",
     "Verify sealed Rust toolchain", "Verify sealed policy tools", "Verify sealed delivery-contract tools",
     "Verify sealed producer tools", "Verify sealed producer tools and isolated Buildx load",
@@ -4710,7 +4584,7 @@ SUPPORT = {
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",
     "Install locked dashboard browser-test dependencies", "Set up pinned cross-build tools",
     "Set up Go 1.26.9", "Set up Go 1.26.9 for security checks", "Set up Go 1.26.9 for DERP interop",
-    "Set up pinned Darwin C cross-check tools", "Prove isolated Buildx load contract",
+    "Set up pinned Darwin C cross-check tools",
     "Clean workspace cache credentials",
     "Clean compiler cache credentials", "Report and clean Rust cache", "Start integration Postgres",
     "Wait for integration Postgres", "Stop integration Postgres",
@@ -4835,14 +4709,12 @@ def env_value(expression, context):
     return str(result)
 
 
-def dispatch(selection, cw, desktop, workspace, kind_workspace, owner):
+def dispatch(selection, cw, desktop):
     with tempfile.NamedTemporaryFile("r") as output:
         environment = dict(
             os.environ, VERIFICATION_SELECTION=selection, VERIFICATION_TESTED_TREE_RECEIPT="fallback",
             CW_PACKAGE_SELECTED=cw, DESKTOP_PACKAGE_SELECTED=desktop,
-            WORKSPACE_IMAGE_SELECTED=workspace, VERIFICATION_SUPERSEDED="false",
-            KIND_WORKSPACE_SOURCE=kind_workspace, WORKSPACE_IMAGE_OWNER=owner,
-            GITHUB_OUTPUT=output.name,
+            VERIFICATION_SUPERSEDED="false", GITHUB_OUTPUT=output.name,
         )
         subprocess.run([emitter], env=environment, check=True, stderr=subprocess.DEVNULL)
         return dict(line.strip().split("=", 1) for line in open(output.name) if line.strip())
@@ -4913,21 +4785,13 @@ capability_jobs = {job_id for job_id, job in jobs.items()
 if capability_jobs - set(WORK):
     raise SystemExit(f"capability jobs without work classification: {sorted(capability_jobs - set(WORK))}")
 
-# The events that reach these jobs, and the workspace owner each gives the
-# dispatch decision, read from the workflow's own expression. A push to main
-# leaves the exact-source workspace to support-images (#2892).
-dispatch_step = next(step for step in jobs["verification-selection"]["steps"] if step.get("id") == "dispatch")
+# The events that reach these jobs.
 EVENTS = {
     "push to main": {"github.event_name": "push", "github.ref": "refs/heads/main"},
     "pull request": {"github.event_name": "pull_request", "github.ref": "refs/pull/7/head"},
     "dispatch": {"github.event_name": "workflow_dispatch", "github.ref": "refs/heads/main"},
     "schedule": {"github.event_name": "schedule", "github.ref": "refs/heads/main"},
 }
-OWNERS = {event: env_value(dispatch_step["env"]["WORKSPACE_IMAGE_OWNER"], github)
-          for event, github in EVENTS.items()}
-if OWNERS != {"push to main": "support-images", "pull request": "ci", "dispatch": "ci", "schedule": "ci"}:
-    raise SystemExit(f"the workspace image owner per event is {OWNERS}")
-WORKSPACE_BUILD = "Build and inspect without publication"
 
 realistic = [line.strip() for line in open(realistic_path) if line.strip()]
 universe = sorted({token for selection in realistic for token in selection.strip("|").split("|")}
@@ -4940,18 +4804,16 @@ for token in universe:
         synthetic.add("|valid:v3|" + "|".join(sorted({token, *extra})) + "|complete|")
 synthetic.add("|valid:v3|complete|")
 checked = 0
-builds = {event: 0 for event in ("push to main", "pull request")}
 for selection in sorted(set(realistic) | synthetic):
     # A quick or scheduled selection dispatches no artifact group.
     quick = "|pr_quick|" in selection or "|scheduled|" in selection
-    # A workflow dispatch has the pull request's owner (checked above).
-    for event, cw, desktop, workspace, kind_workspace in itertools.product(
+    for event, cw, desktop, kind_workspace in itertools.product(
             ("push to main", "pull request"),
-            ("true", "false"), ("true", "false"), ("true", "false"), ("source", "pinned")):
-        expected = dispatch(selection, cw, desktop, workspace, kind_workspace, OWNERS[event])
+            ("true", "false"), ("true", "false"), ("source", "pinned")):
+        expected = dispatch(selection, cw, desktop)
         # A quick selection deliberately ignores artifact facts; its steps
         # see what dispatch saw.
-        facts = ("false", "false", "false") if quick else (cw, desktop, workspace)
+        facts = ("false", "false") if quick else (cw, desktop)
         context = {
             **EVENTS[event],
             "needs.verification-selection.result": "success",
@@ -4966,7 +4828,6 @@ for selection in sorted(set(realistic) | synthetic):
             "needs.verification-selection.outputs.superseded": "false",
             "needs.verification-selection.outputs.cw_package_selected": facts[0],
             "needs.verification-selection.outputs.desktop_package_selected": facts[1],
-            "needs.verification-selection.outputs.workspace_image_selected": facts[2],
         }
         for name, value in expected.items():
             context[f"needs.verification-selection.outputs.{name}"] = value
@@ -4976,27 +4837,12 @@ for selection in sorted(set(realistic) | synthetic):
             if dispatched and not all(work):
                 raise SystemExit(
                     f"{job_id} would start with no work for {selection} "
-                    f"(cw={cw} desktop={desktop} workspace={workspace}): legs={work}")
+                    f"(cw={cw} desktop={desktop}): legs={work}")
             if not dispatched and any(work) and job_id in SELECTION_GATED:
                 raise SystemExit(
                     f"{job_id} has selected work but is not dispatched for {selection} "
-                    f"(cw={cw} desktop={desktop} workspace={workspace}): {work}")
-        # A push to main never builds the exact-source workspace; a pull
-        # request builds it whenever it is selected and Kind does not.
-        built = (evaluate(jobs["workspace-image"]["if"], context)
-                 and WORKSPACE_BUILD in job_work("workspace-image", context)[0])
-        owed = (not quick and workspace == "true"
-                and ("|kind|" not in selection or kind_workspace == "pinned"))
-        if event == "push to main" and built:
-            raise SystemExit(f"a push to main builds the workspace image for {selection} "
-                             f"(workspace={workspace} kind={kind_workspace})")
-        if event == "pull request" and built != owed:
-            raise SystemExit(f"a pull request {'builds' if built else 'skips'} the workspace image for "
-                             f"{selection} (workspace={workspace} kind={kind_workspace})")
-        builds[event] += built
+                    f"(cw={cw} desktop={desktop}): {work}")
         checked += 1
-if not builds["pull request"] or builds["push to main"]:
-    raise SystemExit(f"workspace builds per event: {builds}")
 
 # A scheduled run dispatches the Kind builds and shards alone, whatever the
 # artifact facts say, and an unchanged one dispatches nothing.
@@ -5005,9 +4851,9 @@ scheduled = [selection for selection in realistic if "|scheduled|" in selection]
 if sorted(scheduled) != ["|valid:v3|kind|scheduled|complete|", "|valid:v3|scheduled|complete|"]:
     raise SystemExit(f"scheduled selections are {scheduled}")
 for selection in scheduled:
-    for cw, desktop, workspace, kind_workspace in itertools.product(
-            ("true", "false"), ("true", "false"), ("true", "false"), ("source", "pinned")):
-        expected = dispatch(selection, cw, desktop, workspace, kind_workspace, OWNERS["schedule"])
+    for cw, desktop, kind_workspace in itertools.product(
+            ("true", "false"), ("true", "false"), ("source", "pinned")):
+        expected = dispatch(selection, cw, desktop)
         context = {
             **EVENTS["schedule"],
             "needs.verification-selection.result": "success",
@@ -5021,7 +4867,6 @@ for selection in scheduled:
             "needs.verification-selection.outputs.superseded": "false",
             "needs.verification-selection.outputs.cw_package_selected": cw,
             "needs.verification-selection.outputs.desktop_package_selected": desktop,
-            "needs.verification-selection.outputs.workspace_image_selected": workspace,
         }
         for name, value in expected.items():
             context[f"needs.verification-selection.outputs.{name}"] = value
@@ -5031,14 +4876,12 @@ for selection in scheduled:
             wanted = wanted - {"kind-workspace"}
         if started != wanted:
             raise SystemExit(f"a scheduled run with {selection} starts {sorted(started)}, "
-                             f"not {sorted(wanted)} (cw={cw} desktop={desktop} workspace={workspace} "
-                             f"kind={kind_workspace})")
+                             f"not {sorted(wanted)} (cw={cw} desktop={desktop} kind={kind_workspace})")
         for job_id in started:
             if not all(job_work(job_id, context)):
                 raise SystemExit(f"a scheduled run starts {job_id} with no work for {selection}")
         checked += 1
-print(f"dispatched jobs always have work: {checked} event, selection and artifact combinations; "
-      f"workspace builds: {builds['pull request']} on pull requests, none on main")
+print(f"dispatched jobs always have work: {checked} event, selection and artifact combinations")
 PY
 
 echo 'select-verification fixtures: OK'

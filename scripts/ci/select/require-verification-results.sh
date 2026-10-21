@@ -68,9 +68,6 @@ require_group_result edge-kind \
 require_group_result cw-release-assets \
   "${VERIFICATION_CW_RELEASE_ASSETS_EXPECTED:-missing}" \
   "${VERIFICATION_CW_RELEASE_ASSETS_RESULT:-missing}"
-require_group_result workspace-image \
-  "${VERIFICATION_WORKSPACE_IMAGE_EXPECTED:-missing}" \
-  "${VERIFICATION_WORKSPACE_IMAGE_RESULT:-missing}"
 
 case "$tested_tree_receipt" in
   fallback)

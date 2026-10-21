@@ -157,7 +157,6 @@ if grep -q '^enable-openid-connect:' "$WORKFLOW"; then
 fi
 cache_jobs=(
   cw-release-assets
-  workspace-image
   standard
   rust-compile
   rust-packages
@@ -182,7 +181,7 @@ for job in "${cache_jobs[@]}"; do
   grep -Fq '    enable-openid-connect: true' <<<"$job_block" ||
     fail "$job cannot request its untrusted cache identity"
   cache_selector=select-untrusted-rust-cache.sh
-  if [[ "$job" == workspace-image || "$job" == kind-workspace ]]; then
+  if [[ "$job" == kind-workspace ]]; then
     cache_selector=select-untrusted-workspace-cache.sh
   fi
   grep -Fq "scripts/ci/setup/$cache_selector \"\$RUNNER_TEMP/codewire-sccache-r2.aws\"" \

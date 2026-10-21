@@ -5,18 +5,9 @@ selection="${VERIFICATION_SELECTION:-}"
 tested_tree_receipt="${VERIFICATION_TESTED_TREE_RECEIPT:-}"
 cw_package_selected="${CW_PACKAGE_SELECTED:-}"
 desktop_package_selected="${DESKTOP_PACKAGE_SELECTED:-}"
-workspace_image_selected="${WORKSPACE_IMAGE_SELECTED:-}"
 # A main push that main has moved past dispatches nothing: the newer commit's
 # run, queued behind it, verifies the cumulative change.
 superseded="${VERIFICATION_SUPERSEDED:-false}"
-# Whether Kind builds the exact-source workspace (source) or runs the
-# published pin (pinned). Callers that predate the choice mean source.
-kind_workspace_source="${KIND_WORKSPACE_SOURCE:-source}"
-# Which workflow builds and verifies the exact-source workspace image. A push to
-# main leaves it to support-images, which runs the workspace contract on the
-# exact image it publishes (#2892); pull requests, dispatches and callers that
-# predate the choice keep CI's own build.
-workspace_image_owner="${WORKSPACE_IMAGE_OWNER:-ci}"
 
 fail() {
   echo "::error::$*" >&2
@@ -30,21 +21,12 @@ case "$tested_tree_receipt" in
   accepted|fallback) ;;
   *) fail "tested-tree receipt has invalid result ${tested_tree_receipt:-missing}" ;;
 esac
-for value in "$cw_package_selected" "$desktop_package_selected" \
-    "$workspace_image_selected" "$superseded"; do
+for value in "$cw_package_selected" "$desktop_package_selected" "$superseded"; do
   case "$value" in
     true|false) ;;
     *) fail "artifact selection has invalid result ${value:-missing}" ;;
   esac
 done
-case "$kind_workspace_source" in
-  source|pinned) ;;
-  *) fail "Kind workspace source is invalid: $kind_workspace_source" ;;
-esac
-case "$workspace_image_owner" in
-  ci|support-images) ;;
-  *) fail "workspace image owner is invalid: $workspace_image_owner" ;;
-esac
 
 selected() {
   [[ "$selection" == *"|$1|"* ]]
@@ -70,7 +52,6 @@ declare -A expected=(
   [services_runtime]=false
   [edge_kind]=false
   [cw_release_assets]=false
-  [workspace_image]=false
 )
 
 if [ "$superseded" = true ]; then
@@ -78,8 +59,8 @@ if [ "$superseded" = true ]; then
 elif [ "$tested_tree_receipt" = fallback ]; then
   # A hosted pull request's quick selection (pr_quick) runs only the quick
   # families it names. Artifact facts dispatch nothing there: the CW release
-  # assets, container contract and desktop package run on main, or on a pull
-  # request labelled ci-full. A scheduled run (scheduled) checks Kind alone,
+  # assets and desktop package run on main, or on a pull request labelled
+  # ci-full. A scheduled run (scheduled) checks Kind alone,
   # which the pushes to main may defer; they ran the artifact groups.
   artifact_groups=true
   if selected pr_quick || selected scheduled; then
@@ -96,7 +77,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
     desktop_package=true
   fi
   selected policy && expected[policy]=true
-  selected_any contracts go_support web docs sdk_go sdk_ts sdk_python \
+  selected_any contracts go_support web docs sdk_go sdk_ts sdk_python ios \
     && expected[standard]=true
   selected_any \
     deploy release runtime_confidential runtime_dev_smoke security \
@@ -129,17 +110,6 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   selected kind && expected[edge_kind]=true
   if [ "$artifact_groups" = true ] && [ "$cw_package_selected" = true ]; then
     expected[cw_release_assets]=true
-  fi
-  # Selected Kind builds and proves the workspace and dashboard images itself,
-  # unless it runs the published workspace pin; then the selected exact-source
-  # workspace still needs Container contract verification, when CI owns it.
-  # Dashboard and iOS work keep the job on every event.
-  if { [ "$artifact_groups" = true ] && [ "$workspace_image_owner" = ci ] \
-        && [ "$workspace_image_selected" = true ] \
-        && { ! selected kind || [ "$kind_workspace_source" = pinned ]; }; } \
-      || selected ios \
-      || { selected web && ! selected kind; }; then
-    expected[workspace_image]=true
   fi
 
   # A future trusted selector token must never silently create no work merely
@@ -177,8 +147,7 @@ fi
 
 for group in \
     policy standard tooling rust_compile rust_shards rust_transport database \
-    services_control services_runtime edge_kind cw_release_assets \
-    workspace_image; do
+    services_control services_runtime edge_kind cw_release_assets; do
   value="${expected[$group]}"
   printf '%s_expected=%s\n' "$group" "$value"
 done >> "${GITHUB_OUTPUT:-/dev/stdout}"

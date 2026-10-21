@@ -464,7 +464,7 @@ run_web() {
   if selected kind; then
     echo 'dashboard image verification deferred to the exact-image Kind transaction'
   elif [ "${CODEWIRE_DASHBOARD_IMAGE_DEFERRED:-false}" = true ]; then
-    echo 'dashboard image verification deferred to the selected CI container transaction'
+    echo 'dashboard image verification left to Dev delivery, which builds the exact image'
   else
     run_dashboard_image
   fi

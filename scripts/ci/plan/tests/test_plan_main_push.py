@@ -1,8 +1,8 @@
 """CI's artifact facts for a push to main (plan-main-push.py, #2897).
 
 Before #2897 every main push ran apply-verification-plan.py --unclassified, so
-the CW release assets, Container contract, Compile every Rust target and Rust /
-transport jobs ran on every push. A main push now plans the facts with the
+the CW release assets, Container contract (since removed, #3119 A12), Compile
+every Rust target and Rust / transport jobs ran on every push. A main push now plans the facts with the
 previous main's policy, against that commit when main CI's verdict verified it
 (main-ci-verdict.py, the predicate Dev delivery uses, #2892), and keeps every
 artifact selected otherwise.
@@ -80,7 +80,7 @@ def capability_selection(paths: list[str]) -> str:
 
 def dispatched(selection: str, outputs: dict[str, str]) -> dict[str, bool]:
     """Which capability groups the real dispatch emitter starts for these facts on a
-    push to main, which leaves the workspace image to support-images (#2892)."""
+    push to main."""
     env = {key: value for key, value in os.environ.items() if key != "GITHUB_OUTPUT"}
     env.update({
         "VERIFICATION_SELECTION": selection,
@@ -88,9 +88,6 @@ def dispatched(selection: str, outputs: dict[str, str]) -> dict[str, bool]:
         "VERIFICATION_SUPERSEDED": "false",
         "CW_PACKAGE_SELECTED": outputs["cw_package_selected"],
         "DESKTOP_PACKAGE_SELECTED": outputs["desktop_package_selected"],
-        "WORKSPACE_IMAGE_SELECTED": outputs["workspace_image_selected"],
-        "KIND_WORKSPACE_SOURCE": "pinned",
-        "WORKSPACE_IMAGE_OWNER": "support-images",
     })
     completed = subprocess.run(
         [str(REPOSITORY_ROOT / "scripts/ci/select/emit-verification-matrices.sh")],
@@ -153,8 +150,6 @@ class MainPushPlanTests(unittest.TestCase):
 
         previous = dispatched(selection, self.previous_outputs(head))
         self.assertTrue(all(previous[group] for group in HEAVY_ARTIFACT_GROUPS), previous)
-        # Even every artifact selected starts no Container contract job on main.
-        self.assertFalse(previous["workspace_image"], previous)
 
         outputs, log = self.choose(head, before, self.verified(before))
         self.assertEqual(self.selected(outputs), NOTHING)
@@ -174,8 +169,8 @@ class MainPushPlanTests(unittest.TestCase):
         self.assertEqual(outputs["cw_package_state"], "affected")
         groups = dispatched(capability_selection(["crates/codewire-cli/src/main.rs"]), outputs)
         self.assertTrue(all(groups[group] for group in HEAVY_ARTIFACT_GROUPS), groups)
-        # The selected workspace image is support-images' to build and verify.
-        self.assertFalse(groups["workspace_image"], groups)
+        # No CI group verifies the workspace image: support-images does (#3119 A12).
+        self.assertNotIn("workspace_image", groups)
 
     def test_pin_only_push_selects_what_compiles_the_pin(self) -> None:
         before = self.repo.add_workspace_pin_crate()

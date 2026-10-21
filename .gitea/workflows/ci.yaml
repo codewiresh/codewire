@@ -98,8 +98,6 @@ jobs:
       cw_package_selected: ${{ steps.select.outputs.cw_package_selected }}
       desktop_package_state: ${{ steps.select.outputs.desktop_package_state }}
       desktop_package_selected: ${{ steps.select.outputs.desktop_package_selected }}
-      workspace_image_state: ${{ steps.select.outputs.workspace_image_state }}
-      workspace_image_selected: ${{ steps.select.outputs.workspace_image_selected }}
       tested_tree_receipt: ${{ steps.receipt.outputs.tested_tree_receipt }}
       tested_tree_reason: ${{ steps.receipt.outputs.tested_tree_reason }}
       tested_tree_pr: ${{ steps.receipt.outputs.tested_tree_pr }}
@@ -118,7 +116,6 @@ jobs:
       services_runtime_expected: ${{ steps.dispatch.outputs.services_runtime_expected }}
       edge_kind_expected: ${{ steps.dispatch.outputs.edge_kind_expected }}
       cw_release_assets_expected: ${{ steps.dispatch.outputs.cw_release_assets_expected }}
-      workspace_image_expected: ${{ steps.dispatch.outputs.workspace_image_expected }}
       superseded: ${{ steps.superseded.outputs.superseded }}
       superseded_by: ${{ steps.superseded.outputs.superseded_by }}
       kind_workspace_source: ${{ steps.kind-workspace.outputs.kind_workspace_source }}
@@ -283,10 +280,9 @@ jobs:
       # Kind runs the published, digest-pinned workspace image unless this
       # change alters the image definition (images/base, images/workspace).
       # The sandbox daemon `cw` comes from the exact-source daemon image, so the
-      # workspace's own `cw` is not under test. When Kind takes the pin, the
-      # selected exact-source workspace verification runs in Container contract
-      # verification instead (in support-images on a push to main), so no check
-      # is dropped.
+      # workspace's own `cw` is not under test. The exact-source workspace
+      # image is verified where it is built: in support-images, which runs the
+      # workspace contract on the image it publishes from main (#3119 A12).
       - name: Choose the Kind workspace image source
         id: kind-workspace
         env:
@@ -310,12 +306,9 @@ jobs:
           VERIFICATION_TESTED_TREE_RECEIPT: ${{ steps.receipt.outputs.tested_tree_receipt }}
           CW_PACKAGE_SELECTED: ${{ steps.select.outputs.cw_package_selected }}
           DESKTOP_PACKAGE_SELECTED: ${{ steps.select.outputs.desktop_package_selected }}
+          # Read only by a pull request's trusted dispatcher that predates the
+          # removal of Container contract verification (#3119 A12).
           WORKSPACE_IMAGE_SELECTED: ${{ steps.select.outputs.workspace_image_selected }}
-          KIND_WORKSPACE_SOURCE: ${{ steps.kind-workspace.outputs.kind_workspace_source }}
-          # A push to main leaves the exact-source workspace image to
-          # support-images, which runs the workspace contract on the exact
-          # image it publishes (#2892). Same value as the container scope below.
-          WORKSPACE_IMAGE_OWNER: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'support-images' || 'ci' }}
         run: |
           set -euo pipefail
           dispatch_selector='scripts/ci/select/emit-verification-matrices.sh'
@@ -329,7 +322,7 @@ jobs:
               for group in \
                   policy standard tooling rust_compile rust_shards rust_transport database \
                   services_control services_runtime edge_kind \
-                  cw_release_assets workspace_image; do
+                  cw_release_assets; do
                 echo "${group}_expected=true" >> "$GITHUB_OUTPUT"
               done
               exit 0
@@ -436,118 +429,6 @@ jobs:
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
-
-  workspace-image:
-    enable-openid-connect: true
-    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
-    name: Container contract verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
-    # Workspace verification uses only the existing untrusted cache identity.
-    # With apt packages from the in-cluster snapshot cache (#2803) this job
-    # took 35 minutes cold (run 14199) and 22 warm (run 14254), most of it the
-    # CW producer and the arm64 cw cross-compile; the apt steps fell from 52
-    # minutes to seconds. The ceiling leaves the runner its cleanup margin.
-    # A push to main builds no workspace image here: support-images runs the
-    # contract on the exact image it publishes (#2892), so on main this job
-    # runs only the standalone dashboard image and the iOS tests.
-    timeout-minutes: 55
-    needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.workspace_image_expected == 'true' }}
-    env:
-      CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
-      CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
-      # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
-      CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
-    steps:
-      - name: Reuse exact PR-head content verification
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
-        run: echo 'container contract verification inherited from the exact tested PR-head tree'
-
-      - name: Resolve container contract scope
-        id: container-scope
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        env:
-          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-          WORKSPACE_IMAGE_SELECTED: ${{ needs.verification-selection.outputs.workspace_image_selected }}
-          KIND_WORKSPACE_SOURCE: ${{ needs.verification-selection.outputs.kind_workspace_source }}
-          # Same value as the dispatch decision's owner.
-          WORKSPACE_IMAGE_OWNER: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'support-images' || 'ci' }}
-        run: |
-          set -euo pipefail
-          owner="${WORKSPACE_IMAGE_OWNER:-ci}"
-          case "$owner" in
-            ci|support-images) ;;
-            *) echo "::error::workspace image owner is invalid: $owner" >&2; exit 1 ;;
-          esac
-          # This job builds and verifies the exact-source workspace only when
-          # CI owns it: a push to main leaves it to support-images, which runs
-          # the contract on the exact image it publishes. Selected Kind owns it
-          # unless it runs the published pin; then this job keeps it.
-          workspace=false
-          if [ "$owner" = ci ] && [ "$WORKSPACE_IMAGE_SELECTED" = true ] \
-              && { [[ "$VERIFICATION_SELECTION" != *'|kind|'* ]] || [ "${KIND_WORKSPACE_SOURCE:-}" = pinned ]; }; then
-            workspace=true
-          fi
-          # The standalone dashboard image and the iOS tests run on every event.
-          selected=false
-          if [ "$workspace" = true ] \
-              || [[ "$VERIFICATION_SELECTION" == *'|ios|'* ]] \
-              || { [[ "$VERIFICATION_SELECTION" == *'|web|'* ]] \
-                && [[ "$VERIFICATION_SELECTION" != *'|kind|'* ]]; }; then
-            selected=true
-          fi
-          printf 'workspace=%s\nselected=%s\n' "$workspace" "$selected" >> "$GITHUB_OUTPUT"
-
-      - name: Container contracts not selected
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.selected != 'true' }}
-        run: echo 'standalone container work is unaffected, owned by selected Kind, or on main owned by support-images; no checkout, download, installation, or build required'
-
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.selected == 'true' }}
-
-      - name: Bound cargo jobs by memory
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.selected == 'true' }}
-        run: scripts/ci/setup/bound-cargo-jobs.sh
-
-      - name: Prove isolated Buildx load contract
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.workspace == 'true' }}
-        run: |
-          scripts/ci/tests/test-build-local-image.sh
-          scripts/ci/tests/test-workspace-agent-contract.sh
-          scripts/ci/verify/rehearse-build-local-image.sh
-
-      - name: Select independent workspace caches
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.workspace == 'true' }}
-        env:
-          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
-          CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ github.event.inputs.layer_cache }}
-        run: scripts/ci/setup/select-untrusted-workspace-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
-
-      - name: Build and inspect without publication
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.workspace == 'true' }}
-        run: scripts/ci/verify/verify-workspace-image.sh
-
-      - name: Clean workspace cache credentials
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.workspace == 'true' }}
-        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
-
-      - name: Build and inspect the standalone dashboard image
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|web|') && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
-        env:
-          # This direct bake does not receive the workspace compiler secret.
-          CODEWIRE_SCCACHE_MODE: disabled
-        run: scripts/ci/verify/run-product-verification.sh dashboard-image
-
-      - name: Run iOS package tests in the pinned Swift image
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|ios|') }}
-        run: |
-          scripts/ci/verify/run-product-verification.sh ios-config
-          docker build --file - apps/ios <<'DOCKERFILE'
-          FROM swift@sha256:0ff707a48519cf1473616c759e019bcff21cfbafa3d2687bf8fd41a2757adc9a
-          WORKDIR /workspace
-          COPY . .
-          RUN swift test --scratch-path /tmp/codewire-ios-build
-          DOCKERFILE
 
   policy:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -689,6 +570,17 @@ jobs:
       - name: Run SDK Python
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_python|') }}
         run: scripts/ci/verify/run-product-verification.sh sdk-python
+
+      - name: Run iOS package tests in the pinned Swift image
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|ios|') }}
+        run: |
+          scripts/ci/verify/run-product-verification.sh ios-config
+          docker build --file - apps/ios <<'DOCKERFILE'
+          FROM swift@sha256:0ff707a48519cf1473616c759e019bcff21cfbafa3d2687bf8fd41a2757adc9a
+          WORKDIR /workspace
+          COPY . .
+          RUN swift test --scratch-path /tmp/codewire-ios-build
+          DOCKERFILE
 
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
@@ -1929,7 +1821,6 @@ jobs:
     needs:
       - verification-selection
       - cw-release-assets
-      - workspace-image
       - policy
       - standard
       - tooling
@@ -1976,8 +1867,6 @@ jobs:
           VERIFICATION_EDGE_KIND_RESULT: ${{ needs.edge-kind.result }}
           VERIFICATION_CW_RELEASE_ASSETS_EXPECTED: ${{ needs.verification-selection.outputs.cw_release_assets_expected }}
           VERIFICATION_CW_RELEASE_ASSETS_RESULT: ${{ needs.cw-release-assets.result }}
-          VERIFICATION_WORKSPACE_IMAGE_EXPECTED: ${{ needs.verification-selection.outputs.workspace_image_expected }}
-          VERIFICATION_WORKSPACE_IMAGE_RESULT: ${{ needs.workspace-image.result }}
         run: scripts/ci/select/require-verification-results.sh
 
       # Main CI's verdict for its own commit (#2892), printed only after every

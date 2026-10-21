@@ -27,10 +27,8 @@ run() {
 # Other refs, other events and shipping jobs never touch the cache.
 out="$(run rust-compile push refs/heads/feature)"; grep -qF 'not a push to main or a pull request' <<<"$out" || fail 'another ref used the cache'
 out="$(run rust-compile schedule refs/heads/main)"; grep -qF 'not a push to main or a pull request' <<<"$out" || fail 'a scheduled run used the cache'
-for job in cw-release-assets workspace-image; do
-  out="$(run "$job" push refs/heads/main)"; grep -qF 'ships an artifact' <<<"$out" || fail "$job used the cache on main"
-  out="$(run "$job" pull_request refs/pull/1/head)"; grep -qF 'ships an artifact' <<<"$out" || fail "$job used the cache on a pull request"
-done
+out="$(run cw-release-assets push refs/heads/main)"; grep -qF 'ships an artifact' <<<"$out" || fail 'cw-release-assets used the cache on main'
+out="$(run cw-release-assets pull_request refs/pull/1/head)"; grep -qF 'ships an artifact' <<<"$out" || fail 'cw-release-assets used the cache on a pull request'
 [[ ! -e "$work/cache/v1" && ! -L "$work/workspace/target/ci-cache" ]] || fail 'a skipped job changed the cache'
 
 # A main push links its target and Cargo home into the cache.
@@ -108,7 +106,7 @@ for name, job in jobs.items():
     assert report["name"] == "Report the warm Rust cache", name
     assert report["if"] == checkout["if"].replace("${{ ", "${{ always() && ", 1), name
 assert wired == expected, sorted(wired ^ expected)
-assert not wired & {"cw-release-assets", "workspace-image"}
+assert "cw-release-assets" not in wired
 WIRING
 
 printf '[test-warm-rust-cache] main and pull requests only, shipping excluded, weekly and epoch wipes, LRU and Cargo home caps: OK\n'

@@ -30,8 +30,6 @@ green_results=(
   VERIFICATION_EDGE_KIND_RESULT=success
   VERIFICATION_CW_RELEASE_ASSETS_EXPECTED=true
   VERIFICATION_CW_RELEASE_ASSETS_RESULT=success
-  VERIFICATION_WORKSPACE_IMAGE_EXPECTED=true
-  VERIFICATION_WORKSPACE_IMAGE_RESULT=success
 )
 
 unselected_results=(
@@ -58,8 +56,6 @@ unselected_results=(
   VERIFICATION_EDGE_KIND_RESULT=skipped
   VERIFICATION_CW_RELEASE_ASSETS_EXPECTED=false
   VERIFICATION_CW_RELEASE_ASSETS_RESULT=skipped
-  VERIFICATION_WORKSPACE_IMAGE_EXPECTED=false
-  VERIFICATION_WORKSPACE_IMAGE_RESULT=skipped
 )
 
 expect_failure() {
@@ -194,11 +190,6 @@ expect_failure cw_release_assets_failure \
   'cw-release-assets selected capability group concluded failure' \
   VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
   VERIFICATION_CW_RELEASE_ASSETS_RESULT=failure
-
-expect_failure workspace_image_failure \
-  'workspace-image selected capability group concluded failure' \
-  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
-  VERIFICATION_WORKSPACE_IMAGE_RESULT=failure
 
 expect_failure malformed_selection 'verification selection is invalid or incomplete' \
   VERIFICATION_SELECTION='|valid:v3|policy|'

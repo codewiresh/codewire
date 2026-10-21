@@ -56,7 +56,7 @@ import yaml
 
 jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
 sized = {name for name, job in jobs.items() if "cpu10-ram17g" in str(job.get("runs-on", ""))}
-assert len(sized) == 12, sorted(sized)
+assert len(sized) == 11, sorted(sized)
 for name in sized:
     job = jobs[name]
     assert "CARGO_BUILD_JOBS" not in (job.get("env") or {}), name

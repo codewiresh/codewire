@@ -30,7 +30,7 @@ readonly cache="$root/v1"
 readonly target_cap_kib="${WARM_CACHE_TARGET_CAP_KIB:-87890625}"
 readonly cargo_home_cap_kib="${WARM_CACHE_CARGO_HOME_CAP_KIB:-11718750}"
 # Artifacts that ship or are published build from a clean target.
-readonly shipping_jobs=' cw-release-assets workspace-image '
+readonly shipping_jobs=' cw-release-assets '
 
 : "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
 : "${GITHUB_JOB:?Forgejo job id is required}"
