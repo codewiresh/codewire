@@ -5,12 +5,16 @@ on:
   push:
     branches: [main]
 
-# A newer main push cancels this run, queued or building (#2893): only the
-# newest commit's pair is published and proposed as the pin. A run that starts
-# after main moved on still builds nothing (see "Skip a superseded commit").
+# A support build that is already running finishes when main moves on: main
+# pushes arrive faster than the build, so cancelling it left no pair published
+# all day (owner, 2026-10-21). A newer push's run waits behind it instead of
+# building beside it on the trusted builder. When it starts, a commit main has
+# already moved past builds nothing ("Skip a superseded commit"), and the
+# newest commit plans against the pair just published, so it builds only
+# changed inputs.
 concurrency:
   group: support-images-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}

@@ -26,12 +26,13 @@ fi
 if grep -q '^  workflow_dispatch:' "$WORKFLOW"; then
   fail 'support-image publication must be canonical-main push-only'
 fi
-# A newer main push cancels a superseded publication, queued or building
-# (#2893), within this one group.
+# A running support build finishes when main moves on, and a newer push's run
+# waits behind it in one group rather than building beside it (owner,
+# 2026-10-21). A waiting commit that main has moved past builds nothing.
 concurrency_block="$(sed -n '/^concurrency:$/,/^$/p' "$WORKFLOW")"
 # shellcheck disable=SC2016 # Match the literal workflow expression.
-[[ "$concurrency_block" == $'concurrency:\n  group: support-images-${{ github.ref }}\n  cancel-in-progress: true' ]] ||
-  fail 'a newer main push does not cancel a superseded support-image publication'
+[[ "$concurrency_block" == $'concurrency:\n  group: support-images-${{ github.ref }}\n  cancel-in-progress: false' ]] ||
+  fail 'a newer main push cancels a running support build, or support runs build in parallel'
 if grep -Fq 'CODEWIRE_GHCR_PUBLISH_ENABLED' "$WORKFLOW"; then
   fail 'support GHCR publication retains its rollout flag'
 fi
