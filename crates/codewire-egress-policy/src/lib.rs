@@ -12,11 +12,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
+mod builtin;
 mod cidr;
 pub mod host_addresses;
 mod hostname;
 pub mod lease;
+pub mod reference;
+pub mod typed;
 
+pub use builtin::{
+    BuiltinPolicy, LOCKED_ID, LOCKED_POLICY_DIGEST, LOCKED_POLICY_YAML, is_reserved_policy_name,
+};
 use cidr::IpNetwork;
 use hostname::{NamePattern, canonical_hostname, protected_name};
 
@@ -350,12 +356,16 @@ struct CompiledRule {
 
 impl CompiledRule {
     fn matches(&self, request: &EgressRequest) -> bool {
+        (self.ports.is_empty() || self.ports.binary_search(&request.port).is_ok())
+            && self.matches_any_port(request)
+    }
+
+    fn matches_any_port(&self, request: &EgressRequest) -> bool {
         self.protocols.binary_search(&request.protocol).is_ok()
             && self
                 .route_classes
                 .binary_search(&request.route_class)
                 .is_ok()
-            && (self.ports.is_empty() || self.ports.binary_search(&request.port).is_ok())
             && (self.destinations.is_empty()
                 || request.hostname.as_deref().is_some_and(|hostname| {
                     self.destinations
@@ -492,9 +502,14 @@ impl CompiledPolicy {
         })
     }
 
+    /// The built-in `open` policy, `codewire-developer-v1`.
     pub fn developer_baseline() -> Self {
-        PolicyDocument::parse_yaml(DEVELOPER_BASELINE_YAML)
-            .expect("the built-in developer egress policy must remain valid")
+        BuiltinPolicy::Open.compile()
+    }
+
+    /// The built-in `locked` policy: no rules, so no workload egress.
+    pub fn locked() -> Self {
+        BuiltinPolicy::Locked.compile()
     }
 
     pub fn digest(&self) -> PolicyDigest {
@@ -548,6 +563,24 @@ impl CompiledPolicy {
         }
     }
 
+    /// Whether some allow rule matches `request` on any port. It only
+    /// classifies a refusal as "port not allowed"; it never admits anything.
+    pub(crate) fn allows_on_another_port(&self, request: &EgressRequest) -> bool {
+        if request
+            .hostname
+            .as_deref()
+            .is_some_and(|hostname| protected_name(hostname).is_some())
+            || request
+                .address
+                .is_some_and(|address| classify_address(address).is_some())
+        {
+            return false;
+        }
+        self.rules
+            .iter()
+            .any(|rule| rule.action == PolicyAction::Allow && rule.matches_any_port(request))
+    }
+
     fn deny(&self, reason: DecisionReason, rule_id: Option<String>) -> PolicyDecision {
         PolicyDecision {
             action: DecisionAction::Deny,
@@ -565,73 +598,81 @@ pub fn classify_address(address: IpAddr) -> Option<AddressClass> {
     }
 }
 
+/// The fixed IPv4 refusals, in classification order: the first match names
+/// the class.
+const PROTECTED_V4: [(u32, u8, AddressClass); 15] = [
+    (0x0000_0000, 8, AddressClass::Unspecified),
+    (0x0a00_0000, 8, AddressClass::Private),
+    (0xac10_0000, 12, AddressClass::Private),
+    (0xc0a8_0000, 16, AddressClass::Private),
+    (0x6440_0000, 10, AddressClass::Shared),
+    (0x7f00_0000, 8, AddressClass::Loopback),
+    (0xa9fe_0000, 16, AddressClass::LinkLocal),
+    (0xc000_0200, 24, AddressClass::Documentation),
+    (0xc633_6400, 24, AddressClass::Documentation),
+    (0xcb00_7100, 24, AddressClass::Documentation),
+    (0xc612_0000, 15, AddressClass::Benchmark),
+    (0xe000_0000, 4, AddressClass::Multicast),
+    (0xc000_0000, 24, AddressClass::Reserved),
+    (0xc058_6300, 24, AddressClass::Reserved),
+    (0xf000_0000, 4, AddressClass::Reserved),
+];
+
+/// The fixed IPv6 refusals, in classification order. Each network is its
+/// leading hexadecimal groups shifted into place.
+const PROTECTED_V6: [(u128, u8, AddressClass); 17] = [
+    (0, 128, AddressClass::Unspecified),
+    (1, 128, AddressClass::Loopback),
+    (0, 96, AddressClass::Mapped),
+    (0xffff << 32, 96, AddressClass::Mapped),
+    (0x0064_ff9b << 96, 96, AddressClass::Mapped),
+    (0x0064_ff9b_0001 << 80, 48, AddressClass::Mapped),
+    (0xfc00 << 112, 7, AddressClass::Private),
+    (0xfe80 << 112, 10, AddressClass::LinkLocal),
+    (0xfec0 << 112, 10, AddressClass::Reserved),
+    (0xff00 << 112, 8, AddressClass::Multicast),
+    (0x2001_0db8 << 96, 32, AddressClass::Documentation),
+    (0x2001_0002 << 96, 48, AddressClass::Benchmark),
+    (0x0100 << 112, 64, AddressClass::Reserved),
+    (0x2001 << 112, 23, AddressClass::Reserved),
+    (0x2002 << 112, 16, AddressClass::Reserved),
+    (0x3fff << 112, 20, AddressClass::Reserved),
+    (0x5f00 << 112, 16, AddressClass::Reserved),
+];
+
 fn classify_ipv4(address: Ipv4Addr) -> Option<AddressClass> {
     let raw = u32::from(address);
-    if in_v4(raw, 0x0000_0000, 8) {
-        Some(AddressClass::Unspecified)
-    } else if in_v4(raw, 0x0a00_0000, 8)
-        || in_v4(raw, 0xac10_0000, 12)
-        || in_v4(raw, 0xc0a8_0000, 16)
-    {
-        Some(AddressClass::Private)
-    } else if in_v4(raw, 0x6440_0000, 10) {
-        Some(AddressClass::Shared)
-    } else if in_v4(raw, 0x7f00_0000, 8) {
-        Some(AddressClass::Loopback)
-    } else if in_v4(raw, 0xa9fe_0000, 16) {
-        Some(AddressClass::LinkLocal)
-    } else if in_v4(raw, 0xc000_0200, 24)
-        || in_v4(raw, 0xc633_6400, 24)
-        || in_v4(raw, 0xcb00_7100, 24)
-    {
-        Some(AddressClass::Documentation)
-    } else if in_v4(raw, 0xc612_0000, 15) {
-        Some(AddressClass::Benchmark)
-    } else if in_v4(raw, 0xe000_0000, 4) {
-        Some(AddressClass::Multicast)
-    } else if in_v4(raw, 0xc000_0000, 24)
-        || in_v4(raw, 0xc058_6300, 24)
-        || in_v4(raw, 0xf000_0000, 4)
-    {
-        Some(AddressClass::Reserved)
-    } else {
-        None
-    }
+    PROTECTED_V4
+        .iter()
+        .find(|(network, prefix, _)| in_v4(raw, *network, *prefix))
+        .map(|(_, _, class)| *class)
 }
 
 fn classify_ipv6(address: Ipv6Addr) -> Option<AddressClass> {
     let raw = u128::from(address);
-    if address.is_unspecified() {
-        Some(AddressClass::Unspecified)
-    } else if address.is_loopback() {
-        Some(AddressClass::Loopback)
-    } else if in_v6(raw, 0x0000_0000_0000_0000_0000_0000_0000_0000, 96)
-        || in_v6(raw, 0x0000_0000_0000_0000_0000_ffff_0000_0000, 96)
-        || in_v6(raw, 0x0064_ff9b_0000_0000_0000_0000_0000_0000, 96)
-        || in_v6(raw, 0x0064_ff9b_0001_0000_0000_0000_0000_0000, 48)
-    {
-        Some(AddressClass::Mapped)
-    } else if in_v6(raw, 0xfc00_0000_0000_0000_0000_0000_0000_0000, 7) {
-        Some(AddressClass::Private)
-    } else if in_v6(raw, 0xfe80_0000_0000_0000_0000_0000_0000_0000, 10) {
-        Some(AddressClass::LinkLocal)
-    } else if in_v6(raw, 0xfec0_0000_0000_0000_0000_0000_0000_0000, 10) {
-        Some(AddressClass::Reserved)
-    } else if in_v6(raw, 0xff00_0000_0000_0000_0000_0000_0000_0000, 8) {
-        Some(AddressClass::Multicast)
-    } else if in_v6(raw, 0x2001_0db8_0000_0000_0000_0000_0000_0000, 32) {
-        Some(AddressClass::Documentation)
-    } else if in_v6(raw, 0x2001_0002_0000_0000_0000_0000_0000_0000, 48) {
-        Some(AddressClass::Benchmark)
-    } else if in_v6(raw, 0x0100_0000_0000_0000_0000_0000_0000_0000, 64)
-        || in_v6(raw, 0x2001_0000_0000_0000_0000_0000_0000_0000, 23)
-        || in_v6(raw, 0x2002_0000_0000_0000_0000_0000_0000_0000, 16)
-        || in_v6(raw, 0x3fff_0000_0000_0000_0000_0000_0000_0000, 20)
-        || in_v6(raw, 0x5f00_0000_0000_0000_0000_0000_0000_0000, 16)
-    {
-        Some(AddressClass::Reserved)
-    } else {
-        None
+    PROTECTED_V6
+        .iter()
+        .find(|(network, prefix, _)| in_v6(raw, *network, *prefix))
+        .map(|(_, _, class)| *class)
+}
+
+/// The class of the first fixed refusal that shares any address with
+/// `network`. Two prefixes overlap exactly when the shorter one contains the
+/// other's network address.
+pub(crate) fn protected_overlap(network: IpNetwork) -> Option<AddressClass> {
+    match network {
+        IpNetwork::V4 { network, prefix } => PROTECTED_V4
+            .iter()
+            .find(|(protected, protected_prefix, _)| {
+                in_v4(*protected, network, prefix) || in_v4(network, *protected, *protected_prefix)
+            })
+            .map(|(_, _, class)| *class),
+        IpNetwork::V6 { network, prefix } => PROTECTED_V6
+            .iter()
+            .find(|(protected, protected_prefix, _)| {
+                in_v6(*protected, network, prefix) || in_v6(network, *protected, *protected_prefix)
+            })
+            .map(|(_, _, class)| *class),
     }
 }
 

@@ -409,3 +409,134 @@ fn decisions_expose_only_bounded_reason_rule_and_digest() {
     assert_eq!(decision.policy_digest, policy.digest());
     assert_eq!(decision.reason_code(), "protected-address-private");
 }
+
+#[test]
+fn builtin_policies_have_stable_names_ids_bytes_and_digests() {
+    // `open` is `codewire-developer-v1`: its bytes and digest never change.
+    assert_eq!(
+        DEVELOPER_BASELINE_YAML,
+        b"version: 1\ndefault: deny\nrules:\n  - id: developer-public-dns\n    action: allow\n    protocols: [dns]\n    ports: [53]\n    destinations: [\"*\"]\n    route_classes: [general]\n  - id: developer-public-tcp\n    action: allow\n    protocols: [tcp]\n    ports: [22, 80, 443]\n    cidrs: [0.0.0.0/0, \"::/0\"]\n    route_classes: [general]\n"
+    );
+    assert_eq!(
+        DEVELOPER_BASELINE_DIGEST,
+        "fab8151c7bffd0d0fe6ca1a9397ae6b60fa1e0ae650a967f9c9445ac3dd4189f"
+    );
+    assert_eq!(
+        LOCKED_POLICY_YAML,
+        b"version: 1\ndefault: deny\nrules: []\n"
+    );
+    assert_eq!(
+        LOCKED_POLICY_DIGEST,
+        "145641138b37aaf7724fb49bc3dd5f59c515ff34e60a2cfbdc7d51d4da9b16ca"
+    );
+
+    assert_eq!(
+        BuiltinPolicy::ALL,
+        [BuiltinPolicy::Open, BuiltinPolicy::Locked]
+    );
+    for (builtin, name, id, digest) in [
+        (
+            BuiltinPolicy::Open,
+            "open",
+            "codewire-developer-v1",
+            DEVELOPER_BASELINE_DIGEST,
+        ),
+        (
+            BuiltinPolicy::Locked,
+            "locked",
+            "codewire-locked-v1",
+            LOCKED_POLICY_DIGEST,
+        ),
+    ] {
+        assert_eq!(builtin.name(), name);
+        assert_eq!(builtin.to_string(), name);
+        assert_eq!(builtin.id(), id);
+        assert_eq!(builtin.digest_hex(), digest);
+        assert_eq!(builtin.compile().digest().to_hex(), digest);
+        assert_eq!(BuiltinPolicy::from_name(name), Some(builtin));
+    }
+    assert_eq!(
+        CompiledPolicy::developer_baseline().digest().to_hex(),
+        DEVELOPER_BASELINE_DIGEST
+    );
+    assert_eq!(
+        CompiledPolicy::locked().digest().to_hex(),
+        LOCKED_POLICY_DIGEST
+    );
+    assert_eq!(BuiltinPolicy::from_name("Open"), None);
+    assert_eq!(BuiltinPolicy::from_name("work"), None);
+}
+
+#[test]
+fn builtin_names_are_reserved_in_any_letter_case() {
+    for name in ["open", "OPEN", "Open", "locked", "LOCKED", "lOcKeD"] {
+        assert!(is_reserved_policy_name(name), "{name} is not reserved");
+    }
+    for name in ["work", "opened", "unlocked", "open-1", ""] {
+        assert!(!is_reserved_policy_name(name), "{name} is reserved");
+    }
+}
+
+#[test]
+fn locked_admits_no_workload_egress() {
+    let policy = CompiledPolicy::locked();
+    assert!(policy.canonical_document().rules.is_empty());
+    for route_class in [
+        RouteClass::General,
+        RouteClass::Credential,
+        RouteClass::Mesh,
+    ] {
+        let query = EgressRequest::dns_query("github.com", route_class).unwrap();
+        assert_eq!(policy.evaluate(&query).reason, DecisionReason::DefaultDeny);
+        for address in [PUBLIC_V4, PUBLIC_V6] {
+            for port in [22, 80, 443] {
+                let decision = policy.evaluate(&request(address, port, None, route_class));
+                assert_eq!(decision.reason, DecisionReason::DefaultDeny);
+                assert_eq!(decision.policy_digest.to_hex(), LOCKED_POLICY_DIGEST);
+            }
+        }
+    }
+}
+
+#[test]
+fn locked_is_the_empty_typed_policy_and_open_is_outside_the_subset() {
+    let empty = typed::TypedPolicy::new([]).unwrap();
+    assert_eq!(empty.compile().digest().to_hex(), LOCKED_POLICY_DIGEST);
+    assert_eq!(
+        typed::TypedPolicy::from_document(CompiledPolicy::locked().canonical_document()).unwrap(),
+        empty
+    );
+    let open = typed::TypedPolicy::from_document(
+        CompiledPolicy::developer_baseline().canonical_document(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        open.to_string(),
+        "egress policy rule developer-public-dns is outside the supported subset: its id is not a .dns or .tcp allow rule id"
+    );
+}
+
+#[test]
+fn protected_overlap_finds_any_shared_address() {
+    for (network, class) in [
+        ("0.0.0.0/0", Some(AddressClass::Unspecified)),
+        ("8.0.0.0/5", Some(AddressClass::Private)),
+        ("10.20.0.0/16", Some(AddressClass::Private)),
+        ("100.96.0.0/11", Some(AddressClass::Shared)),
+        ("192.0.0.0/8", Some(AddressClass::Private)),
+        ("192.0.2.0/24", Some(AddressClass::Documentation)),
+        ("8.8.8.8/32", None),
+        ("8.0.0.0/8", None),
+        ("93.0.0.0/8", None),
+        ("::/0", Some(AddressClass::Unspecified)),
+        ("2000::/3", Some(AddressClass::Documentation)),
+        ("2606:4700:4700::1111/128", None),
+        ("fe80::/64", Some(AddressClass::LinkLocal)),
+    ] {
+        assert_eq!(
+            protected_overlap(cidr::IpNetwork::parse(network).unwrap()),
+            class,
+            "{network}"
+        );
+    }
+}
