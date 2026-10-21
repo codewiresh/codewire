@@ -33,6 +33,10 @@ struct Source {
     /// scheduling (#3059).
     hold_until_overlap: Arc<AtomicBool>,
     overlap: Arc<Notify>,
+    /// When set, every key list waits until the test lets go, so a deadline
+    /// passes with each read unfinished whatever the host's speed.
+    hold_reads: Arc<AtomicBool>,
+    released: Arc<Notify>,
     calls: Arc<Mutex<Vec<String>>>,
 }
 
@@ -118,8 +122,12 @@ async fn fixture() -> (AppState, Source, tokio::task::JoinHandle<()>) {
                 let bytes = to_bytes(request.into_body(), 8192).await.unwrap();
                 let request = ListApiKeysRequest::decode_from_slice(&bytes).unwrap();
                 assert_eq!(request.page_size, 0); assert!(request.page_token.is_empty());
-                // Registered before the count, so a second read's notify
-                // always reaches it.
+                // Registered before the flags are read, so a notify always
+                // reaches a read that is waiting.
+                let released = source.released.notified();
+                if source.hold_reads.load(Ordering::SeqCst) {
+                    released.await;
+                }
                 let overlapped = source.overlap.notified();
                 let active = source.active.fetch_add(1, Ordering::SeqCst) + 1;
                 source.peak.fetch_max(active, Ordering::SeqCst);
@@ -631,6 +639,9 @@ async fn personal_api_key_inventory_deadline_leaves_unfinished_groups_unavailabl
         })
         .collect();
     assert_eq!(INVENTORY_BUDGET, Duration::from_secs(10));
+    // No read finishes before the deadline: each waits until the test lets
+    // go, after the inventory gave up on them.
+    source.hold_reads.store(true, Ordering::SeqCst);
     load_groups_until(
         &state,
         &context.cookie,
@@ -640,6 +651,8 @@ async fn personal_api_key_inventory_deadline_leaves_unfinished_groups_unavailabl
     )
     .await
     .unwrap();
+    source.hold_reads.store(false, Ordering::SeqCst);
+    source.released.notify_waiters();
     assert!(
         groups
             .iter()
