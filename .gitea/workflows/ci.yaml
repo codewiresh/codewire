@@ -345,17 +345,16 @@ jobs:
   cw-release-assets:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: CW release-assets verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.cw_release_assets_expected == 'true' }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/cw-cross-ci
     steps:
       - name: Reuse exact PR-head content verification
@@ -476,7 +475,7 @@ jobs:
     enable-openid-connect: true
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Container contract verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     # Workspace verification uses only the existing untrusted cache identity.
     # With apt packages from the in-cluster snapshot cache (#2803) this job
     # took 35 minutes cold (run 14199) and 22 warm (run 14254), most of it the
@@ -491,11 +490,10 @@ jobs:
     outputs:
       workspace_cache_seed: ${{ steps.cache-seed-report.outputs.workspace_cache_seed }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
       CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
@@ -641,13 +639,12 @@ jobs:
     # world-writable. The measured full ShellCheck phase joins the existing
     # heavy tooling group only when trusted selection requests it.
     name: Policy verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.policy_expected == 'true' }}
@@ -701,17 +698,16 @@ jobs:
   standard:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Standard verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.standard_expected == 'true' }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
     steps:
       - name: Reuse exact PR-head content verification
@@ -838,13 +834,12 @@ jobs:
     # them behind language and SDK verification. These checks still need the
     # dependency egress and compute budget intentionally absent from ci-lite.
     name: Tooling / delivery contract verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.tooling_expected == 'true' }}
@@ -941,17 +936,16 @@ jobs:
   rust-compile:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Compile every Rust target
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_compile_expected == 'true' }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
     steps:
@@ -1030,17 +1024,16 @@ jobs:
   rust-packages:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Rust / transport packages
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_shards_expected == 'true' }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
     steps:
@@ -1122,17 +1115,16 @@ jobs:
   rust-features:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Rust / transport feature graphs
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_shards_expected == 'true' }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
     steps:
@@ -1214,17 +1206,16 @@ jobs:
   rust-transport:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Rust / transport verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     enable-openid-connect: true
     timeout-minutes: 55
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_transport_expected == 'true' }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_DESKTOP_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/desktop-release
@@ -1348,17 +1339,16 @@ jobs:
   database:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Database verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.database_expected == 'true' }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
     steps:
@@ -1479,17 +1469,16 @@ jobs:
   services-control:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Service control-plane verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.services_control_expected == 'true' }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
     steps:
@@ -1632,17 +1621,16 @@ jobs:
   services-runtime:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Service runtime-plane verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.services_runtime_expected == 'true' }}
     env:
-      # On main this job runs in a 17 GiB metal guest whose CPU bursts to the
-      # host (infra#1534); one rustc per visible CPU would exceed it.
-      # Eleven (about 1.5 GiB each) is the floor to raise from measured peak
-      # memory. Pull requests stay on the eight-vCPU cloud shape.
-      CARGO_BUILD_JOBS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '11' || '8' }}
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
     steps:
@@ -2365,7 +2353,7 @@ jobs:
     # This experiment uses the existing untrusted PR cache identity only.
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job obtains only the reviewed untrusted cache identity.
     name: Workspace cache experiment (${{ matrix.case }})
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     enable-openid-connect: true
     timeout-minutes: 55
     needs: [verification-selection, workspace-image, kind-workspace]
@@ -2378,6 +2366,10 @@ jobs:
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
       CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -2431,7 +2423,7 @@ jobs:
     # Cost-only opt-in, after all measured workers stop using the shared cache.
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job obtains only the reviewed untrusted cache identity.
     name: Opt-in workspace cache experiment probes
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
     enable-openid-connect: true
     timeout-minutes: 55
     needs: [verification-selection, workspace-image, kind-workspace, workspace-cache-measurement]
@@ -2441,6 +2433,10 @@ jobs:
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
       CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
+      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
+      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
+      # 1.5 GiB each) is the floor to raise from measured peak memory.
+      CARGO_BUILD_JOBS: '11'
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:

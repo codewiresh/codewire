@@ -860,7 +860,7 @@ class WorkflowTests(unittest.TestCase):
         body = workflow_job("workspace-cache-measurement")
         self.assertIn("    name: Workspace cache experiment (${{ matrix.case }})\n", body)
         self.assertIn("    runs-on: " + chr(36) + "{{ github.event_name == 'push' && github.ref == "
-                      "'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}\n", body)
+                      "'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}\n", body)
         self.assertIn("    enable-openid-connect: true\n", body)
         self.assertNotIn("continue-on-error", body)
         self.assertIn("workspace_cache_experiment == 'true'", body)

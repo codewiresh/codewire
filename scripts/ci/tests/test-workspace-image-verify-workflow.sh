@@ -47,8 +47,8 @@ BUILDER = re.compile(
     r"|build-support-platform\.sh linux/"
 )
 HEAVY = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}"
-# Metal main guests carry the ci-heavy pool label, so the same cache policy admits them.
-METAL_MAIN = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy' }}"
+# Metal guests carry the ci-heavy pool label, so the same cache policy admits them.
+METAL_MAIN = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}"
 # Jobs that call an image builder without the cache: the arm64 support legs
 # build on the remote ci-arm64-builder node outside the cluster, and the
 # support join only assembles the two platform digests. A release's own pair
@@ -102,7 +102,7 @@ grep -qF '  workspace-image:' <<<"$workspace_job" || fail 'workspace-image job i
 grep -qF '    name: Container contract verification' <<<"$workspace_job" ||
   fail 'workspace job is not named for its complete non-publishing scope'
 # shellcheck disable=SC2016 # The workflow expression is literal text.
-grep -qxF '    runs-on: ${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-main-large'"'"' || '"'"'ci-heavy'"'"' }}' <<<"$workspace_job" ||
+grep -qxF '    runs-on: ${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-main-large'"'"' || '"'"'ci-heavy-cpu10-ram17g'"'"' }}' <<<"$workspace_job" ||
   fail 'Docker-backed workspace verification is not assigned to the heavy capability profile'
 grep -qF '    timeout-minutes: 55' <<<"$workspace_job" ||
   fail 'workspace cold-build ceiling does not preserve the runner cleanup margin'

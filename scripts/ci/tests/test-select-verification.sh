@@ -8,10 +8,10 @@ WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
 # uses the shared Heavy pool (infra forgejo-runners dispatcher).
 # shellcheck disable=SC2016 # The workflow expression is literal text.
 HEAVY_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-heavy-main'"'"' || '"'"'ci-heavy'"'"' }}'
-# A main push's ordinary Heavy groups run on the metal guests' sized label
-# (infra#1534); pull requests keep cloud Heavy.
-METAL_MAIN_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-main-large'"'"' || '"'"'ci-heavy'"'"' }}'
-METAL_MAIN_CARGO_JOBS='      CARGO_BUILD_JOBS: ${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'11'"'"' || '"'"'8'"'"' }}'
+# Every ordinary Heavy group runs on the metal guests' sized labels
+# (infra#1534), main's label on a main push; cloud takes only overflow.
+METAL_MAIN_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-main-large'"'"' || '"'"'ci-heavy-cpu10-ram17g'"'"' }}'
+METAL_MAIN_CARGO_JOBS='      CARGO_BUILD_JOBS: '"'"'11'"'"''
 DIAGNOSTICS_WORKFLOW="$ROOT/.gitea/workflows/manual-diagnostics.yaml"
 CLI_RELEASE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
 TMP_ROOT="$ROOT/.tmp"
@@ -2909,16 +2909,16 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 12 ]] || {
-  echo 'Codewire CI requires twelve ordinary heavy groups (policy included) on the metal main label' >&2
+[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 14 ]] || {
+  echo 'Codewire CI requires twelve ordinary heavy groups (policy included), the measurement matrix and its probe on the metal labels' >&2
   exit 1
 }
-[[ "$(grep -Fxc "$METAL_MAIN_CARGO_JOBS" "$WORKFLOW")" -eq 12 ]] || {
-  echo 'each metal main group must bound its cargo jobs to its guest memory' >&2
+[[ "$(grep -Fxc "$METAL_MAIN_CARGO_JOBS" "$WORKFLOW")" -eq 14 ]] || {
+  echo 'each metal group must bound its cargo jobs to its guest memory' >&2
   exit 1
 }
-[[ "$(grep -Fxc "    runs-on: ${HEAVY_RUNS_ON}" "$WORKFLOW")" -eq 7 ]] || {
-  echo 'Codewire CI requires Edge / Kind, four parallel Kind producers, one opted-in measurement matrix and its post-measurement probe, each selecting the main-first Heavy label' >&2
+[[ "$(grep -Fxc "    runs-on: ${HEAVY_RUNS_ON}" "$WORKFLOW")" -eq 5 ]] || {
+  echo 'Codewire CI requires Edge / Kind and four parallel Kind producers, each selecting the main-first cloud Heavy label until Kind runs in a metal guest' >&2
   exit 1
 }
 if grep -Eq '^ *runs-on: ci-heavy(-main)?$' "$WORKFLOW"; then
