@@ -107,6 +107,7 @@ assert_static_contract() {
       'env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' 'user_ssh "printf' \
       'StrictHostKeyChecking=yes' 'GlobalKnownHostsFile=/dev/null' \
       'UserKnownHostsFile=$pinned' 'run_user_ssh_journey' \
+      'user_ssh_as "cw-$ENV_ID"' 'did not run through the managed Host cw-* block' \
       "printf a && printf b | tr b B; exit 7" 'cmp -s "$up" "$down"' \
       'expect_host_key_refused forged' 'expect_host_key_refused previous-generation' \
       'the recorded host key did not rotate across stop and start'; do
