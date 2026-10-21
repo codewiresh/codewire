@@ -114,4 +114,20 @@ FAKE_STATE="$work/state" FAKE_MODE=ok buildx_builder_remove "$work/bin/docker" '
   >/dev/null 2>&1 || status=$?
 [[ "$status" == 2 && ! -e "$work/state/calls" ]] || fail 'an unsafe builder name reached Docker'
 
-echo 'buildx builder removal: success, confirmed-absent, waited deletion, persisting, unknown, hung and unsafe-name cases passed'
+# buildx_builder_cap applies the workstation CPU ceiling only under bin/heavy.
+printf '#!/bin/sh\necho "$*" >>"%s/cpu-calls"\n' "$work" >"$work/bin/codewire-cpu"
+chmod 0755 "$work/bin/codewire-cpu"
+rm -f "$work/cpu-calls"
+(PATH="$work/bin:$PATH"; unset CODEWIRE_CPU_SLICE; buildx_builder_cap b) ||
+  fail 'buildx_builder_cap failed outside bin/heavy'
+[[ ! -e "$work/cpu-calls" ]] || fail 'buildx_builder_cap ran codewire-cpu outside bin/heavy'
+(PATH="$work/bin:$PATH" CODEWIRE_CPU_SLICE=cwvmtest.slice buildx_builder_cap b) ||
+  fail 'buildx_builder_cap failed under bin/heavy'
+[[ "$(cat "$work/cpu-calls")" == apply ]] || fail 'buildx_builder_cap did not apply the CPU ceiling'
+# Both builder-creation paths cap their builder right after it bootstraps.
+grep -A1 -- '--bootstrap >/dev/null$' "$ROOT/scripts/ci/images/build-kind-images.sh" |
+  grep -qx 'buildx_builder_cap "$builder"' || fail 'the Kind image build does not cap its builder'
+grep -A1 -- 'buildx inspect "$builder" --bootstrap' "$ROOT/scripts/ci/images/workspace-cache.sh" |
+  grep -qx '  buildx_builder_cap "$builder"' || fail 'the workspace cache build does not cap its builder'
+
+echo 'buildx builder removal: success, confirmed-absent, waited deletion, persisting, unknown, hung, unsafe-name and CPU-cap cases passed'

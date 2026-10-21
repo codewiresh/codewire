@@ -142,6 +142,7 @@ builder_created=true
   --driver-opt "image=$BUILDKIT_IMAGE" \
   --buildkitd-config "$buildkit_config" \
   --bootstrap >/dev/null
+buildx_builder_cap "$builder"
 
 started_at="$(date +%s)"
 bake_args=(

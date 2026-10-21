@@ -114,6 +114,7 @@ workspace_cache_create_builder() {
   workspace_cache_command "$docker_bin" buildx create --name "$builder" --node "$node" --driver docker-container \
     "${driver_args[@]}" --buildkitd-config "$scratch_dir/buildkitd.toml" >/dev/null || return
   workspace_cache_command "$docker_bin" buildx inspect "$builder" --bootstrap >/dev/null || return
+  buildx_builder_cap "$builder"
   # Capture the owned daemon identity in every mode, including the cold case.
   workspace_cache_command "$docker_bin" container inspect "buildx_buildkit_$node" --format '{{.Id}}' \
       >"$scratch_dir/container-id" || return

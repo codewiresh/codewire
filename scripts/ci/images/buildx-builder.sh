@@ -73,3 +73,16 @@ buildx_builder_remove() {
     done <<<"$present"
   done
 }
+
+# buildx_builder_cap BUILDER gives a just-bootstrapped docker-container builder
+# its CPU ceiling on the owner's workstation. buildx ignores cgroup-parent under
+# systemd's cgroup driver, so the builder container lands in system.slice;
+# codewire-cpu caps each buildx_buildkit_* container, but only when it runs. It
+# acts only when codewire/root bin/heavy started the build (CODEWIRE_CPU_SLICE)
+# and codewire-cpu is installed; CI and tests never set the variable.
+buildx_builder_cap() {
+  [ -n "${CODEWIRE_CPU_SLICE:-}" ] || return 0
+  command -v codewire-cpu >/dev/null 2>&1 || return 0
+  codewire-cpu apply >/dev/null 2>&1 ||
+    echo "buildx builder $1: codewire-cpu apply failed; it runs without its CPU ceiling" >&2
+}
