@@ -30,6 +30,13 @@ const localOnlyResolverRule = "--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE lo
 // e2e/ssr-dashboard.design-system.ssr.ts checks the GPU process holds no
 // host GPU device.
 const hostGpuIsolation = ["--disable-accelerated-video-decode", "--disable-accelerated-video-encode"];
+// A test browser never reaches the desktop session. With no display variable,
+// nothing it loads can open the owner's X or Wayland server. A missing X
+// socket once sent such a connection to a firewall prompt, and every frame
+// stalled (#3019).
+const desktopVariables = new Set(["DISPLAY", "WAYLAND_DISPLAY"]);
+const browserEnvironment = Object.fromEntries(Object.entries(process.env)
+  .filter((entry): entry is [string, string] => entry[1] !== undefined && !desktopVariables.has(entry[0])));
 const designFixtureProjects = [
   {
     name: "design-fixtures-desktop",
@@ -74,6 +81,7 @@ export default defineConfig({
   use: {
     launchOptions: {
       args: [localOnlyResolverRule, ...hostGpuIsolation],
+      env: browserEnvironment,
       executablePath: chromiumExecutable,
       ignoreDefaultArgs: useDevShm ? ["--disable-dev-shm-usage"] : undefined,
     },

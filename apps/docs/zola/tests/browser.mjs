@@ -11,7 +11,11 @@ const ensure = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 
-const browser = await chromium.launch({ headless: true });
+// A test browser never reaches the desktop session: no display variable, so
+// nothing it loads can open the owner's X or Wayland server (#3019).
+const browserEnvironment = Object.fromEntries(Object.entries(process.env)
+  .filter(([name, value]) => value !== undefined && name !== "DISPLAY" && name !== "WAYLAND_DISPLAY"));
+const browser = await chromium.launch({ headless: true, env: browserEnvironment });
 const context = await browser.newContext({
   viewport: { width: 1440, height: 900 },
   colorScheme: "dark",

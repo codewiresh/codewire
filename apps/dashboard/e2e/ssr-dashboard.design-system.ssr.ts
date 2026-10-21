@@ -342,3 +342,17 @@ test("the browser draws without a host GPU driver", async ({ browser }) => {
   expect([...new Set(held)].sort(), "host GPU devices the GPU process holds").toEqual([]);
   await page.close();
 });
+
+// Nor can it reach the desktop session: playwright.config.ts launches it
+// without the display variables (#3019). Its environment is the launch
+// options' env as this run resolves them for the project; an unset env would
+// hand it the runner's whole environment. (Chromium rewrites its own
+// /proc/<pid>/environ for process titles, so that cannot be read instead.)
+const desktopVariables = new Set(["DISPLAY", "WAYLAND_DISPLAY"]);
+
+test("the browser launches without the desktop display variables", async ({ browser }, testInfo) => {
+  expect(browser.isConnected()).toBe(true);
+  const { launchOptions } = testInfo.project.use as { launchOptions?: { env?: Record<string, unknown> } };
+  expect(launchOptions?.env, "the browser's launch environment is set, not inherited").toBeDefined();
+  expect(Object.keys(launchOptions!.env!).filter((name) => desktopVariables.has(name)), "desktop variables").toEqual([]);
+});

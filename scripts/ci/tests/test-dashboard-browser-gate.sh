@@ -235,6 +235,15 @@ grep -Fq 'const hostGpuIsolation = ["--disable-accelerated-video-decode", "--dis
   fail 'dashboard browser can load a host GPU driver'
 grep -Fq 'test("the browser draws without a host GPU driver"' "$ROOT/apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts" ||
   fail 'the host GPU isolation runtime check is missing'
+# Test browsers never carry the desktop session's display variables (#3019).
+grep -Fq 'const desktopVariables = new Set(["DISPLAY", "WAYLAND_DISPLAY"]);' "$PLAYWRIGHT_CONFIG" &&
+  grep -Fq '      env: browserEnvironment,' "$PLAYWRIGHT_CONFIG" ||
+  fail 'dashboard browser inherits the desktop display'
+grep -Fq 'name !== "DISPLAY" && name !== "WAYLAND_DISPLAY"' "$ROOT/apps/docs/zola/tests/browser.mjs" &&
+  grep -Fq 'chromium.launch({ headless: true, env: browserEnvironment })' "$ROOT/apps/docs/zola/tests/browser.mjs" ||
+  fail 'docs browser inherits the desktop display'
+grep -Fq 'test("the browser launches without the desktop display variables"' "$ROOT/apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts" ||
+  fail 'the desktop display isolation runtime check is missing'
 grep -Fq 'name: "Dashboard", exact: true' "$AUTH_SETUP" ||
   fail 'authentication setup does not prove the authenticated dashboard'
 grep -Fq 'codewire.session_token' "$AUTH_SETUP" ||
