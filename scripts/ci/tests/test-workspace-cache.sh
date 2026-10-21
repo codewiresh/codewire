@@ -473,37 +473,70 @@ for canary in hit lazy-hit lazy-wrong miss export-failure; do
   [[ -s "$credential_work/r2.aws" && ! -e "$FAKE_FILE" ]]
 done
 export FAKE_CANARY_PROCESS="$work/canary-process" FAKE_CANARY_CHILD="$work/canary-child"
-: >"$FAKE_LOG"; : >"$FAKE_BUILDS"
-FAKE_CANARY=hang FAKE_CANARY_READY_DELAY=3 "$ROOT/scripts/ci/tests/canary-workspace-r2-cache.sh" \
-  "$credential_work/r2.aws" "$work/report-cancel" >"$work/canary-cancel.out" 2>&1 &
-canary_pid=$!
-for ((attempt=0; attempt<200; attempt++)); do
-  [[ ! -s "$FAKE_CANARY_CHILD" ]] || break
-  sleep 0.05
-done
-[[ -s "$FAKE_CANARY_CHILD" && -s "$FAKE_FILE" ]] || {
-  kill -TERM "$canary_pid" 2>/dev/null || true
-  wait "$canary_pid" 2>/dev/null || true
-  echo 'cache canary did not publish cancellation readiness within ten seconds' >&2
-  exit 1
+# True once the recorded process has exited. A reparented zombie cannot
+# execute or access credentials; the host reaper owns its final wait.
+process_gone() {
+  local state
+  state="$(ps -o stat= -p "$1" 2>/dev/null || true)"
+  [[ -z "$state" || "$state" == Z* ]]
 }
-kill -TERM "$canary_pid"
-set +e
-wait "$canary_pid"
-status=$?
-set -e
-[[ "$status" != 0 && ! -e "$work/report-cancel/result.txt" && ! -e "$FAKE_FILE" ]] || {
-  echo 'cache canary cancellation did not fail and clean its credential/report' >&2
-  exit 1
+# Poll a condition for at most ten seconds; never assume a fixed delay.
+eventually() {
+  local attempt
+  for ((attempt=0; attempt<200; attempt++)); do
+    "$@" && return 0
+    sleep 0.05
+  done
+  "$@"
 }
-grep -q 'exec .* rm -f /run/codewire-cache/aws-credentials' "$FAKE_LOG"
-grep -q '^buildx rm --force codewire-workspace-' "$FAKE_LOG"
-for pid_file in "$FAKE_CANARY_PROCESS" "$FAKE_CANARY_CHILD"; do
-  child_pid="$(<"$pid_file")"
-  # A reparented zombie cannot execute or access credentials; the host reaper
-  # owns its final wait. No live mock Docker process or child may survive.
-  state="$(ps -o stat= -p "$child_pid" || true)"
-  [[ -z "$state" || "$state" == Z* ]] || { kill -TERM "$child_pid"; echo 'canary left a live child' >&2; exit 1; }
-done
+credential_erased() { [[ ! -e "$FAKE_FILE" ]]; }
+# Cancel a hanging canary, then check each cleanup guarantee separately. GNU
+# timeout delivers the signal it receives twice, to the canary and then to its
+# whole process group, and under load the second can arrive while the canary's
+# signal trap is already running (#3079). The repeated mode keeps signalling
+# the group until the canary exits, so any window in which a later TERM can
+# cut cleanup short is hit.
+cancel_canary() {
+  local mode="$1" canary_pid status pid_file
+  : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; rm -f "$FAKE_CANARY_CHILD"
+  rm -rf "$work/report-cancel"
+  FAKE_CANARY=hang FAKE_CANARY_READY_DELAY=3 \
+    "$ROOT/scripts/ci/tests/canary-workspace-r2-cache.sh" \
+    "$credential_work/r2.aws" "$work/report-cancel" >"$work/canary-cancel.out" 2>&1 &
+  canary_pid=$!
+  if ! eventually test -s "$FAKE_CANARY_CHILD" || [[ ! -s "$FAKE_FILE" ]]; then
+    kill -TERM "$canary_pid" 2>/dev/null || true
+    wait "$canary_pid" 2>/dev/null || true
+    echo "cache canary ($mode) did not publish cancellation readiness within ten seconds" >&2
+    return 1
+  fi
+  kill -TERM "$canary_pid"
+  if [[ "$mode" == repeated ]]; then
+    # The bounded canary leads its own process group (GNU timeout's setpgid).
+    while kill -TERM -- "-$canary_pid" 2>/dev/null; do :; done
+  fi
+  set +e
+  wait "$canary_pid"
+  status=$?
+  set -e
+  for pid_file in "$FAKE_CANARY_PROCESS" "$FAKE_CANARY_CHILD"; do
+    eventually process_gone "$(<"$pid_file")" || {
+      kill -TERM "$(<"$pid_file")" 2>/dev/null || true
+      echo "cache canary ($mode) left a live child" >&2
+      return 1
+    }
+  done
+  eventually credential_erased || {
+    echo "cache canary ($mode) cancellation left the daemon credential" >&2; return 1;
+  }
+  [[ "$status" != 0 ]] || { echo "cache canary ($mode) cancellation reported success" >&2; return 1; }
+  [[ ! -e "$work/report-cancel/result.txt" ]] || {
+    echo "cache canary ($mode) cancellation left a success report" >&2; return 1;
+  }
+  grep -q 'exec .* rm -f /run/codewire-cache/aws-credentials' "$FAKE_LOG"
+  grep -q '^buildx rm --force codewire-workspace-' "$FAKE_LOG"
+}
+cancel_canary single
+cancel_canary repeated
 printf 'workspace cache: 9 mode pairs, 7 apt snapshot cases, %s diagnostic cases, owned daemon credentials, bounded retry and failure cleanup passed\n' \
   "$diagnostic_cases"

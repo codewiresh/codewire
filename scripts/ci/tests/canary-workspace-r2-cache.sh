@@ -26,10 +26,12 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-r2-canary.XXXXXX")"
 cleanup() {
   local status=$? cleanup_status=0
   # GNU timeout delivers a signal it receives twice, to this child and then
-  # to its process group. A second TERM or INT must not cut erasure short;
+  # to its process group, and under load the second can arrive while this
+  # cleanup is starting. The signal traps below already ignore further INT and
+  # TERM before they exit, so no later signal can cut erasure short (#3079);
   # the outer timeout's kill-after still bounds this cleanup.
-  trap - EXIT
   trap '' INT TERM
+  trap - EXIT
   workspace_cache_cleanup_builder || cleanup_status=$?
   rm -rf "$work"
   [[ "$status" != 0 || "$cleanup_status" == 0 ]] || status="$cleanup_status"
@@ -38,8 +40,10 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# Ignore further signals before exiting: a second TERM that runs this trap
+# again inside the EXIT cleanup would exit before the credential is erased.
+trap "trap '' INT TERM; exit 130" INT
+trap "trap '' INT TERM; exit 143" TERM
 case "$(uname -m)" in
   x86_64) architecture=amd64 ;;
   aarch64) architecture=arm64 ;;

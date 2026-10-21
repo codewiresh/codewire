@@ -30,10 +30,12 @@ source_backup="$work/cw-main.original"
 cleanup() {
   local status=$? cleanup_status=0
   # GNU timeout delivers a signal it receives twice, to this child and then
-  # to its process group. A second TERM or INT must not cut erasure short;
+  # to its process group, and under load the second can arrive while this
+  # cleanup is starting. The signal traps below already ignore further INT and
+  # TERM before they exit, so no later signal can cut erasure short (#3079);
   # the outer timeout's kill-after still bounds this cleanup.
-  trap - EXIT
   trap '' INT TERM
+  trap - EXIT
   if [[ -n "$cancel_pid" ]]; then
     kill -TERM "$cancel_pid" 2>/dev/null || true
     wait "$cancel_pid" 2>/dev/null || true
@@ -55,8 +57,10 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# Ignore further signals before exiting: a second TERM that runs this trap
+# again inside the EXIT cleanup would exit before the credential is erased.
+trap "trap '' INT TERM; exit 130" INT
+trap "trap '' INT TERM; exit 143" TERM
 
 python3 "$probe_tool" prepare "$ROOT" "$report" "$WORKSPACE_BUILDKIT_IMAGE" "$original_credentials"
 source_sha="$(jq -er .source_sha "$report/identity.json")"
