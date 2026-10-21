@@ -240,6 +240,18 @@ a test fails or is skipped, or when either viewport runs nothing.
 Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to a pinned Chromium to reuse it.
 Otherwise the runner resolves the pinned Chromium as the Kind browser suite
 does (above).
+
+The runner serves the fixtures and runs the browser in its own network
+namespace (`unshare -rn`, loopback only). On the host, a bridge network
+appearing or disappearing (`docker network create` or `rm`, a Compose project,
+Kind) makes Chromium fail the loopback connections it is opening with
+`net::ERR_NETWORK_CHANGED`, and a page loses its scripts (#3043). The
+namespace sees only its own loopback. Where a user namespace cannot be made,
+the run uses the host network and says so, with the reason, at the start and
+in its summary. `run-design-fixtures.sh --network` prints which it would use.
+The Kind dashboard browser suite and the `dashboard-ssr-*` projects stay on
+the host network: they reach the dashboard, API and identity services through
+host ports.
 A new spec that reads `CODEWIRE_DESIGN_ORIGIN` must be added to that list; the
 `test:fixtures` unit test enforces this.
 

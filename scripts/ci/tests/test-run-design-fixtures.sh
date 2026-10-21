@@ -69,8 +69,36 @@ printf '{not json' >"$TMP/unreadable.json"
 rejects unreadable 'unreadable Playwright report'
 python3 -c 'import json,sys; json.dump({"suites": [], "errors": [{"message": "config failed\nstack"}]}, open(sys.argv[1], "w"))' "$TMP/errors.json"
 rejects errors 'run error: config failed'
+# The network decision (#3043): a private namespace whenever unshare -rn can
+# bring its loopback up, otherwise a loud host-network fallback with the reason.
+stubs="$TMP/stubs"
+mkdir -p "$stubs/failing" "$stubs/working"
+printf '#!/bin/sh\necho "unshare: unshare failed: Operation not permitted" >&2\nexit 1\n' >"$stubs/failing/unshare"
+printf '#!/bin/sh\nexit 0\n' >"$stubs/working/unshare"
+printf '#!/bin/sh\nexit 0\n' >"$stubs/working/ip"
+cp "$stubs/working/ip" "$stubs/failing/ip"
+chmod +x "$stubs"/*/*
+[ "$(PATH="$stubs/failing:$PATH" "$RUNNER" --network)" = 'network namespace unavailable: unshare: unshare failed: Operation not permitted; running on the host network' ] ||
+  fail 'a failing user namespace did not fall back loudly with its reason'
+[ "$(PATH="$stubs/working:$PATH" "$RUNNER" --network)" = 'private network namespace (loopback only)' ] ||
+  fail 'a working user namespace was not used'
+if unshare -rn ip link set lo up 2>/dev/null; then
+  [ "$("$RUNNER" --network)" = 'private network namespace (loopback only)' ] ||
+    fail 'this runner can create a network namespace but the gate would not use it'
+fi
+grep -Fq 'exec unshare -rn env CODEWIRE_DESIGN_FIXTURES_NETNS=inside' "$RUNNER" ||
+  fail 'the gate does not enter the network namespace it decides on'
+DESIGN_FIXTURES_NETWORK='network namespace unavailable: reason; running on the host network' "$RUNNER" --check-report "$TMP/passing.json" >"$TMP/fallback.out" 2>&1 ||
+  fail 'a host-network run was rejected'
+grep -Fq '[design-fixtures] WARNING: network namespace unavailable: reason; running on the host network' "$TMP/fallback.out" ||
+  fail 'the host-network fallback is missing from the run summary'
+DESIGN_FIXTURES_NETWORK='private network namespace (loopback only)' "$RUNNER" --check-report "$TMP/passing.json" >"$TMP/private.out" 2>&1 ||
+  fail 'a private-network run was rejected'
+grep -Fq '[design-fixtures] network: private network namespace (loopback only)' "$TMP/private.out" ||
+  fail 'the private network is missing from the run summary'
+
 if "$RUNNER" unexpected-argument >"$TMP/usage.out" 2>&1; then
   fail 'runner accepted an unexpected argument'
 fi
 
-printf '[test-run-design-fixtures] report judgement: pass, flaky, empty, missing project, skipped, failed, foreign project, unreadable and run errors\n'
+printf '[test-run-design-fixtures] report judgement: pass, flaky, network namespace and fallback, empty, missing project, skipped, failed, foreign project, unreadable and run errors\n'

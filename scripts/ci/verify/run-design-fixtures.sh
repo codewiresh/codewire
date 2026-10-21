@@ -23,6 +23,7 @@ die() {
 check_report() {
   python3 - "$1" "${PROJECTS[@]}" <<'PY'
 import json
+import os
 import sys
 from collections import Counter
 
@@ -65,6 +66,11 @@ for project in projects:
         failures.append(f"{project} ran no passing tests")
     summary.append(f"{project} {passed} passed, {counts['flaky']} flaky")
 print("[design-fixtures] " + "; ".join(summary))
+network = os.environ.get("DESIGN_FIXTURES_NETWORK", "")
+if network.startswith("network namespace unavailable"):
+    print(f"[design-fixtures] WARNING: {network}")
+elif network:
+    print(f"[design-fixtures] network: {network}")
 if failures:
     for failure in failures[:40]:
         print(f"[design-fixtures] ERROR: {failure}", file=sys.stderr)
@@ -77,7 +83,35 @@ if [ "${1:-}" = --check-report ]; then
   check_report "$2"
   exit
 fi
-[ "$#" -eq 0 ] || die "usage: $0 [--check-report <playwright-json-report>]"
+# A host bridge network appearing or disappearing (docker network create or
+# rm, Compose projects, Kind) makes Chromium fail the loopback connections it
+# is opening with net::ERR_NETWORK_CHANGED, and a page loses its scripts
+# (#3043). So the server and browser run in their own network namespace,
+# which sees only its own loopback. Where one cannot be made, the run says so
+# in its summary and uses the host network.
+readonly PRIVATE_NETWORK="private network namespace (loopback only)"
+
+network_decision() {
+  local reason=""
+  if ! command -v unshare >/dev/null 2>&1; then
+    reason="unshare is not installed"
+  elif ! command -v ip >/dev/null 2>&1; then
+    reason="ip (iproute2) is not installed"
+  elif ! reason="$(unshare -rn ip link set lo up 2>&1)"; then
+    reason="$(printf '%s\n' "${reason:-unshare -rn failed}" | head -n 1)"
+  else
+    printf '%s\n' "$PRIVATE_NETWORK"
+    return
+  fi
+  printf 'network namespace unavailable: %s; running on the host network\n' "$reason"
+}
+
+if [ "${1:-}" = --network ]; then
+  [ "$#" -eq 1 ] || die "usage: $0 --network"
+  network_decision
+  exit
+fi
+[ "$#" -eq 0 ] || die "usage: $0 [--check-report <playwright-json-report> | --network]"
 
 # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
 source "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
@@ -86,6 +120,21 @@ source "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
 
 chromium="$(resolve_pinned_playwright_chromium "$ROOT")"
 prepare_playwright_browser_runtime "$chromium" "$ROOT"
+
+# Chromium is resolved first: fetching it may need the host network.
+if [ "${CODEWIRE_DESIGN_FIXTURES_NETNS:-}" = inside ]; then
+  ip link set lo up || die "the private network namespace has no loopback"
+  network="$PRIVATE_NETWORK"
+else
+  network="$(network_decision)"
+  if [ "$network" = "$PRIVATE_NETWORK" ]; then
+    log "running in a $network"
+    exec unshare -rn env CODEWIRE_DESIGN_FIXTURES_NETNS=inside PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$chromium" \
+      bash "$ROOT/scripts/ci/verify/run-design-fixtures.sh"
+  fi
+  log "WARNING: $network"
+fi
+export DESIGN_FIXTURES_NETWORK="$network"
 
 mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/design-fixtures.XXXXXX")"
