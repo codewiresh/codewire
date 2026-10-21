@@ -63,12 +63,38 @@ def require_owned_subreaper():
         raise AssertionError("host journey lost its owned-family subreaper")
 
 
+def linux_children(parent):
+    """Live and zombie children of PARENT, from each process's /proc stat.
+
+    Not /proc/<pid>/task/<tid>/children: kernels without CONFIG_PROC_CHILDREN,
+    such as the CI's Kata guests, have no such file. A process that exits
+    during the scan is skipped. comm may hold spaces and parentheses, so the
+    fields after it start at the last ')'.
+    """
+    children = []
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry.name}/stat", "rb") as handle:
+                text = handle.read()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if b")" not in text:
+            continue
+        fields = text[text.rindex(b")") + 2:].split()
+        if int(fields[1]) == parent:
+            children.append(int(entry.name))
+    return children
+
+
 def arm_owned_family():
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(36, 1, 0, 0, 0) != 0:
         raise AssertionError("cannot enable host journey owned-family subreaper")
     require_owned_subreaper()
-    Path("/proc/thread-self/children").read_text()
+    if linux_children(os.getpid()):
+        raise AssertionError("host journey must begin without existing children")
     try:
         os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT | WALL)
     except ChildProcessError:
