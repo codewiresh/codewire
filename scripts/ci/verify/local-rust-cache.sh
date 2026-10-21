@@ -50,6 +50,14 @@ CODEWIRE_LOCAL_SCCACHE_WATCH_SECONDS=60
 # throughout, so the stall is measured again from the newer one.
 CODEWIRE_LOCAL_SCCACHE_OBSERVATION_GAP_SECONDS=180
 
+# Every Cargo entrypoint that sources this file (local preflight, pull request
+# CI and main CI) builds dev and test profiles with line tables only:
+# backtraces keep file and line, targets shrink several-fold and link faster,
+# and one setting everywhere keeps the shared compiler-cache keys identical
+# (infra#1534). A caller that sets its own value keeps it.
+: "${CARGO_PROFILE_DEV_DEBUG:=line-tables-only}"
+export CARGO_PROFILE_DEV_DEBUG
+
 local_rust_cache_status() {
   printf 'CODEWIRE_LOCAL_RUST_CACHE %s\n' "$*" >&2
 }

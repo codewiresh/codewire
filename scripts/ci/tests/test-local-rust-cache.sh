@@ -499,3 +499,10 @@ while [[ -n "$(pgrep -f -- "$watch_mark")" ]]; do
 done
 
 printf '[test-local-rust-cache] hung server: stopped by progress, slow and idle servers kept: OK\n'
+
+# Sourcing selects line tables for dev and test builds, and keeps a caller's own value.
+[[ "$(env -u CARGO_PROFILE_DEV_DEBUG bash -c 'source "$1"; printf %s "$CARGO_PROFILE_DEV_DEBUG"' _ "$HELPER")" == line-tables-only ]] ||
+  fail 'sourcing did not select line-tables-only debuginfo'
+[[ "$(CARGO_PROFILE_DEV_DEBUG=full bash -c 'source "$1"; printf %s "$CARGO_PROFILE_DEV_DEBUG"' _ "$HELPER")" == full ]] ||
+  fail "sourcing overrode a caller's debuginfo setting"
+printf '[test-local-rust-cache] dev debuginfo: line tables by default, caller value kept: OK\n'
