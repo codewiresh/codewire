@@ -16,6 +16,11 @@ readonly TRUSTED_BUILDKIT_ENDPOINT="tcp://$TRUSTED_BUILDKIT_HOST:1234"
 # 1.5 GiB. It is raised once the first trusted build measures the guest's
 # memory.peak (infra#1534).
 readonly TRUSTED_BUILDKIT_CARGO_BUILD_JOBS=14
+# The static CW producer sizes its own Cargo jobs from the machine it runs on
+# (finalize-cw-runtime-source.py, 3 GiB per job), and the job that verifies its
+# receipt recomputes that exact command. On a remote builder those machines
+# differ, so the job pins the count both sides use: 7 for the 24 GiB guest.
+readonly TRUSTED_BUILDKIT_CW_PRODUCER_JOBS=7
 # deploy-dev.yaml and support-images.yaml pass no artifacts between jobs, and
 # a failed half cancels its run, so the recovery reruns the whole run.
 readonly TRUSTED_BUILDKIT_RECOVERY='after checking the builder (infra docs/runbooks/ci-buildkit-trusted.md), the owner may build this commit in the job: set the repository variable CODEWIRE_IN_JOB_BUILD_SHA to this commit and rerun all jobs of this run, or dispatch deploy-prod.yaml with in_job_build'
@@ -58,8 +63,10 @@ trusted_buildkit_attach() {
       "$TRUSTED_BUILDKIT_ENDPOINT" "$TRUSTED_BUILDKIT_RECOVERY" >&2
     return 1
   fi
-  # Every build on it, the static CW producer included, bounds Cargo's jobs.
+  # Every build on it bounds Cargo's jobs; the CW producer and its verifier
+  # share one explicit count.
   export CODEWIRE_CARGO_BUILD_JOBS="$TRUSTED_BUILDKIT_CARGO_BUILD_JOBS"
+  export CODEWIRE_CARGO_JOBS="$TRUSTED_BUILDKIT_CW_PRODUCER_JOBS"
   printf 'Attached the trusted BuildKit builder %s (Cargo jobs %s)\n' \
     "$TRUSTED_BUILDKIT_ENDPOINT" "$TRUSTED_BUILDKIT_CARGO_BUILD_JOBS" >&2
 }

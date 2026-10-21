@@ -337,12 +337,14 @@ def produce(args):
         asset.require(re.fullmatch(r"[a-z0-9][a-z0-9_.-]{1,160}", args.builder), "producer builder refused")
         prefix.extend(("--builder", args.builder))
     cache = compiler_cache(args.sccache_mode)
-    # The trusted BuildKit builder bounds Cargo's jobs to its memory
-    # (scripts/ci/setup/trusted-buildkit.sh); otherwise Cargo's default.
-    jobs = os.environ.get("CODEWIRE_CARGO_BUILD_JOBS", "")
+    # On a remote builder the producer and this job's receipt check run on
+    # different machines, so the job pins the producer's Cargo job count both
+    # use (CODEWIRE_CARGO_JOBS, scripts/ci/setup/trusted-buildkit.sh). Without
+    # it both size the count from the one machine they share.
+    jobs = os.environ.get("CODEWIRE_CARGO_JOBS", "")
     if jobs:
-        asset.require(re.fullmatch(r"[1-9][0-9]{0,2}", jobs), "Cargo job count refused")
-        cache.extend(("--build-arg", "CARGO_BUILD_JOBS=" + jobs))
+        asset.require(re.fullmatch(r"[1-9][0-9]?", jobs) and int(jobs) <= 32, "Cargo job count refused")
+        cache.extend(("--build-arg", "CODEWIRE_CARGO_JOBS=" + jobs))
     for name in ("cache_from", "cache_to"):
         for value in getattr(args, name):
             asset.require(value and "\0" not in value and "\n" not in value, "layer cache argument refused")

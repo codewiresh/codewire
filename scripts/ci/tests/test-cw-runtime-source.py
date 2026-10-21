@@ -341,6 +341,17 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
                     self.assertEqual(finalizer.cargo_jobs(), expected, size)
             with mock.patch.dict(os.environ, {"CODEWIRE_CARGO_JOBS": "24"}):
                 self.assertEqual(finalizer.cargo_jobs(), "24")
+            # A remote builder runs the producer on another machine than the job
+            # that verifies its receipt. Sized per machine, the two commands
+            # differ; the job's pinned count gives both the same command.
+            def command_on(size):
+                with mock.patch.object(finalizer, "machine", return_value=size):
+                    return finalizer.command("runtime")
+            with mock.patch.dict(os.environ, {"CODEWIRE_CARGO_JOBS": ""}):
+                del os.environ["CODEWIRE_CARGO_JOBS"]
+                self.assertNotEqual(command_on((61, 23)), command_on((8, 15)))
+            with mock.patch.dict(os.environ, {"CODEWIRE_CARGO_JOBS": "7"}):
+                self.assertEqual(command_on((61, 23)), command_on((8, 15)))
             for refused in ("0", "33", "08", "x", ""):
                 with mock.patch.dict(os.environ, {"CODEWIRE_CARGO_JOBS": refused}):
                     with self.assertRaises(Exception):

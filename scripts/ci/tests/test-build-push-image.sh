@@ -1093,15 +1093,22 @@ grep -qxF "candidate_ref=registry.example.invalid/codewire/daemon@$digest" "$GIT
   cd "$source_fixture"
   FAKE_DIGEST="$second_digest" \
   CODEWIRE_BASE_IMAGE_REF="$base_ref" \
-  CODEWIRE_CARGO_BUILD_JOBS=14 \
+  CODEWIRE_CARGO_BUILD_JOBS=14 CODEWIRE_CARGO_JOBS=7 \
     "$BUILDER" workspace images/workspace/Dockerfile .
 )
 grep -qxF 'family=workspace' "$GITHUB_OUTPUT" ||
   fail 'workspace candidate family is absent'
-# On the trusted builder both the workspace solve and its CW producer bound
-# Cargo's jobs to the builder's memory.
-[[ "$(grep -E ' buildx build ' "$FAKE_DOCKER_CALLS" | grep -F 'CODEWIRE_CARGO_BUILD_JOBS=14 ' | grep -c -- '--build-arg CARGO_BUILD_JOBS=14')" -eq 2 ]] ||
-  fail 'the workspace build and its CW producer did not bound Cargo jobs'
+# On the trusted builder the workspace solve bounds Cargo's jobs to the
+# builder's memory, and the CW producer receives the job count this job also
+# uses to verify its receipt, never one sized from another machine.
+[[ "$(grep -E ' CW_PRODUCER=false .* buildx build ' "$FAKE_DOCKER_CALLS" | grep -c -- '--build-arg CARGO_BUILD_JOBS=14')" -eq 1 ]] ||
+  fail 'the workspace build did not bound Cargo jobs'
+producer_call="$(grep -E ' CW_PRODUCER=true .* buildx build ' "$FAKE_DOCKER_CALLS")"
+[[ "$(grep -c -- '--build-arg CODEWIRE_CARGO_JOBS=7' <<<"$producer_call")" -eq 1 ]] ||
+  fail 'the CW producer did not receive the pinned Cargo job count'
+if grep -qF -- '--build-arg CARGO_BUILD_JOBS=' <<<"$producer_call"; then
+  fail 'the CW producer received the workspace Cargo job count'
+fi
 grep -qF -- "--build-arg BASE_IMAGE_REF=$base_ref" "$FAKE_DOCKER_CALLS" ||
   fail 'exact base digest did not reach the workspace build'
 [[ "$(build_invocation_count)" -eq 2 ]] ||
