@@ -1,6 +1,7 @@
 //! Synthetic transport/crypto/Store proof. None of these keys or executables
 //! are product release assets, and no public origin or live provider is used.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::os::fd::AsRawFd as _;
@@ -34,7 +35,7 @@ struct TestKey {
     agent: Child,
     fingerprint: String,
     public: Vec<u8>,
-    fake_time: Option<&'static str>,
+    fake_time: Option<Cell<u64>>,
 }
 
 impl TestKey {
@@ -126,7 +127,12 @@ impl TestKey {
             agent,
             fingerprint: String::new(),
             public: Vec::new(),
-            fake_time: expired.then_some("946684800"),
+            // Faked from 2000-01-01. Every gpg process would restart a
+            // ticking faked clock at the same instant, so a key created a
+            // second into one run was "in the future" to the next on a loaded
+            // host. Each run instead freezes its clock a minute after the last
+            // run's, so every later signature is strictly newer.
+            fake_time: expired.then_some(Cell::new(946_684_800)),
         };
         drop(listener);
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -185,8 +191,9 @@ impl TestKey {
                 "--homedir",
             ])
             .arg(self.directory.path());
-        if let Some(time) = self.fake_time {
-            command.args(["--faked-system-time", time]);
+        if let Some(time) = &self.fake_time {
+            command.args(["--faked-system-time", &format!("{}!", time.get())]);
+            time.set(time.get() + 60);
         }
         let output = command
             .args(arguments)
