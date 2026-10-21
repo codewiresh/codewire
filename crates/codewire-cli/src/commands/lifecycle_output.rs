@@ -123,6 +123,50 @@ pub(crate) fn exact_reference_id(stored: &str) -> Option<(StoragePlacement, &str
     ))
 }
 
+/// One environment's credential profile name, from its stored exact
+/// reference by one bounded lookup (a lifecycle summary). `None` when the
+/// reference is not exact or the lookup fails or runs out.
+pub(crate) async fn credential_profile_name(
+    client: &crate::environment_client::EnvironmentClient,
+    stored: &str,
+) -> Option<String> {
+    exact_reference_id(stored)?;
+    bounded(client.resolve_credential_profile(stored))
+        .await
+        .map(|profile| profile.name)
+}
+
+/// The account's platform credential profile names by ID, from one bounded
+/// listing, for many environments at once (the `cw use` picker). A failed
+/// or slow listing leaves every name unknown, so each environment shows its
+/// canonical reference.
+pub(crate) async fn credential_profile_names(
+    platform: &crate::config::ResolvedPlatformConfig,
+) -> std::collections::BTreeMap<String, String> {
+    bounded(async {
+        let client = crate::environment_client::connect_client(platform)?;
+        super::platform_profiles::list_profiles(&client).await
+    })
+    .await
+    .map(|profiles| {
+        profiles
+            .into_iter()
+            .map(|profile| (profile.id, profile.name))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// The name `names` (from [`credential_profile_names`]) gives a stored
+/// exact profile reference.
+pub(crate) fn listed_profile_name<'a>(
+    names: &'a std::collections::BTreeMap<String, String>,
+    stored: &str,
+) -> Option<&'a str> {
+    let (_, id) = exact_reference_id(stored)?;
+    names.get(id).map(String::as_str)
+}
+
 /// Runs a best-effort lookup for at most [`NAME_LOOKUP_TIMEOUT`]; any
 /// failure or timeout is `None`.
 pub(crate) async fn bounded<T>(lookup: impl Future<Output = anyhow::Result<T>>) -> Option<T> {

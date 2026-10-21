@@ -271,7 +271,7 @@ pub(crate) async fn handle_ls(globals: &Globals, args: ListArgs) -> anyhow::Resu
         return super::member_control::terminal::list(globals, args).await;
     }
     let Some(environment) = args.environment else {
-        return handle_environment_inventory(
+        return inventory::handle_environment_inventory(
             globals,
             globals.placement,
             EnvListArgs {

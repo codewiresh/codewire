@@ -516,19 +516,14 @@ async fn resolve_unplaced_session_target(
         return Ok(native_session_target(environment));
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if environment.and_then(trimmed_str).is_none() {
-        if let Ok(target) = config::current_target(&paths.mesh_data_dir)
-            && !(target.kind == "local" && target.target_ref == "local")
-        {
-            if target.kind != "local" {
-                return environment_session_target_from_current(globals, &paths, &env, target)
-                    .await;
-            }
-            if let Some(environment) = native_environment(&target.target_ref).await? {
-                return Ok(native_session_target(environment));
-            }
+    if environment.and_then(trimmed_str).is_none()
+        && let Ok(target) = config::current_target(&paths.mesh_data_dir)
+        && !(target.kind == "local" && target.target_ref == "local")
+    {
+        if target.kind != "local" {
+            return environment_session_target_from_current(globals, &paths, &env, target).await;
         }
-        if let Some(environment) = native_selected_environment().await? {
+        if let Some(environment) = native_environment(&target.target_ref).await? {
             return Ok(native_session_target(environment));
         }
     }
@@ -1502,7 +1497,9 @@ pub(super) fn session_mode(session: &EnvironmentSessionView) -> &'static str {
 }
 
 /// Session rows as JSON, each with its recorded `mode`.
-fn sessions_json(sessions: &[EnvironmentSessionView]) -> anyhow::Result<serde_json::Value> {
+pub(crate) fn sessions_json(
+    sessions: &[EnvironmentSessionView],
+) -> anyhow::Result<serde_json::Value> {
     sessions
         .iter()
         .map(|session| {
@@ -2476,176 +2473,16 @@ fn strip_ansi_escapes(data: &[u8]) -> Vec<u8> {
     output
 }
 
-/// One `cw ls` inventory row: the environment, where it runs, its state and
-/// its sessions. The JSON keeps every field the former `cw env list` rows
-/// (`type`, `name`, `placement`, `selected`, `state`, `daemon_health`, `id`)
-/// and `cw list` rows (`environment_id`, `environment`, `running`,
-/// `sessions`, `error`) carried, so their consumers read it unchanged.
-#[derive(Clone, Debug, serde::Serialize)]
-struct InventoryRow {
-    #[serde(flatten)]
-    entry: UnifiedEnvironmentListEntry,
-    environment_id: String,
-    environment: String,
-    running: bool,
-    sessions: serde_json::Value,
-    session_count: Option<usize>,
-    error: Option<String>,
-}
-
-/// `cw ls`: one row per environment, running or not. A running environment
-/// whose sessions cannot be read keeps its row, marked unavailable.
-pub(crate) async fn handle_environment_inventory(
+/// The sessions of the environment `target` names, as `cw ls` counts them.
+pub(crate) async fn list_target_sessions(
     globals: &Globals,
-    placement: Option<EnvironmentPlacement>,
-    args: EnvListArgs,
-) -> anyhow::Result<()> {
+    target: config::CurrentTargetConfig,
+) -> anyhow::Result<Vec<EnvironmentSessionView>> {
     let paths = ResolvePaths::from_env(&OsEnv)?;
-    let inventory = unified_environment_inventory(globals, placement, &args).await?;
-    let mut rows = Vec::with_capacity(inventory.entries.len());
-    for entry in inventory.entries {
-        let running = entry.state.eq_ignore_ascii_case("running");
-        let target = inventory_target(&entry);
-        let (sessions, error) = if running {
-            let listed = match environment_session_target_from_current(
-                globals,
-                &paths,
-                &OsEnv,
-                target.clone(),
-            )
-            .await
-            {
-                Ok(session_target) => session_target.list().await,
-                Err(error) => Err(error),
-            };
-            match listed {
-                Ok(sessions) => (sessions, None),
-                Err(error) => (Vec::new(), Some(format!("{error:#}"))),
-            }
-        } else {
-            (Vec::new(), None)
-        };
-        rows.push(InventoryRow {
-            environment_id: target.target_ref,
-            environment: entry.name.clone(),
-            running,
-            session_count: error.is_none().then_some(sessions.len()),
-            sessions: sessions_json(&sessions)?,
-            error,
-            entry,
-        });
-    }
-    match args.output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&rows)?),
-        // An unavailable location is not an empty list.
-        OutputFormat::Text if rows.is_empty() && !inventory.unavailable.is_empty() => {}
-        OutputFormat::Text => {
-            print!("{}", format_environment_inventory(&rows, placement));
-            for row in rows.iter().filter(|row| row.error.is_some()) {
-                eprintln!(
-                    "cw: sessions in {} are unavailable: {}",
-                    row.environment,
-                    row.error.as_deref().unwrap_or_default()
-                );
-            }
-        }
-    }
-    for location in &inventory.unavailable {
-        eprintln!(
-            "cw: {} environments could not be listed: {}",
-            location.location, location.error
-        );
-    }
-    inventory_outcome(&inventory.unavailable)
-}
-
-/// `cw ls` lists environments: it fails only when a location's environments
-/// could not be listed, after printing every one it could. An environment
-/// whose sessions are unreadable is still listed (SESSIONS `unavailable`),
-/// so it does not change the outcome; `cw ls ENV` fails for that instead.
-fn inventory_outcome(unavailable: &[UnavailableLocation]) -> anyhow::Result<()> {
-    if unavailable.is_empty() {
-        return Ok(());
-    }
-    let locations: Vec<&str> = unavailable
-        .iter()
-        .map(|location| location.location)
-        .collect();
-    anyhow::bail!(
-        "environment inventory is partial: {} environments could not be listed",
-        locations.join(" and ")
-    )
-}
-
-/// The session target an inventory row names: local VMs by name, host and
-/// cloud environments by ID, as `cw use` saves them.
-fn inventory_target(entry: &UnifiedEnvironmentListEntry) -> config::CurrentTargetConfig {
-    let (kind, target_ref) = match (entry.environment_type.as_str(), entry.placement.as_str()) {
-        ("host", _) => ("host", entry.id.clone()),
-        (_, "platform") => ("env", entry.id.clone()),
-        _ => ("local", entry.name.clone()),
-    };
-    config::CurrentTargetConfig {
-        kind: kind.to_owned(),
-        target_ref,
-        name: entry.name.clone(),
-    }
-}
-
-fn format_environment_inventory(
-    rows: &[InventoryRow],
-    placement: Option<EnvironmentPlacement>,
-) -> String {
-    if rows.is_empty() {
-        return match placement {
-            Some(EnvironmentPlacement::Local) => "No local environments.\n",
-            Some(EnvironmentPlacement::Platform) => "No cloud environments.\n",
-            None => "No environments.\n",
-        }
-        .to_owned();
-    }
-    let table: Vec<[String; 5]> =
-        std::iter::once(["", "NAME", "LOCATION", "STATE", "SESSIONS"].map(String::from))
-            .chain(rows.iter().map(|row| {
-                let location = match (
-                    row.entry.environment_type.as_str(),
-                    row.entry.placement.as_str(),
-                ) {
-                    ("host", _) => "host",
-                    (_, "platform") => "cloud",
-                    _ => "local",
-                };
-                let sessions = match (row.running, row.session_count) {
-                    (false, _) => "-".to_owned(),
-                    (true, Some(count)) => count.to_string(),
-                    (true, None) => "unavailable".to_owned(),
-                };
-                [
-                    if row.entry.selected { "*" } else { " " }.to_owned(),
-                    row.entry.name.clone(),
-                    location.to_owned(),
-                    display_str(&row.entry.state).to_owned(),
-                    sessions,
-                ]
-            }))
-            .collect();
-    let widths: [usize; 4] = std::array::from_fn(|column| {
-        table
-            .iter()
-            .map(|row| row[column].chars().count())
-            .max()
-            .unwrap_or(0)
-    });
-    let mut output = String::new();
-    for row in &table {
-        output.push_str(&format!("{:<width$} ", row[0], width = widths[0]));
-        for (cell, width) in row[1..4].iter().zip(&widths[1..]) {
-            output.push_str(&format!("{cell:<width$}  "));
-        }
-        output.push_str(&row[4]);
-        output.push('\n');
-    }
-    output
+    environment_session_target_from_current(globals, &paths, &OsEnv, target)
+        .await?
+        .list()
+        .await
 }
 
 /// `cw ls ENV`: that environment's sessions with their recorded mode.
@@ -3115,124 +2952,5 @@ mod run_output_tests {
             duplicate_session_name(&place, &session("coding", "Exited")).to_string(),
             "app already has a session named coding (exited); `--name` never reuses one: restart it with `cw --local restart app --session coding`, or choose another --name"
         );
-    }
-}
-
-#[cfg(test)]
-mod inventory_tests {
-    use super::*;
-
-    fn row(
-        name: &str,
-        placement: &str,
-        kind: &str,
-        state: &str,
-        count: Option<usize>,
-    ) -> InventoryRow {
-        InventoryRow {
-            entry: UnifiedEnvironmentListEntry {
-                environment_type: kind.into(),
-                name: name.into(),
-                placement: placement.into(),
-                selected: name == "app",
-                state: state.into(),
-                daemon_health: String::new(),
-                id: format!("{name}-id"),
-            },
-            environment_id: name.into(),
-            environment: name.into(),
-            running: state == "running",
-            sessions: serde_json::Value::Array(Vec::new()),
-            session_count: count,
-            error: None,
-        }
-    }
-
-    #[test]
-    fn the_inventory_lists_location_state_and_sessions_and_keeps_stopped_rows() {
-        let rows = [
-            row("app", "local", "sandbox", "running", Some(2)),
-            row("review", "platform", "sandbox", "stopped", None),
-            row("team", "local", "host", "running", None),
-        ];
-        assert_eq!(
-            format_environment_inventory(&rows, None),
-            concat!(
-                "  NAME    LOCATION  STATE    SESSIONS\n",
-                "* app     local     running  2\n",
-                "  review  cloud     stopped  -\n",
-                "  team    host      running  unavailable\n",
-            )
-        );
-        assert_eq!(
-            format_environment_inventory(&[], None),
-            "No environments.\n"
-        );
-        assert_eq!(
-            format_environment_inventory(&[], Some(EnvironmentPlacement::Local)),
-            "No local environments.\n"
-        );
-        assert_eq!(
-            format_environment_inventory(&[], Some(EnvironmentPlacement::Platform)),
-            "No cloud environments.\n"
-        );
-        // The JSON keeps the former env-list and list fields side by side.
-        let json = serde_json::to_value(&rows[0]).unwrap();
-        for field in [
-            "type",
-            "name",
-            "placement",
-            "selected",
-            "state",
-            "daemon_health",
-            "id",
-            "environment_id",
-            "environment",
-            "running",
-            "sessions",
-            "session_count",
-            "error",
-        ] {
-            assert!(json.get(field).is_some(), "{field}");
-        }
-        // A row whose sessions are unreadable is still listed and does not
-        // fail the inventory; an unlisted location does.
-        let mut partial = rows.to_vec();
-        partial[0].error = Some("daemon unavailable".into());
-        partial[0].session_count = None;
-        assert!(
-            format_environment_inventory(&partial, None)
-                .contains("* app     local     running  unavailable\n")
-        );
-        assert_eq!(
-            serde_json::to_value(&partial[0]).unwrap()["error"],
-            "daemon unavailable"
-        );
-        inventory_outcome(&[]).unwrap();
-        let cloud = UnavailableLocation {
-            location: "cloud",
-            error: "list environments: unavailable".into(),
-        };
-        assert_eq!(
-            inventory_outcome(&[cloud]).unwrap_err().to_string(),
-            "environment inventory is partial: cloud environments could not be listed"
-        );
-        let both = [
-            UnavailableLocation {
-                location: "local",
-                error: "supervisor".into(),
-            },
-            UnavailableLocation {
-                location: "cloud",
-                error: "server".into(),
-            },
-        ];
-        assert_eq!(
-            inventory_outcome(&both).unwrap_err().to_string(),
-            "environment inventory is partial: local and cloud environments could not be listed"
-        );
-        assert_eq!(inventory_target(&rows[1].entry).kind, "env");
-        assert_eq!(inventory_target(&rows[2].entry).kind, "host");
-        assert_eq!(inventory_target(&rows[0].entry).target_ref, "app");
     }
 }

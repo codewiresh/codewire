@@ -383,16 +383,13 @@ async fn handle_unified_environment_port(
                     }
                 }
             }
-            (Some(EnvironmentPlacement::Local), None) => Some(
-                native_selected_environment()
-                    .await?
-                    .map(|environment| environment.name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "no local environment selected; pass ENV or run `cw use --local ENV`"
-                        )
-                    })?,
-            ),
+            (Some(EnvironmentPlacement::Local), None) => {
+                Some(selected_local_environment_name().await?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no local environment selected; pass ENV or run `cw use --local ENV`"
+                    )
+                })?)
+            }
             (None, None) => selected_local_environment_name().await?,
         };
         if let Some(name) = local {
@@ -406,18 +403,24 @@ async fn handle_unified_environment_port(
     handle_platform_env_command(globals, EnvCommand::Port(args)).await
 }
 
-/// The selected environment's name when it is a local VM.
+/// The selected environment's name when it is a local VM. Only an explicit
+/// `cw use` selects; a selected VM that no longer exists is an error.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn selected_local_environment_name() -> anyhow::Result<Option<String>> {
     let paths = ResolvePaths::from_env(&OsEnv)?;
     match config::current_target(&paths.mesh_data_dir) {
-        Ok(target) if target.kind == "env" || target.kind == "host" => Ok(None),
         Ok(target) if target.kind == "local" && target.target_ref != "local" => {
-            Ok(Some(target.target_ref))
+            native_environment(&target.target_ref)
+                .await?
+                .map(|environment| Some(environment.name))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "the selected local VM {} no longer exists; pass ENV or run `cw use`",
+                        target.name
+                    )
+                })
         }
-        _ => Ok(native_selected_environment()
-            .await?
-            .map(|environment| environment.name)),
+        _ => Ok(None),
     }
 }
 
@@ -1431,177 +1434,21 @@ async fn handle_unified_environment_list(
     placement: Option<EnvironmentPlacement>,
     args: EnvListArgs,
 ) -> anyhow::Result<()> {
-    let inventory = unified_environment_inventory(globals, placement, &args).await?;
-    if let Some(location) = inventory.unavailable.first() {
-        anyhow::bail!(
-            "{} environments could not be listed: {}",
-            location.location,
-            location.error
-        );
+    let inventory = inventory::environment_inventory(
+        globals,
+        placement,
+        &inventory::InventoryOptions::listing(&args),
+    )
+    .await?;
+    if let Some((location, error)) = inventory.unavailable().first() {
+        anyhow::bail!("{} could not be listed: {error}", location.listing());
     }
-    print_unified_environment_list(&inventory.entries, args.output)
-}
-
-/// A location whose environments could not be listed: the local runtime or
-/// the cloud. Never shown as an empty list.
-#[derive(Debug)]
-pub(crate) struct UnavailableLocation {
-    pub(crate) location: &'static str,
-    pub(crate) error: String,
-}
-
-/// The environments the placement admits, sorted by name, and the
-/// locations that could not be listed.
-#[derive(Debug)]
-pub(crate) struct EnvironmentInventory {
-    pub(crate) entries: Vec<UnifiedEnvironmentListEntry>,
-    pub(crate) unavailable: Vec<UnavailableLocation>,
-}
-
-/// Every environment the placement admits, local and cloud. An unconfigured
-/// cloud is skipped without a placement; a location that fails to list is
-/// reported as unavailable, never as empty, and the other locations are
-/// still listed.
-pub(crate) async fn unified_environment_inventory(
-    globals: &Globals,
-    placement: Option<EnvironmentPlacement>,
-    args: &EnvListArgs,
-) -> anyhow::Result<EnvironmentInventory> {
-    let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env)?;
-    let mut unavailable = Vec::new();
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let native = if placement != Some(EnvironmentPlacement::Platform)
-        && args.environment_type.as_deref() != Some("host")
-    {
-        native_environments().await.unwrap_or_else(|error| {
-            unavailable.push(UnavailableLocation {
-                location: "local",
-                error: format!("{error:#}"),
-            });
-            Vec::new()
-        })
-    } else {
-        Vec::new()
-    };
-
-    let platform = if placement != Some(EnvironmentPlacement::Local)
-        && args.environment_type.as_deref() != Some("host")
-        && (placement == Some(EnvironmentPlacement::Platform)
-            || resolve_platform(globals, &paths, &env).is_ok())
-    {
-        let listed = async {
-            let platform = resolve_platform(globals, &paths, &env)?;
-            let environment_client = EnvironmentClient::new(&platform)?;
-            let organization_client = organization_client(&platform)?;
-            let orgs = organization_client.list_orgs().await.context("list orgs")?;
-            let org_id = current_org_id(&platform, &orgs)?;
-            let environments = environment_client
-                .list_environments(&org_id, args.all)
-                .await
-                .context("list environments")?;
-            let filtered = filter_environments(
-                &environments,
-                args.environment_type.as_deref(),
-                args.state.as_deref(),
-                args.all,
-            );
-            anyhow::Ok(
-                platform_environment_daemon_health(&environment_client, &org_id, filtered).await,
-            )
-        }
-        .await;
-        listed.unwrap_or_else(|error| {
-            unavailable.push(UnavailableLocation {
-                location: "cloud",
-                error: format!("{error:#}"),
-            });
-            Vec::new()
-        })
-    } else {
-        Vec::new()
-    };
-
-    let current = config::current_target(&paths.mesh_data_dir)
-        .ok()
-        .filter(|target| !(target.kind == "local" && target.target_ref == "local"));
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let current = current.filter(|target| {
-        target.kind != "local"
-            || native.iter().any(|environment| {
-                target.target_ref == environment.name || target.target_ref == environment.id
-            })
-    });
-    let current = current.as_ref();
-    let mut entries = unified_environment_list_entries(&platform, current);
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    entries.extend(
-        native
-            .iter()
-            .map(|environment| UnifiedEnvironmentListEntry {
-                environment_type: "sandbox".into(),
-                name: environment.name.clone(),
-                placement: "local".to_string(),
-                selected: native_environment_is_selected(environment, current),
-                state: native_state_label(environment.state).to_string(),
-                daemon_health: if environment.state
-                    == codewire_local_vmm::control::v1::EnvironmentState::Running as i32
-                {
-                    "ready".to_string()
-                } else {
-                    "unavailable".to_string()
-                },
-                id: environment.id.clone(),
-            }),
-    );
-    #[cfg(unix)]
-    if placement != Some(EnvironmentPlacement::Platform)
-        && args.environment_type.as_deref() != Some("sandbox")
-    {
-        let hosts = host_environments().unwrap_or_else(|error| {
-            unavailable.push(UnavailableLocation {
-                location: "trusted host",
-                error: format!("{error:#}"),
-            });
-            Vec::new()
-        });
-        for environment in hosts {
-            let daemon_health = host_daemon_health(&environment).await;
-            entries.push(UnifiedEnvironmentListEntry {
-                environment_type: "host".into(),
-                name: environment.name.clone(),
-                placement: "local".into(),
-                selected: current
-                    .is_some_and(|t| t.kind == "host" && t.target_ref == environment.id),
-                state: environment.state,
-                id: environment.id,
-                daemon_health,
-            });
-        }
-    }
-    if let Some(state) = args.state.as_deref() {
-        entries.retain(|entry| entry.state.eq_ignore_ascii_case(state));
-    }
-    entries.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then(left.placement.cmp(&right.placement))
-    });
-    Ok(EnvironmentInventory {
-        entries,
-        unavailable,
-    })
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn native_environment_is_selected(
-    environment: &codewire_local_vmm::control::v1::Environment,
-    current: Option<&config::CurrentTargetConfig>,
-) -> bool {
-    current.is_some_and(|target| {
-        target.kind == "local"
-            && (target.target_ref == environment.name || target.target_ref == environment.id)
-    }) || (current.is_none() && environment.selected)
+    let entries: Vec<UnifiedEnvironmentListEntry> = inventory
+        .entries
+        .into_iter()
+        .map(|entry| entry.list)
+        .collect();
+    print_unified_environment_list(&entries, args.output)
 }
 
 async fn handle_unified_environment_info(
@@ -1943,19 +1790,15 @@ async fn resolve_unified_environment_daemon_target(
 
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let current = config::current_target(&paths.mesh_data_dir).map_err(|_| {
+    let unselected = || {
         anyhow::anyhow!(
             "no environment selected; use `cw use ENV` or pass ENV to `cw {}`",
             command.command_name()
         )
-    })?;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let default_local = current.kind == "local" && current.target_ref == "local";
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if (placement == Some(EnvironmentPlacement::Local) || (placement.is_none() && default_local))
-        && let Some(environment) = native_selected_environment().await?
-    {
-        return Ok(UnifiedEnvironmentTarget::NativeLocal(environment.name));
+    };
+    let current = config::current_target(&paths.mesh_data_dir).map_err(|_| unselected())?;
+    if current == config::default_current_target() {
+        return Err(unselected());
     }
     match (placement, current.kind.as_str()) {
         (Some(EnvironmentPlacement::Local), "env") => {
@@ -1965,7 +1808,7 @@ async fn resolve_unified_environment_daemon_target(
             anyhow::bail!("the selected environment is local; pass a platform ENV")
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        (_, "local") if !current.target_ref.trim().is_empty() && !default_local => {
+        (_, "local") if !current.target_ref.trim().is_empty() => {
             let environment = native_environment(&current.target_ref)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("selected local environment was not found"))?;
@@ -1974,10 +1817,7 @@ async fn resolve_unified_environment_daemon_target(
         (_, "env") if !current.target_ref.trim().is_empty() => {
             Ok(UnifiedEnvironmentTarget::Platform(current.target_ref))
         }
-        _ => anyhow::bail!(
-            "no environment selected; use `cw use ENV` or pass ENV to `cw {}`",
-            command.command_name()
-        ),
+        _ => Err(unselected()),
     }
 }
 
@@ -2049,48 +1889,35 @@ async fn handle_unified_environment_lifecycle(
     }
 }
 
+/// A removed local VM is no longer the current environment: clear the
+/// selection when it named that VM. Nothing else becomes selected.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) async fn reconcile_native_current_after_delete(deleted_name: &str) {
-    let env = OsEnv;
-    let paths = match ResolvePaths::from_env(&env) {
-        Ok(paths) => paths,
-        Err(error) => {
-            eprintln!("Warning: could not reconcile the current local target: {error}");
-            return;
-        }
-    };
-    let Ok(current) = config::current_target(&paths.mesh_data_dir) else {
-        return;
-    };
-    if current.kind != "local"
-        || (current.target_ref != deleted_name && current.name != deleted_name)
-    {
-        return;
-    }
-    let replacement = match native_selected_environment().await {
-        Ok(environment) => native_current_target_after_delete(environment.map(|value| value.name)),
-        Err(error) => {
-            eprintln!("Warning: could not reconcile the current local target: {error}");
-            return;
-        }
-    };
-    if let Err(error) = config::save_current_target(&paths.mesh_data_dir, &replacement) {
-        eprintln!("Warning: could not save the current local target: {error}");
+    let cleared = ResolvePaths::from_env(&OsEnv)
+        .map_err(anyhow::Error::from)
+        .and_then(|paths| {
+            Ok(clear_removed_local_selection(
+                &paths.mesh_data_dir,
+                deleted_name,
+            )?)
+        });
+    if let Err(error) = cleared {
+        eprintln!("Warning: could not clear the current environment: {error:#}");
     }
 }
 
+/// Clears the selection when it is the removed local VM, matched by its
+/// name: names are unique among existing VMs, and a selection by ID of a
+/// VM with this name was this VM or one already gone.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) fn native_current_target_after_delete(
-    selected: Option<String>,
-) -> config::CurrentTargetConfig {
-    match selected {
-        Some(name) => config::CurrentTargetConfig {
-            kind: "local".to_owned(),
-            target_ref: name.clone(),
-            name,
-        },
-        None => config::default_current_target(),
-    }
+pub(super) fn clear_removed_local_selection(
+    data_dir: &std::path::Path,
+    deleted_name: &str,
+) -> Result<bool, config::ConfigError> {
+    config::selection::clear_if(data_dir, |selection| {
+        selection.location == config::selection::SelectionLocation::Local
+            && (selection.name == deleted_name || selection.id == deleted_name)
+    })
 }
 
 async fn handle_unified_environment_refresh_skills(
@@ -2253,31 +2080,6 @@ pub(crate) fn reject_local_create_options(args: &EnvCreateArgs) -> anyhow::Resul
         );
     }
     Ok(())
-}
-
-pub(crate) fn unified_environment_list_entries(
-    platform: &[(Environment, String)],
-    current: Option<&config::CurrentTargetConfig>,
-) -> Vec<UnifiedEnvironmentListEntry> {
-    let mut entries = platform
-        .iter()
-        .map(|(environment, daemon_health)| UnifiedEnvironmentListEntry {
-            environment_type: "sandbox".into(),
-            name: environment_display_name(environment).to_string(),
-            placement: "platform".to_string(),
-            selected: current
-                .is_some_and(|target| target.kind == "env" && target.target_ref == environment.id),
-            state: environment.state.clone(),
-            daemon_health: daemon_health.clone(),
-            id: environment.id.clone(),
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then(left.placement.cmp(&right.placement))
-    });
-    entries
 }
 
 fn print_unified_environment_list(

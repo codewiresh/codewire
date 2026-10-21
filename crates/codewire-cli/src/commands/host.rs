@@ -707,14 +707,10 @@ pub(crate) async fn host_lifecycle(
             let _registry = HostLock::wait(&registry.join("registry.lock")).await?;
             fs::remove_dir_all(&root).context("remove owned host runtime metadata")?;
             let paths = ResolvePaths::from_env(&OsEnv)?;
-            if config::current_target(&paths.mesh_data_dir)
-                .is_ok_and(|t| t.kind == "host" && t.target_ref == environment.id)
-            {
-                config::save_current_target(
-                    &paths.mesh_data_dir,
-                    &config::default_current_target(),
-                )?;
-            }
+            config::selection::clear_if(&paths.mesh_data_dir, |selection| {
+                selection.location == config::selection::SelectionLocation::Host
+                    && selection.id == environment.id
+            })?;
             println!("Removed host environment {}", environment.name);
             return Ok(());
         }

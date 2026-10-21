@@ -160,7 +160,9 @@ fn platform_authentication_kind(
     }
 }
 
-async fn list_profiles(client: &CodewireClient) -> anyhow::Result<Vec<rpc::AccessProfile>> {
+pub(super) async fn list_profiles(
+    client: &CodewireClient,
+) -> anyhow::Result<Vec<rpc::AccessProfile>> {
     let mut profiles = Vec::new();
     let mut page_token = String::new();
     let mut cursors = BTreeSet::new();

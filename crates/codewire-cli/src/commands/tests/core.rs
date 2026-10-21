@@ -1282,24 +1282,6 @@ fn resolve_environment_id_rejects_ambiguous_targets() {
     );
 }
 
-#[test]
-fn format_current_target_text_reports_local_and_mesh_network() {
-    let target = config::default_current_target();
-
-    assert_eq!(
-        format_current_target_text(&target, None, Some("project-alpha"), false),
-        "local  network: project-alpha\n"
-    );
-    assert_eq!(
-        format_current_target_text(&target, None, Some("project-alpha"), true),
-        concat!(
-            "Kind:      local\n",
-            "Network:   project-alpha\n",
-            "Target:    local\n"
-        )
-    );
-}
-
 /// Rows of a rendered top-level help, as (section heading, command name).
 fn help_rows(help: &str) -> Vec<(String, String)> {
     let mut heading = String::new();

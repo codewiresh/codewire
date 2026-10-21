@@ -59,6 +59,16 @@ impl Allocation {
         }
     }
 
+    /// The vCPU, RAM and disk cells of a table row (`2`, `4 GiB`, `40 GiB`);
+    /// an unknown value is `None`.
+    pub(crate) fn cells(&self) -> [Option<String>; 3] {
+        [
+            self.cpu_millicores.map(cpus),
+            self.memory_bytes.map(binary_size),
+            self.disk_bytes.map(binary_size),
+        ]
+    }
+
     /// `2 vCPU · 4 GiB RAM · 40 GiB disk`, or `None` when nothing is known.
     pub(crate) fn render(&self, style: Style) -> Option<String> {
         let parts: Vec<String> = [

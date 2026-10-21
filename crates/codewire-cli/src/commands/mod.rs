@@ -213,8 +213,11 @@ pub(crate) struct WhoamiArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct UseTargetArgs {
-    #[arg(value_name = "TARGET")]
-    pub(crate) target: String,
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; omit to choose from a list in an interactive terminal"
+    )]
+    pub(crate) target: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -625,8 +628,10 @@ pub(crate) struct CredentialProfileDeleteArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct CurrentTargetArgs {
-    #[arg(short, long, help = "Show full target details")]
-    verbose: bool,
+    #[arg(short, long, help = "Also show the environment's ID and organization")]
+    pub(crate) verbose: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -2511,8 +2516,10 @@ pub(crate) enum OutputFormat {
 
 mod collaboration;
 mod core;
+mod current_environment;
 mod environment;
 pub(crate) mod flat;
+pub(crate) mod inventory;
 pub(crate) mod lifecycle_output;
 mod mesh_commands;
 mod platform_commands;
@@ -2523,6 +2530,7 @@ mod storage_placement;
 
 pub(crate) use collaboration::*;
 pub(crate) use core::*;
+pub(crate) use current_environment::{handle_current_command, handle_use_command};
 pub(crate) use environment::*;
 #[cfg(test)]
 pub(crate) use flat::env_operation;

@@ -10,7 +10,8 @@ weight: 8
 | --- | --- |
 | `~/.config/cw/config.json` | Platform server URL and default organization (`CW_CONFIG_DIR` changes the directory) |
 | `~/.config/cw/credentials.json` | Your platform sign-in |
-| `~/.codewire/config.toml` | The local Mesh service's endpoint and identity, the current `cw use` target, the local credential store kind |
+| `~/.codewire/config.toml` | The local Mesh service's endpoint and identity, the current `cw use` target in the form earlier releases read, the local credential store kind |
+| `~/.codewire/current-environment.toml` | The current environment `cw use` selected: its location, canonical ID, name and, for a cloud environment, organization |
 | `~/.codewire/network_selection.json` | The network new environments join, with its Mesh endpoint and organization (`cw network use`) |
 | `~/.codewire/native-v1/` | Local VM state, disks and logs |
 | `~/.codewire/credentials-v1/` | Local credential records (material is in the Secret Service or Keychain) |

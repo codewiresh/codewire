@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::commands::lifecycle_output::{
-    ResultBlock, bounded, credential_ref, environment_command, exact_reference_id, location_label,
-    next_run_command, secret_refs, unless_interrupted,
+    ResultBlock, bounded, credential_profile_name, credential_ref, environment_command,
+    exact_reference_id, location_label, next_run_command, secret_refs, unless_interrupted,
 };
 use crate::output::{
     Allocation, LifecycleSummary, MeshPlacement, NetworkRef, Outcome, SourceRef, Status,
@@ -90,10 +90,7 @@ pub(crate) async fn resolve_source_names(
     };
     let profile = async {
         let profile = selection.credentials.as_ref()?;
-        exact_reference_id(&profile.profile)?;
-        bounded(client.resolve_credential_profile(&profile.profile))
-            .await
-            .map(|profile| profile.name)
+        credential_profile_name(client, &profile.profile).await
     };
     let project = async {
         exact_reference_id(&selection.secrets.project)?;

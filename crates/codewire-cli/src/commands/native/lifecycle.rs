@@ -24,7 +24,7 @@ fn stored_spec(environment: &v1::Environment) -> Option<ProjectSpec> {
 /// The saved Mesh attachment: a network on the platform's hosted Mesh reads
 /// `cloud:NAME`, one on a self-managed local Mesh `local:NAME`. Not a
 /// connectivity claim.
-pub(super) fn network_ref(mesh: Option<&v1::MeshAttachment>) -> NetworkRef {
+pub(crate) fn network_ref(mesh: Option<&v1::MeshAttachment>) -> NetworkRef {
     let Some(mesh) = mesh else {
         return NetworkRef::NotAttached;
     };
@@ -63,6 +63,12 @@ pub(super) fn environment_credentials(
             SourceRef::Unresolved(name.to_owned())
         }),
     }
+}
+
+/// The credential profile a local VM selected, by name, read from its own
+/// metadata: the lifecycle summary's rendering, for inventory rows.
+pub(crate) fn local_vm_credentials(environment: &v1::Environment) -> SourceRef {
+    environment_credentials(environment, stored_spec(environment).as_ref())
 }
 
 /// A summary of `environment` with the secrets reference the caller
@@ -386,7 +392,10 @@ pub(crate) async fn remove_native_environment(
             .await);
         }
     };
-    reconcile_native_current_after_delete(&removed.name).await;
+    // An unconfirmed removal may have left the VM: it stays selected.
+    if removed.removed {
+        reconcile_native_current_after_delete(&removed.name).await;
+    }
     match output {
         OutputFormat::Json => println!(
             "{}",

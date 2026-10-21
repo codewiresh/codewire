@@ -63,10 +63,14 @@ shows the current one, with the error code when something failed.
 ## Selecting an environment
 
 ```sh
+cw use                 # choose from your local and cloud environments
 cw use my-app          # the default for session commands
 cw use --local my-app  # when a local and a hosted environment share a name
 cw current
 ```
+
+Only `cw use` selects: creating an environment does not, and removing the
+current one leaves none selected.
 
 Environment commands take `--local` or `--cloud` to restrict a name to one
 placement; without either, `cw` looks in trusted hosts, local VMs and the

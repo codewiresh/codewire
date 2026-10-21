@@ -60,8 +60,11 @@ cw report ENV        # isolation, runtime and trust evidence (cloud and host)
 
 Without `ENV`, `ls` lists every environment, running or stopped: trusted
 hosts, local VMs and, when signed in, the current organization's, one row
-each with its location (`local`, `cloud` or `host`), state and session count;
-`*` marks the selected one. `--all` includes destroyed cloud environments.
+each with its location (`local`, `cloud` or `host`), state, session count and
+saved network attachment (`cloud:NAME` or `local:NAME`, the Mesh it was
+attached to; not a connectivity check); `›` marks the current environment
+(`cw use`). When you are not signed in, a note says that cloud environments
+were not listed. `--all` includes destroyed cloud environments.
 An environment whose sessions cannot be read keeps its row, its SESSIONS
 marked `unavailable` (the reason is in the JSON `error`), and `ls` still
 succeeds. When a location cannot be listed at all, such as the cloud or the
@@ -184,13 +187,33 @@ bootstrap and current selection.
 ## cw use, cw current
 
 ```sh
-cw use ENV [--local|--cloud]
-cw current [-v|--verbose]
+cw use [ENV] [--local|--cloud]
+cw current [-v|--verbose] [--output json]
 ```
 
-`use` makes `ENV` the default for session commands, looking in trusted hosts,
-then local VMs, then the current organization; `--local` or `--cloud` limits
-the lookup to one placement and settles a name that exists in both.
+`use ENV` makes `ENV`, by name or ID, the current environment: the one
+commands use when you name none. `--local` or `--cloud` says where to look
+and settles a name that exists in both; a name found in one place while the
+other could not be listed is refused rather than guessed.
+
+Without `ENV`, in an interactive terminal, `use` opens a list of your local
+VMs and cloud environments with their location, state, vCPU, RAM, disk and
+credential profile. Type to filter, move with the arrow keys, Enter selects
+and Escape or Ctrl-C cancels without changing anything; `--local` or
+`--cloud` limits the list. Trusted hosts are selected by name only. Outside
+an interactive terminal `ENV` is required. Selecting a stopped environment
+does not start it.
+
+The selection keeps the environment's identity, not just its name: a local
+VM that was removed and created again under the same name is not current
+until you select it again. Removing the current environment clears the selection;
+nothing else becomes current.
+
+`current` shows the current environment's location, state and saved network
+attachment, says when it no longer exists, or says that none is selected.
+`--verbose` adds its ID and organization; `--output json` returns
+`{"selected": false}` or the selection with `status` `found`, `missing` or
+`unavailable`.
 
 ## cw init
 

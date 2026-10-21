@@ -32,8 +32,9 @@ mod ports;
 mod sources;
 
 pub(crate) use lifecycle::{
-    NativeCreated, print_native_created, remove_native_environment, restart_native_environment,
-    start_native_environment, stop_native_environment,
+    NativeCreated, local_vm_credentials, network_ref, print_native_created,
+    remove_native_environment, restart_native_environment, start_native_environment,
+    stop_native_environment,
 };
 pub(crate) use ports::handle_native_environment_port;
 
@@ -1197,13 +1198,6 @@ pub(crate) async fn native_environment(name: &str) -> anyhow::Result<Option<v1::
         }))
 }
 
-pub(crate) async fn native_selected_environment() -> anyhow::Result<Option<v1::Environment>> {
-    Ok(native_environments()
-        .await?
-        .into_iter()
-        .find(|environment| environment.selected))
-}
-
 pub(crate) async fn get_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     let mut client = native_client().await?;
     get_native_environment_with_authority_recovery(&mut client, name).await
@@ -1215,11 +1209,22 @@ pub(crate) async fn get_native_environment(name: &str) -> anyhow::Result<v1::Env
 pub(crate) async fn native_shell_stdio(name: Option<&str>) -> anyhow::Result<()> {
     let environment = match name {
         Some(name) => native_environment(name).await?,
-        None => native_selected_environment().await?,
+        // Only an explicit `cw use` selects; the supervisor's own flag does not.
+        None => {
+            let paths = ResolvePaths::from_env(&OsEnv)?;
+            let target = config::current_target(&paths.mesh_data_dir)?;
+            if target.kind == "local" && target.target_ref != "local" {
+                native_environment(&target.target_ref).await?
+            } else {
+                None
+            }
+        }
     }
     .ok_or_else(|| match name {
         Some(name) => anyhow::anyhow!("local environment {name} was not found"),
-        None => anyhow::anyhow!("no local environment is selected; name one"),
+        None => anyhow::anyhow!(
+            "no local environment is selected; name one, or select one with `cw --local use ENV`"
+        ),
     })?;
     let environment_id = Uuid::parse_str(&environment.id).context("local environment UUID")?;
     let mut client = native_client().await?;
@@ -2563,7 +2568,7 @@ fn absolute_override(name: &str) -> anyhow::Result<Option<PathBuf>> {
     Ok(Some(path))
 }
 
-fn native_state_exists() -> anyhow::Result<bool> {
+pub(crate) fn native_state_exists() -> anyhow::Result<bool> {
     let config = native_runtime_config()?;
     for name in ["supervisor.db", "state.json"] {
         match std::fs::symlink_metadata(config.root.join(name)) {

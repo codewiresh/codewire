@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+pub mod selection;
+
 pub const CW_CONFIG_DIR_ENV: &str = "CW_CONFIG_DIR";
 pub const CW_MESH_DATA_DIR_ENV: &str = "CW_MESH_DATA_DIR";
 pub const CODEWIRE_SERVER_URL_ENV: &str = "CODEWIRE_SERVER_URL";
@@ -862,19 +864,12 @@ pub fn default_current_target() -> CurrentTargetConfig {
     }
 }
 
-pub fn current_target_from_config(config: &MeshConfig) -> CurrentTargetConfig {
-    match config.current_target.as_ref() {
-        Some(target) if !target.kind.trim().is_empty() => CurrentTargetConfig {
-            kind: target.kind.trim().to_string(),
-            target_ref: target.target_ref.trim().to_string(),
-            name: target.name.trim().to_string(),
-        },
-        _ => default_current_target(),
-    }
-}
-
+/// The target the current selection names, or the unset default
+/// ([`default_current_target`]) when nothing is selected. See [`selection`].
 pub fn current_target(data_dir: &Path) -> Result<CurrentTargetConfig, ConfigError> {
-    Ok(current_target_from_config(&load_mesh_config(data_dir)?))
+    Ok(selection::load(data_dir)?
+        .map(|selected| selected.target())
+        .unwrap_or_else(default_current_target))
 }
 
 pub fn load_project_document(
@@ -887,25 +882,6 @@ pub fn load_project_document(
     codewire_project::parse_project_yaml(&data).map_err(|source| ConfigError::ParseCodewireConfig {
         path: path.to_path_buf(),
         source,
-    })
-}
-
-pub fn save_current_target(
-    data_dir: &Path,
-    target: &CurrentTargetConfig,
-) -> Result<(), ConfigError> {
-    let kind = target.kind.trim();
-    let target_ref = target.target_ref.trim();
-    if kind.is_empty() || target_ref.is_empty() {
-        return Err(ConfigError::InvalidCurrentTarget);
-    }
-    let name = target.name.trim();
-    update_mesh_config(data_dir, |config| {
-        config.current_target = Some(CurrentTargetConfig {
-            kind: kind.to_string(),
-            target_ref: target_ref.to_string(),
-            name: name.to_string(),
-        });
     })
 }
 
@@ -1267,7 +1243,7 @@ pub enum ConfigError {
     InvalidMeshConfigRoot { path: PathBuf },
     #[error("network name must be non-empty")]
     InvalidMeshSelection,
-    #[error("current target kind and ref must be non-empty")]
+    #[error("the current environment needs a canonical ID and a name")]
     InvalidCurrentTarget,
     #[error("incomplete platform config {path}: missing server_url")]
     IncompletePlatformConfig { path: PathBuf },
@@ -1616,110 +1592,6 @@ environment_token = "retired-bearer"
         assert!(matches!(
             load_mesh_config(&paths.mesh_data_dir),
             Err(ConfigError::ParseMesh { .. })
-        ));
-    }
-
-    #[test]
-    fn current_target_defaults_to_local_when_missing_or_blank() {
-        let home = tempfile::tempdir().unwrap();
-        let env = MapEnv::default();
-        let paths = paths(home.path(), &env);
-
-        assert_eq!(
-            current_target(&paths.mesh_data_dir).unwrap(),
-            default_current_target()
-        );
-
-        write_mesh_config(
-            &paths.mesh_data_dir,
-            r#"
-[current_target]
-kind = " "
-ref = "env_123"
-name = "builder"
-"#,
-        );
-
-        assert_eq!(
-            current_target(&paths.mesh_data_dir).unwrap(),
-            default_current_target()
-        );
-    }
-
-    #[test]
-    fn save_current_target_writes_go_compatible_toml_and_preserves_mesh_settings() {
-        let home = tempfile::tempdir().unwrap();
-        let env = MapEnv::default();
-        let paths = paths(home.path(), &env);
-        write_mesh_config(
-            &paths.mesh_data_dir,
-            r#"
-mesh_url = "https://mesh.codewire.sh"
-mesh_auth_token = "mesh-token"
-mesh_selected_network = "project-alpha"
-"#,
-        );
-
-        save_current_target(
-            &paths.mesh_data_dir,
-            &CurrentTargetConfig {
-                kind: " env ".to_string(),
-                target_ref: " 12345678-abcd-4000-9000-000000000001 ".to_string(),
-                name: " builder ".to_string(),
-            },
-        )
-        .unwrap();
-
-        let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
-        assert!(data.contains("mesh_url = \"https://mesh.codewire.sh\""));
-        assert!(data.contains("mesh_auth_token = \"mesh-token\""));
-        // An older cw's selection key is parse-only and dropped on write.
-        assert!(!data.contains("mesh_selected_network"));
-        assert!(data.contains("[current_target]"));
-        assert!(data.contains("kind = \"env\""));
-        assert!(data.contains("ref = \"12345678-abcd-4000-9000-000000000001\""));
-        assert!(data.contains("name = \"builder\""));
-
-        assert_eq!(
-            current_target(&paths.mesh_data_dir).unwrap(),
-            CurrentTargetConfig {
-                kind: "env".to_string(),
-                target_ref: "12345678-abcd-4000-9000-000000000001".to_string(),
-                name: "builder".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn save_current_target_rejects_blank_kind_or_ref() {
-        let home = tempfile::tempdir().unwrap();
-        let env = MapEnv::default();
-        let paths = paths(home.path(), &env);
-
-        assert!(matches!(
-            save_current_target(
-                &paths.mesh_data_dir,
-                &CurrentTargetConfig {
-                    kind: String::new(),
-                    target_ref: "local".to_string(),
-                    name: "local".to_string(),
-                }
-            )
-            .unwrap_err(),
-            ConfigError::InvalidCurrentTarget
-        ));
-
-        assert!(matches!(
-            save_current_target(
-                &paths.mesh_data_dir,
-                &CurrentTargetConfig {
-                    kind: "env".to_string(),
-                    target_ref: " ".to_string(),
-                    name: String::new(),
-                }
-            )
-            .unwrap_err(),
-            ConfigError::InvalidCurrentTarget
         ));
     }
 

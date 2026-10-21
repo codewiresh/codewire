@@ -334,7 +334,10 @@ enum Command {
     Logout,
     #[command(about = "Show current user and server")]
     Whoami(WhoamiArgs),
-    #[command(about = "Select an environment; --local or --cloud limits the lookup")]
+    #[command(
+        about = "Select the current environment; without ENV, choose from a list",
+        long_about = "Select the current environment, which commands use when no environment is named.\n\nWith ENV, select it by name or ID; --local or --cloud says where to look when a name exists in both. Without ENV, choose from a searchable list of local and cloud environments (--local or --cloud filters it): arrow keys move, typing filters, Enter selects, Escape cancels without changing the selection. Selecting a stopped environment does not start it. Outside an interactive terminal, ENV is required."
+    )]
     Use(UseTargetArgs),
     #[command(about = "Show the current environment")]
     Current(CurrentTargetArgs),

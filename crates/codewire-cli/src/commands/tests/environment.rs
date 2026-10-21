@@ -5,29 +5,24 @@ fn short_env_id_does_not_panic_on_non_ascii_refs() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn native_delete_replacement_persists_an_existing_or_unselected_target_without_stale_identity() {
+fn removing_the_selected_local_vm_clears_the_selection_and_selects_nothing_else() {
+    use config::selection::{EnvironmentSelection, SelectionLocation};
     let data = private_mesh_data_fixture();
-    config::save_current_target(
-        data.path(),
-        &config::CurrentTargetConfig {
-            kind: "local".into(),
-            target_ref: "deleted-vm".into(),
-            name: "deleted-vm".into(),
-        },
-    )
-    .unwrap();
-    for selected in [Some("remaining-vm".to_owned()), None] {
-        let replacement = super::environment::native_current_target_after_delete(selected.clone());
-        config::save_current_target(data.path(), &replacement).unwrap();
-        let saved = config::current_target(data.path()).unwrap();
-        assert_eq!(saved, replacement);
-        assert_ne!(saved.target_ref, "deleted-vm");
-        if let Some(name) = selected {
-            assert_eq!(saved.target_ref, name);
-        } else {
-            assert_eq!(saved, config::default_current_target());
-        }
-    }
+    let selected = EnvironmentSelection {
+        location: SelectionLocation::Local,
+        id: "8f0c2b3e-4d5a-4b6c-9d7e-0f1a2b3c4d5e".into(),
+        name: "deleted-vm".into(),
+        organization_id: None,
+    };
+    config::selection::save(data.path(), &selected).unwrap();
+    assert!(!super::environment::clear_removed_local_selection(data.path(), "other-vm").unwrap());
+    assert_eq!(config::selection::load(data.path()).unwrap(), Some(selected));
+    assert!(super::environment::clear_removed_local_selection(data.path(), "deleted-vm").unwrap());
+    assert_eq!(config::selection::load(data.path()).unwrap(), None);
+    assert_eq!(
+        config::current_target(data.path()).unwrap(),
+        config::default_current_target()
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -372,25 +367,6 @@ fn native_resize_requires_whole_cores_and_never_shrinks_disk() {
     assert!(resolve_native_resize_plan(&fractional, current, Vec::new()).is_err());
 }
 
-#[test]
-fn platform_environment_list_marks_selection_and_daemon_health() {
-    let platform = test_environment("env-platform", Some("cloud"), "running");
-    let current = config::CurrentTargetConfig {
-        kind: "env".to_string(),
-        target_ref: platform.id.clone(),
-        name: "cloud".to_string(),
-    };
-
-    let entries =
-        unified_environment_list_entries(&[(platform, "ready".to_string())], Some(&current));
-
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "cloud");
-    assert_eq!(entries[0].placement, "platform");
-    assert!(entries[0].selected);
-    assert_eq!(entries[0].daemon_health, "ready");
-}
-
 #[tokio::test]
 async fn platform_environment_list_asks_daemon_status_only_for_running_environments() {
     use buffa::Message as _;
@@ -472,34 +448,6 @@ async fn platform_environment_list_asks_daemon_status_only_for_running_environme
         platform_environment_daemon_health(&client(&failing), "org_test", environments()).await;
     assert!(health.iter().all(|(_, health)| health == "unavailable"));
     assert_eq!(failing.received_requests().await.unwrap().len(), 2);
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn native_environment_list_uses_explicit_current_then_supervisor_selection() {
-    let environment = codewire_local_vmm::control::v1::Environment {
-        id: "native-id".to_owned(),
-        name: "native-name".to_owned(),
-        selected: true,
-        ..Default::default()
-    };
-    assert!(native_environment_is_selected(&environment, None));
-    assert!(native_environment_is_selected(
-        &environment,
-        Some(&config::CurrentTargetConfig {
-            kind: "local".to_owned(),
-            target_ref: "native-id".to_owned(),
-            name: "native-name".to_owned(),
-        })
-    ));
-    assert!(!native_environment_is_selected(
-        &environment,
-        Some(&config::CurrentTargetConfig {
-            kind: "env".to_owned(),
-            target_ref: "platform-id".to_owned(),
-            name: "platform-name".to_owned(),
-        })
-    ));
 }
 
 #[test]
@@ -626,10 +574,18 @@ fn use_parser_accepts_explicit_environment_placement() {
         let Command::Use(UseTargetArgs { target }) = cli.command else {
             panic!("expected use command");
         };
-        assert_eq!(target, "workbench");
+        assert_eq!(target.as_deref(), Some("workbench"));
     }
     let cli = Cli::try_parse_from(["cw", "--cloud", "use", "--local", "workbench"]).unwrap();
     assert!(cli.placement().is_err());
+    // Without ENV, `cw use` opens the picker; placement filters it.
+    for argv in [vec!["cw", "use"], vec!["cw", "--cloud", "use"], vec!["cw", "use", "--local"]] {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        let Command::Use(UseTargetArgs { target }) = cli.command else {
+            panic!("expected use command");
+        };
+        assert_eq!(target, None);
+    }
 }
 
 #[test]

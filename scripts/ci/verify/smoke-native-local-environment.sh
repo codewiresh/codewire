@@ -942,12 +942,12 @@ run_named_reader_smoke() {
 }
 
 assert_current_target_cleared() {
-  if rg -qF 'could not save the current local target' "$LAST_STDERR"; then
-    die 'last environment deletion failed to clear the current target'
+  if rg -qF 'could not clear the current environment' "$LAST_STDERR"; then
+    die 'last environment deletion failed to clear the current environment'
   fi
-  run_cw current --verbose
-  rg -q '^Target: +local$' "$LAST_STDOUT" ||
-    die 'last environment deletion retained a stale current target'
+  run_cw current --output json
+  jq -e '.selected == false' "$LAST_STDOUT" >/dev/null ||
+    die 'last environment deletion retained a stale current environment'
 }
 
 run_cw_with_secret_stdin() {
@@ -3275,22 +3275,32 @@ printf '%s\n' 'repository skill generation two' >"$REPOSITORY_SKILL_SOURCE/SKILL
 printf '%s\n' 'direct skill generation two' >"$DIRECT_SKILL_SOURCE/SKILL.md"
 printf '%s\n' 'user skill generation two' >"$USER_SKILL_SOURCE/SKILL.md"
 printf 'direct read-only host changed after creation\n' >"$DIRECT_RO_SOURCE/data.txt"
+# Creating an environment does not select it; only `cw use` does.
 run_cw ls --local --output json
 jq -e '
   length == 1 and
   (.[0] |
     .name == "native-smoke" and
     .placement == "local" and
-    .selected == true and
+    .selected == false and
     .state == "running" and
     .daemon_health == "ready")
 ' "$LAST_STDOUT" >/dev/null || die 'native environment list metadata drifted'
 run_cw use --local "$NAME"
-rg -qxF 'Current target set to native-smoke.' "$LAST_STDERR" ||
+rg -qF 'Current environment: native-smoke' "$LAST_STDOUT" ||
   die 'native environment selection output drifted'
-run_cw current
-rg -qxF 'native-smoke  network: native-smoke-network' "$LAST_STDOUT" ||
-  die 'native current-target output drifted'
+run_cw current --output json
+jq -e --arg network "$MESH_NETWORK" '
+  .selected == true and
+  .name == "native-smoke" and
+  .location == "local" and
+  .status == "found" and
+  .state == "running" and
+  .network == ("local:" + $network)
+' "$LAST_STDOUT" >/dev/null || die 'native current-environment output drifted'
+run_cw ls --local --output json
+jq -e '.[0].selected == true' "$LAST_STDOUT" >/dev/null ||
+  die 'native environment list did not mark the selected environment'
 [[ "$(stat -c '%a' "$STATE_ROOT")" == 700 ]] || die 'native state root is not mode 0700'
 [[ "$(stat -c '%a' "$STATE_ROOT/supervisor.db")" == 600 ]] ||
   die 'native supervisor database is not mode 0600'
@@ -4258,6 +4268,7 @@ COPY_ENVIRONMENT_ID="$(native_database_value environment_id)"
   die 'Docker-disabled environment created a Docker data disk'
 printf 'host changed after copy creation\n' >"$WORKSPACE/data.txt"
 printf 'host-only after copy\n' >"$WORKSPACE/host-only.txt"
+run_cw use --local "$NAME"
 # The quoted expression is evaluated by the guest shell, not this host script.
 # shellcheck disable=SC2016
 run_cw run --no-tty -- /bin/sh -lc \
