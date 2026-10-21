@@ -1,8 +1,30 @@
-# Generic text that must not reach the public mirror: matched against added
-# diff lines and commit messages of every commit about to be pushed. One
+# Generic text that must not reach main or the public mirror: matched against
+# added diff lines and commit messages of every commit, before merge in the
+# source-approval workflow and before each mirror push, and against every
+# tracked text file by the policy core (check-mirror-content.sh --tree). One
 # extended regular expression per line. A bracket keeps a pattern from matching
-# its own line. Patterns that name private hosts, machines or repositories are
-# not tracked: check-mirror-content.sh reads them from the
-# MIRROR_PRIVATE_CONTENT_PATTERNS environment variable.
+# its own line. An "except: REGEX" line after a pattern names a reviewed
+# allow-list: its matches are blanked before the pattern is tested. Patterns
+# that name private hosts, machines, people or repositories are not tracked:
+# check-mirror-content.sh reads them from the MIRROR_PRIVATE_CONTENT_PATTERNS
+# environment variable.
 Reviewed-o[n]: *[a-z]+://
 INFISICA[L]_[A-Z0-9_]*IDENTITY_ID[=:] ?"?[0-9a-fA-F-]{36}
+# An absolute home directory, on Linux or macOS. Owner rule: never commit a
+# home directory path, in a comment or anywhere else. Write $HOME, ~, or a
+# placeholder below. A path such as $TMP or a fixture root followed by a home
+# segment is not an absolute home directory and does not match.
+(^|[^A-Za-z0-9._/$}-])/(hom[e]|User[s])/[A-Za-z0-9_][A-Za-z0-9._-]*([^A-Za-z0-9._-]|$)
+# The reviewed users a committed home directory may name, each a placeholder or
+# a product account, never a person:
+#   codewire  the workload user inside every sandbox and workspace image
+#   user      the documented neutral placeholder (AGENTS.md, docs/dev)
+#   someone   the documented neutral macOS placeholder in docs and tests
+#   tester    a synthetic test user (credential authority tests)
+#   synthetic a synthetic macOS keychain owner (protected-store tests)
+#   team      a synthetic shared-home fixture (guest probe workspace plans)
+#   kind      a synthetic Kind runner home (pre-push worktree tests)
+#   a, u, x   single-letter synthetic users (socket directory, update and
+#             darwin supervisor tests)
+#   outside   a path that escapes an SFTP root (workspace-access realpath test)
+except: /(home|Users)/(codewire|user|someone|tester|synthetic|team|kind|a|u|x|outside)([^A-Za-z0-9._-]|$)

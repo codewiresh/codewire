@@ -204,6 +204,135 @@ other="$(git -C "$repo" rev-parse HEAD)"
 git -C "$repo" checkout -q main
 if run_check "$other" >"$work/out" 2>&1; then fail 'a non-ancestor mirror head was accepted'; fi
 
+# Home directories. Owner rule: never commit one, in a comment or anywhere
+# else. The paths are assembled here so this file is itself clean.
+home_of() { printf '/%s/%s' "$1" "$2"; }
+leak="$(home_of home alice)/src/project"
+mac_leak="$(home_of Users alice)/Library"
+for content in "// a file above the worktree, as $leak holds" "HOME=$mac_leak" \
+  "$(home_of home user)/$(home_of home alice)/"; do
+  commit_file notes.txt "$content"
+  if run_check "$base" >"$work/out" 2>&1; then fail "a home directory was accepted: $content"; fi
+  grep -Fq 'pattern 3 found in added lines of' "$work/out" ||
+    fail 'a home directory refusal does not name the commit and pattern 3'
+  if grep -Fq alice "$work/out"; then fail 'a refusal printed the home directory'; fi
+  reset_to_base
+done
+# The reviewed placeholders and product users pass, and so does a home segment
+# under another root, which is not an absolute home directory.
+for content in "$(home_of home user)/src/codewire" "$(home_of home codewire)/.codex" \
+  "$(home_of Users someone)/Library" "$(home_of home tester)" "\$TMP$(home_of home .claude)/jobs" \
+  "/synthetic$(home_of home .codewire)/credentials-v1"; do
+  commit_file notes.txt "$content"
+  run_check "$base" >"$work/out" 2>&1 || {
+    cat "$work/out" >&2
+    fail "a reviewed placeholder or relative home segment was refused: $content"
+  }
+  reset_to_base
+done
+# Old behaviour: without the home-directory rule the same leak went through, as
+# it did before the rule existed.
+grep -v -e '^except: ' -e "hom\[e\]" "$repo/scripts/ci/release/public-content-patterns.txt" >"$work/old-patterns.txt"
+commit_file notes.txt "// as $leak holds"
+run_check --patterns "$work/old-patterns.txt" "$base" >/dev/null 2>&1 ||
+  fail 'the old patterns already refused a home directory; this fixture no longer shows the change'
+reset_to_base
+# An except line needs its own pattern above it.
+printf 'except: anything\n' >"$work/bad-patterns.txt"
+commit_file notes.txt 'plain'
+if run_check --patterns "$work/bad-patterns.txt" "$base" >"$work/out" 2>&1; then
+  fail 'an except line without a pattern was accepted'
+fi
+grep -Fq 'except line without its own pattern' "$work/out" || fail 'a stray except line is not attributable'
+reset_to_base
+
+# The pull request scan runs the same patterns before merge, over the commits
+# after the merge base: a branch behind main is not blamed for main's commits.
+git -C "$repo" checkout -q -b feature "$base"
+commit_file feature.txt "// as $leak holds" 'feat: a change'
+leaky_feature="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" checkout -q main
+commit_file main-only.txt 'see build-box-4' 'main: its own change'
+main_head="$(git -C "$repo" rev-parse HEAD)"
+run_pull_request() {
+  run_gate CI=true "MIRROR_PRIVATE_CONTENT_PATTERNS=$private_patterns" -- --pull-request --no-gitleaks "$@"
+}
+if run_pull_request "$main_head" "$leaky_feature" >"$work/out" 2>&1; then
+  fail 'a pull request adding a home directory was accepted'
+fi
+grep -Fq "pattern 3 found in added lines of: $(git -C "$repo" rev-parse --short "$leaky_feature")" "$work/out" ||
+  fail 'a pull request refusal does not name its commit and pattern 3'
+grep -Fq 'must not reach main' "$work/out" || fail 'a pull request refusal does not say it blocks the merge'
+if grep -Fq 'private pattern' "$work/out"; then fail "main's own commit was blamed on the pull request"; fi
+if grep -Fq alice "$work/out"; then fail 'a pull request refusal printed the home directory'; fi
+git -C "$repo" checkout -q -B feature "$base"
+commit_file feature.txt 'plain' 'feat: a clean change'
+clean_feature="$(git -C "$repo" rev-parse HEAD)"
+run_pull_request "$main_head" "$clean_feature" >/dev/null 2>&1 ||
+  fail 'a clean pull request behind main was refused'
+# The title and body become the squash message, so they are scanned too.
+printf 'feat: wire build-box-2 in\n\nBody text.\n' >"$work/pr-text"
+if run_pull_request --message-file "$work/pr-text" "$main_head" "$clean_feature" >"$work/out" 2>&1; then
+  fail 'a private name in the pull request title was accepted'
+fi
+grep -Fq 'private pattern 3 found in the pull request title or body' "$work/out" ||
+  fail 'a title refusal does not name the pattern'
+if grep -Fq build-box "$work/out"; then fail 'a title refusal printed the private name'; fi
+# The candidate's own pattern file cannot weaken the scan: the caller passes
+# the protected base's copy.
+git -C "$repo" checkout -q feature
+printf '# emptied by the candidate\n' >"$repo/scripts/ci/release/public-content-patterns.txt"
+printf '// as %s holds\n' "$leak" >"$repo/feature.txt"
+git -C "$repo" add -A
+git -C "$repo" commit -q -m 'feat: drop the rules'
+weakening="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" checkout -q main
+cp "$ROOT/scripts/ci/release/public-content-patterns.txt" "$work/trusted-patterns.txt"
+if run_pull_request --patterns "$work/trusted-patterns.txt" "$main_head" "$weakening" >"$work/out" 2>&1; then
+  fail "a candidate's emptied pattern file let a home directory through"
+fi
+grep -Fq 'pattern 3 found in added lines of' "$work/out" || fail 'the trusted patterns were not applied'
+# Fail closed without the private patterns, and on a malformed or missing commit.
+if run_gate CI=true -- --pull-request --no-gitleaks "$main_head" "$clean_feature" >"$work/out" 2>&1; then
+  fail 'a pull request scan without private patterns was accepted'
+fi
+grep -Fq 'MIRROR_PRIVATE_CONTENT_PATTERNS is empty' "$work/out" || fail 'an empty private list is not attributable'
+for pair in "main $clean_feature" "$main_head $(printf '0%.0s' {1..40})"; do
+  # shellcheck disable=SC2086 # the pair is two words by construction
+  if run_pull_request $pair >/dev/null 2>&1; then fail "pull request commits '$pair' were accepted"; fi
+done
+git -C "$repo" checkout -q -B main "$base"
+git -C "$repo" branch -q -D feature
+
+# The policy core's tree scan names the file and line of a committed home
+# directory, never the text, and needs no private patterns.
+printf 'line one\n# as %s holds\n%s/src/codewire\n' "$leak" "$(home_of home user)" >"$repo/tree.txt"
+git -C "$repo" add -A
+git -C "$repo" commit -q -m 'tree fixture'
+if run_gate CI=true -- --tree >"$work/out" 2>&1; then fail 'the tree scan accepted a committed home directory'; fi
+grep -Fq 'pattern 3 found at: tree.txt:2 ' "$work/out" || fail 'the tree scan does not name the file and line'
+if grep -Fq alice "$work/out"; then fail 'the tree scan printed the home directory'; fi
+printf 'line one\n%s/src/codewire\n' "$(home_of home user)" >"$repo/tree.txt"
+git -C "$repo" add -A
+git -C "$repo" commit -q -m 'tree fixture clean'
+run_gate CI=true -- --tree >"$work/out" 2>&1 || { cat "$work/out" >&2; fail 'the tree scan refused a placeholder'; }
+reset_to_base
+
+# The protected-base source-approval workflow runs the scan on every pull
+# request, from its own copy of the script and patterns.
+readonly APPROVAL="$ROOT/.gitea/workflows/source-approval.yml"
+grep -Fq "if: forgejo.event_name == 'pull_request_target'" "$APPROVAL" &&
+  grep -Fq 'trusted="$GITHUB_WORKSPACE/.source-approval-base/scripts/ci/release"' "$APPROVAL" &&
+  grep -Fq 'bash "$trusted/check-mirror-content.sh" --pull-request' "$APPROVAL" &&
+  grep -Fq -- '--patterns "$trusted/public-content-patterns.txt"' "$APPROVAL" ||
+  fail 'source approval does not run the protected-base content scan on pull requests'
+# shellcheck disable=SC2016 # the workflow expression is matched literally
+grep -Fq 'MIRROR_PRIVATE_CONTENT_PATTERNS: ${{ vars.MIRROR_PRIVATE_CONTENT_PATTERNS }}' "$APPROVAL" ||
+  fail 'source approval does not pass the private content patterns'
+if grep -Fq 'MIRROR_CONTENT_LOCAL_TEST' "$APPROVAL"; then
+  fail 'source approval runs the content scan as a local test'
+fi
+
 # The mirror script scans the pending range before it pushes.
 scan_line="$(grep -n 'check-mirror-content.sh' "$MIRROR" | head -1 | cut -d: -f1)"
 push_line="$(grep -n 'push github HEAD:refs/heads/main' "$MIRROR" | head -1 | cut -d: -f1)"
