@@ -32,10 +32,35 @@ libs/tailnet/go.mod
 tests/contract/go.mod
 EOF
 )"
-actual_modules="$(
-  cd "$ROOT"
-  find . -name go.mod -not -path './.git/*' -printf '%P\n' | LC_ALL=C sort
-)"
+# The repository's Go modules: tracked files and new ones not yet added, never
+# an ignored path such as a CI job's Cargo home under target/, which holds
+# third-party crates' own go.mod files.
+repository_go_modules() {
+  git -C "$1" ls-files --cached --others --exclude-standard -z -- ':(glob)**/go.mod' \
+    | while IFS= read -r -d '' path; do
+        [ ! -e "$1/$path" ] || printf '%s\n' "$path"
+      done | LC_ALL=C sort -u
+}
+
+fixture="$(mktemp -d)"
+trap 'rm -rf "$fixture"' EXIT
+git -C "$fixture" init -q
+mkdir -p "$fixture/libs/kept" "$fixture/libs/deleted" "$fixture/libs/new" \
+  "$fixture/target/ci-rust-cargo-home/registry/crate"
+printf 'target/\n' >"$fixture/.gitignore"
+for module in libs/kept libs/deleted libs/new target/ci-rust-cargo-home/registry/crate; do
+  printf 'module example.invalid/%s\n' "$module" >"$fixture/$module/go.mod"
+done
+git -C "$fixture" add .gitignore libs/kept/go.mod libs/deleted/go.mod
+rm "$fixture/libs/deleted/go.mod"
+fixture_modules="$(repository_go_modules "$fixture")"
+if [ "$fixture_modules" != "$(printf '%s\n' libs/kept/go.mod libs/new/go.mod)" ]; then
+  echo 'Go module listing must count tracked and new modules, not ignored or deleted ones' >&2
+  printf '%s\n' "$fixture_modules" >&2
+  exit 1
+fi
+
+actual_modules="$(repository_go_modules "$ROOT")"
 if [ "$actual_modules" != "$expected_modules" ]; then
   echo 'Go module ownership differs from the accepted four-module boundary' >&2
   diff -u <(printf '%s\n' "$expected_modules") <(printf '%s\n' "$actual_modules") >&2 || true

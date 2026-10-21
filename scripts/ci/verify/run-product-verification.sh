@@ -242,6 +242,7 @@ run_policy_core_one() {
   scripts/ci/tests/test-rust-owned-fixtures.sh
   scripts/ci/tests/test-require-verification-results.sh
   scripts/ci/tests/test-verify-tested-tree-receipt.sh
+  python3 -I -B scripts/ci/tests/test-ci-merge-check.py
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
   scripts/ci/tests/test-cargo-target-runner-failures.sh
   scripts/ci/tests/test-darwin-cross-check.sh

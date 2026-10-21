@@ -626,6 +626,9 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/dev-deployment-smoke-receipt.yaml|\
       .gitea/workflows/prod-readonly-smoke.yaml|\
       .gitea/workflows/runtime-dev-commodity-smoke.yaml|\
+      .gitea/workflows/merge-check.yaml|\
+      scripts/ci/receipts/ci-merge-check.py|\
+      scripts/ci/tests/test-ci-merge-check.py|\
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
       scripts/dev/dashboard-watch.py|\
       scripts/dev/macos-cli.py|scripts/dev/test-macos-cli.py|\
@@ -686,6 +689,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
       scripts/ci/tests/test-local-rust-cache.sh|\
+      scripts/ci/tests/test-run-host-rust-build.sh|\
       scripts/ci/tests/test-run-side-by-side.sh|\
       scripts/ci/tests/test-darwin-cross-check.sh|\
       scripts/ci/tests/test-ci-runner-image-contract.sh|\

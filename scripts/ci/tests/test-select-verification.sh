@@ -450,6 +450,22 @@ run_paths_case ci_self pull_request refs/pull/2/head false \
   scripts/ci/tests/test-verify-release-tag-receipt.sh \
   scripts/ci/tests/test-local-prepush-receipt.sh \
   scripts/ci/tests/test-source-approval-workflow.sh
+# The CI-worker merge check (#3055) is CI policy: its workflow, binding tool
+# and tests, and the host Rust build fixture it made hermetic, select Policy
+# alone. Unmapped they were unclassified and qualified
+# in full, as an unmapped neighbouring workflow still is.
+run_paths_case ci_worker_merge_check pull_request refs/pull/3055/head false \
+  'policy security security_js' \
+  .gitea/workflows/merge-check.yaml \
+  scripts/ci/receipts/ci-merge-check.py \
+  scripts/ci/tests/test-ci-merge-check.py \
+  scripts/ci/tests/test-run-host-rust-build.sh
+printf '%s\n' .gitea/workflows/merge-check-neighbour.yaml > "$TMP/merge-check-neighbour.paths"
+merge_check_neighbour="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/3055/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/merge-check-neighbour.paths" 2>/dev/null)"
+assert_contract_field merge_check_neighbour "$merge_check_neighbour" classification unclassified
+assert_contract_field merge_check_neighbour "$merge_check_neighbour" required_local_mode full
 run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   'policy runtime_dev_smoke rust_curated_locks security security_js' \
   .githooks/pre-push scripts/dev/preflight.sh \

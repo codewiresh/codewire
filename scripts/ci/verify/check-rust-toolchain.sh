@@ -45,6 +45,7 @@ readonly -a PINNED_WORKFLOWS=(
   '.gitea/workflows/connect-apikey-smoke.yaml:1'
   '.gitea/workflows/deploy-dev.yaml:1'
   '.gitea/workflows/manual-diagnostics.yaml:1'
+  '.gitea/workflows/merge-check.yaml:1'
   '.gitea/workflows/support-images.yaml:1'
 )
 readonly CANARY_WORKFLOW='.gitea/workflows/rust-latest-canary.yaml'

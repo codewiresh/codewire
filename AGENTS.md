@@ -216,6 +216,18 @@ up to date with `main`, which branch protection requires, and merge on:
 - for a change to credential, broker, bridge or relay code, a green
   `make kind-test SUITES=credentials` on the retained cluster.
 
+A merge check on a CI worker is the same evidence as a local `--for-merge`
+run. Label the pull request `merge-check`. A metal guest then runs
+`scripts/dev/preflight.sh --for-merge --emit-receipt` on the pull request's
+exact head merged with current `main`, with no credentials and no remote cache
+writes, and runs it again on every push. A separate job issues the receipt.
+It runs no pull-request code, so pull-request code cannot forge the receipt.
+A change to the merge check's own machinery gets no receipt and qualifies
+locally. Merge on it only when
+`scripts/ci/receipts/ci-merge-check.py verify --pr N` passes, which binds the
+receipt to the current head and `main`. A local run stays valid. The product
+journey and the Kind rules are unchanged (owner, 2026-10-20, cited on #3013).
+
 Kind gates only platform, dashboard, and credential, broker, bridge or relay
 code. A CLI-only change merges on its unit tests, lints and host journey with
 a built `cw`, with no local Kind run; Kind confirms it after merge, and a
