@@ -491,30 +491,37 @@ fn refusal_status(refusal: RuntimeRefusal) -> Status {
 }
 
 async fn admit_endpoint(
-    core: &mut SupervisorCore,
+    supervisor: &Supervisor,
     id: Uuid,
     expected: Option<&Intent>,
 ) -> Result<(Endpoint, RunnerRecord), Status> {
-    if core
-        .store
-        .has_pending_lifecycle_operation(id)
-        .map_err(SupervisorError::from)
-        .map_err(Status::from)?
-    {
-        return Err(Status::aborted(
-            "native environment has a pending lifecycle operation; runtime control cannot replay it",
-        ));
-    }
-    let environment = core
-        .state
-        .environments
-        .values()
-        .find(|environment| environment.id == id)
-        .cloned()
-        .ok_or_else(|| Status::not_found("native environment UUID was not found"))?;
-    if core.incompatible_runners.contains(&id)
-        || environment.state != StoredEnvironmentState::Running
-    {
+    let environment = {
+        let core = supervisor.core();
+        if core
+            .store
+            .has_pending_lifecycle_operation(id)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?
+        {
+            return Err(Status::aborted(
+                "native environment has a pending lifecycle operation; runtime control cannot replay it",
+            ));
+        }
+        let environment = core
+            .state
+            .environments
+            .values()
+            .find(|environment| environment.id == id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("native environment UUID was not found"))?;
+        if core.incompatible_runners.contains(&id) {
+            return Err(Status::failed_precondition(
+                "runtime requires a compatible running Linux VM",
+            ));
+        }
+        environment
+    };
+    if environment.state != StoredEnvironmentState::Running {
         return Err(Status::failed_precondition(
             "runtime requires a compatible running Linux VM",
         ));
@@ -549,8 +556,9 @@ async fn admit_endpoint(
     // The retained runner's actual birth, protocol and Running reply are read
     // directly; its transient capability never enters durable runtime state.
     let (access, pin) =
-        observe_retained_runner(core.config.runner_socket(id), &identity, &runner).await?;
-    let (mut endpoint, runner) = admit_physical_endpoint(core, identity, runner, access, expected)?;
+        observe_retained_runner(supervisor.config.runner_socket(id), &identity, &runner).await?;
+    let (mut endpoint, runner) =
+        admit_physical_endpoint(&supervisor.core(), identity, runner, access, expected)?;
     endpoint.runner_pin = Some(pin);
     endpoint.revalidate()?;
     Ok((endpoint, runner))
@@ -561,12 +569,12 @@ async fn admit_endpoint(
 /// promote that boot. This is observation only: lost selectors/receipts never
 /// cause a new publish, selection or bootstrap-default substitution.
 pub(super) async fn confirm_boot(
-    core: &mut SupervisorCore,
+    supervisor: &Supervisor,
     name: &str,
     generation: u64,
     access: v1::DaemonAccess,
 ) -> Result<(), Status> {
-    let environment = core.environment(name).map_err(Status::from)?;
+    let environment = supervisor.environment(name).map_err(Status::from)?;
     let Some(binding) = environment.cw_runtime.as_ref() else {
         return Ok(());
     };
@@ -586,9 +594,11 @@ pub(super) async fn confirm_boot(
         bootstrap_catalog_sha256: binding.active_catalog_generation.clone(),
     };
     identity.validate().map_err(Status::failed_precondition)?;
-    let (endpoint, _) = admit_physical_endpoint(core, identity, runner, access, None)?;
+    let (endpoint, _) =
+        admit_physical_endpoint(&supervisor.core(), identity, runner, access, None)?;
     let reply = endpoint.call(RuntimeAction::Info, None).await?;
-    approve_reply(core, &reply)?;
+    let core = supervisor.core();
+    approve_reply(&core, &reply)?;
     reconcile_interrupted(&core.store, &reply)?;
     Ok(())
 }
@@ -933,12 +943,12 @@ fn finish(
 /// Crash recovery NEVER republishes or reissues Select. If no receipt exists,
 /// durable Cancel races the old in-flight request at the guest commit lock.
 pub(super) async fn recover(
-    core: &mut SupervisorCore,
+    supervisor: &Supervisor,
     operation: &OperationRecord,
 ) -> Result<(), SupervisorError> {
     let intent = Intent::decode(operation).map_err(|_| SupervisorError::InvalidState)?;
     let (endpoint, _) =
-        match admit_endpoint(core, intent.binding.environment_id, Some(&intent)).await {
+        match admit_endpoint(supervisor, intent.binding.environment_id, Some(&intent)).await {
             Ok(endpoint) => endpoint,
             Err(_) => {
                 // Only an authoritative stopped record for this exact UUID
@@ -948,6 +958,7 @@ pub(super) async fn recover(
                     LiveProcess::recover(&intent.vmm),
                     Err(RecoveryError::ProcessExited)
                 );
+                let core = supervisor.core();
                 if vmm_exited
                     && core.state.environments.values().any(|environment| {
                         environment.id == intent.binding.environment_id
@@ -989,7 +1000,7 @@ pub(super) async fn recover(
     // A peer/receipt admission refusal preserves the uncertain intent. It is
     // never converted into a shutdown of this retained supervisor or a false
     // terminal result by the ordinary lifecycle worker.
-    let _ = finish(core, operation, &reply);
+    let _ = finish(&supervisor.core(), operation, &reply);
     Ok(())
 }
 
@@ -1017,7 +1028,7 @@ impl SupervisorRpc {
                 "rollback selects only a retained runtime",
             ));
         }
-        let engine_path = { self.core.lock().await.config.engine_root() };
+        let engine_path = self.supervisor.config.engine_root();
         let asset = if rollback {
             None
         } else {
@@ -1044,13 +1055,15 @@ impl SupervisorRpc {
             )
         };
         let (operation, endpoint, initial) = {
-            let mut core = self.core.lock().await;
-            if let Some(operation) = core
+            let serial = self.supervisor.serial.lock().await;
+            let existing = self
+                .supervisor
+                .core()
                 .store
                 .operation_by_request(request_id)
                 .map_err(SupervisorError::from)
-                .map_err(Status::from)?
-            {
+                .map_err(Status::from)?;
+            if let Some(operation) = existing {
                 let intent = Intent::decode(&operation)?;
                 if intent.binding != requested
                     || intent.expected_revision != request.expected_revision
@@ -1063,7 +1076,7 @@ impl SupervisorRpc {
                     return Err(Status::aborted("runtime request UUID collision"));
                 }
                 // An existing request is observation only, even with a source.
-                drop(core);
+                drop(serial);
                 return self
                     .runtime_query(
                         v1::LinuxCwRuntimeQuery {
@@ -1074,11 +1087,12 @@ impl SupervisorRpc {
                     )
                     .await;
             }
-            let (endpoint, runner) = admit_endpoint(&mut core, id, None).await?;
+            let (endpoint, runner) = admit_endpoint(&self.supervisor, id, None).await?;
             if endpoint.binding != requested {
                 return Err(Status::failed_precondition("runtime VM binding changed"));
             }
             let initial = endpoint.call(RuntimeAction::Info, None).await?;
+            let mut core = self.supervisor.core();
             approve_reply(&core, &initial)?;
             reconcile_interrupted(&core.store, &initial)?;
             if initial.selection.revision != request.expected_revision {
@@ -1139,6 +1153,7 @@ impl SupervisorRpc {
                 .map_err(SupervisorError::from)
                 .map_err(Status::from)?;
             core.runtime_operations.insert(operation.operation_id);
+            drop(serial);
             (operation, endpoint, initial)
         };
         let service = self.clone();
@@ -1179,21 +1194,30 @@ impl SupervisorRpc {
         };
         // The entire transfer above holds no global core lock. CAS and exact
         // owner reread below serialize with lifecycle admission and cancellation.
-        let mut core = self.core.lock().await;
-        let current = match core
+        let _serial = self.supervisor.serial.lock().await;
+        let current = self
+            .supervisor
+            .core()
             .store
-            .cw_runtime_operation_by_id(operation.operation_id)
-        {
+            .cw_runtime_operation_by_id(operation.operation_id);
+        let current = match current {
             Ok(Some(current)) => current,
             _ => {
-                core.runtime_operations.remove(&operation.operation_id);
+                self.supervisor
+                    .core()
+                    .runtime_operations
+                    .remove(&operation.operation_id);
                 return;
             }
         };
         if !current.phase.terminal()
-            && admit_endpoint(&mut core, intent.binding.environment_id, Some(&intent))
-                .await
-                .is_ok()
+            && admit_endpoint(
+                &self.supervisor,
+                intent.binding.environment_id,
+                Some(&intent),
+            )
+            .await
+            .is_ok()
         {
             let result = if publish.is_ok() {
                 endpoint
@@ -1205,40 +1229,43 @@ impl SupervisorRpc {
                     .await
             };
             if let Ok(reply) = result {
-                let _ = finish(&core, &current, &reply);
+                let _ = finish(&self.supervisor.core(), &current, &reply);
             }
             // A failed/lost commit response retains intent and its exact ID.
             // Recovery observes/cancels it; it never issues a second Select.
         }
-        if !current.phase.terminal()
-            && endpoint.runner.is_exited().ok() == Some(true)
-            && endpoint.vmm.is_exited().ok() == Some(true)
-        {
-            let latest = core
-                .store
-                .cw_runtime_operation_by_id(operation.operation_id)
-                .ok()
-                .flatten();
-            if let Some(latest) = latest.filter(|operation| !operation.phase.terminal()) {
-                let _ = core.store.advance_operation(
-                    latest.operation_id,
-                    latest.checkpoint,
-                    OperationPhase::Interrupted,
-                    None,
-                    Some("runtime_vm_birth_lost"),
-                );
+        let latest = {
+            let mut core = self.supervisor.core();
+            if !current.phase.terminal()
+                && endpoint.runner.is_exited().ok() == Some(true)
+                && endpoint.vmm.is_exited().ok() == Some(true)
+            {
+                let latest = core
+                    .store
+                    .cw_runtime_operation_by_id(operation.operation_id)
+                    .ok()
+                    .flatten();
+                if let Some(latest) = latest.filter(|operation| !operation.phase.terminal()) {
+                    let _ = core.store.advance_operation(
+                        latest.operation_id,
+                        latest.checkpoint,
+                        OperationPhase::Interrupted,
+                        None,
+                        Some("runtime_vm_birth_lost"),
+                    );
+                }
             }
-        }
-        core.runtime_operations.remove(&operation.operation_id);
-        if let Ok(Some(latest)) = core
-            .store
-            .cw_runtime_operation_by_id(operation.operation_id)
+            core.runtime_operations.remove(&operation.operation_id);
+            core.store
+                .cw_runtime_operation_by_id(operation.operation_id)
+        };
+        if let Ok(Some(latest)) = latest
             && !latest.phase.terminal()
         {
             // One bounded recovery attempt observes or durably cancels the
             // original intent; it never retries Publish or Select. A remaining
             // unknown effect is retained for explicit observe/cancel.
-            let _ = recover(&mut core, &latest).await;
+            let _ = recover(&self.supervisor, &latest).await;
         }
     }
 
@@ -1253,12 +1280,14 @@ impl SupervisorRpc {
                 "cancel requires the original request UUID",
             ));
         }
-        let mut core = self.core.lock().await;
+        let _serial = self.supervisor.serial.lock().await;
         let operation = if request.request_id.is_empty() {
             None
         } else {
             Some(
-                core.store
+                self.supervisor
+                    .core()
+                    .store
                     .operation_by_request(parse_operation_id(&request.request_id)?)
                     .map_err(SupervisorError::from)
                     .map_err(Status::from)?
@@ -1274,11 +1303,14 @@ impl SupervisorRpc {
         // After a reboot, observe the retained old receipt through the new
         // trusted publisher only. No old request may mutate a new VM birth.
         let historical = if let (Some(operation), Some(intent)) = (&operation, &intent) {
-            let environment = core
+            let environment = self
+                .supervisor
+                .core()
                 .state
                 .environments
                 .values()
                 .find(|environment| environment.id == id)
+                .cloned()
                 .ok_or_else(|| Status::not_found("native environment UUID was not found"))?;
             let bootstrap = environment.cw_runtime.as_ref().ok_or_else(|| {
                 Status::failed_precondition("VM has no immutable cw bootstrap catalog")
@@ -1293,7 +1325,7 @@ impl SupervisorRpc {
             false
         };
         let expected = intent.as_ref().filter(|_| !historical);
-        let (endpoint, _) = admit_endpoint(&mut core, id, expected).await?;
+        let (endpoint, _) = admit_endpoint(&self.supervisor, id, expected).await?;
         let action = match (&operation, &intent) {
             (Some(operation), Some(intent)) if cancel && !operation.phase.terminal() => {
                 intent.request(operation.operation_id, true).action
@@ -1304,6 +1336,7 @@ impl SupervisorRpc {
             _ => RuntimeAction::Info,
         };
         let reply = endpoint.call(action, None).await?;
+        let core = self.supervisor.core();
         approve_reply(&core, &reply)?;
         let operation = if let Some(operation) = operation {
             if !operation.phase.terminal() && reply.observed.is_some() {
@@ -1335,8 +1368,10 @@ impl LinuxCwRuntimeService for SupervisorRpc {
         &self,
         request: Request<v1::LinuxCwRuntimeSelector>,
     ) -> Result<Response<v1::LinuxCwRuntimeIdentity>, Status> {
-        let core = self.core.lock().await;
-        let id = resolve_saved_identity(&core.state, &request.into_inner().selector)?;
+        let id = resolve_saved_identity(
+            &self.supervisor.core().state,
+            &request.into_inner().selector,
+        )?;
         Ok(Response::new(v1::LinuxCwRuntimeIdentity {
             environment_id: id.to_string(),
         }))
@@ -1966,7 +2001,7 @@ mod tests {
                     .code(),
                 tonic::Code::Aborted
             );
-            let mut core = service.core.lock().await;
+            let mut core = service.supervisor.core();
             assert_eq!(
                 SupervisorStore::inspect(&core.root).unwrap().1,
                 before_state

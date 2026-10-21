@@ -423,7 +423,7 @@ fn explicit_config_aliases_bind_one_canonical_directory_without_opening_saved_lo
 async fn supervisor_selects_platform_broker_and_clients_without_local_profile_or_login_reads() {
     for profile in [false, true] {
         let environment = environment(profile);
-        let (_temporary, mut core) =
+        let (_temporary, core) =
             crate::supervisor::tests::test_supervisor_core(environment.clone());
         fs::create_dir_all(&core.config.platform_config_dir).unwrap();
         let request = core
@@ -442,6 +442,7 @@ async fn supervisor_selects_platform_broker_and_clients_without_local_profile_or
             platform.config_directory,
             fs::canonicalize(&core.config.platform_config_dir).unwrap()
         );
+        let core = crate::supervisor::tests::test_supervisor(core);
         // With no credential authority to ask, the start keeps the pinned
         // clients but omits GitHub; it neither fails nor fabricates it.
         assert_eq!(
@@ -537,8 +538,8 @@ async fn broker_requests_keep_both_authority_bindings_without_opening_local_cred
 async fn initial_platform_repository_preparation_rejects_missing_profile_metadata_before_local_lookup()
  {
     let environment = environment(true);
-    let (_temporary, mut core) =
-        crate::supervisor::tests::test_supervisor_core(environment.clone());
+    let (_temporary, core) = crate::supervisor::tests::test_supervisor_core(environment.clone());
+    let core = crate::supervisor::tests::test_supervisor(core);
     let mut project: ProjectSpec =
         serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
     project.repositories.push(codewire_project::RepositorySpec {
@@ -683,7 +684,7 @@ fn the_pinned_anthropic_form_chooses_claude_codes_form() {
 #[tokio::test]
 async fn a_platform_profile_has_an_ssh_key_only_with_its_ssh_slot() {
     async fn has_key(
-        core: &mut SupervisorCore,
+        core: &Supervisor,
         project: &ProjectSpec,
         profile_id: &AccessProfileId,
         slots: &[&str],
@@ -700,8 +701,8 @@ async fn a_platform_profile_has_an_ssh_key_only_with_its_ssh_slot() {
             .unwrap()
     }
     let environment = environment(true);
-    let (_temporary, mut core) =
-        crate::supervisor::tests::test_supervisor_core(environment.clone());
+    let (_temporary, core) = crate::supervisor::tests::test_supervisor_core(environment.clone());
+    let core = crate::supervisor::tests::test_supervisor(core);
     let profile_id = environment
         .access_binding
         .as_ref()
@@ -717,9 +718,9 @@ async fn a_platform_profile_has_an_ssh_key_only_with_its_ssh_slot() {
     });
     // Without a github.com source in SSH form nothing asks, so the authority
     // is never started.
-    assert!(!has_key(&mut core, &project, &profile_id, &["github", "ssh"]).await);
+    assert!(!has_key(&core, &project, &profile_id, &["github", "ssh"]).await);
     project.repositories[0].source = "git@github.com:synthetic/repository.git".into();
-    assert!(has_key(&mut core, &project, &profile_id, &["github", "ssh"]).await);
-    assert!(!has_key(&mut core, &project, &profile_id, &["codex", "github"]).await);
+    assert!(has_key(&core, &project, &profile_id, &["github", "ssh"]).await);
+    assert!(!has_key(&core, &project, &profile_id, &["codex", "github"]).await);
     assert!(!core.config.credential_authority_root.exists());
 }

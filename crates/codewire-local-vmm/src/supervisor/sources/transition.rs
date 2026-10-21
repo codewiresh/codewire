@@ -335,8 +335,10 @@ impl SupervisorRpc {
             .map_err(Status::from)?
             .ok_or_else(|| Status::invalid_argument("environment ID is required"))?;
         SourceSelection::from_request(&request).map_err(Status::from)?;
-        let mut core = self.core.lock().await;
-        let existing = core
+        let serial = self.supervisor.serial.lock().await;
+        let existing = self
+            .supervisor
+            .core()
             .store
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
@@ -354,17 +356,24 @@ impl SupervisorRpc {
             operation
         } else {
             require_expected_environment(
-                core.environment(&request.name).map_err(Status::from)?,
+                &self
+                    .supervisor
+                    .environment(&request.name)
+                    .map_err(Status::from)?,
                 Some(environment_id),
             )?;
-            core.replay_pending_operations()
+            self.supervisor
+                .replay_pending_operations()
                 .await
                 .map_err(Status::from)?;
-            let environment = core.environment(&request.name).map_err(Status::from)?;
-            require_expected_environment(environment, Some(environment_id))?;
-            let transition = SourceTransition::new(&request, environment).map_err(Status::from)?;
+            let environment = self
+                .supervisor
+                .environment(&request.name)
+                .map_err(Status::from)?;
+            require_expected_environment(&environment, Some(environment_id))?;
+            let transition = SourceTransition::new(&request, &environment).map_err(Status::from)?;
             transition
-                .validate_running_delivery(environment)
+                .validate_running_delivery(&environment)
                 .map_err(Status::from)?;
             if let Some(binding) = transition
                 .target
@@ -375,7 +384,7 @@ impl SupervisorRpc {
                 // becomes replayable. A later lost ACK can then be reconciled
                 // by exact binding identity without trusting a caller label.
                 let mut metadata = codewire_local_credentials::LocalCredentialClient::connect(
-                    &core.config.credential_authority_config(),
+                    &self.supervisor.config.credential_authority_config(),
                 )
                 .await
                 .map_err(|_| Status::unavailable("local credential authority is unavailable"))?;
@@ -426,7 +435,9 @@ impl SupervisorRpc {
             }
             let payload = serde_json::to_value(transition)
                 .map_err(|_| Status::invalid_argument("invalid source update request"))?;
-            core.store
+            self.supervisor
+                .core()
+                .store
                 .begin_operation(
                     request_id,
                     Some(environment_id),
@@ -437,7 +448,7 @@ impl SupervisorRpc {
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(core);
+        drop(serial);
         if !operation.phase.terminal() {
             self.schedule_operation_worker(false);
         }
@@ -536,16 +547,16 @@ async fn publish_binding(
     Err(SupervisorError::CredentialAuthorityUnavailable)
 }
 
-impl SupervisorCore {
+impl Supervisor {
     pub(in crate::supervisor) async fn execute_source_operation(
-        &mut self,
+        &self,
         operation: &OperationRecord,
     ) -> Result<(), SupervisorError> {
         match self.update_environment_sources(operation).await {
             Ok(completed) => {
                 let transition = SourceTransition::from_operation(&completed)?;
-                let result = environment_operation_result(self.environment(&transition.name)?);
-                self.complete_operation(&completed, &result)?;
+                let result = environment_operation_result(&self.environment(&transition.name)?);
+                self.core().complete_operation(&completed, &result)?;
                 Ok(())
             }
             // This also covers an unknown binding ACK: keep the immutable
@@ -556,6 +567,7 @@ impl SupervisorCore {
             ) => Err(error),
             Err(error) => {
                 let current = self
+                    .core()
                     .store
                     .operation_by_request(operation.request_id)?
                     .ok_or(SupervisorError::InvalidState)?;
@@ -573,22 +585,28 @@ impl SupervisorCore {
                         lifecycle_failure_code(
                             "environment_sources",
                             &error,
-                            self.recorded_runner_error_code(&transition.name),
+                            self.core().recorded_runner_error_code(&transition.name),
                         )
                     };
-                    self.log_operation_failure(&current, &transition.name, &error, &code);
+                    self.core()
+                        .log_operation_failure(&current, &transition.name, &error, &code);
                     // If a target launch partially succeeded, prove it stopped
                     // before publishing terminal failure. Never roll back pins.
                     self.ensure_vm_stopped(&transition.name).await?;
-                    self.fail_operation_with_environment_error(&current, &transition.name, &code)?;
+                    self.core().fail_operation_with_environment_error(
+                        &current,
+                        &transition.name,
+                        &code,
+                    )?;
                 } else {
-                    self.log_operation_failure(
+                    self.core().log_operation_failure(
                         &current,
                         &transition.name,
                         &error,
                         "environment_sources_conflict",
                     );
-                    self.fail_operation(&current, "environment_sources_conflict")?;
+                    self.core()
+                        .fail_operation(&current, "environment_sources_conflict")?;
                 }
                 Ok(())
             }
@@ -596,7 +614,7 @@ impl SupervisorCore {
     }
 
     async fn update_environment_sources(
-        &mut self,
+        &self,
         operation: &OperationRecord,
     ) -> Result<OperationRecord, SupervisorError> {
         let transition = SourceTransition::from_operation(operation)?;
@@ -605,21 +623,22 @@ impl SupervisorCore {
             .ok_or(SupervisorError::InvalidState)?;
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
-            transition.require_current(self.environment(&transition.name)?, &operation)?;
+            transition.require_current(&self.environment(&transition.name)?, &operation)?;
             match effect {
                 LifecycleEffect::StopVm => {
                     self.reconcile_active_environment_before_protected_effect(&transition.name)
                         .await?;
                     self.ensure_vm_stopped(&transition.name).await?;
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordStopped => {
-                    let mut next = self.state.clone();
-                    next.environments
-                        .get_mut(&transition.name)
-                        .ok_or(SupervisorError::InvalidState)?
-                        .state = StoredEnvironmentState::Stopped;
-                    operation = self.checkpoint_state_operation(&operation, next)?;
+                    operation = self.commit_operation(&operation, |next| {
+                        next.environments
+                            .get_mut(&transition.name)
+                            .ok_or(SupervisorError::InvalidState)?
+                            .state = StoredEnvironmentState::Stopped;
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::ApplySourceAccessBinding => {
                     let expected = transition.expected.local_binding(environment_id)?;
@@ -645,60 +664,62 @@ impl SupervisorCore {
                         )
                         .await?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordEnvironmentSources => {
-                    let mut next = self.state.clone();
-                    let environment = next
-                        .environments
-                        .get_mut(&transition.name)
-                        .ok_or(SupervisorError::InvalidState)?;
-                    transition.target.write_to(environment)?;
-                    environment.generation = transition.target_generation;
-                    environment.state = StoredEnvironmentState::Stopped;
-                    operation = self.checkpoint_state_operation(&operation, next)?;
+                    operation = self.commit_operation(&operation, |next| {
+                        let environment = next
+                            .environments
+                            .get_mut(&transition.name)
+                            .ok_or(SupervisorError::InvalidState)?;
+                        transition.target.write_to(environment)?;
+                        environment.generation = transition.target_generation;
+                        environment.state = StoredEnvironmentState::Stopped;
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::RequireEnvironmentAccess => {
                     if transition.was_running {
                         self.require_environment_access(&transition.name).await?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordStarting => {
-                    let mut next = self.state.clone();
-                    if transition.was_running {
-                        let environment = next
-                            .environments
-                            .get_mut(&transition.name)
-                            .ok_or(SupervisorError::InvalidState)?;
-                        if !matches!(
-                            environment.state,
-                            StoredEnvironmentState::Stopped | StoredEnvironmentState::Starting
-                        ) {
-                            return Err(SupervisorError::InvalidState);
+                    operation = self.commit_operation(&operation, |next| {
+                        if transition.was_running {
+                            let environment = next
+                                .environments
+                                .get_mut(&transition.name)
+                                .ok_or(SupervisorError::InvalidState)?;
+                            if !matches!(
+                                environment.state,
+                                StoredEnvironmentState::Stopped | StoredEnvironmentState::Starting
+                            ) {
+                                return Err(SupervisorError::InvalidState);
+                            }
+                            environment.state = StoredEnvironmentState::Starting;
+                            if let Some(runner) = environment.runner.as_mut() {
+                                runner.error_code = None;
+                            }
                         }
-                        environment.state = StoredEnvironmentState::Starting;
-                        if let Some(runner) = environment.runner.as_mut() {
-                            runner.error_code = None;
-                        }
-                    }
-                    operation = self.checkpoint_state_operation(&operation, next)?;
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::EnsureRunner => {
                     if transition.was_running {
                         validate_environment_workload_secret_delivery(
-                            self.environment(&transition.name)?,
+                            &self.environment(&transition.name)?,
                             false,
                         )?;
                         let artifact = artifact_generation_for_boot(
-                            self.environment(&transition.name)?,
+                            &self.environment(&transition.name)?,
                             false,
                         )?
                         .to_owned();
                         self.runner_client_for_artifact(&transition.name, &artifact)
                             .await?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StartVm => {
                     if transition.was_running {
@@ -709,7 +730,7 @@ impl SupervisorCore {
                         )
                         .await?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordSourceOutcome => {
                     if transition.was_running {
@@ -718,23 +739,24 @@ impl SupervisorCore {
                         // after StartVm is not perpetual evidence of Running.
                         self.reconcile(&transition.name).await?;
                         let current = self.environment(&transition.name)?;
-                        transition.require_current(current, &operation)?;
+                        transition.require_current(&current, &operation)?;
                         if current.state != StoredEnvironmentState::Running
                             || current.runner.is_none()
                         {
                             return Err(SupervisorError::NotRunning);
                         }
                     }
-                    let mut next = self.state.clone();
-                    next.environments
-                        .get_mut(&transition.name)
-                        .ok_or(SupervisorError::InvalidState)?
-                        .state = if transition.was_running {
-                        StoredEnvironmentState::Running
-                    } else {
-                        StoredEnvironmentState::Stopped
-                    };
-                    operation = self.checkpoint_state_operation(&operation, next)?;
+                    operation = self.commit_operation(&operation, |next| {
+                        next.environments
+                            .get_mut(&transition.name)
+                            .ok_or(SupervisorError::InvalidState)?
+                            .state = if transition.was_running {
+                            StoredEnvironmentState::Running
+                        } else {
+                            StoredEnvironmentState::Stopped
+                        };
+                        Ok(())
+                    })?;
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }

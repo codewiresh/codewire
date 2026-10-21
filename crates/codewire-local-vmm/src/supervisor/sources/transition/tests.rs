@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use super::*;
 use crate::supervisor::tests::{
-    project_environment, spawn_test_supervisor_server, test_supervisor_core,
+    project_environment, spawn_test_supervisor_server, test_supervisor, test_supervisor_core,
     test_supervisor_service, test_workspace_generation,
 };
 
@@ -258,10 +258,11 @@ async fn stopped_source_commit_is_atomic_preserves_built_identity_and_never_boot
     profile_target(&mut request, "platform");
     edit_target(&mut request, |project| project.secrets = Default::default());
     let transition = SourceTransition::new(&request, &environment).unwrap();
-    let (_parent, mut core) = test_supervisor_core(environment);
+    let (_parent, core) = test_supervisor_core(environment);
     // The authority effect has its own ACK tests below. Begin immediately
     // before the one SQLite state/checkpoint transaction, without material.
     let operation = begin_at(&core, &transition, 3);
+    let core = test_supervisor(core);
     let finished = core.update_environment_sources(&operation).await.unwrap();
     assert_eq!(
         finished.checkpoint as usize,
@@ -269,10 +270,10 @@ async fn stopped_source_commit_is_atomic_preserves_built_identity_and_never_boot
     );
     let current = core.environment("dev").unwrap();
     assert_eq!(current.generation, original.generation + 1);
-    assert!(SourceSelection::from_environment(current).unwrap() == transition.target);
+    assert!(SourceSelection::from_environment(&current).unwrap() == transition.target);
     assert_eq!(current.state, StoredEnvironmentState::Stopped);
     assert!(current.runner.is_none());
-    assert!(core.children.is_empty());
+    assert!(core.core().children.is_empty());
     assert_eq!(
         current.active_workspace_generation,
         original.active_workspace_generation
@@ -287,9 +288,10 @@ async fn stopped_source_commit_is_atomic_preserves_built_identity_and_never_boot
         original.active_artifact_generation
     );
     let (_, stored) = SupervisorStore::inspect(&core.root).unwrap();
-    assert_eq!(stored.environments["dev"], *current);
+    assert_eq!(stored.environments["dev"], current);
     let completed = core
-        .complete_operation(&finished, &environment_operation_result(current))
+        .core()
+        .complete_operation(&finished, &environment_operation_result(&current))
         .unwrap();
     assert_eq!(
         completed.checkpoint as usize,
@@ -318,11 +320,12 @@ async fn source_clear_atomically_removes_both_profile_and_complete_secret_select
         project.credentials = None;
     });
     let transition = SourceTransition::new(&request, &environment).unwrap();
-    let (_parent, mut core) = test_supervisor_core(environment);
+    let (_parent, core) = test_supervisor_core(environment);
     let operation = begin_at(&core, &transition, 3);
+    let core = test_supervisor(core);
     core.update_environment_sources(&operation).await.unwrap();
     let current = core.environment("dev").unwrap();
-    let selected = SourceSelection::from_environment(current).unwrap();
+    let selected = SourceSelection::from_environment(&current).unwrap();
     assert!(selected.profile.is_none());
     assert!(selected.validate().unwrap().secrets.is_empty());
     assert!(current.access_profile.is_none());
@@ -347,13 +350,15 @@ async fn source_replay_rejects_third_metadata_without_overwriting_or_advancing()
         .unwrap();
     let before = core.environment("dev").unwrap().clone();
     core.save().unwrap();
+    let core = test_supervisor(core);
     assert!(matches!(
         core.update_environment_sources(&operation).await,
         Err(SupervisorError::EnvironmentAccessUnavailable)
     ));
-    assert_eq!(*core.environment("dev").unwrap(), before);
+    assert_eq!(core.environment("dev").unwrap(), before);
     assert_eq!(
-        core.store
+        core.core()
+            .store
             .operation_by_request(operation.request_id)
             .unwrap()
             .unwrap()
@@ -418,9 +423,8 @@ async fn source_request_replay_is_exact_after_completion_and_client_disconnect()
     );
     assert_eq!(
         service
-            .core
-            .lock()
-            .await
+            .supervisor
+            .core()
             .environment("dev")
             .unwrap()
             .generation,
@@ -479,8 +483,8 @@ async fn running_source_admission_journals_mixed_delivery_before_stop() {
             .into_inner();
         assert_eq!(admitted.phase, v1::OperationPhase::Intent as i32);
         assert_eq!(admitted.checkpoint, 0);
-        let core = service.core.lock().await;
-        let pending = core.store.pending_operations().unwrap();
+        let core = &service.supervisor;
+        let pending = core.core().store.pending_operations().unwrap();
         assert_eq!(pending.len(), 1);
         assert!(
             SourceTransition::from_operation(&pending[0])
@@ -489,7 +493,7 @@ async fn running_source_admission_journals_mixed_delivery_before_stop() {
                 == target
         );
         assert_eq!(pending[0].environment_id, Some(original.id));
-        assert_eq!(core.environment("dev").unwrap(), &original);
+        assert_eq!(core.environment("dev").unwrap(), original);
     }
 }
 
@@ -522,9 +526,9 @@ async fn stopped_mixed_targets_require_local_profile_authority_and_can_be_cleare
         let service = test_supervisor_service(core);
         let error = service.admit_source_update(request).await.unwrap_err();
         assert_eq!(error.code(), tonic::Code::Unavailable);
-        let core = service.core.lock().await;
-        assert!(core.store.pending_operations().unwrap().is_empty());
-        assert_eq!(core.environment("dev").unwrap(), &original);
+        let core = &service.supervisor;
+        assert!(core.core().store.pending_operations().unwrap().is_empty());
+        assert_eq!(core.environment("dev").unwrap(), original);
         assert!(!core.config.credential_authority_root.exists());
 
         let mut existing = original;
@@ -583,9 +587,8 @@ async fn source_admission_rejects_stale_selection_before_journaling() {
     assert!(service.admit_source_update(request).await.is_err());
     assert!(
         service
-            .core
-            .lock()
-            .await
+            .supervisor
+            .core()
             .store
             .pending_operations()
             .unwrap()
@@ -834,8 +837,10 @@ async fn source_reboot_replay_keeps_exact_target_and_advances_generation_only_on
             .unwrap()
             .unwrap();
         assert_eq!(resumed.checkpoint, if checkpoint < 4 { 0 } else { 4 });
+        let core = test_supervisor(core);
         core.execute_source_operation(&resumed).await.unwrap();
         let final_operation = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -845,7 +850,7 @@ async fn source_reboot_replay_keeps_exact_target_and_advances_generation_only_on
         assert_eq!(final_operation.checkpoint, 10);
         let environment = core.environment("dev").unwrap();
         assert_eq!(environment.generation, 2);
-        assert!(SourceSelection::from_environment(environment).unwrap() == transition.target);
+        assert!(SourceSelection::from_environment(&environment).unwrap() == transition.target);
         assert_eq!(environment.state, StoredEnvironmentState::Stopped);
         assert!(environment.runner.is_none());
     }
@@ -878,15 +883,17 @@ async fn running_source_reboot_after_start_cannot_publish_running_without_recrea
             .unwrap()
             .unwrap();
         assert_eq!(resumed.checkpoint, 4);
+        let core = test_supervisor(core);
         // No runtime is provisioned by this synthetic fixture. The restart
         // must reach real runner admission, not jump to RecordSourceOutcome.
         assert!(core.update_environment_sources(&resumed).await.is_err());
         let environment = core.environment("dev").unwrap();
         assert_ne!(environment.state, StoredEnvironmentState::Running);
         assert_eq!(environment.generation, 2);
-        assert!(SourceSelection::from_environment(environment).unwrap() == transition.target);
+        assert!(SourceSelection::from_environment(&environment).unwrap() == transition.target);
         assert_eq!(
-            core.store
+            core.core()
+                .store
                 .operation_by_request(operation.request_id)
                 .unwrap()
                 .unwrap()
@@ -912,13 +919,15 @@ async fn source_outcome_replay_cannot_claim_a_dead_same_boot_vm_is_running() {
         .unwrap();
     core.environment_mut("dev").unwrap().generation = 2;
     core.save().unwrap();
+    let core = test_supervisor(core);
     assert!(core.update_environment_sources(&operation).await.is_err());
     assert_ne!(
         core.environment("dev").unwrap().state,
         StoredEnvironmentState::Running
     );
     assert_eq!(
-        core.store
+        core.core()
+            .store
             .operation_by_request(operation.request_id)
             .unwrap()
             .unwrap()
@@ -934,13 +943,15 @@ async fn source_worker_preserves_pending_intent_when_authority_is_unavailable() 
         let mut request = target_request(&environment);
         profile_target(&mut request, "local");
         let transition = SourceTransition::new(&request, &environment).unwrap();
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
         let operation = begin_at(&core, &transition, 2);
+        let core = test_supervisor(core);
         assert!(matches!(
             core.run_pending_operations(recovering).await,
             Err(SupervisorError::CredentialAuthorityUnavailable)
         ));
         let pending = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -948,7 +959,7 @@ async fn source_worker_preserves_pending_intent_when_authority_is_unavailable() 
         assert_eq!(pending.checkpoint, 2);
         assert!(!pending.phase.terminal());
         assert!(
-            SourceSelection::from_environment(core.environment("dev").unwrap()).unwrap()
+            SourceSelection::from_environment(&core.environment("dev").unwrap()).unwrap()
                 == transition.expected
         );
     }
@@ -995,12 +1006,12 @@ async fn failed_source_effect_records_and_logs_its_own_cause_without_secret_valu
         let transition = SourceTransition::new(&request, &environment).unwrap();
         environment.state = state;
         let (_parent, mut core) = test_supervisor_core(environment);
-        core.log = Some(
+        core.log = Some(Arc::new(
             DiagnosticLog::adopt(
                 diagnostic_log::open_child_log(&core.root, diagnostic_log::SUPERVISOR_LOG).unwrap(),
             )
             .unwrap(),
-        );
+        ));
         let operation = begin_at(&core, &transition, checkpoint);
         transition
             .target
@@ -1008,12 +1019,14 @@ async fn failed_source_effect_records_and_logs_its_own_cause_without_secret_valu
             .unwrap();
         core.environment_mut("dev").unwrap().generation = 2;
         core.save().unwrap();
+        let core = test_supervisor(core);
 
         // No runtime is provisioned, so the target start fails at `effect`.
         core.run_pending_operations(false).await.unwrap();
 
         // The journal row records the failing checkpoint and its cause.
         let failed = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -1028,7 +1041,7 @@ async fn failed_source_effect_records_and_logs_its_own_cause_without_secret_valu
         );
         assert_eq!(failed.error_code.as_deref(), Some(expected));
         // `cw info` shows it, and so does the failed `cw update`.
-        let shown = core.environment_proto("dev").unwrap();
+        let shown = core.core().environment_proto("dev").unwrap();
         assert_eq!(shown.state, v1::EnvironmentState::Error as i32);
         assert_eq!(shown.error_code, expected);
         let failure = operation_outcome(operation_proto(&failed).unwrap()).unwrap_err();
@@ -1062,6 +1075,7 @@ async fn failed_source_effect_records_and_logs_its_own_cause_without_secret_valu
         assert!(line.ends_with(&format!(" error_code={expected}")), "{line}");
 
         let journal = core
+            .core()
             .store
             .recent_environment_operations(failed.environment_id.unwrap())
             .unwrap()

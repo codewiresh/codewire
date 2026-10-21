@@ -490,7 +490,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let mut core = SupervisorCore {
         config: config.clone(),
-        root,
+        root: Arc::new(root),
         store,
         state,
         children: HashMap::new(),
@@ -500,18 +500,18 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         download_cache: BTreeMap::new(),
         retiring: false,
         operation_progress: operation_progress.clone(),
-        log,
+        log: log.map(Arc::new),
         _lock: lock,
     };
     #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     core.admit_synthetic_workspace_image_pin()?;
     core.recover_host_reboot_workspace_transitions()?;
-    core.reconcile_exposing_runners_for_startup().await?;
-    core.begin_rollback_of_failed_creates()?;
+    let supervisor = Supervisor::new(core, shutdown_tx);
+    supervisor.reconcile_exposing_runners_for_startup().await?;
+    supervisor.core().begin_rollback_of_failed_creates()?;
     let service = SupervisorRpc {
         info: supervisor_info(&config),
-        core: Arc::new(Mutex::new(core)),
-        shutdown: shutdown_tx,
+        supervisor: Arc::new(supervisor),
         operation_reader: Arc::new(Mutex::new(operation_reader)),
         operation_events,
         operation_progress,
@@ -673,13 +673,16 @@ fn orphan_inventory_response(
     })
 }
 
+/// The supervisor's state: its store, the in-memory copy of its durable state
+/// and the runner processes it owns. Only short synchronous sections of
+/// [`Supervisor::core`]'s lock touch it, never across an await (#2978).
 struct SupervisorCore {
     config: NativeRuntimeConfig,
-    root: PrivateRoot,
+    root: Arc<PrivateRoot>,
     store: SupervisorStore,
     state: SupervisorState,
     children: HashMap<Uuid, Child>,
-    live_runners: HashMap<Uuid, LiveProcess>,
+    live_runners: HashMap<Uuid, Arc<LiveProcess>>,
     runtime_operations: BTreeSet<Uuid>,
     // Observation only: an unsupported protocol never grants runner RPC or
     // retirement authority, and does not rewrite the durable lifecycle state.
@@ -695,27 +698,203 @@ struct SupervisorCore {
     // a new supervisor starts without them.
     download_cache: BTreeMap<Sha256Digest, u64>,
     // The bounded owner-only log its spawner gave this supervisor, if any.
-    log: Option<DiagnosticLog>,
+    log: Option<Arc<DiagnosticLog>>,
     _lock: SupervisorLock,
 }
 
-async fn resolve_workspace_image(
-    reference: &RegistryReference,
-    content: &ContentStore,
-    pinned: Option<ResolvedImage>,
-    download_cache: &mut BTreeMap<Sha256Digest, u64>,
-) -> Result<ResolvedImage, SupervisorError> {
-    if let Some(image) = pinned {
-        if image.source_reference != reference.original() {
-            return Err(SupervisorError::InvalidState);
+/// The supervisor (#2978). Lifecycle operations are its async methods: they
+/// await runners, the credential authority, registries and disks with no lock
+/// held, and read or change [`SupervisorCore`] only in short synchronous
+/// sections.
+struct Supervisor {
+    config: NativeRuntimeConfig,
+    root: Arc<PrivateRoot>,
+    log: Option<Arc<DiagnosticLog>>,
+    operation_progress: broadcast::Sender<OperationProgress>,
+    shutdown: watch::Sender<bool>,
+    core: std::sync::Mutex<SupervisorCore>,
+    serial: Mutex<()>,
+}
+
+impl Supervisor {
+    fn new(core: SupervisorCore, shutdown: watch::Sender<bool>) -> Self {
+        Self {
+            config: core.config.clone(),
+            root: Arc::clone(&core.root),
+            log: core.log.clone(),
+            operation_progress: core.operation_progress.clone(),
+            shutdown,
+            core: std::sync::Mutex::new(core),
+            serial: Mutex::new(()),
         }
-        image.verify_cached(content)?;
-        return Ok(image);
     }
-    let resolver = RegistryResolver::new(content)?;
-    let resolved = resolver.resolve_anonymous(reference).await;
-    *download_cache = resolver.verified_blobs();
-    Ok(resolved?)
+
+    /// The state lock. A panic while it was held may have left memory ahead
+    /// of the store, so a poisoned lock stops this supervisor; the next one
+    /// starts from the store.
+    fn core(&self) -> std::sync::MutexGuard<'_, SupervisorCore> {
+        self.core.lock().unwrap_or_else(|poisoned| {
+            let _ = self.shutdown.send(true);
+            poisoned.into_inner()
+        })
+    }
+
+    /// A copy of one environment's record as it is now.
+    fn environment(&self, name: &str) -> Result<EnvironmentRecord, SupervisorError> {
+        self.core().environment(name).cloned()
+    }
+
+    /// Applies `change` to the current state and records it with the
+    /// operation's transactional checkpoint, in one section of the lock, so a
+    /// change is never made to a copy older than another commit.
+    fn commit_operation(
+        &self,
+        operation: &OperationRecord,
+        change: impl FnOnce(&mut SupervisorState) -> Result<(), SupervisorError>,
+    ) -> Result<OperationRecord, SupervisorError> {
+        let mut core = self.core();
+        let mut next_state = core.state.clone();
+        change(&mut next_state)?;
+        core.checkpoint_state_operation(operation, next_state)
+    }
+
+    /// Applies `change` to the current state and fails the operation with
+    /// `error_code`, in one section of the lock.
+    fn fail_operation_with(
+        &self,
+        operation: &OperationRecord,
+        error_code: &str,
+        change: impl FnOnce(&mut SupervisorState) -> Result<(), SupervisorError>,
+    ) -> Result<OperationRecord, SupervisorError> {
+        let mut core = self.core();
+        let mut next_state = core.state.clone();
+        change(&mut next_state)?;
+        let updated = core.store.replace_state_and_advance_operation(
+            &next_state,
+            operation.operation_id,
+            operation.checkpoint,
+            OperationPhase::Failed,
+            None,
+            Some(error_code),
+        )?;
+        core.state = next_state;
+        Ok(updated)
+    }
+
+    /// Applies `change` to one environment's current record and saves the
+    /// state, in one section of the lock; a failed save changes nothing.
+    fn update_environment(
+        &self,
+        name: &str,
+        change: impl FnOnce(&mut EnvironmentRecord) -> Result<(), SupervisorError>,
+    ) -> Result<(), SupervisorError> {
+        let mut core = self.core();
+        let mut next_state = core.state.clone();
+        change(
+            next_state
+                .environments
+                .get_mut(name)
+                .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?,
+        )?;
+        core.store.replace_state(&next_state)?;
+        core.state = next_state;
+        Ok(())
+    }
+}
+
+/// Records a first boot's staged workspace generation; `None` (one already
+/// staged) changes nothing.
+fn record_staged_workspace_generation(
+    state: &mut SupervisorState,
+    name: &str,
+    generation: Option<WorkspaceGenerationRecord>,
+) -> Result<(), SupervisorError> {
+    let Some(generation) = generation else {
+        return Ok(());
+    };
+    let environment = state
+        .environments
+        .get_mut(name)
+        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+    if environment.active_workspace_generation.is_some()
+        || environment.staging_workspace_generation.is_some()
+    {
+        return Err(SupervisorError::InvalidState);
+    }
+    environment.staging_workspace_generation = Some(generation);
+    Ok(())
+}
+
+/// Records an update's staged runtime artifacts and workspace generation;
+/// `None` (already staged) changes nothing.
+fn record_staged_workspace_update(
+    state: &mut SupervisorState,
+    name: &str,
+    parameters: &WorkspaceTransitionParameters,
+    staged: Option<(String, WorkspaceGenerationRecord)>,
+) -> Result<(), SupervisorError> {
+    let Some((artifact_generation, generation)) = staged else {
+        return Ok(());
+    };
+    let environment = state
+        .environments
+        .get_mut(name)
+        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+    let active = environment
+        .active_workspace_generation
+        .as_ref()
+        .ok_or(SupervisorError::InvalidState)?;
+    if workspace_storage_generation(active)? != parameters.prior_storage_generation {
+        return Err(SupervisorError::InvalidState);
+    }
+    if environment.staging_workspace_generation.is_some() {
+        return Err(SupervisorError::InvalidState);
+    }
+    environment.staging_artifact_generation = Some(artifact_generation);
+    environment.staging_workspace_generation = Some(generation);
+    Ok(())
+}
+
+fn record_staged_workspace_rollback(
+    state: &mut SupervisorState,
+    name: &str,
+    parameters: &WorkspaceTransitionParameters,
+) -> Result<(), SupervisorError> {
+    let WorkspaceTransitionIntent::Rollback {
+        rollback_storage_generation,
+    } = &parameters.intent
+    else {
+        return Err(SupervisorError::InvalidState);
+    };
+    state
+        .environments
+        .get_mut(name)
+        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
+        .stage_rollback_workspace_generation(
+            &parameters.prior_storage_generation,
+            rollback_storage_generation,
+        )
+}
+
+impl Supervisor {
+    async fn resolve_workspace_image(
+        &self,
+        reference: &RegistryReference,
+        content: &ContentStore,
+        pinned: Option<ResolvedImage>,
+    ) -> Result<ResolvedImage, SupervisorError> {
+        if let Some(image) = pinned {
+            if image.source_reference != reference.original() {
+                return Err(SupervisorError::InvalidState);
+            }
+            image.verify_cached(content)?;
+            return Ok(image);
+        }
+        let resolver = RegistryResolver::new(content)?;
+        let resolved = resolver.resolve_anonymous(reference).await;
+        self.core().download_cache = resolver.verified_blobs();
+        Ok(resolved?)
+    }
 }
 
 impl SupervisorCore {
@@ -836,10 +1015,10 @@ impl SupervisorCore {
             .get_mut(name)
             .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))
     }
+}
 
-    async fn access_control_client(
-        &mut self,
-    ) -> Result<LocalCredentialControlClient, SupervisorError> {
+impl Supervisor {
+    async fn access_control_client(&self) -> Result<LocalCredentialControlClient, SupervisorError> {
         LocalCredentialControlClient::connect(&self.config.credential_authority_config())
             .await
             .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)
@@ -850,7 +1029,7 @@ impl SupervisorCore {
     /// connection (#2723): a platform profile's slots say so; a local
     /// profile's exact revision is read from the authority, material-free.
     async fn profile_has_ssh_key(
-        &mut self,
+        &self,
         request: &v1::CreateEnvironmentRequest,
         project: &codewire_project::ProjectSpec,
         platform: bool,
@@ -890,7 +1069,7 @@ impl SupervisorCore {
     }
 
     async fn bind_environment_access(
-        &mut self,
+        &self,
         request: &v1::CreateEnvironmentRequest,
         environment_id: Uuid,
     ) -> Result<(), SupervisorError> {
@@ -921,12 +1100,13 @@ impl SupervisorCore {
             })
     }
 
-    async fn require_environment_access(&mut self, name: &str) -> Result<(), SupervisorError> {
-        let Some(expected) = self.environment(name)?.access_binding.clone() else {
+    async fn require_environment_access(&self, name: &str) -> Result<(), SupervisorError> {
+        let environment = self.environment(name)?;
+        let Some(expected) = environment.access_binding.clone() else {
             return Ok(());
         };
         let project: codewire_project::ProjectSpec = serde_json::from_slice(
-            self.environment(name)?
+            environment
                 .project_spec_json
                 .as_deref()
                 .ok_or(SupervisorError::InvalidState)?,
@@ -938,7 +1118,7 @@ impl SupervisorCore {
             // Metadata configures native clients only. Actual guest Ready is
             // required before the parent opens fresh authenticated delegation;
             // its live platform admission never consults the local profile DB.
-            sources::platform::managed_clients(self.environment(name)?)?
+            sources::platform::managed_clients(&environment)?
                 .ok_or(SupervisorError::EnvironmentAccessUnavailable)?;
             return Ok(());
         }
@@ -959,7 +1139,7 @@ impl SupervisorCore {
     /// Material-free. `None` when it cannot answer at this start; the
     /// supervisor's log then records why, as a closed reason only.
     async fn platform_github_connected(
-        &mut self,
+        &self,
         environment: &EnvironmentRecord,
         generation: u64,
     ) -> Option<bool> {
@@ -986,7 +1166,7 @@ impl SupervisorCore {
     /// the platform refusing the saved login (not the creator's, an API key,
     /// another server), or the platform unavailable.
     async fn ask_platform_github(
-        &mut self,
+        &self,
         environment: &EnvironmentRecord,
         generation: u64,
     ) -> Result<bool, &'static str> {
@@ -1019,7 +1199,7 @@ impl SupervisorCore {
     /// Capture only client-slot metadata from the exact selected revision.
     /// This configures clients; each broker request still evaluates live grants.
     async fn managed_credential_clients_for_boot(
-        &mut self,
+        &self,
         environment: &EnvironmentRecord,
         generation: u64,
     ) -> Result<codewire_access::ManagedCredentialClients, SupervisorError> {
@@ -1094,7 +1274,7 @@ impl SupervisorCore {
     }
 
     async fn stop_environment_broker_if_present(
-        &mut self,
+        &self,
         environment: &EnvironmentRecord,
     ) -> Result<(), SupervisorError> {
         if environment.generation == 0 {
@@ -1123,7 +1303,7 @@ impl SupervisorCore {
             .map_err(credential_control_error)
     }
 
-    async fn revoke_environment_access_best_effort(&mut self, environment_id: Uuid) -> bool {
+    async fn revoke_environment_access_best_effort(&self, environment_id: Uuid) -> bool {
         let Ok(environment_id) = access_environment_id(environment_id) else {
             return true;
         };
@@ -1136,7 +1316,7 @@ impl SupervisorCore {
             .is_err()
     }
 
-    async fn environment_access_cleanup_pending(&mut self, environment_id: Uuid) -> bool {
+    async fn environment_access_cleanup_pending(&self, environment_id: Uuid) -> bool {
         let Ok(environment_id) = access_environment_id(environment_id) else {
             return true;
         };
@@ -1149,13 +1329,17 @@ impl SupervisorCore {
             Err(_) => true,
         }
     }
+}
 
+impl SupervisorCore {
     fn orphan_inventory(&self) -> Result<v1::ListOrphansResponse, SupervisorError> {
         let deletion_trash_names = self.store.deletion_trash_names()?;
         orphan_inventory_response(&self.root, &self.state, &deletion_trash_names)
     }
+}
 
-    async fn admit_current_artifact_generation(&mut self) -> Result<String, SupervisorError> {
+impl Supervisor {
+    async fn admit_current_artifact_generation(&self) -> Result<String, SupervisorError> {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         RuntimeArtifactStore::create(&engine)
             .map_err(|_| SupervisorError::ArtifactStore)?
@@ -1163,7 +1347,9 @@ impl SupervisorCore {
             .await
             .map_err(|_| SupervisorError::ArtifactStore)
     }
+}
 
+impl SupervisorCore {
     #[cfg(target_os = "macos")]
     fn require_vz_helper(&self) -> Result<(), SupervisorError> {
         let lock = crate::artifact::ArtifactLock::read(&self.config.artifact_lock)?;
@@ -1178,9 +1364,11 @@ impl SupervisorCore {
             }
         }
     }
+}
 
+impl Supervisor {
     async fn admit_cached_artifact_generation(
-        &mut self,
+        &self,
         artifact_generation: &str,
     ) -> Result<(), SupervisorError> {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
@@ -1192,9 +1380,9 @@ impl SupervisorCore {
         Ok(())
     }
 
-    async fn preflight(&mut self) -> Result<String, SupervisorError> {
+    async fn preflight(&self) -> Result<String, SupervisorError> {
         #[cfg(target_os = "macos")]
-        self.require_vz_helper()?;
+        self.core().require_vz_helper()?;
         let artifact_generation = self.admit_current_artifact_generation().await?;
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         RuntimeArtifactStore::create(&engine)
@@ -1217,7 +1405,7 @@ impl SupervisorCore {
     }
 
     async fn prepare_create_workspace_plan(
-        &mut self,
+        &self,
         request: &v1::CreateEnvironmentRequest,
         environment_id: Uuid,
     ) -> Result<WorkspacePlan, SupervisorError> {
@@ -1333,19 +1521,25 @@ impl SupervisorCore {
         Ok(plan)
     }
 
+    /// The workspace generation a first boot stages, or `None` when one is
+    /// already active or staged. [`record_staged_workspace_generation`]
+    /// records it.
     async fn stage_workspace_generation(
-        &mut self,
+        &self,
         name: &str,
-    ) -> Result<SupervisorState, SupervisorError> {
-        self.collect_unreferenced_workspace_roots(name)?;
-        self.collect_unreferenced_content()?;
-        self.collect_unreferenced_runtime_artifacts()?;
+    ) -> Result<Option<WorkspaceGenerationRecord>, SupervisorError> {
+        {
+            let mut core = self.core();
+            core.collect_unreferenced_workspace_roots(name)?;
+            core.collect_unreferenced_content()?;
+            core.collect_unreferenced_runtime_artifacts()?;
+        }
         let (project_json, project_sha256, artifact_generation) = {
             let environment = self.environment(name)?;
             if environment.active_workspace_generation.is_some()
                 || environment.staging_workspace_generation.is_some()
             {
-                return Ok(self.state.clone());
+                return Ok(None);
             }
             (
                 environment
@@ -1378,41 +1572,40 @@ impl SupervisorCore {
         let reference = RegistryReference::parse(&project.image)?;
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let content = ContentStore::create(&engine)?;
-        let pinned = self.matching_synthetic_workspace_image(&reference)?;
-        let image =
-            resolve_workspace_image(&reference, &content, pinned, &mut self.download_cache).await?;
-        let skill_snapshot = self
-            .spawn_skill_snapshot_resolution(name, &project, &project_sha256, 1, None)?
+        let pinned = self.core().matching_synthetic_workspace_image(&reference)?;
+        let image = self
+            .resolve_workspace_image(&reference, &content, pinned)
+            .await?;
+        let resolution = self.core().spawn_skill_snapshot_resolution(
+            name,
+            &project,
+            &project_sha256,
+            1,
+            None,
+        )?;
+        let skill_snapshot = resolution
             .await
             .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
-        let generation = WorkspaceGenerationRecord::new_with_skill_snapshot(
+        WorkspaceGenerationRecord::new_with_skill_snapshot(
             &project_json,
             project_sha256.to_owned(),
             artifact_generation,
             image,
             DEFAULT_OCI_ROOT_DISK_BYTES,
             skill_snapshot,
-        )?;
-
-        let mut next_state = self.state.clone();
-        let environment = next_state
-            .environments
-            .get_mut(name)
-            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-        if environment.active_workspace_generation.is_some()
-            || environment.staging_workspace_generation.is_some()
-        {
-            return Err(SupervisorError::InvalidState);
-        }
-        environment.staging_workspace_generation = Some(generation);
-        Ok(next_state)
+        )
+        .map(Some)
+        .map_err(Into::into)
     }
 
+    /// The runtime artifacts and workspace generation an update stages, or
+    /// `None` when they are already staged. [`record_staged_workspace_update`]
+    /// records them.
     async fn stage_workspace_update(
-        &mut self,
+        &self,
         name: &str,
         parameters: &WorkspaceTransitionParameters,
-    ) -> Result<SupervisorState, SupervisorError> {
+    ) -> Result<Option<(String, WorkspaceGenerationRecord)>, SupervisorError> {
         let WorkspaceTransitionIntent::Update {
             project_spec_json,
             project_spec_sha256,
@@ -1420,32 +1613,28 @@ impl SupervisorCore {
         else {
             return Err(SupervisorError::InvalidState);
         };
-        self.collect_unreferenced_workspace_roots(name)?;
-        self.collect_unreferenced_content()?;
-        self.collect_unreferenced_runtime_artifacts()?;
         {
-            let environment = self.environment(name)?;
-            let active = environment
-                .active_workspace_generation
-                .as_ref()
-                .ok_or(SupervisorError::InvalidState)?;
-            if workspace_storage_generation(active)? != parameters.prior_storage_generation {
-                return Err(SupervisorError::InvalidState);
-            }
-            if environment.staging_workspace_generation.is_some() {
-                workspace_transition_requires_boot(environment, parameters)?;
-                return Ok(self.state.clone());
-            }
+            let mut core = self.core();
+            core.collect_unreferenced_workspace_roots(name)?;
+            core.collect_unreferenced_content()?;
+            core.collect_unreferenced_runtime_artifacts()?;
+        }
+        let environment = self.environment(name)?;
+        let active = environment
+            .active_workspace_generation
+            .as_ref()
+            .ok_or(SupervisorError::InvalidState)?;
+        if workspace_storage_generation(active)? != parameters.prior_storage_generation {
+            return Err(SupervisorError::InvalidState);
+        }
+        if environment.staging_workspace_generation.is_some() {
+            workspace_transition_requires_boot(&environment, parameters)?;
+            return Ok(None);
         }
 
         let project: codewire_project::ProjectSpec =
             serde_json::from_slice(project_spec_json).map_err(|_| SupervisorError::InvalidState)?;
         let (artifact_generation, image, root_disk_bytes) = if parameters.refresh_skills {
-            let active = self
-                .environment(name)?
-                .active_workspace_generation
-                .as_ref()
-                .ok_or(SupervisorError::InvalidState)?;
             (
                 active.artifact_generation.clone(),
                 active.image.clone(),
@@ -1456,32 +1645,27 @@ impl SupervisorCore {
             let artifact_generation = self.admit_current_artifact_generation().await?;
             let engine = PrivateRoot::open(&self.config.engine_root())?;
             let content = ContentStore::create(&engine)?;
-            let pinned = self.matching_synthetic_workspace_image(&reference)?;
-            let image =
-                resolve_workspace_image(&reference, &content, pinned, &mut self.download_cache)
-                    .await?;
+            let pinned = self.core().matching_synthetic_workspace_image(&reference)?;
+            let image = self
+                .resolve_workspace_image(&reference, &content, pinned)
+                .await?;
             (artifact_generation, image, DEFAULT_OCI_ROOT_DISK_BYTES)
         };
-        let plan_generation = match self
-            .environment(name)?
-            .active_workspace_generation
-            .as_ref()
-            .and_then(|generation| generation.skill_snapshot.as_ref())
-        {
+        let plan_generation = match active.skill_snapshot.as_ref() {
             Some(snapshot) => snapshot
                 .plan_generation()
                 .checked_add(1)
                 .ok_or(SupervisorError::InvalidState)?,
             None => 1,
         };
-        let skill_snapshot = self
-            .spawn_skill_snapshot_resolution(
-                name,
-                &project,
-                project_spec_sha256,
-                plan_generation,
-                None,
-            )?
+        let resolution = self.core().spawn_skill_snapshot_resolution(
+            name,
+            &project,
+            project_spec_sha256,
+            plan_generation,
+            None,
+        )?;
+        let skill_snapshot = resolution
             .await
             .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
         let generation = WorkspaceGenerationRecord::new_with_skill_snapshot(
@@ -1492,27 +1676,11 @@ impl SupervisorCore {
             root_disk_bytes,
             skill_snapshot,
         )?;
-
-        let mut next_state = self.state.clone();
-        let environment = next_state
-            .environments
-            .get_mut(name)
-            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-        let active = environment
-            .active_workspace_generation
-            .as_ref()
-            .ok_or(SupervisorError::InvalidState)?;
-        if workspace_storage_generation(active)? != parameters.prior_storage_generation {
-            return Err(SupervisorError::InvalidState);
-        }
-        if environment.staging_workspace_generation.is_some() {
-            return Err(SupervisorError::InvalidState);
-        }
-        environment.staging_artifact_generation = Some(artifact_generation);
-        environment.staging_workspace_generation = Some(generation);
-        Ok(next_state)
+        Ok(Some((artifact_generation, generation)))
     }
+}
 
+impl SupervisorCore {
     fn spawn_skill_snapshot_resolution(
         &self,
         name: &str,
@@ -1552,29 +1720,6 @@ impl SupervisorCore {
             })
             .map(|prepared| prepared.map(|prepared| prepared.plan().clone()))
         }))
-    }
-
-    fn stage_workspace_rollback(
-        &self,
-        name: &str,
-        parameters: &WorkspaceTransitionParameters,
-    ) -> Result<SupervisorState, SupervisorError> {
-        let WorkspaceTransitionIntent::Rollback {
-            rollback_storage_generation,
-        } = &parameters.intent
-        else {
-            return Err(SupervisorError::InvalidState);
-        };
-        let mut next_state = self.state.clone();
-        next_state
-            .environments
-            .get_mut(name)
-            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
-            .stage_rollback_workspace_generation(
-                &parameters.prior_storage_generation,
-                rollback_storage_generation,
-            )?;
-        Ok(next_state)
     }
 
     fn collect_unreferenced_workspace_roots(
@@ -1620,9 +1765,11 @@ impl SupervisorCore {
             .map_err(|_| SupervisorError::ArtifactStore)?;
         Ok(())
     }
+}
 
+impl Supervisor {
     async fn revalidate_workspace_plan_for_boot(
-        &mut self,
+        &self,
         plan: &WorkspacePlan,
     ) -> Result<(), SupervisorError> {
         let plan = plan.clone();
@@ -1636,13 +1783,13 @@ impl SupervisorCore {
     }
 
     async fn revalidate_environment_workspace_plan_for_boot(
-        &mut self,
+        &self,
         name: &str,
     ) -> Result<(), SupervisorError> {
         let environment = self.environment(name)?;
         let plan = environment.workspace_plan.clone();
         let exposes_direct_shares =
-            environment.runner.is_some() && environment_may_expose_direct_shares(environment);
+            environment.runner.is_some() && environment_may_expose_direct_shares(&environment);
         let validation = self.revalidate_workspace_plan_for_boot(&plan).await;
         if exposes_direct_shares && validation.is_err() {
             // A replay can resume after StartVm. Reconciliation terminates an
@@ -1654,7 +1801,7 @@ impl SupervisorCore {
     }
 
     async fn reconcile_active_environment_before_protected_effect(
-        &mut self,
+        &self,
         name: &str,
     ) -> Result<(), SupervisorError> {
         let environment = self.environment(name)?;
@@ -1668,7 +1815,7 @@ impl SupervisorCore {
             }
             return Err(SupervisorError::NotRunning);
         }
-        if !environment_may_expose_direct_shares(environment) {
+        if !environment_may_expose_direct_shares(&environment) {
             return if environment.state == StoredEnvironmentState::Orphaned {
                 Err(SupervisorError::Orphaned)
             } else {
@@ -1692,8 +1839,9 @@ impl SupervisorCore {
         Ok(())
     }
 
-    async fn reconcile_exposing_runners_for_startup(&mut self) -> Result<(), SupervisorError> {
+    async fn reconcile_exposing_runners_for_startup(&self) -> Result<(), SupervisorError> {
         let names = self
+            .core()
             .state
             .environments
             .iter()
@@ -1748,7 +1896,7 @@ impl SupervisorCore {
     }
 
     async fn create(
-        &mut self,
+        &self,
         request: &v1::CreateEnvironmentRequest,
         workspace_plan: &WorkspacePlan,
         operation: &OperationRecord,
@@ -1766,6 +1914,7 @@ impl SupervisorCore {
             .await;
         if validation.is_err()
             && self
+                .core()
                 .state
                 .environments
                 .get(&request.name)
@@ -1788,32 +1937,37 @@ impl SupervisorCore {
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
             match effect {
                 LifecycleEffect::RecordEnvironment => {
-                    let mut next_state = self.state.clone();
-                    if let Some(environment) = next_state.environments.get(&request.name) {
-                        if environment.id != environment_id
-                            || u32::from(environment.vcpus) != request.vcpus
-                            || environment.memory_mib != request.memory_mib
-                            || environment.disk_bytes != request.disk_bytes
-                            || environment.docker_disk_bytes != request.docker_disk_bytes
-                            || environment.host_ports != host_ports_from_proto(&request.host_ports)?
-                            || environment.mesh
-                                != mesh_attachment_from_proto(request.mesh.as_ref())?
-                            || environment.project_spec_json.as_deref()
-                                != Some(request.project_spec_json.as_slice())
-                            || environment.project_spec_sha256.as_deref()
-                                != Some(request.project_spec_sha256.as_str())
-                            || environment.access_profile != expected_access_profile
-                            || environment.access_binding != expected_access_binding
-                            || environment.platform_source_authority
-                                != request
-                                    .platform_source_authority
-                                    .as_ref()
-                                    .map(PlatformSourceAuthority::from_proto)
-                                    .transpose()?
-                            || &environment.workspace_plan != workspace_plan
-                        {
-                            return Err(SupervisorError::AlreadyExists(request.name.clone()));
-                        }
+                    let recorded = |environment: &EnvironmentRecord| {
+                        Ok::<_, SupervisorError>(
+                            environment.id == environment_id
+                                && u32::from(environment.vcpus) == request.vcpus
+                                && environment.memory_mib == request.memory_mib
+                                && environment.disk_bytes == request.disk_bytes
+                                && environment.docker_disk_bytes == request.docker_disk_bytes
+                                && environment.host_ports
+                                    == host_ports_from_proto(&request.host_ports)?
+                                && environment.mesh
+                                    == mesh_attachment_from_proto(request.mesh.as_ref())?
+                                && environment.project_spec_json.as_deref()
+                                    == Some(request.project_spec_json.as_slice())
+                                && environment.project_spec_sha256.as_deref()
+                                    == Some(request.project_spec_sha256.as_str())
+                                && environment.access_profile == expected_access_profile
+                                && environment.access_binding == expected_access_binding
+                                && environment.platform_source_authority
+                                    == request
+                                        .platform_source_authority
+                                        .as_ref()
+                                        .map(PlatformSourceAuthority::from_proto)
+                                        .transpose()?
+                                && &environment.workspace_plan == workspace_plan,
+                        )
+                    };
+                    // Admission awaits the runtime's artifacts with no lock
+                    // held; the record is inserted only if the name is still
+                    // free when it commits.
+                    let admitted = if self.environment(&request.name).is_ok() {
+                        None
                     } else {
                         let artifact_generation = self.preflight().await?;
                         self.require_vm_only_guest_for_plan(&artifact_generation, workspace_plan)
@@ -1829,49 +1983,58 @@ impl SupervisorCore {
                             });
                         let vcpus = u8::try_from(request.vcpus)
                             .map_err(|_| SupervisorError::InvalidRequest)?;
-                        next_state.environments.insert(
-                            request.name.clone(),
-                            EnvironmentRecord {
-                                cw_runtime,
-                                id: environment_id,
-                                name: request.name.clone(),
-                                state: StoredEnvironmentState::Starting,
-                                vcpus,
-                                memory_mib: request.memory_mib,
-                                disk_bytes: request.disk_bytes,
-                                docker_disk_bytes: request.docker_disk_bytes,
-                                generation: 0,
-                                host_ports: host_ports_from_proto(&request.host_ports)?,
-                                mesh: mesh_attachment_from_proto(request.mesh.as_ref())?,
-                                workspace_plan: workspace_plan.clone(),
-                                project_spec_json: Some(request.project_spec_json.clone()),
-                                project_spec_sha256: Some(request.project_spec_sha256.clone()),
-                                access_profile: expected_access_profile.clone(),
-                                access_binding: expected_access_binding.clone(),
-                                platform_source_authority: request
-                                    .platform_source_authority
-                                    .as_ref()
-                                    .map(PlatformSourceAuthority::from_proto)
-                                    .transpose()?,
-                                runner: None,
-                                active_artifact_generation: Some(artifact_generation),
-                                staging_artifact_generation: None,
-                                active_workspace_generation: None,
-                                staging_workspace_generation: None,
-                                rollback_workspace_generation: None,
-                            },
-                        );
+                        Some(EnvironmentRecord {
+                            cw_runtime,
+                            id: environment_id,
+                            name: request.name.clone(),
+                            state: StoredEnvironmentState::Starting,
+                            vcpus,
+                            memory_mib: request.memory_mib,
+                            disk_bytes: request.disk_bytes,
+                            docker_disk_bytes: request.docker_disk_bytes,
+                            generation: 0,
+                            host_ports: host_ports_from_proto(&request.host_ports)?,
+                            mesh: mesh_attachment_from_proto(request.mesh.as_ref())?,
+                            workspace_plan: workspace_plan.clone(),
+                            project_spec_json: Some(request.project_spec_json.clone()),
+                            project_spec_sha256: Some(request.project_spec_sha256.clone()),
+                            access_profile: expected_access_profile.clone(),
+                            access_binding: expected_access_binding.clone(),
+                            platform_source_authority: request
+                                .platform_source_authority
+                                .as_ref()
+                                .map(PlatformSourceAuthority::from_proto)
+                                .transpose()?,
+                            runner: None,
+                            active_artifact_generation: Some(artifact_generation),
+                            staging_artifact_generation: None,
+                            active_workspace_generation: None,
+                            staging_workspace_generation: None,
+                            rollback_workspace_generation: None,
+                        })
+                    };
+                    operation = self.commit_operation(&operation, |next_state| {
+                        if let Some(environment) = next_state.environments.get(&request.name) {
+                            if !recorded(environment)? {
+                                return Err(SupervisorError::AlreadyExists(request.name.clone()));
+                            }
+                            return Ok(());
+                        }
+                        let environment = admitted.ok_or(SupervisorError::InvalidState)?;
+                        next_state
+                            .environments
+                            .insert(request.name.clone(), environment);
                         next_state.current = Some(request.name.clone());
-                    }
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::BindEnvironmentAccess => {
                     self.bind_environment_access(request, environment_id)
                         .await?;
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::ProvisionWorkspace => {
-                    let environment = self.environment(&request.name)?.clone();
+                    let environment = self.environment(&request.name)?;
                     let engine_root = self.config.engine_root();
                     let expected_plan_sha256 = environment.workspace_plan.sha256()?;
                     let plan = environment.workspace_plan;
@@ -1894,20 +2057,23 @@ impl SupervisorCore {
                     if snapshot.plan_sha256 != expected_plan_sha256 {
                         return Err(SupervisorError::InvalidState);
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StageWorkspaceGeneration => {
-                    let next_state = self.stage_workspace_generation(&request.name).await?;
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    let generation = self.stage_workspace_generation(&request.name).await?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        record_staged_workspace_generation(next_state, &request.name, generation)
+                    })?;
                 }
                 LifecycleEffect::RecordStarting => {
-                    let mut next_state = self.state.clone();
-                    let environment = next_state
-                        .environments
-                        .get_mut(&request.name)
-                        .ok_or_else(|| SupervisorError::NotFound(request.name.clone()))?;
-                    reserve_boot_generation(environment, 1)?;
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        let environment = next_state
+                            .environments
+                            .get_mut(&request.name)
+                            .ok_or_else(|| SupervisorError::NotFound(request.name.clone()))?;
+                        reserve_boot_generation(environment, 1)?;
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::EnsureRunner => {
                     let staging = self
@@ -1915,50 +2081,56 @@ impl SupervisorCore {
                         .staging_workspace_generation
                         .is_some();
                     validate_environment_workload_secret_delivery(
-                        self.environment(&request.name)?,
+                        &self.environment(&request.name)?,
                         staging,
                     )?;
                     let artifact_generation =
-                        artifact_generation_for_boot(self.environment(&request.name)?, staging)?
+                        artifact_generation_for_boot(&self.environment(&request.name)?, staging)?
                             .to_owned();
                     let _ = self
                         .runner_client_for_artifact(&request.name, &artifact_generation)
                         .await?;
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StartVm => {
                     self.ensure_vm_started(&request.name, 1, operation.operation_id)
                         .await?;
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordRunning => {
-                    let mut next_state = self.state.clone();
-                    let environment = next_state
-                        .environments
-                        .get_mut(&request.name)
-                        .ok_or_else(|| SupervisorError::NotFound(request.name.clone()))?;
-                    let _displaced = environment.promote_staging_workspace_generation()?;
-                    environment.generation = 1;
-                    environment.state = StoredEnvironmentState::Running;
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        let environment = next_state
+                            .environments
+                            .get_mut(&request.name)
+                            .ok_or_else(|| SupervisorError::NotFound(request.name.clone()))?;
+                        let _displaced = environment.promote_staging_workspace_generation()?;
+                        environment.generation = 1;
+                        environment.state = StoredEnvironmentState::Running;
+                        Ok(())
+                    })?;
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }
         }
         Ok((
             self.environment(&request.name)?
-                .proto(self.selected(&request.name)),
+                .proto(self.core().selected(&request.name)),
             operation,
         ))
     }
 
-    async fn run_pending_operations(&mut self, recovering: bool) -> Result<(), SupervisorError> {
-        if self.retiring {
+    async fn run_pending_operations(&self, recovering: bool) -> Result<(), SupervisorError> {
+        if self.core().retiring {
             return Err(SupervisorError::Retiring);
         }
-        for operation in self.store.pending_operations()? {
+        let pending = self.core().store.pending_operations()?;
+        for operation in pending {
             if operation.kind.cw_runtime() {
-                if !self.runtime_operations.contains(&operation.operation_id) {
+                if !self
+                    .core()
+                    .runtime_operations
+                    .contains(&operation.operation_id)
+                {
                     runtime::recover(self, &operation).await?;
                 }
                 continue;
@@ -1968,14 +2140,16 @@ impl SupervisorCore {
                 .get("name")
                 .and_then(|value| value.as_str())
             else {
-                self.interrupt_operation(&operation, "invalid_replay_payload")?;
+                self.core()
+                    .interrupt_operation(&operation, "invalid_replay_payload")?;
                 continue;
             };
             if operation.kind == OperationKind::Create {
                 let (request, workspace_plan) = match create_request_from_operation(&operation) {
                     Ok(prepared) => prepared,
                     Err(_) => {
-                        self.interrupt_operation(&operation, "invalid_replay_payload")?;
+                        self.core()
+                            .interrupt_operation(&operation, "invalid_replay_payload")?;
                         continue;
                     }
                 };
@@ -1993,24 +2167,26 @@ impl SupervisorCore {
                         } else {
                             create_failure_code(&error)
                         };
-                        self.log_operation_failure(&operation, name, &error, error_code);
+                        self.core()
+                            .log_operation_failure(&operation, name, &error, error_code);
                         self.roll_back_failed_create(&operation, name, error_code, recovering)
                             .await?;
                         // If failure happened before RecordEnvironment, the
                         // prepared repository bundles have no durable owner.
                         // If it happened later, the recorded plan retains
                         // them. Re-derive reachability in either case.
-                        let _ = self.collect_unreferenced_content();
+                        let _ = self.core().collect_unreferenced_content();
                         continue;
                     }
                 };
                 let result = self
+                    .core()
                     .state
                     .environments
                     .get(name)
                     .map(environment_operation_result)
                     .ok_or(SupervisorError::InvalidState)?;
-                self.complete_operation(&operation, &result)?;
+                self.core().complete_operation(&operation, &result)?;
                 continue;
             }
             if operation.kind == OperationKind::Start {
@@ -2028,21 +2204,24 @@ impl SupervisorCore {
                             _ => lifecycle_failure_code(
                                 "start",
                                 &error,
-                                self.recorded_runner_error_code(name),
+                                self.core().recorded_runner_error_code(name),
                             ),
                         };
-                        self.log_operation_failure(&operation, name, &error, &error_code);
-                        self.fail_replayed_operation(&operation, name, &error_code)?;
+                        self.core()
+                            .log_operation_failure(&operation, name, &error, &error_code);
+                        self.core()
+                            .fail_replayed_operation(&operation, name, &error_code)?;
                         continue;
                     }
                 };
                 let result = self
+                    .core()
                     .state
                     .environments
                     .get(name)
                     .map(environment_operation_result)
                     .ok_or(SupervisorError::InvalidState)?;
-                self.complete_operation(&operation, &result)?;
+                self.core().complete_operation(&operation, &result)?;
                 continue;
             }
             if operation.kind == OperationKind::Stop {
@@ -2050,18 +2229,21 @@ impl SupervisorCore {
                     Ok(result) => result,
                     Err(error) => {
                         let error_code = lifecycle_failure_code("stop", &error, None);
-                        self.log_operation_failure(&operation, name, &error, &error_code);
-                        self.fail_pending_operation(&operation, &error_code)?;
+                        self.core()
+                            .log_operation_failure(&operation, name, &error, &error_code);
+                        self.core()
+                            .fail_pending_operation(&operation, &error_code)?;
                         continue;
                     }
                 };
                 let result = self
+                    .core()
                     .state
                     .environments
                     .get(name)
                     .map(environment_operation_result)
                     .ok_or(SupervisorError::InvalidState)?;
-                self.complete_operation(&operation, &result)?;
+                self.core().complete_operation(&operation, &result)?;
                 continue;
             }
             if operation.kind == OperationKind::Delete {
@@ -2076,8 +2258,14 @@ impl SupervisorCore {
                 let operation = match self.resize(name, &operation).await {
                     Ok(operation) => operation,
                     Err(error @ SupervisorError::ReplacementPreflight(_)) => {
-                        self.log_operation_failure(&operation, name, &error, "restart_preflight");
-                        self.fail_pending_operation(&operation, "restart_preflight")?;
+                        self.core().log_operation_failure(
+                            &operation,
+                            name,
+                            &error,
+                            "restart_preflight",
+                        );
+                        self.core()
+                            .fail_pending_operation(&operation, "restart_preflight")?;
                         continue;
                     }
                     Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
@@ -2090,21 +2278,24 @@ impl SupervisorCore {
                             lifecycle_failure_code(
                                 "resize",
                                 &error,
-                                self.recorded_runner_error_code(name),
+                                self.core().recorded_runner_error_code(name),
                             )
                         };
-                        self.log_operation_failure(&operation, name, &error, &error_code);
-                        self.fail_replayed_operation(&operation, name, &error_code)?;
+                        self.core()
+                            .log_operation_failure(&operation, name, &error, &error_code);
+                        self.core()
+                            .fail_replayed_operation(&operation, name, &error_code)?;
                         continue;
                     }
                 };
                 let result = self
+                    .core()
                     .state
                     .environments
                     .get(name)
                     .map(environment_operation_result)
                     .ok_or(SupervisorError::InvalidState)?;
-                self.complete_operation(&operation, &result)?;
+                self.core().complete_operation(&operation, &result)?;
                 continue;
             }
             if matches!(
@@ -2115,6 +2306,7 @@ impl SupervisorCore {
                     Ok(operation) => operation,
                     Err(error @ SupervisorError::ReplacementPreflight(_)) => {
                         let current = self
+                            .core()
                             .store
                             .operation_by_request(operation.request_id)?
                             .ok_or(SupervisorError::InvalidState)?;
@@ -2123,7 +2315,8 @@ impl SupervisorCore {
                         } else {
                             "workspace_rollback_preflight"
                         };
-                        self.log_operation_failure(&operation, name, &error, error_code);
+                        self.core()
+                            .log_operation_failure(&operation, name, &error, error_code);
                         self.abort_workspace_transition_with_stop(
                             &current, name, error_code, false,
                         )
@@ -2145,22 +2338,24 @@ impl SupervisorCore {
                             lifecycle_failure_code(
                                 prefix,
                                 &error,
-                                self.recorded_runner_error_code(name),
+                                self.core().recorded_runner_error_code(name),
                             )
                         };
-                        self.log_operation_failure(&operation, name, &error, &error_code);
+                        self.core()
+                            .log_operation_failure(&operation, name, &error, &error_code);
                         self.abort_replayed_workspace_transition(&operation, name, &error_code)
                             .await?;
                         continue;
                     }
                 };
                 let result = self
+                    .core()
                     .state
                     .environments
                     .get(name)
                     .map(environment_operation_result)
                     .ok_or(SupervisorError::InvalidState)?;
-                self.complete_operation(&operation, &result)?;
+                self.core().complete_operation(&operation, &result)?;
                 continue;
             }
             if operation.kind == OperationKind::UpdateEnvironmentSources {
@@ -2180,44 +2375,50 @@ impl SupervisorCore {
                             _ if recovering => "host_ports_interrupted".to_owned(),
                             _ => lifecycle_failure_code("host_ports", &error, None),
                         };
-                        self.log_operation_failure(&operation, name, &error, &error_code);
-                        self.fail_pending_operation(&operation, &error_code)?;
+                        self.core()
+                            .log_operation_failure(&operation, name, &error, &error_code);
+                        self.core()
+                            .fail_pending_operation(&operation, &error_code)?;
                         continue;
                     }
                 };
                 let result = self
+                    .core()
                     .state
                     .environments
                     .get(name)
                     .map(environment_operation_result)
                     .ok_or(SupervisorError::InvalidState)?;
-                self.complete_operation(&operation, &result)?;
+                self.core().complete_operation(&operation, &result)?;
                 continue;
             }
             if operation.kind == OperationKind::Reconcile {
-                let operation = self.apply_reconcile_operation(&operation)?;
+                let operation = self.core().apply_reconcile_operation(&operation)?;
                 let result = self
+                    .core()
                     .state
                     .environments
                     .get(name)
                     .map(environment_operation_result)
                     .ok_or(SupervisorError::InvalidState)?;
-                self.complete_operation(&operation, &result)?;
+                self.core().complete_operation(&operation, &result)?;
                 continue;
             }
             return Err(SupervisorError::InvalidState);
         }
-        self.ensure_no_unowned_workspace_staging()
+        self.core().ensure_no_unowned_workspace_staging()
     }
 
-    async fn replay_pending_operations(&mut self) -> Result<(), SupervisorError> {
+    async fn replay_pending_operations(&self) -> Result<(), SupervisorError> {
         self.run_pending_operations(true).await
     }
 
-    async fn execute_pending_operations(&mut self) -> Result<(), SupervisorError> {
+    async fn execute_pending_operations(&self) -> Result<(), SupervisorError> {
         self.run_pending_operations(false).await
     }
+}
 
+impl SupervisorCore {
     fn recover_host_reboot_workspace_transitions(&mut self) -> Result<(), SupervisorError> {
         let operations = self.store.host_reboot_interrupted_workspace_transitions()?;
         let mut next_state = self.state.clone();
@@ -2298,12 +2499,14 @@ impl SupervisorCore {
         }
         Ok(())
     }
+}
 
+impl Supervisor {
     /// Runs one delete to its end. A delete that fails before its tree
     /// reaches trash keeps the environment and records why; later failures
     /// stop the worker, because only finishing the same delete is safe.
     async fn run_delete_operation(
-        &mut self,
+        &self,
         name: &str,
         operation: &OperationRecord,
         recovering: bool,
@@ -2316,8 +2519,12 @@ impl SupervisorCore {
                 } else {
                     "delete_failed"
                 };
-                self.log_operation_failure(operation, name, &error, error_code);
-                if self.retain_failed_delete(operation, name, error_code)? {
+                self.core()
+                    .log_operation_failure(operation, name, &error, error_code);
+                if self
+                    .core()
+                    .retain_failed_delete(operation, name, error_code)?
+                {
                     return Ok(());
                 }
                 return Err(error);
@@ -2328,7 +2535,7 @@ impl SupervisorCore {
             "removed": true,
             "cleanup_pending": cleanup_pending,
         });
-        self.complete_operation(&operation, &result)?;
+        self.core().complete_operation(&operation, &result)?;
         if let Some(environment_id) = operation.environment_id {
             diagnostic_log::remove_log(
                 &self.root,
@@ -2338,7 +2545,9 @@ impl SupervisorCore {
         }
         Ok(())
     }
+}
 
+impl SupervisorCore {
     /// Environments that an earlier failed create left in `error` (never run:
     /// generation 0 and no active workspace generation) get the ordinary
     /// delete, which the startup worker then runs like any pending delete.
@@ -2372,7 +2581,9 @@ impl SupervisorCore {
         }
         Ok(())
     }
+}
 
+impl Supervisor {
     /// A failed create leaves nothing behind (#2491). Once the environment
     /// is recorded, the create fails in the same transaction that begins the
     /// ordinary delete of that environment, which then runs at once. The
@@ -2380,12 +2591,31 @@ impl SupervisorCore {
     /// so a delete that cannot finish leaves a visible `error` environment
     /// and a failed delete, never a silent record or a false "removed".
     async fn roll_back_failed_create(
-        &mut self,
+        &self,
         failed: &OperationRecord,
         name: &str,
         error_code: &str,
         recovering: bool,
     ) -> Result<(), SupervisorError> {
+        let rollback = self
+            .core()
+            .fail_create_and_begin_rollback(failed, name, error_code)?;
+        match rollback {
+            Some(rollback) => self.run_delete_operation(name, &rollback, recovering).await,
+            None => Ok(()),
+        }
+    }
+}
+
+impl SupervisorCore {
+    /// Fails a create and, in the same transaction, begins the delete of the
+    /// environment it recorded; `None` when it recorded nothing to remove.
+    fn fail_create_and_begin_rollback(
+        &mut self,
+        failed: &OperationRecord,
+        name: &str,
+        error_code: &str,
+    ) -> Result<Option<OperationRecord>, SupervisorError> {
         let current = self
             .store
             .operation_by_request(failed.request_id)?
@@ -2401,7 +2631,7 @@ impl SupervisorCore {
         else {
             // Nothing was recorded; there is nothing to remove.
             self.fail_operation(&current, error_code)?;
-            return Ok(());
+            return Ok(None);
         };
         let payload = serde_json::json!({
             "name": name,
@@ -2427,7 +2657,7 @@ impl SupervisorCore {
             &payload,
         )?;
         self.state = next_state;
-        self.run_delete_operation(name, &rollback, recovering).await
+        Ok(Some(rollback))
     }
 
     fn fail_replayed_operation(
@@ -2496,14 +2726,17 @@ impl SupervisorCore {
         self.fail_operation(&current, error_code)?;
         Ok(())
     }
+}
 
+impl Supervisor {
     async fn abort_replayed_workspace_transition(
-        &mut self,
+        &self,
         replayed: &OperationRecord,
         name: &str,
         error_code: &str,
     ) -> Result<(), SupervisorError> {
         let current = self
+            .core()
             .store
             .operation_by_request(replayed.request_id)?
             .ok_or(SupervisorError::InvalidState)?;
@@ -2511,7 +2744,9 @@ impl SupervisorCore {
             .await?;
         Ok(())
     }
+}
 
+impl SupervisorCore {
     fn complete_operation(
         &self,
         operation: &OperationRecord,
@@ -2716,22 +2951,24 @@ impl SupervisorCore {
             )
             .map_err(Into::into)
     }
+}
 
-    async fn reconcile(&mut self, name: &str) -> Result<(), SupervisorError> {
+impl Supervisor {
+    async fn reconcile(&self, name: &str) -> Result<(), SupervisorError> {
         self.reconcile_runner(name, false).await
     }
 
     async fn reconcile_runner(
-        &mut self,
+        &self,
         name: &str,
         force_direct_share_quarantine: bool,
     ) -> Result<(), SupervisorError> {
         let environment_id = self.environment(name)?.id;
-        self.incompatible_runners.remove(&environment_id);
+        self.core().incompatible_runners.remove(&environment_id);
         let environment = self.environment(name)?;
         let Some(record) = environment.runner.clone() else {
             if environment.state == StoredEnvironmentState::Running {
-                self.mark_runner_dead(name)?;
+                self.core().mark_runner_dead(name)?;
             }
             return Ok(());
         };
@@ -2746,9 +2983,10 @@ impl SupervisorCore {
             )
         };
         let expected_socket = self.config.runner_socket(environment_id);
-        let exited = if let Some(live) = self.live_runners.get(&environment_id) {
+        let live = self.core().live_runners.get(&environment_id).cloned();
+        let exited = if let Some(live) = live {
             if live.identity() != &record.process {
-                self.mark_orphaned(name)?;
+                self.core().mark_orphaned(name)?;
                 return Ok(());
             }
             live.is_exited()?
@@ -2758,15 +2996,15 @@ impl SupervisorCore {
                 Err(RecoveryError::ReadProcess(error))
                     if error.kind() == io::ErrorKind::NotFound =>
                 {
-                    self.mark_runner_dead(name)?;
+                    self.core().mark_runner_dead(name)?;
                     return Ok(());
                 }
                 Err(RecoveryError::ProcessExited) => {
-                    self.mark_runner_dead(name)?;
+                    self.core().mark_runner_dead(name)?;
                     return Ok(());
                 }
                 Err(RecoveryError::IdentityMismatch) => {
-                    self.mark_orphaned(name)?;
+                    self.core().mark_orphaned(name)?;
                     return Ok(());
                 }
                 // A runner exits with its supervisor on Darwin. One still
@@ -2780,9 +3018,9 @@ impl SupervisorCore {
                     )
                     .await?
                     {
-                        self.mark_runner_dead(name)?;
+                        self.core().mark_runner_dead(name)?;
                     } else {
-                        self.mark_orphaned(name)?;
+                        self.core().mark_orphaned(name)?;
                     }
                     return Ok(());
                 }
@@ -2790,12 +3028,14 @@ impl SupervisorCore {
             };
             let exited = live.is_exited()?;
             if !exited {
-                self.live_runners.insert(environment_id, live);
+                self.core()
+                    .live_runners
+                    .insert(environment_id, Arc::new(live));
             }
             exited
         };
         if exited {
-            self.mark_runner_dead(name)?;
+            self.core().mark_runner_dead(name)?;
             return Ok(());
         }
         // A stopped environment's runner from another cw (an older supervisor
@@ -2837,7 +3077,7 @@ impl SupervisorCore {
             }
         }
         if !socket_trusted {
-            self.mark_orphaned(name)?;
+            self.core().mark_orphaned(name)?;
             return Ok(());
         }
         let mut client = match RunnerClient::connect(&expected_socket).await {
@@ -2846,7 +3086,7 @@ impl SupervisorCore {
                 // Metadata inspection must not stop an existing VM before a
                 // replacement has been admitted. Keep its exact custody;
                 // every useful RPC still requires current protocol admission.
-                self.incompatible_runners.insert(environment_id);
+                self.core().incompatible_runners.insert(environment_id);
                 return Ok(());
             }
             Err(error) => return Err(error.into()),
@@ -2856,25 +3096,25 @@ impl SupervisorCore {
             .await
             .map_err(|_| SupervisorError::RunnerUnavailable)?;
         if info.environment_id != environment_id.to_string() {
-            self.mark_orphaned(name)?;
+            self.core().mark_orphaned(name)?;
             return Ok(());
         }
         if !runner_artifact_identity_matches(&record.artifact_generation, &info.artifact_generation)
         {
-            self.mark_orphaned(name)?;
+            self.core().mark_orphaned(name)?;
             return Ok(());
         }
         let state = match StoredEnvironmentState::from_proto(info.state) {
             Ok(state) => state,
             Err(_) => {
-                self.mark_orphaned(name)?;
+                self.core().mark_orphaned(name)?;
                 return Ok(());
             }
         };
         let attached_runtime = (!info.cw_runtime_catalog_generation.is_empty())
             .then_some(info.cw_runtime_catalog_generation.as_str());
-        if !runner_cw_runtime_identity_matches(self.environment(name)?, &record, &info, state) {
-            self.mark_orphaned(name)?;
+        if !runner_cw_runtime_identity_matches(&self.environment(name)?, &record, &info, state) {
+            self.core().mark_orphaned(name)?;
             return Ok(());
         }
         let runner_error_code = (!info.error_code.is_empty()).then_some(info.error_code.as_str());
@@ -2882,11 +3122,17 @@ impl SupervisorCore {
         if (state == StoredEnvironmentState::Error) != runner_error_valid
             || (runner_error_code.is_some() && !runner_error_valid)
         {
-            self.mark_orphaned(name)?;
+            self.core().mark_orphaned(name)?;
             return Ok(());
         }
         let generation = self.environment(name)?.generation.max(info.generation);
-        self.record_reconcile_observation(name, state, generation, false, runner_error_code)?;
+        self.core().record_reconcile_observation(
+            name,
+            state,
+            generation,
+            false,
+            runner_error_code,
+        )?;
         let attached_runtime = attached_runtime.map(str::to_owned);
         if self
             .environment(name)?
@@ -2894,20 +3140,20 @@ impl SupervisorCore {
             .as_ref()
             .is_some_and(|runner| runner.cw_runtime_catalog_generation != attached_runtime)
         {
-            let prior = self.state.clone();
-            self.environment_mut(name)?
-                .runner
-                .as_mut()
-                .ok_or(SupervisorError::InvalidState)?
-                .cw_runtime_catalog_generation = attached_runtime;
-            if let Err(error) = self.save() {
-                self.state = prior;
-                return Err(error);
-            }
+            self.update_environment(name, |environment| {
+                environment
+                    .runner
+                    .as_mut()
+                    .ok_or(SupervisorError::InvalidState)?
+                    .cw_runtime_catalog_generation = attached_runtime;
+                Ok(())
+            })?;
         }
         Ok(())
     }
+}
 
+impl SupervisorCore {
     fn apply_reconcile_operation(
         &mut self,
         operation: &OperationRecord,
@@ -3028,9 +3274,11 @@ impl SupervisorCore {
             .then_some(RUNNER_EXIT_ERROR_CODE);
         self.record_reconcile_observation(name, state, generation, true, error_code)
     }
+}
 
+impl Supervisor {
     async fn runner_client_for_artifact(
-        &mut self,
+        &self,
         name: &str,
         artifact_generation: &str,
     ) -> Result<RunnerClient, SupervisorError> {
@@ -3038,21 +3286,18 @@ impl SupervisorCore {
             return Err(SupervisorError::InvalidState);
         }
         self.reconcile(name).await?;
-        if self
-            .incompatible_runners
-            .contains(&self.environment(name)?.id)
-        {
+        let environment = self.environment(name)?;
+        if self.core().incompatible_runners.contains(&environment.id) {
             return Err(SupervisorError::RunnerProtocolUnsupported);
         }
-        if self.environment(name)?.state == StoredEnvironmentState::Orphaned {
+        if environment.state == StoredEnvironmentState::Orphaned {
             return Err(SupervisorError::Orphaned);
         }
-        if self.environment(name)?.runner.is_none() {
+        if environment.runner.is_none() {
             self.admit_cached_artifact_generation(artifact_generation)
                 .await?;
             return self.spawn_runner(name, artifact_generation).await;
         }
-        let environment = self.environment(name)?;
         let environment_id = environment.id;
         let record = environment
             .runner
@@ -3092,7 +3337,7 @@ impl SupervisorCore {
     }
 
     async fn spawn_runner(
-        &mut self,
+        &self,
         name: &str,
         artifact_generation: &str,
     ) -> Result<RunnerClient, SupervisorError> {
@@ -3208,9 +3453,11 @@ impl SupervisorCore {
             artifact_generation: artifact_generation.to_owned(),
             error_code: None,
         };
-        self.environment_mut(name)?.runner = Some(runner_record);
-        if let Err(error) = self.save() {
-            self.environment_mut(name)?.runner = None;
+        let recorded = self.update_environment(name, |environment| {
+            environment.runner = Some(runner_record);
+            Ok(())
+        });
+        if let Err(error) = recorded {
             let _ = live.signal(Signal::KILL);
             let _ = child.wait();
             let _ = remove_bound_socket(&socket, &socket_identity);
@@ -3221,8 +3468,10 @@ impl SupervisorCore {
             Err(error) => {
                 let _ = live.signal(Signal::KILL);
                 let _ = child.wait();
-                self.environment_mut(name)?.runner = None;
-                self.save()?;
+                self.update_environment(name, |environment| {
+                    environment.runner = None;
+                    Ok(())
+                })?;
                 let _ = remove_bound_socket(&socket, &socket_identity);
                 return Err(error.into());
             }
@@ -3235,22 +3484,26 @@ impl SupervisorCore {
         }) {
             let _ = live.signal(Signal::KILL);
             let _ = child.wait();
-            self.environment_mut(name)?.runner = None;
-            self.save()?;
+            self.update_environment(name, |environment| {
+                environment.runner = None;
+                Ok(())
+            })?;
             let _ = remove_bound_socket(&socket, &socket_identity);
             return Err(SupervisorError::RunnerAdoption);
         }
-        self.live_runners.insert(environment_id, live);
-        self.children.insert(environment_id, child);
+        let mut core = self.core();
+        core.live_runners.insert(environment_id, Arc::new(live));
+        core.children.insert(environment_id, child);
         Ok(client)
     }
 
     async fn require_environment_guest_seed_abi(
-        &mut self,
+        &self,
         name: &str,
         staging: bool,
     ) -> Result<(), SupervisorError> {
-        let generation = artifact_generation_for_boot(self.environment(name)?, staging)?.to_owned();
+        let generation =
+            artifact_generation_for_boot(&self.environment(name)?, staging)?.to_owned();
         self.require_guest_seed_abi_for_generation(&generation)
             .await
     }
@@ -3258,7 +3511,7 @@ impl SupervisorCore {
     /// A plan that keeps paths on the VM's disk boots only a guest that binds
     /// them; checked before a create or start rather than failing at boot.
     async fn require_vm_only_guest_for_plan(
-        &mut self,
+        &self,
         generation: &str,
         workspace_plan: &WorkspacePlan,
     ) -> Result<(), SupervisorError> {
@@ -3279,7 +3532,7 @@ impl SupervisorCore {
     }
 
     async fn require_guest_seed_abi_for_generation(
-        &mut self,
+        &self,
         generation: &str,
     ) -> Result<(), SupervisorError> {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
@@ -3292,7 +3545,7 @@ impl SupervisorCore {
         Ok(())
     }
 
-    async fn admit_start_boot_inputs(&mut self, name: &str) -> Result<(), SupervisorError> {
+    async fn admit_start_boot_inputs(&self, name: &str) -> Result<(), SupervisorError> {
         let environment = self.environment(name)?;
         let staging = environment.staging_workspace_generation.is_some();
         let generation = if !staging
@@ -3308,7 +3561,7 @@ impl SupervisorCore {
                 .filter(|generation| valid_sha256(generation))
                 .ok_or(SupervisorError::InvalidState)?
         } else {
-            artifact_generation_for_boot(environment, staging)?
+            artifact_generation_for_boot(&environment, staging)?
         }
         .to_owned();
         self.require_guest_seed_abi_for_generation(&generation)
@@ -3330,7 +3583,7 @@ impl SupervisorCore {
     }
 
     /// Admit the installed cw runtime source and return its catalog generation.
-    async fn admit_installed_cw_runtime(&mut self) -> Result<Option<String>, SupervisorError> {
+    async fn admit_installed_cw_runtime(&self) -> Result<Option<String>, SupervisorError> {
         let engine_root = self.config.engine_root();
         let source = self.config.cw_runtime_lock();
         tokio::task::spawn_blocking(move || {
@@ -3354,7 +3607,7 @@ impl SupervisorCore {
     /// Revalidate an environment's bound cw runtime catalog and return its
     /// generation.
     async fn admit_environment_cw_runtime(
-        &mut self,
+        &self,
         name: &str,
     ) -> Result<Option<String>, SupervisorError> {
         // Unbound legacy/raw environments remain unbound across an ordinary
@@ -3380,14 +3633,14 @@ impl SupervisorCore {
     }
 
     async fn ensure_vm_started(
-        &mut self,
+        &self,
         name: &str,
         generation: u64,
         operation_id: Uuid,
     ) -> Result<(), SupervisorError> {
         self.revalidate_environment_workspace_plan_for_boot(name)
             .await?;
-        let environment = self.environment(name)?.clone();
+        let environment = self.environment(name)?;
         let staging = environment.staging_workspace_generation.is_some();
         let expected_artifact_generation =
             artifact_generation_for_boot(&environment, staging)?.to_owned();
@@ -3445,8 +3698,9 @@ impl SupervisorCore {
         let managed_credential_clients = self
             .managed_credential_clients_for_boot(&projection_environment, generation)
             .await?;
-        let broker_request =
-            self.credential_broker_request_for_environment(&projection_environment, generation)?;
+        let broker_request = self
+            .core()
+            .credential_broker_request_for_environment(&projection_environment, generation)?;
         let environment_projection_sha256 =
             if broker_request.projection.is_some() || broker_request.platform.is_some() {
                 projection_environment
@@ -3556,7 +3810,7 @@ impl SupervisorCore {
         let info = match (start, runner_error_code) {
             (Ok(info), None) => info,
             (Err(status), Some(error_code)) => {
-                self.record_runner_start_failure(name, &error_code)?;
+                self.core().record_runner_start_failure(name, &error_code)?;
                 if error_code == crate::runner_service::GUEST_DOCKER_TOOLING_MISSING {
                     return Err(SupervisorError::GuestDockerToolingMissing);
                 }
@@ -3593,14 +3847,18 @@ impl SupervisorCore {
                 return Err(SupervisorError::VmStart(status.message().to_owned()));
             }
         }
-        self.environment_mut(name)?
-            .runner
-            .as_mut()
-            .ok_or(SupervisorError::InvalidState)?
-            .cw_runtime_catalog_generation = cw_runtime;
-        self.save()
+        self.update_environment(name, |environment| {
+            environment
+                .runner
+                .as_mut()
+                .ok_or(SupervisorError::InvalidState)?
+                .cw_runtime_catalog_generation = cw_runtime;
+            Ok(())
+        })
     }
+}
 
+impl SupervisorCore {
     fn record_runner_start_failure(
         &mut self,
         name: &str,
@@ -3618,18 +3876,20 @@ impl SupervisorCore {
         environment.state = StoredEnvironmentState::Error;
         self.save()
     }
+}
 
-    async fn ensure_vm_stopped(&mut self, name: &str) -> Result<(), SupervisorError> {
+impl Supervisor {
+    async fn ensure_vm_stopped(&self, name: &str) -> Result<(), SupervisorError> {
         self.reconcile(name).await?;
         if self.environment(name)?.state == StoredEnvironmentState::Orphaned {
             return Err(SupervisorError::Orphaned);
         }
-        let environment = self.environment(name)?.clone();
+        let environment = self.environment(name)?;
         self.stop_environment_broker_if_present(&environment)
             .await?;
-        if self.incompatible_runners.contains(&environment.id) {
+        if self.core().incompatible_runners.contains(&environment.id) {
             self.terminate_recorded_runner(name).await?;
-            self.mark_runner_dead(name)?;
+            self.core().mark_runner_dead(name)?;
             return Ok(());
         }
         if environment.runner.is_none() {
@@ -3647,7 +3907,7 @@ impl SupervisorCore {
     }
 
     async fn start(
-        &mut self,
+        &self,
         name: &str,
         operation: &OperationRecord,
     ) -> Result<(v1::Environment, OperationRecord), SupervisorError> {
@@ -3678,20 +3938,23 @@ impl SupervisorCore {
                 LifecycleEffect::RequireEnvironmentAccess => {
                     self.require_environment_access(name).await?;
                     self.admit_start_boot_inputs(name).await?;
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordStarting => {
-                    let mut next_state = self.state.clone();
-                    let environment = next_state
-                        .environments
-                        .get_mut(name)
-                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-                    reserve_boot_generation(environment, target_generation)?;
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        let environment = next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                        reserve_boot_generation(environment, target_generation)?;
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::StageWorkspaceGeneration => {
-                    let next_state = self.stage_workspace_generation(name).await?;
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    let generation = self.stage_workspace_generation(name).await?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        record_staged_workspace_generation(next_state, name, generation)
+                    })?;
                 }
                 LifecycleEffect::EnsureRunner => {
                     let staging = self
@@ -3699,43 +3962,44 @@ impl SupervisorCore {
                         .staging_workspace_generation
                         .is_some();
                     validate_environment_workload_secret_delivery(
-                        self.environment(name)?,
+                        &self.environment(name)?,
                         staging,
                     )?;
                     let artifact_generation =
-                        artifact_generation_for_boot(self.environment(name)?, staging)?.to_owned();
+                        artifact_generation_for_boot(&self.environment(name)?, staging)?.to_owned();
                     let _ = self
                         .runner_client_for_artifact(name, &artifact_generation)
                         .await?;
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StartVm => {
                     self.ensure_vm_started(name, target_generation, operation.operation_id)
                         .await?;
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordRunning => {
-                    let mut next_state = self.state.clone();
-                    let environment = next_state
-                        .environments
-                        .get_mut(name)
-                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-                    let _displaced = environment.promote_staging_workspace_generation()?;
-                    environment.generation = target_generation;
-                    environment.state = StoredEnvironmentState::Running;
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        let environment = next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                        let _displaced = environment.promote_staging_workspace_generation()?;
+                        environment.generation = target_generation;
+                        environment.state = StoredEnvironmentState::Running;
+                        Ok(())
+                    })?;
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }
         }
         Ok((
-            self.environment(name)?.proto(self.selected(name)),
+            self.environment(name)?.proto(self.core().selected(name)),
             operation,
         ))
     }
 
     async fn stop(
-        &mut self,
+        &self,
         name: &str,
         operation: &OperationRecord,
     ) -> Result<(v1::Environment, OperationRecord), SupervisorError> {
@@ -3753,27 +4017,28 @@ impl SupervisorCore {
             match effect {
                 LifecycleEffect::StopVm => {
                     self.ensure_vm_stopped(name).await?;
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordStopped => {
-                    let mut next_state = self.state.clone();
-                    next_state
-                        .environments
-                        .get_mut(name)
-                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
-                        .state = StoredEnvironmentState::Stopped;
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
+                            .state = StoredEnvironmentState::Stopped;
+                        Ok(())
+                    })?;
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }
         }
         Ok((
-            self.environment(name)?.proto(self.selected(name)),
+            self.environment(name)?.proto(self.core().selected(name)),
             operation,
         ))
     }
 
-    async fn retire_existing_runner(&mut self, name: &str) -> Result<(), SupervisorError> {
+    async fn retire_existing_runner(&self, name: &str) -> Result<(), SupervisorError> {
         self.reconcile(name).await?;
         if self.environment(name)?.state == StoredEnvironmentState::Orphaned {
             return Err(SupervisorError::Orphaned);
@@ -3783,11 +4048,13 @@ impl SupervisorCore {
         if environment.runner.is_none() {
             return Ok(());
         }
-        if self.incompatible_runners.contains(&environment_id) {
+        if self.core().incompatible_runners.contains(&environment_id) {
             self.terminate_recorded_runner(name).await?;
-            self.mark_runner_dead(name)?;
-            self.environment_mut(name)?.state = StoredEnvironmentState::Stopped;
-            return self.save();
+            self.core().mark_runner_dead(name)?;
+            return self.update_environment(name, |environment| {
+                environment.state = StoredEnvironmentState::Stopped;
+                Ok(())
+            });
         }
         let socket = self.config.runner_socket(environment_id);
         let mut client = RunnerClient::connect(&socket).await?;
@@ -3797,17 +4064,20 @@ impl SupervisorCore {
             .map_err(|_| SupervisorError::RunnerRetirement)?;
         let generation = self.environment(name)?.generation;
         let live = self
+            .core()
             .live_runners
             .get(&environment_id)
+            .cloned()
             .ok_or(SupervisorError::InvalidState)?;
-        let _ = request_runner_shutdown_and_observe(&mut client, environment_id, generation, live)
+        let _ = request_runner_shutdown_and_observe(&mut client, environment_id, generation, &live)
             .await?;
         drop(client);
         self.terminate_recorded_runner(name).await?;
-        let environment = self.environment_mut(name)?;
-        environment.runner = None;
-        environment.state = StoredEnvironmentState::Stopped;
-        self.save()
+        self.update_environment(name, |environment| {
+            environment.runner = None;
+            environment.state = StoredEnvironmentState::Stopped;
+            Ok(())
+        })
     }
 
     /// Terminate the exact process and remove the exact socket recorded for a
@@ -3817,7 +4087,7 @@ impl SupervisorCore {
     /// processes carry a parent-death signal, so killing this exact runner
     /// also closes its pre-upgrade guest boundary; a replacement runner still
     /// performs tracked-process cleanup before accepting lifecycle work.
-    async fn terminate_recorded_runner(&mut self, name: &str) -> Result<(), SupervisorError> {
+    async fn terminate_recorded_runner(&self, name: &str) -> Result<(), SupervisorError> {
         let environment = self.environment(name)?;
         let environment_id = environment.id;
         let socket_identity = environment
@@ -3842,7 +4112,7 @@ impl SupervisorCore {
     }
 
     async fn quarantine_recorded_runner(
-        &mut self,
+        &self,
         name: &str,
         socket_trusted: bool,
     ) -> Result<(), SupervisorError> {
@@ -3870,7 +4140,7 @@ impl SupervisorCore {
         };
         // Once the exact runner has exited, clear its durable identity even if
         // cleanup of a previously trusted socket reports an I/O failure.
-        self.mark_runner_dead(name)?;
+        self.core().mark_runner_dead(name)?;
         socket_cleanup
     }
 
@@ -3881,7 +4151,7 @@ impl SupervisorCore {
     /// only while it is still the recorded socket; the record is cleared, so
     /// the next start runs the runner of whichever cw starts it.
     async fn retire_idle_runner(
-        &mut self,
+        &self,
         name: &str,
         record: &RunnerRecord,
     ) -> Result<(), SupervisorError> {
@@ -3897,14 +4167,11 @@ impl SupervisorCore {
             Some(socket) => remove_bound_socket(&socket, &record.socket).map_err(Into::into),
             None => Ok(()),
         };
-        self.mark_runner_dead(name)?;
+        self.core().mark_runner_dead(name)?;
         socket_cleanup
     }
 
-    async fn terminate_recorded_runner_process(
-        &mut self,
-        name: &str,
-    ) -> Result<(), SupervisorError> {
+    async fn terminate_recorded_runner_process(&self, name: &str) -> Result<(), SupervisorError> {
         let environment = self.environment(name)?;
         let environment_id = environment.id;
         let runner = environment
@@ -3912,8 +4179,10 @@ impl SupervisorCore {
             .clone()
             .ok_or(SupervisorError::InvalidState)?;
         let live = self
+            .core()
             .live_runners
             .get(&environment_id)
+            .cloned()
             .ok_or(SupervisorError::InvalidState)?;
         if live.identity() != &runner.process {
             return Err(SupervisorError::InvalidState);
@@ -3921,7 +4190,7 @@ impl SupervisorCore {
         if !live.is_exited()? {
             live.signal(Signal::KILL)?;
         }
-        let mut child = self.children.remove(&environment_id);
+        let mut child = self.core().children.remove(&environment_id);
         let exited = if let Some(mut owned_child) = child.take() {
             matches!(
                 tokio::time::timeout(
@@ -3937,12 +4206,12 @@ impl SupervisorCore {
         if !exited {
             return Err(SupervisorError::RunnerExitTimeout);
         }
-        self.live_runners.remove(&environment_id);
+        self.core().live_runners.remove(&environment_id);
         Ok(())
     }
 
     async fn update_host_ports(
-        &mut self,
+        &self,
         name: &str,
         operation: &OperationRecord,
     ) -> Result<OperationRecord, SupervisorError> {
@@ -3971,7 +4240,7 @@ impl SupervisorCore {
                     if environment.state == StoredEnvironmentState::Running {
                         let generation = environment.generation;
                         let artifact_generation =
-                            artifact_generation_for_boot(environment, false)?.to_owned();
+                            artifact_generation_for_boot(&environment, false)?.to_owned();
                         let mut runner = self
                             .runner_client_for_artifact(name, &artifact_generation)
                             .await?;
@@ -3989,23 +4258,24 @@ impl SupervisorCore {
                                 }
                             })?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordHostPorts => {
-                    let mut next_state = self.state.clone();
-                    next_state
-                        .environments
-                        .get_mut(name)
-                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
-                        .host_ports = target.clone();
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
+                            .host_ports = target.clone();
+                        Ok(())
+                    })?;
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }
         }
     }
 
-    async fn prepare_environment_for_delete(&mut self, name: &str) -> Result<(), SupervisorError> {
+    async fn prepare_environment_for_delete(&self, name: &str) -> Result<(), SupervisorError> {
         let environment = self.environment(name)?;
         let environment_id = environment.id;
         let never_started = environment.generation == 0
@@ -4028,7 +4298,7 @@ impl SupervisorCore {
         // revocation cannot do it for a platform profile or a projection,
         // which hold no local binding, and the authority would otherwise keep
         // restarting a broker whose runner is gone (#2924).
-        let environment = self.environment(name)?.clone();
+        let environment = self.environment(name)?;
         self.stop_environment_broker_if_present(&environment)
             .await?;
         if self.environment(name)?.runner.is_none() {
@@ -4041,7 +4311,7 @@ impl SupervisorCore {
                 return Ok(());
             }
             let artifact_generation =
-                delete_cleanup_artifact_generation(self.environment(name)?)?.to_owned();
+                delete_cleanup_artifact_generation(&self.environment(name)?)?.to_owned();
             let _ = self
                 .runner_client_for_artifact(name, &artifact_generation)
                 .await?;
@@ -4050,7 +4320,7 @@ impl SupervisorCore {
     }
 
     async fn resize(
-        &mut self,
+        &self,
         name: &str,
         operation: &OperationRecord,
     ) -> Result<OperationRecord, SupervisorError> {
@@ -4080,7 +4350,7 @@ impl SupervisorCore {
                     if was_running {
                         self.require_environment_access(name).await?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StopVm => {
                     if was_running {
@@ -4096,16 +4366,17 @@ impl SupervisorCore {
                             })?;
                     }
                     self.ensure_vm_stopped(name).await?;
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordStopped => {
-                    let mut next_state = self.state.clone();
-                    next_state
-                        .environments
-                        .get_mut(name)
-                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
-                        .state = StoredEnvironmentState::Stopped;
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
+                            .state = StoredEnvironmentState::Stopped;
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::GrowDisk => {
                     let current_disk_bytes = self.environment(name)?.disk_bytes;
@@ -4114,11 +4385,11 @@ impl SupervisorCore {
                     }
                     if disk_bytes > current_disk_bytes {
                         validate_environment_workload_secret_delivery(
-                            self.environment(name)?,
+                            &self.environment(name)?,
                             false,
                         )?;
                         let artifact_generation =
-                            artifact_generation_for_boot(self.environment(name)?, false)?
+                            artifact_generation_for_boot(&self.environment(name)?, false)?
                                 .to_owned();
                         let mut runner = self
                             .runner_client_for_artifact(name, &artifact_generation)
@@ -4131,58 +4402,61 @@ impl SupervisorCore {
                             return Err(SupervisorError::InvalidRunnerResponse);
                         }
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordResources => {
-                    let mut next_state = self.state.clone();
-                    let environment = next_state
-                        .environments
-                        .get_mut(name)
-                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-                    environment.vcpus = vcpus;
-                    environment.memory_mib = memory_mib;
-                    environment.disk_bytes = disk_bytes;
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        let environment = next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                        environment.vcpus = vcpus;
+                        environment.memory_mib = memory_mib;
+                        environment.disk_bytes = disk_bytes;
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::RecordStarting => {
-                    let mut next_state = self.state.clone();
-                    let environment = next_state
-                        .environments
-                        .get_mut(name)
-                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-                    if was_running {
-                        reserve_boot_generation(environment, target_generation)?;
-                    } else if environment.generation != target_generation {
-                        return Err(SupervisorError::InvalidState);
-                    }
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        let environment = next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                        if was_running {
+                            reserve_boot_generation(environment, target_generation)?;
+                        } else if environment.generation != target_generation {
+                            return Err(SupervisorError::InvalidState);
+                        }
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::RestartVm => {
                     if was_running {
                         self.ensure_vm_started(name, target_generation, operation.operation_id)
                             .await?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordResizeOutcome => {
-                    let mut next_state = self.state.clone();
-                    let environment = next_state
-                        .environments
-                        .get_mut(name)
-                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-                    if was_running {
-                        let _displaced = environment.promote_staging_workspace_generation()?;
-                        if environment.generation != target_generation {
-                            return Err(SupervisorError::InvalidState);
+                    operation = self.commit_operation(&operation, |next_state| {
+                        let environment = next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                        if was_running {
+                            let _displaced = environment.promote_staging_workspace_generation()?;
+                            if environment.generation != target_generation {
+                                return Err(SupervisorError::InvalidState);
+                            }
+                            environment.state = StoredEnvironmentState::Running;
+                        } else {
+                            if environment.generation != target_generation {
+                                return Err(SupervisorError::InvalidState);
+                            }
+                            environment.state = StoredEnvironmentState::Stopped;
                         }
-                        environment.state = StoredEnvironmentState::Running;
-                    } else {
-                        if environment.generation != target_generation {
-                            return Err(SupervisorError::InvalidState);
-                        }
-                        environment.state = StoredEnvironmentState::Stopped;
-                    }
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                        Ok(())
+                    })?;
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }
@@ -4191,7 +4465,7 @@ impl SupervisorCore {
     }
 
     async fn workspace_transition(
-        &mut self,
+        &self,
         name: &str,
         operation: &OperationRecord,
     ) -> Result<OperationRecord, SupervisorError> {
@@ -4205,8 +4479,8 @@ impl SupervisorCore {
         {
             return Err(SupervisorError::InvalidState);
         }
-        let parameters = workspace_transition_parameters(operation, self.environment(name)?)?;
-        reject_workspace_transition_workload_secrets(self.environment(name)?, &parameters)?;
+        let parameters = workspace_transition_parameters(operation, &self.environment(name)?)?;
+        reject_workspace_transition_workload_secrets(&self.environment(name)?, &parameters)?;
         self.revalidate_environment_workspace_plan_for_boot(name)
             .await?;
         let mut operation = operation.clone();
@@ -4216,24 +4490,27 @@ impl SupervisorCore {
                     if parameters.was_running {
                         self.require_environment_access(name).await?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StageWorkspaceGeneration
                     if operation.kind == OperationKind::UpdateWorkspace =>
                 {
-                    validate_workspace_transition_start(self.environment(name)?, &parameters)?;
-                    let next_state = self.stage_workspace_update(name, &parameters).await?;
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    validate_workspace_transition_start(&self.environment(name)?, &parameters)?;
+                    let staged = self.stage_workspace_update(name, &parameters).await?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        record_staged_workspace_update(next_state, name, &parameters, staged)
+                    })?;
                 }
                 LifecycleEffect::StageRollbackGeneration
                     if operation.kind == OperationKind::RollbackWorkspace =>
                 {
-                    validate_workspace_transition_start(self.environment(name)?, &parameters)?;
-                    let next_state = self.stage_workspace_rollback(name, &parameters)?;
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    validate_workspace_transition_start(&self.environment(name)?, &parameters)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        record_staged_workspace_rollback(next_state, name, &parameters)
+                    })?;
                 }
                 LifecycleEffect::StopVm => {
-                    if workspace_transition_requires_boot(self.environment(name)?, &parameters)? {
+                    if workspace_transition_requires_boot(&self.environment(name)?, &parameters)? {
                         self.require_environment_guest_seed_abi(name, true)
                             .await
                             .map_err(|error| {
@@ -4246,51 +4523,53 @@ impl SupervisorCore {
                             })?;
                         self.ensure_vm_stopped(name).await?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordStopped => {
-                    let mut next_state = self.state.clone();
-                    let environment = next_state
-                        .environments
-                        .get_mut(name)
-                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-                    if workspace_transition_requires_boot(environment, &parameters)? {
-                        environment.state = StoredEnvironmentState::Stopped;
-                    }
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        let environment = next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                        if workspace_transition_requires_boot(environment, &parameters)? {
+                            environment.state = StoredEnvironmentState::Stopped;
+                        }
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::RecordStarting => {
-                    let mut next_state = self.state.clone();
-                    let environment = next_state
-                        .environments
-                        .get_mut(name)
-                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-                    if workspace_transition_requires_boot(environment, &parameters)? {
-                        reserve_boot_generation(environment, parameters.target_generation)?;
-                    }
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        let environment = next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                        if workspace_transition_requires_boot(environment, &parameters)? {
+                            reserve_boot_generation(environment, parameters.target_generation)?;
+                        }
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::EnsureRunner => {
-                    if workspace_transition_requires_boot(self.environment(name)?, &parameters)? {
+                    if workspace_transition_requires_boot(&self.environment(name)?, &parameters)? {
                         let staging = self
                             .environment(name)?
                             .staging_workspace_generation
                             .is_some();
                         validate_environment_workload_secret_delivery(
-                            self.environment(name)?,
+                            &self.environment(name)?,
                             staging,
                         )?;
                         let artifact_generation =
-                            artifact_generation_for_boot(self.environment(name)?, staging)?
+                            artifact_generation_for_boot(&self.environment(name)?, staging)?
                                 .to_owned();
                         let _ = self
                             .runner_client_for_artifact(name, &artifact_generation)
                             .await?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StartVm => {
-                    if workspace_transition_requires_boot(self.environment(name)?, &parameters)? {
+                    if workspace_transition_requires_boot(&self.environment(name)?, &parameters)? {
                         self.ensure_vm_started(
                             name,
                             parameters.target_generation,
@@ -4298,36 +4577,40 @@ impl SupervisorCore {
                         )
                         .await?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RestoreDesiredPower => {
                     if !parameters.was_running
-                        && workspace_transition_requires_boot(self.environment(name)?, &parameters)?
+                        && workspace_transition_requires_boot(
+                            &self.environment(name)?,
+                            &parameters,
+                        )?
                     {
                         self.ensure_vm_stopped(name).await?;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordWorkspaceTransition => {
-                    let mut next_state = self.state.clone();
-                    let environment = next_state
-                        .environments
-                        .get_mut(name)
-                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-                    if workspace_transition_requires_boot(environment, &parameters)? {
-                        let _displaced = environment.promote_staging_workspace_generation()?;
-                        environment.generation = parameters.target_generation;
-                        environment.state = if parameters.was_running {
-                            StoredEnvironmentState::Running
+                    operation = self.commit_operation(&operation, |next_state| {
+                        let environment = next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                        if workspace_transition_requires_boot(environment, &parameters)? {
+                            let _displaced = environment.promote_staging_workspace_generation()?;
+                            environment.generation = parameters.target_generation;
+                            environment.state = if parameters.was_running {
+                                StoredEnvironmentState::Running
+                            } else {
+                                StoredEnvironmentState::Stopped
+                            };
+                        } else if operation.kind == OperationKind::UpdateWorkspace {
+                            environment.finish_staging_workspace_update_without_boot()?;
                         } else {
-                            StoredEnvironmentState::Stopped
-                        };
-                    } else if operation.kind == OperationKind::UpdateWorkspace {
-                        environment.finish_staging_workspace_update_without_boot()?;
-                    } else {
-                        return Err(SupervisorError::InvalidState);
-                    }
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                            return Err(SupervisorError::InvalidState);
+                        }
+                        Ok(())
+                    })?;
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }
@@ -4336,7 +4619,7 @@ impl SupervisorCore {
     }
 
     async fn abort_workspace_transition(
-        &mut self,
+        &self,
         operation: &OperationRecord,
         name: &str,
         error_code: &str,
@@ -4346,7 +4629,7 @@ impl SupervisorCore {
     }
 
     async fn abort_workspace_transition_with_stop(
-        &mut self,
+        &self,
         operation: &OperationRecord,
         name: &str,
         error_code: &str,
@@ -4367,58 +4650,50 @@ impl SupervisorCore {
         if operation.environment_id != Some(environment.id) {
             return Err(SupervisorError::InvalidState);
         }
-        let parameters = workspace_transition_parameters(operation, environment)?;
+        let parameters = workspace_transition_parameters(operation, &environment)?;
         cleanup_interrupted_skill_snapshot(&self.config.engine_root(), environment.id)?;
         if operation.checkpoint == 0 {
-            return self.fail_operation(operation, error_code);
+            return self.core().fail_operation(operation, error_code);
         }
 
-        let requires_boot = workspace_transition_requires_boot(environment, &parameters)?;
+        let requires_boot = workspace_transition_requires_boot(&environment, &parameters)?;
         if requires_boot && may_stop {
             self.ensure_vm_stopped(name).await?;
         }
-        let mut next_state = self.state.clone();
-        let environment = next_state
-            .environments
-            .get_mut(name)
-            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-        match &parameters.intent {
-            WorkspaceTransitionIntent::Update {
-                project_spec_json,
-                project_spec_sha256,
-            } => {
-                environment
-                    .staging_workspace_generation
-                    .as_ref()
-                    .ok_or(SupervisorError::InvalidState)?
-                    .validate_for_project_intent(project_spec_json, project_spec_sha256)?;
-                environment.staging_workspace_generation = None;
-                environment.staging_artifact_generation = None;
+        self.fail_operation_with(operation, error_code, |next_state| {
+            let environment = next_state
+                .environments
+                .get_mut(name)
+                .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+            match &parameters.intent {
+                WorkspaceTransitionIntent::Update {
+                    project_spec_json,
+                    project_spec_sha256,
+                } => {
+                    environment
+                        .staging_workspace_generation
+                        .as_ref()
+                        .ok_or(SupervisorError::InvalidState)?
+                        .validate_for_project_intent(project_spec_json, project_spec_sha256)?;
+                    environment.staging_workspace_generation = None;
+                    environment.staging_artifact_generation = None;
+                }
+                WorkspaceTransitionIntent::Rollback {
+                    rollback_storage_generation,
+                } => environment.restore_staged_rollback_workspace_generation(
+                    &parameters.prior_storage_generation,
+                    rollback_storage_generation,
+                )?,
             }
-            WorkspaceTransitionIntent::Rollback {
-                rollback_storage_generation,
-            } => environment.restore_staged_rollback_workspace_generation(
-                &parameters.prior_storage_generation,
-                rollback_storage_generation,
-            )?,
-        }
-        if requires_boot && may_stop {
-            environment.state = StoredEnvironmentState::Stopped;
-        }
-        let updated = self.store.replace_state_and_advance_operation(
-            &next_state,
-            operation.operation_id,
-            operation.checkpoint,
-            OperationPhase::Failed,
-            None,
-            Some(error_code),
-        )?;
-        self.state = next_state;
-        Ok(updated)
+            if requires_boot && may_stop {
+                environment.state = StoredEnvironmentState::Stopped;
+            }
+            Ok(())
+        })
     }
 
     async fn delete(
-        &mut self,
+        &self,
         name: &str,
         operation: &OperationRecord,
     ) -> Result<(OperationRecord, bool), SupervisorError> {
@@ -4429,8 +4704,9 @@ impl SupervisorCore {
         if operation.kind != OperationKind::Delete {
             return Err(SupervisorError::InvalidState);
         }
-        if let Some(environment) = self.state.environments.get(name)
-            && environment.id != environment_id
+        if self
+            .environment(name)
+            .is_ok_and(|environment| environment.id != environment_id)
         {
             return Err(SupervisorError::InvalidState);
         }
@@ -4447,14 +4723,14 @@ impl SupervisorCore {
                         operation.operation_id,
                     )? {
                         DeletionTreeLocation::Active(_) => {
-                            if !self.state.environments.contains_key(name) {
+                            if !self.core().state.environments.contains_key(name) {
                                 return Err(SupervisorError::InvalidState);
                             }
                             self.prepare_environment_for_delete(name).await?;
                         }
                         DeletionTreeLocation::Trash(_) | DeletionTreeLocation::Missing => {}
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::MoveToTrash => {
                     match deletion_tree_location(
@@ -4477,6 +4753,7 @@ impl SupervisorCore {
                             // nothing to trash. Any other recorded
                             // environment must still have one.
                             if self
+                                .core()
                                 .state
                                 .environments
                                 .get(name)
@@ -4492,7 +4769,7 @@ impl SupervisorCore {
                             }
                         }
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RevokeEnvironmentAccess => {
                     if revoke_access {
@@ -4500,22 +4777,26 @@ impl SupervisorCore {
                             .revoke_environment_access_best_effort(environment_id)
                             .await;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RemoveEnvironment => {
-                    let mut next_state = self.state.clone();
-                    next_state.environments.remove(name);
-                    if next_state.current.as_deref() == Some(name) {
-                        next_state.current = next_state.environments.keys().next().cloned();
-                    }
-                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    operation = self.commit_operation(&operation, |next_state| {
+                        next_state.environments.remove(name);
+                        if next_state.current.as_deref() == Some(name) {
+                            next_state.current = next_state.environments.keys().next().cloned();
+                        }
+                        Ok(())
+                    })?;
                 }
                 LifecycleEffect::CleanupTrash => {
                     let trash_pending =
                         cleanup_trashed_vm(&engine_root, environment_id, operation.operation_id)
                             .is_err();
-                    let content_pending = self.collect_unreferenced_content().is_err();
-                    let artifact_pending = self.collect_unreferenced_runtime_artifacts().is_err();
+                    let content_pending = self.core().collect_unreferenced_content().is_err();
+                    let artifact_pending = self
+                        .core()
+                        .collect_unreferenced_runtime_artifacts()
+                        .is_err();
                     if trash_pending || content_pending || artifact_pending {
                         // Deletion is already durable. Any object that cannot
                         // pass the exact allowlist remains quarantined for
@@ -4523,7 +4804,7 @@ impl SupervisorCore {
                         // silently adopted.
                         cleanup_pending = true;
                     }
-                    operation = self.checkpoint_operation(&operation)?;
+                    operation = self.core().checkpoint_operation(&operation)?;
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }
@@ -4535,8 +4816,11 @@ impl SupervisorCore {
         // Re-derive shared-CAS cleanup state after the final checkpoint. This
         // preserves an honest cleanup_pending result if the supervisor died
         // after applying CleanupTrash but before completing the operation.
-        cleanup_pending |= self.collect_unreferenced_content().is_err();
-        cleanup_pending |= self.collect_unreferenced_runtime_artifacts().is_err();
+        cleanup_pending |= self.core().collect_unreferenced_content().is_err();
+        cleanup_pending |= self
+            .core()
+            .collect_unreferenced_runtime_artifacts()
+            .is_err();
         if revoke_access {
             cleanup_pending |= self
                 .environment_access_cleanup_pending(environment_id)
@@ -4545,13 +4829,13 @@ impl SupervisorCore {
         Ok((operation, cleanup_pending))
     }
 
-    async fn daemon_access(&mut self, name: &str) -> Result<v1::DaemonAccess, SupervisorError> {
+    async fn daemon_access(&self, name: &str) -> Result<v1::DaemonAccess, SupervisorError> {
         self.reconcile(name).await?;
         if self.environment(name)?.state != StoredEnvironmentState::Running {
             return Err(SupervisorError::NotRunning);
         }
         let artifact_generation =
-            artifact_generation_for_boot(self.environment(name)?, false)?.to_owned();
+            artifact_generation_for_boot(&self.environment(name)?, false)?.to_owned();
         let mut client = self
             .runner_client_for_artifact(name, &artifact_generation)
             .await?;
@@ -4560,7 +4844,9 @@ impl SupervisorCore {
             .await
             .map_err(|_| SupervisorError::RunnerUnavailable)
     }
+}
 
+impl SupervisorCore {
     fn credential_broker_ensure_request(
         &self,
         name: &str,
@@ -4653,8 +4939,7 @@ fn credential_broker_runtime_proto(runtime: AuthorityBrokerRuntime) -> v1::Crede
 #[derive(Clone)]
 struct SupervisorRpc {
     info: v1::SupervisorInfo,
-    core: Arc<Mutex<SupervisorCore>>,
-    shutdown: watch::Sender<bool>,
+    supervisor: Arc<Supervisor>,
     operation_reader: Arc<Mutex<SupervisorOperationReader>>,
     operation_events: broadcast::Sender<OperationRecord>,
     operation_progress: broadcast::Sender<OperationProgress>,
@@ -4674,11 +4959,11 @@ impl SupervisorRpc {
         }
         let service = self.clone();
         tokio::spawn(async move {
-            let mut core = service.core.lock().await;
+            let serial = service.supervisor.serial.lock().await;
             let result = if recovering {
-                core.replay_pending_operations().await
+                service.supervisor.replay_pending_operations().await
             } else {
-                core.execute_pending_operations().await
+                service.supervisor.execute_pending_operations().await
             };
             let deferred_for_authority = recovering
                 && matches!(
@@ -4686,9 +4971,9 @@ impl SupervisorRpc {
                     Err(SupervisorError::CredentialAuthorityUnavailable)
                 );
             service.worker_running.store(false, Ordering::Release);
-            drop(core);
+            drop(serial);
             if result.is_err() && !deferred_for_authority {
-                let _ = service.shutdown.send(true);
+                let _ = service.supervisor.shutdown.send(true);
             }
         });
     }
@@ -4723,16 +5008,19 @@ impl LocalSupervisorService for SupervisorRpc {
         request.mesh =
             canonicalize_mesh_attachment_proto(request.mesh.as_ref()).map_err(Status::from)?;
         let request_id = validate_create(&request).map_err(Status::from)?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        let operation = match core
+        let existing = self
+            .supervisor
+            .core()
             .store
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
-            .map_err(Status::from)?
-        {
+            .map_err(Status::from)?;
+        let operation = match existing {
             Some(operation) => {
                 let (recorded, _) =
                     create_request_from_operation(&operation).map_err(Status::from)?;
@@ -4745,7 +5033,13 @@ impl LocalSupervisorService for SupervisorRpc {
                 // A new create for a taken name fails here, before anything
                 // is recorded. Replay above has already finished any rollback
                 // of a failed create, so its name is free again.
-                if core.state.environments.contains_key(&request.name) {
+                if self
+                    .supervisor
+                    .core()
+                    .state
+                    .environments
+                    .contains_key(&request.name)
+                {
                     return Err(Status::from(SupervisorError::AlreadyExists(
                         request.name.clone(),
                     )));
@@ -4754,7 +5048,8 @@ impl LocalSupervisorService for SupervisorRpc {
                 // preparation. Successful preparation journals this SAME ID;
                 // failure abandons it and keeps offline replay unchanged.
                 let environment_id = Uuid::new_v4();
-                let workspace_plan = match core
+                let workspace_plan = match self
+                    .supervisor
                     .prepare_create_workspace_plan(&request, environment_id)
                     .await
                 {
@@ -4764,14 +5059,19 @@ impl LocalSupervisorService for SupervisorRpc {
                         // bundle before a later repository fails. The
                         // supervisor lock makes it safe to re-derive retained
                         // content here without racing another lifecycle.
-                        let _ = core.collect_unreferenced_content();
+                        let _ = self.supervisor.core().collect_unreferenced_content();
                         return Err(Status::from(error));
                     }
                 };
                 let payload =
                     create_operation_payload(&request, &workspace_plan).map_err(Status::from)?;
-                begin_create_operation(&core.store, request_id, environment_id, &payload)
-                    .map_err(Status::from)?
+                begin_create_operation(
+                    &self.supervisor.core().store,
+                    request_id,
+                    environment_id,
+                    &payload,
+                )
+                .map_err(Status::from)?
             }
         };
         let payload_matches = create_request_from_operation(&operation)
@@ -4783,7 +5083,7 @@ impl LocalSupervisorService for SupervisorRpc {
             return Err(Status::aborted("local lifecycle request ID collision"));
         }
         let response = operation_proto(&operation)?;
-        drop(core);
+        drop(serial);
         if !operation.phase.terminal() {
             self.schedule_operation_worker(false);
         }
@@ -4794,14 +5094,26 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         _request: Request<v1::ListEnvironmentsRequest>,
     ) -> Result<Response<v1::ListEnvironmentsResponse>, Status> {
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let _serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        let names = core.state.environments.keys().cloned().collect::<Vec<_>>();
+        let names = self
+            .supervisor
+            .core()
+            .state
+            .environments
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         for name in &names {
-            core.reconcile(name).await.map_err(Status::from)?;
+            self.supervisor
+                .reconcile(name)
+                .await
+                .map_err(Status::from)?;
         }
+        let core = self.supervisor.core();
         let environments = core
             .state
             .environments
@@ -4817,13 +5129,20 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Environment>, Status> {
         let name = selected_name(request.into_inner())?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let _serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        core.reconcile(&name).await.map_err(Status::from)?;
+        self.supervisor
+            .reconcile(&name)
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(
-            core.environment_proto(&name).map_err(Status::from)?,
+            self.supervisor
+                .core()
+                .environment_proto(&name)
+                .map_err(Status::from)?,
         ))
     }
 
@@ -4833,13 +5152,18 @@ impl LocalSupervisorService for SupervisorRpc {
     ) -> Result<Response<v1::Environment>, Status> {
         let (name, _request_id, expected_environment_id) =
             mutation_selection(request.into_inner())?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let _serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        core.reconcile(&name).await.map_err(Status::from)?;
-        let environment = core.environment(&name).map_err(Status::from)?.clone();
+        self.supervisor
+            .reconcile(&name)
+            .await
+            .map_err(Status::from)?;
+        let environment = self.supervisor.environment(&name).map_err(Status::from)?;
         require_expected_environment(&environment, expected_environment_id)?;
+        let mut core = self.supervisor.core();
         if core.state.current.as_deref() != Some(name.as_str()) {
             core.state.current = Some(name.clone());
             core.save().map_err(Status::from)?;
@@ -4853,8 +5177,10 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         _request: Request<v1::ListOrphansRequest>,
     ) -> Result<Response<v1::ListOrphansResponse>, Status> {
-        let core = self.core.lock().await;
-        core.orphan_inventory()
+        let _serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .core()
+            .orphan_inventory()
             .map(Response::new)
             .map_err(Status::from)
     }
@@ -4864,15 +5190,21 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        core.reconcile(&name).await.map_err(Status::from)?;
-        let environment = core.environment(&name).map_err(Status::from)?.clone();
+        self.supervisor
+            .reconcile(&name)
+            .await
+            .map_err(Status::from)?;
+        let environment = self.supervisor.environment(&name).map_err(Status::from)?;
         require_expected_environment(&environment, expected_environment_id)?;
         reject_environment_workload_secrets(&environment).map_err(Status::from)?;
-        let existing = core
+        let existing = self
+            .supervisor
+            .core()
             .store
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
@@ -4899,7 +5231,9 @@ impl LocalSupervisorService for SupervisorRpc {
                     .ok_or_else(|| Status::internal("local generation overflow"))?
             };
             let payload = serde_json::json!({"name": name, "generation": generation});
-            core.store
+            self.supervisor
+                .core()
+                .store
                 .begin_operation(
                     request_id,
                     Some(environment.id),
@@ -4910,7 +5244,7 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(core);
+        drop(serial);
         if !operation.phase.terminal() {
             self.schedule_operation_worker(false);
         }
@@ -4922,15 +5256,18 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        let environment = core.environment(&name).map_err(Status::from)?;
-        require_expected_environment(environment, expected_environment_id)?;
+        let environment = self.supervisor.environment(&name).map_err(Status::from)?;
+        require_expected_environment(&environment, expected_environment_id)?;
         let environment_id = environment.id;
         let payload = serde_json::json!({"name": name});
-        let operation = core
+        let operation = self
+            .supervisor
+            .core()
             .store
             .begin_operation(
                 request_id,
@@ -4941,7 +5278,7 @@ impl LocalSupervisorService for SupervisorRpc {
             .map_err(SupervisorError::from)
             .map_err(Status::from)?;
         let response = operation_proto(&operation)?;
-        drop(core);
+        drop(serial);
         if !operation.phase.terminal() {
             self.schedule_operation_worker(false);
         }
@@ -4953,12 +5290,16 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        core.reconcile(&name).await.map_err(Status::from)?;
-        let environment = core.environment(&name).map_err(Status::from)?.clone();
+        self.supervisor
+            .reconcile(&name)
+            .await
+            .map_err(Status::from)?;
+        let environment = self.supervisor.environment(&name).map_err(Status::from)?;
         require_expected_environment(&environment, expected_environment_id)?;
         reject_environment_workload_secrets(&environment).map_err(Status::from)?;
         if !matches!(
@@ -4969,7 +5310,9 @@ impl LocalSupervisorService for SupervisorRpc {
                 "native local environment must be running or recoverable",
             ));
         }
-        let existing = core
+        let existing = self
+            .supervisor
+            .core()
             .store
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
@@ -4995,10 +5338,12 @@ impl LocalSupervisorService for SupervisorRpc {
             }
             operation
         } else {
-            core.require_environment_guest_seed_abi(&name, false)
+            self.supervisor
+                .require_environment_guest_seed_abi(&name, false)
                 .await
                 .map_err(Status::from)?;
-            core.admit_environment_cw_runtime(&name)
+            self.supervisor
+                .admit_environment_cw_runtime(&name)
                 .await
                 .map_err(Status::from)?;
             let target_generation = environment
@@ -5013,7 +5358,9 @@ impl LocalSupervisorService for SupervisorRpc {
                 "was_running": true,
                 "target_generation": target_generation,
             });
-            core.store
+            self.supervisor
+                .core()
+                .store
                 .begin_operation(
                     request_id,
                     Some(environment.id),
@@ -5024,7 +5371,7 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(core);
+        drop(serial);
         if !operation.phase.terminal() {
             self.schedule_operation_worker(false);
         }
@@ -5036,12 +5383,16 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        core.reconcile(&name).await.map_err(Status::from)?;
-        let environment = core.environment(&name).map_err(Status::from)?.clone();
+        self.supervisor
+            .reconcile(&name)
+            .await
+            .map_err(Status::from)?;
+        let environment = self.supervisor.environment(&name).map_err(Status::from)?;
         require_expected_environment(&environment, expected_environment_id)?;
         reject_environment_workload_secrets(&environment).map_err(Status::from)?;
         if !matches!(
@@ -5095,7 +5446,9 @@ impl LocalSupervisorService for SupervisorRpc {
             "was_running": environment.state == StoredEnvironmentState::Running,
             "refresh_skills": true,
         });
-        let existing = core
+        let existing = self
+            .supervisor
+            .core()
             .store
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
@@ -5109,7 +5462,9 @@ impl LocalSupervisorService for SupervisorRpc {
             }
             operation
         } else {
-            core.store
+            self.supervisor
+                .core()
+                .store
                 .begin_operation(
                     request_id,
                     Some(environment.id),
@@ -5120,7 +5475,7 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(core);
+        drop(serial);
         if !operation.phase.terminal() {
             self.schedule_operation_worker(false);
         }
@@ -5135,18 +5490,22 @@ impl LocalSupervisorService for SupervisorRpc {
         let request_id = validate_resize(&request).map_err(Status::from)?;
         let expected_environment_id =
             parse_optional_environment_id(&request.environment_id).map_err(Status::from)?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        let environment = core
+        let environment = self
+            .supervisor
             .environment(&request.name)
             .map_err(Status::from)?
             .clone();
         require_expected_environment(&environment, expected_environment_id)?;
         reject_environment_workload_secrets(&environment).map_err(Status::from)?;
 
-        let existing = core
+        let existing = self
+            .supervisor
+            .core()
             .store
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
@@ -5238,13 +5597,15 @@ impl LocalSupervisorService for SupervisorRpc {
             } else {
                 OperationKind::Restart
             };
-            core.store
+            self.supervisor
+                .core()
+                .store
                 .begin_operation(request_id, Some(environment.id), kind, &payload)
                 .map_err(SupervisorError::from)
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(core);
+        drop(serial);
         if !operation.phase.terminal() {
             self.schedule_operation_worker(false);
         }
@@ -5267,16 +5628,20 @@ impl LocalSupervisorService for SupervisorRpc {
             .iter()
             .map(|binding| serde_json::json!([binding.host_port, binding.guest_port]))
             .collect::<Vec<_>>();
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        let environment = core
+        let environment = self
+            .supervisor
             .environment(&request.name)
             .map_err(Status::from)?
             .clone();
         require_expected_environment(&environment, expected_environment_id)?;
-        let existing = core
+        let existing = self
+            .supervisor
+            .core()
             .store
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
@@ -5299,7 +5664,9 @@ impl LocalSupervisorService for SupervisorRpc {
             if !matches!(
                 environment.state,
                 StoredEnvironmentState::Running | StoredEnvironmentState::Stopped
-            ) || core
+            ) || self
+                .supervisor
+                .core()
                 .store
                 .has_pending_lifecycle_operation(environment.id)
                 .map_err(SupervisorError::from)
@@ -5316,7 +5683,9 @@ impl LocalSupervisorService for SupervisorRpc {
                 "remove": request.remove,
                 "target": target,
             });
-            core.store
+            self.supervisor
+                .core()
+                .store
                 .begin_operation(
                     request_id,
                     Some(environment.id),
@@ -5327,7 +5696,7 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(core);
+        drop(serial);
         if !operation.phase.terminal() {
             self.schedule_operation_worker(false);
         }
@@ -5346,17 +5715,19 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let mut core = self.core.lock().await;
+        let serial = self.supervisor.serial.lock().await;
         // Preserve the selector's stable-identity precondition before replaying
         // any durable work. A replay may remove this environment (including
         // when this request ID names the pending delete itself), but it must
         // not turn a stale caller's NotFound into an effect or replay error.
-        match core
+        let recorded = self
+            .supervisor
+            .core()
             .store
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
-            .map_err(Status::from)?
-        {
+            .map_err(Status::from)?;
+        match recorded {
             Some(operation) => {
                 if operation.kind != OperationKind::Delete
                     || delete_operation_revoke_access(&operation, &name).is_err()
@@ -5370,14 +5741,17 @@ impl LocalSupervisorService for SupervisorRpc {
                 }
             }
             None => {
-                let environment = core.environment(&name).map_err(Status::from)?;
-                require_expected_environment(environment, expected_environment_id)?;
+                let environment = self.supervisor.environment(&name).map_err(Status::from)?;
+                require_expected_environment(&environment, expected_environment_id)?;
             }
         }
-        core.replay_pending_operations()
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        let existing = core
+        let existing = self
+            .supervisor
+            .core()
             .store
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
@@ -5397,14 +5771,15 @@ impl LocalSupervisorService for SupervisorRpc {
                 operation
             }
             None => {
-                let environment = core.environment(&name).map_err(Status::from)?;
-                require_expected_environment(environment, expected_environment_id)?;
+                let environment = self.supervisor.environment(&name).map_err(Status::from)?;
+                require_expected_environment(&environment, expected_environment_id)?;
                 let environment_id = environment.id;
                 let payload = serde_json::json!({
                     "name": name,
-                    "revoke_access": environment_uses_access_profile(environment)
+                    "revoke_access": environment_uses_access_profile(&environment)
                         .map_err(Status::from)?,
                 });
+                let mut core = self.supervisor.core();
                 let operation = core
                     .store
                     .begin_operation(
@@ -5423,7 +5798,7 @@ impl LocalSupervisorService for SupervisorRpc {
             }
         };
         let response = operation_proto(&operation)?;
-        drop(core);
+        drop(serial);
         if !operation.phase.terminal() {
             self.schedule_operation_worker(false);
         }
@@ -5453,7 +5828,7 @@ impl LocalSupervisorService for SupervisorRpc {
         let mut progress_events = self.operation_progress.subscribe();
         // A supervisor stopping after a failed operation drains its open
         // connections; a watch of an unfinished operation must end, not wait.
-        let mut shutdown = self.shutdown.subscribe();
+        let mut shutdown = self.supervisor.shutdown.subscribe();
         if *shutdown.borrow() {
             return Err(Status::unavailable(
                 "native local supervisor stopped before the operation finished; run the command again",
@@ -5592,11 +5967,13 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::DaemonAccess>, Status> {
         let name = selected_name(request.into_inner())?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let _serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        core.daemon_access(&name)
+        self.supervisor
+            .daemon_access(&name)
             .await
             .map(Response::new)
             .map_err(Status::from)
@@ -5608,14 +5985,18 @@ impl LocalSupervisorService for SupervisorRpc {
     ) -> Result<Response<v1::CredentialBrokerRuntime>, Status> {
         let name = selected_name(request.into_inner())?;
         let broker_request = {
-            let mut core = self.core.lock().await;
-            core.replay_pending_operations()
+            let _serial = self.supervisor.serial.lock().await;
+            self.supervisor
+                .replay_pending_operations()
                 .await
                 .map_err(Status::from)?;
-            core.reconcile_active_environment_before_protected_effect(&name)
+            self.supervisor
+                .reconcile_active_environment_before_protected_effect(&name)
                 .await
                 .map_err(Status::from)?;
-            core.credential_broker_ensure_request(&name)
+            self.supervisor
+                .core()
+                .credential_broker_ensure_request(&name)
                 .map_err(Status::from)?
         };
         ensure_credential_broker(broker_request)
@@ -5664,16 +6045,25 @@ impl LocalSupervisorService for SupervisorRpc {
                 Status::invalid_argument("managed runtime requires an environment UUID")
             })?;
         let name = selected_name(request)?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let _serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        core.reconcile(&name).await.map_err(Status::from)?;
-        if core.incompatible_runners.contains(&expected) {
+        self.supervisor
+            .reconcile(&name)
+            .await
+            .map_err(Status::from)?;
+        if self
+            .supervisor
+            .core()
+            .incompatible_runners
+            .contains(&expected)
+        {
             return Err(Status::from(SupervisorError::RunnerProtocolUnsupported));
         }
-        let environment = core.environment(&name).map_err(Status::from)?;
-        let generation = managed_runtime_artifact_generation(environment, expected)?.to_owned();
+        let environment = self.supervisor.environment(&name).map_err(Status::from)?;
+        let generation = managed_runtime_artifact_generation(&environment, expected)?.to_owned();
         let runtime_generation = environment
             .cw_runtime
             .as_ref()
@@ -5687,7 +6077,7 @@ impl LocalSupervisorService for SupervisorRpc {
             .ok_or_else(|| {
                 Status::failed_precondition("running VM has no admitted cw runtime catalog")
             })?;
-        let engine_root = core.config.engine_root();
+        let engine_root = self.supervisor.config.engine_root();
         let open_generation = runtime_generation.clone();
         let disk = tokio::task::spawn_blocking(move || {
             let engine = PrivateRoot::open(&engine_root)?;
@@ -5734,11 +6124,14 @@ impl LocalSupervisorService for SupervisorRpc {
                 "a local VM supervisor retires only for its own protocol or a newer one",
             ));
         }
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
+        let serial = self.supervisor.serial.lock().await;
+        self.supervisor
+            .replay_pending_operations()
             .await
             .map_err(Status::from)?;
-        if let Some((name, _)) = core
+        if let Some((name, _)) = self
+            .supervisor
+            .core()
             .state
             .environments
             .iter()
@@ -5750,30 +6143,33 @@ impl LocalSupervisorService for SupervisorRpc {
         // this supervisor, and an older successor (`cw upgrade rollback`)
         // cannot use a newer runner: end each one this supervisor tracks
         // before handing over. A newer successor would end it anyway.
-        let idle: Vec<(String, RunnerRecord)> = core
-            .state
-            .environments
-            .iter()
-            .filter(|(_, environment)| {
-                environment.state == StoredEnvironmentState::Stopped
-                    && core.live_runners.contains_key(&environment.id)
-            })
-            .filter_map(|(name, environment)| {
-                environment
-                    .runner
-                    .clone()
-                    .map(|runner| (name.clone(), runner))
-            })
-            .collect();
+        let idle: Vec<(String, RunnerRecord)> = {
+            let core = self.supervisor.core();
+            core.state
+                .environments
+                .iter()
+                .filter(|(_, environment)| {
+                    environment.state == StoredEnvironmentState::Stopped
+                        && core.live_runners.contains_key(&environment.id)
+                })
+                .filter_map(|(name, environment)| {
+                    environment
+                        .runner
+                        .clone()
+                        .map(|runner| (name.clone(), runner))
+                })
+                .collect()
+        };
         for (name, runner) in idle {
-            core.retire_idle_runner(&name, &runner)
+            self.supervisor
+                .retire_idle_runner(&name, &runner)
                 .await
                 .map_err(Status::from)?;
         }
-        core.retiring = true;
-        diagnostic_log::record(core.log.as_ref(), "supervisor_retiring", &[]);
-        drop(core);
-        let _ = self.shutdown.send(true);
+        self.supervisor.core().retiring = true;
+        diagnostic_log::record(self.supervisor.log.as_deref(), "supervisor_retiring", &[]);
+        drop(serial);
+        let _ = self.supervisor.shutdown.send(true);
         Ok(Response::new(v1::RetireSupervisorResponse {}))
     }
 }
@@ -8907,7 +9303,7 @@ mod tests {
     }
 
     async fn start_test_credential_authority(
-        core: &SupervisorCore,
+        core: &Supervisor,
     ) -> (
         LocalCredentialClient,
         tokio::task::JoinHandle<Result<(), codewire_local_credentials::AuthorityRuntimeError>>,
@@ -8940,7 +9336,7 @@ mod tests {
     }
 
     async fn bind_test_environment_access(
-        core: &mut SupervisorCore,
+        core: &Supervisor,
         authority: &mut LocalCredentialClient,
     ) -> EnvironmentAccessBinding {
         let profile = authority
@@ -8959,19 +9355,21 @@ mod tests {
             .create_environment_access_binding(&binding)
             .await
             .unwrap();
-        let environment = core.environment_mut("dev").unwrap();
-        environment.access_profile = Some("user/work".parse().unwrap());
-        environment.access_binding = Some(binding.clone());
-        let mut project: codewire_project::ProjectSpec =
-            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
-        project.credentials = Some(codewire_project::CredentialBinding {
-            profile: format!("local:id:{}", binding.profile_id),
-        });
-        let json = project.canonical_json().unwrap();
-        environment.project_spec_sha256 = Some(format!("{:x}", Sha256::digest(&json)));
-        environment.project_spec_json = Some(json);
-        environment.validate("dev").unwrap();
-        core.save().unwrap();
+        core.update_environment("dev", |environment| {
+            environment.access_profile = Some("user/work".parse().unwrap());
+            environment.access_binding = Some(binding.clone());
+            let mut project: codewire_project::ProjectSpec =
+                serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+            project.credentials = Some(codewire_project::CredentialBinding {
+                profile: format!("local:id:{}", binding.profile_id),
+            });
+            let json = project.canonical_json().unwrap();
+            environment.project_spec_sha256 = Some(format!("{:x}", Sha256::digest(&json)));
+            environment.project_spec_json = Some(json);
+            environment.validate("dev").unwrap();
+            Ok(())
+        })
+        .unwrap();
         binding
     }
 
@@ -9137,7 +9535,7 @@ mod tests {
                 credential_authority_root: parent.path().join("credentials"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
-            root,
+            root: Arc::new(root),
             store,
             state,
             children: HashMap::new(),
@@ -9364,17 +9762,19 @@ mod tests {
         assert_eq!(SocketIdentity::capture(&socket).unwrap(), stale);
     }
 
+    pub(super) fn test_supervisor(core: SupervisorCore) -> Supervisor {
+        Supervisor::new(core, watch::channel(false).0)
+    }
+
     pub(super) fn test_supervisor_service(core: SupervisorCore) -> SupervisorRpc {
         let operation_reader = SupervisorOperationReader::open(&core.root).unwrap();
         let operation_events = core.store.operation_events();
         let operation_progress = core.operation_progress.clone();
         let info = supervisor_info(&core.config);
-        let (shutdown, _shutdown_rx) = watch::channel(false);
         let host_keys = Arc::new(ssh::HostKeys::new(&core.config.root));
         SupervisorRpc {
             info,
-            core: Arc::new(Mutex::new(core)),
-            shutdown,
+            supervisor: Arc::new(test_supervisor(core)),
             operation_reader: Arc::new(Mutex::new(operation_reader)),
             operation_events,
             operation_progress,
@@ -9770,7 +10170,7 @@ mod tests {
         environment.state = StoredEnvironmentState::Running;
         environment.runner = Some(runner);
         core.save().unwrap();
-        core.live_runners.insert(environment_id, live);
+        core.live_runners.insert(environment_id, Arc::new(live));
         core.children.insert(environment_id, child);
         (environment_id, process_identity)
     }
@@ -9828,7 +10228,7 @@ mod tests {
                 credential_authority_root: parent.path().join("credentials"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
-            root,
+            root: Arc::new(root),
             store,
             state,
             children: HashMap::new(),
@@ -9955,9 +10355,10 @@ mod tests {
         assert!(workspace_transition_requires_boot(&environment, &parameters).unwrap());
         reserve_boot_generation(&mut environment, parameters.target_generation).unwrap();
         let environment_id = environment.id;
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
         let operation = begin_and_advance_test_operation(
-            &core.store,
+            &core.core().store,
             environment_id,
             OperationKind::UpdateWorkspace,
             &payload,
@@ -9968,6 +10369,7 @@ mod tests {
         core.replay_pending_operations().await.unwrap();
 
         let operation = core
+            .core()
             .store
             .operation_by_request(request_id)
             .unwrap()
@@ -10057,9 +10459,10 @@ mod tests {
         environment.validate("dev").unwrap();
         reserve_boot_generation(&mut environment, parameters.target_generation).unwrap();
         let environment_id = environment.id;
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
         let operation = begin_and_advance_test_operation(
-            &core.store,
+            &core.core().store,
             environment_id,
             OperationKind::RollbackWorkspace,
             &payload,
@@ -10070,6 +10473,7 @@ mod tests {
         core.replay_pending_operations().await.unwrap();
 
         let operation = core
+            .core()
             .store
             .operation_by_request(request_id)
             .unwrap()
@@ -10507,9 +10911,10 @@ mod tests {
             .into_inner();
         assert_eq!(response.operation_id, operation.operation_id.to_string());
         assert_eq!(response.phase, v1::OperationPhase::Completed as i32);
-        let core = service.core.lock().await;
+        let core = &service.supervisor;
         assert_eq!(
-            core.store
+            core.core()
+                .store
                 .operation_by_request(request_id)
                 .unwrap()
                 .unwrap()
@@ -10719,8 +11124,10 @@ mod tests {
         environment.validate("dev").unwrap();
         let environment_id = environment.id;
         let payload = workspace_update_payload(&environment, &project_json, &project_sha256, true);
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
         let operation = core
+            .core()
             .store
             .begin_operation(
                 Uuid::new_v4(),
@@ -10732,6 +11139,7 @@ mod tests {
         let mut operation = operation;
         for _ in 0..2 {
             operation = core
+                .core()
                 .store
                 .advance_operation(
                     operation.operation_id,
@@ -10746,6 +11154,7 @@ mod tests {
         core.replay_pending_operations().await.unwrap();
 
         let completed = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -10817,8 +11226,10 @@ mod tests {
         let environment_id = environment.id;
         let payload =
             workspace_update_payload(&environment, &next_project_json, &next_project_sha256, true);
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
         let operation = core
+            .core()
             .store
             .begin_operation(
                 Uuid::new_v4(),
@@ -10828,6 +11239,7 @@ mod tests {
             )
             .unwrap();
         let operation = core
+            .core()
             .store
             .advance_operation(
                 operation.operation_id,
@@ -10958,8 +11370,10 @@ mod tests {
             false,
         );
         reserve_boot_generation(&mut environment, 2).unwrap();
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
         let mut operation = core
+            .core()
             .store
             .begin_operation(
                 Uuid::new_v4(),
@@ -10970,6 +11384,7 @@ mod tests {
             .unwrap();
         for _ in 0..7 {
             operation = core
+                .core()
                 .store
                 .advance_operation(
                     operation.operation_id,
@@ -10981,7 +11396,9 @@ mod tests {
                 .unwrap();
         }
 
-        core.recover_host_reboot_workspace_transitions().unwrap();
+        core.core()
+            .recover_host_reboot_workspace_transitions()
+            .unwrap();
         assert!(
             core.environment("dev")
                 .unwrap()
@@ -10992,6 +11409,7 @@ mod tests {
         let request_id = operation.request_id;
         core.replay_pending_operations().await.unwrap();
         let operation = core
+            .core()
             .store
             .operation_by_request(request_id)
             .unwrap()
@@ -11060,8 +11478,10 @@ mod tests {
             .unwrap();
         reserve_boot_generation(&mut environment, parameters.target_generation).unwrap();
         let environment_id = environment.id;
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
         let mut operation = core
+            .core()
             .store
             .begin_operation(
                 Uuid::new_v4(),
@@ -11072,6 +11492,7 @@ mod tests {
             .unwrap();
         for _ in 0..7 {
             operation = core
+                .core()
                 .store
                 .advance_operation(
                     operation.operation_id,
@@ -11087,6 +11508,7 @@ mod tests {
         core.replay_pending_operations().await.unwrap();
 
         let operation = core
+            .core()
             .store
             .operation_by_request(request_id)
             .unwrap()
@@ -11782,14 +12204,15 @@ mod tests {
                 .unwrap_err();
 
             assert_eq!(error.code(), tonic::Code::InvalidArgument);
-            let core = service.core.lock().await;
+            let core = &service.supervisor;
             assert!(
-                core.store
+                core.core()
+                    .store
                     .operation_by_request(request_id)
                     .unwrap()
                     .is_none()
             );
-            assert!(!core.state.environments.contains_key(&name));
+            assert!(!core.core().state.environments.contains_key(&name));
             assert!(!credential_root.exists());
         }
     }
@@ -11825,8 +12248,9 @@ mod tests {
         assert_eq!(submitted.kind, v1::OperationKind::Start as i32);
         assert_eq!(submitted.phase, v1::OperationPhase::Intent as i32);
         assert_eq!(submitted.checkpoint, 0);
-        let core = service.core.lock().await;
+        let core = &service.supervisor;
         let pending = core
+            .core()
             .store
             .operation_by_request(request_id)
             .unwrap()
@@ -12257,13 +12681,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_stopped_environment_records_updated_host_ports_for_its_next_start() {
-        let (_parent, mut core) = test_supervisor_core(project_environment());
-        core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
-        core.save().unwrap();
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
+        core.core().environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
+        core.core().save().unwrap();
         let environment_id = core.environment("dev").unwrap().id;
         // Any guest port may be published after create, not only declared ones.
         let target = vec![HostPortBinding::new(18_080, 47_321).unwrap()];
         let operation = core
+            .core()
             .store
             .begin_operation(
                 Uuid::new_v4(),
@@ -12501,7 +12927,8 @@ mod tests {
             platform_source_authority: None,
         };
         validate_create(&request).unwrap();
-        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
         let plan = core
             .prepare_create_workspace_plan(&request, Uuid::new_v4())
             .await
@@ -12565,7 +12992,8 @@ mod tests {
             platform_source_authority: None,
         };
         validate_create(&request).unwrap();
-        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
         let plan = core
             .prepare_create_workspace_plan(&request, Uuid::new_v4())
             .await
@@ -12674,7 +13102,8 @@ mod tests {
             platform_source_authority: None,
         };
         validate_create(&request).unwrap();
-        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
         let plan = core
             .prepare_create_workspace_plan(&request, Uuid::new_v4())
             .await
@@ -12791,6 +13220,7 @@ mod tests {
             .unwrap();
         let credential_root = source.join("new-credential-authority");
         core.config.credential_authority_root = credential_root.clone();
+        let core = test_supervisor(core);
 
         let error = core
             .create(&request, &workspace_plan, &operation)
@@ -12802,15 +13232,16 @@ mod tests {
             SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged)
         ));
         let pending = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
             .unwrap();
         assert_eq!(pending.checkpoint, 0);
-        assert!(!core.state.environments.contains_key(&request.name));
+        assert!(!core.core().state.environments.contains_key(&request.name));
         assert!(!credential_root.exists());
-        assert!(core.children.is_empty());
-        assert!(core.live_runners.is_empty());
+        assert!(core.core().children.is_empty());
+        assert!(core.core().live_runners.is_empty());
     }
 
     #[cfg(target_os = "linux")]
@@ -12870,6 +13301,7 @@ mod tests {
         std::os::unix::fs::symlink(_parent.path().join("missing-platform"), &platform_alias)
             .unwrap();
         core.config.platform_config_dir = platform_alias;
+        let core = test_supervisor(core);
 
         let error = core
             .create(&request, &workspace_plan, &operation)
@@ -12878,6 +13310,7 @@ mod tests {
 
         assert!(matches!(error, SupervisorError::InvalidConfiguration));
         let pending = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -12918,6 +13351,7 @@ mod tests {
             .unwrap();
         let credential_root = source.join("new-credential-authority");
         core.config.credential_authority_root = credential_root.clone();
+        let core = test_supervisor(core);
 
         let error = core.start("dev", &operation).await.unwrap_err();
 
@@ -12926,6 +13360,7 @@ mod tests {
             SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged)
         ));
         let pending = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -12936,8 +13371,8 @@ mod tests {
         assert_eq!(environment.generation, original_generation);
         assert!(environment.runner.is_none());
         assert!(!credential_root.exists());
-        assert!(core.children.is_empty());
-        assert!(core.live_runners.is_empty());
+        assert!(core.core().children.is_empty());
+        assert!(core.core().live_runners.is_empty());
     }
 
     #[cfg(target_os = "linux")]
@@ -12972,6 +13407,7 @@ mod tests {
             .unwrap();
         let credential_root = source.join("new-credential-authority");
         core.config.credential_authority_root = credential_root.clone();
+        let core = test_supervisor(core);
 
         let error = core
             .workspace_transition("dev", &operation)
@@ -12983,6 +13419,7 @@ mod tests {
             SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged)
         ));
         let pending = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -12994,8 +13431,8 @@ mod tests {
         assert!(environment.staging_workspace_generation.is_none());
         assert!(environment.runner.is_none());
         assert!(!credential_root.exists());
-        assert!(core.children.is_empty());
-        assert!(core.live_runners.is_empty());
+        assert!(core.core().children.is_empty());
+        assert!(core.core().live_runners.is_empty());
     }
 
     #[cfg(target_os = "linux")]
@@ -13027,6 +13464,7 @@ mod tests {
             .unwrap();
         let credential_root = source.join("new-credential-authority");
         core.config.credential_authority_root = credential_root.clone();
+        let core = test_supervisor(core);
 
         let error = core.resize("dev", &operation).await.unwrap_err();
 
@@ -13035,6 +13473,7 @@ mod tests {
             SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged)
         ));
         let pending = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -13044,8 +13483,8 @@ mod tests {
         assert_eq!(environment.state, StoredEnvironmentState::Running);
         assert!(environment.runner.is_none());
         assert!(!credential_root.exists());
-        assert!(core.children.is_empty());
-        assert!(core.live_runners.is_empty());
+        assert!(core.core().children.is_empty());
+        assert!(core.core().live_runners.is_empty());
     }
 
     #[cfg(target_os = "linux")]
@@ -13057,6 +13496,7 @@ mod tests {
         environment.workspace_plan = direct_workspace_plan(&source);
         let (_parent, mut core) = test_supervisor_core(environment);
         core.config.credential_authority_root = source.join("new-credential-authority");
+        let core = test_supervisor(core);
 
         let error = core
             .ensure_vm_started("dev", 2, Uuid::new_v4())
@@ -13091,6 +13531,7 @@ mod tests {
         std::os::unix::fs::symlink(_parent.path().join("missing-platform"), &platform_alias)
             .unwrap();
         core.config.platform_config_dir = platform_alias;
+        let core = test_supervisor(core);
 
         let error = core
             .ensure_vm_started("dev", 2, Uuid::new_v4())
@@ -13431,7 +13872,7 @@ mod tests {
         )
         .unwrap();
         store.replace_state(&state).unwrap();
-        let mut core = SupervisorCore {
+        let core = SupervisorCore {
             config: NativeRuntimeConfig {
                 root: root_path,
                 artifact_root: parent.path().join("artifacts"),
@@ -13441,7 +13882,7 @@ mod tests {
                 credential_authority_root: parent.path().join("credentials"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
-            root,
+            root: Arc::new(root),
             store,
             state,
             children: HashMap::new(),
@@ -13454,11 +13895,10 @@ mod tests {
             log: None,
             _lock: lock,
         };
+        let core = test_supervisor(core);
 
-        assert_eq!(
-            core.stage_workspace_generation("dev").await.unwrap(),
-            core.state
-        );
+        // A staged environment stages nothing more; staging still collects.
+        assert_eq!(core.stage_workspace_generation("dev").await.unwrap(), None);
         assert!(paths.generations_dir.join(active_storage).is_dir());
         assert!(!paths.generations_dir.join(stale_storage).exists());
         for digest in retained_content.keys() {
@@ -13505,8 +13945,8 @@ mod tests {
         assert_eq!(response.id, selected_id.to_string());
         assert!(response.selected);
 
-        let core = service.core.lock().await;
-        assert_eq!(core.state.current.as_deref(), Some("selected"));
+        let core = &service.supervisor;
+        assert_eq!(core.core().state.current.as_deref(), Some("selected"));
         let (_, persisted) = SupervisorStore::inspect(&core.root).unwrap();
         assert_eq!(persisted.current.as_deref(), Some("selected"));
     }
@@ -13526,8 +13966,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::NotFound);
 
-        let core = service.core.lock().await;
-        assert_eq!(core.state.current.as_deref(), Some("dev"));
+        let core = &service.supervisor;
+        assert_eq!(core.core().state.current.as_deref(), Some("dev"));
     }
 
     #[tokio::test]
@@ -13576,7 +14016,8 @@ mod tests {
 
     #[tokio::test]
     async fn broker_stop_does_not_treat_missing_authority_as_proven_child_death() {
-        let (_parent, mut core) = test_supervisor_core(project_environment_with_access());
+        let (_parent, core) = test_supervisor_core(project_environment_with_access());
+        let core = test_supervisor(core);
         let environment = core.environment("dev").unwrap().clone();
         assert!(environment.generation > 0);
         assert!(matches!(
@@ -13587,9 +14028,10 @@ mod tests {
 
     #[tokio::test]
     async fn broker_stop_accepts_exact_authority_ack_without_changing_profile_binding() {
-        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
         let (mut authority, server) = start_test_credential_authority(&core).await;
-        let binding = bind_test_environment_access(&mut core, &mut authority).await;
+        let binding = bind_test_environment_access(&core, &mut authority).await;
         let environment = core.environment("dev").unwrap().clone();
         core.stop_environment_broker_if_present(&environment)
             .await
@@ -13626,7 +14068,8 @@ mod tests {
         ] {
             assert!(environment.generation > 0);
             let environment_id = environment.id;
-            let (_parent, mut core) = test_supervisor_core(environment);
+            let (_parent, core) = test_supervisor_core(environment);
+            let core = test_supervisor(core);
             let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
             let paths = VmPaths::create(&engine, environment_id).unwrap();
             assert!(matches!(
@@ -13651,7 +14094,8 @@ mod tests {
 
     #[tokio::test]
     async fn client_bootstrap_requires_the_exact_profile_binding_without_material_access() {
-        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
         let empty = core.environment("dev").unwrap().clone();
         assert_eq!(
             core.managed_credential_clients_for_boot(&empty, 1)
@@ -13660,7 +14104,7 @@ mod tests {
             Default::default()
         );
         let (mut authority, server) = start_test_credential_authority(&core).await;
-        let binding = bind_test_environment_access(&mut core, &mut authority).await;
+        let binding = bind_test_environment_access(&core, &mut authority).await;
         let environment = core.environment("dev").unwrap().clone();
         assert_eq!(
             core.managed_credential_clients_for_boot(&environment, 1)
@@ -13720,7 +14164,8 @@ mod tests {
             public.access_profile_id,
             "11111111-1111-4111-8111-111111111111"
         );
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
 
         assert!(matches!(
             core.require_environment_access("dev").await,
@@ -13764,12 +14209,12 @@ mod tests {
             error.message(),
             "direct-share source changed after admission"
         );
-        let core = service.core.lock().await;
+        let core = &service.supervisor;
         let environment = core.environment("dev").unwrap();
         assert_eq!(environment.state, StoredEnvironmentState::Error);
         assert!(environment.runner.is_none());
-        assert!(!core.live_runners.contains_key(&environment_id));
-        assert!(!core.children.contains_key(&environment_id));
+        assert!(!core.core().live_runners.contains_key(&environment_id));
+        assert!(!core.core().children.contains_key(&environment_id));
         assert!(!socket.exists());
         assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
         assert!(matches!(
@@ -13777,8 +14222,6 @@ mod tests {
             Err(RecoveryError::ProcessExited | RecoveryError::ReadProcess(_))
         ));
         let _ = detached_child.wait().unwrap();
-        drop(core);
-
         shutdown_tx.send(()).unwrap();
         runner_server.await.unwrap();
     }
@@ -13803,7 +14246,7 @@ mod tests {
 
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
         assert_eq!(error.message(), "local environment is not running");
-        let core = service.core.lock().await;
+        let core = &service.supervisor;
         let environment = core.environment("dev").unwrap();
         assert_eq!(environment.state, StoredEnvironmentState::Error);
         assert!(environment.runner.is_none());
@@ -13841,15 +14284,13 @@ mod tests {
             error.message(),
             "local environment ownership is orphaned; inspect it with `cw doctor local`"
         );
-        let core = service.core.lock().await;
+        let core = &service.supervisor;
         let environment = core.environment("dev").unwrap();
         assert_eq!(environment.state, StoredEnvironmentState::Orphaned);
         assert!(environment.runner.is_some());
         assert_eq!(fs::read(&socket).unwrap(), b"untrusted replacement");
         assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
         assert!(LiveProcess::recover(&process_identity).is_ok());
-        drop(core);
-
         detached_child.kill().unwrap();
         detached_child.wait().unwrap();
         shutdown_tx.send(()).unwrap();
@@ -14339,8 +14780,10 @@ mod tests {
     async fn recovering_start_waits_for_the_owner_authority_without_losing_intent() {
         let environment = project_environment_with_access();
         let environment_id = environment.id;
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
         let operation = core
+            .core()
             .store
             .begin_operation(
                 Uuid::new_v4(),
@@ -14355,6 +14798,7 @@ mod tests {
             Err(SupervisorError::CredentialAuthorityUnavailable)
         ));
         let pending = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -14395,9 +14839,10 @@ mod tests {
             platform_source_authority: None,
         };
         let payload = create_operation_payload(&request, &workspace_plan).unwrap();
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
         let operation = begin_and_advance_test_operation(
-            &core.store,
+            &core.core().store,
             environment_id,
             OperationKind::Create,
             &payload,
@@ -14409,6 +14854,7 @@ mod tests {
             Err(SupervisorError::CredentialAuthorityUnavailable)
         ));
         let pending = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -14434,8 +14880,10 @@ mod tests {
             "was_running": true,
             "target_generation": environment.generation + 1,
         });
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
         let operation = core
+            .core()
             .store
             .begin_operation(
                 Uuid::new_v4(),
@@ -14450,6 +14898,7 @@ mod tests {
             Err(SupervisorError::CredentialAuthorityUnavailable)
         ));
         let pending = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -14478,8 +14927,10 @@ mod tests {
         let environment_id = environment.id;
         let payload =
             workspace_update_payload(&environment, &project_spec_json, &project_spec_sha256, true);
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
         let operation = core
+            .core()
             .store
             .begin_operation(
                 Uuid::new_v4(),
@@ -14494,6 +14945,7 @@ mod tests {
             Err(SupervisorError::CredentialAuthorityUnavailable)
         ));
         let pending = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -14533,14 +14985,16 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::Unavailable);
         assert_eq!(error.message(), "local credential authority is unavailable");
-        let core = service.core.lock().await;
+        let core = &service.supervisor;
         assert!(
-            core.store
+            core.core()
+                .store
                 .operation_by_request(new_request_id)
                 .unwrap()
                 .is_none()
         );
         let pending = core
+            .core()
             .store
             .operation_by_request(pending_request_id)
             .unwrap()
@@ -14573,10 +15027,11 @@ mod tests {
             // A spawn would fail: deleting this preboot state must need
             // neither an executable runner nor an admitted workspace image.
             core.config.executable = parent.path().join("must-not-spawn");
+            let core = test_supervisor(core);
             let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
             let paths = VmPaths::create(&engine, environment_id).unwrap();
             let create = begin_and_advance_test_operation(
-                &core.store,
+                &core.core().store,
                 environment_id,
                 OperationKind::Create,
                 &serde_json::json!({"name": "dev"}),
@@ -14595,9 +15050,11 @@ mod tests {
             } else {
                 "create_registry_blob_stream"
             };
-            core.fail_operation_with_environment_error(&create, "dev", failure_code)
+            core.core()
+                .fail_operation_with_environment_error(&create, "dev", failure_code)
                 .unwrap();
             let delete = core
+                .core()
                 .store
                 .begin_operation(
                     Uuid::new_v4(),
@@ -14628,10 +15085,10 @@ mod tests {
                 .unwrap();
             assert_eq!(failed.phase, OperationPhase::Failed);
             assert_eq!(failed.error_code.as_deref(), Some(failure_code));
-            assert!(core.state.environments.is_empty());
-            assert!(core.state.current.is_none());
-            assert!(core.children.is_empty());
-            assert!(core.live_runners.is_empty());
+            assert!(core.core().state.environments.is_empty());
+            assert!(core.core().state.current.is_none());
+            assert!(core.core().children.is_empty());
+            assert!(core.core().live_runners.is_empty());
             assert!(!paths.vm_dir.exists());
             assert!(matches!(
                 deletion_tree_location(
@@ -14656,7 +15113,8 @@ mod tests {
             environment.generation = generation;
             environment.state = state;
             let environment_id = environment.id;
-            let (_parent, mut core) = test_supervisor_core(environment);
+            let (_parent, core) = test_supervisor_core(environment);
+            let core = test_supervisor(core);
             let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
             let paths = VmPaths::create(&engine, environment_id).unwrap();
 
@@ -14665,7 +15123,7 @@ mod tests {
                 Err(SupervisorError::InvalidState),
             ));
             assert!(paths.vm_dir.exists());
-            assert!(core.state.environments.contains_key("dev"));
+            assert!(core.core().state.environments.contains_key("dev"));
         }
     }
 
@@ -14673,17 +15131,21 @@ mod tests {
     async fn preboot_delete_does_not_reclassify_a_recorded_dead_runner() {
         let environment = project_environment();
         let environment_id = environment.id;
-        let (_parent, mut core) = test_supervisor_core(environment);
+        let (_parent, core) = test_supervisor_core(environment);
+        let core = test_supervisor(core);
         let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
         let paths = VmPaths::create(&engine, environment_id).unwrap();
         let (listener, identity) =
             bind_owner_only_listener(&core.config.runner_socket(environment_id)).unwrap();
-        attach_test_runner_process(&mut core, identity);
-        let environment = core.environment_mut("dev").unwrap();
-        environment.generation = 0;
-        environment.state = StoredEnvironmentState::Error;
-        core.save().unwrap();
-        let child = core.children.get_mut(&environment_id).unwrap();
+        attach_test_runner_process(&mut core.core(), identity);
+        {
+            let mut guard = core.core();
+            let environment = guard.environment_mut("dev").unwrap();
+            environment.generation = 0;
+            environment.state = StoredEnvironmentState::Error;
+            guard.save().unwrap();
+        }
+        let mut child = core.core().children.remove(&environment_id).unwrap();
         child.kill().unwrap();
         child.wait().unwrap();
 
@@ -14738,10 +15200,12 @@ mod tests {
             environment.generation = 1;
             environment.state = StoredEnvironmentState::Stopped;
             let environment_id = environment.id;
-            let (_parent, mut core) = test_supervisor_core(environment);
+            let (_parent, core) = test_supervisor_core(environment);
+            let core = test_supervisor(core);
             let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
             let paths = VmPaths::create(&engine, environment_id).unwrap();
             let delete = core
+                .core()
                 .store
                 .begin_operation(
                     Uuid::new_v4(),
@@ -14776,7 +15240,7 @@ mod tests {
                 StoredEnvironmentState::Error
             );
             assert!(paths.vm_dir.exists());
-            assert!(core.store.pending_operations().unwrap().is_empty());
+            assert!(core.core().store.pending_operations().unwrap().is_empty());
             // Replaying again finds nothing to do.
             core.replay_pending_operations().await.unwrap();
         }
@@ -14787,9 +15251,10 @@ mod tests {
         let (_parent, core) = test_supervisor_core(project_environment());
         let service = test_supervisor_service(core);
         let operation = {
-            let core = service.core.lock().await;
+            let core = &service.supervisor;
             let environment = core.environment("dev").unwrap();
-            core.store
+            core.core()
+                .store
                 .begin_operation(
                     Uuid::new_v4(),
                     Some(environment.id),
@@ -14813,7 +15278,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(initial.is_ok());
-        service.shutdown.send(true).unwrap();
+        service.supervisor.shutdown.send(true).unwrap();
         let ended = tokio::time::timeout(
             Duration::from_secs(5),
             futures::StreamExt::next(&mut stream),
@@ -14860,8 +15325,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::NotFound);
         assert_eq!(error.message(), "local environment was not found");
-        let core = service.core.lock().await;
+        let core = &service.supervisor;
         let pending = core
+            .core()
             .store
             .operation_by_request(request_id)
             .unwrap()
@@ -14924,8 +15390,8 @@ mod tests {
             v1::EnvironmentState::Stopped
         );
         {
-            let core = service.core.lock().await;
-            assert!(core.store.pending_operations().unwrap().is_empty());
+            let core = &service.supervisor;
+            assert!(core.core().store.pending_operations().unwrap().is_empty());
         }
 
         drop(client);
@@ -15106,14 +15572,15 @@ mod tests {
                 fs::write(&socket, b"untrusted replacement").unwrap();
             }
             core.config.credential_authority_root = source.join("new-credential-authority");
+            let core = test_supervisor(core);
 
             core.reconcile("dev").await.unwrap();
 
             let environment = core.environment("dev").unwrap();
             assert_eq!(environment.state, StoredEnvironmentState::Error);
             assert!(environment.runner.is_none());
-            assert!(!core.live_runners.contains_key(&environment_id));
-            assert!(!core.children.contains_key(&environment_id));
+            assert!(!core.core().live_runners.contains_key(&environment_id));
+            assert!(!core.core().children.contains_key(&environment_id));
             assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
             if replace_socket {
                 assert_eq!(fs::read(&socket).unwrap(), b"untrusted replacement");
@@ -15148,8 +15615,12 @@ mod tests {
                     attach_test_runner_process(&mut core, socket_identity);
                 let before = core.environment("dev").unwrap().clone();
 
-                core.reconcile_exposing_runners_for_startup().await.unwrap();
                 let service = test_supervisor_service(core);
+                service
+                    .supervisor
+                    .reconcile_exposing_runners_for_startup()
+                    .await
+                    .unwrap();
                 let listed = service
                     .list_environments(Request::new(v1::ListEnvironmentsRequest {}))
                     .await
@@ -15167,15 +15638,16 @@ mod tests {
                     .into_inner();
                 assert_eq!(inspected.state, v1::EnvironmentState::Running as i32);
                 assert_eq!(inspected.error_code, "runner_protocol_unsupported");
-                let mut core = service.core.lock().await;
-                assert_eq!(core.environment("dev").unwrap(), &before);
+                let core = &service.supervisor;
+                assert_eq!(core.environment("dev").unwrap(), before);
                 assert_eq!(
                     SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
                     before
                 );
-                assert!(core.live_runners.contains_key(&environment_id));
+                assert!(core.core().live_runners.contains_key(&environment_id));
                 assert!(
-                    core.children
+                    core.core()
+                        .children
                         .get_mut(&environment_id)
                         .unwrap()
                         .try_wait()
@@ -15199,15 +15671,14 @@ mod tests {
                     core.ensure_vm_stopped("dev").await.unwrap();
                 }
                 assert!(core.environment("dev").unwrap().runner.is_none());
-                assert!(!core.live_runners.contains_key(&environment_id));
-                assert!(!core.children.contains_key(&environment_id));
+                assert!(!core.core().live_runners.contains_key(&environment_id));
+                assert!(!core.core().children.contains_key(&environment_id));
                 assert!(!socket.exists());
                 assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
                 assert!(matches!(
                     LiveProcess::recover(&process_identity),
                     Err(RecoveryError::ProcessExited | RecoveryError::ReadProcess(_))
                 ));
-                drop(core);
                 shutdown_tx.send(()).unwrap();
                 server.await.unwrap();
             }
@@ -15216,7 +15687,8 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_does_not_kill_a_runner_for_a_transient_protocol_query_failure() {
-        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
         let socket = core
             .config
             .runner_socket(core.environment("dev").unwrap().id);
@@ -15226,7 +15698,7 @@ mod tests {
                 TestRunnerProtocolReply::Failure(tonic::Code::Unavailable),
             );
         let (environment_id, _process_identity) =
-            attach_test_runner_process(&mut core, socket_identity);
+            attach_test_runner_process(&mut core.core(), socket_identity);
 
         let error = core.reconcile("dev").await.unwrap_err();
 
@@ -15236,9 +15708,10 @@ mod tests {
         ));
         assert!(!error.to_string().contains("untrusted test peer detail"));
         assert!(core.environment("dev").unwrap().runner.is_some());
-        assert!(core.live_runners.contains_key(&environment_id));
+        assert!(core.core().live_runners.contains_key(&environment_id));
         assert!(
-            core.children
+            core.core()
+                .children
                 .get_mut(&environment_id)
                 .unwrap()
                 .try_wait()
@@ -15249,7 +15722,7 @@ mod tests {
         assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
 
         core.terminate_recorded_runner("dev").await.unwrap();
-        core.mark_runner_dead("dev").unwrap();
+        core.core().mark_runner_dead("dev").unwrap();
         shutdown_tx.send(()).unwrap();
         server.await.unwrap();
     }
@@ -15258,31 +15731,35 @@ mod tests {
     #[tokio::test]
     async fn old_guest_start_refuses_before_checkpoint_or_runner_effects() {
         for (checkpoint, staged) in [(0, false), (1, false), (0, true), (3, true)] {
-            let (_parent, mut core) = test_supervisor_core(project_environment());
+            let (_parent, core) = test_supervisor_core(project_environment());
+            let core = test_supervisor(core);
             let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
             let generation =
                 install_test_guest_generation(&engine, b"\0CWGUESTABI\0seed=8;cw_catalog=0\0");
-            let environment = core.environment_mut("dev").unwrap();
-            if staged {
-                environment.active_workspace_generation =
-                    Some(test_workspace_generation_with_artifact(
-                        environment.project_spec_json.as_deref().unwrap(),
-                        environment.project_spec_sha256.as_deref().unwrap(),
-                        &generation,
-                        b"old-start-guest",
-                    ));
+            {
+                let mut guard = core.core();
+                let environment = guard.environment_mut("dev").unwrap();
+                if staged {
+                    environment.active_workspace_generation =
+                        Some(test_workspace_generation_with_artifact(
+                            environment.project_spec_json.as_deref().unwrap(),
+                            environment.project_spec_sha256.as_deref().unwrap(),
+                            &generation,
+                            b"old-start-guest",
+                        ));
+                }
+                environment.active_artifact_generation = Some(generation);
+                guard.save().unwrap();
             }
-            environment.active_artifact_generation = Some(generation);
-            core.save().unwrap();
             let socket = core
                 .config
                 .runner_socket(core.environment("dev").unwrap().id);
             let (socket_identity, useful_calls, shutdown_tx, server) =
                 spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(3));
-            let (environment_id, _) = attach_test_runner_process(&mut core, socket_identity);
+            let (environment_id, _) = attach_test_runner_process(&mut core.core(), socket_identity);
             let before = core.environment("dev").unwrap().clone();
             let operation = begin_and_advance_test_operation(
-                &core.store,
+                &core.core().store,
                 environment_id,
                 OperationKind::Start,
                 &serde_json::json!({"name": "dev", "generation": before.generation + 1}),
@@ -15296,20 +15773,22 @@ mod tests {
                     crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_)
                 )
             ));
-            assert_eq!(core.environment("dev").unwrap(), &before);
+            assert_eq!(core.environment("dev").unwrap(), before);
             assert_eq!(
                 SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
                 before
             );
             assert_eq!(
-                core.store
+                core.core()
+                    .store
                     .operation_by_request(operation.request_id)
                     .unwrap()
                     .unwrap(),
                 operation
             );
             assert!(
-                core.children
+                core.core()
+                    .children
                     .get_mut(&environment_id)
                     .unwrap()
                     .try_wait()
@@ -15320,7 +15799,7 @@ mod tests {
             assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
 
             core.terminate_recorded_runner("dev").await.unwrap();
-            core.mark_runner_dead("dev").unwrap();
+            core.core().mark_runner_dead("dev").unwrap();
             shutdown_tx.send(()).unwrap();
             server.await.unwrap();
         }
@@ -15329,16 +15808,18 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[tokio::test]
     async fn first_start_admits_only_its_retained_boot_assets() {
-        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
         let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
         let generation = install_test_guest_generation(
             &engine,
             codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER,
         );
-        core.environment_mut("dev")
+        core.core()
+            .environment_mut("dev")
             .unwrap()
             .active_artifact_generation = Some(generation.clone());
-        core.save().unwrap();
+        core.core().save().unwrap();
         // First staging must use retained assets, even when installed defaults
         // changed or are invalid. It must not implicitly select a cw runtime.
         fs::write(
@@ -15353,11 +15834,12 @@ mod tests {
         .unwrap();
         let before = core.environment("dev").unwrap().clone();
         core.admit_start_boot_inputs("dev").await.unwrap();
-        assert_eq!(core.environment("dev").unwrap(), &before);
+        assert_eq!(core.environment("dev").unwrap(), before);
         assert!(!core.config.engine_root().join("cw-runtimes").exists());
 
         for retained in [None, Some("B".repeat(64))] {
-            core.environment_mut("dev")
+            core.core()
+                .environment_mut("dev")
                 .unwrap()
                 .active_artifact_generation = retained;
             assert!(matches!(
@@ -15365,10 +15847,12 @@ mod tests {
                 Err(SupervisorError::InvalidState)
             ));
         }
-        core.environment_mut("dev")
+        core.core()
+            .environment_mut("dev")
             .unwrap()
             .active_artifact_generation = Some(generation.clone());
-        core.environment_mut("dev")
+        core.core()
+            .environment_mut("dev")
             .unwrap()
             .staging_artifact_generation = Some(generation);
         assert!(matches!(
@@ -15380,24 +15864,27 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[tokio::test]
     async fn restart_without_a_workspace_refuses_before_retiring_a_live_runner() {
-        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
         let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
         let generation = install_test_guest_generation(
             &engine,
             codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER,
         );
-        core.environment_mut("dev")
+        core.core()
+            .environment_mut("dev")
             .unwrap()
             .active_artifact_generation = Some(generation);
-        core.save().unwrap();
+        core.core().save().unwrap();
         let socket = core
             .config
             .runner_socket(core.environment("dev").unwrap().id);
         let (socket_identity, useful_calls, shutdown_tx, server) =
             spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(3));
-        let (environment_id, _) = attach_test_runner_process(&mut core, socket_identity);
+        let (environment_id, _) = attach_test_runner_process(&mut core.core(), socket_identity);
         let before = core.environment("dev").unwrap().clone();
         let operation = core
+            .core()
             .store
             .begin_operation(
                 Uuid::new_v4(),
@@ -15418,13 +15905,14 @@ mod tests {
             Err(SupervisorError::ReplacementPreflight(inner))
             if matches!(inner.as_ref(), SupervisorError::InvalidState)
         ));
-        assert_eq!(core.environment("dev").unwrap(), &before);
+        assert_eq!(core.environment("dev").unwrap(), before);
         assert_eq!(
             SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
             before
         );
         assert!(
-            core.children
+            core.core()
+                .children
                 .get_mut(&environment_id)
                 .unwrap()
                 .try_wait()
@@ -15441,27 +15929,33 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[tokio::test]
     async fn old_guest_restart_refuses_before_retiring_an_incompatible_runner() {
-        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
         let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
         let generation =
             install_test_guest_generation(&engine, b"\0CWGUESTABI\0seed=8;cw_catalog=0\0");
-        let environment = core.environment_mut("dev").unwrap();
-        environment.active_workspace_generation = Some(test_workspace_generation_with_artifact(
-            environment.project_spec_json.as_deref().unwrap(),
-            environment.project_spec_sha256.as_deref().unwrap(),
-            &generation,
-            b"old-guest",
-        ));
-        environment.active_artifact_generation = Some(generation);
-        core.save().unwrap();
+        {
+            let mut guard = core.core();
+            let environment = guard.environment_mut("dev").unwrap();
+            environment.active_workspace_generation =
+                Some(test_workspace_generation_with_artifact(
+                    environment.project_spec_json.as_deref().unwrap(),
+                    environment.project_spec_sha256.as_deref().unwrap(),
+                    &generation,
+                    b"old-guest",
+                ));
+            environment.active_artifact_generation = Some(generation);
+            guard.save().unwrap();
+        }
         let socket = core
             .config
             .runner_socket(core.environment("dev").unwrap().id);
         let (socket_identity, useful_calls, shutdown_tx, server) =
             spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(3));
-        let (environment_id, _) = attach_test_runner_process(&mut core, socket_identity);
+        let (environment_id, _) = attach_test_runner_process(&mut core.core(), socket_identity);
         let before = core.environment("dev").unwrap().clone();
         let operation = core
+            .core()
             .store
             .begin_operation(
                 Uuid::new_v4(),
@@ -15482,13 +15976,14 @@ mod tests {
         let status = Status::from(error);
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
         assert!(status.message().contains("boot assets"));
-        assert_eq!(core.environment("dev").unwrap(), &before);
+        assert_eq!(core.environment("dev").unwrap(), before);
         assert_eq!(
             SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
             before
         );
         assert!(
-            core.children
+            core.core()
+                .children
                 .get_mut(&environment_id)
                 .unwrap()
                 .try_wait()
@@ -15505,9 +16000,10 @@ mod tests {
 
     #[tokio::test]
     async fn ordinary_boot_keeps_an_unbound_environment_unbound() {
-        let (_parent, mut core) = test_supervisor_core(project_environment());
-        core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Running;
-        core.save().unwrap();
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
+        core.core().environment_mut("dev").unwrap().state = StoredEnvironmentState::Running;
+        core.core().save().unwrap();
         // A newly installed, even invalid, default is outside this environment's
         // retained selection. Ordinary start/restart must not read or bind it.
         fs::write(core.config.cw_runtime_lock(), b"invalid installed default").unwrap();
@@ -15518,7 +16014,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(core.environment("dev").unwrap(), &before);
+        assert_eq!(core.environment("dev").unwrap(), before);
         assert_eq!(
             SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
             before
@@ -15529,35 +16025,37 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[tokio::test]
     async fn workspace_rollback_preflight_restores_metadata_without_stopping_the_vm() {
-        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let core = test_supervisor(core);
         let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
         let active = install_test_guest_generation(
             &engine,
             codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER,
         );
         let old = install_test_guest_generation(&engine, b"\0CWGUESTABI\0seed=8;cw_catalog=0\0");
-        let environment = core.environment_mut("dev").unwrap();
-        let json = environment.project_spec_json.as_deref().unwrap();
-        let sha = environment.project_spec_sha256.as_deref().unwrap();
-        environment.active_workspace_generation = Some(test_workspace_generation_with_artifact(
-            json, sha, &active, b"active",
-        ));
-        environment.rollback_workspace_generation = Some(test_workspace_generation_with_artifact(
-            json,
-            sha,
-            &old,
-            b"rollback",
-        ));
-        environment.active_artifact_generation = Some(active);
-        core.save().unwrap();
+        {
+            let mut guard = core.core();
+            let environment = guard.environment_mut("dev").unwrap();
+            let json = environment.project_spec_json.as_deref().unwrap();
+            let sha = environment.project_spec_sha256.as_deref().unwrap();
+            environment.active_workspace_generation = Some(
+                test_workspace_generation_with_artifact(json, sha, &active, b"active"),
+            );
+            environment.rollback_workspace_generation = Some(
+                test_workspace_generation_with_artifact(json, sha, &old, b"rollback"),
+            );
+            environment.active_artifact_generation = Some(active);
+            guard.save().unwrap();
+        }
         let socket = core
             .config
             .runner_socket(core.environment("dev").unwrap().id);
         let (identity, useful_calls, shutdown_tx, server) =
             spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(3));
-        let (environment_id, _) = attach_test_runner_process(&mut core, identity);
+        let (environment_id, _) = attach_test_runner_process(&mut core.core(), identity);
         let before = core.environment("dev").unwrap().clone();
         let operation = core
+            .core()
             .store
             .begin_operation(
                 Uuid::new_v4(),
@@ -15570,6 +16068,7 @@ mod tests {
         core.execute_pending_operations().await.unwrap();
 
         let failed = core
+            .core()
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
@@ -15582,14 +16081,15 @@ mod tests {
             failed.error_code.as_deref(),
             Some("workspace_rollback_preflight")
         );
-        assert_eq!(core.environment("dev").unwrap(), &before);
+        assert_eq!(core.environment("dev").unwrap(), before);
         assert_eq!(
             SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
             before
         );
-        assert!(core.store.pending_operations().unwrap().is_empty());
+        assert!(core.core().store.pending_operations().unwrap().is_empty());
         assert!(
-            core.children
+            core.core()
+                .children
                 .get_mut(&environment_id)
                 .unwrap()
                 .try_wait()
@@ -15804,9 +16304,10 @@ mod tests {
         let (_parent, core) = test_supervisor_core(project_environment());
         let service = test_supervisor_service(core);
         let operation = {
-            let core = service.core.lock().await;
+            let core = &service.supervisor;
             let environment = core.environment("dev").unwrap();
-            core.store
+            core.core()
+                .store
                 .begin_operation(
                     Uuid::new_v4(),
                     Some(environment.id),
@@ -15878,9 +16379,10 @@ mod tests {
         assert_eq!(progress.guest_sequence, 3);
 
         {
-            let core = service.core.lock().await;
-            let result = environment_operation_result(core.environment("dev").unwrap());
-            core.store
+            let core = &service.supervisor;
+            let result = environment_operation_result(&core.environment("dev").unwrap());
+            core.core()
+                .store
                 .advance_operation(
                     operation_id,
                     operation.checkpoint,
@@ -15923,9 +16425,10 @@ mod tests {
         let (_parent, core) = test_supervisor_core(project_environment());
         let service = test_supervisor_service(core);
         let operation = {
-            let core = service.core.lock().await;
+            let core = &service.supervisor;
             let environment = core.environment("dev").unwrap();
-            core.store
+            core.core()
+                .store
                 .begin_operation(
                     Uuid::new_v4(),
                     Some(environment.id),
@@ -15945,9 +16448,10 @@ mod tests {
         drop(stream);
 
         let completed = {
-            let core = service.core.lock().await;
-            let result = environment_operation_result(core.environment("dev").unwrap());
-            core.store
+            let core = &service.supervisor;
+            let result = environment_operation_result(&core.environment("dev").unwrap());
+            core.core()
+                .store
                 .advance_operation(
                     operation.operation_id,
                     operation.checkpoint,
@@ -15971,8 +16475,9 @@ mod tests {
         // Model the create/staging transaction after it has published bytes to
         // the three generation stores but before it has durably published the
         // references. Every RPC mutation and every collector must wait for the
-        // same supervisor-core guard across that entire boundary.
-        let mut create = service.core.lock().await;
+        // same lifecycle serialization across that entire boundary.
+        let serial = service.supervisor.serial.lock().await;
+        let create = &service.supervisor;
         let engine = PrivateRoot::open(&create.config.engine_root()).unwrap();
         let (candidate_artifact, candidate_kernel) =
             install_test_artifact_generation(&engine, b"candidate-kernel");
@@ -16003,7 +16508,7 @@ mod tests {
             fs::set_permissions(&generation.root_disk, fs::Permissions::from_mode(0o600)).unwrap();
         }
 
-        let mut published_state = create.state.clone();
+        let mut published_state = create.core().state.clone();
         let published_environment = published_state.environments.get_mut("dev").unwrap();
         published_environment.active_artifact_generation = Some(candidate_artifact.clone());
         published_environment.active_workspace_generation = Some(candidate_workspace);
@@ -16028,10 +16533,11 @@ mod tests {
         .unwrap();
 
         let (collector_started, collector_reached_lock) = tokio::sync::oneshot::channel();
-        let collector_core = Arc::clone(&service.core);
+        let collector_supervisor = Arc::clone(&service.supervisor);
         let collector = tokio::spawn(async move {
             collector_started.send(()).unwrap();
-            let mut core = collector_core.lock().await;
+            let _serial = collector_supervisor.serial.lock().await;
+            let mut core = collector_supervisor.core();
             let roots = core.collect_unreferenced_workspace_roots("dev").unwrap();
             core.collect_unreferenced_content().unwrap();
             core.collect_unreferenced_runtime_artifacts().unwrap();
@@ -16041,9 +16547,12 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(!collector.is_finished());
 
-        create.state = published_state;
-        create.save().unwrap();
-        drop(create);
+        {
+            let mut core = create.core();
+            core.state = published_state;
+            core.save().unwrap();
+        }
+        drop(serial);
 
         assert_eq!(collector.await.unwrap(), vec![stale_storage]);
         assert!(paths.generations_dir.join(candidate_storage).is_dir());
@@ -16494,12 +17003,12 @@ mod tests {
         let environment = project_environment();
         let environment_id = environment.id;
         let (_parent, mut core) = test_supervisor_core(environment);
-        core.log = Some(
+        core.log = Some(Arc::new(
             DiagnosticLog::adopt(
                 diagnostic_log::open_child_log(&core.root, diagnostic_log::SUPERVISOR_LOG).unwrap(),
             )
             .unwrap(),
-        );
+        ));
         core.environment_mut("dev").unwrap().runner = Some(RunnerRecord {
             cw_runtime_catalog_generation: None,
             process: ProcessIdentity {
@@ -16583,9 +17092,10 @@ mod tests {
                 ..Default::default()
             };
             let payload = create_operation_payload(&request, &environment.workspace_plan).unwrap();
-            let (_parent, mut core) = test_supervisor_core(environment);
+            let (_parent, core) = test_supervisor_core(environment);
+            let core = test_supervisor(core);
             let operation = begin_and_advance_test_operation(
-                &core.store,
+                &core.core().store,
                 environment_id,
                 OperationKind::Create,
                 &payload,
@@ -16636,7 +17146,7 @@ mod tests {
                 .find(|operation| operation.kind == OperationKind::Delete)
                 .expect("the failed create began its rollback delete");
             assert_eq!(rollback.phase, OperationPhase::Completed);
-            assert!(core.store.pending_operations().unwrap().is_empty());
+            assert!(core.core().store.pending_operations().unwrap().is_empty());
             assert!(unexpected.is_file(), "unsafe objects remain quarantined");
             let public = operation_proto(&persisted).unwrap();
             assert_eq!(public.error_code, expected_code);
@@ -16667,22 +17177,23 @@ mod tests {
         stranded.state = StoredEnvironmentState::Error;
         stranded.generation = 0;
         let stranded_id = stranded.id;
-        let (_parent, mut core) = test_supervisor_core(stranded);
+        let (_parent, core) = test_supervisor_core(stranded);
+        let core = test_supervisor(core);
         // A once-running environment in `error` is recoverable, not stranded.
         let mut recoverable = project_environment();
         recoverable.name = "kept".to_owned();
         recoverable.state = StoredEnvironmentState::Error;
-        let mut next_state = core.state.clone();
+        let mut next_state = core.core().state.clone();
         next_state
             .environments
             .insert("kept".to_owned(), recoverable.clone());
-        core.store.replace_state(&next_state).unwrap();
-        core.state = next_state;
+        core.core().store.replace_state(&next_state).unwrap();
+        core.core().state = next_state;
 
-        core.begin_rollback_of_failed_creates().unwrap();
+        core.core().begin_rollback_of_failed_creates().unwrap();
         // A second start before the worker ran begins nothing new.
-        core.begin_rollback_of_failed_creates().unwrap();
-        let pending = core.store.pending_operations().unwrap();
+        core.core().begin_rollback_of_failed_creates().unwrap();
+        let pending = core.core().store.pending_operations().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].kind, OperationKind::Delete);
         assert_eq!(pending[0].environment_id, Some(stranded_id));
@@ -16693,8 +17204,8 @@ mod tests {
             core.environment("dev"),
             Err(SupervisorError::NotFound(_))
         ));
-        assert_eq!(core.environment("kept").unwrap(), &recoverable);
-        assert!(core.store.pending_operations().unwrap().is_empty());
+        assert_eq!(core.environment("kept").unwrap(), recoverable);
+        assert!(core.core().store.pending_operations().unwrap().is_empty());
     }
 
     #[test]
@@ -16763,7 +17274,7 @@ mod tests {
                 credential_authority_root: parent.path().join("credentials"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
-            root,
+            root: Arc::new(root),
             store,
             state,
             children: HashMap::new(),
@@ -16834,7 +17345,7 @@ mod tests {
                 credential_authority_root: parent.path().join("credentials"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
-            root,
+            root: Arc::new(root),
             store,
             state,
             children: HashMap::new(),
@@ -17363,11 +17874,11 @@ mod retire_tests {
         retire(&service, NATIVE_SUPERVISOR_PROTOCOL_VERSION)
             .await
             .unwrap();
-        let core = service.core.lock().await;
+        let core = &service.supervisor;
         let environment = core.environment("dev").unwrap();
         assert!(environment.runner.is_none());
         assert_eq!(environment.state, StoredEnvironmentState::Stopped);
-        assert!(!core.live_runners.contains_key(&environment_id));
+        assert!(!core.core().live_runners.contains_key(&environment_id));
         assert!(
             rustix::process::test_kill_process(
                 rustix::process::Pid::from_raw(process.pid as i32).unwrap()
@@ -17392,7 +17903,7 @@ mod retire_tests {
             let (_parent, mut core) = test_supervisor_core(project_environment());
             with_runner(&mut core, state);
             let service = test_supervisor_service(core);
-            let shutdown = service.shutdown.subscribe();
+            let shutdown = service.supervisor.shutdown.subscribe();
             let refused = retire(&service, ours + 1).await.unwrap_err();
             assert_eq!(refused.code(), tonic::Code::FailedPrecondition, "{state:?}");
             assert!(
@@ -17400,12 +17911,12 @@ mod retire_tests {
                 "{refused:?}"
             );
             assert!(!*shutdown.borrow(), "{state:?}");
-            assert!(!service.core.lock().await.retiring, "{state:?}");
+            assert!(!service.supervisor.core().retiring, "{state:?}");
         }
 
         let (_parent, core) = test_supervisor_core(project_environment());
         let service = test_supervisor_service(core);
-        let shutdown = service.shutdown.subscribe();
+        let shutdown = service.supervisor.shutdown.subscribe();
         assert_eq!(
             retire(&service, ours - 1).await.unwrap_err().code(),
             tonic::Code::InvalidArgument
@@ -17460,7 +17971,8 @@ mod download_cache_tests {
         let mut failed = project_environment();
         failed.state = StoredEnvironmentState::Error;
         failed.generation = 0;
-        let (_parent, mut core) = test_supervisor_core(failed);
+        let (_parent, core) = test_supervisor_core(failed);
+        let core = super::tests::test_supervisor(core);
         let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
         let content = ContentStore::create(&engine).unwrap();
         let (layer, bytes) = cached_layer();
@@ -17468,15 +17980,15 @@ mod download_cache_tests {
             .admit_bytes(&layer, bytes::Bytes::from_static(bytes))
             .await
             .unwrap();
-        core.download_cache = BTreeMap::from([(layer.clone(), bytes.len() as u64)]);
+        core.core().download_cache = BTreeMap::from([(layer.clone(), bytes.len() as u64)]);
 
-        core.begin_rollback_of_failed_creates().unwrap();
+        core.core().begin_rollback_of_failed_creates().unwrap();
         core.run_pending_operations(true).await.unwrap();
         assert!(matches!(
             core.environment("dev"),
             Err(SupervisorError::NotFound(_))
         ));
-        assert_eq!(core.download_cache.len(), 1);
+        assert_eq!(core.core().download_cache.len(), 1);
         assert!(
             content
                 .contains_verified(&layer, bytes.len() as u64)
@@ -17500,7 +18012,7 @@ mod download_cache_tests {
             }))
             .await
             .unwrap();
-        assert!(service.core.lock().await.download_cache.is_empty());
+        assert!(service.supervisor.core().download_cache.is_empty());
     }
 
     #[tokio::test]

@@ -616,9 +616,8 @@ const fn rpc(spec: connectrpc::Spec, behavior: RpcBehavior) -> RpcSemantics {
 
 impl SupervisorRpc {
     async fn public_namespace_id(&self) -> Result<Uuid, connectrpc::ConnectError> {
-        self.core
-            .lock()
-            .await
+        self.supervisor
+            .core()
             .store
             .namespace_id()
             .map_err(|_| local_internal())
@@ -678,22 +677,31 @@ impl SupervisorRpc {
         environment_id: Uuid,
     ) -> Result<v1::DaemonAccess, Status> {
         let (access, broker_request) = {
-            let mut core = self.core.lock().await;
-            let name = core
+            let _serial = self.supervisor.serial.lock().await;
+            let name = self
+                .supervisor
+                .core()
                 .state
                 .environments
                 .values()
                 .find(|environment| environment.id == environment_id)
                 .map(|environment| environment.name.clone())
                 .ok_or_else(|| Status::not_found("local environment was not found"))?;
-            core.replay_pending_operations()
+            self.supervisor
+                .replay_pending_operations()
                 .await
                 .map_err(Status::from)?;
-            if core.environment(&name).map_err(Status::from)?.id != environment_id {
+            if self.supervisor.environment(&name).map_err(Status::from)?.id != environment_id {
                 return Err(Status::not_found("local environment was not found"));
             }
-            let access = core.daemon_access(&name).await.map_err(Status::from)?;
-            let broker_request = core
+            let access = self
+                .supervisor
+                .daemon_access(&name)
+                .await
+                .map_err(Status::from)?;
+            let broker_request = self
+                .supervisor
+                .core()
                 .credential_broker_ensure_request(&name)
                 .map_err(Status::from)?;
             (access, broker_request)
@@ -703,12 +711,11 @@ impl SupervisorRpc {
         // shell depend on remote provider DNS or inference availability. A
         // failure is still recorded, by its closed cause, so a VM that has no
         // credentials says why (an unreachable authority, for one).
-        let core = self.core.clone();
+        let log = self.supervisor.log.clone();
         drop(tokio::spawn(async move {
             if let Err(error) = ensure_credential_broker(broker_request).await {
-                let core = core.lock().await;
                 diagnostic_log::record(
-                    core.log.as_ref(),
+                    log.as_deref(),
                     "credential_broker_failed",
                     &[
                         ("environment", LogField::Id(environment_id)),
@@ -2392,7 +2399,7 @@ impl proto::EnvironmentService for SupervisorRpc {
                 })?;
                 let reference = match placement {
                     codewire_project::StoragePlacement::Local => {
-                        let config = self.core.lock().await.config.credential_authority_config();
+                        let config = self.supervisor.config.credential_authority_config();
                         let mut metadata =
                             codewire_local_credentials::LocalCredentialClient::connect(&config)
                                 .await
@@ -3002,9 +3009,8 @@ mod tests {
         assert_eq!(denied.code, connectrpc::ErrorCode::FailedPrecondition);
         assert!(
             service
-                .core
-                .lock()
-                .await
+                .supervisor
+                .core()
                 .store
                 .pending_operations()
                 .unwrap()
