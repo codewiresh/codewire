@@ -11,7 +11,8 @@ HEAVY_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'ref
 # Every ordinary Heavy group runs on the metal guests' sized labels
 # (infra#1534), main's label on a main push; cloud takes only overflow.
 METAL_MAIN_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-main-large'"'"' || '"'"'ci-heavy-cpu10-ram17g'"'"' }}'
-METAL_MAIN_CARGO_JOBS='      CARGO_BUILD_JOBS: '"'"'11'"'"''
+# Each one bounds cargo by its runner's memory at job start (bound-cargo-jobs.sh).
+METAL_CARGO_BOUND='        run: scripts/ci/setup/bound-cargo-jobs.sh'
 DIAGNOSTICS_WORKFLOW="$ROOT/.gitea/workflows/manual-diagnostics.yaml"
 CLI_RELEASE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
 TMP_ROOT="$ROOT/.tmp"
@@ -701,6 +702,12 @@ run_paths_case warm_rust_cache pull_request refs/pull/3094/head false \
 run_paths_case warm_rust_cache_fixture pull_request refs/pull/3095/head false \
   'policy security security_js' \
   scripts/ci/tests/test-warm-rust-cache.sh
+run_paths_case bound_cargo_jobs pull_request refs/pull/3101/head false \
+  'policy rust rust_workspace security security_js' \
+  scripts/ci/setup/bound-cargo-jobs.sh
+run_paths_case bound_cargo_jobs_fixture pull_request refs/pull/3102/head false \
+  'policy security security_js' \
+  scripts/ci/tests/test-bound-cargo-jobs.sh
 run_paths_case workspace_cache_consumers pull_request refs/pull/2047/head false \
   'policy security security_js' \
   scripts/ci/setup/select-untrusted-workspace-cache.sh \
@@ -2495,7 +2502,7 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
   if [ "$runner" = heavy ]; then runner="$HEAVY_RUNS_ON"; fi
   if [ "$runner" = metal-main ]; then
     runner="$METAL_MAIN_RUNS_ON"
-    grep -qxF "$METAL_MAIN_CARGO_JOBS" "$block"
+    grep -qxF "$METAL_CARGO_BOUND" "$block"
   fi
   grep -qxF "    runs-on: ${runner}" "$block"
   if [ "$job_id" = edge-kind ]; then
@@ -2929,7 +2936,7 @@ fi
   echo 'Codewire CI requires twelve ordinary heavy groups (policy included), the measurement matrix and its probe on the metal labels' >&2
   exit 1
 }
-[[ "$(grep -Fxc "$METAL_MAIN_CARGO_JOBS" "$WORKFLOW")" -eq 14 ]] || {
+[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 14 ]] || {
   echo 'each metal group must bound its cargo jobs to its guest memory' >&2
   exit 1
 }
@@ -4851,7 +4858,7 @@ SUPPORT = {
     "Verify sealed producer tools", "Verify sealed producer tools and isolated Buildx load",
     "Verify Rust cache capacity", "Verify Rust protobuf compiler", "Verify GPUI and Wry build prerequisites",
     "Verify Kind runner tools", "Select best-effort shared Rust cache", "Select existing compiler cache",
-    "Select the warm Rust cache", "Report the warm Rust cache",
+    "Select the warm Rust cache", "Report the warm Rust cache", "Bound cargo jobs by memory",
     "Select independent workspace caches", "Install pinned protobuf compiler",
     "Install pinned protoc for Rust builds", "Install pinned protoc for Rust-backed standard checks",
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",

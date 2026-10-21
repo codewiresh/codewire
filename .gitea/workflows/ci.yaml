@@ -351,10 +351,6 @@ jobs:
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.cw_release_assets_expected == 'true' }}
     env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/cw-cross-ci
     steps:
       - name: Reuse exact PR-head content verification
@@ -367,6 +363,10 @@ jobs:
 
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
@@ -490,10 +490,6 @@ jobs:
     outputs:
       workspace_cache_seed: ${{ steps.cache-seed-report.outputs.workspace_cache_seed }}
     env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
       CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
@@ -544,6 +540,10 @@ jobs:
 
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.selected == 'true' }}
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.selected == 'true' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Prove isolated Buildx load contract
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.workspace == 'true' }}
@@ -640,11 +640,6 @@ jobs:
     # heavy tooling group only when trusted selection requests it.
     name: Policy verification
     runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
-    env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.policy_expected == 'true' }}
@@ -657,6 +652,10 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           fetch-depth: 0
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed policy tools
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|policy|') }}
@@ -704,10 +703,6 @@ jobs:
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.standard_expected == 'true' }}
     env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
     steps:
       - name: Reuse exact PR-head content verification
@@ -726,6 +721,10 @@ jobs:
         env:
           CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
         run: scripts/ci/setup/select-warm-rust-cache.sh
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Set up Go 1.26.9
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|go_support|') || contains(needs.verification-selection.outputs.selection, '|sdk_go|')) }}
@@ -847,11 +846,6 @@ jobs:
     # dependency egress and compute budget intentionally absent from ci-lite.
     name: Tooling / delivery contract verification
     runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
-    env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.tooling_expected == 'true' }}
@@ -864,6 +858,10 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           fetch-depth: 0
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Set up Go 1.26.9 for security checks
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|security_go|') }}
@@ -954,10 +952,6 @@ jobs:
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_compile_expected == 'true' }}
     env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
     steps:
@@ -975,6 +969,10 @@ jobs:
         env:
           CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
         run: scripts/ci/setup/select-warm-rust-cache.sh
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
@@ -1054,10 +1052,6 @@ jobs:
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_shards_expected == 'true' }}
     env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
     steps:
@@ -1075,6 +1069,10 @@ jobs:
         env:
           CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
         run: scripts/ci/setup/select-warm-rust-cache.sh
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
@@ -1157,10 +1155,6 @@ jobs:
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_shards_expected == 'true' }}
     env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
     steps:
@@ -1178,6 +1172,10 @@ jobs:
         env:
           CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
         run: scripts/ci/setup/select-warm-rust-cache.sh
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
@@ -1260,10 +1258,6 @@ jobs:
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_transport_expected == 'true' }}
     env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_DESKTOP_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/desktop-release
@@ -1282,6 +1276,10 @@ jobs:
         env:
           CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
         run: scripts/ci/setup/select-warm-rust-cache.sh
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
@@ -1405,10 +1403,6 @@ jobs:
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.database_expected == 'true' }}
     env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
     steps:
@@ -1426,6 +1420,10 @@ jobs:
         env:
           CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
         run: scripts/ci/setup/select-warm-rust-cache.sh
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
@@ -1547,10 +1545,6 @@ jobs:
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.services_control_expected == 'true' }}
     env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
     steps:
@@ -1588,6 +1582,10 @@ jobs:
         env:
           CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
         run: scripts/ci/setup/select-warm-rust-cache.sh
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
@@ -1711,10 +1709,6 @@ jobs:
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.services_runtime_expected == 'true' }}
     env:
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
     steps:
@@ -1752,6 +1746,10 @@ jobs:
         env:
           CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
         run: scripts/ci/setup/select-warm-rust-cache.sh
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
@@ -2462,15 +2460,14 @@ jobs:
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
       CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ needs.verification-selection.outputs.ci_head_commit }}
           persist-credentials: false
+
+      - name: Bound cargo jobs by memory
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed measurement tools
         run: scripts/ci/setup/assert-ci-runner-image.sh
@@ -2529,15 +2526,14 @@ jobs:
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
       CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
-      # This job runs in a 17 GiB metal guest whose CPU bursts to the host
-      # (infra#1534); one rustc per visible CPU would exceed it. Eleven (about
-      # 1.5 GiB each) is the floor to raise from measured peak memory.
-      CARGO_BUILD_JOBS: '11'
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ needs.verification-selection.outputs.ci_head_commit }}
           persist-credentials: false
+
+      - name: Bound cargo jobs by memory
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed probe tools
         run: scripts/ci/setup/assert-ci-runner-image.sh

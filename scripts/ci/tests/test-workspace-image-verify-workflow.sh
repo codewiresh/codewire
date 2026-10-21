@@ -490,6 +490,7 @@ if sys.argv[2:] == ["--mutations"]:
     scope_owner = "          # Same value as the dispatch decision's owner.\n          WORKSPACE_IMAGE_OWNER: "
     dispatch_owner = "Same value as the container scope below.\n          WORKSPACE_IMAGE_OWNER: "
     checkout = f"        if: ${{{{ {RECEIPT} && steps.container-scope.outputs.selected == 'true' }}}}\n"
+    bound = "\n      - name: Bound cargo jobs by memory\n"
     mutations = {
         "build guarded by the artifact fact": (build + build_if, build + build_if.replace(WORKSPACE, old_guard)),
         "build bypassed on a push":
@@ -508,10 +509,12 @@ if sys.argv[2:] == ["--mutations"]:
         "scope accepts any owner": ("            ci|support-images) ;;\n", "            *) ;;\n"),
         "scope continues on error":
             ("        id: container-scope\n", "        id: container-scope\n        continue-on-error: true\n"),
+        # The checkout's condition is shared with the cargo bound step that
+        # follows it, so the anchor names that step too.
         "unguarded workspace build":
-            (checkout, checkout + "\n      - name: Build the workspace\n"
-                                  f"        if: ${{{{ {RECEIPT} }}}}\n"
-                                  "        run: scripts/ci/verify/verify-workspace-image.sh\n"),
+            (checkout + bound, checkout + "\n      - name: Build the workspace\n"
+                                          f"        if: ${{{{ {RECEIPT} }}}}\n"
+                                          "        run: scripts/ci/verify/verify-workspace-image.sh\n" + bound),
     }
     for label, (old, new) in mutations.items():
         if text.count(old) != 1:
