@@ -44,6 +44,8 @@ grep -A3 '^kubectl_ro()' "$PROOF" | grep -q 'get) ;;' || fail 'kubectl_ro allows
 grep -q "e.state = 'destroyed'" "$PROOF" || fail 'no destroyed-environment binding check'
 grep -q 'released_at IS NULL' "$PROOF" || fail 'no live-binding filter'
 grep -q 'live-pod-uid-differs' "$PROOF" || fail 'no live Pod UID comparison (L1)'
+# A codewire.yaml where the proof runs must not change the requested shape.
+grep -qF 'cw create --no-file --image' "$PROOF" || fail 'the proof create reads a codewire.yaml'
 grep -q "e.state = 'running' AND e.desired_state = 'started'" "$PROOF" ||
   fail 'the running-environment check does not exclude destroyed environments'
 for journey in create destroy-stopped replay; do

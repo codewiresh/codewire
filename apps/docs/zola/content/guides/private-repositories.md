@@ -59,7 +59,8 @@ application secret does not enable cloning.
 
 ## Local VMs
 
-A local VM takes repositories from `codewire.yaml` rather than `--repo`:
+A local VM takes repositories from `codewire.yaml` or from repeatable
+`--repo`, as a cloud environment does:
 
 ```yaml
 repositories:

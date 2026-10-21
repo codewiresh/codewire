@@ -504,7 +504,7 @@ pub(crate) async fn create_native_environment(
     let mut client = native_boot_client().await?;
     if args.name.as_deref().and_then(trimmed_str).is_none() {
         args.name = Some(default_native_name(
-            args.path.as_deref(),
+            Some(&native_source(&args)?.project_directory),
             &native_names().await,
         ));
     }
@@ -523,10 +523,8 @@ pub(crate) async fn create_native_environment(
         .to_owned();
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let requested_path = args.path.as_deref().unwrap_or_else(|| Path::new("."));
-    let source_path = std::fs::canonicalize(requested_path)
-        .with_context(|| format!("resolve native workspace {}", requested_path.display()))?;
-    let mut project = native_codewire_yaml(&source_path, args.file.as_deref())?;
+    let (source, mut project, provenance) = native_plan(&args)?;
+    let source_path = source.project_directory.clone();
     apply_native_setup_overrides(
         &mut project.spec,
         args.install.as_deref(),
@@ -537,14 +535,17 @@ pub(crate) async fn create_native_environment(
     }
     sources::apply_create_source_flags(&mut project.spec, &args)?;
     let declared_direct_mounts = native_direct_mount_warning(&project.local_mounts);
-    let workspace = resolve_native_workspace(
+    let implicit = project.spec.repositories.is_empty() && project.local_mounts.is_empty();
+    let mut workspace = resolve_native_workspace(
         &source_path,
         &mut project,
         args.path_mode,
         Some(&paths.mesh_data_dir.join("native-empty-workspace")),
         native_runtime_supports_mounts(),
     )?;
+    anchor_workspace(&mut workspace, &source, implicit);
     if !reviewed && matches!(args.output, OutputFormat::Text) {
+        eprintln!("Configuration: {}", provenance.text());
         if let Some(notice) = &workspace.notice {
             eprintln!("{notice}");
         }
@@ -722,6 +723,7 @@ pub(crate) async fn create_native_environment(
     Ok(Some(NativeCreated {
         environment,
         secrets: context.secrets,
+        configuration: provenance,
     }))
 }
 
@@ -832,17 +834,16 @@ fn default_native_name(path: Option<&Path>, taken: &[String]) -> String {
 }
 
 fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
-    let requested = args.path.as_deref().unwrap_or_else(|| Path::new("."));
-    let source = std::fs::canonicalize(requested)
-        .with_context(|| format!("resolve {}", requested.display()))?;
-    let mut project = native_codewire_yaml(&source, args.file.as_deref())?;
-    let workspace = resolve_native_workspace(
-        &source,
+    let (source, mut project, provenance) = native_plan(args)?;
+    let implicit = project.spec.repositories.is_empty() && project.local_mounts.is_empty();
+    let mut workspace = resolve_native_workspace(
+        &source.project_directory,
         &mut project,
         args.path_mode,
         None,
         native_runtime_supports_mounts(),
     )?;
+    anchor_workspace(&mut workspace, &source, implicit);
     let image = args
         .image
         .as_deref()
@@ -898,6 +899,7 @@ fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
             "  Name         {}",
             args.name.as_deref().unwrap_or_default()
         ),
+        format!("  Config       {}", provenance.text()),
         format!("  Workspace    {}", workspace.description),
     ];
     if let Some(kept_in_vm) = &workspace.kept_in_vm {
@@ -2606,32 +2608,129 @@ struct NativeProjectPlan {
     working_directory_explicit: bool,
 }
 
+/// Where a local create's configuration comes from and its project
+/// directory: the implicit workspace, the base of `workspace.vm_only` and the
+/// default name.
+#[derive(Debug, PartialEq, Eq)]
+struct NativeSource {
+    project_directory: PathBuf,
+    config: project_file::ConfigSource,
+    /// The invoking directory, when a file found above it, without
+    /// `--path`, made the file's folder the project directory.
+    invoked_from: Option<PathBuf>,
+}
+
+/// The search starts at `--path` or the invoking directory. `--file` is a
+/// relative path beneath that directory. Without `--path`, a file found
+/// above the invoking directory makes its own folder the project directory,
+/// so creating from a subdirectory matches creating beside the file; an
+/// explicit `--path` stays the project directory.
+fn native_source(args: &EnvCreateArgs) -> anyhow::Result<NativeSource> {
+    let requested = args.path.as_deref().unwrap_or_else(|| Path::new("."));
+    let start = std::fs::canonicalize(requested)
+        .with_context(|| format!("resolve native workspace {}", requested.display()))?;
+    if args.no_file {
+        return Ok(NativeSource {
+            project_directory: start,
+            config: project_file::ConfigSource::NoFile,
+            invoked_from: None,
+        });
+    }
+    native_source_at(start, args.path.is_some(), args.file.as_deref())
+}
+
+/// [`native_source`] from the canonical start directory.
+fn native_source_at(
+    start: PathBuf,
+    explicit_path: bool,
+    file: Option<&Path>,
+) -> anyhow::Result<NativeSource> {
+    if let Some(file) = file {
+        if file.is_absolute()
+            || file.as_os_str().is_empty()
+            || file
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            anyhow::bail!("native --file must be a relative path beneath --path");
+        }
+        return Ok(NativeSource {
+            config: project_file::ConfigSource::File(start.join(file)),
+            project_directory: start,
+            invoked_from: None,
+        });
+    }
+    let Some(found) = project_file::discover(&start)? else {
+        return Ok(NativeSource {
+            project_directory: start,
+            config: project_file::ConfigSource::Flags,
+            invoked_from: None,
+        });
+    };
+    let folder = found
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("native codewire.yaml has no parent directory"))?
+        .to_owned();
+    let (project_directory, invoked_from) = if explicit_path || folder == start {
+        (start, None)
+    } else {
+        (folder, Some(start))
+    };
+    Ok(NativeSource {
+        project_directory,
+        config: project_file::ConfigSource::Discovered(found),
+        invoked_from,
+    })
+}
+
+/// The selected file with the repository flags applied, and where the
+/// configuration came from. Explicit repositories replace the file's list.
+fn native_plan(
+    args: &EnvCreateArgs,
+) -> anyhow::Result<(NativeSource, NativeProjectPlan, project_file::Provenance)> {
+    let source = native_source(args)?;
+    let mut project = native_codewire_yaml(&source.project_directory, &source.config)?;
+    let mut provenance = project_file::Provenance::new(source.config.clone());
+    provenance.repositories_from_flags = project_file::apply_repository_flags(
+        &mut project.spec,
+        &args.repo_urls,
+        &args.repo_flags,
+        args.branch.as_deref().and_then(trimmed_str),
+        true,
+    )?;
+    provenance.default_image =
+        project.spec.image.is_empty() && args.image.as_deref().and_then(trimmed_str).is_none();
+    Ok((source, project, provenance))
+}
+
+/// The workspace line names the project directory a file above the invoking
+/// directory chose, and where the person is.
+fn anchor_workspace(workspace: &mut NativeWorkspace, source: &NativeSource, implicit: bool) {
+    if let Some(from) = &source.invoked_from
+        && implicit
+        && workspace.description != "empty"
+    {
+        workspace.description = format!(
+            "{} (from codewire.yaml; you are in {})",
+            workspace.description,
+            project_file::shown_path(from)
+        );
+    }
+}
+
 fn native_codewire_yaml(
     source_path: &Path,
-    requested_file: Option<&Path>,
+    config: &project_file::ConfigSource,
 ) -> anyhow::Result<NativeProjectPlan> {
-    let file = requested_file.unwrap_or_else(|| Path::new("codewire.yaml"));
-    if file.is_absolute()
-        || file.as_os_str().is_empty()
-        || file
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        anyhow::bail!("native --file must be a relative path beneath --path");
-    }
-    let path = source_path.join(file);
-    let file = match std::fs::File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && requested_file.is_none() => {
-            let (vm_only, vm_only_notes) = native_vm_only(source_path, None);
-            return Ok(NativeProjectPlan {
-                vm_only,
-                vm_only_notes,
-                ..NativeProjectPlan::default()
-            });
-        }
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    let Some(path) = config.path() else {
+        let (vm_only, vm_only_notes) = native_vm_only(source_path, None);
+        return Ok(NativeProjectPlan {
+            vm_only,
+            vm_only_notes,
+            ..NativeProjectPlan::default()
+        });
     };
+    let file = std::fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
     use std::io::Read as _;
     let mut data = String::new();
     file.take((codewire_project::MAX_PROJECT_DOCUMENT_BYTES + 1) as u64)
@@ -2642,7 +2741,8 @@ fn native_codewire_yaml(
     let unsupported = native_unsupported_project_fields(&document);
     if !unsupported.is_empty() {
         anyhow::bail!(
-            "native local preview does not yet support codewire.yaml fields: {}",
+            "native local preview does not yet support {} fields: {}",
+            path.display(),
             unsupported.join(", ")
         );
     }
@@ -2894,6 +2994,32 @@ fn vm_only_review(source_path: &Path, patterns: &[String], live: bool) -> Vec<St
     lines
 }
 
+/// A declared workspace: each repository's isolated clone and destination,
+/// then the file's mounts.
+fn declared_workspace(
+    repositories: &[codewire_project::RepositorySpec],
+    mounts: &[v1::LocalMountInput],
+) -> String {
+    let mut parts = repositories
+        .iter()
+        .map(|repository| {
+            format!(
+                "clone {} at {}",
+                terminal_text(&repository.source),
+                terminal_text(&repository.destination)
+            )
+        })
+        .collect::<Vec<_>>();
+    if !mounts.is_empty() {
+        parts.push(if repositories.is_empty() {
+            "as declared in codewire.yaml".to_owned()
+        } else {
+            "mounts as declared in codewire.yaml".to_owned()
+        });
+    }
+    parts.join(", ")
+}
+
 /// Why the guest leaves a pattern's folder shared: a symlink or file at the
 /// path, or a parent that is not a plain folder. None when it can be created.
 fn vm_only_blocked(source_path: &Path, path: &str) -> Option<String> {
@@ -3076,7 +3202,7 @@ fn resolve_native_workspace(
     if !project.spec.repositories.is_empty() || !project.local_mounts.is_empty() {
         if requested_mode.is_some() {
             anyhow::bail!(
-                "--path-mode applies only when codewire.yaml has no repositories or mounts"
+                "--path-mode applies only when codewire.yaml has no repositories or mounts and no --repo is given"
             );
         }
         let kept = project
@@ -3094,7 +3220,7 @@ fn resolve_native_workspace(
             Vec::new()
         };
         return Ok(NativeWorkspace {
-            description: "as declared in codewire.yaml".to_owned(),
+            description: declared_workspace(&project.spec.repositories, &project.local_mounts),
             kept_in_vm: applies.then(|| codewire_project::vm_only_summary(&vm_only)),
             vm_only_notes: if applies {
                 project
@@ -3300,9 +3426,6 @@ fn display_host_path(path: &Path) -> String {
 
 fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
     let mut unsupported = Vec::new();
-    if !args.repo_urls.is_empty() || !args.repo_flags.is_empty() {
-        unsupported.push("repositories");
-    }
     if args.preset_slug.is_some() || args.preset_id.is_some() {
         unsupported.push("presets");
     }
@@ -3314,9 +3437,6 @@ fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Res
     }
     if args.isolation.is_some() {
         unsupported.push("--isolation");
-    }
-    if args.branch.is_some() {
-        unsupported.push("--branch");
     }
     if args.coding_agent.is_some() {
         unsupported.push("--coding-agent");
@@ -3416,6 +3536,17 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The plan from `dir`'s own codewire.yaml, or from no file.
+    fn yaml_in(dir: &Path) -> anyhow::Result<NativeProjectPlan> {
+        let path = dir.join("codewire.yaml");
+        let config = if path.exists() {
+            project_file::ConfigSource::Discovered(path)
+        } else {
+            project_file::ConfigSource::Flags
+        };
+        native_codewire_yaml(dir, &config)
+    }
 
     /// A platform profile qualifies a managed agent in a local VM by its
     /// pinned slots and the rule hosted Sandboxes use; before, any platform
@@ -4037,7 +4168,7 @@ mod tests {
     fn native_yaml_accepts_the_shared_workspace_image_field() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("codewire.yaml"), "image: workspace\n").unwrap();
-        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        let project = yaml_in(temp.path()).unwrap();
         assert_eq!(project.spec.image, "workspace");
     }
 
@@ -4049,7 +4180,7 @@ mod tests {
             "install_command: '  printf install  '\nstartup_script: '  printf startup  '\n",
         )
         .unwrap();
-        let mut project = native_codewire_yaml(temp.path(), None).unwrap();
+        let mut project = yaml_in(temp.path()).unwrap();
         assert_eq!(project.spec.install_command, "printf install");
         assert_eq!(project.spec.startup_script, "printf startup");
         apply_native_setup_overrides(&mut project.spec, None, Some("  printf override  ")).unwrap();
@@ -4119,7 +4250,7 @@ mod tests {
             "version: 1\ncpu: \"2000m\"\nmemory: \"8GB\"\ndisk: \"40GB\"\n",
         )
         .unwrap();
-        let resources = native_codewire_yaml(temp.path(), None).unwrap();
+        let resources = yaml_in(temp.path()).unwrap();
         assert_eq!(resources.vcpus, Some(2));
         assert_eq!(resources.memory_mib, Some(8 * 1024));
         assert_eq!(resources.disk_bytes, Some(40 * 1024 * 1024 * 1024));
@@ -4134,7 +4265,7 @@ mod tests {
         )
         .unwrap();
 
-        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        let project = yaml_in(temp.path()).unwrap();
         assert_eq!(
             project.spec.credentials.as_ref().unwrap().profile,
             "local:user/work"
@@ -4150,7 +4281,7 @@ mod tests {
         )
         .unwrap();
 
-        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        let project = yaml_in(temp.path()).unwrap();
         assert_eq!(project.spec.secrets.project, "local:development");
         assert_eq!(
             project.spec.secrets.user,
@@ -4168,7 +4299,7 @@ mod tests {
                 format!("environment: {{{key}: synthetic}}\n"),
             )
             .unwrap();
-            let error = native_codewire_yaml(temp.path(), None).unwrap_err();
+            let error = yaml_in(temp.path()).unwrap_err();
             assert!(
                 format!("{error:#}")
                     .contains(&format!("{key} is reserved for Codewire runtime control")),
@@ -4188,8 +4319,11 @@ mod tests {
             "mounts: [{source: ../fixtures, destination: /workspace/fixtures, mode: copy}]\n",
         )
         .unwrap();
-        let mut project =
-            native_codewire_yaml(temp.path(), Some(Path::new("config/dev.yaml"))).unwrap();
+        let mut project = native_codewire_yaml(
+            temp.path(),
+            &project_file::ConfigSource::File(temp.path().join("config/dev.yaml")),
+        )
+        .unwrap();
         assert_eq!(project.spec.working_directory, "/workspace/fixtures");
         assert_eq!(project.local_mounts.len(), 1);
         assert_eq!(
@@ -4221,7 +4355,7 @@ mod tests {
             "mounts: [{source: ./fixtures, destination: /workspace/fixtures, mode: direct, read_only: true}]\n",
         )
         .unwrap();
-        let mut project = native_codewire_yaml(temp.path(), None).unwrap();
+        let mut project = yaml_in(temp.path()).unwrap();
         assert_eq!(project.local_mounts.len(), 1);
         assert_eq!(
             project.local_mounts[0].mode,
@@ -4257,13 +4391,13 @@ working_directory: /workspace/github
         )
         .unwrap();
 
-        let mut project = native_codewire_yaml(temp.path(), None).unwrap();
+        let mut project = yaml_in(temp.path()).unwrap();
         assert_eq!(project.spec.repositories.len(), 2);
         assert_eq!(project.spec.working_directory, "/workspace/github");
         assert_eq!(
             resolve_native_workspace(temp.path(), &mut project, None, None, true).unwrap(),
             NativeWorkspace {
-                description: "as declared in codewire.yaml".to_owned(),
+                description: "clone https://github.com/noeljackson/method.git at /workspace/github, clone https://git.example.invalid/supplychain.git at /workspace/gitea".to_owned(),
                 ..NativeWorkspace::default()
             }
         );
@@ -4283,6 +4417,249 @@ working_directory: /workspace/github
         );
     }
 
+    fn local_create_args(argv: &[&str]) -> Box<EnvCreateArgs> {
+        use clap::Parser as _;
+        let mut full = vec!["cw", "--local", "create"];
+        full.extend_from_slice(argv);
+        let (_, _, EnvCommand::Create(args)) =
+            crate::commands::env_operation(crate::Cli::try_parse_from(full).unwrap())
+        else {
+            panic!("expected environment creation");
+        };
+        args
+    }
+
+    /// A Git checkout `app` with a root codewire.yaml and `app/crates`.
+    fn checkout(yaml: &str) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap().join("app");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("crates")).unwrap();
+        std::fs::write(root.join("codewire.yaml"), yaml).unwrap();
+        (temp, root)
+    }
+
+    #[test]
+    fn native_discovery_from_a_subdirectory_anchors_the_project_at_the_file() {
+        let (_temp, root) = checkout("version: 1\ninstall_command: make setup\n");
+        let found = project_file::ConfigSource::Discovered(root.join("codewire.yaml"));
+        // Without --path: the file's folder is the project directory.
+        assert_eq!(
+            native_source_at(root.join("crates"), false, None).unwrap(),
+            NativeSource {
+                project_directory: root.clone(),
+                config: found.clone(),
+                invoked_from: Some(root.join("crates")),
+            }
+        );
+        // Beside the file nothing changes.
+        assert_eq!(
+            native_source_at(root.clone(), false, None).unwrap(),
+            NativeSource {
+                project_directory: root.clone(),
+                config: found.clone(),
+                invoked_from: None,
+            }
+        );
+        // An explicit --path stays the project directory; the file applies.
+        assert_eq!(
+            native_source_at(root.join("crates"), true, None).unwrap(),
+            NativeSource {
+                project_directory: root.join("crates"),
+                config: found.clone(),
+                invoked_from: None,
+            }
+        );
+        // --file overrides the search and is read beneath the start.
+        std::fs::write(root.join("crates/ci.yaml"), "version: 1\n").unwrap();
+        assert_eq!(
+            native_source_at(root.join("crates"), false, Some(Path::new("ci.yaml")))
+                .unwrap()
+                .config,
+            project_file::ConfigSource::File(root.join("crates/ci.yaml"))
+        );
+        assert!(
+            native_source_at(root.clone(), false, Some(Path::new("/etc/codewire.yaml"))).is_err()
+        );
+        let missing =
+            native_source_at(root.clone(), false, Some(Path::new("missing.yaml"))).unwrap();
+        assert!(native_codewire_yaml(&root, &missing.config).is_err());
+
+        let source = native_source_at(root.join("crates"), false, None).unwrap();
+        let mut workspace = NativeWorkspace {
+            description: format!(
+                "mount {} at /workspace/app (live, read-write)",
+                root.display()
+            ),
+            ..NativeWorkspace::default()
+        };
+        anchor_workspace(&mut workspace, &source, true);
+        assert_eq!(
+            workspace.description,
+            format!(
+                "mount {} at /workspace/app (live, read-write) (from codewire.yaml; you are in {})",
+                root.display(),
+                project_file::shown_path(&root.join("crates"))
+            )
+        );
+        // Declared repositories or an empty workspace use no project folder.
+        for (description, implicit) in [("empty", true), ("clone x at /workspace/x", false)] {
+            let mut workspace = NativeWorkspace {
+                description: description.to_owned(),
+                ..NativeWorkspace::default()
+            };
+            anchor_workspace(&mut workspace, &source, implicit);
+            assert_eq!(workspace.description, description);
+        }
+    }
+
+    #[test]
+    fn native_no_file_skips_the_search() {
+        let (_temp, root) = checkout("version: 1\ninstall_command: make setup\n");
+        let args =
+            local_create_args(&["--path", root.join("crates").to_str().unwrap(), "--no-file"]);
+        let (source, project, provenance) = native_plan(&args).unwrap();
+        assert_eq!(source.config, project_file::ConfigSource::NoFile);
+        assert_eq!(source.project_directory, root.join("crates"));
+        assert!(project.spec.install_command.is_empty());
+        assert_eq!(
+            provenance.text(),
+            "flags only (--no-file); default workspace image"
+        );
+    }
+
+    #[test]
+    fn native_discovery_never_merges_a_nested_repository_file() {
+        let (_temp, root) = checkout("version: 1\ninstall_command: make root\n");
+        let nested = root.join("vendor/lib");
+        std::fs::create_dir_all(nested.join(".git")).unwrap();
+        std::fs::write(
+            nested.join("codewire.yaml"),
+            "version: 1\ninstall_command: make nested\nstartup_script: nested-only\n",
+        )
+        .unwrap();
+        let source = native_source_at(root.clone(), false, None).unwrap();
+        let plan = native_codewire_yaml(&source.project_directory, &source.config).unwrap();
+        assert_eq!(plan.spec.install_command, "make root");
+        assert!(plan.spec.startup_script.is_empty());
+        let source = native_source_at(nested.clone(), false, None).unwrap();
+        let plan = native_codewire_yaml(&source.project_directory, &source.config).unwrap();
+        assert_eq!(plan.spec.install_command, "make nested");
+    }
+
+    #[test]
+    fn native_repo_flags_select_isolated_clones_that_replace_the_file_list() {
+        let (_temp, root) = checkout(
+            "version: 1\nrepositories:\n  - source: https://example.test/org/file.git\n    destination: /workspace/file\ninstall_command: make setup\n",
+        );
+        let path = root.to_str().unwrap();
+        let args = local_create_args(&[
+            "--path",
+            path,
+            "--repo",
+            "https://example.test/org/web.git::/workspace/web",
+            "--repo",
+            "https://example.test/org/api.git@dev::/workspace/api",
+        ]);
+        reject_unsupported_native_create_options(&args).unwrap();
+        let (source, mut project, provenance) = native_plan(&args).unwrap();
+        assert!(provenance.repositories_from_flags);
+        assert_eq!(project.spec.install_command, "make setup");
+        assert_eq!(project.spec.working_directory, "/workspace");
+        assert_eq!(
+            project
+                .spec
+                .repositories
+                .iter()
+                .map(|r| (r.source.as_str(), r.branch.as_str(), r.destination.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("https://example.test/org/web.git", "", "/workspace/web"),
+                ("https://example.test/org/api.git", "dev", "/workspace/api"),
+            ]
+        );
+        let workspace =
+            resolve_native_workspace(&source.project_directory, &mut project, None, None, true)
+                .unwrap();
+        // Isolated clones: no host mount and no implicit snapshot.
+        assert!(project.local_mounts.is_empty());
+        assert!(workspace.source_path.is_empty());
+        assert_eq!(
+            workspace.description,
+            "clone https://example.test/org/web.git at /workspace/web, clone https://example.test/org/api.git at /workspace/api"
+        );
+        let error = resolve_native_workspace(
+            &source.project_directory,
+            &mut project,
+            Some(PathModeArg::Snapshot),
+            None,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--repo"), "{error}");
+
+        // One positional repository with --branch, and no file.
+        let empty = tempfile::tempdir().unwrap();
+        let args = local_create_args(&[
+            "--path",
+            empty.path().to_str().unwrap(),
+            "https://example.test/org/app.git",
+            "--branch",
+            "release",
+        ]);
+        let (_, project, provenance) = native_plan(&args).unwrap();
+        assert_eq!(project.spec.repositories[0].branch, "release");
+        assert_eq!(project.spec.working_directory, "/workspace/app");
+        assert!(provenance.default_image);
+        // --branch without a repository, and duplicate destinations, refuse.
+        let args = local_create_args(&["--path", empty.path().to_str().unwrap(), "--branch", "x"]);
+        assert!(native_plan(&args).is_err());
+        let args = local_create_args(&[
+            "--path",
+            empty.path().to_str().unwrap(),
+            "--repo",
+            "https://example.test/org/a.git::/workspace/app",
+            "--repo",
+            "https://example.test/org/b.git::/workspace/app",
+        ]);
+        assert!(native_plan(&args).is_err());
+    }
+
+    #[test]
+    fn native_review_names_the_configuration_source() {
+        let (_temp, root) = checkout("version: 1\nimage: workspace\n");
+        let mut args = local_create_args(&["--path", root.join("crates").to_str().unwrap()]);
+        args.name = Some("app".to_owned());
+        let summary = native_create_summary(&args).unwrap();
+        assert!(
+            summary.contains(&format!(
+                "  Config       {}\n",
+                project_file::shown_path(&root.join("codewire.yaml"))
+            )),
+            "{summary}"
+        );
+        std::fs::remove_file(root.join("codewire.yaml")).unwrap();
+        let summary = native_create_summary(&args).unwrap();
+        assert!(
+            summary.contains(
+                "  Config       flags only, no codewire.yaml found; default workspace image\n"
+            ),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn start_restart_and_attach_take_no_project_file() {
+        use clap::Parser as _;
+        for argv in [
+            ["cw", "start", "app", "--file", "codewire.yaml"],
+            ["cw", "restart", "app", "--file", "codewire.yaml"],
+            ["cw", "attach", "app", "--file", "codewire.yaml"],
+        ] {
+            assert!(crate::Cli::try_parse_from(argv).is_err(), "{argv:?}");
+        }
+    }
+
     #[test]
     fn native_yaml_accepts_skill_projection_metadata_without_agent_installation() {
         let temp = tempfile::tempdir().unwrap();
@@ -4292,7 +4669,7 @@ working_directory: /workspace/github
             "agents: {tools: [codex]}\nskills: [{source: repository, path: .agents/skills/rust}]\n",
         )
         .unwrap();
-        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        let project = yaml_in(temp.path()).unwrap();
         assert_eq!(project.spec.agents.tools, vec!["codex"]);
         assert_eq!(project.spec.agents.install, None);
         assert_eq!(project.spec.skills.len(), 1);
@@ -4302,7 +4679,7 @@ working_directory: /workspace/github
             "agents: {install: true, tools: [codex]}\nskills: [{source: repository, path: .agents/skills/rust}]\n",
         )
         .unwrap();
-        let error = native_codewire_yaml(temp.path(), None).unwrap_err();
+        let error = yaml_in(temp.path()).unwrap_err();
         assert!(error.to_string().contains("fields: agents"), "{error}");
     }
 
@@ -4315,7 +4692,7 @@ working_directory: /workspace/github
         )
         .unwrap();
 
-        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        let project = yaml_in(temp.path()).unwrap();
         assert_eq!(
             project
                 .spec
@@ -4352,7 +4729,7 @@ working_directory: /workspace/github
         let project_dir = temp.path().join("My App");
         std::fs::create_dir(&project_dir).unwrap();
         let source = std::fs::canonicalize(&project_dir).unwrap();
-        let mut project = native_codewire_yaml(&source, None).unwrap();
+        let mut project = yaml_in(&source).unwrap();
         let workspace = resolve_native_workspace(&source, &mut project, None, None, true).unwrap();
         assert_eq!(workspace.source_path, "");
         assert_eq!(workspace.path_mode, "");
@@ -4396,7 +4773,7 @@ working_directory: /workspace/github
         )
         .unwrap();
         let source = std::fs::canonicalize(temp.path()).unwrap();
-        let mut project = native_codewire_yaml(&source, None).unwrap();
+        let mut project = yaml_in(&source).unwrap();
         resolve_native_workspace(&source, &mut project, None, None, true).unwrap();
         assert_eq!(project.local_mounts.len(), 1);
         assert_eq!(project.spec.working_directory, "/workspace");
@@ -4407,7 +4784,7 @@ working_directory: /workspace/github
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("file"), "content").unwrap();
         let source = std::fs::canonicalize(temp.path()).unwrap();
-        let mut project = native_codewire_yaml(&source, None).unwrap();
+        let mut project = yaml_in(&source).unwrap();
         let workspace = resolve_native_workspace(&source, &mut project, None, None, false).unwrap();
         assert!(project.local_mounts.is_empty());
         assert_eq!(workspace.source_path, source.to_string_lossy());
@@ -4429,7 +4806,7 @@ working_directory: /workspace/github
         let source = std::fs::canonicalize(temp.path()).unwrap();
         let mount = |yaml: &str| {
             std::fs::write(source.join("codewire.yaml"), yaml).unwrap();
-            let mut project = native_codewire_yaml(&source, None).unwrap();
+            let mut project = yaml_in(&source).unwrap();
             let workspace =
                 resolve_native_workspace(&source, &mut project, None, None, true).unwrap();
             (project, workspace)
@@ -4454,7 +4831,7 @@ working_directory: /workspace/github
 
         // A copy snapshot skips the list; a clone takes only committed files.
         std::fs::write(source.join("codewire.yaml"), "version: 1\n").unwrap();
-        let mut project = native_codewire_yaml(&source, None).unwrap();
+        let mut project = yaml_in(&source).unwrap();
         let copy =
             resolve_native_workspace(&source, &mut project, Some(PathModeArg::Copy), None, true)
                 .unwrap();

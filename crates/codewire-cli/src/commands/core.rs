@@ -307,6 +307,7 @@ pub(crate) fn env_create_request_from_init_args(
         path: None,
         path_mode: None,
         file: None,
+        no_file: false,
         spec: None,
         ttl: args.ttl.clone(),
         cpu: args.cpu.map(|value| value.to_string()),

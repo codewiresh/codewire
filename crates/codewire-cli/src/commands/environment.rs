@@ -489,6 +489,23 @@ pub(crate) async fn handle_platform_env_command(
 ) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
+    // A create reads and checks its configuration, and names where it came
+    // from, before it reads the platform settings or sends any request.
+    let mut prepared_create = match &command {
+        EnvCommand::Create(args) => {
+            let source = project_file::select_from(
+                &project_file::invoking_directory()?,
+                args.file.as_deref(),
+                args.no_file,
+            )?;
+            let prepared = prepare_platform_env_create(args, &source)?;
+            if matches!(args.output, OutputFormat::Text) {
+                eprintln!("Configuration: {}", prepared.1.text());
+            }
+            Some(prepared)
+        }
+        _ => None,
+    };
     let platform = resolve_platform(globals, &paths, &env)?;
     // An explicit network on a cloud create is refused before any request.
     if let EnvCommand::Create(args) = &command {
@@ -515,7 +532,9 @@ pub(crate) async fn handle_platform_env_command(
         EnvCommand::Runtime(_) => anyhow::bail!("cw runtime supports only native Linux VMs"),
         EnvCommand::Create(args) => {
             let began = Instant::now();
-            let mut request = prepare_platform_env_create_request(&args)?;
+            let (mut request, provenance) = prepared_create
+                .take()
+                .context("the create request was not prepared")?;
             if let Some(request) = resolve_env_create_mesh_bootstrap(
                 &paths,
                 &env,
@@ -554,9 +573,12 @@ pub(crate) async fn handle_platform_env_command(
                 eprintln!("Preset saved: {} ({}).", preset.name, preset.id);
             }
             match args.output {
-                OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&environment)?)
-                }
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &provenance.add_to(serde_json::to_value(&environment)?)
+                    )?
+                ),
                 OutputFormat::Text if args.follow && !args.no_wait => {
                     let caps = super::lifecycle_output::capabilities(args.output);
                     let summary = lifecycle::cloud_summary(&environment, Outcome::Created, &names);
@@ -2310,9 +2332,25 @@ pub(crate) fn format_environment_daemon_status(status: &EnvironmentDaemonStatus)
     output
 }
 
+/// The request from the flags and the file `--file` names, if any. Nothing
+/// is searched for: `cw init` and direct request construction use this; a
+/// create selects its file first ([`project_file::select_from`]).
 pub(crate) fn env_create_request_from_args(
     args: &EnvCreateArgs,
 ) -> anyhow::Result<CreateEnvironmentRequest> {
+    let source = match args.file.as_deref() {
+        Some(path) => project_file::ConfigSource::File(path.to_owned()),
+        None => project_file::ConfigSource::Flags,
+    };
+    env_create_request_from_source(args, &source).map(|(request, _)| request)
+}
+
+/// The request from the selected file and the flags, which win over it, and
+/// where its configuration came from. `cw use` never selects a source.
+pub(crate) fn env_create_request_from_source(
+    args: &EnvCreateArgs,
+    source: &project_file::ConfigSource,
+) -> anyhow::Result<(CreateEnvironmentRequest, project_file::Provenance)> {
     let ttl_seconds = args
         .ttl
         .as_deref()
@@ -2321,10 +2359,13 @@ pub(crate) fn env_create_request_from_args(
         .transpose()
         .context("invalid --ttl duration")?;
     let preset_id = trimmed_optional(args.preset_id.clone());
-    // Only the explicitly named file supplies defaults. Neither the working
-    // directory nor `cw use` selects a source or a management write target.
-    let mut project_spec = match args.file.as_deref() {
-        Some(path) => sources::load_platform_document(path)?,
+    let mut provenance = project_file::Provenance::new(source.clone());
+    let mut project_spec = match source.path() {
+        Some(path) => {
+            let document = sources::load_platform_document(path)?;
+            provenance.unused_fields = document.unused_fields;
+            document.spec
+        }
         None => codewire_project::ProjectSpec::default(),
     };
     if let Some(preset) = &args.preset_slug {
@@ -2339,31 +2380,15 @@ pub(crate) fn env_create_request_from_args(
             expand_image_ref(image)
         };
     }
-    if !args.repo_urls.is_empty() || !args.repo_flags.is_empty() {
-        project_spec.repositories = collect_env_create_repos(
-            &args.repo_urls,
-            &args.repo_flags,
-            args.branch.as_deref().and_then(trimmed_str),
-        )?;
-        project_spec.working_directory = match project_spec.repositories.as_slice() {
-            [repository] => repository.destination.clone(),
-            _ => "/workspace".to_owned(),
-        };
-    } else if let Some(branch) = args.branch.as_deref().and_then(trimmed_str) {
-        match project_spec.repositories.as_mut_slice() {
-            [repository] => {
-                repository.branch = branch.to_owned();
-                repository.revision.clear();
-            }
-            [] if args.file.is_some() => anyhow::bail!("--branch requires a repository"),
-            // `cw init --branch` detects its repository after constructing
-            // this draft. Keep that existing deferred discovery intact.
-            [] => {}
-            _ => anyhow::bail!(
-                "--branch is ambiguous with multiple YAML repositories; specify --repo"
-            ),
-        }
-    }
+    // Without a file, `cw init --branch` detects its repository after
+    // constructing this draft, so a missing repository is not refused here.
+    provenance.repositories_from_flags = project_file::apply_repository_flags(
+        &mut project_spec,
+        &args.repo_urls,
+        &args.repo_flags,
+        args.branch.as_deref().and_then(trimmed_str),
+        source.path().is_some(),
+    )?;
     if let Some(install) = &args.install {
         project_spec.install_command = install.trim().to_owned();
     }
@@ -2409,14 +2434,17 @@ pub(crate) fn env_create_request_from_args(
         });
     }
     project_spec.validate()?;
-    Ok(CreateEnvironmentRequest {
-        preset_id,
-        name: trimmed_optional(args.name.clone()),
-        ttl_seconds,
-        isolation_tier: args.isolation.clone().unwrap_or_default(),
-        project_spec,
-        ..Default::default()
-    })
+    Ok((
+        CreateEnvironmentRequest {
+            preset_id,
+            name: trimmed_optional(args.name.clone()),
+            ttl_seconds,
+            isolation_tier: args.isolation.clone().unwrap_or_default(),
+            project_spec,
+            ..Default::default()
+        },
+        provenance,
+    ))
 }
 
 fn parse_platform_create_quantity(value: Option<&str>, label: &str) -> anyhow::Result<Option<i32>> {
@@ -2449,19 +2477,32 @@ fn parse_create_disk(value: Option<&str>) -> anyhow::Result<Option<i32>> {
         .transpose()
 }
 
-pub(crate) fn prepare_platform_env_create_request(
+/// The cloud create request and its provenance. With no image or preset
+/// named, a file or a create without repositories gets the default workspace
+/// image. Only a flags-only create with repositories leaves the image to the
+/// defaults Codewire Cloud saved for its first repository, so those defaults
+/// never fill settings a selected file left out.
+pub(crate) fn prepare_platform_env_create(
     args: &EnvCreateArgs,
-) -> anyhow::Result<CreateEnvironmentRequest> {
-    let mut request = env_create_request_from_args(args)?;
+    source: &project_file::ConfigSource,
+) -> anyhow::Result<(CreateEnvironmentRequest, project_file::Provenance)> {
+    let (mut request, mut provenance) = env_create_request_from_source(args, source)?;
     request.project_spec.ensure_platform_compatible()?;
     if request.preset_id.is_none()
         && request.project_spec.preset.is_empty()
-        && request.project_spec.repositories.is_empty()
         && request.project_spec.image.is_empty()
     {
-        request.project_spec.image = CANONICAL_WORKSPACE_IMAGE.to_string();
+        match request.project_spec.repositories.first() {
+            Some(repository) if source.path().is_none() => {
+                provenance.repository_defaults = Some(repository.source.clone());
+            }
+            _ => {
+                request.project_spec.image = CANONICAL_WORKSPACE_IMAGE.to_string();
+                provenance.default_image = true;
+            }
+        }
     }
-    Ok(request)
+    Ok((request, provenance))
 }
 
 #[derive(serde::Serialize)]

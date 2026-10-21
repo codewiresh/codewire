@@ -550,6 +550,9 @@ run_explicit_isolation_tier_case() {
     { previous = $0 }
     END { exit found ? 0 : 1 }
   ' "$args_file" || fail "environment create did not request confidential isolation explicitly"
+  # Without its own document the smoke reads no codewire.yaml.
+  [[ "$(sed -n '1,2p' "$args_file" | paste -sd ' ')" == "create --no-file" ]] ||
+    fail "environment create without a document may read a codewire.yaml"
 }
 
 run_resize_guest_case() {

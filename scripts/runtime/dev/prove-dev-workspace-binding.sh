@@ -235,7 +235,8 @@ create_env() {
   # The per-user create limit (10 per 60 s) resets only after 60 s without a
   # create, so a long run waits out the window instead of failing a journey.
   for attempt in 1 2 3; do
-    if cw create --image "$PROOF_IMAGE" --name "$name" --cpu "$PROOF_CPU" \
+    # --no-file: a codewire.yaml where the proof runs must not change its shape.
+    if cw create --no-file --image "$PROOF_IMAGE" --name "$name" --cpu "$PROOF_CPU" \
       --memory "$PROOF_MEMORY" --disk "$PROOF_DISK" --isolation standard --ttl "$PROOF_TTL" \
       --no-network --no-wait --yes --output json >"$out" 2>"$out.err"; then
       break

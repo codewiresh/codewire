@@ -1075,7 +1075,7 @@ pub(crate) struct EnvCreateArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Local project directory; used with --local"
+        help = "Local project directory, where the codewire.yaml search starts; used with --local"
     )]
     path: Option<PathBuf>,
     #[arg(
@@ -1088,9 +1088,15 @@ pub(crate) struct EnvCreateArgs {
     #[arg(
         long,
         value_name = "FILE",
-        help = "Project YAML file (relative to --path for local creation)"
+        help = "Project YAML file to use instead of the nearest codewire.yaml (relative to --path for a local create)"
     )]
     file: Option<PathBuf>,
+    #[arg(
+        long,
+        conflicts_with = "file",
+        help = "Use only the flags: do not read the nearest codewire.yaml"
+    )]
+    no_file: bool,
     #[arg(
         long,
         value_name = "SPEC",
@@ -1122,7 +1128,7 @@ pub(crate) struct EnvCreateArgs {
     isolation: Option<String>,
     #[arg(
         long = "repo",
-        help = "Git repo (repeatable, URL[@branch][::/workspace/path])"
+        help = "Git repository to clone (repeatable, URL[@branch][::/workspace/path]); replaces the file's repositories"
     )]
     repo_flags: Vec<String>,
     #[arg(long, help = "Branch to checkout")]
@@ -2523,6 +2529,7 @@ pub(crate) mod inventory;
 pub(crate) mod lifecycle_output;
 mod mesh_commands;
 mod platform_commands;
+pub(crate) mod project_file;
 mod secrets;
 mod sessions;
 mod ssh_trust;

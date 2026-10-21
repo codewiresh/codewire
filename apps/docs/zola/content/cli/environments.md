@@ -18,8 +18,10 @@ are marked.
 cw create [REPO_URL]... [OPTIONS]
 ```
 
-Creates a cloud sandbox unless `--local` is given. Repositories are
-`URL[@branch][::/workspace/path]`, as positionals or with `--repo`.
+Creates a cloud sandbox unless `--local` is given, from the nearest
+`codewire.yaml` (see [the project file](@/guides/project-file.md)) and the
+flags, which win over it. Repositories are `URL[@branch][::/workspace/path]`,
+as positionals or with `--repo`; they replace the file's repositories.
 
 | Flag | Meaning |
 | --- | --- |
@@ -27,9 +29,10 @@ Creates a cloud sandbox unless `--local` is given. Repositories are
 | `--type sandbox\|host` | Sandbox (default) or explicitly trusted host execution; `host` needs `--local` |
 | `--image IMAGE` | Container image; `workspace` is shorthand for the Codewire workspace image |
 | `--preset SLUG`, `--preset-id ID` | Cloud: create from a preset |
-| `--repo URL`, `--branch` | Cloud: repositories to check out |
-| `--file FILE` | Project YAML file (relative to `--path` for local creation) |
-| `--path PATH` | Local: the project directory (default `.`) |
+| `--repo URL`, `--branch` | Repositories to clone, each to its own path |
+| `--file FILE` | Project YAML file instead of the nearest `codewire.yaml` (relative to `--path` for local creation) |
+| `--no-file` | Use only the flags; read no `codewire.yaml` |
+| `--path PATH` | Local: the project directory, where the `codewire.yaml` search starts (default `.`) |
 | `--path-mode mount\|snapshot\|clone\|copy\|empty` | Local: mount the directory live (default), copy it once (a Git repository's committed state, or the directory), or start empty |
 | `--cpu`, `--memory`, `--disk` | Resources, for example `--cpu 2 --memory 8GB --disk 40GB` |
 | `--docker-disk SIZE`, `--no-docker` | Local: the guest Docker data disk (default 8 GiB), or no Docker daemon |

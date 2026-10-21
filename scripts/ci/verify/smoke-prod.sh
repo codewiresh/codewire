@@ -255,7 +255,10 @@ create_environment() {
   output="$(mktemp "$ROOT/.tmp/prod-smoke-create.XXXXXX")"
   errors="$(mktemp "$ROOT/.tmp/prod-smoke-create-err.XXXXXX")"
   log "creating production smoke environment $SMOKE_NAME"
+  # --no-file: only these flags configure the smoke, never a codewire.yaml
+  # in the directory it runs from.
   if ! cw_prod create \
+      --no-file \
       --preset "$SMOKE_PRESET" \
       --repo "$SMOKE_REPO" \
       --name "$SMOKE_NAME" \

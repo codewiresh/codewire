@@ -1113,7 +1113,9 @@ assert_admin_oauth_principal() {
 
 create_environment() {
   local create_out="$TMPDIR_SMOKE/create.out"
-  local -a source_args=()
+  # Only the smoke's own document or flags configure it, never a codewire.yaml
+  # in the directory it runs from.
+  local -a source_args=(--no-file)
   if [[ -n "$APP_SECRET_DOCUMENT" ]]; then
     if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
       verify_application_all_scope_metadata

@@ -15,7 +15,19 @@ pub(super) fn placement(value: StoragePlacementArg) -> codewire_project::Storage
     }
 }
 
-pub(super) fn load_platform_document(path: &Path) -> anyhow::Result<codewire_project::ProjectSpec> {
+/// A codewire.yaml selected for a cloud create.
+#[derive(Debug)]
+pub(super) struct PlatformDocument {
+    pub(super) spec: codewire_project::ProjectSpec,
+    /// Settings only a local VM uses, accepted and left out.
+    pub(super) unused_fields: Vec<&'static str>,
+}
+
+/// Reads the selected file. Local-only settings that would change what runs
+/// (mounts, host ports, local credential or secret stores) refuse the create
+/// before any request; `workspace.vm_only`, which only shapes a local VM's
+/// disk, is accepted and reported as unused.
+pub(super) fn load_platform_document(path: &Path) -> anyhow::Result<PlatformDocument> {
     let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut content = String::new();
     file.take((codewire_project::MAX_PROJECT_DOCUMENT_BYTES + 1) as u64)
@@ -23,8 +35,26 @@ pub(super) fn load_platform_document(path: &Path) -> anyhow::Result<codewire_pro
         .with_context(|| format!("read {}", path.display()))?;
     let document = codewire_project::parse_project_yaml(&content)
         .with_context(|| format!("parse {}", path.display()))?;
-    document.ensure_platform_compatible()?;
-    Ok(document.spec)
+    document.ensure_platform_compatible().with_context(|| {
+        format!(
+            "{} cannot configure a cloud environment; create a local VM from it, or choose another file with --file",
+            path.display()
+        )
+    })?;
+    let unused_fields = if document
+        .local
+        .vm_only
+        .as_ref()
+        .is_some_and(|patterns| !patterns.is_empty())
+    {
+        vec!["workspace.vm_only"]
+    } else {
+        Vec::new()
+    };
+    Ok(PlatformDocument {
+        spec: document.spec,
+        unused_fields,
+    })
 }
 
 pub(super) fn validate_update_args(args: &EnvUpdateArgs) -> anyhow::Result<()> {

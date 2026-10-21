@@ -470,7 +470,12 @@ pub(crate) fn print_native_created(
     caps: &Capabilities,
 ) -> anyhow::Result<()> {
     match output {
-        OutputFormat::Json => print_native_environment(&created.environment, output),
+        OutputFormat::Json => {
+            let view = NativeEnvironmentView::try_from(&created.environment)?;
+            let result = created.configuration.add_to(serde_json::to_value(&view)?);
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
         OutputFormat::Text => {
             print_summary(
                 &local_summary(
@@ -490,6 +495,8 @@ pub(crate) fn print_native_created(
 pub(crate) struct NativeCreated {
     pub(crate) environment: v1::Environment,
     pub(crate) secrets: SourceRef,
+    /// Where its configuration came from, for the JSON result.
+    pub(crate) configuration: crate::commands::project_file::Provenance,
 }
 
 #[cfg(test)]

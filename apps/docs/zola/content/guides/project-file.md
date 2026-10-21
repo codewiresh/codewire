@@ -5,17 +5,41 @@ weight: 7
 ---
 
 `codewire.yaml` in a project's root describes the environment that project
-wants. `cw create --local --path .` reads it from the directory; the
-platform reads it from `--file codewire.yaml` or from the repository. Explicit
-flags override the file.
+wants. One file describes the whole environment, including every repository
+it clones. Explicit flags override the file.
 
 ```sh
 cw init                                                   # writes codewire.yaml from the current directory
 cw init --image workspace --install 'pnpm install' --startup 'pnpm dev'
-cw create --local --name app --path .
-cw create --name app --file codewire.yaml
+cw create --local --name app             # a local VM from the nearest codewire.yaml
+cw create --cloud --name app             # the same file, for a cloud environment
+cw create --cloud --name app --file codewire.ci.yaml   # another file
+cw create --cloud --name app --image workspace --no-file   # flags only
 cw create --name app --image workspace --write-preset  # write the resolved preset back
 ```
+
+## Which file is used
+
+`cw create` looks for `codewire.yaml` in the current directory (`--path`
+for `--local`) and then in each parent, up to the root of its Git
+repository; outside a Git repository it checks only that directory. The
+nearest file wins, and only that file is read: a nested repository's own
+`codewire.yaml`, and any file inside a cloned repository, is never merged
+in. `--file` selects another file and `--no-file` uses the flags alone.
+
+Before it creates anything, `cw create` names the configuration it uses
+(`Configuration: ~/src/app/codewire.yaml`), and `--output json` returns it
+as `configuration`. Without `--path`, a file found in a parent folder makes
+that folder the local VM's project directory, exactly as if you had run the
+command beside the file; the review shows the folder and where you are.
+
+A file that names no `image` or `preset` gets the Codewire workspace image.
+Only a cloud create without a file, image or preset uses the defaults the
+platform saved for its first repository, and says so.
+
+Starting, restarting or attaching to an existing environment never reads a
+file: it keeps the configuration it was created with, even after the file
+changes. A new `cw create` reads the file again.
 
 `cw init` refuses to overwrite an existing file without `--force`. Given only
 direct inputs (image, commands, resources, variables) it works offline;
@@ -89,7 +113,10 @@ Keep secret values, key file paths and store references out of this file:
 
 ## Local-only behaviour
 
-`--repo` is refused for a local VM; declare repositories in the file and the
-host's Git fetches them. `mounts` and `workspace.vm_only` apply to local VMs,
-where `--path` is mounted live by default. `cw create --local` shows the
-resolved settings and asks before creating.
+Repositories, from the file or from repeatable `--repo
+URL[@branch][::/workspace/path]`, are isolated clones that the host's Git
+fetches; `--repo` replaces the file's list rather than adding to it, and no
+host directory is mounted. `mounts` and `workspace.vm_only` apply to local
+VMs, where `--path` is mounted live by default; a cloud create ignores
+`workspace.vm_only` and refuses `mounts` and host ports. `cw create --local`
+shows the resolved settings and asks before creating.

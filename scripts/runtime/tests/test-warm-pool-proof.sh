@@ -47,6 +47,8 @@ fi
 grep -qF 'POOL_PREFIX="cw-pool-"' "$PROOF" || fail 'no shared-pool prefix'
 grep -qF '"$launch" == warm' "$PROOF" || fail 'hits are not classified by the warm launch type'
 grep -qF 'SHADOW_PREFIX="shadow-pool-"' "$PROOF" || fail 'no shadow-pool check for the off-shape create'
+# A codewire.yaml where the proof runs must not change the requested shape.
+grep -qF 'cw create --no-file --image' "$PROOF" || fail 'the proof create reads a codewire.yaml'
 grep -qF 'observedGeneration == .metadata.generation' "$PROOF" || fail 'no capable-controller preflight'
 # Billing opens at bind, and destroyed environments keep no live binding.
 grep -qF 'w.bound_at <= s.started_at' "$PROOF" || fail 'no billing-at-bind check'
