@@ -4,7 +4,7 @@ name: CI
 on:
   push:
     branches: [main]
-  # Adding or removing a label (ci-full, kind-e2e) starts a fresh run with the
+  # Adding or removing a label (ci-full) starts a fresh run with the
   # new labels; the concurrency group below cancels the superseded one.
   # Closing or merging a pull request starts a run that does nothing, so the
   # same group cancels the pull request's run still in flight, which no one

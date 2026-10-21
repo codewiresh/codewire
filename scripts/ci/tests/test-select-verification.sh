@@ -4543,10 +4543,6 @@ scope_select() {
     "${SCOPE_SELECTOR:-$SELECTOR}" "$paths" </dev/null
 }
 
-kind_subset() {
-  selection_tokens "$(selection_value "$1")" | grep -Ex 'edge_kind|kind' | tr '\n' ' ' || true
-}
-
 no_labels="$(scope_event no_labels 'feat: change')"
 ci_full="$(scope_event ci_full 'feat: change' ci-full)"
 kind_label="$(scope_event kind_label 'feat: change' kind-e2e)"
@@ -4561,7 +4557,6 @@ while IFS='|' read -r name quick_expected paths_list; do
   # kind-e2e compare against it.
   push_output="$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" scope_select push '' '' "$paths")"
   pr_full_output="$(scope_select pull_request '' "$no_labels" "$paths")"
-  kinds="$(kind_subset "$push_output")"
 
   # The checked-in switch keeps that selection on a push to main, less kind
   # while it defers Kind, and nothing else.
@@ -4604,15 +4599,18 @@ while IFS='|' read -r name quick_expected paths_list; do
     scope_select pull_request quick "$ci_full" "$paths" >&2
     exit 1
   }
-  # kind-e2e (label or title marker) adds main's Kind selection to the quick
-  # families, as it adds Kind to the complete selection today.
+  # Kind runs only on the schedule and ci-full (owner, 2026-10-21): the
+  # retired kind-e2e label and title marker add nothing, quick or complete.
   for kind_event in "$kind_label" "$kind_marker"; do
-    assert_tokens "${name}_kind" "$quick_expected $kinds pr_quick" \
-      "$(scope_select pull_request quick "$kind_event" "$paths")"
+    [ "$(scope_select pull_request quick "$kind_event" "$paths")" = "$quick_output" ] || {
+      echo "${name}: the retired kind-e2e opt-in still selects Kind" >&2
+      exit 1
+    }
+    [ "$(scope_select pull_request '' "$kind_event" "$paths")" = "$pr_full_output" ] || {
+      echo "${name}: the retired kind-e2e opt-in still selects Kind without the quick scope" >&2
+      exit 1
+    }
   done
-  # Without the hosted scope, a pull request keeps today's Kind opt-in.
-  assert_tokens "${name}_kind_complete" "$push_tokens $kinds" \
-    "$(scope_select pull_request '' "$kind_label" "$paths")"
 done <<'CASES'
 docs|policy|docs/dev/AGENT-WORKFLOW.md
 rust_cli|policy rust_compile|crates/codewire-cli/src/main.rs

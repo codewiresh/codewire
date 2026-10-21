@@ -467,14 +467,11 @@ if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ] \
   pr_ci_full=true
 fi
 
+# Hosted, a pull request runs Kind only with ci-full (owner, 2026-10-21);
+# local tooling that needs Kind's selection asks with KIND_E2E_OPT_IN.
 pr_kind_opt_in=false
 if truthy "${KIND_E2E_OPT_IN:-}" || [ "$pr_ci_full" = true ]; then
   pr_kind_opt_in=true
-elif [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then
-  if grep -Eiq '(\[kind-e2e\]|\[run-kind-e2e\]|"name"[[:space:]]*:[[:space:]]*"kind-e2e")' \
-      "$GITHUB_EVENT_PATH"; then
-    pr_kind_opt_in=true
-  fi
 fi
 
 event_selected=false
@@ -2234,8 +2231,8 @@ if token_selected policy; then
   select_token policy_shell_omittable
 fi
 
-# Kind takes over an hour. A pull request runs it only when opted in
-# ([kind-e2e] in its title or body, or the kind-e2e or ci-full label).
+# Kind takes over an hour. A pull request runs it only with the ci-full
+# label.
 # Dispatched and scheduled runs keep it, and so does a push to main unless
 # main-push-switch.sh defers it (below).
 if [ "$event" = pull_request ] && [ "$pr_kind_opt_in" != true ]; then
