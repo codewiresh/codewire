@@ -15,8 +15,9 @@ use codewire_proto::codewire::v1::{
 };
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use tokio::sync::Notify;
 
 #[derive(Clone, Default)]
 struct Source {
@@ -27,6 +28,11 @@ struct Source {
     mutation: Arc<AtomicUsize>,
     active: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
+    /// When set, a key list waits until a second one is in flight, until two
+    /// first overlap, so a test sees reads overlap whatever the host's
+    /// scheduling (#3059).
+    hold_until_overlap: Arc<AtomicBool>,
+    overlap: Arc<Notify>,
     calls: Arc<Mutex<Vec<String>>>,
 }
 
@@ -46,6 +52,10 @@ impl Source {
         self.count("/CreateApiKey") + self.count("/UpdateApiKey") + self.count("/DeleteApiKey")
     }
 }
+
+/// How long a held key list waits for a second one before giving up; well
+/// inside the page's `INVENTORY_BUDGET`.
+const OVERLAP_WAIT: Duration = Duration::from_secs(3);
 
 fn proto(message: impl buffa::Message) -> Response {
     Response::builder()
@@ -108,9 +118,23 @@ async fn fixture() -> (AppState, Source, tokio::task::JoinHandle<()>) {
                 let bytes = to_bytes(request.into_body(), 8192).await.unwrap();
                 let request = ListApiKeysRequest::decode_from_slice(&bytes).unwrap();
                 assert_eq!(request.page_size, 0); assert!(request.page_token.is_empty());
+                // Registered before the count, so a second read's notify
+                // always reaches it.
+                let overlapped = source.overlap.notified();
                 let active = source.active.fetch_add(1, Ordering::SeqCst) + 1;
                 source.peak.fetch_max(active, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                if source.hold_until_overlap.load(Ordering::SeqCst) {
+                    if active >= 2 {
+                        source.overlap.notify_waiters();
+                    } else if source.peak.load(Ordering::SeqCst) < 2
+                        && tokio::time::timeout(OVERLAP_WAIT, overlapped).await.is_err()
+                    {
+                        // Reads that never overlap: stop holding, so the page
+                        // finishes inside its budget and the peak assertion
+                        // says what happened.
+                        source.hold_until_overlap.store(false, Ordering::SeqCst);
+                    }
+                }
                 source.active.fetch_sub(1, Ordering::SeqCst);
                 let keys = match source.keys.load(Ordering::SeqCst) {
                     1 => return failure(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
@@ -559,11 +583,17 @@ async fn personal_api_key_inventory_pages_organizations_and_bounds_concurrent_re
     let (state, source, server) = fixture().await;
     let (headers, _) = headers();
     source.membership.store(5, Ordering::SeqCst);
+    source.hold_until_overlap.store(true, Ordering::SeqCst);
     let response = page(State(state.clone()), headers.clone(), query()).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(body(response).await.contains("cursor=org-19"));
     assert_eq!(source.count("/ListApiKeys"), 20);
-    assert!((2..=LIST_CONCURRENCY).contains(&source.peak.load(Ordering::SeqCst)));
+    let peak = source.peak.load(Ordering::SeqCst);
+    assert!(
+        (2..=LIST_CONCURRENCY).contains(&peak),
+        "key lists ran {peak} at a time, not 2 to {LIST_CONCURRENCY}"
+    );
+    source.hold_until_overlap.store(false, Ordering::SeqCst);
     source.reset();
     let response = page(
         State(state),
