@@ -523,8 +523,10 @@ recovering a control operation. Parent notifications stay within that member's
 environment; a host coordinator reads the member's inbox explicitly.
 
 Ordinary member commands use `run --no-tty -- COMMAND`, followed by `wait` and
-`logs`. Member PTY attachment is unsupported. Run the host updater on the
-member owner; `--member` does not provide remote environment or updater controls.
+`logs`. Member `wait` reports only the session's final state and exit code;
+read the output with `logs`. Member PTY attachment is unsupported. Run the host
+updater on the member owner; `--member` does not provide remote environment or
+updater controls.
 Provider steering and interruption follow the capabilities in the table above.
 
 ## Install local execution

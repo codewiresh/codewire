@@ -1172,11 +1172,17 @@ async fn journey(
             None,
         )
         .await;
-    assert_eq!(
-        waited["stdout"],
-        "member-start\nreal-member-input\nend-marker"
-    );
+    // Wait reports state only; the output travels through logs.
     assert_eq!(waited["session"]["exit_code"], 0);
+    assert_eq!(waited.as_object().unwrap().len(), 1, "{waited}");
+    let output = caller
+        .run(&["--member", "target", "logs", "--session", sid], None)
+        .await;
+    assert!(output.status.success());
+    assert_eq!(
+        output.stdout,
+        b"member-start\nreal-member-input\nend-marker"
+    );
     let list = caller
         .json(&["--member", "target", "ls", "--output", "json"], None)
         .await;
@@ -1240,8 +1246,9 @@ async fn journey(
         )
         .await;
     let large_sid = large[0]["session_id"].as_str().unwrap();
-    caller
-        .json(
+    let started = Instant::now();
+    let large_wait = caller
+        .run(
             &[
                 "--member",
                 "target",
@@ -1256,6 +1263,22 @@ async fn journey(
             None,
         )
         .await;
+    let large_wait_ms = started.elapsed().as_millis();
+    assert!(
+        large_wait.status.success(),
+        "{}",
+        String::from_utf8_lossy(&large_wait.stderr)
+    );
+    // Waiting on a finished session costs the same at any output size: it
+    // reads the session record and never pages the retained output.
+    let large_wait_exchanges = exchange_actions(&large_wait.stderr);
+    assert!(
+        large_wait_exchanges.keys().all(|action| action == "5"),
+        "{large_wait_exchanges:?}"
+    );
+    let waited: Value = serde_json::from_slice(&large_wait.stdout).unwrap();
+    assert_eq!(waited["session"]["exit_code"], 0);
+    let started = Instant::now();
     let logs = caller
         .run(
             &[
@@ -1270,7 +1293,9 @@ async fn journey(
             None,
         )
         .await;
+    let large_logs_ms = started.elapsed().as_millis();
     assert!(logs.status.success());
+    let large_logs_exchanges = exchange_actions(&logs.stderr);
     assert_eq!(logs.stdout, b"large-final-marker\n");
     let held = caller
         .json(
@@ -1588,10 +1613,27 @@ async fn journey(
         "actual_exchange_path_witnesses":witnesses,"inbound_derp_counter_available":false,
         "ordinary_command":true,"duplicate_single_admission":true,"input_acknowledged":true,"retained_output_large_final_marker":true,
         "stale_generation_refused":true,"request_conflict_refused":true,"revocation_refused_new_reads_and_effects":true,"own_observe_after_revoke":true,
+        "large_wait":{"elapsed_ms":large_wait_ms,"exchanges_by_action":large_wait_exchanges},
+        "large_logs":{"elapsed_ms":large_logs_ms,"exchanges_by_action":large_logs_exchanges},
         "managed_pty_lifecycle_refused":true,"sentinel_preserved":true,"unrelated_local_session_preserved":true,
         "actual_local_replacement_stale_control_refused":true,"actual_helper_crash_cleanup":true,"delegated_target_session_survives_helper_death":true,"helper_and_daemon_terminal":true});
     drop(server);
     (report, target, caller, helper, daemon)
+}
+
+/// The typed member exchanges one command made, counted by action from the
+/// route witness each exchange prints (a caller with a required transport).
+fn exchange_actions(stderr: &[u8]) -> std::collections::BTreeMap<String, u64> {
+    let mut counts = std::collections::BTreeMap::new();
+    for line in std::str::from_utf8(stderr).unwrap().lines() {
+        if let Some(raw) = line.strip_prefix("[cw] member transport ") {
+            let witness: Value = serde_json::from_str(raw).unwrap();
+            *counts
+                .entry(witness["action"].as_u64().unwrap().to_string())
+                .or_default() += 1;
+        }
+    }
+    counts
 }
 
 fn subreaper(value: i32) -> bool {

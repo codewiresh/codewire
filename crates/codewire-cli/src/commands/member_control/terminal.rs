@@ -106,13 +106,7 @@ pub(crate) async fn run(globals: &Globals, args: EnvironmentRunArgs) -> anyhow::
     if args.detach || matches!(args.output, OutputFormat::Json) {
         return Ok(());
     }
-    wait_loop(
-        &mut remote,
-        &session,
-        Duration::from_secs(1800),
-        OutputFormat::Text,
-    )
-    .await
+    follow(&mut remote, &session, Duration::from_secs(1800)).await
 }
 pub(crate) async fn list(globals: &Globals, args: ListArgs) -> anyhow::Result<()> {
     ensure!(
@@ -213,6 +207,9 @@ pub(crate) async fn stop(globals: &Globals, args: SessionTargetArgs) -> anyhow::
     );
     print_environment_sessions(&[host_environment_session_view(stopped)], args.output)
 }
+/// `wait` asks the member only for the session's state, never its output, so
+/// its cost does not grow with what the session printed. Read the output with
+/// `logs`: a terminal record means the daemon already joined the output tasks.
 pub(crate) async fn wait(globals: &Globals, args: WaitArgs) -> anyhow::Result<()> {
     ensure!(
         args.message.is_none(),
@@ -225,34 +222,86 @@ pub(crate) async fn wait(globals: &Globals, args: WaitArgs) -> anyhow::Result<()
     let values = selection.values();
     let (_, mut remote) = open(globals, None).await?;
     let sid = target(&values, &remote.alias.binding.environment_id)?;
-    let session = remote.get(sid).await?;
-    wait_loop(&mut remote, &session, timeout, args.output).await
+    let initial = remote.get(sid).await?;
+    let current = until_terminal(&initial, timeout, async || remote.get(sid).await).await?;
+    ensure!(!current.cleanup_unknown, "member terminal cleanup unknown");
+    let view = host_environment_session_view(current.clone());
+    match args.output {
+        OutputFormat::Json => value(serde_json::json!({ "session": view }), args.output)?,
+        OutputFormat::Text => {
+            print_environment_sessions(&[view], args.output)?;
+            if let Some(member) = globals.member.as_deref() {
+                eprintln!("[cw] read its output with cw --member {member} logs --session {sid}");
+            }
+        }
+    }
+    ensure!(
+        current.exit_code == Some(0),
+        "session exited with code {:?}",
+        current.exit_code
+    );
+    Ok(())
 }
-async fn wait_loop(
+
+const WAIT_POLL: Duration = Duration::from_millis(200);
+
+/// Polls only the session record until the selected launch is terminal.
+async fn until_terminal(
+    initial: &v1::SessionRecord,
+    timeout: Duration,
+    mut get: impl AsyncFnMut() -> anyhow::Result<v1::SessionRecord>,
+) -> anyhow::Result<v1::SessionRecord> {
+    tokio::time::timeout(timeout, async {
+        let mut current = initial.clone();
+        loop {
+            guard(&current, &initial.session_id, initial.launch_generation)?;
+            if terminal(&current) {
+                return Ok(current);
+            }
+            tokio::time::sleep(WAIT_POLL).await;
+            current = get().await?;
+        }
+    })
+    .await
+    .context("member wait timed out; outcome unknown, command not replayed")?
+}
+
+/// A foreground `run` streams the session's output until it exits.
+async fn follow(
     remote: &mut transport::Remote,
     initial: &v1::SessionRecord,
     timeout: Duration,
-    format: OutputFormat,
 ) -> anyhow::Result<()> {
-    tokio::time::timeout(timeout,async {
-        let mut offset=0;let mut output=Vec::new();let mut history_gap=false;
+    tokio::time::timeout(timeout, async {
+        let mut offset = 0;
         loop {
-            let page=remote.output(&initial.session_id,offset).await?;
-            if page.history_gap { history_gap=true; if matches!(format,OutputFormat::Text){eprintln!("[cw] older member output unavailable");} }
+            let page = remote.output(&initial.session_id, offset).await?;
+            if page.history_gap {
+                eprintln!("[cw] older member output unavailable");
+            }
             for chunk in page.chunks {
-                if matches!(format,OutputFormat::Text) {write_session_output(&mut std::io::stdout(),&chunk.data,true)?;}
-                else {ensure!(output.len()+chunk.data.len()<=4*1024*1024,"member JSON wait output bound exceeded; use logs for retained output");output.extend(chunk.data);}
+                write_session_output(&mut std::io::stdout(), &chunk.data, true)?;
             }
-            let advanced=page.next_offset>offset;offset=page.next_offset;
-            let current=remote.get(&initial.session_id).await?;guard(&current,&initial.session_id,initial.launch_generation)?;
-            if terminal(&current) && offset>=current.output_end_offset {
-                ensure!(!current.cleanup_unknown,"member terminal cleanup unknown");
-                if matches!(format,OutputFormat::Json){value(serde_json::json!({"session":host_environment_session_view(current.clone()),"stdout":String::from_utf8_lossy(&output),"history_gap":history_gap}),format)?;}
-                ensure!(current.exit_code==Some(0),"session exited with code {:?}",current.exit_code);return Ok::<_,anyhow::Error>(());
+            let advanced = page.next_offset > offset;
+            offset = page.next_offset;
+            let current = remote.get(&initial.session_id).await?;
+            guard(&current, &initial.session_id, initial.launch_generation)?;
+            if terminal(&current) && offset >= current.output_end_offset {
+                ensure!(!current.cleanup_unknown, "member terminal cleanup unknown");
+                ensure!(
+                    current.exit_code == Some(0),
+                    "session exited with code {:?}",
+                    current.exit_code
+                );
+                return Ok::<_, anyhow::Error>(());
             }
-            if !advanced {tokio::time::sleep(Duration::from_millis(100)).await;}
+            if !advanced {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
-    }).await.context("member wait timed out; outcome unknown, command not replayed")?
+    })
+    .await
+    .context("member wait timed out; outcome unknown, command not replayed")?
 }
 pub(crate) async fn logs(globals: &Globals, args: SessionLogs) -> anyhow::Result<()> {
     let Some(session) = args.session.clone() else {
@@ -338,4 +387,73 @@ pub(crate) async fn logs(globals: &Globals, args: SessionLogs) -> anyhow::Result
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(state: i32, generation: u64) -> v1::SessionRecord {
+        v1::SessionRecord {
+            session_id: format!("session-{}", uuid::Uuid::nil()),
+            launch_generation: generation,
+            state,
+            exit_code: (state == 5).then_some(0),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_on_a_finished_session_reads_nothing_more() {
+        let mut reads = 0;
+        let done = until_terminal(&record(5, 1), Duration::from_secs(1), async || {
+            reads += 1;
+            anyhow::bail!("a finished session needs no further read")
+        })
+        .await
+        .unwrap();
+        assert_eq!((done.state, reads), (5, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_polls_only_the_session_record_until_it_is_terminal() {
+        let mut states = vec![2, 2, 5].into_iter();
+        let mut reads = 0;
+        let done = until_terminal(&record(2, 1), Duration::from_secs(5), async || {
+            reads += 1;
+            Ok(record(states.next().unwrap(), 1))
+        })
+        .await
+        .unwrap();
+        assert_eq!((done.state, done.exit_code, reads), (5, Some(0), 3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_refuses_a_replaced_launch() {
+        let error = until_terminal(&record(2, 1), Duration::from_secs(5), async || {
+            Ok(record(5, 2))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "member retained session incarnation changed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_timeout_reports_an_unknown_outcome() {
+        let mut reads = 0;
+        let error = until_terminal(&record(2, 1), Duration::from_secs(1), async || {
+            reads += 1;
+            Ok(record(2, 1))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "member wait timed out; outcome unknown, command not replayed"
+        );
+        assert!((4..=5).contains(&reads), "{reads}");
+    }
 }

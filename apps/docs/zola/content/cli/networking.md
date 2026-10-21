@@ -131,6 +131,8 @@ by canonical `session-UUID` IDs, with `--session` for `stop`, `restart` and
 environment named alongside must be the pinned one, and `--local` or `--cloud`
 is refused; command runs need `--no-tty`; attaching is
 unsupported; `--request-id` and `--expected-launch-generation` make a control
-operation observable after a lost reply. Member control exists on Linux only:
+operation observable after a lost reply. Under `--member`, `wait --session`
+reports only the session's final state and exit code; read its output with
+`logs --session`. Member control exists on Linux only:
 macOS offers no public way to find a session's processes after their parent
 exits, so on a Mac run sessions in a local VM instead.
