@@ -1275,8 +1275,23 @@ def revalidate():
     for pid, (fd, expected) in pins.items():
         require(alive(fd) and identity(pid)[0] == expected, 'sampler ancestry changed')
 
+def proc_children(parent):
+    # Each process's /proc stat names its parent; a kernel without
+    # CONFIG_PROC_CHILDREN (the CI's Kata guests) has no task children
+    # lists. A process gone mid-scan is skipped; comm may hold ')'.
+    found = set()
+    for entry in os.scandir('/proc'):
+        if not entry.name.isdecimal():
+            continue
+        try:
+            raw = (Path('/proc') / entry.name / 'stat').read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if b')' in raw and int(raw[raw.rindex(b')') + 2:].split()[1]) == parent:
+            found.add(int(entry.name))
+    return found
+
 def paused_children():
-    result = set()
     tasks = list((Path('/proc') / str(sampler) / 'task').iterdir())
     require(0 < len(tasks) <= 128, 'sampler task count refused')
     for task in tasks:
@@ -1284,9 +1299,8 @@ def paused_children():
         fields = (task / 'stat').read_text().rsplit(') ', 1)[1].split()
         if fields[0] not in ('T', 't'):
             return None
-        raw = (task / 'children').read_bytes()
-        require(len(raw) <= 8192, 'sampler child inventory is too large')
-        result.update(int(value) for value in raw.split())
+    result = proc_children(sampler)
+    require(len(result) <= 1024, 'sampler child inventory is too large')
     return result
 
 try:

@@ -380,6 +380,7 @@ for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh',
     else:
         shutil.copy(tool, destination)
 for helper in ('scripts/dev/preflight.sh', 'scripts/ci/select/select-verification.sh',
+               'scripts/ci/select/merge-gate.py', 'scripts/ci/select/merge-gate.tsv',
                'scripts/ci/receipts/local-prepush-receipt.py'):
     destination = fixture / helper
     destination.parent.mkdir(parents=True, exist_ok=True)

@@ -93,13 +93,10 @@ class Process:
 def descendants(pid):
     result, pending = set(), [pid]
     while pending:
-        parent = pending.pop()
-        for task in Path(f"/proc/{parent}/task").iterdir():
-            for value in (task / "children").read_text().split():
-                child = int(value)
-                if child not in result:
-                    result.add(child)
-                    pending.append(child)
+        for child in host.linux_children(pending.pop()):
+            if child not in result:
+                result.add(child)
+                pending.append(child)
     return result
 
 

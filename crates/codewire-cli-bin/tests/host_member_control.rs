@@ -479,25 +479,38 @@ impl OwnedChild {
     }
 }
 
-fn owned_children() -> std::io::Result<Vec<OwnedChild>> {
+/// Direct children of PARENT, from each process's /proc stat. Not the task
+/// children lists: a kernel built without CONFIG_PROC_CHILDREN, such as the
+/// CI's Kata guest kernel, has none. A process that exits during the scan is
+/// skipped; the parent pid follows the last ')' because comm may contain
+/// spaces and parentheses.
+fn child_pids(parent: u32) -> std::io::Result<std::collections::BTreeSet<u32>> {
     let mut ids = std::collections::BTreeSet::new();
-    let mut tasks = 0;
-    for task in fs::read_dir("/proc/self/task")? {
-        let task = task?;
-        tasks += 1;
-        if tasks > 32 {
-            return Err(std::io::Error::other(
-                "fixture task inventory exceeded bound",
-            ));
-        }
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(task.path())?;
-        let bytes = proc_bytes(&directory, "children", 8192)?;
-        let text = std::str::from_utf8(&bytes).map_err(std::io::Error::other)?;
-        for pid in text.split_whitespace() {
-            ids.insert(pid.parse::<u32>().map_err(std::io::Error::other)?);
+    for entry in fs::read_dir("/proc")? {
+        let Some(pid) = entry?
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let stat = match fs::read(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(close) = stat.iter().rposition(|byte| *byte == b')') else {
+            continue;
+        };
+        let ppid = std::str::from_utf8(&stat[close + 1..])
+            .ok()
+            .and_then(|fields| fields.split_whitespace().nth(1))
+            .and_then(|field| field.parse::<u32>().ok())
+            .ok_or_else(|| std::io::Error::other("malformed /proc stat"))?;
+        if ppid == parent {
+            ids.insert(pid);
             if ids.len() > 128 {
                 return Err(std::io::Error::other(
                     "fixture child inventory exceeded bound",
@@ -505,7 +518,12 @@ fn owned_children() -> std::io::Result<Vec<OwnedChild>> {
             }
         }
     }
-    ids.into_iter()
+    Ok(ids)
+}
+
+fn owned_children() -> std::io::Result<Vec<OwnedChild>> {
+    child_pids(std::process::id())?
+        .into_iter()
         .map(|pid| OwnedChild::capture(pid, None))
         .collect()
 }
@@ -1683,7 +1701,7 @@ fn host_member_isolated_kernel_journey() {
     assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
     assert!(subreaper(1));
     assert!(
-        Path::new("/proc/thread-self/children").exists(),
+        child_pids(std::process::id()).is_ok(),
         "kernel child custody unavailable before launch"
     );
     let direct = match std::env::var("CW_MEMBER_CASE_TRANSPORT").unwrap().as_str() {

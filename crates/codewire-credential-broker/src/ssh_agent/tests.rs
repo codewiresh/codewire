@@ -96,16 +96,14 @@ impl SshAgentConfig {
             // Only the explicit synthetic ssh-add's own children are inspected.
             // The connected FIFO barrier keeps askpass/cat alive here.
             let pid = add.and_then(|child| child.pid).unwrap().as_raw_pid();
-            let children =
-                std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap();
-            let children: Vec<_> = children.split_whitespace().collect();
+            let children = child_pids(pid);
             assert_eq!(
                 children.len(),
                 1,
                 "expected exactly one owned askpass consumer"
             );
             for child in children {
-                observe(Pid::from_raw(child.parse().unwrap()).unwrap(), false);
+                observe(Pid::from_raw(child).unwrap(), false);
             }
         }
         let reached = probe
@@ -993,4 +991,37 @@ async fn helper_change_after_config_is_rejected_before_starting_material_tools()
     assert!(matches!(result, Err(SshAgentError::Configuration)));
     owner.shutdown().await.unwrap();
     synthetic.assert_clean();
+}
+
+/// Direct children of PARENT, from each process's /proc stat. Not the task
+/// children lists: a kernel built without CONFIG_PROC_CHILDREN, such as the
+/// CI's Kata guest kernel, has none. A process that exits during the scan is
+/// skipped; the parent pid follows the last ')' because comm may contain
+/// spaces and parentheses.
+fn child_pids(parent: i32) -> Vec<i32> {
+    let mut children = Vec::new();
+    for entry in std::fs::read_dir("/proc").unwrap() {
+        let Some(pid) = entry
+            .unwrap()
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some(close) = stat.iter().rposition(|byte| *byte == b')') else {
+            continue;
+        };
+        let ppid = std::str::from_utf8(&stat[close + 1..])
+            .ok()
+            .and_then(|fields| fields.split_whitespace().nth(1))
+            .and_then(|field| field.parse::<i32>().ok());
+        if ppid == Some(parent) {
+            children.push(pid);
+        }
+    }
+    children
 }

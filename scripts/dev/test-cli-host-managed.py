@@ -484,9 +484,19 @@ class Process:
 
 
 def children(pid):
+    # Each process's /proc stat names its parent; a kernel without
+    # CONFIG_PROC_CHILDREN (the CI's Kata guests) has no task children
+    # lists. A process gone mid-scan is skipped; comm may hold ')'.
     found = set()
-    for task in Path(f"/proc/{pid}/task").iterdir():
-        found.update(int(value) for value in (task / "children").read_text().split())
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdecimal():
+            continue
+        try:
+            raw = (Path("/proc") / entry.name / "stat").read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if b")" in raw and int(raw[raw.rindex(b")") + 2:].split()[1]) == pid:
+            found.add(int(entry.name))
     require(len(found) <= 256, "owned child inventory exceeded bound")
     return found
 

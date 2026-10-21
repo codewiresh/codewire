@@ -1726,7 +1726,7 @@ fn managed_member_isolated_kernel_journey() {
     }
     assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
     assert!(subreaper(1));
-    assert!(Path::new("/proc/thread-self/children").exists());
+    assert!(child_pids(std::process::id()).is_ok());
     let direct = match std::env::var("CW_MEMBER_CASE_TRANSPORT").unwrap().as_str() {
         "direct" => true,
         "derp" => false,

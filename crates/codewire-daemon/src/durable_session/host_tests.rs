@@ -1253,15 +1253,32 @@ struct FixtureDescendant {
 
 #[cfg(target_os = "linux")]
 impl FixtureDescendant {
+    /// Direct children of PID, from each process's /proc stat: a kernel
+    /// without CONFIG_PROC_CHILDREN (the CI's Kata guests) has no task
+    /// children lists. A process gone mid-scan is skipped; the parent pid
+    /// follows the last ')' because comm may contain spaces and parentheses.
     fn children(pid: u32) -> std::collections::BTreeSet<u32> {
         let mut children = std::collections::BTreeSet::new();
-        for task in std::fs::read_dir(format!("/proc/{pid}/task")).unwrap() {
-            let task = task.unwrap();
-            for child in std::fs::read_to_string(task.path().join("children"))
+        for entry in std::fs::read_dir("/proc").unwrap() {
+            let Some(child) = entry
                 .unwrap()
-                .split_whitespace()
-            {
-                let child = child.parse::<u32>().unwrap();
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read(format!("/proc/{child}/stat")) else {
+                continue;
+            };
+            let Some(close) = stat.iter().rposition(|byte| *byte == b')') else {
+                continue;
+            };
+            let parent = std::str::from_utf8(&stat[close + 1..])
+                .ok()
+                .and_then(|fields| fields.split_whitespace().nth(1))
+                .and_then(|field| field.parse::<u32>().ok());
+            if parent == Some(pid) {
                 assert_ne!(child, 0);
                 children.insert(child);
             }

@@ -158,18 +158,20 @@ local_rust_cache_socket_owner() {
   [[ -n "$pid" ]] && printf '%s\n' "$pid"
 }
 
-# Succeed while PID runs a child: a compiler, or compiler detection. Where the
-# kernel does not list children, assume one runs.
+# Succeed while PID runs a child: a compiler, or compiler detection. Each
+# process's stat names its parent, so this needs no task children lists, which
+# a kernel without CONFIG_PROC_CHILDREN (the CI's Kata guests) does not have.
+# A process that exits mid-scan is skipped. Without /proc, assume one runs.
 local_rust_cache_server_compiling() {
-  local task child
-  local -a children
-  [[ -r "/proc/$1/task/$1/children" ]] || return 0
-  for task in /proc/"$1"/task/*/children; do
-    children=()
-    { IFS=' ' read -r -a children <"$task"; } 2>/dev/null || true
-    for child in "${children[@]}"; do
-      local_rust_cache_process_start "$child" >/dev/null && return 0
-    done
+  local stat line child
+  local -a fields
+  [[ -r /proc/self/stat ]] || return 0
+  for stat in /proc/[0-9]*/stat; do
+    { IFS= read -r line <"$stat"; } 2>/dev/null || continue
+    IFS=' ' read -r -a fields <<<"${line##*) }"
+    [[ "${fields[1]:-}" == "$1" ]] || continue
+    child="${stat#/proc/}"
+    local_rust_cache_process_start "${child%/stat}" >/dev/null && return 0
   done
   return 1
 }
