@@ -17,9 +17,12 @@ its bootstrap API key, and stores only the raw replacement key in its
 canonical OpenBao document.
 
 Production targets require both the exact target and --allow-prod-mutation.
+The cluster comes from CODEWIRE_DEV_CLUSTER or CODEWIRE_PROD_CLUSTER (set in
+~/.config/codewire/env); it selects the Infra kubeconfig-CLUSTER.yaml and its
+admin@CLUSTER context.
 
 Safety:
-  - target identity, cluster, namespace, and secret destinations are fixed
+  - target identity, namespace, and secret destinations are fixed
   - no raw key is written to stdout, argv, or logs
   - never run with shell tracing enabled or pipe output through tee
 USAGE
@@ -83,8 +86,7 @@ done
 
 case "$TARGET" in
   dev)
-    KUBECONFIG_FIXED="$HOME/src/infra/kubeconfig-dev-cluster.yaml"
-    KUBE_CONTEXT="admin@dev-cluster"
+    CLUSTER="${CODEWIRE_DEV_CLUSTER:?set CODEWIRE_DEV_CLUSTER to the Dev cluster name}"
     KUBE_NAMESPACE="dev"
     FIXTURE_USER_ID="f23d1c4a5ed665e62094d9d106c0d13b"
     FIXTURE_USER_EMAIL="connect-apikey-smoke-dev@codewire-dev.sh"
@@ -99,8 +101,7 @@ case "$TARGET" in
   prod)
     [[ "$ALLOW_PROD_MUTATION" == "1" ]] || \
       die "production provisioning requires --allow-prod-mutation"
-    KUBECONFIG_FIXED="$HOME/src/infra/kubeconfig-prod-cluster.yaml"
-    KUBE_CONTEXT="admin@prod-cluster"
+    CLUSTER="${CODEWIRE_PROD_CLUSTER:?set CODEWIRE_PROD_CLUSTER to the Production cluster name}"
     KUBE_NAMESPACE="prod"
     FIXTURE_USER_ID="627a3c7cad1f50a7b44c00de1e054df9"
     FIXTURE_USER_EMAIL="connect-apikey-smoke-prod@codewire.sh"
@@ -115,8 +116,7 @@ case "$TARGET" in
   prod-evidence-secondary)
     [[ "$ALLOW_PROD_MUTATION" == "1" ]] || \
       die "production provisioning requires --allow-prod-mutation"
-    KUBECONFIG_FIXED="$HOME/src/infra/kubeconfig-prod-cluster.yaml"
-    KUBE_CONTEXT="admin@prod-cluster"
+    CLUSTER="${CODEWIRE_PROD_CLUSTER:?set CODEWIRE_PROD_CLUSTER to the Production cluster name}"
     KUBE_NAMESPACE="prod"
     FIXTURE_USER_ID="258099727105fa93538769d4e3498b24"
     FIXTURE_USER_EMAIL="connect-apikey-evidence-prod-secondary@codewire.sh"
@@ -132,6 +132,9 @@ case "$TARGET" in
     die "--target must be dev, prod, or prod-evidence-secondary"
     ;;
 esac
+[[ "$CLUSTER" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || die "cluster name is invalid for target=$TARGET"
+KUBECONFIG_FIXED="$HOME/src/infra/kubeconfig-$CLUSTER.yaml"
+KUBE_CONTEXT="admin@$CLUSTER"
 
 for command in awk bao find jq kubectl mktemp rm rmdir sha256sum; do
   command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"

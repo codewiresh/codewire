@@ -121,6 +121,10 @@ case "$label" in
        "$EXPECTED_CODEWIRE_ORGANIZATION_ID" == bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb &&
        -n "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" &&
        "$KUBE_CONTEXT" == codewire-dev && "$SANDBOX_NAMESPACE" == dev-sandboxes &&
+       "$CODEWIRE_DEV_CLUSTER" == example-dev-cluster &&
+       "$CODEWIRE_DEV_KUBE_SERVER" == https://192.0.2.30:6443 &&
+       "$CODEWIRE_DEV_KUBE_TLS_SERVER_NAME" == api.example-dev-cluster.example.invalid &&
+       "$CODEWIRE_DEV_KUBE_CA_SHA256" == cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc &&
        -z "${CODEWIRE_ADMIN_OAUTH_CONFIG_DIR+x}" && -z "${EXPECTED_NODE+x}" &&
        -z "${LOCAL_PLATFORM_IMAGE+x}" ]] || exit 105
     ;;
@@ -217,6 +221,10 @@ export CODEWIRE_SERVER_URL=https://codewire-dev.sh
 export EXPECTED_CODEWIRE_DEV_SERVER_URL=https://codewire-dev.sh
 export KUBECONFIG="$FAKE_ROOT/fixtures/kubeconfig"
 export KUBE_CONTEXT=codewire-dev
+export CODEWIRE_DEV_CLUSTER=example-dev-cluster
+export CODEWIRE_DEV_KUBE_SERVER=https://192.0.2.30:6443
+export CODEWIRE_DEV_KUBE_TLS_SERVER_NAME=api.example-dev-cluster.example.invalid
+export CODEWIRE_DEV_KUBE_CA_SHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 export CODEWIRE_SERVER_NAMESPACE=dev
 export SANDBOX_NAMESPACE=dev-sandboxes
 export EXPECTED_NODE=node.example
@@ -472,18 +480,20 @@ expect_status 0 "$TEST_ROOT/hosted.out" "$RUNNER" --only dev-initial-private-che
 grep -Fq 'selected result: PASS; full acceptance: NOT CLAIMED' "$TEST_ROOT/hosted.out" ||
   fail 'hosted selection claimed full acceptance'
 pass
-for invalid in identity image browser; do
+for invalid in identity image browser pin; do
   : >"$CALLS"
   case "$invalid" in
     identity) export EXPECTED_CODEWIRE_ORGANIZATION_ID=cccccccccccccccccccccccccccccccc ;;
     image) export DEV_CHECKOUT_WORKSPACE_IMAGE=registry.example/workspace:latest ;;
     browser) export DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE='' ;;
+    pin) export CODEWIRE_DEV_KUBE_CA_SHA256='' ;;
   esac
   expect_status 1 "$TEST_ROOT/hosted-$invalid.out" "$RUNNER" --only dev-initial-private-checkout
   [[ ! -s "$CALLS" ]] || fail "invalid hosted $invalid reached a child"
   export EXPECTED_CODEWIRE_ORGANIZATION_ID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   export DEV_CHECKOUT_WORKSPACE_IMAGE=registry.example/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   export DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE="$FAKE_ROOT/fixtures/browser-input.json"
+  export CODEWIRE_DEV_KUBE_CA_SHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
   pass
 done
 unset DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE DEV_SMOKE_BROWSER_AUTH_BUN_BIN DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN DEV_CHECKOUT_WORKSPACE_IMAGE
@@ -583,6 +593,8 @@ for input_name in ACCEPTANCE_NORMAL_CW_BIN ACCEPTANCE_SYNTHETIC_CW_BIN \
     LOCAL_PLATFORM_MESH_PROBE_BIN CODEWIRE_SERVER_URL EXPECTED_CODEWIRE_DEV_SERVER_URL \
     EXPECTED_CODEWIRE_ADMIN_EMAIL EXPECTED_CODEWIRE_ADMIN_USER_ID \
     EXPECTED_CODEWIRE_ORGANIZATION_ID KUBECONFIG KUBE_CONTEXT \
+    CODEWIRE_DEV_CLUSTER CODEWIRE_DEV_KUBE_SERVER CODEWIRE_DEV_KUBE_TLS_SERVER_NAME \
+    CODEWIRE_DEV_KUBE_CA_SHA256 \
     CODEWIRE_SERVER_NAMESPACE SANDBOX_NAMESPACE EXPECTED_NODE \
     EXPECTED_TAILNET_PATH_TRANSPORT EXPECTED_TAILNET_PEER_RELAY_ENDPOINT \
     EXPECTED_UDP_RELAY_BIND_ADDRS EXPECTED_UDP_RELAY_ALLOCATOR_URL \

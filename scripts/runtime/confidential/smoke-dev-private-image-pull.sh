@@ -4,7 +4,7 @@ umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
-KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"
+KUBE_CONTEXT="${KUBE_CONTEXT:-${CODEWIRE_DEV_CLUSTER:?set CODEWIRE_DEV_CLUSTER to the Dev cluster name}}"
 SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-dev}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 NODE="${CONFIDENTIAL_SNP_NODE:?set CONFIDENTIAL_SNP_NODE to the Dev confidential node}"

@@ -50,7 +50,7 @@ Options:
   -h, --help                Show this help
 
 Safety:
-  - run through Infra scripts/kube-access --mode agent dev-cluster
+  - run through Infra scripts/kube-access --mode agent for the Dev cluster
   - establish the normal OpenBao human OIDC session before invoking it
   - never run with shell tracing or pipe output through tee
   - a failed publication or probe keeps the previously active key usable

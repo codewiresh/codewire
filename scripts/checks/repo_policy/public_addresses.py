@@ -45,13 +45,6 @@ ALLOWED_ADDRESSES: dict[str, str] = {
     "2a09:8280:1::2222": "public anycast STUN result in upstream-derived tracker tests",
 }
 
-# Live deployment inputs that still ship from this tree. Each entry names the
-# work that moves it to the private deploy repository; delete it then.
-PENDING_DEPLOY_INPUTS: dict[str, str] = {
-    "deployments/k8s/overlays/dev/kustomization.yaml": "#1383 moves Dev deploy inputs to codewire/deploy",
-}
-
-
 def public_address(literal: str) -> bool:
     try:
         address = ipaddress.ip_address(literal)
@@ -81,7 +74,7 @@ def scan_public_addresses(paths: list[str]) -> list[str]:
     self_path = Path(__file__).relative_to(ROOT).as_posix()
     findings: list[str] = []
     for rel in paths:
-        if rel == self_path or rel in PENDING_DEPLOY_INPUTS:
+        if rel == self_path:
             continue
         data = (ROOT / rel).read_bytes()
         if b"\0" in data:

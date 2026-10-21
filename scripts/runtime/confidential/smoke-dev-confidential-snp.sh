@@ -7,10 +7,11 @@ KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 
 CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"
 EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-https://codewire-dev.sh}"
-KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"
+DEV_CLUSTER="${CODEWIRE_DEV_CLUSTER:?set CODEWIRE_DEV_CLUSTER to the Dev cluster name}"
+KUBE_CONTEXT="${KUBE_CONTEXT:-$DEV_CLUSTER}"
 NODE="${CONFIDENTIAL_SNP_NODE:?set CONFIDENTIAL_SNP_NODE to the Dev confidential node}"
 INFRA_ROOT="${INFRA_ROOT:-$HOME/src/infra}"
-HOST_GATE_STACK="${CONFIDENTIAL_SNP_HOST_GATE_STACK:-dev-cluster}"
+HOST_GATE_STACK="${CONFIDENTIAL_SNP_HOST_GATE_STACK:-$DEV_CLUSTER}"
 HOST_GATE_MIN_EPHEMERAL_GIB="${CONFIDENTIAL_SNP_HOST_GATE_MIN_EPHEMERAL_GIB:-1500}"
 HOST_PROFILE_ISOLATION_RECEIPT='check-talos-runtime-artifacts: confidential profile isolation passed: shared_fs=none host-share-overrides=denied'
 PROBE_NAMESPACE="${CONFIDENTIAL_SNP_PROBE_NAMESPACE:-codewire-runtime-probes}"
@@ -234,8 +235,8 @@ run_host_gate() {
     die "missing Infra Talos runtime-artifact verifier at $INFRA_ROOT/scripts/check-talos-runtime-artifacts"
   [[ -x "$INFRA_ROOT/scripts/talos-external-worker" ]] || \
     die "missing Infra Talos external-worker wrapper at $INFRA_ROOT/scripts/talos-external-worker"
-  [[ "$HOST_GATE_STACK" == "dev-cluster" ]] || \
-    die "confidential SNP host gate must use dev-cluster"
+  [[ "$HOST_GATE_STACK" == "$DEV_CLUSTER" ]] || \
+    die "confidential SNP host gate must use the Dev cluster $DEV_CLUSTER"
   [[ "$HOST_GATE_MIN_EPHEMERAL_GIB" =~ ^[0-9]+$ ]] || \
     die "confidential SNP host-gate ephemeral threshold must be an integer"
 

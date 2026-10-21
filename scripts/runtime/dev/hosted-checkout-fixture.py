@@ -57,13 +57,16 @@ OBSERVATION_FAILURE_CODES = {
     "invalid public key": "ready-metadata",
 }
 IMAGE = re.compile(r"(?:ghcr\.io/codewiresh/workspace|registry\.example\.invalid/codewire/workspace)@sha256:[0-9a-f]{64}")
-# Public route/trust binding from owning Infra clusters/kubernetes-access.json
-# main a7cb24de1ed865e44cc728530d4f47f64c33202c, dev-cluster. No alternatives.
-DEV_CONTEXT = "dev-cluster"
+# Public route/trust binding of the Dev cluster from the owning Infra
+# clusters/kubernetes-access.json. The operator environment supplies it
+# (~/.config/codewire/env, #1383); an unset or malformed pin refuses every
+# mode. No alternatives.
+DEV_CONTEXT = os.environ.get("CODEWIRE_DEV_CLUSTER", "")
 DEV_NAMESPACE = "dev-sandboxes"
-DEV_SERVER = "https://100.64.0.152:6443"
-DEV_TLS = "api.dev-cluster.codewire.sh"
-DEV_CA_SHA256 = "c649ace4c99caaf7d8e653c0858e3da2f0de7714d823edfd70acdc91d816c692"
+DEV_SERVER = os.environ.get("CODEWIRE_DEV_KUBE_SERVER", "")
+DEV_TLS = os.environ.get("CODEWIRE_DEV_KUBE_TLS_SERVER_NAME", "")
+DEV_CA_SHA256 = os.environ.get("CODEWIRE_DEV_KUBE_CA_SHA256", "")
+DNS_NAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
 RESOURCES = {"ConfigMap": ("v1", "configmaps"), "Pod": ("v1", "pods"),
              "Service": ("v1", "services"), "NetworkPolicy": ("networking.k8s.io/v1", "networkpolicies")}
 
@@ -173,7 +176,14 @@ class Kube:
             raise Failure("invalid fixture Kubernetes response") from None
 
 
+def require_dev_pin():
+    require(DNS_NAME.fullmatch(DEV_CONTEXT) and DNS_NAME.fullmatch(DEV_TLS)
+            and re.fullmatch(r"https://[0-9A-Za-z.:\[\]-]+:[0-9]{1,5}", DEV_SERVER)
+            and re.fullmatch(r"[0-9a-f]{64}", DEV_CA_SHA256), "Dev cluster pin is not configured")
+
+
 def preflight(args, directory):
+    require_dev_pin()
     admission(args.principal_user_id, args.principal_email, args.organization_id)
     require(args.namespace == DEV_NAMESPACE, "invalid fixture namespace")
     require(args.context == DEV_CONTEXT and IMAGE.fullmatch(args.image), "invalid fixture context or image")
@@ -184,6 +194,7 @@ def cluster_trust(kube):
     # Project this selected PUBLIC cluster only. Never emit users, token/key
     # fields or the entire raw kubeconfig. Require the inline public CA: do not
     # use --flatten, which also opens selected-user private key/cert paths.
+    require_dev_pin()
     cluster = kube.run([
         "config", "view", "--minify", "--raw", "-o", "jsonpath={.clusters[0].cluster}"])
     require(isinstance(cluster, dict) and cluster.get("server") == DEV_SERVER and cluster.get("tls-server-name") == DEV_TLS

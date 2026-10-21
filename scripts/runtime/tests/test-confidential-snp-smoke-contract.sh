@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CONFIDENTIAL_SNP_NODE=dev-node-1
+export CONFIDENTIAL_SNP_NODE=example-node-1
+export CODEWIRE_DEV_CLUSTER=example-dev-cluster
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SMOKE="$ROOT/scripts/runtime/confidential/smoke-dev-confidential-snp.sh"
@@ -60,6 +61,12 @@ if "$SMOKE" --skip-coco --keep-product >"$validation_dir/keep.out" 2>"$validatio
   exit 1
 fi
 rg -F -- '--keep-product requires the Codewire product smoke' "$validation_dir/keep.err" >/dev/null
+# The Dev cluster binding comes from the operator environment, never source.
+if env -u CODEWIRE_DEV_CLUSTER "$SMOKE" --help >"$validation_dir/cluster.out" 2>"$validation_dir/cluster.err"; then
+  printf 'confidential smoke ran without a Dev cluster binding\n' >&2
+  exit 1
+fi
+rg -F 'set CODEWIRE_DEV_CLUSTER to the Dev cluster name' "$validation_dir/cluster.err" >/dev/null
 rm -rf "$validation_dir"
 
 if rg -n '^[[:space:]]*(kubectl|kubectl_dev)([[:space:]]+[^[:space:]]+)*[[:space:]]+(apply|create|delete|edit|patch|replace|scale)\b' "$SMOKE"; then
@@ -74,7 +81,8 @@ fi
 rg -F 'SMOKE_KUSTOMIZATION="codewire-deploy-confidential-smoke-dev"' "$SMOKE" >/dev/null
 rg -F 'CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"' "$SMOKE" >/dev/null
 rg -F 'EXPECTED_CODEWIRE_DEV_SERVER_URL="${EXPECTED_CODEWIRE_DEV_SERVER_URL:-https://codewire-dev.sh}"' "$SMOKE" >/dev/null
-rg -F 'KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"' "$SMOKE" >/dev/null
+rg -F 'DEV_CLUSTER="${CODEWIRE_DEV_CLUSTER:?set CODEWIRE_DEV_CLUSTER to the Dev cluster name}"' "$SMOKE" >/dev/null
+rg -F 'KUBE_CONTEXT="${KUBE_CONTEXT:-$DEV_CLUSTER}"' "$SMOKE" >/dev/null
 rg -F 'SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"' "$SMOKE" >/dev/null
 rg -F 'NODE="${CONFIDENTIAL_SNP_NODE:?set CONFIDENTIAL_SNP_NODE to the Dev confidential node}"' "$SMOKE" >/dev/null
 rg -F './scripts/talos-external-worker verify' "$SMOKE" >/dev/null
@@ -303,7 +311,7 @@ done
 
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
-rg -F 'kubernetes.io/hostname: dev-node-1' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'kubernetes.io/hostname: example-node-1' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'storageClassName: longhorn' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'longhorn-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
@@ -647,7 +655,7 @@ case "$*" in
   'get runtimeclass commodity confidential -o yaml')
     printf '%s\n' 'items: []'
     ;;
-  'get node dev-node-1 -o json')
+  'get node example-node-1 -o json')
     jq -n '{metadata: {labels: {
       "katacontainers.io/kata-runtime": "true",
       "node.codewire.sh/runtime-candidate": "true",
@@ -687,7 +695,7 @@ mkdir -p "$bootstrap_dir/infra/scripts"
 cat >"$bootstrap_dir/infra/scripts/check-talos-runtime-artifacts" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == '--stack dev-cluster' ]]
+[[ "$*" == '--stack example-dev-cluster' ]]
 if [[ -n "${HOST_ARTIFACTS_CALLS:-}" ]]; then
   printf '%s\n' "$*" >>"$HOST_ARTIFACTS_CALLS"
 fi
@@ -702,7 +710,7 @@ EOF
 cat >"$bootstrap_dir/infra/scripts/talos-external-worker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == 'verify dev-cluster dev-node-1 1500' ]]
+[[ "$*" == 'verify example-dev-cluster example-node-1 1500' ]]
 if [[ -n "${HOST_WORKER_CALLS:-}" ]]; then
   printf '%s\n' "$*" >>"$HOST_WORKER_CALLS"
 fi
@@ -746,8 +754,8 @@ PATH="$bootstrap_dir/bin:$PATH" \
 rg -Fx \
   'check-talos-runtime-artifacts: confidential profile isolation passed: shared_fs=none host-share-overrides=denied' \
   "$bootstrap_dir/host-gate-evidence/host-runtime-gate.log" >/dev/null
-rg -Fx -- '--stack dev-cluster' "$bootstrap_dir/host-artifacts.calls" >/dev/null
-rg -Fx -- 'verify dev-cluster dev-node-1 1500' \
+rg -Fx -- '--stack example-dev-cluster' "$bootstrap_dir/host-artifacts.calls" >/dev/null
+rg -Fx -- 'verify example-dev-cluster example-node-1 1500' \
   "$bootstrap_dir/host-worker.calls" >/dev/null
 
 for unsafe_shared_fs in \

@@ -297,7 +297,7 @@ case "$count" in
     [[ "$input" == *"COUNT(*) FROM org_members WHERE org_id = o.id"* ]]
     if [[ "$*" == *'258099727105fa93538769d4e3498b24'* ]]; then
       printf '258099727105fa93538769d4e3498b24|connect-apikey-evidence-prod-secondary@codewire.sh|f|63742e203ad7e3c65f25af8e221ccf21|connect-apikey-evidence-prod-secondary|1|1|1|0|1|dddddddd\n'
-    elif [[ "$*" == *'admin@dev-cluster'* ]]; then
+    elif [[ "$*" == *'admin@example-dev-cluster'* ]]; then
       printf 'f23d1c4a5ed665e62094d9d106c0d13b|connect-apikey-smoke-dev@codewire-dev.sh|f|9bef2654d4ac6824ead235fdb9bb8598|connect-apikey-smoke-dev|1|1|1|0|1|dddddddd\n'
     else
       printf '627a3c7cad1f50a7b44c00de1e054df9|connect-apikey-smoke-prod@codewire.sh|f|3289cbf3e0ca05c5ef2ac7cb696d5318|connect-apikey-smoke-prod|1|1|1|0|1|dddddddd\n'
@@ -324,8 +324,8 @@ run_provision_case() {
   local fake_home="$case_dir/home"
   local provision_tmp="$case_dir/tmp"
   mkdir -p "$bin_dir" "$fake_home/src/infra" "$provision_tmp"
-  touch "$fake_home/src/infra/kubeconfig-dev-cluster.yaml"
-  touch "$fake_home/src/infra/kubeconfig-prod-cluster.yaml"
+  touch "$fake_home/src/infra/kubeconfig-example-dev-cluster.yaml"
+  touch "$fake_home/src/infra/kubeconfig-example-prod-cluster.yaml"
   make_fake_kubectl "$bin_dir/kubectl"
   make_fake_bao "$bin_dir"
   : >"$case_dir/kubectl.log"
@@ -336,17 +336,17 @@ run_provision_case() {
   case "$target" in
     dev)
       expected_path="apps/codewire/dev/apikey-smoke"
-      expected_context="admin@dev-cluster"
+      expected_context="admin@example-dev-cluster"
       ;;
     prod)
       args+=(--allow-prod-mutation)
       expected_path="apps/codewire/prod/apikey-smoke"
-      expected_context="admin@prod-cluster"
+      expected_context="admin@example-prod-cluster"
       ;;
     prod-evidence-secondary)
       args+=(--allow-prod-mutation)
       expected_path="apps/codewire/prod/apikey-evidence-secondary"
-      expected_context="admin@prod-cluster"
+      expected_context="admin@example-prod-cluster"
       ;;
     *) fail "unsupported provision test target: $target" ;;
   esac
@@ -354,6 +354,8 @@ run_provision_case() {
   PATH="$bin_dir:$PATH" \
     HOME="$fake_home" \
     TMPDIR="$provision_tmp" \
+    CODEWIRE_DEV_CLUSTER=example-dev-cluster \
+    CODEWIRE_PROD_CLUSTER=example-prod-cluster \
     BAO_ADDR="https://openbao.example.invalid" \
     BAO_TOKEN="must-not-reach-kubectl" \
     FAKE_KUBECTL_LOG="$case_dir/kubectl.log" \
@@ -400,6 +402,15 @@ test_provisioner() {
   set -e
   [[ "$rc" != "0" ]] || fail "secondary provisioning guard accepted a single opt-in"
   grep -F 'requires --allow-prod-mutation' "$case_dir/evidence.err" >/dev/null
+
+  # The cluster binding has no source default.
+  set +e
+  env -u CODEWIRE_DEV_CLUSTER "$ROOT/scripts/runtime/apikey/provision-apikey-smoke-user.sh" \
+    --target dev >"$case_dir/unbound.out" 2>"$case_dir/unbound.err"
+  rc=$?
+  set -e
+  [[ "$rc" != "0" ]] || fail "dev provisioning accepted an unset cluster binding"
+  grep -F 'set CODEWIRE_DEV_CLUSTER to the Dev cluster name' "$case_dir/unbound.err" >/dev/null
 
   run_provision_case dev
   run_provision_case prod

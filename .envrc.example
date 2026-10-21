@@ -21,6 +21,16 @@
 # export CODEWIRE_SCCACHE_MODE=local
 # export CODEWIRE_BUILDKIT_CACHE_MODE=local
 
+# Hosted cluster bindings for the Dev and Production operator scripts. These
+# have no default: the source tree carries no live cluster value (#1383).
+# export CODEWIRE_DEV_CLUSTER=example-dev-cluster
+# export CODEWIRE_PROD_CLUSTER=example-prod-cluster
+# The Dev cluster route and trust pin the hosted checkout fixture requires,
+# from Infra clusters/kubernetes-access.json.
+# export CODEWIRE_DEV_KUBE_SERVER=https://192.0.2.30:6443
+# export CODEWIRE_DEV_KUBE_TLS_SERVER_NAME=api.example-dev-cluster.example.invalid
+# export CODEWIRE_DEV_KUBE_CA_SHA256=<SHA-256 of the cluster CA certificate>
+
 # Per-worktree overrides stay out of the shared file.
 [ -f "$(dirname "${BASH_SOURCE[0]:-$0}")/.envrc.local" ] && . "$(dirname "${BASH_SOURCE[0]:-$0}")/.envrc.local"
 

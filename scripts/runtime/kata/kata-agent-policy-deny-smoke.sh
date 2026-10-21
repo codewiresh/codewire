@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
-KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"
+KUBE_CONTEXT="${KUBE_CONTEXT:-${CODEWIRE_DEV_CLUSTER:?set CODEWIRE_DEV_CLUSTER to the Dev cluster name}}"
 KATA_POLICY_DENY_NAMESPACE="${KATA_POLICY_DENY_NAMESPACE:-}"
 KATA_POLICY_DENY_POD="${KATA_POLICY_DENY_POD:-kata-policy-deny-exec}"
 KATA_POLICY_DENY_RUNTIME_CLASS="${KATA_POLICY_DENY_RUNTIME_CLASS:-commodity}"

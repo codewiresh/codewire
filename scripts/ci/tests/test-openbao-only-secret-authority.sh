@@ -253,15 +253,18 @@ yq ea -o=json -I=0 \
   'select(.kind == "ConfigMap" and (.metadata.name | test("^codewire-config-"))) | .data' \
   "$render_root/production.yaml" >"$render_root/production-config.json"
 
+# The source names every hosted OpenBao identity with a placeholder. The
+# private deploy release supplies the live values and its render tests own
+# them (#1383); a placeholder that survives a hosted render fails there.
 jq -e '
   .BAO_ADDR == "https://openbao.example.invalid" and
-  .OPENBAO_KUBERNETES_API_AUDIENCE == "https://10.60.0.100:6443" and
-  .TENANT_SECRET_BAO_AUTH_MOUNT == "dev-cluster-k8s" and
-  .TENANT_SECRET_BAO_ROLE == "codewire-tenant-dev-cluster" and
-  .TENANT_SECRET_BAO_AUDIENCE == "openbao-codewire-tenant-dev-cluster" and
-  .CONFIDENTIAL_STORAGE_BAO_AUDIENCE == "openbao-codewire-confidential-storage-dev-cluster" and
-  .TENANT_SECRET_BAO_TRANSIT_MOUNT == "codewire-tenant-dev" and
-  .TENANT_SECRET_BAO_TRANSIT_KEY == "tenant-dek" and
+  .OPENBAO_KUBERNETES_API_AUDIENCE == "https://192.0.2.10:6443" and
+  .TENANT_SECRET_BAO_AUTH_MOUNT == "example-cluster-k8s" and
+  .TENANT_SECRET_BAO_ROLE == "codewire-tenant-example-cluster" and
+  .TENANT_SECRET_BAO_AUDIENCE == "openbao-codewire-tenant-example-cluster" and
+  .CONFIDENTIAL_STORAGE_BAO_AUDIENCE == "openbao-codewire-confidential-storage-example-cluster" and
+  .TENANT_SECRET_BAO_TRANSIT_MOUNT == "codewire-tenant-example" and
+  .TENANT_SECRET_BAO_TRANSIT_KEY == "example-transit-key" and
   .TENANT_SECRET_BAO_EXPECTED_CLUSTER_ID == "00000000-0000-0000-0000-000000000000"
 ' "$render_root/dev-config.json" >/dev/null
 
@@ -387,17 +390,16 @@ for topology in local-kind local-kind-static; do
 done
 
 # Production binds the tenant-secret client to its reconciled OpenBao Transit
-# authority (clusters/system-cluster/access/openbao-codewire-tenant-secrets.json
-# in infra); confidential storage stays unconfigured until reconciled.
-prod_login_mount='prod-cluster-k8s'
-jq -e --arg prod_login_mount "$prod_login_mount" '
+# authority through the same placeholders, which its release supplies;
+# confidential storage stays unconfigured until reconciled.
+jq -e '
   .BAO_ADDR == "https://openbao.example.invalid" and
-  .OPENBAO_KUBERNETES_API_AUDIENCE == "https://10.70.0.100:6443" and
-  .TENANT_SECRET_BAO_AUTH_MOUNT == $prod_login_mount and
-  .TENANT_SECRET_BAO_ROLE == "codewire-tenant-prod-cluster" and
-  .TENANT_SECRET_BAO_AUDIENCE == "openbao-codewire-tenant-prod-cluster" and
-  .TENANT_SECRET_BAO_TRANSIT_MOUNT == "codewire-tenant-prod" and
-  .TENANT_SECRET_BAO_TRANSIT_KEY == "tenant-dek" and
+  .OPENBAO_KUBERNETES_API_AUDIENCE == "https://192.0.2.20:6443" and
+  .TENANT_SECRET_BAO_AUTH_MOUNT == "example-cluster-k8s" and
+  .TENANT_SECRET_BAO_ROLE == "codewire-tenant-example-cluster" and
+  .TENANT_SECRET_BAO_AUDIENCE == "openbao-codewire-tenant-example-cluster" and
+  .TENANT_SECRET_BAO_TRANSIT_MOUNT == "codewire-tenant-example" and
+  .TENANT_SECRET_BAO_TRANSIT_KEY == "example-transit-key" and
   .TENANT_SECRET_BAO_EXPECTED_CLUSTER_ID == "00000000-0000-0000-0000-000000000000" and
   .CONFIDENTIAL_STORAGE_BAO_ADDR == "" and
   .CONFIDENTIAL_STORAGE_BAO_ROLE == "" and

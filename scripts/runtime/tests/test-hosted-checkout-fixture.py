@@ -19,15 +19,23 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.dont_write_bytecode = True
+CERTIFICATE = b"synthetic-public-certificate"
+# A synthetic Dev cluster pin; the operator environment supplies the real one.
+SYNTHETIC_DEV_PIN = {
+    "CODEWIRE_DEV_CLUSTER": "example-dev-cluster",
+    "CODEWIRE_DEV_KUBE_SERVER": "https://192.0.2.30:6443",
+    "CODEWIRE_DEV_KUBE_TLS_SERVER_NAME": "api.example-dev-cluster.example.invalid",
+    "CODEWIRE_DEV_KUBE_CA_SHA256": hashlib.sha256(CERTIFICATE).hexdigest(),
+}
 SPEC = importlib.util.spec_from_file_location("checkout_fixture", ROOT / "scripts/runtime/dev/hosted-checkout-fixture.py")
 FIXTURE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(FIXTURE)
+with patch.dict(os.environ, SYNTHETIC_DEV_PIN):
+    SPEC.loader.exec_module(FIXTURE)
 REAL_KUBE = FIXTURE.Kube
 USER, ORGANIZATION = "1" * 32, "2" * 32
 KEY = "ssh-ed25519 " + base64.b64encode(struct.pack(">I", 11) + b"ssh-ed25519" + struct.pack(">I", 32) + bytes(32)).decode()
 IMAGE = "ghcr.io/codewiresh/workspace@sha256:" + "3" * 64
 READY = KEY + "\n" + "4" * 40 + "\n" + FIXTURE.CONTENT + "\n"
-CERTIFICATE = b"synthetic-public-certificate"
 
 
 class FakeKube:
@@ -120,14 +128,11 @@ class FixtureTests(unittest.TestCase):
         self.kube = FakeKube()
         self.admission_patch = patch.object(FIXTURE, "IDENTITY", self.identity)
         self.kube_patch = patch.object(FIXTURE, "Kube", return_value=self.kube)
-        self.ca_patch = patch.object(FIXTURE, "DEV_CA_SHA256", hashlib.sha256(CERTIFICATE).hexdigest())
         self.admission_patch.start()
         self.kube_patch.start()
-        self.ca_patch.start()
 
     def tearDown(self):
         self.kube_patch.stop()
-        self.ca_patch.stop()
         self.admission_patch.stop()
         self.temporary.cleanup()
 
@@ -408,6 +413,15 @@ class FixtureTests(unittest.TestCase):
                     FIXTURE.start(self.args)
                 self.kube.cluster = original
         self.assertFalse(any(args[0] == "create" for args, _ in self.kube.calls))
+
+    def test_unset_dev_pin_refuses_before_any_cluster_read(self):
+        for name in ("DEV_CONTEXT", "DEV_SERVER", "DEV_TLS", "DEV_CA_SHA256"):
+            with self.subTest(name=name), patch.object(FIXTURE, name, ""):
+                with self.assertRaises(FIXTURE.Failure) as caught:
+                    FIXTURE.start(self.args)
+                self.assertEqual(str(caught.exception), "Dev cluster pin is not configured")
+        self.assertEqual(self.kube.calls, [])
+        self.assertFalse(self.args.state_dir.exists())
 
     def test_real_kubectl_projects_only_public_selected_cluster(self):
         # Local synthetic kubeconfig only: no network or owner config/user reads.
