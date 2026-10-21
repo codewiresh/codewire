@@ -251,13 +251,20 @@ Remote-SSH on `cw-<id>`.
 
 ```sh
 cw setup ssh [--ssh-config-file ~/.ssh/config] [-o|--ssh-option OPTION]... [-n|--dry-run]
+cw setup ssh remove [--ssh-config-file ~/.ssh/config] [-n|--dry-run]
 ```
 
 Writes the managed `Host cw-*` block with `ProxyCommand cw shell --stdio %n`
 and `KnownHostsCommand cw ssh known-hosts %H`, so that `ssh`, `scp`, `sftp`,
-`rsync` and VS Code Remote-SSH reach cloud environments. `--dry-run` prints
-the result instead of writing it. `cw setup` writes the same block unless
-`--skip-ssh` is given.
+`rsync` and VS Code Remote-SSH reach cloud environments, and reports whether
+the block was written or unchanged. `--dry-run` shows the change to the
+managed block without writing it; the rest of the file is not printed.
+`cw setup` writes the same block unless `--skip-ssh` is given.
+
+`cw setup ssh remove` deletes only the managed block and keeps every other
+line. It reports nothing to remove when there is no block or no file, and
+creates nothing. It refuses, changing nothing, when one of the two marker
+lines is missing or the file is not writable.
 
 ## cw preset (cloud)
 

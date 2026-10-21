@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::commands::progress::terminal_text;
+
 use super::*;
 use codewire_client::{ClientError, CodewireClient, DeleteApiKeyRequest, ListApiKeysRequest};
 
@@ -401,16 +403,15 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
     }
 
     if !args.skip_ssh {
-        if let Err(err) = handle_config_ssh_command(SshSetupArgs {
-            ssh_config_file: None,
-            ssh_options: Vec::new(),
-            dry_run: false,
-        }) {
-            eprintln!("Warning: SSH config update failed: {err}");
-            eprintln!("You can retry later with: cw setup ssh");
-        } else {
-            eprintln!("Updated OpenSSH config.");
+        // Setup's own lines go to stderr, so the SSH result does too, once.
+        let style = crate::output::Capabilities::from_process(crate::output::OutputMode::Text)
+            .stderr_style();
+        eprintln!();
+        match install_default_managed_ssh_config() {
+            Ok(outcome) => eprint!("{}", outcome.render(style)),
+            Err(err) => eprint!("{}", render_ssh_setup_failure(&err, style)),
         }
+        eprintln!();
     }
 
     eprintln!("Setup complete.");
@@ -2047,31 +2048,541 @@ pub(crate) fn ssh_cw_command(path: &Path) -> anyhow::Result<String> {
     })
 }
 
+/// `cw setup ssh` and `cw setup ssh remove`: the result on stdout.
 pub(crate) fn handle_config_ssh_command(args: SshSetupArgs) -> anyhow::Result<()> {
-    let config_path =
-        expand_home_path(args.ssh_config_file.unwrap_or_else(default_ssh_config_path))?;
-    let (content, changed) = render_managed_ssh_config(
-        &config_path,
+    let outcome = match args.command {
+        Some(SshSetupCommand::Remove(remove)) => remove_managed_ssh_config(
+            SshConfigFile::resolve(remove.ssh_config_file)?,
+            remove.dry_run,
+        )?,
+        None => install_managed_ssh_config(
+            SshConfigFile::resolve(args.ssh_config_file)?,
+            &SshConfigOptions {
+                cw_command: ssh_cw_command(&current_cw_executable()?)?,
+                ssh_options: args.ssh_options,
+            },
+            args.dry_run,
+        )?,
+    };
+    let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
+    print!("{}", outcome.render(caps.stdout_style()));
+    Ok(())
+}
+
+/// The managed section `cw setup` and `cw vscode` keep current in the
+/// default SSH config, running this `cw`.
+pub(crate) fn install_default_managed_ssh_config() -> anyhow::Result<SshConfigOutcome> {
+    install_managed_ssh_config(
+        SshConfigFile::resolve(None)?,
         &SshConfigOptions {
             cw_command: ssh_cw_command(&current_cw_executable()?)?,
-            ssh_options: args.ssh_options,
+            ssh_options: Vec::new(),
         },
-    )?;
+        false,
+    )
+}
 
-    if args.dry_run {
-        std::io::stdout().write_all(content.as_bytes())?;
-        return Ok(());
+/// `cw setup`'s report when the SSH config could not be written. Sign-in
+/// has succeeded by then, so setup goes on.
+pub(crate) fn render_ssh_setup_failure(
+    error: &anyhow::Error,
+    style: crate::output::Style,
+) -> String {
+    use crate::output::{Role, Status};
+    format!(
+        "{} SSH config not updated\n  {}\n\n{} Retry: cw setup ssh\n",
+        style.status(Status::Attention),
+        style.paint(Role::Dim, &terminal_text(&format!("{error:#}"))),
+        style.status(Status::Next),
+    )
+}
+
+/// The SSH config a setup or removal works on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SshConfigFile {
+    /// As named: `--ssh-config-file` with `~` expanded, or the default.
+    pub(crate) path: PathBuf,
+    /// The file a write replaces: `path`, or the file its symlinks lead to,
+    /// so a linked config stays a link.
+    pub(crate) target: PathBuf,
+    /// Not the default, so OpenSSH reads it only with `-F`.
+    pub(crate) named: bool,
+}
+
+impl SshConfigFile {
+    pub(crate) fn resolve(named: Option<PathBuf>) -> anyhow::Result<Self> {
+        let default = expand_home_path(default_ssh_config_path());
+        let (path, named) = match named {
+            Some(path) => {
+                let path = expand_home_path(path)?;
+                let named = default.ok().as_ref() != Some(&path);
+                (path, named)
+            }
+            None => (default?, false),
+        };
+        Ok(Self {
+            target: ssh_config_write_target(&path)?,
+            path,
+            named,
+        })
     }
 
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create ssh config dir {parent:?}"))?;
+    /// The file's text, or `None` when there is no file.
+    fn read(&self) -> anyhow::Result<Option<String>> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("read ssh config {}", self.path.display()));
+            }
+        };
+        String::from_utf8(bytes).map(Some).map_err(|_| {
+            anyhow::anyhow!(
+                "{} is not UTF-8 text, so cw cannot edit it without changing your entries; it was not changed",
+                self.path.display()
+            )
+        })
     }
-    write_ssh_config_file(&config_path, content.as_bytes())?;
 
-    if changed {
-        println!("Updated {}", config_path.display());
+    /// `--ssh-config-file PATH` for a command that must name this file
+    /// again, or nothing for the default.
+    fn flag(&self) -> String {
+        if self.named {
+            format!(
+                " --ssh-config-file {}",
+                shell_word(&self.path.to_string_lossy())
+            )
+        } else {
+            String::new()
+        }
+    }
+
+    /// The path, and where it leads when it is a symlink.
+    fn shown(&self) -> String {
+        if self.target == self.path {
+            terminal_text(&self.path.display().to_string())
+        } else {
+            format!(
+                "{} -> {}",
+                terminal_text(&self.path.display().to_string()),
+                terminal_text(&self.target.display().to_string())
+            )
+        }
+    }
+
+    fn incomplete_markers(&self, rerun: &str) -> anyhow::Error {
+        anyhow::anyhow!(
+            "{} has an incomplete Codewire section: a `{SSH_CONFIG_MARKER_START}` line without its `{SSH_CONFIG_MARKER_END}` line, or the reverse; it was not changed. Delete the leftover marker line, then run `{rerun}{}` again",
+            self.path.display(),
+            self.flag()
+        )
+    }
+
+    /// Replaces the file's content without ever leaving it truncated or
+    /// half written: see [`write_ssh_config_atomically`]. A file that is
+    /// not writable, not a regular file or has other hard links is refused
+    /// unchanged; a missing file is created 0600, in a 0700 directory when
+    /// that is missing too.
+    fn replace(&self, content: &[u8], rerun: &str) -> anyhow::Result<()> {
+        let rerun = format!("{rerun}{}", self.flag());
+        let target = &self.target;
+        let permissions = match fs::symlink_metadata(target) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    metadata.is_file(),
+                    "{} is not a regular file; it was not changed",
+                    target.display()
+                );
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+                    anyhow::ensure!(
+                        metadata.nlink() <= 1,
+                        "{} has {} hard links, and replacing it would leave the other names with the old text; it was not changed. Make the other names symlinks to it, then run `{rerun}` again",
+                        target.display(),
+                        metadata.nlink()
+                    );
+                }
+                // The rename below needs only the directory to be
+                // writable, so ask the file itself.
+                if let Err(err) = fs::OpenOptions::new().write(true).open(target) {
+                    anyhow::bail!(
+                        "{} is not writable ({err}); it was not changed. Make it writable, for example `chmod u+w {}`, then run `{rerun}` again",
+                        target.display(),
+                        shell_word(&target.to_string_lossy())
+                    );
+                }
+                Some(metadata.permissions())
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(parent) = target
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                {
+                    create_private_dir_all(parent)
+                        .with_context(|| format!("create ssh config dir {}", parent.display()))?;
+                }
+                None
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("inspect ssh config {}", target.display()));
+            }
+        };
+        write_ssh_config_atomically(target, content, permissions, &rerun)
+    }
+}
+
+/// What `cw setup ssh` or `cw setup ssh remove` did to the SSH config, or
+/// with `--dry-run` would do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SshConfigChange {
+    /// The managed section was added, updated or moved first.
+    Written,
+    Unchanged,
+    Removed,
+    /// There is no managed section, or no file.
+    NothingToRemove,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SshConfigOutcome {
+    pub(crate) change: SshConfigChange,
+    pub(crate) file: SshConfigFile,
+    /// The file existed before.
+    pub(crate) existed: bool,
+    /// `--dry-run`: nothing was written.
+    pub(crate) dry_run: bool,
+    /// The managed sections before and after, which a dry run compares.
+    pub(crate) before: String,
+    pub(crate) after: String,
+}
+
+impl SshConfigOutcome {
+    /// The result block: outcome and file, then how to use or restore the
+    /// section. A dry run shows the managed section's change instead, never
+    /// the rest of the file.
+    pub(crate) fn render(&self, style: crate::output::Style) -> String {
+        use crate::output::{Role, Status};
+        let path = self.file.shown();
+        let flag = self.file.flag();
+        let mut out = String::new();
+        if self.dry_run
+            && matches!(
+                self.change,
+                SshConfigChange::Written | SshConfigChange::Removed
+            )
+        {
+            let verb = match self.change {
+                SshConfigChange::Written => "write",
+                _ => "remove",
+            };
+            out.push_str(&format!("Dry run: would {verb} the Codewire SSH section\n"));
+            out.push_str(&format!(
+                "  {}\n",
+                style.paint(
+                    Role::Dim,
+                    &format!("{path}{}nothing written", style.separator())
+                )
+            ));
+            if self.before == self.after {
+                out.push_str(&format!(
+                    "  {}\n",
+                    style.paint(
+                        Role::Dim,
+                        "Its text is unchanged; it moves to the top of the file, or the blank lines around it change."
+                    )
+                ));
+            }
+            out.push('\n');
+            for (sign, line) in ssh_section_diff(&self.before, &self.after) {
+                let line = format!("{sign} {}", visible_config_line(line));
+                out.push_str("  ");
+                out.push_str(&match sign {
+                    '+' => style.paint(Role::Success, &line),
+                    '-' => style.paint(Role::Failure, &line),
+                    _ => line,
+                });
+                out.push('\n');
+            }
+            return out;
+        }
+        let (headline, detail) = match self.change {
+            SshConfigChange::Written => ("Codewire SSH section written", path),
+            SshConfigChange::Unchanged => ("Codewire SSH section unchanged", path),
+            SshConfigChange::Removed => (
+                "Codewire SSH section removed",
+                format!("{path}{}your own entries kept", style.separator()),
+            ),
+            SshConfigChange::NothingToRemove if self.existed => (
+                "Nothing to remove",
+                format!("{path} has no Codewire SSH section"),
+            ),
+            SshConfigChange::NothingToRemove => {
+                ("Nothing to remove", format!("{path} does not exist"))
+            }
+        };
+        out.push_str(&format!(
+            "{} {headline}\n  {}\n",
+            style.status(Status::Done),
+            style.paint(Role::Dim, &detail)
+        ));
+        match self.change {
+            SshConfigChange::Written | SshConfigChange::Unchanged => {
+                let ssh = if self.file.named {
+                    format!(
+                        "ssh -F {} cw-NAME",
+                        shell_word(&self.file.path.to_string_lossy())
+                    )
+                } else {
+                    "ssh cw-NAME".to_string()
+                };
+                out.push_str(&format!(
+                    "\n{} {}\n  {}\n",
+                    style.status(Status::Next),
+                    terminal_text(&ssh),
+                    style.paint(
+                        Role::Dim,
+                        "Cloud environments, by name or ID. Local VMs: use `cw shell NAME`."
+                    )
+                ));
+            }
+            SshConfigChange::Removed => out.push_str(&format!(
+                "\n{} Add it back: {}\n",
+                style.status(Status::Next),
+                terminal_text(&format!("cw setup ssh{flag}"))
+            )),
+            SshConfigChange::NothingToRemove => {}
+        }
+        out
+    }
+}
+
+/// Writes the managed section first in `file`, replacing every earlier
+/// Codewire section and keeping the user's entries after it.
+pub(crate) fn install_managed_ssh_config(
+    file: SshConfigFile,
+    options: &SshConfigOptions,
+    dry_run: bool,
+) -> anyhow::Result<SshConfigOutcome> {
+    let block = ssh_config_block(options)?;
+    let existing = file.read()?;
+    let current = existing.as_deref().unwrap_or_default();
+    let split =
+        split_managed_ssh_sections(current).map_err(|_| file.incomplete_markers("cw setup ssh"))?;
+    let rendered = place_managed_ssh_section(current, &block)?;
+    let change = if existing.as_deref() == Some(rendered.as_str()) {
+        SshConfigChange::Unchanged
     } else {
-        println!("No changes to {}", config_path.display());
+        SshConfigChange::Written
+    };
+    if change == SshConfigChange::Written && !dry_run {
+        file.replace(rendered.as_bytes(), "cw setup ssh")?;
+    }
+    Ok(SshConfigOutcome {
+        change,
+        existed: existing.is_some(),
+        dry_run,
+        before: split.sections.join("\n"),
+        after: block,
+        file,
+    })
+}
+
+/// Takes every Codewire section out of `file` and keeps everything else.
+/// A missing file, or one without a section, is left alone; nothing is
+/// created.
+pub(crate) fn remove_managed_ssh_config(
+    file: SshConfigFile,
+    dry_run: bool,
+) -> anyhow::Result<SshConfigOutcome> {
+    let Some(existing) = file.read()? else {
+        return Ok(SshConfigOutcome {
+            change: SshConfigChange::NothingToRemove,
+            file,
+            existed: false,
+            dry_run,
+            before: String::new(),
+            after: String::new(),
+        });
+    };
+    let split = split_managed_ssh_sections(&existing)
+        .map_err(|_| file.incomplete_markers("cw setup ssh remove"))?;
+    let change = if split.sections.is_empty() {
+        SshConfigChange::NothingToRemove
+    } else {
+        if !dry_run {
+            file.replace(split.rest.as_bytes(), "cw setup ssh remove")?;
+        }
+        SshConfigChange::Removed
+    };
+    Ok(SshConfigOutcome {
+        change,
+        file,
+        existed: true,
+        dry_run,
+        before: split.sections.join("\n"),
+        after: String::new(),
+    })
+}
+
+/// `before` against `after`, line by line: `' '` for a kept line, `'-'`
+/// for a removed one and `'+'` for an added one, from their longest common
+/// subsequence.
+pub(crate) fn ssh_section_diff<'a>(before: &'a str, after: &'a str) -> Vec<(char, &'a str)> {
+    let before: Vec<&str> = before.lines().collect();
+    let after: Vec<&str> = after.lines().collect();
+    let mut common = vec![vec![0usize; after.len() + 1]; before.len() + 1];
+    for i in (0..before.len()).rev() {
+        for j in (0..after.len()).rev() {
+            common[i][j] = if before[i] == after[j] {
+                common[i + 1][j + 1] + 1
+            } else {
+                common[i + 1][j].max(common[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    let mut diff = Vec::with_capacity(before.len().max(after.len()));
+    while i < before.len() && j < after.len() {
+        if before[i] == after[j] {
+            diff.push((' ', before[i]));
+            i += 1;
+            j += 1;
+        } else if common[i + 1][j] >= common[i][j + 1] {
+            diff.push(('-', before[i]));
+            i += 1;
+        } else {
+            diff.push(('+', after[j]));
+            j += 1;
+        }
+    }
+    diff.extend(before[i..].iter().map(|line| ('-', *line)));
+    diff.extend(after[j..].iter().map(|line| ('+', *line)));
+    diff
+}
+
+/// A config line as the terminal may show it: indentation kept, control
+/// characters replaced.
+fn visible_config_line(line: &str) -> String {
+    line.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
+/// `text` as one word of a shell command, quoted only when it needs it.
+fn shell_word(text: &str) -> String {
+    let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"/._-+@%,:=~".contains(&byte);
+    if !text.is_empty() && text.bytes().all(plain) {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+/// The file a write to `path` changes: `path` itself, or the file at the end
+/// of its symlinks, which need not exist yet. A link's target is named from
+/// its directory's real path, so `..` and linked directories are resolved.
+pub(crate) fn ssh_config_write_target(path: &Path) -> anyhow::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    let resolved = |current: PathBuf| {
+        if current == path {
+            return current;
+        }
+        match (current.parent().map(fs::canonicalize), current.file_name()) {
+            (Some(Ok(dir)), Some(name)) => dir.join(name),
+            _ => current,
+        }
+    };
+    for _ in 0..40 {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let link = fs::read_link(&current)
+                    .with_context(|| format!("read symlink {}", current.display()))?;
+                current = match current.parent() {
+                    Some(parent) if link.is_relative() => parent.join(link),
+                    _ => link,
+                };
+            }
+            Ok(_) => return Ok(resolved(current)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(resolved(current)),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("inspect ssh config {}", current.display()));
+            }
+        }
+    }
+    anyhow::bail!("{} is a chain of more than 40 symlinks", path.display())
+}
+
+fn create_private_dir_all(dir: &Path) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// Writes `content` to a new file beside `target`, syncs it and renames it
+/// over `target`, so a failure at any step leaves `target` as it was. The
+/// new file is created 0600 and then takes `permissions`, the replaced
+/// file's mode.
+pub(crate) fn write_ssh_config_atomically(
+    target: &Path,
+    content: &[u8],
+    permissions: Option<fs::Permissions>,
+    rerun: &str,
+) -> anyhow::Result<()> {
+    let dir = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = target
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{} names no file", target.display()))?;
+    let temp = dir.join(format!(
+        ".{}.cw-{:016x}",
+        name.to_string_lossy(),
+        rand::random::<u64>()
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp).map_err(|err| {
+        anyhow::anyhow!(
+            "cannot create a file in {} to replace {} safely ({err}); it was not changed. Make the directory writable, then run `{rerun}` again",
+            dir.display(),
+            target.display()
+        )
+    })?;
+    let written = file
+        .write_all(content)
+        .and_then(|()| match permissions {
+            Some(permissions) => file.set_permissions(permissions),
+            None => Ok(()),
+        })
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            fs::rename(&temp, target)
+        });
+    if let Err(err) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(err)
+            .with_context(|| format!("write ssh config {}; it was not changed", target.display()));
+    }
+    // Make the rename itself durable where the platform allows it.
+    #[cfg(unix)]
+    if let Ok(dir) = fs::File::open(dir) {
+        let _ = dir.sync_all();
     }
     Ok(())
 }
@@ -2094,21 +2605,6 @@ pub(crate) fn expand_home_path(path: PathBuf) -> anyhow::Result<PathBuf> {
         return Ok(PathBuf::from(home).join(rest));
     }
     Ok(path)
-}
-
-pub(crate) fn render_managed_ssh_config(
-    config_path: &Path,
-    options: &SshConfigOptions,
-) -> anyhow::Result<(String, bool)> {
-    let existing = match fs::read(config_path) {
-        Ok(existing) => existing,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(err) => return Err(err).with_context(|| format!("read ssh config {config_path:?}")),
-    };
-    let existing_text = String::from_utf8_lossy(&existing);
-    let rendered = place_managed_ssh_section(&existing_text, &ssh_config_block(options)?)?;
-    let changed = existing != rendered.as_bytes();
-    Ok((rendered, changed))
 }
 
 pub(crate) fn ssh_config_block(options: &SshConfigOptions) -> anyhow::Result<String> {
@@ -2194,36 +2690,61 @@ pub(crate) fn place_managed_ssh_section(existing: &str, managed: &str) -> anyhow
     Ok(output)
 }
 
-pub(crate) fn remove_managed_ssh_section(existing: &str) -> anyhow::Result<String> {
-    let start = existing.find(SSH_CONFIG_MARKER_START);
-    let end = existing.find(SSH_CONFIG_MARKER_END);
+/// A config split into its Codewire sections and everything else.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SplitSshConfig {
+    /// The text without the sections.
+    pub(crate) rest: String,
+    /// Each section from its start marker through its end marker.
+    pub(crate) sections: Vec<String>,
+}
 
-    match (start, end) {
-        (None, None) => Ok(existing.to_string()),
-        (Some(start), Some(end)) if end >= start => {
-            let mut end = end + SSH_CONFIG_MARKER_END.len();
-            if existing.as_bytes().get(end) == Some(&b'\n') {
-                end += 1;
+/// Splits out every Codewire section: from its start marker through its end
+/// marker's line ending. A section at the very start of the file also takes
+/// the one blank line `cw setup ssh` writes after it. Every other byte stays
+/// in `rest`. A marker without its partner, or a start marker inside a
+/// section, is refused.
+pub(crate) fn split_managed_ssh_sections(existing: &str) -> anyhow::Result<SplitSshConfig> {
+    let incomplete = || anyhow::anyhow!("malformed ssh config: Codewire markers are incomplete");
+    let mut split = SplitSshConfig::default();
+    let mut remaining = existing;
+    let mut at_file_start = true;
+    loop {
+        let start = remaining.find(SSH_CONFIG_MARKER_START);
+        let end = remaining.find(SSH_CONFIG_MARKER_END);
+        let (start, end) = match (start, end) {
+            (None, None) => {
+                split.rest.push_str(remaining);
+                return Ok(split);
             }
-            Ok(format!("{}{}", &existing[..start], &existing[end..]))
+            (Some(start), Some(end)) if end > start => (start, end),
+            _ => return Err(incomplete()),
+        };
+        let body = &remaining[start + SSH_CONFIG_MARKER_START.len()..end];
+        if body.contains(SSH_CONFIG_MARKER_START) {
+            return Err(incomplete());
         }
-        _ => anyhow::bail!("malformed ssh config: Codewire markers are incomplete"),
+        let end = end + SSH_CONFIG_MARKER_END.len();
+        split.rest.push_str(&remaining[..start]);
+        split.sections.push(remaining[start..end].to_string());
+        let mut after = strip_line_ending(&remaining[end..]);
+        if at_file_start && start == 0 {
+            after = strip_line_ending(after);
+        }
+        at_file_start = false;
+        remaining = after;
     }
 }
 
-pub(crate) fn write_ssh_config_file(path: &Path, content: &[u8]) -> anyhow::Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("write ssh config {path:?}"))?;
-    file.write_all(content)
-        .with_context(|| format!("write ssh config {path:?}"))
+/// `text` without one leading line ending, if it starts with one.
+fn strip_line_ending(text: &str) -> &str {
+    text.strip_prefix("\r\n")
+        .or_else(|| text.strip_prefix('\n'))
+        .unwrap_or(text)
+}
+
+pub(crate) fn remove_managed_ssh_section(existing: &str) -> anyhow::Result<String> {
+    Ok(split_managed_ssh_sections(existing)?.rest)
 }
 
 pub(crate) fn install_completion_for_current_shell() -> anyhow::Result<()> {

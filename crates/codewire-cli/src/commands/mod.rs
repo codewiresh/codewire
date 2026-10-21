@@ -75,7 +75,10 @@ pub(crate) struct CompletionArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub(crate) struct SshSetupArgs {
+    #[command(subcommand)]
+    command: Option<SshSetupCommand>,
     #[arg(long, value_name = "PATH", help = "Path to the SSH config file")]
     ssh_config_file: Option<PathBuf>,
     #[arg(
@@ -87,7 +90,28 @@ pub(crate) struct SshSetupArgs {
     #[arg(
         short = 'n',
         long,
-        help = "Print the resulting SSH config instead of writing it"
+        help = "Show the change to the managed Codewire section without writing it"
+    )]
+    dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SshSetupCommand {
+    #[command(
+        about = "Remove the managed Codewire section from your SSH config",
+        long_about = "Removes only the managed Codewire section, from its start marker through its end marker. Your own SSH entries and your environments are kept."
+    )]
+    Remove(SshRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SshRemoveArgs {
+    #[arg(long, value_name = "PATH", help = "Path to the SSH config file")]
+    ssh_config_file: Option<PathBuf>,
+    #[arg(
+        short = 'n',
+        long,
+        help = "Show the section that would be removed without writing"
     )]
     dry_run: bool,
 }
@@ -192,7 +216,7 @@ pub(crate) struct SetupArgs {
 pub(crate) enum SetupCommand {
     #[command(
         about = "Write the OpenSSH integration for Codewire environments",
-        long_about = "Adds or updates the managed Codewire section in your SSH config so OpenSSH, scp, sftp, rsync, and Remote-SSH can use `cw shell --stdio` as ProxyCommand."
+        long_about = "Adds or updates the managed Codewire section in your SSH config so OpenSSH, scp, sftp, rsync, and Remote-SSH can use `cw shell --stdio` as ProxyCommand. `cw setup ssh remove` takes it out again.\n\nThe section passes the host name to ProxyCommand (`%n`) for every `cw-*` host, so it needs OpenSSH 9.6 or later, or a distribution build that includes the CVE-2023-51385 fix. Without that fix, a host name from an untrusted source, such as a git submodule URL, can run commands."
     )]
     Ssh(SshSetupArgs),
 }

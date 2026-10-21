@@ -262,10 +262,13 @@ fn openssh_resolves_the_managed_block_first() {
             "Host *\n    ForwardAgent yes\n    PasswordAuthentication yes\n    StrictHostKeyChecking no\n",
         )
         .unwrap();
-    let (rendered, changed) =
-        render_managed_ssh_config(&config_path, &ssh_test_options(&[])).unwrap();
-    assert!(changed);
-    fs::write(&config_path, &rendered).unwrap();
+    let outcome = install_managed_ssh_config(
+        SshConfigFile::resolve(Some(config_path.clone())).unwrap(),
+        &ssh_test_options(&[]),
+        false,
+    )
+    .unwrap();
+    assert_eq!(outcome.change, SshConfigChange::Written);
 
     let resolve = |host: &str| {
         let output = std::process::Command::new("ssh")
@@ -392,18 +395,421 @@ fn managed_ssh_section_is_current_only_for_the_same_cw() {
     assert!(!managed_ssh_section_is_current(&bare, TEST_CW));
 }
 
+fn ssh_test_file(path: &std::path::Path) -> SshConfigFile {
+    SshConfigFile::resolve(Some(path.to_path_buf())).unwrap()
+}
+
+fn install_test_ssh_config(
+    path: &std::path::Path,
+    dry_run: bool,
+) -> anyhow::Result<SshConfigOutcome> {
+    install_managed_ssh_config(ssh_test_file(path), &ssh_test_options(&[]), dry_run)
+}
+
+#[cfg(unix)]
+fn file_mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
 #[test]
-fn render_managed_ssh_config_detects_no_change() {
+fn ssh_setup_reruns_unchanged_and_remove_restores_the_user_entries() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config");
-    let options = ssh_test_options(&["ServerAliveInterval 30"]);
-    let content = ssh_config_block(&options).unwrap() + "\n";
-    fs::write(&config_path, &content).unwrap();
+    let user = "Host github.com\n    User git\n\nHost *\n    ServerAliveInterval 30\n";
+    fs::write(&config_path, user).unwrap();
 
-    let (rendered, changed) = render_managed_ssh_config(&config_path, &options).unwrap();
+    let preview = install_test_ssh_config(&config_path, true).unwrap();
+    assert_eq!(preview.change, SshConfigChange::Written);
+    assert!(preview.dry_run && preview.before.is_empty());
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        user,
+        "a dry run writes nothing"
+    );
 
-    assert!(!changed);
-    assert_eq!(rendered, content);
+    let written = install_test_ssh_config(&config_path, false).unwrap();
+    assert_eq!(written.change, SshConfigChange::Written);
+    let configured = fs::read_to_string(&config_path).unwrap();
+    assert_eq!(configured, format!("{CURRENT_MANAGED_SSH_BLOCK}\n\n{user}"));
+
+    let again = install_test_ssh_config(&config_path, false).unwrap();
+    assert_eq!(again.change, SshConfigChange::Unchanged);
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), configured);
+
+    let preview = remove_managed_ssh_config(ssh_test_file(&config_path), true).unwrap();
+    assert_eq!(preview.change, SshConfigChange::Removed);
+    assert_eq!(preview.before, CURRENT_MANAGED_SSH_BLOCK);
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        configured,
+        "a dry run writes nothing"
+    );
+
+    let removed = remove_managed_ssh_config(ssh_test_file(&config_path), false).unwrap();
+    assert_eq!(removed.change, SshConfigChange::Removed);
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), user);
+
+    let second = remove_managed_ssh_config(ssh_test_file(&config_path), false).unwrap();
+    assert_eq!(second.change, SshConfigChange::NothingToRemove);
+    assert!(second.existed);
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), user);
+}
+
+#[test]
+fn ssh_setup_creates_a_private_file_and_remove_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let ssh_dir = dir.path().join("home/.ssh");
+    let config_path = ssh_dir.join("config");
+
+    let removed = remove_managed_ssh_config(ssh_test_file(&config_path), false).unwrap();
+    assert_eq!(removed.change, SshConfigChange::NothingToRemove);
+    assert!(!removed.existed);
+    assert!(!dir.path().join("home").exists(), "remove creates nothing");
+
+    let preview = install_test_ssh_config(&config_path, true).unwrap();
+    assert_eq!(preview.change, SshConfigChange::Written);
+    assert!(
+        !dir.path().join("home").exists(),
+        "a dry run creates nothing"
+    );
+
+    install_test_ssh_config(&config_path, false).unwrap();
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        format!("{CURRENT_MANAGED_SSH_BLOCK}\n")
+    );
+    #[cfg(unix)]
+    {
+        assert_eq!(file_mode(&config_path), 0o600);
+        assert_eq!(file_mode(&ssh_dir), 0o700);
+    }
+    // Only the config is left beside it: the replacement file was renamed.
+    let names: Vec<_> = fs::read_dir(&ssh_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["config"]);
+
+    remove_managed_ssh_config(ssh_test_file(&config_path), false).unwrap();
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_setup_keeps_an_existing_files_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config");
+    fs::write(&config_path, "Host a\n    User b\n").unwrap();
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+    install_test_ssh_config(&config_path, false).unwrap();
+    assert_eq!(file_mode(&config_path), 0o644);
+    remove_managed_ssh_config(ssh_test_file(&config_path), false).unwrap();
+    assert_eq!(file_mode(&config_path), 0o644);
+}
+
+#[test]
+fn ssh_setup_refuses_incomplete_markers_and_leaves_the_file_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config");
+    for broken in [
+        format!("Host a\n{SSH_CONFIG_MARKER_START}\nHost cw-*\n    User codewire\n"),
+        format!("Host a\n{SSH_CONFIG_MARKER_END}\n"),
+        format!("{SSH_CONFIG_MARKER_END}\nHost a\n{SSH_CONFIG_MARKER_START}\n"),
+        format!(
+            "{SSH_CONFIG_MARKER_START}\nHost a\n{SSH_CONFIG_MARKER_START}\nHost b\n{SSH_CONFIG_MARKER_END}\n"
+        ),
+    ] {
+        fs::write(&config_path, &broken).unwrap();
+        let error = install_test_ssh_config(&config_path, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("incomplete Codewire section"), "{error}");
+        assert!(error.contains("it was not changed"), "{error}");
+        assert!(
+            error.contains("then run `cw setup ssh --ssh-config-file "),
+            "{error}"
+        );
+        let error = remove_managed_ssh_config(ssh_test_file(&config_path), false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("then run `cw setup ssh remove --ssh-config-file "),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), broken);
+    }
+}
+
+#[test]
+fn ssh_setup_refuses_a_config_that_is_not_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config");
+    let latin1 = b"# caf\xe9\nHost a\n    User b\n";
+    fs::write(&config_path, latin1).unwrap();
+
+    let error = install_test_ssh_config(&config_path, false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("is not UTF-8 text"), "{error}");
+    let error = remove_managed_ssh_config(ssh_test_file(&config_path), false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("is not UTF-8 text"), "{error}");
+    assert_eq!(fs::read(&config_path).unwrap(), latin1);
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_setup_refuses_a_read_only_config_and_leaves_it_unchanged() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config");
+    let stale = CURRENT_MANAGED_SSH_BLOCK.replace(TEST_CW, "/old/cw") + "\n\nHost a\n";
+    fs::write(&config_path, &stale).unwrap();
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o400)).unwrap();
+    if fs::OpenOptions::new()
+        .write(true)
+        .open(&config_path)
+        .is_ok()
+    {
+        eprintln!("running with permission to write any file; skipping the read-only check");
+        return;
+    }
+
+    let error = install_test_ssh_config(&config_path, false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("is not writable"), "{error}");
+    assert!(error.contains("chmod u+w"), "{error}");
+    assert!(
+        error.contains("then run `cw setup ssh --ssh-config-file "),
+        "{error}"
+    );
+    let error = remove_managed_ssh_config(ssh_test_file(&config_path), false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("is not writable"), "{error}");
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), stale);
+    assert_eq!(file_mode(&config_path), 0o400);
+    // A config that needs no change is not written, so it is not refused.
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&config_path, format!("{CURRENT_MANAGED_SSH_BLOCK}\n")).unwrap();
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o400)).unwrap();
+    assert_eq!(
+        install_test_ssh_config(&config_path, false).unwrap().change,
+        SshConfigChange::Unchanged
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_setup_writes_through_a_symlinked_config() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("dotfiles")).unwrap();
+    fs::create_dir_all(dir.path().join(".ssh")).unwrap();
+    let real = dir.path().join("dotfiles/ssh_config");
+    let link = dir.path().join(".ssh/config");
+    let user = "Host a\n    User b\n";
+    fs::write(&real, user).unwrap();
+    std::os::unix::fs::symlink("../dotfiles/ssh_config", &link).unwrap();
+
+    let file = ssh_test_file(&link);
+    assert_eq!(
+        file.target,
+        fs::canonicalize(dir.path().join("dotfiles"))
+            .unwrap()
+            .join("ssh_config")
+    );
+    install_test_ssh_config(&link, false).unwrap();
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(&real).unwrap(),
+        format!("{CURRENT_MANAGED_SSH_BLOCK}\n\n{user}")
+    );
+    remove_managed_ssh_config(ssh_test_file(&link), false).unwrap();
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_to_string(&real).unwrap(), user);
+
+    // A link to a file that does not exist yet: remove leaves it alone, and
+    // setup creates the file it names.
+    let dangling = dir.path().join(".ssh/dangling");
+    std::os::unix::fs::symlink("../dotfiles/new_config", &dangling).unwrap();
+    let removed = remove_managed_ssh_config(ssh_test_file(&dangling), false).unwrap();
+    assert_eq!(removed.change, SshConfigChange::NothingToRemove);
+    assert!(!dir.path().join("dotfiles/new_config").exists());
+    install_test_ssh_config(&dangling, false).unwrap();
+    assert!(
+        fs::symlink_metadata(&dangling)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("dotfiles/new_config")).unwrap(),
+        format!("{CURRENT_MANAGED_SSH_BLOCK}\n")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_setup_refuses_a_hard_linked_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config");
+    fs::write(&config_path, "Host a\n").unwrap();
+    fs::hard_link(&config_path, dir.path().join("other")).unwrap();
+
+    let error = install_test_ssh_config(&config_path, false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("has 2 hard links"), "{error}");
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), "Host a\n");
+}
+
+#[test]
+fn split_managed_ssh_sections_takes_every_section_and_keeps_the_rest() {
+    let section = format!(
+        "{SSH_CONFIG_MARKER_START}\nHost cw-*\n    User codewire\nHost *\n{SSH_CONFIG_MARKER_END}"
+    );
+    // Two sections, one in the middle of the user's entries; CRLF line ends.
+    let existing = format!("{section}\r\n\r\nHost a\r\n\r\n{section}\r\nHost b\r\n");
+    let split = split_managed_ssh_sections(&existing).unwrap();
+    assert_eq!(split.sections, [section.clone(), section.clone()]);
+    assert_eq!(split.rest, "Host a\r\n\r\nHost b\r\n");
+    // A section that is not first keeps the blank lines around it.
+    let existing = format!("Host a\n\n{section}\n\nHost b\n");
+    assert_eq!(
+        split_managed_ssh_sections(&existing).unwrap().rest,
+        "Host a\n\n\nHost b\n"
+    );
+    let split = split_managed_ssh_sections("Host a\n").unwrap();
+    assert!(split.sections.is_empty());
+    assert_eq!(split.rest, "Host a\n");
+}
+
+#[test]
+fn ssh_section_diff_marks_kept_removed_and_added_lines() {
+    assert_eq!(
+        ssh_section_diff("a\nb\nc", "a\nB\nc\nd"),
+        [(' ', "a"), ('-', "b"), ('+', "B"), (' ', "c"), ('+', "d")]
+    );
+    assert_eq!(ssh_section_diff("", "a"), [('+', "a")]);
+    assert_eq!(ssh_section_diff("a", ""), [('-', "a")]);
+}
+
+#[test]
+fn ssh_setup_output_names_the_outcome_the_file_and_the_next_step() {
+    let style = crate::output::Style::new(false, crate::output::Charset::Unicode);
+    let default = SshConfigFile {
+        path: "/home/u/.ssh/config".into(),
+        target: "/home/u/.ssh/config".into(),
+        named: false,
+    };
+    let outcome = |change, file: &SshConfigFile, existed, dry_run, before: &str, after: &str| {
+        SshConfigOutcome {
+            change,
+            file: file.clone(),
+            existed,
+            dry_run,
+            before: before.to_string(),
+            after: after.to_string(),
+        }
+        .render(style)
+    };
+    assert_eq!(
+        outcome(SshConfigChange::Written, &default, true, false, "", "x"),
+        "✓ Codewire SSH section written\n  /home/u/.ssh/config\n\n→ ssh cw-NAME\n  Cloud environments, by name or ID. Local VMs: use `cw shell NAME`.\n"
+    );
+    assert_eq!(
+        outcome(SshConfigChange::Unchanged, &default, true, false, "x", "x"),
+        "✓ Codewire SSH section unchanged\n  /home/u/.ssh/config\n\n→ ssh cw-NAME\n  Cloud environments, by name or ID. Local VMs: use `cw shell NAME`.\n"
+    );
+    assert_eq!(
+        outcome(SshConfigChange::Removed, &default, true, false, "x", ""),
+        "✓ Codewire SSH section removed\n  /home/u/.ssh/config · your own entries kept\n\n→ Add it back: cw setup ssh\n"
+    );
+    assert_eq!(
+        outcome(
+            SshConfigChange::NothingToRemove,
+            &default,
+            true,
+            false,
+            "",
+            ""
+        ),
+        "✓ Nothing to remove\n  /home/u/.ssh/config has no Codewire SSH section\n"
+    );
+    assert_eq!(
+        outcome(
+            SshConfigChange::NothingToRemove,
+            &default,
+            false,
+            true,
+            "",
+            ""
+        ),
+        "✓ Nothing to remove\n  /home/u/.ssh/config does not exist\n"
+    );
+    // A named file needs `-F`, and every command names it again.
+    let named = SshConfigFile {
+        path: "/tmp/my ssh/config".into(),
+        target: "/tmp/dotfiles/config".into(),
+        named: true,
+    };
+    assert_eq!(
+        outcome(SshConfigChange::Written, &named, true, false, "", "x"),
+        "✓ Codewire SSH section written\n  /tmp/my ssh/config -> /tmp/dotfiles/config\n\n→ ssh -F '/tmp/my ssh/config' cw-NAME\n  Cloud environments, by name or ID. Local VMs: use `cw shell NAME`.\n"
+    );
+    assert_eq!(
+        outcome(SshConfigChange::Removed, &named, true, false, "x", ""),
+        "✓ Codewire SSH section removed\n  /tmp/my ssh/config -> /tmp/dotfiles/config · your own entries kept\n\n→ Add it back: cw setup ssh --ssh-config-file '/tmp/my ssh/config'\n"
+    );
+    // A dry run shows the managed section's change, and only that.
+    assert_eq!(
+        outcome(
+            SshConfigChange::Written,
+            &default,
+            true,
+            true,
+            "# start\n    ProxyCommand /old/cw\n# end",
+            "# start\n    ProxyCommand /new/cw\n# end",
+        ),
+        "Dry run: would write the Codewire SSH section\n  /home/u/.ssh/config · nothing written\n\n    # start\n  -     ProxyCommand /old/cw\n  +     ProxyCommand /new/cw\n    # end\n"
+    );
+    assert_eq!(
+        outcome(
+            SshConfigChange::Removed,
+            &default,
+            true,
+            true,
+            "# start\n\x1b[2J\n# end",
+            ""
+        ),
+        "Dry run: would remove the Codewire SSH section\n  /home/u/.ssh/config · nothing written\n\n  - # start\n  - ?[2J\n  - # end\n"
+    );
+    assert!(
+        outcome(SshConfigChange::Written, &default, true, true, "x", "x")
+            .contains("Its text is unchanged; it moves to the top of the file")
+    );
+    assert_eq!(
+        render_ssh_setup_failure(
+            &anyhow::anyhow!("/home/u/.ssh/config is not writable"),
+            style
+        ),
+        "! SSH config not updated\n  /home/u/.ssh/config is not writable\n\n→ Retry: cw setup ssh\n"
+    );
 }
 
 #[test]
@@ -872,8 +1278,53 @@ fn setup_ssh_replaces_config_ssh_and_takes_no_placement() {
     };
     assert!(args.dry_run);
     assert_eq!(args.ssh_options, ["ForwardX11 no"]);
+    assert!(args.command.is_none());
     assert!(Cli::try_parse_from(["cw", "setup", "ssh", "--org", "codewire"]).is_err());
     assert!(Cli::try_parse_from(["cw", "config-ssh"]).is_err());
+    let cli = Cli::try_parse_from([
+        "cw",
+        "setup",
+        "ssh",
+        "remove",
+        "-n",
+        "--ssh-config-file",
+        "/tmp/ssh_config",
+    ])
+    .unwrap();
+    let Command::Setup(SetupArgs {
+        command:
+            Some(SetupCommand::Ssh(SshSetupArgs {
+                command: Some(SshSetupCommand::Remove(remove)),
+                ..
+            })),
+        ..
+    }) = cli.command
+    else {
+        panic!("expected setup ssh remove");
+    };
+    assert!(remove.dry_run);
+    assert_eq!(
+        remove.ssh_config_file.as_deref(),
+        Some(std::path::Path::new("/tmp/ssh_config"))
+    );
+    // Remove takes no SSH options, and setup's own flags do not reach it.
+    assert!(Cli::try_parse_from(["cw", "setup", "ssh", "remove", "-o", "ForwardX11 no"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "setup", "ssh", "-n", "remove"]).is_err());
+    let cli = Cli::try_parse_from(["cw", "--cloud", "setup", "ssh", "remove"]).unwrap();
+    let error =
+        crate::validate_placement_scope(&cli.command, "setup", cli.placement().unwrap(), false)
+            .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "--cloud does not apply to `cw setup ssh`"
+    );
+    // `%n` in ProxyCommand needs an OpenSSH with the CVE-2023-51385 fix.
+    let help = Cli::try_parse_from(["cw", "setup", "ssh", "--help"])
+        .unwrap_err()
+        .to_string();
+    assert!(help.contains("OpenSSH 9.6 or later"), "{help}");
+    assert!(help.contains("CVE-2023-51385"), "{help}");
+    assert!(help.contains("remove"), "{help}");
     let cli = Cli::try_parse_from(["cw", "--local", "setup", "ssh"]).unwrap();
     let error = crate::validate_placement_scope(
         &cli.command,

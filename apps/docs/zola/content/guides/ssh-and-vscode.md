@@ -10,8 +10,8 @@ config can use `cw` as its proxy.
 
 ## OpenSSH
 
-`cw setup ssh`, which `cw setup` also runs, adds a managed block to
-`~/.ssh/config`:
+`cw setup ssh`, which `cw setup` also runs, adds a managed block to the top
+of `~/.ssh/config` and reports whether it wrote the block or found it current:
 
 ```text
 # ---- START CODEWIRE ----
@@ -22,7 +22,7 @@ Host cw-*
 # ---- END CODEWIRE ----
 ```
 
-Then any `cw-` host name is an environment, by name or ID:
+Then any `cw-` host name is a cloud environment, by name or ID:
 
 ```sh
 ssh cw-my-app
@@ -31,10 +31,35 @@ rsync -av cw-my-app:/workspace/out/ ./out/
 sftp cw-my-app
 ```
 
+The block passes the host name to `ProxyCommand` (`%n`) for every `cw-` host,
+so use OpenSSH 9.6 or later, or a distribution build that includes the fix for
+CVE-2023-51385. Without that fix, a host name from an untrusted source, such as
+a git submodule URL, can run commands. Many distributions backported the fix
+without changing the version number, so check your distribution's advisory
+rather than `ssh -V` alone.
+
 `KnownHostsCommand` asks the platform for the host key it recorded when the
 environment bound, so there is no trust-on-first-use prompt. Re-run
 `cw setup ssh` after changing SSH options (`--ssh-option` adds lines to the
-block; `--dry-run` prints the result). `cw doctor` checks the block.
+block) or moving `cw`. `--dry-run` shows how the block would change, without
+writing anything. `cw doctor` checks the block.
+
+To take the block out again:
+
+```sh
+cw setup ssh remove             # --dry-run shows what would go
+```
+
+This removes only the block, from its start marker through its end marker;
+your own entries and your environments stay. A file with no block, or no file at all, is left
+alone. If one marker line is missing, `cw` changes nothing and asks you to
+delete the other.
+
+`cw` never edits the file in place. It writes the new text to a file beside
+it and renames that over the old one, so an interrupted run never leaves it
+half written. A symlinked config stays a symlink, because `cw` writes the file
+it points to. A file `cw` creates is readable only by you, and an existing
+one keeps its permissions.
 
 `cw shell --stdio` is for hosted sandboxes. For a local VM or a trusted host,
 use `cw shell ENV` and the session commands.

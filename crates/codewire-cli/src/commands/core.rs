@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::commands::progress::terminal_text;
+
 use super::*;
 
 pub(crate) async fn handle_logout_command(globals: &Globals) -> anyhow::Result<()> {
@@ -143,15 +145,22 @@ pub(crate) async fn handle_vscode_command(
     )
     .await?;
 
-    handle_config_ssh_command(SshSetupArgs {
-        ssh_config_file: None,
-        dry_run: false,
-        ssh_options: Vec::new(),
-    })
-    .context("update ssh config")?;
+    // Keeps the managed SSH section current, silently: the link below
+    // connects through it.
+    install_default_managed_ssh_config().context("update ssh config")?;
 
     let uri = vscode_remote_uri(&environment_id, &args.folder);
-    println!("Opening VS Code for environment {environment_id}...");
+    let style =
+        crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stderr_style();
+    eprintln!(
+        "{} Opening VS Code for {}{}",
+        style.status(crate::output::Status::Next),
+        terminal_text(environment.unwrap_or(&environment_id)),
+        style.paint(
+            crate::output::Role::Dim,
+            &format!("{}{}", style.separator(), terminal_text(&args.folder))
+        )
+    );
     open_browser(&uri)
 }
 

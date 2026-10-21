@@ -202,6 +202,7 @@ updates have separate remaining acceptance work.
 cw setup ssh
 cw shell --stdio my-app
 cw vscode my-app
+cw setup ssh remove
 ```
 
 `cw shell --stdio` is the permanent OpenSSH/VS Code proxy path.
@@ -218,7 +219,10 @@ OpenSSH a second `KnownHostsCommand` run per connection. The SSH server runs
 inside the environment's sandbox, so the block also turns off agent and X11
 forwarding, GSSAPI delegation and password, keyboard-interactive and public-key
 authentication. `--ssh-option` cannot override these. `cw doctor` warns when
-the block is outdated or not first.
+the block is outdated or not first. `cw setup ssh remove` deletes only the
+managed block and keeps every other line. Both commands replace the file
+through a new file beside it and a rename, never in place, and write through a
+symlinked config to the file it names.
 
 ## Mesh
 
