@@ -12,7 +12,17 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 
+/// How long a test waits for an event, such as a relay message, before it
+/// fails.
 const WAIT: Duration = Duration::from_secs(2);
+
+/// A deadline no test reaches. These tests check who a saved login belongs
+/// to and what it reaches, not timing, so a loaded host's scheduling must not
+/// decide them (#3081). The deadline itself is tested on its own, with one
+/// that has already passed.
+fn no_deadline() -> Instant {
+    Instant::now() + Duration::from_secs(24 * 60 * 60)
+}
 
 fn binding(directory: &Path, server: &str) -> PlatformCredentialBinding {
     PlatformCredentialBinding {
@@ -70,10 +80,19 @@ fn saved(directory: &Path, server: &str, token: &str, fresh: bool) {
 }
 
 async fn userinfo(server: &MockServer, token: &str, owner: &str) {
+    userinfo_after(server, token, owner, Duration::ZERO).await;
+}
+
+/// UserInfo for `token`, answered after `delay`.
+async fn userinfo_after(server: &MockServer, token: &str, owner: &str, delay: Duration) {
     Mock::given(method("GET"))
         .and(path("/api/oauth/userinfo"))
         .and(header("authorization", format!("Bearer {token}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"sub": owner})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"sub": owner}))
+                .set_delay(delay),
+        )
         .expect(1)
         .mount(server)
         .await;
@@ -129,7 +148,7 @@ async fn explicit_saved_oauth_rejects_missing_malformed_api_key_and_origin_misma
             }
             _ => unreachable!(),
         }
-        let error = authenticated_client(&selected, Instant::now() + WAIT)
+        let error = authenticated_client(&selected, no_deadline())
             .await
             .err()
             .expect(attack);
@@ -143,9 +162,17 @@ async fn explicit_saved_oauth_binds_user_and_ignores_changed_default_organizatio
     let server = MockServer::start().await;
     let directory = tempfile::tempdir().unwrap();
     saved(directory.path(), &server.uri(), "synthetic-original", true);
-    userinfo(&server, "synthetic-original", "another-owner").await;
+    // A provider slower than WAIT, as a loaded host makes it, still gets the
+    // ownership decision, not a deadline (#3081).
+    userinfo_after(
+        &server,
+        "synthetic-original",
+        "another-owner",
+        WAIT + Duration::from_millis(500),
+    )
+    .await;
     let selected = binding(directory.path(), &server.uri());
-    let error = authenticated_client(&selected, Instant::now() + WAIT)
+    let error = authenticated_client(&selected, no_deadline())
         .await
         .err()
         .unwrap();
@@ -170,7 +197,7 @@ async fn saved_refresh_is_once_and_userinfo_and_returned_client_share_original_b
         .await;
     userinfo(&server, "synthetic-refreshed", "synthetic-owner").await;
     let selected = binding(directory.path(), &server.uri());
-    let client = authenticated_client(&selected, Instant::now() + WAIT)
+    let client = authenticated_client(&selected, no_deadline())
         .await
         .unwrap();
     // Simulate a subsequent login replacing the normal saved pair. The admitted
@@ -557,10 +584,7 @@ async fn github_connection_state_is_read_as_the_creator_from_metadata_only() {
             .mount(&server)
             .await;
         let connected = NativePlatformCredentialConnector
-            .github_connected(
-                binding(directory.path(), &server.uri()),
-                Instant::now() + WAIT,
-            )
+            .github_connected(binding(directory.path(), &server.uri()), no_deadline())
             .await
             .unwrap();
         assert_eq!(connected, expected, "{credentials:?}");
@@ -572,10 +596,7 @@ async fn github_connection_state_is_read_as_the_creator_from_metadata_only() {
     saved(directory.path(), &server.uri(), "synthetic-access", true);
     userinfo(&server, "synthetic-access", "another-owner").await;
     let error = NativePlatformCredentialConnector
-        .github_connected(
-            binding(directory.path(), &server.uri()),
-            Instant::now() + WAIT,
-        )
+        .github_connected(binding(directory.path(), &server.uri()), no_deadline())
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::PermissionDenied);
@@ -604,10 +625,7 @@ async fn github_connection_state_is_read_as_the_creator_from_metadata_only() {
             .unwrap(),
         }
         let error = NativePlatformCredentialConnector
-            .github_connected(
-                binding(directory.path(), &server.uri()),
-                Instant::now() + WAIT,
-            )
+            .github_connected(binding(directory.path(), &server.uri()), no_deadline())
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::PermissionDenied, "{attack}");
