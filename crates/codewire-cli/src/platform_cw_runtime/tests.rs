@@ -1330,6 +1330,25 @@ impl OwnedChild {
         assert!(self.terminal(), "owned child cleanup unknown");
         self.child.wait().unwrap()
     }
+
+    /// Blocks until a child bounded by its own deadline ends. Its stdin stays
+    /// open until then: `Child::wait` would close it first, ending a child
+    /// that reads its input before its deadline could.
+    fn wait_for_its_end(&mut self) -> std::process::ExitStatus {
+        let mut p = libc::pollfd {
+            fd: self.pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd for the owned pidfd, which outlives this call.
+        while unsafe { libc::poll(&raw mut p, 1, -1) } != 1 {
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EINTR)
+            );
+        }
+        self.child.wait().unwrap()
+    }
 }
 
 impl Drop for OwnedChild {
@@ -1424,6 +1443,9 @@ fn inherited_ignored_blocked_alarm_is_replaced_by_an_actual_kernel_deadline() {
     let f = Fixture::new();
     let mut original = OwnedChild::spawn(&f, "old-deadline");
     wait_alarm_ready(&f, &original, "old-deadline");
+    // Past the old alarm's 1 s. After its witness the child only parks, so a
+    // terminal child here can only be that alarm, however long this thread
+    // was descheduled.
     thread::sleep(Duration::from_millis(1250));
     assert!(
         !original.terminal(),
@@ -1432,21 +1454,28 @@ fn inherited_ignored_blocked_alarm_is_replaced_by_an_actual_kernel_deadline() {
     assert_eq!(child_birth(original.child.id()), original.birth);
     original.signal(libc::SIGKILL);
     assert_eq!(original.wait().signal(), Some(libc::SIGKILL));
+    // The repaired deadline proves itself: it alone ends this child, with
+    // SIGALRM. There is no readiness witness to wait for, because a child
+    // descheduled past its 1 s deadline before writing one would end without
+    // it. Without the deadline the child ends at its own 8 s input deadline,
+    // not by SIGALRM, so this waits for its end with no bound of its own.
     let mut repaired = OwnedChild::spawn(&f, "deadline");
-    wait_alarm_ready(&f, &repaired, "deadline");
-    assert_eq!(repaired.wait().signal(), Some(libc::SIGALRM));
+    assert_eq!(repaired.wait_for_its_end().signal(), Some(libc::SIGALRM));
     assert_no_home_effect(&f);
 }
 
+/// Waits for the old-alarm child's witness, published after its alarm. That
+/// child ends only by a signal, so this waits for the witness or the child's
+/// end rather than a wall-clock bound that load can exceed. The end is read
+/// before the witness: a witness published just before an end still counts.
 fn wait_alarm_ready(f: &Fixture, child: &OwnedChild, mode: &str) {
     let path = f.root.path().join(format!("alarm-ready-{mode}"));
-    let until = Instant::now() + Duration::from_secs(5);
-    while !path.exists() {
-        assert!(
-            !child.terminal(),
-            "alarm child died before its readiness witness"
-        );
-        assert!(Instant::now() < until, "alarm child readiness deadline");
+    loop {
+        let ended = child.terminal();
+        if path.exists() {
+            break;
+        }
+        assert!(!ended, "alarm child died before its readiness witness");
         thread::sleep(Duration::from_millis(10));
     }
     let mut file = HeldFile::open(&path, 5, 0o600).unwrap();
@@ -1454,6 +1483,21 @@ fn wait_alarm_ready(f: &Fixture, child: &OwnedChild, mode: &str) {
     file.file_mut().read_to_end(&mut bytes).unwrap();
     file.check().unwrap();
     assert_eq!(bytes, b"ready");
+}
+
+/// Publishes a complete witness: written and synced under a private name,
+/// then renamed into place, so the owner never reads a partial one.
+fn publish_witness(path: &Path) {
+    let partial = path.with_extension("partial");
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&partial)
+        .unwrap();
+    file.write_all(b"ready").unwrap();
+    file.sync_all().unwrap();
+    stdfs::rename(&partial, path).unwrap();
 }
 
 #[test]
@@ -1466,6 +1510,11 @@ fn owned_stage_subprocess() {
             // Exact old alarm-only behavior, deliberately under the inherited
             // ignore/block state. The owner proves it stays live, then reaps it.
             unsafe { libc::alarm(1) };
+            publish_witness(&root.join("alarm-ready-old-deadline"));
+            // Only that alarm, the owner's kill or its death signal ends it.
+            loop {
+                thread::park();
+            }
         }
         Ok("deadline") => arm_deadline(1).unwrap(),
         Ok("stage") => {}
@@ -1487,18 +1536,6 @@ fn owned_stage_subprocess() {
             panic!("held executable did not replace the child");
         }
         _ => panic!("unknown synthetic child mode"),
-    }
-    let mode = std::env::var(CHILD_MODE).unwrap();
-    if mode != "stage" {
-        let path = root.join(format!("alarm-ready-{mode}"));
-        let mut ready = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
-            .open(path)
-            .unwrap();
-        ready.write_all(b"ready").unwrap();
-        ready.sync_all().unwrap();
     }
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut input = BoundedInput::stdin(deadline).unwrap();

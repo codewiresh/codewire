@@ -1548,7 +1548,13 @@ mod tests {
         assert!(validated_resolved_addresses("https://mesh.example.com", Vec::new()).is_err());
     }
 
-    #[tokio::test]
+    // The setup deadline runs on a controlled clock. It starts when the
+    // client starts dialing, so on a wall clock a loaded host could spend
+    // the whole second before the HTTP/2 exchange this test is about. A
+    // pending blocking task holds the paused clock still while the real
+    // loopback exchange happens; once the peer has acknowledged SETTINGS it
+    // is released, and the idle runtime advances straight to the deadline.
+    #[tokio::test(start_paused = true)]
     async fn setup_times_out_after_http2_accepts_but_never_responds() {
         let listener = test_bounded(
             "HTTP/2 listener bind",
@@ -1557,6 +1563,12 @@ mod tests {
         .await
         .unwrap();
         let addr = listener.local_addr().unwrap();
+        let (release_clock, clock_held) = std::sync::mpsc::channel::<()>();
+        // Waits on the real clock: if the exchange never happens, the clock
+        // moves again after the same test bound and the test fails, not hangs.
+        let clock_hold = tokio::task::spawn_blocking(move || {
+            let _ = clock_held.recv_timeout(TEST_WALL_BOUND);
+        });
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(test_bounded("HTTP/2 peer task", async move {
@@ -1605,6 +1617,8 @@ mod tests {
         test_bounded("HTTP/2 SETTINGS exchange", accepted_rx)
             .await
             .expect("HTTP/2 peer accepted the connection");
+        release_clock.send(()).expect("clock hold remains active");
+        clock_hold.await.expect("clock hold ends");
         let error = test_bounded("stalled Coordinate setup", client)
             .await
             .expect("coordinator setup task remains joinable")
