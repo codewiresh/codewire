@@ -2697,7 +2697,19 @@ mod tests {
 
     /// Run `operation` with a JSON subscriber on the fixture's own target and
     /// return what it logged.
+    ///
+    /// tracing caches each callsite's interest. While at most one dispatcher
+    /// was live at the last registration, a callsite registered for the first
+    /// time asks only the registering thread's default. So a parallel test
+    /// with no subscriber could hit a fixture event first and cache "never"
+    /// for every thread, and this capture would read an empty log. A second,
+    /// permanent dispatcher keeps tracing asking every live dispatcher, this
+    /// capture's included, whenever it computes interest.
     fn logged<T>(operation: impl FnOnce() -> T) -> (T, String) {
+        static ASK_EVERY_DISPATCHER: std::sync::OnceLock<tracing::Dispatch> =
+            std::sync::OnceLock::new();
+        ASK_EVERY_DISPATCHER
+            .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
         #[derive(Clone, Default)]
         struct Buffer(Arc<Mutex<Vec<u8>>>);
         impl std::io::Write for Buffer {
@@ -2721,6 +2733,24 @@ mod tests {
         let result = tracing::subscriber::with_default(subscriber, operation);
         let text = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
         (result, text)
+    }
+
+    /// A fixture event whose callsite only the capture test below uses.
+    fn first_registration_probe() {
+        tracing::info!(target: TARGET, event = "first_registration_probe", "probe");
+    }
+
+    /// The race behind #3103, forced: a thread with no subscriber registers a
+    /// fixture callsite first, while the capture's dispatcher is live. The
+    /// capture still reads the event.
+    #[test]
+    fn capture_survives_a_callsite_first_registered_without_a_subscriber() {
+        let ((), log) = logged(|| {
+            std::thread::spawn(first_registration_probe).join().unwrap();
+            first_registration_probe();
+        });
+        let event: Value = serde_json::from_str(log.trim()).unwrap();
+        assert_eq!(event["fields"]["event"], "first_registration_probe");
     }
 
     fn claude_token_request(body: Value) -> Result<(StatusCode, Value), BrokerUpstreamError> {
