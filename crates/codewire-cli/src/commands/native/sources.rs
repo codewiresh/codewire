@@ -901,13 +901,17 @@ fn source_preview(
     platform: Option<&v1::PlatformSourceAuthority>,
 ) -> String {
     let mut output = format!(
-        "  Secret project: {:?}\n  User secrets: {:?}\n  Organization secrets: {}\n",
+        "  Secret project: {:?}\n  User secrets: {}\n  Organization secrets: {}\n",
         if spec.secrets.project.is_empty() {
             "none"
         } else {
             &spec.secrets.project
         },
-        spec.secrets.user,
+        match spec.secrets.user {
+            None => "none",
+            Some(codewire_project::StoragePlacement::Local) => "local",
+            Some(codewire_project::StoragePlacement::Platform) => "platform",
+        },
         if spec.secrets.organization {
             "selected platform organization"
         } else {
@@ -1045,31 +1049,46 @@ pub(super) fn source_view(environment: &v1::Environment) -> anyhow::Result<Optio
 }
 
 pub(super) fn format_source_view(view: Option<&SourceView>) -> String {
+    use crate::commands::progress::terminal_text;
+    use codewire_project::StoragePlacement;
+
     let Some(view) = view else {
         return "Sources:     metadata unavailable\n".to_owned();
     };
+    let secrets = &view.secrets;
     let mut output = format!(
-        "Secrets:     {:?}\nUser secrets: {:?}\nOrg secrets: {}\n",
-        if view.secrets.project.is_empty() {
-            "none"
+        "Secrets:     {}\n",
+        if secrets.project.is_empty() {
+            "none".to_owned()
         } else {
-            &view.secrets.project
-        },
-        view.secrets.user,
-        view.secrets.organization
+            terminal_text(&secrets.project)
+        }
     );
+    if let Some(placement) = secrets.user {
+        output.push_str(match placement {
+            StoragePlacement::Local => "User secrets: local\n",
+            StoragePlacement::Platform => "User secrets: platform\n",
+        });
+    }
+    if secrets.organization {
+        output.push_str("Org secrets: platform organization\n");
+    }
     if let Some(profile) = &view.credentials {
         output.push_str(&format!(
-            "Credentials: {:?} ({:?}, revision {})\n",
-            profile.profile, profile.reference, profile.revision
+            "Credentials: {} ({}, revision {})\n",
+            terminal_text(&profile.profile),
+            terminal_text(&profile.reference),
+            profile.revision
         ));
     } else {
         output.push_str("Credentials: none\n");
     }
     if let Some(platform) = &view.platform {
         output.push_str(&format!(
-            "Source server: {:?}\nSource org: {:?}\nSource account: {:?}\n",
-            platform.server_url, platform.organization_id, platform.user_id
+            "Source server: {}\nSource org: {}\nSource account: {}\n",
+            terminal_text(&platform.server_url),
+            terminal_text(&platform.organization_id),
+            terminal_text(&platform.user_id)
         ));
     }
     output

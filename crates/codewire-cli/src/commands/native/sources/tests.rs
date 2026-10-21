@@ -486,6 +486,37 @@ fn source_inspection_is_value_free_and_reports_missing_metadata_honestly() {
 }
 
 #[test]
+fn source_inspection_prints_plain_values() {
+    let empty = SourceView {
+        secrets: SecretBindings::default(),
+        credentials: None,
+        platform: None,
+    };
+    assert_eq!(
+        format_source_view(Some(&empty)),
+        "Secrets:     none\nCredentials: none\n"
+    );
+    let selected = SourceView {
+        secrets: SecretBindings {
+            project: "platform:id:app".to_owned(),
+            organization: true,
+            user: Some(codewire_project::StoragePlacement::Local),
+        },
+        credentials: Some(CredentialView {
+            profile: "work".to_owned(),
+            reference: "local:work".to_owned(),
+            revision: 3,
+        }),
+        platform: None,
+    };
+    assert_eq!(
+        format_source_view(Some(&selected)),
+        "Secrets:     platform:id:app\nUser secrets: local\nOrg secrets: platform organization\n\
+         Credentials: work (local:work, revision 3)\n"
+    );
+}
+
+#[test]
 fn confirmation_is_bounded_default_no_and_eof_safe() {
     for input in ["", "\n", "no\n", "yesterday\n"] {
         assert!(!read_confirmation(input.as_bytes()).unwrap());
