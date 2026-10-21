@@ -314,8 +314,6 @@ image_guards = ('test-cw-image-context.py', 'test-cw-runtime-source.py',
                 'test-cw-image-source.py', 'test-cw-image-consumer.py')
 assert set(image_guards) <= {Path(helper).name for helper in policy_helpers}
 assert 'scripts/ci/tests/test-darwin-cross-check.sh' in policy_helpers
-canary_guard = 'crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py'
-assert canary_guard in policy_helpers, 'composition fixture omitted the actual crate-local policy guard'
 # Merge lanes run beside policy, so every selected family's terminal helper is
 # synthetic too (a selected security family audits the JS supply chain).
 for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh',
@@ -371,8 +369,7 @@ git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'synthetic selected local VM 
 receipt_owner = fixture / 'scripts/ci/receipts/local-prepush-receipt.py'
 preflight = fixture / 'scripts/dev/preflight.sh'
 receipt_cases = [dict(COMPOSITION_FAIL_TOOL=name) for name in
-                 (Path(canary_guard).name,
-                  'test-darwin-cross-check.sh', *image_guards)]
+                 ('test-darwin-cross-check.sh', *image_guards)]
 receipt_cases += [dict(COMPOSITION_FAIL_ARGS=json.dumps(darwin_check))]
 for injected in receipt_cases:
     trace.write_text('')

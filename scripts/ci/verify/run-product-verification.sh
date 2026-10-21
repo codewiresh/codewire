@@ -284,8 +284,6 @@ run_policy_core_one() {
   python3 scripts/dev/test-macos-git-tool.py
   python3 scripts/dev/test-macos-local-runtime.py
   python3 scripts/dev/test-linux-local-runtime.py
-  python3 scripts/dev/test-macos-app-sandbox-canary.py
-  python3 crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py
   python3 scripts/checks/repo_checks.py license-map
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py design-tokens --self-test

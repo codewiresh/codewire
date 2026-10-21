@@ -37,8 +37,6 @@ SSH_OPTIONS = ["-oBatchMode=yes", "-oForwardAgent=no", "-oConnectTimeout=10",
                "-oServerAliveInterval=10", "-oServerAliveCountMax=2"]
 SWIFT_COMPONENTS = {
     "vz-runner": ("macos-vz-runner", "swift-vz-runner", ("codewire-vz-runner",)),
-    "sandbox-canary": ("macos-sandbox-canary-experiment", "swift-sandbox-canary",
-                       ("sandbox-experiment-owner", "sandbox-candidate", "canary-deputy")),
 }
 
 # The command owner and archive helpers, shared with the runtime's e2fsprogs
@@ -415,11 +413,7 @@ def worker(root, run):
                 scratch = root / "target" / scratch_name
                 command(["xcrun", "swift", "--version"])
                 command(["xcrun", "--show-sdk-version"])
-                if component == "vz-runner":
-                    command([str(package / "Tests/test_ipc_system.sh")])
-                else:
-                    command(["python3", str(package / "Tests/test_static_contract.py")])
-                    command(["python3", str(source / "scripts/dev/test-macos-app-sandbox-canary.py"), "-v"])
+                command([str(package / "Tests/test_ipc_system.sh")])
                 command(["xcrun", "swift-format", "lint", "--strict", "--recursive", str(package)])
                 swift = ["--package-path", str(package), "--scratch-path", str(scratch),
                          "-Xswiftc", "-warnings-as-errors", "-Xcc", "-Werror"]
@@ -437,18 +431,6 @@ def worker(root, run):
                             "Swift Testing macro plugin is missing from the selected toolchain")
                     command(["xcrun", "swift", "test", *swift, "-Xswiftc",
                              "-load-plugin-library", "-Xswiftc", str(testing_plugin)])
-                    if component == "sandbox-canary":
-                        # This assertion needs synchronous main-thread execution,
-                        # outside Swift Testing's dispatch-main actor context.
-                        command(["xcrun", "swift", "-warnings-as-errors",
-                                 str(package / "Tests/test_run_loop.swift")])
-                        lifecycle = isolated / "test-application-lifecycle"
-                        command(["xcrun", "swiftc", "-warnings-as-errors", "-parse-as-library",
-                                 "-swift-version", "6",
-                                 str(package / "Sources/CanaryDeputy/ApplicationLifecycle.swift"),
-                                 str(package / "Tests/test_application_lifecycle.swift"),
-                                 "-o", str(lifecycle)])
-                        command([str(lifecycle)])
             else:
                 raise RuntimeError("unknown developer build component")
             for artifact in (run / "artifacts").iterdir():
@@ -498,8 +480,7 @@ import pathlib, sys, tarfile
 run = pathlib.Path(sys.argv[1])
 paths = [run / 'request.json', run / 'result.json', *run.glob('command-*.log')]
 paths += [run / 'artifacts' / name for name in (
-    'cw-aarch64-apple-darwin', 'cw-x86_64-apple-darwin', 'codewire-vz-runner-arm64',
-    'sandbox-experiment-owner-arm64', 'sandbox-candidate-arm64', 'canary-deputy-arm64')]
+    'cw-aarch64-apple-darwin', 'cw-x86_64-apple-darwin', 'codewire-vz-runner-arm64')]
 if not (run / 'request.json').is_file(): raise SystemExit('run not found')
 with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
     for path in paths:
