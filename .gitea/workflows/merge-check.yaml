@@ -57,9 +57,6 @@ jobs:
       main: ${{ steps.merge.outputs.main }}
       tree: ${{ steps.merge.outputs.tree }}
     env:
-      # A 17 GiB guest whose CPU bursts to the host: eleven rustc processes,
-      # as in ci.yaml.
-      CARGO_BUILD_JOBS: '11'
       # The same Cargo paths as ci.yaml's Rust jobs: the warm cache links them,
       # and compiles hit main's compiler cache.
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
@@ -72,6 +69,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      # As in ci.yaml: cargo's parallel rustc processes fit the memory of the
+      # runner this job landed on, a metal guest or a cloud overflow worker.
+      - name: Bound cargo jobs by memory
+        run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed Rust toolchain
         run: scripts/ci/setup/assert-ci-runner-image.sh
