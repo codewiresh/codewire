@@ -32,8 +32,6 @@ done
 ROOT="$(cd "$ROOT" && pwd)"
 
 readonly SEALED_TOOLCHAIN_STEP='name: Verify sealed Rust toolchain'
-readonly CANARY_RUSTUP_VERSION='1.29.0'
-readonly CANARY_RUSTUP_SHA256='4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10'
 # These are matched literally against Gitea workflow syntax.
 # shellcheck disable=SC2016
 readonly CI_RUST_CARGO_HOME='${{ github.workspace }}/target/ci-rust-cargo-home'
@@ -44,11 +42,9 @@ readonly -a PINNED_WORKFLOWS=(
   '.gitea/workflows/cli-release.yaml:4'
   '.gitea/workflows/connect-apikey-smoke.yaml:1'
   '.gitea/workflows/deploy-dev.yaml:1'
-  '.gitea/workflows/manual-diagnostics.yaml:1'
   '.gitea/workflows/merge-check.yaml:1'
   '.gitea/workflows/support-images.yaml:1'
 )
-readonly CANARY_WORKFLOW='.gitea/workflows/rust-latest-canary.yaml'
 readonly -a SHIPPED_RUST_DOCKERFILES=(
   'apps/dashboard/Dockerfile'
   'deployments/docker/daemon.Dockerfile'
@@ -92,7 +88,7 @@ list_inputs() {
   for entry in "${PINNED_WORKFLOWS[@]}"; do
     printf '%s\n' "${entry%:*}"
   done
-  printf '%s\n' "$CANARY_WORKFLOW" "$WORKSPACE_DOCKERFILE" \
+  printf '%s\n' "$WORKSPACE_DOCKERFILE" \
     "$RUST_BUILD_BASE_DOCKERFILE" "$RUST_BUILD_WRAPPER" "$BAKE_FILE" \
     "$RUNNER_IMAGE_ASSERTION" "$VMM_INITRAMFS_BUILDER" "$RUNTIME_IMAGE_AUDIT"
   printf '%s\n' "${SHIPPED_RUST_DOCKERFILES[@]}" "${CURATED_MANIFESTS[@]}"
@@ -162,34 +158,9 @@ rust_transport_block="$(sed -n '/^  rust-transport:/,/^  database:/p' \
 [[ "$(grep -Fxc "        run: $CI_CARGO_CAPACITY_CHECK" <<<"$rust_transport_block" || true)" -eq 1 ]] ||
   die 'primary Rust CI job must verify Cargo cache capacity before Cargo verification'
 
-[[ "$(grep -Fxc "  RUSTUP_VERSION: $CANARY_RUSTUP_VERSION" "$ROOT/$CANARY_WORKFLOW" || true)" -eq 1 ]] ||
-  die 'latest-stable canary rustup version drift'
-[[ "$(grep -Fxc "  RUSTUP_INIT_SHA256: $CANARY_RUSTUP_SHA256" "$ROOT/$CANARY_WORKFLOW" || true)" -eq 1 ]] ||
-  die 'latest-stable canary rustup digest drift'
-# Match the workflow shell variable literally.
-# shellcheck disable=SC2016
-[[ "$(grep -Fc 'rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init' "$ROOT/$CANARY_WORKFLOW" || true)" -eq 1 ]] ||
-  die 'latest-stable canary must download only the reviewed rustup-init archive'
-[[ "$(grep -Fc 'sha256sum --check --strict' "$ROOT/$CANARY_WORKFLOW" || true)" -eq 1 ]] ||
-  die 'latest-stable canary must verify rustup-init before execution'
-[[ "$(grep -Fc -- '--default-toolchain stable --no-modify-path' "$ROOT/$CANARY_WORKFLOW" || true)" -eq 1 ]] ||
-  die 'latest-stable canary must be the single moving toolchain consumer'
-[[ "$(grep -Fc 'rust-toolchain@' "$ROOT/$CANARY_WORKFLOW" || true)" -eq 0 ]] ||
-  die 'latest-stable canary must not ask the sealed runner action to mutate Rust'
-grep -Fq 'continue-on-error: true' "$ROOT/$CANARY_WORKFLOW" ||
-  die 'latest-stable canary must remain non-authoritative'
-grep -Fq 'runs-on: ci-heavy' "$ROOT/$CANARY_WORKFLOW" ||
-  die 'latest-stable canary must use the credential-free heavy profile'
-grep -Fq 'cargo +stable check --locked --workspace --all-targets' "$ROOT/$CANARY_WORKFLOW" ||
-  die 'latest-stable canary must override the repository toolchain file explicitly'
-if grep -Fq 'pull_request:' "$ROOT/$CANARY_WORKFLOW"; then
-  die 'latest-stable canary must not become a pull-request gate'
-fi
-
+# Every workflow runs the sealed toolchain; none installs a moving stable one.
 while IFS= read -r workflow; do
-  relative="${workflow#"$ROOT/"}"
-  [[ "$relative" == "$CANARY_WORKFLOW" ]] ||
-    die "moving stable toolchain escaped the canary: $relative"
+  die "a workflow installs the moving stable toolchain: ${workflow#"$ROOT/"}"
 done < <(grep -Rl --include='*.yaml' --include='*.yml' \
   -E -- '--default-toolchain[[:space:]]+stable' "$ROOT/.gitea/workflows" || true)
 

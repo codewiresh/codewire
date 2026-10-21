@@ -16,7 +16,7 @@ emits no machine-readable output. Use
 Pull requests run Kind for a Kind-relevant path with explicit opt-in. Changes
 to direct in-cluster fixture owners select their mandatory Kind proof directly.
 Set VERIFICATION_REQUEST for product workflow_dispatch to a family token or
-all. The separate Manual diagnostics workflow uses rust-stack or go-tailnet.
+all.
 
 VERIFICATION_PR_SCOPE=quick (hosted pull-request CI only) reduces a classified
 pull request to the quick families: policy, its shell domain, and compiling
@@ -429,12 +429,6 @@ select_dispatch_request() {
       ;;
     web|docs|sdk_go|sdk_ts|sdk_python|database|release|deploy|ios)
       select_token "$request"
-      ;;
-    rust-stack)
-      select_token diagnostic_rust_stack
-      ;;
-    go-tailnet)
-      select_token diagnostic_go_tailnet
       ;;
     *)
       echo "warning: unsupported verification request '${request}'; selecting all product verification" >&2

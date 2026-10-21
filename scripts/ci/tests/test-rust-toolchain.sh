@@ -56,27 +56,15 @@ grep -Fq 'local VMM guest builder compiler differs from' "$fixture/guest-toolcha
 cp "$ROOT/scripts/ci/verify/build-local-vmm-initramfs.sh" \
   "$fixture/scripts/ci/verify/build-local-vmm-initramfs.sh"
 
-sed -i 's/4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
-  "$fixture/.gitea/workflows/rust-latest-canary.yaml"
-if "$CHECK" --root "$fixture" >"$fixture/canary-rustup-digest.log" 2>&1; then
-  printf 'Rust toolchain guard accepted canary rustup digest drift\n' >&2
+printf '          rustup-init -y --default-toolchain stable --no-modify-path\n' \
+  >> "$fixture/.gitea/workflows/deploy-dev.yaml"
+if "$CHECK" --root "$fixture" >"$fixture/moving-stable.log" 2>&1; then
+  printf 'Rust toolchain guard accepted a workflow on the moving stable toolchain\n' >&2
   exit 1
 fi
-grep -Fq 'latest-stable canary rustup digest drift' \
-  "$fixture/canary-rustup-digest.log"
-cp "$ROOT/.gitea/workflows/rust-latest-canary.yaml" \
-  "$fixture/.gitea/workflows/rust-latest-canary.yaml"
-
-sed -i 's/--default-toolchain stable/--default-toolchain 1.99.0/' \
-  "$fixture/.gitea/workflows/rust-latest-canary.yaml"
-if "$CHECK" --root "$fixture" >"$fixture/canary-moving-stable.log" 2>&1; then
-  printf 'Rust toolchain guard accepted a pinned canary toolchain\n' >&2
-  exit 1
-fi
-grep -Fq 'latest-stable canary must be the single moving toolchain consumer' \
-  "$fixture/canary-moving-stable.log"
-cp "$ROOT/.gitea/workflows/rust-latest-canary.yaml" \
-  "$fixture/.gitea/workflows/rust-latest-canary.yaml"
+grep -Fq 'a workflow installs the moving stable toolchain: .gitea/workflows/deploy-dev.yaml' \
+  "$fixture/moving-stable.log"
+cp "$ROOT/.gitea/workflows/deploy-dev.yaml" "$fixture/.gitea/workflows/deploy-dev.yaml"
 
 # Match the workflow shell variable literally.
 # shellcheck disable=SC2016

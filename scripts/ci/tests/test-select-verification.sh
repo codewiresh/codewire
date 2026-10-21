@@ -13,7 +13,6 @@ HEAVY_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'ref
 METAL_MAIN_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-main-large'"'"' || '"'"'ci-heavy-cpu10-ram17g'"'"' }}'
 # Each one bounds cargo by its runner's memory at job start (bound-cargo-jobs.sh).
 METAL_CARGO_BOUND='        run: scripts/ci/setup/bound-cargo-jobs.sh'
-DIAGNOSTICS_WORKFLOW="$ROOT/.gitea/workflows/manual-diagnostics.yaml"
 CLI_RELEASE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
 TMP_ROOT="$ROOT/.tmp"
 mkdir -p "$TMP_ROOT"
@@ -1878,10 +1877,6 @@ contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
 assert_contract_field unknown "$contract_output" classification unclassified
 assert_contract_field unknown "$contract_output" required_local_mode full
 
-dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
-  VERIFICATION_REQUEST=rust-stack "$SELECTOR")"
-assert_tokens dispatch_rust_stack diagnostic_rust_stack "$dispatch_output"
-
 diagnostic_paths="$TMP/diagnostic-output.paths"
 printf '%s\n' Makefile scripts/checks/security/audit-runtime-images.sh \
   > "$diagnostic_paths"
@@ -3559,29 +3554,14 @@ if grep -qF '    name: Manual diagnostics' "$WORKFLOW" \
   echo 'product CI must not contain or depend on manual diagnostics' >&2
   exit 1
 fi
-grep -qF 'manual diagnostics moved to the Manual diagnostics workflow' "$WORKFLOW"
+grep -qF 'manual diagnostics are retired; run scripts/ci/verify/rust-stack-rehearsal.sh or scripts/ci/verify/tailnet-parity.sh locally' "$WORKFLOW"
 
-grep -qF 'name: Manual diagnostics' "$DIAGNOSTICS_WORKFLOW"
-grep -qF '  workflow_dispatch:' "$DIAGNOSTICS_WORKFLOW"
-grep -qF '        description: rust-stack or go-tailnet' "$DIAGNOSTICS_WORKFLOW"
-grep -qF 'manual diagnostics require diagnostic=rust-stack or go-tailnet' \
-  "$DIAGNOSTICS_WORKFLOW"
-grep -qF "github.event.inputs.diagnostic == 'rust-stack'" "$DIAGNOSTICS_WORKFLOW"
-grep -qF "github.event.inputs.diagnostic == 'go-tailnet'" "$DIAGNOSTICS_WORKFLOW"
-if grep -qF 'select-verification.sh' "$DIAGNOSTICS_WORKFLOW"; then
-  echo 'manual diagnostics must validate its bounded input directly' >&2
-  exit 1
-fi
-grep -qF 'scripts/ci/verify/tailnet-parity.sh' "$DIAGNOSTICS_WORKFLOW"
-grep -qF 'scripts/ci/verify/rust-stack-rehearsal.sh' "$DIAGNOSTICS_WORKFLOW"
 if rg -n 'cr-golden|diagnostic_cr_golden|go_cr_golden|TestGolden.*-update' \
-    "$WORKFLOW" "$DIAGNOSTICS_WORKFLOW" "$SELECTOR" \
+    "$WORKFLOW" "$SELECTOR" \
     "$ROOT/scripts/ci/verify/run-product-verification.sh"; then
   echo 'retired Go CR-golden diagnostic remains wired' >&2
   exit 1
 fi
-grep -qF 'name: Verify sealed Rust toolchain' \
-  "$DIAGNOSTICS_WORKFLOW"
 
 # The start-latency measurement is dispatch-only, reads with its own job token
 # on the Lite pool, and runs only the vendored collector its checksum names.

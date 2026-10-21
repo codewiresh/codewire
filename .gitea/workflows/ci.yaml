@@ -182,7 +182,7 @@ jobs:
           set -euo pipefail
           case "${VERIFICATION_REQUEST:-}" in
             rust-stack|go-tailnet)
-              echo "::error::manual diagnostics moved to the Manual diagnostics workflow"
+              echo "::error::manual diagnostics are retired; run scripts/ci/verify/rust-stack-rehearsal.sh or scripts/ci/verify/tailnet-parity.sh locally"
               exit 1
               ;;
           esac
