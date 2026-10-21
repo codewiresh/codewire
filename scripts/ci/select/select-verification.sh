@@ -2114,7 +2114,9 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/ci/verify/dashboard-image.sh|\
-      scripts/ci/tests/test-dashboard-image-network-probe.sh)
+      scripts/ci/verify/build-dashboard-image.sh|\
+      scripts/ci/tests/test-dashboard-image-network-probe.sh|\
+      scripts/ci/tests/test-build-dashboard-image.sh)
         select_token security
         select_token deploy
         select_token edge_kind

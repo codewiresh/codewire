@@ -256,6 +256,7 @@ run_policy_core_one() {
   python3 -B scripts/ci/tests/test-linux-vmm-kernel.py
   scripts/ci/tests/test-build-local-image.sh
   scripts/ci/tests/test-dashboard-image-network-probe.sh
+  scripts/ci/tests/test-build-dashboard-image.sh
   scripts/ci/tests/test-workspace-agent-contract.sh
   python3 -I -B scripts/ci/tests/test-cw-image-context.py
   python3 -I -B scripts/ci/tests/test-cw-runtime-source.py

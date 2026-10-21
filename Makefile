@@ -139,7 +139,7 @@ accept-secrets-credentials:
 
 DASHBOARD_VERIFY_IMAGE ?= codewire-dashboard:verification
 verify-dashboard-image:
-	docker buildx bake --file docker-bake.hcl --pull --load --set 'dashboard.tags=$(DASHBOARD_VERIFY_IMAGE)' dashboard
+	scripts/ci/verify/build-dashboard-image.sh "$(DASHBOARD_VERIFY_IMAGE)"
 	scripts/ci/verify/dashboard-image.sh "$(DASHBOARD_VERIFY_IMAGE)"
 
 # Start core development services
