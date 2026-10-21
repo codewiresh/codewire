@@ -219,8 +219,8 @@ def external_download_errors(text):
 # of building a delivery that can no longer be assembled (#2995). Each job that
 # can run beside another ends with one shared fail-fast step, gated on its own
 # failure and on the job's existing step condition. The checked-in
-# cli-release.yaml holds the reference copy: the dry run, support-images and
-# deploy-prod match it, and cancel_probe_cases runs it.
+# cli-release.yaml holds the reference copy: the dry run matches it, and
+# cancel_probe_cases runs it.
 TARGET_JOBS = ("build-runtime-linux", "build-helper-darwin", "sign-helper", "build-darwin",
                "sign-darwin", "build-linux-musl", "build-linux-gnu")
 CANCEL_STEP = "Cancel the run after this failure"
