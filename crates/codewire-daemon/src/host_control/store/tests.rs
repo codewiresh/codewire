@@ -25,17 +25,55 @@ fn managed_admitted(root: &Path) -> Store {
 fn reopen(state_root: &Path) -> Store {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
+        let held = lock_held_elsewhere(&owner_lock(state_root));
         match Store::open(state_root, &scope().environment_id) {
             Ok(store) => return store,
-            Err(Error::Storage)
-                if std::time::Instant::now() < deadline
-                    && lock_held_elsewhere(&state_root.join(DIRECTORY).join("owner.lock")) =>
-            {
+            Err(Error::Storage) if refused_by_held_lock(state_root, held, deadline) => {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             Err(error) => panic!("reopening the store failed: {error:?}"),
         }
     }
+}
+
+/// Open the managed host-control owner on the store under `config` after the
+/// store's previous owner was dropped, waiting out a lock held elsewhere
+/// exactly as [`reopen`] does (#3162).
+async fn reopen_owner(
+    config: &crate::Config,
+    engine: &crate::durable_session::SessionEngine,
+) -> crate::host_control::Owner {
+    let state_root = &config.host.as_ref().unwrap().state_root;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let held = lock_held_elsewhere(&owner_lock(state_root));
+        let binding = crate::host_control::HostControlBinding::new(scope().environment_id)
+            .unwrap()
+            .with_managed_agents();
+        match crate::host_control::Owner::new(config, binding, engine.clone()).await {
+            Ok(owner) => return owner,
+            Err(Error::Storage) if refused_by_held_lock(state_root, held, deadline) => {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            Err(error) => panic!("reopening the host-control owner failed: {error:?}"),
+        }
+    }
+}
+
+fn owner_lock(state_root: &Path) -> PathBuf {
+    state_root.join(DIRECTORY).join("owner.lock")
+}
+
+/// Whether a refused open met another process's hold on the store's lock:
+/// held just before the attempt, or still held after it. A refusal with the
+/// lock free on both sides is real.
+fn refused_by_held_lock(
+    state_root: &Path,
+    held_before: bool,
+    deadline: std::time::Instant,
+) -> bool {
+    std::time::Instant::now() < deadline
+        && (held_before || lock_held_elsewhere(&owner_lock(state_root)))
 }
 
 /// Whether another open description holds the store's lock right now.
@@ -483,15 +521,7 @@ async fn host_control_store_owner_regrant_current_cas_preserves_observe_and_no_r
         &config,
         crate::credential_bridge::CredentialBridge::new(None),
     );
-    let owner = crate::host_control::Owner::new(
-        &config,
-        crate::host_control::HostControlBinding::new(scope().environment_id)
-            .unwrap()
-            .with_managed_agents(),
-        engine.clone(),
-    )
-    .await
-    .unwrap();
+    let owner = reopen_owner(&config, &engine).await;
     assert_eq!(
         serde_json::to_vec(
             &owner
